@@ -117,13 +117,13 @@ dev_dependencies:
   flutter_lints: ^6.0.0
 
   # Code generation
-  build_runner: ^2.15.1
+  build_runner: ^2.16.0
   drift_dev: ^2.34.0
   # Pin: the current Flutter SDK caps analyzer at 12.x, so drift_dev is held at
   # 2.34.0 (2.34.1+ needs analyzer ^13). drift_dev 2.34.0 calls
   # DartPlaceholder.when(), which sqlparser removed in 0.44.6, so keep sqlparser
   # at 0.44.5. Remove this pin once a newer Flutter SDK unblocks drift_dev.
-  sqlparser: 0.44.5
+  sqlparser: 0.45.0
 
   # Testing
   mocktail: ^1.0.5
