@@ -148,9 +148,9 @@ final class AcpSessionError {
 
 /// A permission request awaiting a user decision.
 ///
-/// Holds only the identifiers and choices needed to render and answer the
-/// request. The tool-call content it references stays in the in-memory
-/// timeline and is never persisted.
+/// Holds only the identifiers, short title, and choices needed to render and
+/// answer the request. The remaining tool-call content stays in memory with the
+/// live capability request and is never persisted.
 @immutable
 final class AcpPendingPermission {
   /// Creates a pending permission reference.
@@ -162,6 +162,7 @@ final class AcpPendingPermission {
     required this.toolCallId,
     required List<AcpPermissionOption> options,
     required this.requestedAt,
+    this.toolTitle,
   }) : options = List<AcpPermissionOption>.unmodifiable(options);
 
   /// Local key that uniquely identifies this pending request within a session.
@@ -172,6 +173,9 @@ final class AcpPendingPermission {
 
   /// Tool call awaiting permission.
   final String toolCallId;
+
+  /// Short tool or interaction title supplied by the agent.
+  final String? toolTitle;
 
   /// Choices offered by the agent.
   final List<AcpPermissionOption> options;
@@ -186,6 +190,7 @@ final class AcpPendingPermission {
           requestKey == other.requestKey &&
           sessionId == other.sessionId &&
           toolCallId == other.toolCallId &&
+          toolTitle == other.toolTitle &&
           requestedAt == other.requestedAt &&
           const ListEquality<AcpPermissionOption>().equals(
             options,
@@ -197,6 +202,7 @@ final class AcpPendingPermission {
     requestKey,
     sessionId,
     toolCallId,
+    toolTitle,
     requestedAt,
     const ListEquality<AcpPermissionOption>().hash(options),
   );

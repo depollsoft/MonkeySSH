@@ -30,6 +30,11 @@ const acpLaunchCommandMaxArgumentCount = 64;
 final _controlCharacterPattern = RegExp(r'[\x00-\x1F\x7F]');
 const _listEquality = ListEquality<String>();
 
+// Immutable adapter build containing the extension-command completion fix.
+// Return to an npm release after https://github.com/svkozak/pi-acp/pull/118 ships.
+const _monkeySshPiAcpPackage =
+    'https://github.com/depollsoft/pi-acp/archive/8e7889c39ac550d36c72e15e17f7bf7338bbfaac.tar.gz';
+
 /// Stable identifiers for built-in ACP providers.
 abstract final class AcpBuiltinProviderIds {
   /// GitHub Copilot CLI.
@@ -742,18 +747,23 @@ final acpGrokBuildProvider = AcpBuiltinProvider(
   ),
 );
 
+final _monkeySshPiAcpCommand = AcpLaunchCommand(
+  executable: 'npx',
+  arguments: const [
+    '--yes',
+    '--prefer-offline',
+    '--allow-remote=all',
+    _monkeySshPiAcpPackage,
+  ],
+);
+
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.pi,
   label: 'Pi',
-  launchCommand: AcpLaunchCommand(executable: 'pi-acp'),
-  executableProbe: AcpExecutableProbe(
-    candidateExecutableNames: const ['pi-acp'],
-  ),
-  adapterFallbackCommand: AcpLaunchCommand(
-    executable: 'npx',
-    arguments: const ['--yes', 'pi-acp@0.0.33'],
-  ),
+  launchCommand: _monkeySshPiAcpCommand,
+  executableProbe: AcpExecutableProbe(candidateExecutableNames: const ['npx']),
+  adapterFallbackCommand: _monkeySshPiAcpCommand,
 );
 
 /// All built-in ACP providers bundled with the app, in display order.

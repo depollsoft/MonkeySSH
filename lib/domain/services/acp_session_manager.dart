@@ -2122,11 +2122,13 @@ class _SessionController {
       if (request.sessionId != _key.acpSessionId) continue;
       switch (request) {
         case cap.AcpPendingPermission(:final permission):
+          final toolTitle = permission.toolCall.title?.trim();
           permissions.add(
             AcpPendingPermission(
               requestKey: request.id,
               sessionId: request.sessionId,
               toolCallId: permission.toolCall.toolCallId,
+              toolTitle: toolTitle?.isEmpty ?? true ? null : toolTitle,
               options: permission.options,
               requestedAt: request.requestedAt,
             ),
