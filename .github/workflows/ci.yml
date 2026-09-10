@@ -188,7 +188,7 @@ jobs:
 
       - name: Test deployment orchestration
         run: |
-          node --test test/scripts/resolve_preview_artifact_test.cjs test/scripts/preview_deploy_comments_test.cjs
+          node --test test/scripts/resolve_preview_artifact_test.cjs test/scripts/preview_deploy_comments_test.cjs test/scripts/agent_usage_probe_test.cjs
           ruby test/scripts/store_delivery_test.rb
           ruby test/scripts/match_git_persistence_test.rb
 

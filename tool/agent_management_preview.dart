@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
+import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
@@ -65,8 +66,8 @@ class _PreviewManagement extends Fake implements AgentManagementService {
     final id = definition.id;
     final status = switch (id) {
       'cli:claude' || 'cli:codex' => AgentRuntimeStatus.updateAvailable,
-      'cli:copilot' || 'cli:antigravity' => AgentRuntimeStatus.installed,
-      'cli:opencode' => AgentRuntimeStatus.needsRepair,
+      _ when definition.kind == AgentRuntimeKind.cli =>
+        AgentRuntimeStatus.installed,
       _ => AgentRuntimeStatus.notInstalled,
     };
     final installed = status != AgentRuntimeStatus.notInstalled;
@@ -92,6 +93,78 @@ class _PreviewManagement extends Fake implements AgentManagementService {
       message: status == AgentRuntimeStatus.needsRepair
           ? 'Required setup scripts did not run.'
           : null,
+    );
+  }
+
+  @override
+  Future<Map<String, AgentUsage>> readUsage(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes,
+  ) async => {
+    for (final runtime in runtimes)
+      runtime.definition.id: _sampleUsage(runtime.definition.id),
+  };
+
+  static AgentUsage _sampleUsage(String id) {
+    final now = DateTime.now();
+    final reset = now.add(const Duration(hours: 2));
+    if (id == 'cli:antigravity') {
+      return AgentUsage(status: AgentUsageStatus.needsRunning, checkedAt: now);
+    }
+    return AgentUsage(
+      status: AgentUsageStatus.available,
+      checkedAt: now,
+      resetCredits: id == 'cli:codex' ? 2 : null,
+      notices: id == 'cli:opencode'
+          ? const [
+              AgentUsageNotice(
+                provider: 'Anthropic',
+                status: AgentUsageStatus.signInRequired,
+              ),
+            ]
+          : const [],
+      windows: switch (id) {
+        'cli:cursor' => [
+          AgentUsageWindow(
+            label: 'Account access',
+            restricted: true,
+            resetsAt: reset,
+          ),
+        ],
+        'cli:hermes' => const [
+          AgentUsageWindow(
+            label: 'Nous · Purchased balance',
+            remaining: 12.34,
+            unit: 'USD',
+          ),
+        ],
+        'cli:grok' => [
+          AgentUsageWindow(
+            label: 'Included credits',
+            usedPercent: 28,
+            resetsAt: reset,
+          ),
+        ],
+        'cli:copilot' => [
+          AgentUsageWindow(
+            label: 'Premium requests',
+            usedPercent: 42,
+            resetsAt: reset,
+          ),
+        ],
+        _ => [
+          AgentUsageWindow(
+            label: id == 'cli:opencode' ? 'OpenAI · 5 hours' : '5 hours',
+            usedPercent: id == 'cli:codex' ? 100 : 42,
+            resetsAt: reset,
+          ),
+          AgentUsageWindow(
+            label: 'Weekly',
+            usedPercent: 28,
+            resetsAt: now.add(const Duration(days: 3)),
+          ),
+        ],
+      },
     );
   }
 

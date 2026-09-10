@@ -5,11 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../domain/models/agent_runtime_info.dart';
+import '../../domain/models/agent_usage.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/services/agent_management_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../widgets/agent_tool_icon.dart';
+import '../widgets/agent_usage_summary.dart';
 import '../widgets/premium_access.dart';
 
 const _redactStoreScreenshotIdentities = bool.fromEnvironment(
@@ -49,6 +51,10 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
   final Set<String> _runningActions = <String>{};
   final Map<String, String> _actionOutput = <String, String>{};
   bool _refreshing = false;
+  bool _checkingUsage = false;
+  int _usageGeneration = 0;
+  Map<String, AgentUsage> _usage = {};
+  Timer? _usageClock;
   bool _updatingAll = false;
   String? _refreshError;
   final Set<String> _queuedActions = <String>{};
@@ -71,7 +77,40 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           status: AgentRuntimeStatus.checking,
         ),
     ];
+    _usageClock = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && _usage.isNotEmpty) setState(() {});
+    });
     unawaited(_refresh());
+  }
+
+  @override
+  void dispose() {
+    _usageClock?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshUsage() async {
+    final generation = ++_usageGeneration;
+    setState(() => _checkingUsage = true);
+    try {
+      final usage = await _service.readUsage(widget.session, _runtimes);
+      if (!mounted || generation != _usageGeneration) return;
+      setState(() => _usage = usage);
+    } on Object {
+      if (!mounted || generation != _usageGeneration) return;
+      setState(
+        () => _usage = {
+          for (final runtime in _runtimes)
+            runtime.definition.id: const AgentUsage(
+              status: AgentUsageStatus.unavailable,
+            ),
+        },
+      );
+    } finally {
+      if (mounted && generation == _usageGeneration) {
+        setState(() => _checkingUsage = false);
+      }
+    }
   }
 
   Future<bool> _canManageAgents() => ref
@@ -91,6 +130,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       setState(() => _runtimes = runtimes);
       widget.onRuntimesRefreshed?.call(runtimes);
       widget.onProvidersRefreshed?.call();
+      unawaited(_refreshUsage());
     } on Object catch (error) {
       if (!mounted) return;
       setState(() => _refreshError = error.toString());
@@ -243,6 +283,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       });
       widget.onRuntimesRefreshed?.call(_runtimes);
       widget.onProvidersRefreshed?.call();
+      unawaited(_refreshUsage());
     } on Object catch (error) {
       if (!mounted) return;
       await _showActionResult(
@@ -383,6 +424,8 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           queuedActions: _queuedActions,
           recheckingActions: _recheckingActions,
           actionOutput: _actionOutput,
+          usage: _usage,
+          checkingUsage: _checkingUsage,
           locked: _busy || _refreshing,
           onAction: _runAction,
           onRecheck: _recheck,
@@ -477,7 +520,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                                     ? 'Checking installed agents…'
                                     : _refreshing
                                     ? 'Refreshing versions…'
-                                    : 'Versions and install sources on this host',
+                                    : 'Installed versions and account usage',
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: scheme.onSurfaceVariant,
                                 ),
@@ -636,6 +679,8 @@ class _RuntimeSection extends StatelessWidget {
     required this.queuedActions,
     required this.recheckingActions,
     required this.actionOutput,
+    required this.usage,
+    required this.checkingUsage,
     required this.locked,
     required this.onAction,
     required this.onRecheck,
@@ -647,6 +692,8 @@ class _RuntimeSection extends StatelessWidget {
   final Set<String> queuedActions;
   final Set<String> recheckingActions;
   final Map<String, String> actionOutput;
+  final Map<String, AgentUsage> usage;
+  final bool checkingUsage;
   final bool locked;
   final ValueChanged<AgentRuntimeInfo> onAction;
   final ValueChanged<AgentRuntimeInfo> onRecheck;
@@ -702,6 +749,8 @@ class _RuntimeSection extends StatelessWidget {
                 _RuntimeRow(
                   key: ValueKey(runtimes[index].definition.id),
                   runtime: runtimes[index],
+                  usage: usage[runtimes[index].definition.id],
+                  checkingUsage: checkingUsage,
                   busy: runningActions.contains(runtimes[index].definition.id),
                   queued: queuedActions.contains(runtimes[index].definition.id),
                   rechecking: recheckingActions.contains(
@@ -736,6 +785,8 @@ class _RuntimeRow extends StatefulWidget {
     required this.rechecking,
     required this.locked,
     required this.actionOutput,
+    required this.usage,
+    required this.checkingUsage,
     required this.onAction,
     required this.onRecheck,
     super.key,
@@ -746,6 +797,8 @@ class _RuntimeRow extends StatefulWidget {
   final bool rechecking;
   final bool locked;
   final String? actionOutput;
+  final AgentUsage? usage;
+  final bool checkingUsage;
   final VoidCallback onAction;
   final VoidCallback onRecheck;
 
@@ -925,6 +978,15 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
+                ),
+              ],
+              if (runtime.status == AgentRuntimeStatus.installed ||
+                  runtime.status == AgentRuntimeStatus.updateAvailable) ...[
+                const SizedBox(height: 8),
+                AgentUsageSummary(
+                  usage: widget.usage,
+                  checking: widget.checkingUsage,
+                  expanded: _expanded,
                 ),
               ],
               if (stacked)

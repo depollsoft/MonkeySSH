@@ -5,12 +5,15 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
 import '../models/agent_runtime_info.dart';
+import '../models/agent_usage.dart';
 import '../models/monetization.dart';
 import 'agent_session_discovery_service.dart';
+import 'agent_usage_parser.dart';
 import 'diagnostics_log_service.dart';
 import 'monetization_service.dart';
 import 'ssh_exec_queue.dart';
@@ -571,6 +574,9 @@ class AgentManagementService {
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
   _runtimeCache = {};
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
+  final Map<int, Future<Map<String, AgentUsage>>> _inFlightUsageChecks = {};
+  final Map<int, ({DateTime at, Map<String, AgentUsage> values})> _usageCache =
+      {};
 
   /// Number of retained connection snapshots.
   @visibleForTesting
@@ -816,6 +822,183 @@ class AgentManagementService {
     );
   }
 
+  /// Reads quotas only when the manager requests them, never during background
+  /// version checks. Credentials and provider responses remain on the host.
+  Future<Map<String, AgentUsage>> readUsage(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes,
+  ) async {
+    if (!await _canManageAgents()) return const {};
+    final existing = _inFlightUsageChecks[session.connectionId];
+    if (existing != null) await existing;
+    late final Future<Map<String, AgentUsage>> check;
+    check = _readUsage(session, runtimes).whenComplete(() {
+      if (identical(_inFlightUsageChecks[session.connectionId], check)) {
+        _inFlightUsageChecks.remove(session.connectionId);
+      }
+    });
+    _inFlightUsageChecks[session.connectionId] = check;
+    return check;
+  }
+
+  Future<Map<String, AgentUsage>> _readUsage(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes,
+  ) async {
+    final selected = <String, String>{};
+    final result = <String, AgentUsage>{};
+    for (final runtime in runtimes) {
+      if (runtime.status != AgentRuntimeStatus.installed &&
+          runtime.status != AgentRuntimeStatus.updateAvailable) {
+        continue;
+      }
+      final tool = runtime.definition.tool;
+      final id = switch (tool) {
+        AgentLaunchTool.claudeCode => 'claude',
+        AgentLaunchTool.codex => 'codex',
+        AgentLaunchTool.copilotCli => 'copilot',
+        AgentLaunchTool.openCode => 'opencode',
+        AgentLaunchTool.antigravity => 'antigravity',
+        AgentLaunchTool.cursorAgent => 'cursor',
+        AgentLaunchTool.pi => 'pi',
+        AgentLaunchTool.hermes => 'hermes',
+        AgentLaunchTool.openclaw => 'openclaw',
+        AgentLaunchTool.grokBuild => 'grok',
+        null => null,
+      };
+      if (id != null &&
+          (runtime.definition.kind == AgentRuntimeKind.cli ||
+              runtime.definition.sharesCliInstallation ||
+              id == 'claude') &&
+          runtime.executablePath != null) {
+        selected[id] = runtime.executablePath!;
+      }
+      result[runtime.definition.id] = AgentUsage(
+        status: id == null
+            ? AgentUsageStatus.unsupported
+            : AgentUsageStatus.unavailable,
+      );
+    }
+    if (selected.isEmpty) return result;
+    _usageCache.removeWhere(
+      (_, entry) => _now().difference(entry.at) >= const Duration(minutes: 2),
+    );
+    final cached = _usageCache[session.connectionId];
+    final parsed = <String, AgentUsage>{};
+    final pending = <String, String>{};
+    for (final entry in selected.entries) {
+      final usage = cached?.values[entry.key];
+      final checkedAt = usage?.checkedAt;
+      final resetPassed =
+          usage?.windows.any(
+            (window) =>
+                window.resetsAt != null &&
+                checkedAt != null &&
+                window.resetsAt!.isAfter(checkedAt) &&
+                !window.resetsAt!.isAfter(_now()),
+          ) ??
+          false;
+      final throttled =
+          usage?.status == AgentUsageStatus.rateLimited ||
+          (usage?.notices.any(
+                (notice) => notice.status == AgentUsageStatus.rateLimited,
+              ) ??
+              false);
+      final reusable =
+          usage != null &&
+          checkedAt != null &&
+          (throttled ||
+              (usage.status == AgentUsageStatus.available &&
+                  !usage.notices.any(
+                    (notice) => notice.status != AgentUsageStatus.notReported,
+                  ))) &&
+          _now().difference(checkedAt) < const Duration(minutes: 2) &&
+          (throttled || !resetPassed);
+      if (reusable) {
+        parsed[entry.key] = usage;
+      } else {
+        pending[entry.key] = entry.value;
+      }
+    }
+    if (pending.isEmpty) {
+      return _mapUsageToRuntimes(runtimes, result, selected, parsed);
+    }
+    try {
+      final script = await rootBundle.loadString(
+        'assets/scripts/agent_usage_probe.cjs',
+      );
+      final source = base64.encode(utf8.encode(script));
+      final input = base64.encode(utf8.encode(jsonEncode(pending)));
+      final bootstrap =
+          "process.env.MONKEYSSH_USAGE_PROBE='1';"
+          "eval(Buffer.from('$source','base64').toString())";
+      const stdinBootstrap =
+          "process.env.MONKEYSSH_USAGE_PROBE='1';"
+          "const r=require('readline').createInterface({input:process.stdin});"
+          "r.once('line',s=>{r.close();eval(Buffer.from(s,'base64').toString())})";
+      final command = session.remoteIsWindows
+          ? buildCompactWindowsPowerShellCommand(
+              '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(\$false); '
+              '& node -e ${powerShellSingleQuote(stdinBootstrap)} $input 2>\$null',
+            )
+          : "$_profilePrefix node -e ${_shellQuote(bootstrap)} '$input' 2>/dev/null";
+      final response = await _run(
+        session,
+        command,
+        input: session.remoteIsWindows
+            ? Uint8List.fromList(utf8.encode('$source\n'))
+            : null,
+        timeout: const Duration(seconds: 18),
+        keepPartialOutputOnTimeout: true,
+      );
+      parsed.addAll(parseAgentUsageOutput(response.output, checkedAt: _now()));
+    } on Object {
+      // No raw provider or authentication errors enter diagnostics or UI.
+    }
+    for (final id in selected.keys) {
+      parsed.putIfAbsent(
+        id,
+        () =>
+            AgentUsage(status: AgentUsageStatus.unavailable, checkedAt: _now()),
+      );
+    }
+    if (_usageCache.length >= _maxRuntimeCacheEntries) {
+      _usageCache.remove(_usageCache.keys.first);
+    }
+    _usageCache[session.connectionId] = (at: _now(), values: parsed);
+    return _mapUsageToRuntimes(runtimes, result, selected, parsed);
+  }
+
+  Map<String, AgentUsage> _mapUsageToRuntimes(
+    List<AgentRuntimeInfo> runtimes,
+    Map<String, AgentUsage> result,
+    Map<String, String> selected,
+    Map<String, AgentUsage> parsed,
+  ) {
+    for (final runtime in runtimes) {
+      if (!result.containsKey(runtime.definition.id)) continue;
+      final id = switch (runtime.definition.tool) {
+        AgentLaunchTool.claudeCode => 'claude',
+        AgentLaunchTool.codex => 'codex',
+        AgentLaunchTool.copilotCli => 'copilot',
+        AgentLaunchTool.openCode => 'opencode',
+        AgentLaunchTool.antigravity => 'antigravity',
+        AgentLaunchTool.cursorAgent => 'cursor',
+        AgentLaunchTool.pi => 'pi',
+        AgentLaunchTool.hermes => 'hermes',
+        AgentLaunchTool.openclaw => 'openclaw',
+        AgentLaunchTool.grokBuild => 'grok',
+        null => null,
+      };
+      if (selected.containsKey(id)) {
+        result[runtime.definition.id] =
+            parsed[id] ??
+            AgentUsage(status: AgentUsageStatus.unavailable, checkedAt: _now());
+      }
+    }
+    return result;
+  }
+
   /// Installs or updates [definition], forwarding command output as it arrives.
   Future<AgentRuntimeActionResult> installOrUpdate(
     SshSession session,
@@ -926,6 +1109,7 @@ class AgentManagementService {
     ValueChanged<String>? onOutput,
     Duration? timeout = const Duration(seconds: 15),
     bool keepPartialOutputOnTimeout = false,
+    Uint8List? input,
     SshExecPriority priority = SshExecPriority.normal,
   }) => session.runQueuedExec(() async {
     final exec = await openSshExec(
@@ -947,7 +1131,13 @@ class AgentManagementService {
           .cast<List<int>>()
           .transform(utf8.decoder)
           .forEach(add);
-      final completion = Future.wait<void>([stdout, stderr, exec.done]);
+      if (input != null) exec.stdin.add(input);
+      final completion = Future.wait<void>([
+        stdout,
+        stderr,
+        exec.done,
+        if (input != null) exec.stdin.close(),
+      ]);
       if (timeout == null) {
         await completion;
       } else {

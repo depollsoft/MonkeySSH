@@ -9,6 +9,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
+import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
@@ -52,6 +53,286 @@ SshSession _remoteSession(_MockSshClient client, {int connectionId = 77}) =>
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'all installed CLI agents request usage and partial failures can retry',
+    () async {
+      final client = _MockSshClient();
+      final commands = <String>[];
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        commands.add(invocation.positionalArguments.first as String);
+        return _execOutput(
+          '__monkeyssh_usage__={"id":"pi","status":"available",'
+          '"windows":[{"label":"Weekly","usedPercent":12}],'
+          '"notices":[{"provider":"Anthropic","status":"signInRequired"}]}',
+        );
+      });
+      final session = _remoteSession(client);
+      final service = _unlockedManagementService(_MockDiscovery());
+      final runtimes = [
+        for (final definition in agentCliRuntimeDefinitions)
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/agent',
+          ),
+      ];
+      final result = await service.readUsage(session, runtimes);
+      final match = RegExp(
+        r"'([A-Za-z0-9+/=]+)' 2>/dev/null$",
+      ).firstMatch(commands.first)!;
+      final requested =
+          jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
+      expect(requested.keys.toSet(), {
+        'claude',
+        'codex',
+        'copilot',
+        'opencode',
+        'antigravity',
+        'cursor',
+        'pi',
+        'hermes',
+        'openclaw',
+        'grok',
+      });
+      expect(result['cli:pi']!.status, AgentUsageStatus.available);
+      await service.readUsage(session, runtimes);
+      expect(commands, hasLength(2));
+    },
+  );
+
+  test(
+    'Windows sends the probe through stdin within the command limit',
+    () async {
+      final client = _MockSshClient();
+      when(
+        () => client.remoteVersion,
+      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      final input = StreamController<Uint8List>();
+      final received = <int>[];
+      input.stream.listen(received.addAll);
+      final exec =
+          _execOutput(
+                '__monkeyssh_usage__={"id":"grok","status":"notReported"}',
+              )
+              as _MockExecSession;
+      when(() => exec.stdin).thenReturn(input.sink);
+      String? command;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        command = invocation.positionalArguments.first as String;
+        return exec;
+      });
+      final service = _unlockedManagementService(_MockDiscovery());
+      final definition = agentCliRuntimeDefinitions.firstWhere(
+        (d) => d.id == 'cli:grok',
+      );
+      final result = await service.readUsage(_remoteSession(client), [
+        AgentRuntimeInfo(
+          definition: definition,
+          status: AgentRuntimeStatus.installed,
+          executablePath: r'C:\tools\grok.exe',
+        ),
+      ]);
+      expect(command!.length, lessThan(7500));
+      expect(
+        decodeEncodedPowerShell(command!),
+        contains("require(''readline'')"),
+      );
+      expect(
+        utf8.decode(base64.decode(utf8.decode(received).trim())),
+        contains('function grokUsage'),
+      );
+      expect(result['cli:grok']!.status, AgentUsageStatus.notReported);
+      await input.close();
+    },
+  );
+
+  test('partial quota snapshots respect provider throttling', () async {
+    final client = _MockSshClient();
+    var calls = 0;
+    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+      _,
+    ) async {
+      calls++;
+      return _execOutput(
+        '__monkeyssh_usage__={"id":"pi","status":"available",'
+        '"windows":[{"label":"Weekly","usedPercent":12}],'
+        '"notices":[{"provider":"Anthropic","status":"rateLimited"}]}',
+      );
+    });
+    final service = _unlockedManagementService(_MockDiscovery());
+    final session = _remoteSession(client);
+    final runtimes = [
+      AgentRuntimeInfo(
+        definition: agentCliRuntimeDefinitions.firstWhere(
+          (d) => d.id == 'cli:pi',
+        ),
+        status: AgentRuntimeStatus.installed,
+        executablePath: '/bin/pi',
+      ),
+    ];
+    await service.readUsage(session, runtimes);
+    await service.readUsage(session, runtimes);
+    expect(calls, 1);
+  });
+  test(
+    'usage is gated and quota snapshots are shared and cached per connection',
+    () async {
+      var now = DateTime.utc(2026, 9, 10);
+      final client = _MockSshClient();
+      var calls = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        _,
+      ) async {
+        calls++;
+        return _execOutput(
+          '__monkeyssh_usage__={"id":"copilot","status":"available",'
+          '"windows":[{"label":"Premium requests","usedPercent":42}]}',
+        );
+      });
+      final session = _remoteSession(client);
+      final runtimes = [
+        for (final definition in [
+          agentCliRuntimeDefinitions[1],
+          agentAcpRuntimeDefinitions.first,
+        ])
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/usr/local/bin/copilot',
+          ),
+      ];
+      final locked = AgentManagementService(
+        _MockDiscovery(),
+        canManageAgents: () async => false,
+      );
+      expect(await locked.readUsage(session, runtimes), isEmpty);
+      expect(calls, 0);
+      final service = AgentManagementService(
+        _MockDiscovery(),
+        canManageAgents: () async => true,
+        now: () => now,
+      );
+      final concurrent = await Future.wait([
+        service.readUsage(session, runtimes),
+        service.readUsage(session, runtimes),
+      ]);
+      expect(calls, 1);
+      final result = concurrent.first;
+      expect(result['cli:copilot']!.status, AgentUsageStatus.available);
+      expect(identical(result['cli:copilot'], result['acp:copilot']), isTrue);
+      now = now.add(const Duration(minutes: 2));
+      await service.readUsage(session, runtimes);
+      expect(calls, 2);
+      await service.readUsage(
+        _remoteSession(client, connectionId: 78),
+        runtimes,
+      );
+      expect(calls, 3);
+    },
+  );
+
+  test(
+    'failed usage checks retry immediately for every supported agent',
+    () async {
+      final client = _MockSshClient();
+      when(
+        () => client.execute(any(), pty: any(named: 'pty')),
+      ).thenThrow(StateError('SECRET'));
+      final session = _remoteSession(client);
+      final runtimes = [
+        for (final definition in [
+          agentCliRuntimeDefinitions.first,
+          agentCliRuntimeDefinitions.firstWhere((d) => d.id == 'cli:opencode'),
+        ])
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/agent',
+          ),
+      ];
+      final service = _unlockedManagementService(_MockDiscovery());
+      final result = await service.readUsage(session, runtimes);
+      expect(result['cli:claude']!.status, AgentUsageStatus.unavailable);
+      expect(result['cli:opencode']!.status, AgentUsageStatus.unavailable);
+      await service.readUsage(session, runtimes);
+      verify(() => client.execute(any(), pty: any(named: 'pty'))).called(2);
+    },
+  );
+
+  test(
+    'retrying a failed provider preserves other provider cooldowns',
+    () async {
+      final client = _MockSshClient();
+      final commands = <String>[];
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        commands.add(invocation.positionalArguments.first as String);
+        return _execOutput(
+          '__monkeyssh_usage__={"id":"claude","status":"rateLimited"}\n'
+          '__monkeyssh_usage__={"id":"copilot","status":"signInRequired"}',
+        );
+      });
+      final session = _remoteSession(client);
+      final service = _unlockedManagementService(_MockDiscovery());
+      final runtimes = [
+        for (final definition in agentCliRuntimeDefinitions.take(2))
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/${definition.executableNames.first}',
+          ),
+      ];
+      await service.readUsage(session, runtimes);
+      await service.readUsage(session, runtimes);
+      final input = RegExp(
+        "'([A-Za-z0-9+/=]+)' 2>/dev/null",
+      ).firstMatch(commands.last)!.group(1)!;
+      final requested =
+          jsonDecode(utf8.decode(base64.decode(input))) as Map<String, dynamic>;
+      expect(requested.keys, ['copilot']);
+    },
+  );
+
+  test('a newly passed reset bypasses the usage cooldown once', () async {
+    var now = DateTime.utc(2026, 9, 10, 12);
+    final client = _MockSshClient();
+    var calls = 0;
+    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+      _,
+    ) async {
+      calls++;
+      return _execOutput(
+        '__monkeyssh_usage__={"id":"claude","status":"available",'
+        '"windows":[{"label":"5 hours","usedPercent":100,"resetsAt":"2026-09-10T12:01:00Z"}]}',
+      );
+    });
+    final session = _remoteSession(client);
+    final service = AgentManagementService(
+      _MockDiscovery(),
+      canManageAgents: () async => true,
+      now: () => now,
+    );
+    final runtimes = [
+      AgentRuntimeInfo(
+        definition: agentCliRuntimeDefinitions.first,
+        status: AgentRuntimeStatus.installed,
+        executablePath: '/bin/claude',
+      ),
+    ];
+    await service.readUsage(session, runtimes);
+    now = now.add(const Duration(minutes: 1));
+    await service.readUsage(session, runtimes);
+    await service.readUsage(session, runtimes);
+    expect(calls, 2);
+  });
+
   testWidgets('stalled probe open fails and releases its queue slot', (
     tester,
   ) async {

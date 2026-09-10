@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
+import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
@@ -41,7 +42,9 @@ void main() {
       () => billing.canUseFeature(MonetizationFeature.agentManagement),
     ).thenAnswer((_) async => access.isProUnlocked);
     service = _MockAgentManagementService();
+
     session = _MockSshSession();
+    when(() => service.readUsage(session, any())).thenAnswer((_) async => {});
     runtimes = [
       AgentRuntimeInfo(
         definition: agentCliRuntimeDefinitions.first,
@@ -151,6 +154,35 @@ void main() {
     );
     runtimes[index] = runtime;
   }
+
+  testWidgets('usage loads independently and refreshes with runtime checks', (
+    tester,
+  ) async {
+    final pending = Completer<Map<String, AgentUsage>>();
+    when(
+      () => service.readUsage(session, any()),
+    ).thenAnswer((_) => pending.future);
+    await pumpScreen(tester);
+    expect(find.text('Checking usage…'), findsWidgets);
+    expect(refreshHandler(tester), isNotNull);
+    pending.complete({
+      'cli:claude': AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [
+          AgentUsageWindow(
+            label: '5 hours',
+            usedPercent: 100,
+            resetsAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+        ],
+      ),
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('5 hours · 100% used · Limit reached'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-management-refresh')));
+    await tester.pumpAndSettle();
+    verify(() => service.readUsage(session, any())).called(2);
+  });
 
   for (final id in ['cli:antigravity', 'cli:cursor', 'cli:grok']) {
     testWidgets('$id offers Install and runs the managed action', (
