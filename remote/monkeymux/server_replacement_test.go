@@ -55,3 +55,36 @@ func TestStopServerForReplacement(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminateConfirmedServerRechecksFailedSignal(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		before, after  pidOwnership
+		signaled, want bool
+		calls          string
+	}{
+		{"already gone", pidOwnershipGone, pidOwnershipGone, false, true, "check"},
+		{"unknown owner", pidOwnershipUnknown, pidOwnershipGone, false, false, "check"},
+		{"signal delivered", pidOwnershipLive, pidOwnershipLive, true, true, "check,signal"},
+		{"exited before signal", pidOwnershipLive, pidOwnershipGone, false, true, "check,signal,check"},
+		{"signal failed while live", pidOwnershipLive, pidOwnershipLive, false, false, "check,signal,check"},
+		{"signal failed then unknown", pidOwnershipLive, pidOwnershipUnknown, false, false, "check,signal,check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			got := terminateConfirmedServer(func() pidOwnership {
+				calls = append(calls, "check")
+				if len(calls) == 1 {
+					return tc.before
+				}
+				return tc.after
+			}, func() bool {
+				calls = append(calls, "signal")
+				return tc.signaled
+			})
+			if got != tc.want || strings.Join(calls, ",") != tc.calls {
+				t.Fatalf("termination confirmed = %v, calls = %v; want %v, %s", got, calls, tc.want, tc.calls)
+			}
+		})
+	}
+}

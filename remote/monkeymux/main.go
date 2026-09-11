@@ -2072,16 +2072,10 @@ func prepareRunningServerReplacement(
 				return waitForServerProcessExit(session, oldPID, timeout)
 			},
 			func() bool {
-				// Unknown ownership never authorizes cleanup of captured panes.
-				// A gone owner does; a live owner requires a successful signal.
-				switch pidRecordOwnership(oldPID, session) {
-				case pidOwnershipGone:
-					return true
-				case pidOwnershipLive:
-					return terminateProcessID(oldPID.pid)
-				default:
-					return false
-				}
+				return terminateConfirmedServer(
+					func() pidOwnership { return pidRecordOwnership(oldPID, session) },
+					func() bool { return terminateProcessID(oldPID.pid) },
+				)
 			},
 			func() { reapReplacementPaneGroups(panes) },
 		)
@@ -2141,6 +2135,19 @@ func keepRespondingServerBeforeReplacement(
 		return false, nil
 	}
 	return false, errServerUpdateStillAlive
+}
+
+// A failed signal can mean the owner exited after the first check. Only proof
+// that it is gone authorizes orphan cleanup; live and unknown remain blocked.
+func terminateConfirmedServer(ownership func() pidOwnership, terminate func() bool) bool {
+	switch ownership() {
+	case pidOwnershipGone:
+		return true
+	case pidOwnershipLive:
+		return terminate() || ownership() == pidOwnershipGone
+	default:
+		return false
+	}
 }
 
 // stopServerForReplacement escalates only after the full graceful wait. The
