@@ -263,3 +263,33 @@ func TestConPtyAlternateScreenStillUsesForegroundRedraw(t *testing.T) {
 		t.Fatal("alternate screen lost its foreground redraw")
 	}
 }
+
+func TestConPtyNormalScreenExplicitThemeRedraw(t *testing.T) {
+	for _, command := range []string{"codex", "copilot", "powershell"} {
+		t.Run(command, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 80, 24)
+			window := &muxWindow{id: "@1", foregroundCommand: command, win32InputMode: true,
+				pty: &resizeRecordingPty{}, ptyWidth: 80, ptyHeight: 24}
+			window.appendHistoryLocked([]byte("saved frame"))
+			server.windows = []*muxWindow{window}
+			server.activeID = window.id
+			registerTestAttachClient(t, server, &recordingConn{}, "primary", 80, 24)
+			original := simulateForegroundResize
+			t.Cleanup(func() { simulateForegroundResize = original })
+			redrew := false
+			simulateForegroundResize = func(candidate *muxWindow, width, height int) {
+				redrew = true
+				if candidate != window || width != 80 || height != 24 || !window.redrawForwardingPaused {
+					t.Fatal("explicit redraw lost its target, dimensions, or synchronized forwarding pause")
+				}
+				if !bytes.Contains(server.foregroundHistoryFallbackHistoryLocked(window), []byte("saved frame")) {
+					t.Fatal("explicit redraw lost its fallback frame")
+				}
+			}
+			server.forceForegroundThemeRedraw(window.id)
+			if redrew != (command != "powershell") {
+				t.Fatalf("theme redraw = %t for %s", redrew, command)
+			}
+		})
+	}
+}

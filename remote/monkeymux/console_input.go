@@ -7,6 +7,54 @@ import (
 	"unicode/utf8"
 )
 
+// Suppress OSC/DCS replies for native console readers, including responses the
+// attach router streams after its carry limit. Keep only parser state, never an
+// unbounded reply. This state belongs to routed replies: interleaved user keys
+// and pasted content must not be consumed as response payload.
+// The router buffers incomplete introducers before it starts streaming, so a
+// lone ESC outside a response remains an immediate Escape key.
+type nativeConsoleResponseFilter struct {
+	kind          byte
+	escape        bool
+	utf8Remaining int
+}
+
+func (f *nativeConsoleResponseFilter) filter(data []byte) ([]byte, bool) {
+	output := make([]byte, 0, len(data))
+	found := f.kind != 0
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		continuation := f.utf8Remaining > 0 && b&0xc0 == 0x80
+		if continuation {
+			f.utf8Remaining--
+		} else {
+			f.utf8Remaining = trailingUtf8ContinuationCount(data[i : i+1])
+		}
+		if f.kind != 0 {
+			if (f.escape && b == '\\') || (!continuation && b == 0x9c) || (f.kind == ']' && b == '\a') {
+				f.kind = 0
+			}
+			f.escape = f.kind != 0 && b == '\x1b'
+			continue
+		}
+		if b == '\x1b' && i+1 < len(data) && (data[i+1] == ']' || data[i+1] == 'P') {
+			i++
+			f.kind = data[i]
+		} else if !continuation && (b == 0x9d || b == 0x90) {
+			if b == 0x9d {
+				f.kind = ']'
+			} else {
+				f.kind = 'P'
+			}
+		} else {
+			output = append(output, b)
+			continue
+		}
+		found = true
+	}
+	return output, found
+}
+
 // Native console readers have no paste event. Remove only the framing while
 // retaining the payload, including literal control strings inside it. Holding
 // incomplete markers avoids ConPTY timing out a lone ESC between input writes.
