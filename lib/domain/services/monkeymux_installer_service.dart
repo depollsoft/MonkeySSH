@@ -639,8 +639,7 @@ class MonkeyMuxInstallerService {
       ].join('\n');
       final output = await _runRawRemoteCommand(
         session,
-        'powershell -NoProfile -NonInteractive -EncodedCommand '
-        '${encodePowerShellCommand(script)}',
+        buildCompactWindowsPowerShellCommand(script),
         priority: priority,
       );
       if (!output.contains('MONKEYMUX_LAUNCHER_MANAGED') &&

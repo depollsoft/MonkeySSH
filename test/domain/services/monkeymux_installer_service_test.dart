@@ -456,6 +456,90 @@ void main() {
   }
 
   test(
+    'Windows launcher command runs through cmd and prunes unused builds',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'monkeymux-launcher-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final home = '${directory.path}/home’s folder';
+      final harness = _InstallHarness(
+        windows: true,
+        remote: _FakeRemoteFileService(
+          homeDirectory: '/${home.replaceAll(r'\', '/')}',
+        )..uploaded = true,
+      );
+      when(
+        () => harness.client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        final command = invocation.positionalArguments.single as String;
+        harness.commands.add(command);
+        return _execSession(
+          _windowsOutputForCommand(
+            command,
+            expectedSha: harness.digest,
+            remoteFileService: harness.remote,
+          ),
+        );
+      });
+      final root = '$home/.monkeyssh/bin/monkeymux';
+      final current = File(
+        '$root/9.9.9/windows-amd64/${harness.digest}/monkeymux.exe',
+      );
+      await current.parent.create(recursive: true);
+      await current.writeAsBytes(harness.binary);
+      final previous = File('$root/0.1.0/windows-amd64/monkeymux.exe');
+      await previous.parent.create(recursive: true);
+      await previous.writeAsBytes(harness.binary);
+      await previous.setLastModified(
+        DateTime.now().subtract(const Duration(days: 30)),
+      );
+      await harness.installer.ensureInstalled(harness.session);
+      final command = harness.commands.singleWhere(
+        (command) => command.startsWith('powershell '),
+      );
+      expect(command.length, lessThan(7500));
+      final batch = File('${directory.path}/install.cmd');
+      await batch.writeAsString('@echo off\r\n$command\r\n');
+      final result = await Process.run('cmd.exe', [
+        '/d',
+        '/c',
+        batch.path,
+      ]).timeout(const Duration(seconds: 20));
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      expect(result.stdout, contains('MONKEYMUX_LAUNCHER_MANAGED'));
+      expect(result.stdout, contains('MONKEYMUX_CLEANUP:1:0'));
+      expect(previous.existsSync(), isFalse);
+      expect(current.existsSync(), isTrue);
+      final pointer = File('$home/.local/bin/.monkeymux-current');
+      expect(
+        await pointer.readAsString(),
+        contains('9.9.9\\windows-amd64\\${harness.digest}\\monkeymux.exe'),
+      );
+
+      // A custom launcher must leave both its pointer and old builds alone.
+      final launcher = File('$home/.local/bin/monkeymux.cmd');
+      await launcher.writeAsString('@REM custom launcher\r\n');
+      await previous.parent.create(recursive: true);
+      await previous.writeAsBytes(harness.binary);
+      await previous.setLastModified(
+        DateTime.now().subtract(const Duration(days: 30)),
+      );
+      final custom = await Process.run('cmd.exe', [
+        '/d',
+        '/c',
+        batch.path,
+      ]).timeout(const Duration(seconds: 20));
+      expect(custom.exitCode, 0, reason: '${custom.stdout}\n${custom.stderr}');
+      expect(custom.stdout, contains('MONKEYMUX_LAUNCHER_PRESERVED'));
+      expect(custom.stdout, isNot(contains('MONKEYMUX_CLEANUP')));
+      expect(await launcher.readAsString(), '@REM custom launcher\r\n');
+      expect(previous.existsSync(), isTrue);
+    },
+    skip: !Platform.isWindows,
+  );
+
+  test(
     'Windows installs beside locked builds and reuses the verified copy',
     () async {
       final harness = _InstallHarness(
@@ -700,6 +784,7 @@ void main() {
               command.contains('powershell -NoProfile -NonInteractive'),
         );
         final launcherScript = decodeEncodedPowerShell(launcherCommand);
+        expect(launcherCommand.length, lessThan(7500));
         for (final matcher in [
           contains(r'.local\bin\monkeymux.cmd'),
           contains(r"'C:\Users\proof’’s\.local\bin\monkeymux.cmd'"),
