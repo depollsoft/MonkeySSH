@@ -215,6 +215,18 @@ void main() {
       },
     );
 
+    test('system keyboard combines and consumes one-shot Ctrl+Alt', () {
+      final controller = KeyboardToolbarController()
+        ..toggleCtrl()
+        ..toggleAlt();
+      addTearDown(controller.dispose);
+
+      expect(controller.applySystemKeyboardModifiers('b'), '\x1b\u0002');
+      expect(controller.isCtrlActive, isFalse);
+      expect(controller.isAltActive, isFalse);
+      expect(controller.applySystemKeyboardModifiers('b'), 'b');
+    });
+
     testWidgets('calls onKeyPressed callback', (tester) async {
       var callCount = 0;
 
@@ -772,53 +784,6 @@ void main() {
       expect(bodyBottom - lastRowBottom, 34);
     });
 
-    testWidgets('arrow keys repeat while held', (tester) async {
-      final output = <String>[];
-      terminal.onOutput = output.add;
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
-        ),
-      );
-
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byTooltip('Up')),
-      );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 160));
-      await gesture.up();
-      await tester.pump();
-
-      expect(output.where((value) => value == '\x1b[A').length, greaterThan(1));
-    });
-
-    testWidgets('arrow holds avoid Kitty event types in raw terminals', (
-      tester,
-    ) async {
-      final output = <String>[];
-      terminal
-        ..onOutput = output.add
-        ..write('\x1b[>31u');
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
-        ),
-      );
-
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byTooltip('Up')),
-      );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 160));
-      await gesture.up();
-      await tester.pump();
-
-      expect(output.where((value) => value == '\x1b[A').length, greaterThan(1));
-      expect(output.where((value) => value.contains(':2')), isEmpty);
-    });
-
     testWidgets(
       'toolbar presses keep legacy sequences without Kitty key flags',
       (tester) async {
@@ -843,110 +808,70 @@ void main() {
       },
     );
 
-    testWidgets('series navigation holds avoid Kitty event types', (
-      tester,
-    ) async {
-      final output = <String>[];
-      terminal
-        ..onOutput = output.add
-        ..write('\x1b[>31u');
+    for (final (name, key, mode, sequence, holdMs, cancel) in const [
+      ('arrow keys repeat while held', 'Up', '', '\x1b[A', 160, false),
+      (
+        'arrow holds avoid Kitty event types in raw terminals',
+        'Up',
+        '\x1b[>31u',
+        '\x1b[A',
+        160,
+        false,
+      ),
+      (
+        'series navigation holds avoid Kitty event types',
+        'Page Up',
+        '\x1b[>31u',
+        '\x1b[5~',
+        160,
+        false,
+      ),
+      (
+        'repeating navigation stops when gesture is cancelled',
+        'Right',
+        '',
+        '\x1b[C',
+        120,
+        true,
+      ),
+      (
+        'repeating navigation stops when released',
+        'Home',
+        '',
+        '\x1b[H',
+        120,
+        false,
+      ),
+    ]) {
+      testWidgets(name, (tester) async {
+        final output = <String>[];
+        terminal
+          ..onOutput = output.add
+          ..write(mode);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
+          ),
+        );
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
-        ),
-      );
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip(key)),
+        );
+        await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+        await tester.pump(Duration(milliseconds: holdMs));
+        if (cancel) {
+          await gesture.cancel();
+        } else {
+          await gesture.up();
+        }
+        await tester.pump();
 
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byTooltip('Page Up')),
-      );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 160));
-      await gesture.up();
-      await tester.pump();
-
-      expect(
-        output.where((value) => value == '\x1b[5~').length,
-        greaterThan(1),
-      );
-      expect(output.where((value) => value.contains(':2')), isEmpty);
-    });
-
-    testWidgets('repeating navigation stops when gesture is cancelled', (
-      tester,
-    ) async {
-      final output = <String>[];
-      terminal.onOutput = output.add;
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
-        ),
-      );
-
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byTooltip('Right')),
-      );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 120));
-      await gesture.cancel();
-      await tester.pump();
-
-      final outputCount = output.where((value) => value == '\x1b[C').length;
-      await tester.pump(const Duration(milliseconds: 150));
-
-      expect(outputCount, greaterThan(1));
-      expect(output.where((value) => value == '\x1b[C').length, outputCount);
-    });
-
-    testWidgets('repeating navigation stops when released', (tester) async {
-      final output = <String>[];
-      terminal.onOutput = output.add;
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
-        ),
-      );
-
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byTooltip('Home')),
-      );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
-      await tester.pump(const Duration(milliseconds: 120));
-      await gesture.up();
-      await tester.pump();
-
-      final outputCount = output.where((value) => value == '\x1b[H').length;
-      await tester.pump(const Duration(milliseconds: 150));
-
-      expect(outputCount, greaterThan(1));
-      expect(output.where((value) => value == '\x1b[H').length, outputCount);
-    });
-  });
-
-  group('Terminal key sequences', () {
-    test('arrow key escape sequences', () {
-      // These are the expected escape sequences for arrow keys
-      expect('\x1b[A', equals('\x1b[A')); // Up
-      expect('\x1b[B', equals('\x1b[B')); // Down
-      expect('\x1b[C', equals('\x1b[C')); // Right
-      expect('\x1b[D', equals('\x1b[D')); // Left
-    });
-
-    test('navigation key escape sequences', () {
-      expect('\x1b[H', equals('\x1b[H')); // Home
-      expect('\x1b[F', equals('\x1b[F')); // End
-      expect('\x1b[5~', equals('\x1b[5~')); // Page Up
-      expect('\x1b[6~', equals('\x1b[6~')); // Page Down
-    });
-
-    test('modifier key combinations', () {
-      // With modifiers, sequences change
-      // Shift = 2, Alt = 3, Shift+Alt = 4, Ctrl = 5, etc.
-      expect('\x1b[1;5A', equals('\x1b[1;5A')); // Ctrl+Up
-      expect('\x1b[1;3A', equals('\x1b[1;3A')); // Alt+Up
-      expect('\x1b[1;2A', equals('\x1b[1;2A')); // Shift+Up
-    });
+        final outputCount = output.where((value) => value == sequence).length;
+        expect(outputCount, greaterThan(1));
+        expect(output.where((value) => value.contains(':2')), isEmpty);
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(output.where((value) => value == sequence).length, outputCount);
+      });
+    }
   });
 }

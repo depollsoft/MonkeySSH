@@ -8,7 +8,6 @@ class AcpNativeBadgeOverlay extends StatelessWidget {
     required this.color,
     required this.badgeKey,
     this.size = 17,
-    this.badgeSize = 12,
     super.key,
   });
 
@@ -24,9 +23,6 @@ class AcpNativeBadgeOverlay extends StatelessWidget {
   /// Square icon slot dimension.
   final double size;
 
-  /// Square badge dimension.
-  final double badgeSize;
-
   @override
   Widget build(BuildContext context) => SizedBox.square(
     dimension: size,
@@ -36,9 +32,9 @@ class AcpNativeBadgeOverlay extends StatelessWidget {
       children: [
         child,
         Positioned(
-          right: -badgeSize * 0.25,
-          bottom: -badgeSize * 0.25,
-          child: AcpNativeBadge(key: badgeKey, color: color, size: badgeSize),
+          right: -3,
+          bottom: -3,
+          child: AcpNativeBadge(key: badgeKey, color: color),
         ),
       ],
     ),

@@ -6,15 +6,19 @@ class TerminalCommandMarkTracker {
   /// Creates a bounded command-mark tracker.
   TerminalCommandMarkTracker({this.maxRetainedMarks = 200});
 
-  /// Maximum attached anchors retained in scrollback.
+  /// Maximum attached anchors retained across both terminal buffers.
   final int maxRetainedMarks;
   Terminal? _terminal;
-  final List<CellAnchor> _marks = <CellAnchor>[];
+  final _marks = <({Buffer buffer, CellAnchor anchor})>[];
 
-  /// Number of marks still attached to terminal scrollback.
+  Iterable<CellAnchor> get _activeMarks => _marks
+      .where((mark) => identical(mark.buffer, _terminal?.buffer))
+      .map((mark) => mark.anchor);
+
+  /// Number of marks still attached to the active terminal buffer.
   int get markCount {
     _pruneDetached();
-    return _marks.length;
+    return _activeMarks.length;
   }
 
   /// Attaches this tracker to a persistent terminal.
@@ -34,32 +38,34 @@ class TerminalCommandMarkTracker {
     if (terminal == null || maxRetainedMarks <= 0) return false;
 
     _pruneDetached();
-    final offset = CellOffset(
-      terminal.buffer.cursorX,
-      terminal.buffer.absoluteCursorY,
-    );
-    if (_marks.isNotEmpty && _marks.last.offset.y == offset.y) return false;
-    _marks.add(terminal.buffer.createAnchorFromOffset(offset));
+    final buffer = terminal.buffer;
+    final offset = CellOffset(buffer.cursorX, buffer.absoluteCursorY);
+    if (_activeMarks.lastOrNull?.y == offset.y) return false;
+    _marks.add((buffer: buffer, anchor: buffer.createAnchorFromOffset(offset)));
     while (_marks.length > maxRetainedMarks) {
-      _marks.removeAt(0).dispose();
+      _marks.removeAt(0).anchor.dispose();
     }
     return true;
   }
 
   /// Returns the closest mark before [absoluteRow], wrapping to the newest.
+  /// Only marks in the active terminal buffer participate in navigation.
   int? previousMarkRow(int absoluteRow) {
     _pruneDetached();
-    if (_marks.isEmpty) return null;
+    int? newestRow;
     for (final mark in _marks.reversed) {
-      if (mark.offset.y < absoluteRow) return mark.offset.y;
+      if (!identical(mark.buffer, _terminal?.buffer)) continue;
+      final row = mark.anchor.y;
+      newestRow ??= row;
+      if (row < absoluteRow) return row;
     }
-    return _marks.last.offset.y;
+    return newestRow;
   }
 
   /// Clears retained anchors.
   void reset({bool keepTerminalReference = true}) {
     for (final mark in _marks) {
-      mark.dispose();
+      mark.anchor.dispose();
     }
     _marks.clear();
     if (!keepTerminalReference) _terminal = null;
@@ -67,16 +73,16 @@ class TerminalCommandMarkTracker {
 
   void _pruneDetached() {
     _marks.removeWhere((mark) {
-      if (mark.attached) return false;
-      mark.dispose();
+      if (mark.anchor.attached) return false;
+      mark.anchor.dispose();
       return true;
     });
   }
 
-  /// Attached mark rows exposed for focused tracker tests.
+  /// Attached mark rows in the active buffer exposed for focused tracker tests.
   @visibleForTesting
   List<int> get debugMarkRows {
     _pruneDetached();
-    return _marks.map((mark) => mark.offset.y).toList(growable: false);
+    return _activeMarks.map((mark) => mark.y).toList(growable: false);
   }
 }

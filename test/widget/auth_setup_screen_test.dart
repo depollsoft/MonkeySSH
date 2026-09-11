@@ -46,30 +46,58 @@ class _BiometricSupportedAuthService extends AuthService {
 }
 
 void main() {
-  testWidgets('enables Next after entering a valid PIN', (tester) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          authServiceProvider.overrideWithValue(
-            _BiometricAvailableAuthService(),
+  for (final keyboard in [false, true]) {
+    testWidgets(
+      'requires six digits to advance via ${keyboard ? 'keyboard' : 'Next'}',
+      (tester) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              authServiceProvider.overrideWithValue(
+                _BiometricAvailableAuthService(),
+              ),
+            ],
+            child: const MaterialApp(home: AuthSetupScreen()),
           ),
-        ],
-        child: const MaterialApp(home: AuthSetupScreen()),
-      ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('PIN Code'));
+        await tester.pumpAndSettle();
+        final nextButton = find.widgetWithText(ElevatedButton, 'Next');
+        expect(tester.widget<ElevatedButton>(nextButton).onPressed, isNull);
+        for (final pin in ['1234', '12345']) {
+          await tester.enterText(find.byType(TextField), pin);
+          await tester.pump();
+          expect(tester.widget<ElevatedButton>(nextButton).onPressed, isNull);
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pumpAndSettle();
+          expect(find.text('Create PIN'), findsOneWidget);
+        }
+        await tester.enterText(find.byType(TextField), '123456');
+        await tester.pump();
+        expect(tester.widget<ElevatedButton>(nextButton).onPressed, isNotNull);
+        if (keyboard) {
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+        } else {
+          await tester.tap(nextButton);
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('Enter your PIN again to confirm.'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          isEmpty,
+        );
+        await tester.enterText(find.byType(TextField), '654321');
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pumpAndSettle();
+        expect(find.text('PINs do not match'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          isEmpty,
+        );
+      },
     );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('PIN Code'));
-    await tester.pumpAndSettle();
-
-    final nextButton = find.widgetWithText(ElevatedButton, 'Next');
-    expect(tester.widget<ElevatedButton>(nextButton).onPressed, isNull);
-
-    await tester.enterText(find.byType(TextField).first, '1234');
-    await tester.pump();
-
-    expect(tester.widget<ElevatedButton>(nextButton).onPressed, isNotNull);
-  });
+  }
 
   testWidgets('explains when biometrics are supported but not enrolled', (
     tester,
@@ -97,7 +125,7 @@ void main() {
 
     await tester.tap(find.text('PIN Code'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).first, '1234');
+    await tester.enterText(find.byType(TextField).first, '123456');
     await tester.pump();
     await tester.tap(find.widgetWithText(ElevatedButton, 'Next'));
     await tester.pumpAndSettle();

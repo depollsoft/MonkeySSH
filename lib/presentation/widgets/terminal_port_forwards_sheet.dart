@@ -80,18 +80,28 @@ class _TerminalPortForwardsSheetState
     final isConnected =
         activeSessionStates[widget.connectionId] ==
         SshConnectionState.connected;
-    final automaticTunnels =
-        ref
-            .read(activeSessionsProvider.notifier)
-            .getActiveTunnelsForHost(widget.hostId)
-            .where((tunnel) => tunnel.isAutomatic)
-            .toList(growable: false)
-          ..sort((left, right) {
-            if (left.isShellRelated != right.isShellRelated) {
-              return left.isShellRelated ? -1 : 1;
-            }
-            return left.remotePort.compareTo(right.remotePort);
-          });
+    final activeTunnels = {
+      for (final tunnel in widget.session.activeTunnels)
+        tunnel.portForwardId: tunnel,
+    };
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    final automaticGroups = <bool, List<ActiveTunnelInfo>>{true: [], false: []};
+    for (final connectionId in sessions.getConnectionsForHost(widget.hostId)) {
+      final tunnels = connectionId == widget.connectionId
+          ? activeTunnels.values
+          : sessions.getSession(connectionId)?.activeTunnels ?? const [];
+      for (final tunnel in tunnels) {
+        if (tunnel.isAutomatic) {
+          automaticGroups[tunnel.isShellRelated]!.add(tunnel);
+        }
+      }
+    }
+    automaticGroups.removeWhere((_, tunnels) => tunnels.isEmpty);
+    for (final tunnels in automaticGroups.values) {
+      tunnels.sort(
+        (left, right) => left.remotePort.compareTo(right.remotePort),
+      );
+    }
 
     return Column(
       children: [
@@ -162,37 +172,35 @@ class _TerminalPortForwardsSheetState
         _buildAutoForwardToggle(
           context,
           autoForwardPorts: autoForwardPorts,
-          hasAutomaticTunnels: automaticTunnels.isNotEmpty,
+          hasAutomaticTunnels: automaticGroups.isNotEmpty,
           isConnected: isConnected,
         ),
         const Divider(height: 1),
         Expanded(
-          child: StreamBuilder<void>(
-            stream: widget.session.portForwardChanges,
-            builder: (context, _) => portForwards.when(
-              loading: () => const BrandListSkeleton(rowCount: 4),
-              error: (_, _) => BrandErrorState(
-                title: 'couldn’t load forwards',
-                message: 'Saved forwards for this host didn’t load.',
-                onRetry: () =>
-                    ref.invalidate(portForwardsForHostProvider(widget.hostId)),
-              ),
-              data: (forwards) {
-                if (forwards.isEmpty && automaticTunnels.isEmpty) {
-                  return _buildEmptyState(context);
-                }
-                return _buildForwardList(
-                  context,
-                  forwards: forwards,
-                  automaticTunnels: automaticTunnels,
-                  isConnected: isConnected,
-                );
-              },
+          child: portForwards.when(
+            loading: () => const BrandListSkeleton(rowCount: 4),
+            error: (_, _) => BrandErrorState(
+              title: 'couldn’t load forwards',
+              message: 'Saved forwards for this host didn’t load.',
+              onRetry: () =>
+                  ref.invalidate(portForwardsForHostProvider(widget.hostId)),
             ),
+            data: (forwards) {
+              if (forwards.isEmpty && automaticGroups.isEmpty) {
+                return _buildEmptyState(context);
+              }
+              return _buildForwardList(
+                context,
+                forwards: forwards,
+                automaticGroups: automaticGroups,
+                activeTunnels: activeTunnels,
+                isConnected: isConnected,
+              );
+            },
           ),
         ),
         if ((portForwards.asData?.value.isNotEmpty ?? false) ||
-            automaticTunnels.isNotEmpty) ...[
+            automaticGroups.isNotEmpty) ...[
           const Divider(height: 1),
           SafeArea(
             top: false,
@@ -314,35 +322,33 @@ class _TerminalPortForwardsSheetState
   Widget _buildForwardList(
     BuildContext context, {
     required List<PortForward> forwards,
-    required List<ActiveTunnelInfo> automaticTunnels,
+    required Map<bool, List<ActiveTunnelInfo>> automaticGroups,
+    required Map<int, ActiveTunnelInfo> activeTunnels,
     required bool isConnected,
   }) => ListView(
     controller: widget.scrollController,
     padding: const EdgeInsets.symmetric(vertical: FluttyTheme.spacingSm),
     children: [
-      if (automaticTunnels.any((tunnel) => tunnel.isShellRelated)) ...[
-        _buildGroupLabel(context, 'This saved host'),
-        for (final tunnel in automaticTunnels.where(
-          (tunnel) => tunnel.isShellRelated,
-        )) ...[
-          _buildAutomaticForwardRow(context, tunnel),
-          const Divider(height: 1),
-        ],
-      ],
-      if (automaticTunnels.any((tunnel) => !tunnel.isShellRelated)) ...[
-        _buildGroupLabel(context, 'Shared host services'),
-        for (final tunnel in automaticTunnels.where(
-          (tunnel) => !tunnel.isShellRelated,
-        )) ...[
+      for (final group in automaticGroups.entries) ...[
+        _buildGroupLabel(
+          context,
+          group.key ? 'This saved host' : 'Shared host services',
+        ),
+        for (final tunnel in group.value) ...[
           _buildAutomaticForwardRow(context, tunnel),
           const Divider(height: 1),
         ],
       ],
       if (forwards.isNotEmpty) ...[
-        if (automaticTunnels.isNotEmpty)
+        if (automaticGroups.isNotEmpty)
           _buildGroupLabel(context, 'Saved forwards'),
         for (var index = 0; index < forwards.length; index++) ...[
-          _buildForwardRow(context, forwards[index], isConnected: isConnected),
+          _buildForwardRow(
+            context,
+            forwards[index],
+            activeTunnel: activeTunnels[forwards[index].id],
+            isConnected: isConnected,
+          ),
           if (index < forwards.length - 1) const Divider(height: 1),
         ],
       ],
@@ -434,14 +440,14 @@ class _TerminalPortForwardsSheetState
   Widget _buildForwardRow(
     BuildContext context,
     PortForward portForward, {
+    required ActiveTunnelInfo? activeTunnel,
     required bool isConnected,
   }) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final isActive = widget.session.isPortForwardActive(portForward.id);
+    final isActive = activeTunnel != null;
     final isPending = _pendingPortForwardIds.contains(portForward.id);
     final isLocal = portForward.forwardType == 'local';
-    final activeTunnel = _activeTunnelForPortForward(portForward.id);
     final canOpenInBrowser =
         isLocal &&
         activeTunnel?.browserHost != null &&
@@ -552,15 +558,6 @@ class _TerminalPortForwardsSheetState
         ),
       ),
     );
-  }
-
-  ActiveTunnelInfo? _activeTunnelForPortForward(int portForwardId) {
-    for (final tunnel in widget.session.activeTunnels) {
-      if (tunnel.portForwardId == portForwardId) {
-        return tunnel;
-      }
-    }
-    return null;
   }
 
   Future<void> _openInBrowser(ActiveTunnelInfo tunnel) =>

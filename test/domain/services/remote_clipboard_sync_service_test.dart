@@ -1,8 +1,40 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/remote_clipboard_sync_service.dart';
 
 void main() {
   group('RemoteClipboardSyncService', () {
+    for (final text in ['', 'line\n', 'line\n\n', 'quote\' and snowman ☃\n']) {
+      test('read command preserves ${jsonEncode(text)}', () async {
+        final command =
+            r'pbpaste() { printf %s "$CLIPBOARD_TEXT"; };'
+            '\n${RemoteClipboardSyncService.buildReadCommand()}';
+        final result = await Process.run(
+          '/bin/sh',
+          ['-c', command],
+          environment: {'CLIPBOARD_TEXT': text},
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        expect(
+          RemoteClipboardSyncService.parseReadOutput(
+            result.stdout as String,
+          ).text,
+          text,
+        );
+      }, skip: Platform.isWindows);
+
+      test('write command preserves ${jsonEncode(text)}', () async {
+        final command =
+            'pbcopy() { cat; };\n'
+            '${RemoteClipboardSyncService.buildWriteCommand(text)}';
+        final result = await Process.run('/bin/sh', ['-c', command]);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        expect(result.stdout, text);
+      }, skip: Platform.isWindows);
+    }
+
     test('canSyncText rejects oversized content', () {
       final text = 'a' * (1024 * 1024 + 1);
       expect(RemoteClipboardSyncService.canSyncText(text), isFalse);

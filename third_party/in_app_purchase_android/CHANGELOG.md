@@ -1,5 +1,10 @@
 ## 0.5.4
 
+* MonkeySSH regression coverage: `BillingReplyOnceTest` exercises duplicate
+  product-detail responses, a callback followed by a synchronous exception, and
+  independent replies for subsequent queries. The existing vendored atomic
+  callback guard covers all these completion paths.
+
 * Fixes a crash (`IllegalStateException: Reply already submitted`) when the
   Play Billing library invokes a response listener more than once for a single
   call.

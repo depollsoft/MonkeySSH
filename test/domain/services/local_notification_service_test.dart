@@ -1,3 +1,7 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -5,6 +9,209 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  // Unit tests do not run the native plugin registrant.
+  AndroidFlutterLocalNotificationsPlugin.registerWith();
+
+  test(
+    'terminal dispatch preserves sound, permission, and missing-plugin results',
+    () async {
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      const payload = TerminalNotificationPayload(hostId: 7, connectionId: 21);
+      final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+      FlutterLocalNotificationsPlatform.instance =
+          IOSFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final service = LocalNotificationService();
+      final calls = <MethodCall>[];
+      var permitted = true;
+      var missingPlugin = false;
+      var sound = TerminalNotificationSound.silent;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..setMockMethodCallHandler(channel, (call) async {
+              calls.add(call);
+              if (call.method == 'getNotificationAppLaunchDetails') return null;
+              if (call.method == 'requestPermissions') {
+                expect(
+                  (call.arguments as Map)['sound'],
+                  sound == TerminalNotificationSound.system,
+                );
+              }
+              if (call.method == 'show') {
+                if (missingPlugin) throw MissingPluginException();
+                expect(
+                  call.arguments,
+                  containsPair('payload', payload.encode()),
+                );
+                expect(call.arguments, containsPair('id', 42));
+              }
+              return permitted;
+            });
+      addTearDown(() {
+        service.dispose();
+        messenger.setMockMethodCallHandler(channel, null);
+        FlutterLocalNotificationsPlatform.instance = previousPlatform;
+        debugDefaultTargetPlatformOverride = null;
+      });
+      for (sound in TerminalNotificationSound.values) {
+        for (final scenario in [(true, false), (false, false), (true, true)]) {
+          (permitted, missingPlugin) = scenario;
+          calls.clear();
+          expect(
+            await service.showTerminalNotification(
+              notificationId: 42,
+              title: 'Ready',
+              body: 'Done',
+              payload: payload,
+              sound: sound,
+            ),
+            permitted && !missingPlugin,
+          );
+          expect(
+            calls.where((call) => call.method == 'requestPermissions'),
+            hasLength(1),
+          );
+          expect(
+            calls.where((call) => call.method == 'show'),
+            hasLength(permitted ? 1 : 0),
+          );
+        }
+      }
+      calls.clear();
+      await service.clearTmuxAlert(42);
+      await service.clearTerminalNotification(43);
+      expect(calls.map((call) => (call.method, call.arguments)), [
+        ('cancel', 42),
+        ('cancel', 43),
+      ]);
+    },
+  );
+
+  for (final delayedMethod in ['requestPermissions', 'show']) {
+    test(
+      'tmux cancellation waits for delayed $delayedMethod and retires its queue',
+      () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            IOSFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final service = LocalNotificationService();
+        final pending = Completer<bool>();
+        final started = Completer<void>();
+        final delivered = <int>{};
+        final operations = <String>[];
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                if (call.method == delayedMethod && !started.isCompleted) {
+                  started.complete();
+                  await pending.future;
+                }
+                if (call.method == 'show') {
+                  final id = (call.arguments as Map)['id'] as int;
+                  delivered.add(id);
+                  operations.add('show $id');
+                } else if (call.method == 'cancel') {
+                  final id = call.arguments as int;
+                  delivered.remove(id);
+                  operations.add('cancel $id');
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+        Future<void> show(int id) => service.showTmuxAlert(
+          notificationId: id,
+          title: 'Ready',
+          body: 'Done',
+          payload: const TmuxAlertNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+            tmuxSessionName: 'main',
+            windowIndex: 1,
+          ),
+        );
+
+        final showing = show(42);
+        await started.future;
+        final clearing = service.clearTmuxAlert(42);
+        // A pending permission dialog or platform show must not block other IDs.
+        await show(43);
+        expect(delivered, {43});
+        expect(operations, ['show 43']);
+        pending.complete(true);
+        await Future.wait([showing, clearing]);
+        expect(operations, ['show 43', 'show 42', 'cancel 42']);
+        expect(delivered, {43});
+        expect(service.pendingNotificationOperationCount, 0);
+
+        // The same ID can be used again after its previous queue was removed.
+        await show(42);
+        expect(delivered, {42, 43});
+        await service.clearTmuxAlert(42);
+        expect(delivered, {43});
+        expect(service.pendingNotificationOperationCount, 0);
+      },
+    );
+  }
+
+  test('a failed tmux show does not prevent queued cancellation', () async {
+    const channel = MethodChannel('dexterous.com/flutter/local_notifications');
+    final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+    FlutterLocalNotificationsPlatform.instance =
+        IOSFlutterLocalNotificationsPlugin();
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final service = LocalNotificationService();
+    final cancelled = <int>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          ..setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'getNotificationAppLaunchDetails') return null;
+            if (call.method == 'show') throw PlatformException(code: 'failed');
+            if (call.method == 'cancel') cancelled.add(call.arguments as int);
+            return true;
+          });
+    addTearDown(() {
+      service.dispose();
+      messenger.setMockMethodCallHandler(channel, null);
+      FlutterLocalNotificationsPlatform.instance = previousPlatform;
+      debugDefaultTargetPlatformOverride = null;
+    });
+    final showing = service.showTmuxAlert(
+      notificationId: 42,
+      title: 'Ready',
+      body: 'Done',
+      payload: const TmuxAlertNotificationPayload(
+        hostId: 7,
+        connectionId: 21,
+        tmuxSessionName: 'main',
+        windowIndex: 1,
+      ),
+    );
+    final expectedError = expectLater(
+      showing,
+      throwsA(isA<PlatformException>()),
+    );
+    final clearing = service.clearTmuxAlert(42);
+    await expectedError;
+    await clearing;
+    expect(cancelled, [42]);
+    expect(service.pendingNotificationOperationCount, 0);
+  });
+
   group('TmuxAlertNotificationPayload', () {
     test('round-trips tmux alert routing fields', () {
       const payload = TmuxAlertNotificationPayload(

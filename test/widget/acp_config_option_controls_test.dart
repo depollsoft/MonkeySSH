@@ -1,20 +1,27 @@
 // ignore_for_file: public_member_api_docs
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
+import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/presentation/widgets/acp_config_option_controls.dart';
+
+import '../support/fake_acp_session_manager.dart';
 
 Future<void> _pump(
   WidgetTester tester,
   Widget child, {
   Size size = const Size(400, 800),
+  bool wrapInMaterialApp = true,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  await tester.pumpWidget(MaterialApp(home: Scaffold(body: child)));
+  await tester.pumpWidget(
+    wrapInMaterialApp ? MaterialApp(home: Scaffold(body: child)) : child,
+  );
 }
 
 void main() {
@@ -63,6 +70,63 @@ void main() {
       expect(calls, contains(('model', 'smart')));
     },
   );
+
+  for (final width in [400.0, 800.0]) {
+    testWidgets('settings route stays live at width $width', (tester) async {
+      AcpSessionManagerState state({required bool value}) =>
+          AcpSessionManagerState(
+            sessions: [
+              fakeAcpSession(
+                configOptions: [
+                  AcpBooleanConfigOption(
+                    id: 'flag',
+                    name: 'Flag',
+                    currentValue: value,
+                  ),
+                ],
+              ),
+            ],
+          );
+      final manager = FakeAcpSessionManager(
+        sessions: state(value: false).sessions,
+      );
+      addTearDown(manager.dispose);
+      await _pump(
+        tester,
+        ProviderScope(
+          overrides: [acpSessionManagerProvider.overrideWithValue(manager)],
+          child: MaterialApp(
+            home: Builder(
+              builder: (context) => TextButton(
+                onPressed: () =>
+                    showAcpConfigOptions(context, sessionKey: fakeAcpKey()),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+        size: Size(width, 800),
+        wrapInMaterialApp: false,
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+      for (final value in [true, false]) {
+        await tester.tap(find.byType(Switch));
+        await tester.pumpAndSettle();
+        expect(manager.configOptionSets.last, ('flag', value));
+        manager.emit(state(value: value));
+        await tester.pumpAndSettle();
+        expect(tester.widget<Switch>(find.byType(Switch)).value, value);
+      }
+      expect(manager.configOptionSets, [('flag', true), ('flag', false)]);
+
+      manager.emit(state(value: true));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    });
+  }
 
   testWidgets('falls back to legacy mode only when no generic option exists', (
     tester,

@@ -729,11 +729,6 @@ String? parseResolvedAdbPath(String output) {
   return resolved;
 }
 
-/// Clears cached remote ADB binary paths.
-@visibleForTesting
-void resetRemoteAdbPathCacheForTesting() =>
-    SshRemoteAdbCommandRunner.debugAdbPathCache.clear();
-
 /// SSH exec implementation of [RemoteAdbCommandRunner].
 class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
   /// Creates the remote command runner.
@@ -742,9 +737,8 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
   static const _commandTimeout = Duration(seconds: 20);
   static const _maxOutputCharacters = 8192;
 
-  /// Resolved ADB binary paths keyed by SSH connection.
-  @visibleForTesting
-  static final Map<int, String> debugAdbPathCache = <int, String>{};
+  /// Resolved ADB binary paths retained only for the lifetime of each session.
+  static final _adbPathCache = Expando<String>();
 
   @override
   Future<bool> isAvailable(SshSession session) async {
@@ -757,7 +751,7 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
         result.output.toLowerCase().contains('android debug bridge')) {
       return true;
     }
-    debugAdbPathCache.remove(session.connectionId);
+    _adbPathCache[session] = null;
     return false;
   }
 
@@ -781,7 +775,7 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
       // Android SDK installer puts platform-tools.
       return 'adb';
     }
-    final cached = debugAdbPathCache[session.connectionId];
+    final cached = _adbPathCache[session];
     if (cached != null) {
       return cached;
     }
@@ -801,7 +795,7 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
       return null;
     }
     final quotedPath = _shellQuote(resolvedPath);
-    debugAdbPathCache[session.connectionId] = quotedPath;
+    _adbPathCache[session] = quotedPath;
     return quotedPath;
   }
 
@@ -868,7 +862,10 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
   }) => session.runQueuedExec(() async {
     SSHSession? execSession;
     try {
-      final commandSession = await session.execute(command);
+      final commandSession = await openSshExec(
+        session.execute(command),
+        _commandTimeout,
+      );
       execSession = commandSession;
       final stdoutFuture = _collectOutput(commandSession.stdout);
       final stderrFuture = _collectOutput(commandSession.stderr);
@@ -1025,6 +1022,8 @@ class DeviceDebugSessionController extends ChangeNotifier {
   AndroidAdbEndpoint? _connectEndpoint;
   String? _remoteSerial;
   int _operationGeneration = 0;
+  Completer<void>? _operation;
+  Future<void>? _stopFuture;
   int _pairingWatchGeneration = 0;
   StreamSubscription<String>? _pairingCodeSubscription;
   bool _pairingPromptVisible = false;
@@ -1055,10 +1054,15 @@ class DeviceDebugSessionController extends ChangeNotifier {
 
   /// Discovers and connects to Wireless ADB, requesting pairing when needed.
   Future<void> enable() async {
-    if (_disposed || _state.isBusy || _state.isActive) {
+    if (_disposed ||
+        _operation != null ||
+        _stopFuture != null ||
+        _state.isBusy ||
+        _state.isActive) {
       return;
     }
     final generation = ++_operationGeneration;
+    final operation = _operation = Completer<void>();
     _setState(
       const DeviceDebugState(
         phase: DeviceDebugPhase.searching,
@@ -1085,6 +1089,9 @@ class DeviceDebugSessionController extends ChangeNotifier {
               'platform tools, or add adb to the PATH your login shell sets, '
               'then try again.',
         );
+      }
+      if (!_owns(generation)) {
+        return;
       }
       if (!await _remoteRunner.supportsPairing(_session)) {
         throw const DeviceDebugException(
@@ -1126,6 +1133,9 @@ class DeviceDebugSessionController extends ChangeNotifier {
       if (_owns(generation)) {
         _setError(error);
       }
+    } finally {
+      _operation = null;
+      operation.complete();
     }
   }
 
@@ -1134,7 +1144,11 @@ class DeviceDebugSessionController extends ChangeNotifier {
     // Guard the state first: a delayed or duplicate notification reply must
     // never rewrite an active session back into the pairing flow, which would
     // leave the tunnel live while the UI showed debugging as off.
-    if (_disposed || _state.isBusy || _state.isActive) {
+    if (_disposed ||
+        _operation != null ||
+        _stopFuture != null ||
+        _state.isBusy ||
+        _state.isActive) {
       return;
     }
     final normalizedCode = pairingCode.trim();
@@ -1149,6 +1163,7 @@ class DeviceDebugSessionController extends ChangeNotifier {
       return;
     }
     final generation = ++_operationGeneration;
+    final operation = _operation = Completer<void>();
     _setState(
       const DeviceDebugState(
         phase: DeviceDebugPhase.pairing,
@@ -1224,6 +1239,9 @@ class DeviceDebugSessionController extends ChangeNotifier {
       final connectEndpoint =
           _connectEndpoint ??
           await _platform.discoverEndpoint(AndroidAdbServiceKind.connect);
+      if (!_owns(generation)) {
+        return;
+      }
       if (connectEndpoint == null) {
         _setState(
           const DeviceDebugState(
@@ -1245,15 +1263,40 @@ class DeviceDebugSessionController extends ChangeNotifier {
       if (_owns(generation)) {
         _setError(error);
       }
+    } finally {
+      _operation = null;
+      operation.complete();
     }
   }
 
   /// Disconnects remote ADB and closes the internal reverse tunnels.
-  Future<void> stop() async {
-    if (_disposed || _state.phase == DeviceDebugPhase.off) {
-      return;
+  ///
+  /// Waits for any cancelled operation and its cleanup before allowing restart.
+  /// Concurrent callers share the same stop future.
+  Future<void> stop() {
+    if (_stopFuture case final pending?) {
+      return pending;
     }
+    if (_disposed || _state.phase == DeviceDebugPhase.off) {
+      return Future<void>.value();
+    }
+    final completion = Completer<void>();
+    _stopFuture = completion.future;
+    unawaited(
+      _stop().then(
+        completion.complete,
+        onError: (Object error, StackTrace stackTrace) {
+          _stopFuture = null;
+          completion.completeError(error, stackTrace);
+        },
+      ),
+    );
+    return completion.future;
+  }
+
+  Future<void> _stop() async {
     ++_operationGeneration;
+    final operation = _operation;
     _setState(
       const DeviceDebugState(
         phase: DeviceDebugPhase.stopping,
@@ -1291,10 +1334,14 @@ class DeviceDebugSessionController extends ChangeNotifier {
       // controller never stays stuck in `stopping` with a live reverse forward.
       await _stopTunnelQuietly(_pairingTunnelId);
       await _stopTunnelQuietly(_connectTunnelId);
+      // Fixed tunnel IDs cannot be reused until the old operation has finished
+      // every cleanup step, including disconnecting a late ADB connection.
+      await operation?.future;
       await _hideReturnPrompt();
       _connectEndpoint = null;
       _remoteSerial = null;
       _pairedFromNotification = false;
+      _stopFuture = null;
       if (!_disposed) {
         _setState(DeviceDebugState.off);
       }
@@ -1340,13 +1387,22 @@ class DeviceDebugSessionController extends ChangeNotifier {
     required int generation,
     required bool canRequestPairing,
   }) async {
+    if (!_owns(generation)) {
+      return;
+    }
     _setState(
       const DeviceDebugState(
         phase: DeviceDebugPhase.connecting,
         message: 'Opening a private ADB tunnel on the SSH host…',
       ),
     );
+    if (!_owns(generation)) {
+      return;
+    }
     await _session.stopForward(_connectTunnelId);
+    if (!_owns(generation)) {
+      return;
+    }
     final remotePort = await _startReverseTunnel(
       tunnelId: _connectTunnelId,
       endpoint: endpoint,
@@ -1362,6 +1418,10 @@ class DeviceDebugSessionController extends ChangeNotifier {
         message: 'Connecting remote ADB to this Android device…',
       ),
     );
+    if (!_owns(generation)) {
+      await _stopTunnelQuietly(_connectTunnelId);
+      return;
+    }
     late final RemoteAdbCommandResult result;
     try {
       result = await _remoteRunner.connect(_session, address: remoteSerial);
@@ -1401,6 +1461,9 @@ class DeviceDebugSessionController extends ChangeNotifier {
       return;
     }
     await _stopTunnelQuietly(_connectTunnelId);
+    if (!_owns(generation)) {
+      return;
+    }
     if (canRequestPairing) {
       // ADB reports an unpaired host in several ways depending on version and
       // on whether the TLS handshake or the authentication step fails, so any

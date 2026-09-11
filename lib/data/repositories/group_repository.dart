@@ -16,27 +16,6 @@ class GroupRepository {
   /// Watch all groups.
   Stream<List<Group>> watchAll() => _orderedGroupsQuery().watch();
 
-  /// Get root groups (no parent).
-  Future<List<Group>> getRootGroups() =>
-      (_orderedGroupsQuery()..where((g) => g.parentId.isNull())).get();
-
-  /// Watch root groups.
-  Stream<List<Group>> watchRootGroups() =>
-      (_orderedGroupsQuery()..where((g) => g.parentId.isNull())).watch();
-
-  /// Get child groups of a parent.
-  Future<List<Group>> getChildren(int parentId) =>
-      (_orderedGroupsQuery()..where((g) => g.parentId.equals(parentId))).get();
-
-  /// Watch child groups.
-  Stream<List<Group>> watchChildren(int parentId) =>
-      (_orderedGroupsQuery()..where((g) => g.parentId.equals(parentId)))
-          .watch();
-
-  /// Get a group by ID.
-  Future<Group?> getById(int id) =>
-      (_db.select(_db.groups)..where((g) => g.id.equals(id))).getSingleOrNull();
-
   /// Insert a new group.
   Future<int> insert(GroupsCompanion group) async {
     final sortOrder = group.sortOrder.present
@@ -44,13 +23,6 @@ class GroupRepository {
         : Value(await _nextSortOrder());
     return _db.into(_db.groups).insert(group.copyWith(sortOrder: sortOrder));
   }
-
-  /// Update an existing group.
-  Future<bool> update(Group group) => _db.update(_db.groups).replace(group);
-
-  /// Delete a group.
-  Future<int> delete(int id) =>
-      (_db.delete(_db.groups)..where((g) => g.id.equals(id))).go();
 
   SimpleSelectStatement<$GroupsTable, Group> _orderedGroupsQuery() =>
       _db.select(_db.groups)..orderBy([

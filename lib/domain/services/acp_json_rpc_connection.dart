@@ -57,19 +57,6 @@ final class AcpRequestTimeoutException extends AcpJsonRpcException {
   final String method;
 }
 
-/// A pending request was cancelled locally.
-final class AcpRequestCancelledException extends AcpJsonRpcException {
-  /// Creates a cancellation error.
-  const AcpRequestCancelledException(this.id, this.method)
-    : super('Request $method ($id) was cancelled');
-
-  /// Cancelled request identifier.
-  final AcpRequestId id;
-
-  /// Cancelled method.
-  final String method;
-}
-
 /// The connection closed while work was pending.
 final class AcpConnectionClosedException extends AcpJsonRpcException {
   /// Creates a connection-closed error.
@@ -143,40 +130,14 @@ final class AcpJsonRpcServerRequest {
   }
 }
 
-/// A cancellable pending JSON-RPC request.
-final class AcpPendingRequest {
-  AcpPendingRequest._({
-    required this.id,
-    required this.method,
-    required this.future,
-    required void Function() cancel,
-  }) : _cancel = cancel;
-
-  /// Request identifier.
-  final AcpRequestId id;
-
-  /// Request method.
-  final String method;
-
-  /// Future JSON-RPC result.
-  final Future<Object?> future;
-
-  final void Function() _cancel;
-
-  /// Cancels local response waiting.
-  void cancel() => _cancel();
-}
-
 final class _PendingResponse {
   _PendingResponse({
     required this.id,
-    required this.method,
     required this.completer,
     required this.timer,
   });
 
   final AcpRequestId id;
-  final String method;
   final Completer<Object?> completer;
   final Timer? timer;
 }
@@ -198,12 +159,19 @@ final class AcpJsonRpcConnection {
     if (maxFrameSize <= 0) {
       throw ArgumentError.value(maxFrameSize, 'maxFrameSize');
     }
-    _incomingSubscription = transport.incoming.listen(
-      _handleBytes,
-      onError: _handleTransportError,
-      onDone: _handleTransportDone,
-      cancelOnError: false,
-    );
+    _incomingSubscription = transport is AcpDecodedTransport
+        ? transport.incomingFrames.listen(
+            _handleDecodedFrame,
+            onError: _handleTransportError,
+            onDone: _handleTransportDone,
+            cancelOnError: false,
+          )
+        : transport.incoming.listen(
+            _handleBytes,
+            onError: _handleTransportError,
+            onDone: _handleTransportDone,
+            cancelOnError: false,
+          );
   }
 
   /// Default deadline applied to requests.
@@ -223,7 +191,7 @@ final class AcpJsonRpcConnection {
     sync: true,
   );
   final _errors = StreamController<AcpJsonRpcException>.broadcast(sync: true);
-  late final StreamSubscription<List<int>> _incomingSubscription;
+  late final StreamSubscription<Object?> _incomingSubscription;
   Future<void> _writeTail = Future<void>.value();
   Future<void>? _closeFuture;
   var _closed = false;
@@ -240,8 +208,8 @@ final class AcpJsonRpcConnection {
   /// Whether the connection has closed.
   bool get isClosed => _closed;
 
-  /// Sends a request and returns a cancellable handle.
-  AcpPendingRequest sendRequest(
+  /// Sends a request and awaits its result.
+  Future<Object?> request(
     String method, {
     Object? params,
     Duration? timeout,
@@ -264,21 +232,23 @@ final class AcpJsonRpcConnection {
     final effectiveTimeout = noTimeout
         ? null
         : timeout ?? defaultRequestTimeout;
+    late final _PendingResponse pending;
     final timer = effectiveTimeout == null
         ? null
         : Timer(effectiveTimeout, () {
-            final pending = _pending.remove(requestId);
-            if (pending == null || pending.completer.isCompleted) return;
+            if (!_removePending(pending) || pending.completer.isCompleted) {
+              return;
+            }
             pending.completer.completeError(
               AcpRequestTimeoutException(requestId, method, effectiveTimeout),
             );
           });
-    _pending[requestId] = _PendingResponse(
+    pending = _PendingResponse(
       id: requestId,
-      method: method,
       completer: completer,
       timer: timer,
     );
+    _pending[requestId] = pending;
     unawaited(
       _writeMessage(<String, Object?>{
         'jsonrpc': '2.0',
@@ -286,35 +256,13 @@ final class AcpJsonRpcConnection {
         'method': method,
         'params': ?params,
       }).catchError((Object error, StackTrace stackTrace) {
-        final pending = _pending.remove(requestId);
-        pending?.timer?.cancel();
-        if (pending != null && !pending.completer.isCompleted) {
+        if (_removePending(pending) && !pending.completer.isCompleted) {
           pending.completer.completeError(error, stackTrace);
         }
       }),
     );
-    return AcpPendingRequest._(
-      id: requestId,
-      method: method,
-      future: completer.future,
-      cancel: () => _cancelRequest(requestId),
-    );
+    return completer.future;
   }
-
-  /// Sends a request and awaits its result.
-  Future<Object?> request(
-    String method, {
-    Object? params,
-    Duration? timeout,
-    AcpRequestId? id,
-    bool noTimeout = false,
-  }) => sendRequest(
-    method,
-    params: params,
-    timeout: timeout,
-    id: id,
-    noTimeout: noTimeout,
-  ).future;
 
   /// Sends a JSON-RPC notification.
   Future<void> notify(String method, {Object? params}) {
@@ -327,8 +275,7 @@ final class AcpJsonRpcConnection {
   }
 
   /// Closes the connection and fails all pending requests.
-  Future<void> close() =>
-      _closeFuture ??= _terminate(const AcpConnectionClosedException());
+  Future<void> close() => _terminate(const AcpConnectionClosedException());
 
   void _handleBytes(List<int> bytes) {
     if (_closed) return;
@@ -369,7 +316,23 @@ final class AcpJsonRpcConnection {
       _protocolFailure(const AcpProtocolException('Invalid ACP JSON frame'));
       return;
     }
-    final message = AcpJson.object(decoded);
+    _handleMessage(AcpJson.object(decoded));
+  }
+
+  void _handleDecodedFrame(AcpDecodedFrame frame) {
+    if (_closed) return;
+    if (frame.byteLength > maxFrameSize || frame.byteLength < 0) {
+      _protocolFailure(
+        AcpProtocolException(
+          'ACP frame exceeds maximum size of $maxFrameSize bytes',
+        ),
+      );
+      return;
+    }
+    _handleMessage(frame.message, immutable: true);
+  }
+
+  void _handleMessage(AcpJsonMap? message, {bool immutable = false}) {
     if (message == null || message['jsonrpc'] != '2.0') {
       _protocolFailure(
         const AcpProtocolException('Invalid JSON-RPC 2.0 message'),
@@ -384,7 +347,7 @@ final class AcpJsonRpcConnection {
           AcpJsonRpcNotification(
             method: method,
             params: message['params'],
-            raw: AcpJson.immutableObject(message),
+            raw: immutable ? message : AcpJson.immutableObject(message),
           ),
         );
         return;
@@ -399,7 +362,7 @@ final class AcpJsonRpcConnection {
         id: id,
         method: method,
         params: message['params'],
-        raw: AcpJson.immutableObject(message),
+        raw: immutable ? message : AcpJson.immutableObject(message),
         respond: (result) => _writeMessage(<String, Object?>{
           'jsonrpc': '2.0',
           'id': id,
@@ -459,18 +422,15 @@ final class AcpJsonRpcConnection {
     pending.completer.complete(message['result']);
   }
 
-  void _cancelRequest(AcpRequestId id) {
-    final pending = _pending.remove(id);
-    if (pending == null) return;
+  bool _removePending(_PendingResponse pending) {
+    // An ID may have been reused since this request's callback was scheduled.
+    if (!identical(_pending[pending.id], pending)) return false;
+    _pending.remove(pending.id);
     pending.timer?.cancel();
-    if (!pending.completer.isCompleted) {
-      pending.completer.completeError(
-        AcpRequestCancelledException(pending.id, pending.method),
-      );
-    }
+    return true;
   }
 
-  Future<void> _writeMessage(AcpJsonMap message) {
+  Future<void> _writeMessage(AcpJsonMap message) async {
     _ensureOpen();
     final bytes = utf8.encode('${jsonEncode(message)}\n');
     if (bytes.length > maxFrameSize) {
@@ -480,7 +440,10 @@ final class AcpJsonRpcConnection {
         ),
       );
     }
-    final operation = _writeTail.then((_) => _transport.write(bytes));
+    final operation = _writeTail.then((_) {
+      _ensureOpen();
+      return _transport.write(bytes);
+    });
     _writeTail = operation.then<void>(
       (_) {},
       onError: (Object _, StackTrace _) {},
@@ -518,7 +481,12 @@ final class AcpJsonRpcConnection {
   Future<void> _terminate(
     AcpJsonRpcException reason, [
     StackTrace? stackTrace,
-  ]) async {
+  ]) => _closeFuture ??= _performTermination(reason, stackTrace);
+
+  Future<void> _performTermination(
+    AcpJsonRpcException reason,
+    StackTrace? stackTrace,
+  ) async {
     if (_closed) return;
     _closed = true;
     for (final pending in _pending.values) {

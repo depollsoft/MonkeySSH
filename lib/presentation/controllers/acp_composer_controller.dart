@@ -77,6 +77,7 @@ class AcpComposerError {
   /// private remote directory instead of embedding them inline.
   bool get isUploadRecoverable =>
       attachmentFailure == AcpAttachmentFailure.inlineSizeLimit ||
+      attachmentFailure == AcpAttachmentFailure.imageSizeLimit ||
       attachmentFailure == AcpAttachmentFailure.unsupportedCapability;
 
   @override
@@ -228,9 +229,6 @@ class AcpComposerController extends ChangeNotifier {
 
   /// The latest content-free error, if any.
   AcpComposerError? get error => _error;
-
-  /// The active leading slash-command query, if any.
-  AcpSlashQuery? get slashQuery => _slashQuery;
 
   /// The ranked slash-command matches for the active query.
   List<AcpAvailableCommand> get slashCommands => _slashCommands;
@@ -422,22 +420,6 @@ class AcpComposerController extends ChangeNotifier {
       clearError: true,
       clearProgress: true,
     );
-    notifyListeners();
-  }
-
-  /// Sets the explicit fallback for the attachment with [id].
-  ///
-  /// The UI uses this to record an explicit user confirmation before falling
-  /// back to a remote upload for an attachment that cannot be embedded inline.
-  void setAttachmentFallback(String id, AcpAttachmentFallback fallback) {
-    if (!isEditable) {
-      return;
-    }
-    final index = _attachments.indexWhere((attachment) => attachment.id == id);
-    if (index < 0) {
-      return;
-    }
-    _attachments[index] = _attachments[index].copyWith(fallback: fallback);
     notifyListeners();
   }
 

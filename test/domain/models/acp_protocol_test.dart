@@ -1,7 +1,23 @@
+import 'dart:collection';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
+
+class _UnreadableMap extends MapBase<String, Object?> {
+  @override
+  Iterable<String> get keys => throw StateError('Discarded entry traversed');
+  @override
+  Object? operator [](Object? key) => throw StateError('Discarded entry read');
+  @override
+  void operator []=(String key, Object? value) =>
+      throw UnsupportedError('read only');
+  @override
+  void clear() => throw UnsupportedError('read only');
+  @override
+  Object? remove(Object? key) => throw UnsupportedError('read only');
+}
 
 void main() {
   test('parses capabilities and preserves unknown extensions', () {
@@ -214,6 +230,81 @@ void main() {
     expect(unknown.meta['vendor'], 'example');
   });
 
+  test('tool update lists skip malformed entries and remain immutable', () {
+    final update = AcpToolCallUpdate.fromJson({
+      'toolCallId': 'tool-1',
+      'content': [
+        null,
+        1,
+        {'type': 'terminal', 'terminalId': 'terminal-1'},
+      ],
+      'locations': [
+        false,
+        'bad',
+        {'path': '/repo/a.dart', 'line': 3},
+      ],
+    });
+    expect(
+      (update.content!.single as AcpToolTerminal).terminalId,
+      'terminal-1',
+    );
+    expect(update.locations!.single.path, '/repo/a.dart');
+    expect(() => update.content!.clear(), throwsUnsupportedError);
+    expect(() => update.locations!.clear(), throwsUnsupportedError);
+    for (final raw in [null, 'bad', 1, <String, Object?>{}]) {
+      final partial = AcpToolCallUpdate.fromJson({
+        'content': raw,
+        'locations': raw,
+      });
+      expect(partial.content, isNull);
+      expect(partial.locations, isNull);
+    }
+    final omitted = AcpToolCallUpdate.fromJson({});
+    expect(omitted.content, isNull);
+    expect(omitted.locations, isNull);
+    for (final raw in [
+      <Object?>[],
+      [null, 1],
+    ]) {
+      final empty = AcpToolCallUpdate.fromJson({
+        'content': raw,
+        'locations': raw,
+      });
+      expect(empty.content, isEmpty);
+      expect(empty.locations, isEmpty);
+    }
+  });
+
+  test('permission and configuration lists tolerate malformed entries', () {
+    for (final raw in [
+      null,
+      'bad',
+      <Object?>[],
+      [null, 1],
+    ]) {
+      expect(AcpPermissionRequest.fromJson({'options': raw}).options, isEmpty);
+      expect(AcpConfigValueGroup.fromJson({'options': raw}).options, isEmpty);
+    }
+    final permission = AcpPermissionRequest.fromJson({
+      'options': [
+        null,
+        1,
+        {'optionId': 'allow', 'kind': 'allow_once'},
+      ],
+    });
+    final group = AcpConfigValueGroup.fromJson({
+      'options': [
+        false,
+        'bad',
+        {'value': 'fast', 'name': 'Fast'},
+      ],
+    });
+    expect(permission.options.single.id, 'allow');
+    expect(group.options.single.value, 'fast');
+    expect(permission.options.clear, throwsUnsupportedError);
+    expect(group.options.clear, throwsUnsupportedError);
+  });
+
   test('normalizes Grok metadata-only reasoning modes', () {
     final result = AcpSessionSetupResult.fromJson({
       'sessionId': 'grok-session',
@@ -258,12 +349,13 @@ void main() {
         AcpSessionUpdate.fromJson({
               'sessionUpdate': 'plan',
               'entries': [
-                for (var index = 0; index < acpMaxPlanEntries + 5; index++)
+                for (var index = 0; index < acpMaxPlanEntries; index++)
                   {
                     'content': 'x' * (acpMaxPlanEntryCharacters + 10),
                     'priority': 'medium',
                     'status': 'pending',
                   },
+                _UnreadableMap(),
               ],
             })
             as AcpPlanUpdate;

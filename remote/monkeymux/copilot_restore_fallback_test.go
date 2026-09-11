@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -49,8 +50,8 @@ func writeCopilotSession(
 		}
 	}
 	if lockPid > 0 {
-		lock := filepath.Join(dir, "inuse."+itoaPositive(lockPid)+".lock")
-		if err := os.WriteFile(lock, []byte(itoaPositive(lockPid)), 0o644); err != nil {
+		lock := filepath.Join(dir, "inuse."+strconv.Itoa(lockPid)+".lock")
+		if err := os.WriteFile(lock, []byte(strconv.Itoa(lockPid)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if !modTime.IsZero() {
@@ -59,18 +60,6 @@ func writeCopilotSession(
 			}
 		}
 	}
-}
-
-func itoaPositive(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := []byte{}
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	return string(buf)
 }
 
 // TestDiscoverCopilotSessionIDsPrefersFreshSessionOnStaleLock reproduces the
@@ -156,8 +145,8 @@ func TestEnrichRestoreCopilotFallsBackToCwd(t *testing.T) {
 	}
 	options := createWindowOptionsForRestore(restore.Windows[0], false)
 	want := agentResumeCommandWithFreshFallback(
-		agentResumeCommand("copilot", "recent-session", false),
-		agentLaunchCommand("copilot", false),
+		monkeyMuxAgentLaunchCommand(agentResumeCommand("copilot", "recent-session", false)),
+		monkeyMuxAgentLaunchCommand(agentLaunchCommand("copilot", false)),
 	)
 	if options.command != want {
 		t.Fatalf("command = %q, want %q", options.command, want)
@@ -168,6 +157,8 @@ func TestEnrichRestoreCopilotFallsBackToCwd(t *testing.T) {
 // windows sharing a directory receive distinct sessions (most recent first) and
 // that a session already claimed elsewhere is never reused.
 func TestAssignCopilotSessionsByWorkingDirectoryDedups(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() { processStartedAtForMetadata = originalProcessStart })
 	home := t.TempDir()
@@ -202,12 +193,14 @@ func TestAssignCopilotSessionsByWorkingDirectoryDedups(t *testing.T) {
 			{Name: "Copilot CLI", AgentTool: "copilot", Cwd: project, PanePid: 202, LastActivityEpochSeconds: now.Add(-2 * time.Hour).Unix()},
 		},
 	}
+	processes := map[int]processInfo{
+		201: {pid: 201, ppid: 1, comm: "copilot", args: "copilot"},
+		202: {pid: 202, ppid: 1, comm: "copilot", args: "copilot"},
+	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	assignCopilotSessionsByWorkingDirectory(
 		restore,
-		map[int]processInfo{
-			201: {pid: 201, ppid: 1, comm: "copilot", args: "copilot"},
-			202: {pid: 202, ppid: 1, comm: "copilot", args: "copilot"},
-		},
+		processes,
 		map[int]struct{}{201: {}, 202: {}},
 	)
 
@@ -269,6 +262,8 @@ func TestCopilotCwdFallbackDoesNotResumeSessionFromBeforeFreshProcess(t *testing
 }
 
 func TestAssignCopilotSessionsByWorkingDirectoryNormalizesPaths(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() { processStartedAtForMetadata = originalProcessStart })
 	processStartedAtForMetadata = func(pid int) time.Time {
@@ -297,9 +292,11 @@ func TestAssignCopilotSessionsByWorkingDirectoryNormalizesPaths(t *testing.T) {
 			{Name: "Copilot CLI", AgentTool: "copilot", Cwd: linkDir, PanePid: 200},
 		},
 	}
+	processes := map[int]processInfo{200: {pid: 200, ppid: 1, comm: "copilot", args: "copilot"}}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	assignCopilotSessionsByWorkingDirectory(
 		restore,
-		map[int]processInfo{200: {pid: 200, ppid: 1, comm: "copilot", args: "copilot"}},
+		processes,
 		map[int]struct{}{200: {}},
 	)
 	if got := restore.Windows[0].AgentSessionID; got != "linked-session" {

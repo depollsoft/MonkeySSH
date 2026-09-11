@@ -23,10 +23,12 @@ import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
+import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_theme_service.dart';
@@ -40,6 +42,8 @@ import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
 import '../support/fake_acp_session_manager.dart';
+import '../support/settings_import_test_helpers.dart'
+    show FakeAuthService, MockAuthStateNotifier;
 
 class _MockHostRepository extends Mock implements HostRepository {}
 
@@ -51,16 +55,48 @@ class _MockTmuxService extends Mock implements TmuxService {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
+Stream<TmuxWindowChangeEvent> _idleWindowChanges() {
+  // Keep cancellation futures in the widget test's fake-async zone. Empty
+  // streams and broadcast controllers can return a cached root-zone future.
+  final controller = StreamController<TmuxWindowChangeEvent>(
+    onCancel: () async {},
+  );
+  addTearDown(controller.close);
+  return controller.stream;
+}
+
 class _MockAgentSessionDiscoveryService extends Mock
     implements AgentSessionDiscoveryService {}
-
-class _MockAgentLaunchPresetService extends Mock
-    implements AgentLaunchPresetService {}
 
 class _MockHostCliLaunchPreferencesService extends Mock
     implements HostCliLaunchPreferencesService {}
 
+class _CountingSettingsService extends SettingsService {
+  _CountingSettingsService(super.db);
+
+  int preferenceReads = 0;
+  int presetSubscriptions = 0;
+
+  @override
+  Future<Map<String, dynamic>?> getJson(String key) {
+    if (key == SettingKeys.agentLaunchPresets ||
+        key == SettingKeys.hostCliLaunchPreferences) {
+      preferenceReads++;
+    }
+    return super.getJson(key);
+  }
+
+  @override
+  Stream<String?> watchString(String key) {
+    if (key == SettingKeys.agentLaunchPresets) presetSubscriptions++;
+    return super.watchString(key);
+  }
+}
+
 class _MockMonetizationService extends Mock implements MonetizationService {}
+
+class _MockSecureTransferService extends Mock
+    implements SecureTransferService {}
 
 void _callReorderItemCallback(
   ReorderCallback? callback,
@@ -394,6 +430,13 @@ ActiveConnection _buildActiveConnection({
   remoteMuxSessionName: remoteMuxSessionName,
 );
 
+SshSession _badgeSession({int hostId = 1}) => SshSession(
+  connectionId: 7,
+  hostId: hostId,
+  client: _MockSshClient(),
+  config: _buildActiveConnection(connectionId: 7, hostId: hostId).config,
+);
+
 TerminalPreviewSnapshot _buildStyledPreviewSnapshot() {
   final terminal = Terminal(maxLines: 100)..write('\x1b[31mready\x1b[0m');
   return SshSession.buildTerminalPreviewSnapshot(terminal)!;
@@ -417,10 +460,18 @@ void main() {
     required AppDatabase db,
     required List overrides,
     Size size = const Size(400, 800),
+    HomeScreenTab initialTab = HomeScreenTab.hosts,
+    Widget? child,
+    bool stubLaunchPresets = true,
     MediaQueryData mediaQueryData = const MediaQueryData(),
   }) => ProviderScope(
     overrides: [
       databaseProvider.overrideWithValue(db),
+      // Badge tests control presets independently of Drift's stream lifecycle.
+      if (stubLaunchPresets)
+        agentLaunchPresetMapProvider.overrideWith(
+          (ref) => Stream.value(const <String, AgentLaunchPreset>{}),
+        ),
       transferIntentServiceProvider.overrideWith(
         (ref) => _TestTransferIntentService(),
       ),
@@ -434,9 +485,136 @@ void main() {
     ],
     child: MediaQuery(
       data: mediaQueryData.copyWith(size: size),
-      child: const MaterialApp(home: HomeScreen()),
+      child: child ?? MaterialApp(home: HomeScreen(initialTab: initialTab)),
     ),
   );
+
+  for (final tab in [HomeScreenTab.hosts, HomeScreenTab.keys]) {
+    testWidgets(
+      '${tab.name} export shows unreadable secrets without reporting an error',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final host = _buildHost(id: 1, label: 'Alpha', sortOrder: 0);
+        final key = SshKey(
+          id: 1,
+          name: 'Alpha key',
+          keyType: 'ed25519',
+          publicKey: 'ssh-ed25519 test',
+          privateKey: '',
+          fingerprint: 'SHA256:test',
+          createdAt: DateTime(2026),
+        );
+        final transferService = _MockSecureTransferService();
+        final message = tab == HomeScreenTab.hosts
+            ? 'Cannot export: re-enter the password for host "Alpha".'
+            : 'Cannot export: re-enter the private key for SSH key "Alpha key".';
+        final createPayload = tab == HomeScreenTab.hosts
+            ? () => transferService.createHostPayload(
+                host: host,
+                transferPassphrase: 'transfer-passphrase',
+                includeReferencedKey: false,
+              )
+            : () => transferService.createKeyPayload(
+                key: key,
+                transferPassphrase: 'transfer-passphrase',
+              );
+        when(
+          createPayload,
+        ).thenAnswer((_) async => throw FormatException(message));
+        final billing = _MockMonetizationService();
+        when(() => billing.currentState).thenReturn(_proMonetizationState);
+        when(
+          () => billing.canUseFeature(MonetizationFeature.encryptedTransfers),
+        ).thenAnswer((_) async => true);
+        try {
+          await tester.pumpWidget(
+            buildMobileHomeScreen(
+              db: db,
+              initialTab: tab,
+              overrides: [
+                activeSessionsProvider.overrideWith(
+                  _TestActiveSessionsNotifier.new,
+                ),
+                allHostsProvider.overrideWith((ref) => Stream.value([host])),
+                allKeysProvider.overrideWith((ref) => Stream.value([key])),
+                authServiceProvider.overrideWithValue(FakeAuthService()),
+                authStateProvider.overrideWith(MockAuthStateNotifier.new),
+                secureTransferServiceProvider.overrideWithValue(
+                  transferService,
+                ),
+                monetizationServiceProvider.overrideWithValue(billing),
+                monetizationStateProvider.overrideWith(
+                  (ref) => Stream.value(_proMonetizationState),
+                ),
+              ],
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          if (tab == HomeScreenTab.hosts) {
+            await tester.tap(find.byTooltip('Host actions'));
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+            await tester.tap(find.text('Export Encrypted File (Pro)'));
+          } else {
+            await tester.tap(find.byTooltip('Export encrypted'));
+          }
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.byType(AlertDialog), findsOneWidget);
+          await tester.enterText(
+            find.widgetWithText(TextField, 'Transfer passphrase'),
+            'transfer-passphrase',
+          );
+          final reportedErrors = <FlutterErrorDetails>[];
+          final originalOnError = FlutterError.onError;
+          addTearDown(() => FlutterError.onError = originalOnError);
+          FlutterError.onError = reportedErrors.add;
+          try {
+            await tester.tap(find.widgetWithText(FilledButton, 'Continue'));
+            await tester.pump();
+            // Exercise a frame during dismissal, when the TextField still needs
+            // its controller, then finish the dialog and SnackBar animations.
+            await tester.pump(const Duration(milliseconds: 100));
+            await tester.pump(const Duration(milliseconds: 200));
+            await tester.pump();
+          } finally {
+            FlutterError.onError = originalOnError;
+          }
+
+          expect(
+            reportedErrors,
+            isEmpty,
+            reason: reportedErrors.map((error) => error.toString()).join('\n'),
+          );
+
+          verify(createPayload).called(1);
+          expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+          expect(find.text('Export failed. Try again.'), findsNothing);
+          expect(find.byType(AlertDialog), findsNothing);
+          expect(find.byType(HomeScreen), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        } finally {
+          // Pump cleanup inside the test's fake async zone, before database
+          // teardown, and resolve any dialog left open by a failed assertion.
+          final navigators = find.byType(Navigator);
+          if (navigators.evaluate().isNotEmpty) {
+            tester
+                .state<NavigatorState>(navigators)
+                .popUntil((route) => route.isFirst);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+  }
 
   group('HomeScreen mobile insets', () {
     const systemNavigationBarHeight = 24.0;
@@ -696,18 +874,10 @@ void main() {
       addTearDown(router.dispose);
 
       await tester.pumpWidget(
-        ProviderScope(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
           overrides: [
-            databaseProvider.overrideWithValue(db),
-            transferIntentServiceProvider.overrideWith(
-              (ref) => _TestTransferIntentService(),
-            ),
-            homeScreenShortcutServiceProvider.overrideWith(
-              (ref) => _TestHomeScreenShortcutService(),
-            ),
-            pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
-              (ref) => Stream<Set<int>>.value(const <int>{}),
-            ),
             activeSessionsProvider.overrideWith(() => sessionsNotifier),
             allHostsProvider.overrideWith(
               (ref) => Stream.value([
@@ -715,10 +885,7 @@ void main() {
               ]),
             ),
           ],
-          child: MediaQuery(
-            data: const MediaQueryData(size: Size(400, 800)),
-            child: MaterialApp.router(routerConfig: router),
-          ),
+          child: MaterialApp.router(routerConfig: router),
         ),
       );
       await tester.pump();
@@ -774,18 +941,10 @@ void main() {
       addTearDown(router.dispose);
 
       await tester.pumpWidget(
-        ProviderScope(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
           overrides: [
-            databaseProvider.overrideWithValue(db),
-            transferIntentServiceProvider.overrideWith(
-              (ref) => _TestTransferIntentService(),
-            ),
-            homeScreenShortcutServiceProvider.overrideWith(
-              (ref) => _TestHomeScreenShortcutService(),
-            ),
-            pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
-              (ref) => Stream<Set<int>>.value(const <int>{}),
-            ),
             activeSessionsProvider.overrideWith(() => sessionsNotifier),
             allHostsProvider.overrideWith(
               (ref) => Stream.value([
@@ -793,10 +952,7 @@ void main() {
               ]),
             ),
           ],
-          child: MediaQuery(
-            data: const MediaQueryData(size: Size(400, 800)),
-            child: MaterialApp.router(routerConfig: router),
-          ),
+          child: MaterialApp.router(routerConfig: router),
         ),
       );
       await tester.pump();
@@ -859,18 +1015,10 @@ void main() {
       addTearDown(router.dispose);
 
       await tester.pumpWidget(
-        ProviderScope(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
           overrides: [
-            databaseProvider.overrideWithValue(db),
-            transferIntentServiceProvider.overrideWith(
-              (ref) => _TestTransferIntentService(),
-            ),
-            homeScreenShortcutServiceProvider.overrideWith(
-              (ref) => _TestHomeScreenShortcutService(),
-            ),
-            pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
-              (ref) => Stream<Set<int>>.value(const <int>{}),
-            ),
             activeSessionsProvider.overrideWith(() => sessionsNotifier),
             allHostsProvider.overrideWith(
               (ref) => Stream.value([
@@ -878,10 +1026,7 @@ void main() {
               ]),
             ),
           ],
-          child: MediaQuery(
-            data: const MediaQueryData(size: Size(400, 800)),
-            child: MaterialApp.router(routerConfig: router),
-          ),
+          child: MaterialApp.router(routerConfig: router),
         ),
       );
       await tester.pump();
@@ -933,18 +1078,10 @@ void main() {
         addTearDown(router.dispose);
 
         await tester.pumpWidget(
-          ProviderScope(
+          buildMobileHomeScreen(
+            db: db,
+            stubLaunchPresets: false,
             overrides: [
-              databaseProvider.overrideWithValue(db),
-              transferIntentServiceProvider.overrideWith(
-                (ref) => _TestTransferIntentService(),
-              ),
-              homeScreenShortcutServiceProvider.overrideWith(
-                (ref) => _TestHomeScreenShortcutService(),
-              ),
-              pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
-                (ref) => Stream<Set<int>>.value(const <int>{}),
-              ),
               activeSessionsProvider.overrideWith(() => sessionsNotifier),
               allHostsProvider.overrideWith(
                 (ref) => Stream.value([
@@ -1026,18 +1163,10 @@ void main() {
       addTearDown(router.dispose);
 
       await tester.pumpWidget(
-        ProviderScope(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
           overrides: [
-            databaseProvider.overrideWithValue(db),
-            transferIntentServiceProvider.overrideWith(
-              (ref) => _TestTransferIntentService(),
-            ),
-            homeScreenShortcutServiceProvider.overrideWith(
-              (ref) => _TestHomeScreenShortcutService(),
-            ),
-            pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
-              (ref) => Stream<Set<int>>.value(const <int>{}),
-            ),
             activeSessionsProvider.overrideWith(() => sessionsNotifier),
             allHostsProvider.overrideWith(
               (ref) => Stream.value([
@@ -1045,10 +1174,7 @@ void main() {
               ]),
             ),
           ],
-          child: MediaQuery(
-            data: const MediaQueryData(size: Size(400, 800)),
-            child: MaterialApp.router(routerConfig: router),
-          ),
+          child: MaterialApp.router(routerConfig: router),
         ),
       );
       await tester.pump();
@@ -1066,6 +1192,138 @@ void main() {
 
       expect(openedRoutes, ['/terminal/1?connectionId=7']);
     });
+    testWidgets('connection chooser rebuilds after its host row is removed', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final hosts = StreamController<List<Host>>();
+      addTearDown(hosts.close);
+      final sessions = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          for (var id = 1; id <= 2; id++)
+            _buildActiveConnection(
+              connectionId: id,
+              hostId: 1,
+              state: SshConnectionState.connecting,
+            ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessions),
+            allHostsProvider.overrideWith((ref) => hosts.stream),
+          ],
+        ),
+      );
+      await tester.pump();
+      hosts.add([_buildHost(id: 1, label: 'Alpha', sortOrder: 0)]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final row = tester.element(find.text('Alpha'));
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.text('2 active connections'), findsOneWidget);
+
+      hosts.add([]);
+      await tester.pumpAndSettle();
+      expect(row.mounted, isFalse);
+      // Re-run the route builder after the originating Consumer is disposed.
+      tester.element(find.byType(BottomSheet)).markNeedsBuild();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Connection #1'), findsOneWidget);
+      expect(find.text('Connection #2'), findsOneWidget);
+      await tester.tap(find.text('Connection #1'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets(
+      'connection chooser scrolls to old connections on a short viewport',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(400, 500));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final openedRoutes = <String>[];
+        final sessionsNotifier = _MutableActiveSessionsNotifier(
+          initialConnections: [
+            for (var id = 1; id <= 30; id++)
+              _buildActiveConnection(
+                connectionId: id,
+                hostId: 1,
+                state: SshConnectionState.connecting,
+                preview: 'connection $id',
+                previewSnapshot: _buildStyledPreviewSnapshot(),
+              ),
+          ],
+        );
+        final router = GoRouter(
+          initialLocation: '/',
+          routes: [
+            GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+            GoRoute(
+              path: '/terminal/:hostId',
+              builder: (context, state) => _RecordingTerminalPage(
+                route: state.uri.toString(),
+                openedRoutes: openedRoutes,
+              ),
+            ),
+          ],
+        );
+        addTearDown(router.dispose);
+
+        await tester.pumpWidget(
+          buildMobileHomeScreen(
+            db: db,
+            stubLaunchPresets: false,
+            overrides: [
+              activeSessionsProvider.overrideWith(() => sessionsNotifier),
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value([
+                  _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                ]),
+              ),
+            ],
+            child: MaterialApp.router(routerConfig: router),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        await tester.ensureVisible(find.text('Alpha'));
+        await tester.tap(find.text('Alpha'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('30 active connections'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        final list = find
+            .descendant(
+              of: find.byType(BottomSheet),
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        await tester.scrollUntilVisible(
+          find.text('New connection'),
+          250,
+          scrollable: list,
+        );
+        expect(find.text('New connection').hitTestable(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        final oldest = find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text('Connection #1'),
+        );
+        await tester.ensureVisible(oldest);
+        await tester.tap(oldest);
+        await tester.pumpAndSettle();
+        expect(openedRoutes, ['/terminal/1?connectionId=1']);
+      },
+    );
   });
 
   testWidgets('context menu triggers expose semantics labels', (tester) async {
@@ -1105,20 +1363,11 @@ void main() {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
     final tmuxService = _MockTmuxService();
-    final sshClient = _MockSshClient();
+
     final hostsController = StreamController<List<Host>>.broadcast();
     addTearDown(hostsController.close);
 
-    final session = SshSession(
-      connectionId: 7,
-      hostId: 1,
-      client: sshClient,
-      config: const SshConnectionConfig(
-        hostname: 'alpha.example.com',
-        port: 22,
-        username: 'root',
-      ),
-    );
+    final session = _badgeSession();
     final sessionsNotifier = _MutableActiveSessionsNotifier(
       initialConnections: [_buildActiveConnection(connectionId: 7, hostId: 1)],
       initialSessions: [session],
@@ -1133,14 +1382,12 @@ void main() {
     ).thenAnswer((_) async => true);
     when(
       () => tmuxService.watchWindowChanges(session, any()),
-    ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+    ).thenAnswer((_) => _idleWindowChanges());
     when(() => tmuxService.listWindows(session, any())).thenAnswer(
       (_) async => const <TmuxWindow>[
         TmuxWindow(index: 0, name: 'editor', isActive: true),
       ],
     );
-
-    hostsController.add(<Host>[]);
 
     await tester.pumpWidget(
       buildMobileHomeScreen(
@@ -1152,12 +1399,13 @@ void main() {
         ],
       ),
     );
+    hostsController.add(<Host>[]);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Connections').first);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     expect(find.text('wrong-session · 1 windows'), findsOneWidget);
 
@@ -1171,86 +1419,497 @@ void main() {
     ]);
     await tester.pump();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     expect(find.text('correct-session · 1 windows'), findsOneWidget);
     expect(find.text('wrong-session · 1 windows'), findsNothing);
   });
 
-  testWidgets('stops loading tmux preferences after badge disposal', (
-    tester,
-  ) async {
-    final db = AppDatabase.forTesting(NativeDatabase.memory());
-    addTearDown(db.close);
-    final presetService = _MockAgentLaunchPresetService();
-    final cliLaunchPreferencesService = _MockHostCliLaunchPreferencesService();
-    final tmuxService = _MockTmuxService();
-    final presetCompleter = Completer<AgentLaunchPreset?>();
-    final sshClient = _MockSshClient();
-    var presetLoadStarted = false;
-    final session = SshSession(
-      connectionId: 7,
-      hostId: 1,
-      client: sshClient,
-      config: const SshConnectionConfig(
-        hostname: 'alpha.example.com',
-        port: 22,
-        username: 'root',
-      ),
-    );
-    final sessionsNotifier = _MutableActiveSessionsNotifier(
-      initialConnections: [_buildActiveConnection(connectionId: 7, hostId: 1)],
-      initialSessions: [session],
-    );
-
-    when(() => presetService.getPresetForHost(1)).thenAnswer((_) {
-      presetLoadStarted = true;
-      return presetCompleter.future;
-    });
-    when(
-      () => cliLaunchPreferencesService.getPreferencesForHost(1),
-    ).thenAnswer((_) async => const HostCliLaunchPreferences());
-    when(() => tmuxService.isTmuxActive(session)).thenAnswer((_) async => true);
-    when(
-      () => tmuxService.currentSessionName(session),
-    ).thenAnswer((_) async => 'work');
-    when(
-      () => tmuxService.watchWindowChanges(session, 'work'),
-    ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
-    when(
-      () => tmuxService.listWindows(session, 'work'),
-    ).thenAnswer((_) async => const <TmuxWindow>[]);
-
-    await tester.pumpWidget(
-      buildMobileHomeScreen(
-        db: db,
-        overrides: [
-          activeSessionsProvider.overrideWith(() => sessionsNotifier),
-          allHostsProvider.overrideWith(
-            (ref) =>
-                Stream.value([_buildHost(id: 1, label: 'Alpha', sortOrder: 0)]),
+  for (final backend in [RemoteMuxBackend.tmux, RemoteMuxBackend.monkeyMux]) {
+    testWidgets(
+      'preview updates reuse preferences and saved ${backend.name} presets refresh the badge',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final settings = _CountingSettingsService(db);
+        final presets = AgentLaunchPresetService(settings);
+        final tmux = _MockTmuxService();
+        final monkeyMux = _MockMonkeyMuxService();
+        final session = _badgeSession();
+        final sessions = _MutableActiveSessionsNotifier(
+          initialConnections: [
+            _buildActiveConnection(connectionId: 7, hostId: 1),
+          ],
+          initialSessions: [session],
+        );
+        when(
+          () => tmux.currentSessionName(session),
+        ).thenAnswer((_) async => 'shell');
+        when(
+          () => tmux.watchWindowChanges(session, any()),
+        ).thenAnswer((_) => _idleWindowChanges());
+        when(
+          () => monkeyMux.watchWindowChanges(session, any()),
+        ).thenAnswer((_) => _idleWindowChanges());
+        const windows = [TmuxWindow(index: 0, name: 'editor', isActive: true)];
+        var queries = 0;
+        when(() => tmux.listWindows(session, any())).thenAnswer((_) async {
+          queries++;
+          return windows;
+        });
+        when(() => monkeyMux.listWindows(session, any())).thenAnswer((_) async {
+          queries++;
+          return windows;
+        });
+        await tester.pumpWidget(
+          buildMobileHomeScreen(
+            db: db,
+            initialTab: HomeScreenTab.connections,
+            stubLaunchPresets: false,
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settings),
+              activeSessionsProvider.overrideWith(() => sessions),
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value([
+                  _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                ]),
+              ),
+              tmuxServiceProvider.overrideWithValue(tmux),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMux),
+              acpSessionManagerProvider.overrideWithValue(
+                FakeAcpSessionManager(),
+              ),
+            ],
           ),
-          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-          hostCliLaunchPreferencesServiceProvider.overrideWithValue(
-            cliLaunchPreferencesService,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('shell · 1 windows'), findsOneWidget);
+        expect(queries, 1);
+        expect(settings.preferenceReads, 0);
+        expect(settings.presetSubscriptions, 1);
+
+        for (var update = 0; update < 5; update++) {
+          sessions.setActiveConnections([
+            _buildActiveConnection(
+              connectionId: 7,
+              hostId: 1,
+              preview: 'output $update',
+            ),
+          ]);
+          await tester.pump();
+        }
+        expect(settings.preferenceReads, 0);
+        expect(settings.presetSubscriptions, 1);
+        expect(queries, 1);
+
+        final preset = AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          tmuxSessionName: ' saved-session ',
+          remoteMuxBackend: backend,
+        );
+        await presets.setPresetForHost(1, preset);
+        await tester.pumpAndSettle();
+        expect(find.text('saved-session · 1 windows'), findsOneWidget);
+        expect(queries, 2);
+        if (backend == RemoteMuxBackend.monkeyMux) {
+          verify(
+            () => monkeyMux.listWindows(session, 'saved-session'),
+          ).called(1);
+        } else {
+          verify(() => tmux.listWindows(session, 'saved-session')).called(1);
+        }
+        await presets.setPresetForHost(2, preset);
+        await presets.setPresetForHost(
+          1,
+          AgentLaunchPreset(
+            tool: preset.tool,
+            tmuxSessionName: preset.tmuxSessionName,
+            remoteMuxBackend: preset.remoteMuxBackend,
+            workingDirectory: '~/another-directory',
           ),
-          tmuxServiceProvider.overrideWithValue(tmuxService),
+        );
+        await tester.pumpAndSettle();
+        expect(queries, 2);
+        expect(settings.presetSubscriptions, 1);
+        await presets.deletePresetForHost(1);
+        await tester.pumpAndSettle();
+        expect(find.text('shell · 1 windows'), findsOneWidget);
+        expect(queries, 3);
+        await tester.pumpWidget(const SizedBox.shrink());
+        // Cancelling the real settings stream schedules Drift's zero-duration
+        // cache cleanup timer. A pump without a duration only flushes microtasks.
+        await tester.pump(Duration.zero);
+      },
+    );
+  }
+
+  for (final duringCancellation in [false, true]) {
+    testWidgets(
+      'stops tmux work after disposal during ${duringCancellation ? 'cancellation' : 'preferences'}',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final cliLaunchPreferencesService =
+            _MockHostCliLaunchPreferencesService();
+        final tmuxService = _MockTmuxService();
+        final presetCompleter = Completer<Map<String, AgentLaunchPreset>>();
+        final cancellation = Completer<void>();
+        var cancelling = false;
+        final changes = StreamController<TmuxWindowChangeEvent>(
+          onCancel: () {
+            cancelling = true;
+            return cancellation.future;
+          },
+        );
+        addTearDown(() {
+          if (!cancellation.isCompleted) cancellation.complete();
+          if (!presetCompleter.isCompleted) presetCompleter.complete(const {});
+          if (!cancelling && !changes.hasListener) {
+            unawaited(changes.stream.listen((_) {}).cancel());
+          }
+          return changes.close();
+        });
+
+        var presetLoadStarted = false;
+        final session = _badgeSession();
+        final sessionsNotifier = _MutableActiveSessionsNotifier(
+          initialConnections: [
+            _buildActiveConnection(connectionId: 7, hostId: 1),
+          ],
+          initialSessions: [session],
+        );
+
+        when(
+          () => tmuxService.isTmuxActive(session),
+        ).thenAnswer((_) async => true);
+        when(
+          () => tmuxService.currentSessionName(session),
+        ).thenAnswer((_) async => 'work');
+        when(() => tmuxService.watchWindowChanges(session, 'work')).thenAnswer(
+          (_) => duringCancellation ? changes.stream : _idleWindowChanges(),
+        );
+        when(
+          () => tmuxService.listWindows(session, 'work'),
+        ).thenAnswer((_) async => const <TmuxWindow>[]);
+
+        try {
+          await tester.pumpWidget(
+            buildMobileHomeScreen(
+              db: db,
+              stubLaunchPresets: false,
+              overrides: [
+                activeSessionsProvider.overrideWith(() => sessionsNotifier),
+                allHostsProvider.overrideWith(
+                  (ref) => Stream.value([
+                    _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                  ]),
+                ),
+                agentLaunchPresetMapProvider.overrideWith((ref) {
+                  presetLoadStarted = true;
+                  return Stream.fromFuture(
+                    duringCancellation
+                        ? Future.value(const <String, AgentLaunchPreset>{})
+                        : presetCompleter.future,
+                  );
+                }),
+                hostCliLaunchPreferencesServiceProvider.overrideWithValue(
+                  cliLaunchPreferencesService,
+                ),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+              ],
+            ),
+          );
+          await tester.pump();
+          await tester.tap(find.text('Connections').first);
+          await tester.pump();
+          // The preset event schedules a provider rebuild and then a query
+          // after that frame; flush both before inspecting service calls.
+          await tester.pump();
+          await tester.pump();
+          expect(presetLoadStarted, isTrue);
+          if (duringCancellation) {
+            verify(
+              () => tmuxService.watchWindowChanges(session, 'work'),
+            ).called(1);
+            verify(() => tmuxService.listWindows(session, 'work')).called(1);
+            expect(cancelling, isFalse);
+            // Empty windows schedule a retry that replaces the subscription.
+            await tester.pump(const Duration(seconds: 10));
+            await tester.pump();
+            expect(cancelling, isTrue);
+            expect(cancellation.isCompleted, isFalse);
+          }
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          if (duringCancellation) {
+            cancellation.complete();
+          } else {
+            presetCompleter.complete(const {});
+          }
+          await tester.pump();
+          await tester.pump();
+
+          expect(tester.takeException(), isNull);
+          verifyNever(() => tmuxService.watchWindowChanges(session, 'work'));
+          verifyNever(() => tmuxService.listWindows(session, 'work'));
+          if (!duringCancellation) {
+            verifyNever(() => tmuxService.currentSessionName(session));
+            verifyNever(
+              () => cliLaunchPreferencesService.getPreferencesForHost(any()),
+            );
+          }
+        } finally {
+          // Dispose providers and cancel retry timers even if an assertion fails.
+          await tester.pumpWidget(const SizedBox.shrink());
+          if (!cancellation.isCompleted) cancellation.complete();
+          if (!presetCompleter.isCompleted) presetCompleter.complete(const {});
+          await tester.pump();
+          await tester.pump();
+        }
+      },
+    );
+  }
+
+  for (final backend in [RemoteMuxBackend.tmux, RemoteMuxBackend.monkeyMux]) {
+    testWidgets(
+      '${backend.name} badge switches and closes using the stable window ID',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final acpManager = FakeAcpSessionManager();
+        addTearDown(acpManager.dispose);
+        const sessionName = 'work';
+        final session = _badgeSession()
+          ..remoteMuxBackend = backend
+          ..remoteMuxSessionName = sessionName;
+        final sessionsNotifier = _MutableActiveSessionsNotifier(
+          initialConnections: [
+            _buildActiveConnection(
+              connectionId: 7,
+              hostId: 1,
+              remoteMuxBackend: backend,
+              remoteMuxSessionName: sessionName,
+            ),
+          ],
+          initialSessions: [session],
+        );
+        final watchWindows = backend == RemoteMuxBackend.monkeyMux
+            ? () => monkeyMuxService.watchWindowChanges(session, sessionName)
+            : () => tmuxService.watchWindowChanges(session, sessionName);
+        final listWindows = backend == RemoteMuxBackend.monkeyMux
+            ? () => monkeyMuxService.listWindows(session, sessionName)
+            : () => tmuxService.listWindows(session, sessionName);
+        final selectWindow = backend == RemoteMuxBackend.monkeyMux
+            ? () => monkeyMuxService.selectWindow(
+                session,
+                sessionName,
+                1,
+                windowId: '@42',
+              )
+            : () => tmuxService.selectWindow(
+                session,
+                sessionName,
+                1,
+                windowId: '@42',
+              );
+        final killWindow = backend == RemoteMuxBackend.monkeyMux
+            ? () => monkeyMuxService.killWindow(
+                session,
+                sessionName,
+                1,
+                windowId: '@42',
+              )
+            : () => tmuxService.killWindow(
+                session,
+                sessionName,
+                1,
+                windowId: '@42',
+              );
+        when(watchWindows).thenAnswer((_) => _idleWindowChanges());
+        when(listWindows).thenAnswer(
+          (_) async => const [
+            TmuxWindow(id: '@1', index: 0, name: 'shell', isActive: true),
+            TmuxWindow(id: '@42', index: 1, name: 'target', isActive: false),
+          ],
+        );
+        when(selectWindow).thenAnswer((_) async {});
+        when(killWindow).thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildMobileHomeScreen(
+            db: db,
+            overrides: [
+              activeSessionsProvider.overrideWith(() => sessionsNotifier),
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value([
+                  _buildHost(
+                    id: 1,
+                    label: 'Alpha',
+                    sortOrder: 0,
+                    tmuxSessionName: sessionName,
+                    remoteMuxBackend: backend,
+                  ),
+                ]),
+              ),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              acpSessionManagerProvider.overrideWithValue(acpManager),
+            ],
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.text('Connections').first);
+        await tester.pump();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('$sessionName · 2 windows'));
+        await tester.pump();
+
+        await tester.tap(find.text('target'));
+        await tester.pump();
+        verify(selectWindow).called(1);
+
+        final targetRow = find
+            .ancestor(of: find.text('target'), matching: find.byType(InkWell))
+            .first;
+        await tester.tap(
+          find.descendant(of: targetRow, matching: find.byIcon(Icons.close)),
+        );
+        await tester.pump();
+        verify(killWindow).called(1);
+        expect(find.text('target'), findsNothing);
+        expect(find.text('shell'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'loads the current tmux query after an overlapping stale refresh finishes',
+    (tester) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final tmuxService = _MockTmuxService();
+      final preferences = StreamController<Map<String, AgentLaunchPreset>>();
+      final oldWindows = Completer<List<TmuxWindow>>();
+      final oldSubscriptionCancellation = Completer<void>();
+      final windowChangeControllers =
+          <StreamController<TmuxWindowChangeEvent>>[];
+      var oldSubscriptionCancellationStarted = false;
+      var currentSessionName = 'old-session';
+      final session = _badgeSession();
+      final sessionsNotifier = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          _buildActiveConnection(connectionId: 7, hostId: 1),
         ],
-      ),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Connections').first);
-    await tester.pump();
-    expect(presetLoadStarted, isTrue);
+        initialSessions: [session],
+      );
+      when(
+        () => tmuxService.currentSessionName(session),
+      ).thenAnswer((_) async => currentSessionName);
+      when(() => tmuxService.watchWindowChanges(session, any())).thenAnswer((
+        invocation,
+      ) {
+        // Cancelling Stream.empty() returns a root-zone future that tester.pump
+        // cannot flush. Keep cancellation futures in this test's fake-async zone.
+        final controller = StreamController<TmuxWindowChangeEvent>(
+          onCancel: () async {
+            if (invocation.positionalArguments[1] == 'old-session') {
+              oldSubscriptionCancellationStarted = true;
+              await oldSubscriptionCancellation.future;
+            }
+          },
+        );
+        windowChangeControllers.add(controller);
+        return controller.stream;
+      });
+      when(
+        () => tmuxService.listWindows(session, 'old-session'),
+      ).thenAnswer((_) => oldWindows.future);
+      when(() => tmuxService.listWindows(session, 'new-session')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(index: 0, name: 'current-window', isActive: true),
+        ],
+      );
 
-    await tester.pumpWidget(const SizedBox.shrink());
-    presetCompleter.complete(null);
-    await tester.pump();
-    await tester.pump();
+      try {
+        await tester.pumpWidget(
+          buildMobileHomeScreen(
+            db: db,
+            stubLaunchPresets: false,
+            overrides: [
+              activeSessionsProvider.overrideWith(() => sessionsNotifier),
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value([
+                  _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                ]),
+              ),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentLaunchPresetMapProvider.overrideWith(
+                (ref) => preferences.stream,
+              ),
+            ],
+          ),
+        );
+        preferences.add(const {});
+        await tester.pump();
+        await tester.tap(find.text('Connections').first);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        verify(() => tmuxService.listWindows(session, 'old-session')).called(1);
 
-    expect(tester.takeException(), isNull);
-    verifyNever(() => cliLaunchPreferencesService.getPreferencesForHost(any()));
-  });
+        // A saved tool change starts a query while the old windows load.
+        currentSessionName = 'new-session';
+        preferences.add(const {
+          '1': AgentLaunchPreset(tool: AgentLaunchTool.codex),
+        });
+        await tester.pump();
+        await tester.pump();
+        verify(() => tmuxService.currentSessionName(session)).called(2);
+        expect(oldSubscriptionCancellationStarted, isTrue);
+        verifyNever(
+          () => tmuxService.watchWindowChanges(session, 'new-session'),
+        );
+
+        // Let the new query subscribe and queue its initial window load while
+        // the old query's listWindows call is still outstanding.
+        oldSubscriptionCancellation.complete();
+        await tester.pump();
+        await tester.pump();
+        verify(
+          () => tmuxService.watchWindowChanges(session, 'new-session'),
+        ).called(1);
+        expect(oldWindows.isCompleted, isFalse);
+        verifyNever(() => tmuxService.listWindows(session, 'new-session'));
+
+        oldWindows.complete(const [
+          TmuxWindow(index: 0, name: 'stale-window', isActive: true),
+        ]);
+        await tester.pump();
+        await tester.pump();
+        verify(() => tmuxService.listWindows(session, 'new-session')).called(1);
+        expect(find.text('new-session · 1 windows'), findsOneWidget);
+        expect(find.text('old-session · 1 windows'), findsNothing);
+        await tester.tap(find.text('new-session · 1 windows'));
+        await tester.pump();
+        expect(find.text('current-window'), findsOneWidget);
+        expect(find.text('stale-window'), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        unawaited(preferences.close());
+        if (!oldWindows.isCompleted) oldWindows.complete(const []);
+        if (!oldSubscriptionCancellation.isCompleted) {
+          oldSubscriptionCancellation.complete();
+        }
+        for (final controller in windowChangeControllers) {
+          unawaited(controller.close());
+        }
+        await tester.pump();
+      }
+    },
+  );
 
   testWidgets(
     'connection badge includes native windows in MonkeyMux window list',
@@ -1259,7 +1918,7 @@ void main() {
       addTearDown(db.close);
       final tmuxService = _MockTmuxService();
       final monkeyMuxService = _MockMonkeyMuxService();
-      final sshClient = _MockSshClient();
+
       final acpManager = FakeAcpSessionManager(
         sessions: [
           fakeAcpSession(
@@ -1271,19 +1930,9 @@ void main() {
       );
       addTearDown(acpManager.dispose);
       const sessionName = 'mmux-work';
-      final session =
-          SshSession(
-              connectionId: 7,
-              hostId: 1,
-              client: sshClient,
-              config: const SshConnectionConfig(
-                hostname: 'alpha.example.com',
-                port: 22,
-                username: 'root',
-              ),
-            )
-            ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
-            ..remoteMuxSessionName = sessionName;
+      final session = _badgeSession()
+        ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+        ..remoteMuxSessionName = sessionName;
       final sessionsNotifier = _MutableActiveSessionsNotifier(
         initialConnections: [
           _buildActiveConnection(
@@ -1302,7 +1951,7 @@ void main() {
           sessionName,
           extraFlags: any(named: 'extraFlags'),
         ),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      ).thenAnswer((_) => _idleWindowChanges());
       when(
         () => monkeyMuxService.listWindows(
           session,
@@ -1340,7 +1989,7 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Connections').first);
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       expect(find.text('$sessionName · 2 windows'), findsOneWidget);
       await tester.tap(find.text('$sessionName · 2 windows'));
@@ -1378,18 +2027,9 @@ void main() {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       final tmuxService = _MockTmuxService();
-      final sshClient = _MockSshClient();
+
       const sessionName = 'work';
-      final session = SshSession(
-        connectionId: 7,
-        hostId: 1,
-        client: sshClient,
-        config: const SshConnectionConfig(
-          hostname: 'alpha.example.com',
-          port: 22,
-          username: 'root',
-        ),
-      );
+      final session = _badgeSession();
       final sessionsNotifier = _MutableActiveSessionsNotifier(
         initialConnections: [
           _buildActiveConnection(
@@ -1405,7 +2045,7 @@ void main() {
 
       when(
         () => tmuxService.watchWindowChanges(session, sessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      ).thenAnswer((_) => _idleWindowChanges());
       when(() => tmuxService.listWindows(session, sessionName)).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(
@@ -1439,7 +2079,7 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Connections').first);
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       expect(find.text('Connection #7 • Implement onboarding'), findsOneWidget);
       expect(find.text('Connection #7 • Designing app prompt'), findsNothing);
@@ -1452,21 +2092,12 @@ void main() {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       final tmuxService = _MockTmuxService();
-      final sshClient = _MockSshClient();
+
       final hostsController = StreamController<List<Host>>.broadcast();
       addTearDown(hostsController.close);
 
       final delayedWindows = Completer<List<TmuxWindow>>();
-      final session = SshSession(
-        connectionId: 7,
-        hostId: 1,
-        client: sshClient,
-        config: const SshConnectionConfig(
-          hostname: 'alpha.example.com',
-          port: 22,
-          username: 'root',
-        ),
-      );
+      final session = _badgeSession();
       final sessionsNotifier = _MutableActiveSessionsNotifier(
         initialConnections: [
           _buildActiveConnection(connectionId: 7, hostId: 1),
@@ -1485,12 +2116,10 @@ void main() {
       ).thenAnswer((_) async => true);
       when(
         () => tmuxService.watchWindowChanges(session, any()),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      ).thenAnswer((_) => _idleWindowChanges());
       when(
         () => tmuxService.listWindows(session, 'correct-session'),
       ).thenAnswer((_) => delayedWindows.future);
-
-      hostsController.add(<Host>[]);
 
       await tester.pumpWidget(
         buildMobileHomeScreen(
@@ -1502,12 +2131,16 @@ void main() {
           ],
         ),
       );
+      hostsController.add(<Host>[]);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
       await tester.tap(find.text('Connections').first);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.pump();
+      verify(() => tmuxService.currentSessionName(session)).called(1);
 
       hostsController.add([
         _buildHost(
@@ -1530,6 +2163,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.text('correct-session · 1 windows'), findsOneWidget);
+      verifyNever(() => tmuxService.currentSessionName(session));
+      verify(
+        () => tmuxService.listWindows(session, 'correct-session'),
+      ).called(1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
     },
   );
 
@@ -1539,20 +2178,11 @@ void main() {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
     final tmuxService = _MockTmuxService();
-    final sshClient = _MockSshClient();
+
     final hostsController = StreamController<List<Host>>.broadcast();
     addTearDown(hostsController.close);
 
-    final session = SshSession(
-      connectionId: 7,
-      hostId: 1,
-      client: sshClient,
-      config: const SshConnectionConfig(
-        hostname: 'alpha.example.com',
-        port: 22,
-        username: 'root',
-      ),
-    );
+    final session = _badgeSession();
     final sessionsNotifier = _MutableActiveSessionsNotifier(
       initialConnections: [_buildActiveConnection(connectionId: 7, hostId: 1)],
       initialSessions: [session],
@@ -1560,34 +2190,23 @@ void main() {
 
     const oldFlags = '-S /tmp/old.sock';
     const newFlags = '-S /tmp/new.sock';
-    when(
-      () => tmuxService.hasSession(session, 'work', extraFlags: oldFlags),
-    ).thenAnswer((_) async => true);
-    when(
-      () =>
-          tmuxService.watchWindowChanges(session, 'work', extraFlags: oldFlags),
-    ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
-    when(
-      () => tmuxService.listWindows(session, 'work', extraFlags: oldFlags),
-    ).thenAnswer(
-      (_) async => const <TmuxWindow>[
-        TmuxWindow(index: 0, name: 'old-server', isActive: true),
-      ],
-    );
-    when(
-      () => tmuxService.hasSession(session, 'work', extraFlags: newFlags),
-    ).thenAnswer((_) async => true);
-    when(
-      () =>
-          tmuxService.watchWindowChanges(session, 'work', extraFlags: newFlags),
-    ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
-    when(
-      () => tmuxService.listWindows(session, 'work', extraFlags: newFlags),
-    ).thenAnswer(
-      (_) async => const <TmuxWindow>[
-        TmuxWindow(index: 0, name: 'new-server', isActive: true),
-      ],
-    );
+    for (final (flags, name) in [
+      (oldFlags, 'old-server'),
+      (newFlags, 'new-server'),
+    ]) {
+      when(
+        () => tmuxService.hasSession(session, 'work', extraFlags: flags),
+      ).thenAnswer((_) async => true);
+      when(
+        () =>
+            tmuxService.watchWindowChanges(session, 'work', extraFlags: flags),
+      ).thenAnswer((_) => _idleWindowChanges());
+      when(
+        () => tmuxService.listWindows(session, 'work', extraFlags: flags),
+      ).thenAnswer(
+        (_) async => [TmuxWindow(index: 0, name: name, isActive: true)],
+      );
+    }
 
     await tester.pumpWidget(
       buildMobileHomeScreen(
@@ -1610,16 +2229,16 @@ void main() {
       ),
     ]);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Connections').first);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     expect(find.text('work · 1 windows'), findsOneWidget);
     await tester.tap(find.text('work · 1 windows'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
     expect(find.text('old-server'), findsOneWidget);
 
     hostsController.add([
@@ -1632,7 +2251,7 @@ void main() {
       ),
     ]);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     expect(find.text('new-server'), findsOneWidget);
     expect(find.text('old-server'), findsNothing);
@@ -1656,7 +2275,6 @@ void main() {
       final tmuxService = _MockTmuxService();
       final discoveryService = _MockAgentSessionDiscoveryService();
       final monetizationService = _MockMonetizationService();
-      final sshClient = _MockSshClient();
 
       final host = _buildHost(
         id: 1,
@@ -1664,16 +2282,7 @@ void main() {
         sortOrder: 0,
         tmuxSessionName: 'work',
       );
-      final session = SshSession(
-        connectionId: 7,
-        hostId: host.id,
-        client: sshClient,
-        config: const SshConnectionConfig(
-          hostname: 'alpha.example.com',
-          port: 22,
-          username: 'root',
-        ),
-      );
+      final session = _badgeSession(hostId: host.id);
       final sessionsNotifier = _MutableActiveSessionsNotifier(
         initialConnections: [
           _buildActiveConnection(connectionId: 7, hostId: host.id),
@@ -1701,7 +2310,7 @@ void main() {
       ).thenAnswer((_) async => true);
       when(
         () => tmuxService.watchWindowChanges(session, 'work'),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      ).thenAnswer((_) => _idleWindowChanges());
       when(() => tmuxService.listWindows(session, 'work')).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(index: 0, name: 'shell', isActive: true),
@@ -1761,11 +2370,11 @@ void main() {
         ),
       );
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.text('Connections').first);
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       expect(find.text('work · 1 windows'), findsOneWidget);
 
@@ -1776,19 +2385,19 @@ void main() {
 
       await tester.tap(find.text('work · 1 windows'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('AI Sessions'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
       await tester.drag(find.text('work · 1 windows'), const Offset(0, -120));
       await tester.pump();
       await tester.tap(find.text('Codex'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Resume codex work'));
       await tester.tap(find.text('Resume codex work'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       verify(
         () => discoveryService.buildResumeCommand(
@@ -1974,6 +2583,76 @@ void main() {
       expect(data.connectionCount, 3);
     });
   });
+
+  for (final tab in [HomeScreenTab.hosts, HomeScreenTab.connections]) {
+    testWidgets('${tab.name} isolates live preview updates by connection', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final connectionA = _buildActiveConnection(
+        connectionId: 1,
+        hostId: 1,
+        preview: 'A unchanged',
+      );
+      ActiveConnection connectionB(String preview) =>
+          _buildActiveConnection(connectionId: 2, hostId: 2, preview: preview);
+      final sessions = _MutableActiveSessionsNotifier(
+        initialConnections: [connectionA, connectionB('B before')],
+      );
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          initialTab: tab,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessions),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                _buildHost(id: 2, label: 'Beta', sortOrder: 1),
+              ]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final previewA = find.ancestor(
+        of: find.text('A unchanged'),
+        matching: find.byType(ConnectionPreviewStack),
+      );
+      final beforeA = tester.widget<ConnectionPreviewStack>(previewA);
+      final list = find.ancestor(of: previewA, matching: find.byType(ListView));
+      final beforeList = tab == HomeScreenTab.connections
+          ? tester.widget(list)
+          : null;
+      expect(find.text('B before'), findsOneWidget);
+
+      sessions.setActiveConnections([connectionA, connectionB('B after')]);
+      await tester.pump();
+      expect(tester.widget<ConnectionPreviewStack>(previewA), same(beforeA));
+      expect(find.text('B before'), findsNothing);
+      expect(find.text('B after'), findsOneWidget);
+      if (tab == HomeScreenTab.connections) {
+        expect(tester.widget(list), same(beforeList));
+        sessions.setActiveConnections([connectionB('B after'), connectionA]);
+        await tester.pump();
+        expect(
+          tester.getTopLeft(find.text('B after')).dy,
+          lessThan(tester.getTopLeft(find.text('A unchanged')).dy),
+        );
+        sessions.setActiveConnections([connectionA]);
+        await tester.pump();
+        expect(find.text('A unchanged'), findsOneWidget);
+        expect(find.text('B after'), findsNothing);
+      }
+
+      // Connected rows without SSH sessions leave tmux discovery retries pending.
+      // Unmount before completing their delay so they cannot schedule more work.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 2));
+    });
+  }
 
   group('hostRowDataProvider per-host isolation', () {
     testWidgets(

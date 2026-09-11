@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_json.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
@@ -22,6 +23,7 @@ final class _SshConfig {
     required this.key,
     required this.bin,
     required this.cwd,
+    this.executable = 'ssh',
   });
 
   factory _SshConfig.fromEnvironment() => _SshConfig(
@@ -33,6 +35,7 @@ final class _SshConfig {
     cwd: Platform.environment['MONKEYSSH_ACP_E2E_CWD'] ?? '',
   );
 
+  final String executable;
   final String host;
   final String port;
   final String user;
@@ -57,13 +60,17 @@ final class _SshConfig {
   ];
 
   Future<ProcessResult> run(String command) =>
-      Process.run('ssh', [...sshArguments, command]);
+      Process.run(executable, [...sshArguments, command]);
 }
 
 String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
 
 final class _SshBridgeTransport implements AcpTransport {
-  _SshBridgeTransport(this.config, this.bridgeId);
+  _SshBridgeTransport(
+    this.config,
+    this.bridgeId, {
+    this.timeout = const Duration(seconds: 5),
+  });
 
   final _incoming = StreamController<List<int>>();
   final _hello = StreamController<void>.broadcast();
@@ -73,6 +80,7 @@ final class _SshBridgeTransport implements AcpTransport {
   final _seenSequences = <int>{};
   final _SshConfig config;
   final String bridgeId;
+  final Duration timeout;
   Process? _process;
   int _lastAck = 0;
   bool holdAcknowledgements = false;
@@ -87,7 +95,7 @@ final class _SshBridgeTransport implements AcpTransport {
     final attachCommand =
         '${_shellQuote('${config.bin}/monkeymux')} acp attach '
         '${_shellQuote(bridgeId)}';
-    final process = await Process.start('ssh', [
+    final process = await Process.start(config.executable, [
       ...config.sshArguments,
       attachCommand,
     ]);
@@ -111,7 +119,7 @@ final class _SshBridgeTransport implements AcpTransport {
       'bridgeId': bridgeId,
       'lastAck': _lastAck,
     });
-    await hello.timeout(const Duration(seconds: 5));
+    await hello.timeout(timeout);
   }
 
   void _handleWireMessage(String line) {
@@ -153,10 +161,17 @@ final class _SshBridgeTransport implements AcpTransport {
 
   Future<void> disconnect() async {
     final process = _process;
-    _process = null;
     if (process == null) return;
-    await process.stdin.close();
-    await process.exitCode.timeout(const Duration(seconds: 5));
+    try {
+      await process.stdin.close().timeout(timeout);
+      await process.exitCode.timeout(timeout);
+    } on Object {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode;
+      rethrow;
+    } finally {
+      _process = null;
+    }
   }
 
   Future<void> reconnect() async {
@@ -166,23 +181,140 @@ final class _SshBridgeTransport implements AcpTransport {
 
   @override
   Future<void> close() async {
-    await disconnect();
-    for (final subscription in _lineSubscriptions) {
-      await subscription.cancel();
+    try {
+      await disconnect();
+    } finally {
+      try {
+        await Future.wait([
+          for (final subscription in _lineSubscriptions) subscription.cancel(),
+          for (final subscription in _stderrSubscriptions)
+            subscription.cancel(),
+        ]);
+      } finally {
+        await Future.wait([_hello.close(), _incoming.close()]);
+      }
     }
-    for (final subscription in _stderrSubscriptions) {
-      await subscription.cancel();
-    }
-    await _hello.close();
-    await _incoming.close();
     if (_errors.isNotEmpty) {
       throw StateError('SSH bridge errors: $_errors');
     }
   }
 }
 
+Future<String> _startBridge(_SshConfig config) async {
+  final start = await config.run(
+    '${_shellQuote('${config.bin}/monkeymux')} acp start '
+    '--provider ${_shellQuote('MonkeySSH ACP E2E')} '
+    '--command ${_shellQuote('${config.bin}/fake-acp-provider')} '
+    '--cwd ${_shellQuote(config.cwd)}',
+  );
+  expect(start.exitCode, 0, reason: '${start.stderr}');
+  final started = jsonDecode(start.stdout as String) as Map<String, dynamic>;
+  final bridgeId = started['bridgeId'] as String;
+  addTearDown(() async {
+    final stop = await config.run(
+      '${_shellQuote('${config.bin}/monkeymux')} acp stop '
+      '${_shellQuote(bridgeId)}',
+    );
+    expect(stop.exitCode, 0, reason: '${stop.stderr}');
+  });
+  return bridgeId;
+}
+
 void main() {
   final enabled = Platform.environment['MONKEYSSH_RUN_LOCAL_SSH_E2E'] == '1';
+
+  for (final missingHandshake in [true, false]) {
+    test(
+      'cleans up SSH and remote bridge after '
+      '${missingHandshake ? 'a missing handshake' : 'a bridge error'}',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'acp-ssh-cleanup-',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final active = File('${directory.path}/active');
+        final executable = File('${directory.path}/ssh');
+        await executable.writeAsString("""
+#!/usr/bin/env python3
+import json, pathlib, sys, time
+active = pathlib.Path(__file__).with_name('active')
+command = sys.argv[-1]
+if ' acp start ' in command:
+    active.touch()
+    print(json.dumps({'bridgeId': 'fixture-bridge'}))
+elif ' acp stop ' in command:
+    active.unlink()
+elif ' acp attach ' in command:
+    sys.stdin.readline()
+    if ${missingHandshake ? 'True' : 'False'}:
+        time.sleep(120)
+    else:
+        print(json.dumps({'type': 'hello'}), flush=True)
+        print(json.dumps({'type': 'error', 'error': 'fixture error'}), flush=True)
+        sys.stdin.read()
+else:
+    sys.exit(1)
+""");
+        expect(
+          (await Process.run('chmod', ['+x', executable.path])).exitCode,
+          0,
+        );
+        final config = _SshConfig(
+          host: 'localhost',
+          port: '22',
+          user: 'fixture',
+          key: 'fixture',
+          bin: directory.path,
+          cwd: directory.path,
+          executable: executable.path,
+        );
+        late _SshBridgeTransport transport;
+        late Process process;
+        addTearDown(() async {
+          expect(active.existsSync(), isFalse);
+          await process.exitCode.timeout(const Duration(seconds: 1));
+          expect(transport._process, isNull);
+          expect(transport._incoming.isClosed, isTrue);
+          expect(transport._hello.isClosed, isTrue);
+        });
+        final bridgeId = await _startBridge(config);
+        transport = _SshBridgeTransport(
+          config,
+          bridgeId,
+          timeout: const Duration(seconds: 1),
+        );
+        final client = AcpClient(AcpJsonRpcConnection(transport: transport));
+        addTearDown(client.close);
+        addTearDown(
+          () => expectLater(
+            transport.close(),
+            missingHandshake
+                ? throwsA(isA<TimeoutException>())
+                : throwsStateError,
+          ),
+        );
+        if (missingHandshake) {
+          await expectLater(
+            transport.connect(),
+            throwsA(isA<TimeoutException>()),
+          );
+        } else {
+          await transport.connect();
+          for (
+            var attempt = 0;
+            transport.errors.isEmpty && attempt < 100;
+            attempt++
+          ) {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+          expect(transport.errors, contains('fixture error'));
+        }
+        process = transport._process!;
+        expect(active.existsSync(), isTrue);
+      },
+      skip: Platform.isWindows ? 'Requires a POSIX Python executable' : false,
+    );
+  }
 
   test(
     'ACP survives a real SSH exec channel and MonkeyMux replay',
@@ -193,23 +325,15 @@ void main() {
       expect(config.bin, isNotEmpty);
       expect(config.cwd, isNotEmpty);
 
-      final start = await config.run(
-        '${_shellQuote('${config.bin}/monkeymux')} acp start '
-        '--provider ${_shellQuote('MonkeySSH ACP E2E')} '
-        '--command ${_shellQuote('${config.bin}/fake-acp-provider')} '
-        '--cwd ${_shellQuote(config.cwd)}',
-      );
-      expect(start.exitCode, 0, reason: '${start.stderr}');
-      final started =
-          jsonDecode(start.stdout as String) as Map<String, dynamic>;
-      final bridgeId = started['bridgeId'] as String;
+      final bridgeId = await _startBridge(config);
       final transport = _SshBridgeTransport(config, bridgeId);
-      await transport.connect();
       final connection = AcpJsonRpcConnection(
         transport: transport,
         defaultRequestTimeout: const Duration(seconds: 10),
       );
       final client = AcpClient(connection);
+      addTearDown(client.close);
+      await transport.connect();
       final updates = client.updates.asBroadcastStream();
       final requests = client.serverRequests.asBroadcastStream();
       final seenKinds = <String>[];
@@ -223,144 +347,139 @@ void main() {
         }
       });
 
-      try {
-        final initialization = await client.initialize();
-        expect(initialization.agentInfo?.name, 'monkeyssh-fake-acp');
-        await client.authenticate('fake-local');
-        final session = await client.newSession(cwd: config.cwd);
-        final sessionId = session.sessionId!;
-        expect(
-          (await client.listSessions()).sessions.single.sessionId,
-          sessionId,
-        );
+      addTearDown(updateSubscription.cancel);
 
-        transport.holdAcknowledgements = true;
-        final permissionRequests = requests
-            .where((request) => request is AcpPermissionServerRequest)
-            .cast<AcpPermissionServerRequest>()
-            .asBroadcastStream();
-        final firstPermission = permissionRequests.first;
-        final image = updates.firstWhere(
-          (notification) =>
-              notification.update is AcpContentChunkUpdate &&
-              (notification.update as AcpContentChunkUpdate).content
-                  is AcpImageContent,
-        );
-        final resource = updates.firstWhere(
-          (notification) =>
-              notification.update is AcpContentChunkUpdate &&
-              (notification.update as AcpContentChunkUpdate).content
-                  is AcpResourceContent,
-        );
-        final prompt = client.prompt(
-          sessionId: sessionId,
-          content: const [AcpTextContent('/fixtures')],
-        );
-        await firstPermission;
-        await transport.disconnect();
+      final initialization = await client.initialize();
+      expect(initialization.agentInfo?.name, 'monkeyssh-fake-acp');
+      await client.authenticate('fake-local');
+      final session = await client.newSession(cwd: config.cwd);
+      final sessionId = session.sessionId!;
+      expect(
+        (await client.listSessions()).sessions.single.sessionId,
+        sessionId,
+      );
 
-        final replayedPermission = permissionRequests.first;
-        await transport.reconnect();
-        final permission = await replayedPermission;
-        expect(permission.permission.options.map((option) => option.id), [
-          'allow-once',
-          'allow-always',
-          'reject-once',
-          'reject-always',
-        ]);
-        await permission.select('allow-once');
-        expect((await prompt).stopReason, AcpStopReason.endTurn);
-        final imageContent =
-            ((await image).update as AcpContentChunkUpdate).content
-                as AcpImageContent;
-        expect(base64Decode(imageContent.data).length, lessThan(1024));
-        final resourceContent =
-            ((await resource).update as AcpContentChunkUpdate).content
-                as AcpResourceContent;
-        expect(
-          (resourceContent.resource as AcpTextResource).text.length,
-          lessThan(1024),
-        );
-        expect(transport.replayedSequenceCount, greaterThan(0));
-        expect(
-          seenKinds,
-          containsAll([
-            'user_message_chunk',
-            'agent_message_chunk',
-            'agent_thought_chunk',
-            'plan',
-            'tool_call',
-            'tool_call_update',
-            'usage_update',
-          ]),
-        );
-        expect(
-          seenKinds.where((kind) => kind == 'agent_message_chunk').length,
-          greaterThanOrEqualTo(3),
-        );
+      transport.holdAcknowledgements = true;
+      final permissionRequests = requests
+          .where((request) => request.method == 'session/request_permission')
+          .asBroadcastStream();
+      final firstPermission = permissionRequests.first;
+      final image = updates.firstWhere(
+        (notification) =>
+            notification.update is AcpContentChunkUpdate &&
+            (notification.update as AcpContentChunkUpdate).content
+                is AcpImageContent,
+      );
+      final resource = updates.firstWhere(
+        (notification) =>
+            notification.update is AcpContentChunkUpdate &&
+            (notification.update as AcpContentChunkUpdate).content
+                is AcpResourceContent,
+      );
+      final prompt = client.prompt(
+        sessionId: sessionId,
+        content: const [AcpTextContent('/fixtures')],
+      );
+      await firstPermission;
+      await transport.disconnect();
 
-        final slashPermission = permissionRequests.first;
-        final slashResponse = updates.firstWhere(
-          (notification) =>
-              notification.update is AcpContentChunkUpdate &&
-              (notification.update as AcpContentChunkUpdate).kind ==
-                  'agent_message_chunk' &&
-              (notification.update as AcpContentChunkUpdate).content
-                  is AcpTextContent &&
-              ((notification.update as AcpContentChunkUpdate).content
-                          as AcpTextContent)
-                      .text ==
-                  'bridge-ok',
-        );
-        final slashPrompt = client.prompt(
-          sessionId: sessionId,
-          content: const [AcpTextContent('/echo bridge-ok')],
-        );
-        await (await slashPermission).select('allow-once');
-        expect((await slashPrompt).stopReason, AcpStopReason.endTurn);
-        await slashResponse;
+      final replayedPermission = permissionRequests.first;
+      await transport.reconnect();
+      final permission = await replayedPermission;
+      expect(
+        AcpPermissionRequest.fromJson(
+          AcpJson.object(permission.params)!,
+        ).options.map((option) => option.id),
+        ['allow-once', 'allow-always', 'reject-once', 'reject-always'],
+      );
+      await permission.respond({
+        'outcome': const AcpSelectedPermissionOutcome('allow-once').toJson(),
+      });
+      expect((await prompt).stopReason, AcpStopReason.endTurn);
+      final imageContent =
+          ((await image).update as AcpContentChunkUpdate).content
+              as AcpImageContent;
+      expect(base64Decode(imageContent.data).length, lessThan(1024));
+      final resourceContent =
+          ((await resource).update as AcpContentChunkUpdate).content
+              as AcpResourceContent;
+      expect(
+        (resourceContent.resource as AcpTextResource).text.length,
+        lessThan(1024),
+      );
+      expect(transport.replayedSequenceCount, greaterThan(0));
+      expect(
+        seenKinds,
+        containsAll([
+          'user_message_chunk',
+          'agent_message_chunk',
+          'agent_thought_chunk',
+          'plan',
+          'tool_call',
+          'tool_call_update',
+          'usage_update',
+        ]),
+      );
+      expect(
+        seenKinds.where((kind) => kind == 'agent_message_chunk').length,
+        greaterThanOrEqualTo(3),
+      );
 
-        await client.loadSession(sessionId: sessionId, cwd: config.cwd);
-        expect(
-          replayedKinds,
-          containsAll([
-            'user_message_chunk',
-            'agent_message_chunk',
-            'agent_thought_chunk',
-          ]),
-        );
-        await client.resumeSession(sessionId: sessionId, cwd: config.cwd);
-        final configOptions = await client.setConfigOption(
-          sessionId: sessionId,
-          configId: 'responseStyle',
-          value: 'detailed',
-        );
-        expect(
-          configOptions.whereType<AcpSelectConfigOption>().single.currentValue,
-          'detailed',
-        );
+      final slashPermission = permissionRequests.first;
+      final slashResponse = updates.firstWhere(
+        (notification) =>
+            notification.update is AcpContentChunkUpdate &&
+            (notification.update as AcpContentChunkUpdate).kind ==
+                'agent_message_chunk' &&
+            (notification.update as AcpContentChunkUpdate).content
+                is AcpTextContent &&
+            ((notification.update as AcpContentChunkUpdate).content
+                        as AcpTextContent)
+                    .text ==
+                'bridge-ok',
+      );
+      final slashPrompt = client.prompt(
+        sessionId: sessionId,
+        content: const [AcpTextContent('/echo bridge-ok')],
+      );
+      await (await slashPermission).respond({
+        'outcome': const AcpSelectedPermissionOutcome('allow-once').toJson(),
+      });
+      expect((await slashPrompt).stopReason, AcpStopReason.endTurn);
+      await slashResponse;
 
-        final thought = updates.firstWhere(
-          (notification) => notification.update.kind == 'agent_thought_chunk',
-        );
-        final waitingPrompt = client.prompt(
-          sessionId: sessionId,
-          content: const [AcpTextContent('/wait')],
-        );
-        await thought;
-        await client.cancel(sessionId);
-        expect((await waitingPrompt).stopReason, AcpStopReason.cancelled);
-        await client.closeSession(sessionId);
-        expect(transport.errors, isEmpty);
-      } finally {
-        await updateSubscription.cancel();
-        await client.close();
-        final stop = await config.run(
-          '${_shellQuote('${config.bin}/monkeymux')} acp stop '
-          '${_shellQuote(bridgeId)}',
-        );
-        expect(stop.exitCode, 0, reason: '${stop.stderr}');
-      }
+      await client.loadSession(sessionId: sessionId, cwd: config.cwd);
+      expect(
+        replayedKinds,
+        containsAll([
+          'user_message_chunk',
+          'agent_message_chunk',
+          'agent_thought_chunk',
+        ]),
+      );
+      await client.resumeSession(sessionId: sessionId, cwd: config.cwd);
+      final configOptions = await client.setConfigOption(
+        sessionId: sessionId,
+        configId: 'responseStyle',
+        value: 'detailed',
+      );
+      expect(
+        configOptions.whereType<AcpSelectConfigOption>().single.currentValue,
+        'detailed',
+      );
+
+      final thought = updates.firstWhere(
+        (notification) => notification.update.kind == 'agent_thought_chunk',
+      );
+      final waitingPrompt = client.prompt(
+        sessionId: sessionId,
+        content: const [AcpTextContent('/wait')],
+      );
+      await thought;
+      await client.cancel(sessionId);
+      expect((await waitingPrompt).stopReason, AcpStopReason.cancelled);
+      await client.closeSession(sessionId);
+      expect(transport.errors, isEmpty);
     },
     skip: enabled ? false : _skipReason,
     timeout: const Timeout(Duration(minutes: 2)),

@@ -1,20 +1,34 @@
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
-import 'package:quiver/collection.dart';
 
 /// A cache of laid out [Paragraph]s. This is used to avoid laying out the same
 /// text multiple times, which is expensive.
+///
+/// The cache owns its paragraphs. Callers must not retain them after [clear]
+/// or eviction/replacement, or dispose them themselves.
 class ParagraphCache {
-  ParagraphCache(int maximumSize)
-      : _cache = LruMap<int, Paragraph>(maximumSize: maximumSize);
+  /// Creates an owning cache with a positive capacity.
+  ParagraphCache(this._maximumSize) {
+    if (_maximumSize <= 0) {
+      throw ArgumentError.value(
+          _maximumSize, 'maximumSize', 'must be positive');
+    }
+  }
 
-  final LruMap<int, Paragraph> _cache;
+  final int _maximumSize;
+  // Insertion order is LRU to MRU. Removing/reinserting on a hit promotes it,
+  // and keys.first finds the eviction candidate without scanning the cache.
+  final _cache = <int, Paragraph>{};
 
   /// Returns a [Paragraph] for the given [key]. [key] is the same as the
   /// key argument to [performAndCacheLayout].
   Paragraph? getLayoutFromCache(int key) {
-    return _cache[key];
+    final paragraph = _cache.remove(key);
+    if (paragraph != null) {
+      _cache[key] = paragraph;
+    }
+    return paragraph;
   }
 
   /// Applies [style] and [textScaler] to [text] and lays it out to create
@@ -33,14 +47,20 @@ class ParagraphCache {
     final paragraph = builder.build();
     paragraph.layout(ParagraphConstraints(width: double.infinity));
 
+    _cache.remove(key)?.dispose();
+    if (_cache.length == _maximumSize) {
+      _cache.remove(_cache.keys.first)!.dispose();
+    }
     _cache[key] = paragraph;
     return paragraph;
   }
 
-  /// Clears the cache. This should be called when the same text and style
-  /// pair no longer produces the same layout. For example, when a font is
-  /// loaded.
+  /// Releases all cached paragraphs. This should be called when the same text
+  /// and style pair no longer produces the same layout, or the owner is disposed.
   void clear() {
+    for (final paragraph in _cache.values) {
+      paragraph.dispose();
+    }
     _cache.clear();
   }
 

@@ -40,76 +40,37 @@ class BackgroundSshService {
   static Future<void> updateStatus({
     required int connectionCount,
     required int connectedCount,
-  }) async {
-    if (!_supportsPlatform) {
-      return;
-    }
-    try {
-      await _channel.invokeMethod<void>('updateStatus', {
-        'connectionCount': connectionCount,
-        'connectedCount': connectedCount,
-      });
-    } on PlatformException catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          'Failed to update background SSH status: '
-          '${error.message ?? error.code}',
-        );
-      }
-    } on MissingPluginException catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          'Failed to update background SSH status: '
-          '${error.message ?? 'missing plugin'}',
-        );
-      }
-    }
-  }
+  }) => _dispatchStatus('updateStatus', 'update background SSH status', {
+    'connectionCount': connectionCount,
+    'connectedCount': connectedCount,
+  });
 
   /// Tell native background UI whether the app is currently foregrounded.
-  static Future<void> setForegroundState({required bool isForeground}) async {
-    if (!_supportsPlatform) {
-      return;
-    }
-    try {
-      await _channel.invokeMethod<void>('setForegroundState', {
+  static Future<void> setForegroundState({required bool isForeground}) =>
+      _dispatchStatus('setForegroundState', 'update background SSH lifecycle', {
         'isForeground': isForeground,
       });
-    } on PlatformException catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          'Failed to update background SSH lifecycle: '
-          '${error.message ?? error.code}',
-        );
-      }
-    } on MissingPluginException catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          'Failed to update background SSH lifecycle: '
-          '${error.message ?? 'missing plugin'}',
-        );
-      }
-    }
-  }
 
   /// Stop the background service.
-  static Future<void> stop() async {
-    if (!_supportsPlatform) {
-      return;
-    }
+  static Future<void> stop() =>
+      _dispatchStatus('stopService', 'stop background SSH status');
+
+  static Future<void> _dispatchStatus(
+    String method,
+    String operation, [
+    Map<String, Object>? arguments,
+  ]) async {
+    if (!_supportsPlatform) return;
     try {
-      await _channel.invokeMethod<void>('stopService');
+      await _channel.invokeMethod<void>(method, arguments);
     } on PlatformException catch (error) {
       if (kDebugMode) {
-        debugPrint(
-          'Failed to stop background SSH status: ${error.message ?? error.code}',
-        );
+        debugPrint('Failed to $operation: ${error.message ?? error.code}');
       }
     } on MissingPluginException catch (error) {
       if (kDebugMode) {
         debugPrint(
-          'Failed to stop background SSH status: '
-          '${error.message ?? 'missing plugin'}',
+          'Failed to $operation: ${error.message ?? 'missing plugin'}',
         );
       }
     }

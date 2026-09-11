@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -40,6 +41,8 @@ const (
 	acpPendingReplayMaxBytes  = acpReplayMaxBytes
 	acpIdleTimeout            = 24 * time.Hour
 	acpProviderDrainTimeout   = 2 * time.Second
+	acpRequestTimeout         = 500 * time.Millisecond
+	acpWaitMaxFailures        = 5
 	// Keep the steady-state live queue modest; attach sizes it dynamically for
 	// the actual replay being primed so a high event-count retention bound does
 	// not preallocate a huge channel for every connected client.
@@ -151,7 +154,7 @@ type acpBridge struct {
 	writerClientID       string
 	pendingRequests      map[string]struct{}
 	inFlightTurns        map[string]struct{}
-	sessionSetupRequests map[string]struct{}
+	sessionSetupRequests map[string]string
 	initializeRequestIDs map[string]struct{}
 	initializeResult     json.RawMessage
 	exitCode             *int
@@ -343,22 +346,78 @@ func acpWaitCommand(args []string) {
 		acpUsageAndExit()
 	}
 	id := args[0]
-	info, err := acpBridgeStatus(id)
-	if err != nil {
-		fatal(errors.New("ACP bridge is not running"))
-	}
-	fmt.Printf("Native agent window: %s\r\n", info.Provider)
-	fmt.Print("Open this MonkeyMux window in MonkeySSH for the native interface.\r\n")
-	fmt.Print("The agent keeps running when this terminal disconnects.\r\n")
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	for range ticker.C {
-		info, err := acpBridgeStatus(id)
-		if err != nil || (info.State != "starting" && info.State != "running") {
-			return
-		}
+	if err := waitForAcpBridge(id, acpBridgeStatus, ticker.C, os.Stdout); err != nil {
+		fatal(err)
 	}
 }
+
+func waitForAcpBridge(id string, status func(string) (acpBridgeInfo, error), ticks <-chan time.Time, output io.Writer) error {
+	introduced := false
+	consecutiveFailures := 0
+	for {
+		info, err := status(id)
+		if err == nil {
+			consecutiveFailures = 0
+			if !introduced {
+				fmt.Fprintf(output, "Native agent window: %s\r\n", info.Provider)
+				fmt.Fprint(output, "Open this MonkeyMux window in MonkeySSH for the native interface.\r\n")
+				fmt.Fprint(output, "The agent keeps running when this terminal disconnects.\r\n")
+				introduced = true
+			}
+			switch info.State {
+			case "exited", "stopped", "protocol_error":
+				return nil
+			}
+		} else if isStaleUnixSocketError(err) {
+			return nil
+		} else if errors.Is(err, os.ErrNotExist) {
+			if socket, resolveErr := acpSocketPath(id); resolveErr == nil {
+				if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
+					return nil
+				}
+			}
+		}
+		if err != nil {
+			var protocolErr *protocolFrameError
+			if errors.As(err, &protocolErr) {
+				return err
+			}
+			if !isTransientAcpStatusError(err) {
+				consecutiveFailures++
+				if consecutiveFailures >= acpWaitMaxFailures {
+					return err
+				}
+			}
+		}
+		<-ticks
+	}
+}
+
+func isTransientAcpStatusError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
+		return true
+	}
+	// Winsock uses different errno values from Go's portable syscall constants.
+	if runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(10054)) || // WSAECONNRESET
+		errors.Is(err, syscall.Errno(10035)) || // WSAEWOULDBLOCK
+		errors.Is(err, syscall.Errno(10004))) { // WSAEINTR
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+}
+
+// protocolFrameError distinguishes malformed frames from transport failures.
+type protocolFrameError struct {
+	err error
+}
+
+func (e *protocolFrameError) Error() string { return e.err.Error() }
+func (e *protocolFrameError) Unwrap() error { return e.err }
 
 func requestAcpBridgeStop(id string) error {
 	conn, err := dialAcpBridge(id)
@@ -366,6 +425,9 @@ func requestAcpBridgeStop(id string) error {
 		return err
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(acpRequestTimeout)); err != nil {
+		return err
+	}
 	return writeAcpWireFrame(conn, acpWireMessage{
 		Version: acpBridgeProtocolVersion,
 		Type:    "command",
@@ -397,7 +459,15 @@ func requestAcpBridgeStopAndWait(id string) error {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := acpBridgeStatus(id); err != nil {
-			return nil
+			if isStaleUnixSocketError(err) {
+				return nil
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
+					return nil
+				}
+			}
+			return err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -538,6 +608,11 @@ func validateAcpProviderEnvironment(providerID string) error {
 	return nil
 }
 
+// newAcpProviderCommand uses ordinary pipes to preserve NDJSON framing.
+func newAcpProviderCommand(command string) *exec.Cmd {
+	return newRunCommand(command)
+}
+
 func newAcpBridge(
 	id string,
 	providerID string,
@@ -602,7 +677,7 @@ func newAcpBridge(
 		clients:              map[string]*acpBridgeClient{},
 		pendingRequests:      map[string]struct{}{},
 		inFlightTurns:        map[string]struct{}{},
-		sessionSetupRequests: map[string]struct{}{},
+		sessionSetupRequests: map[string]string{},
 		providerDone:         make(chan struct{}),
 		providerReapReady:    make(chan struct{}),
 		providerOutput:       stdout,
@@ -619,6 +694,8 @@ func newAcpBridge(
 }
 
 func serveAcpBridge(bridge *acpBridge) error {
+	// The provider is already running, so even socket setup failures must stop it.
+	defer bridge.stop()
 	socket, err := acpSocketPath(bridge.id)
 	if err != nil {
 		return err
@@ -635,7 +712,6 @@ func serveAcpBridge(bridge *acpBridge) error {
 	defer func() {
 		_ = listener.Close()
 		_ = os.Remove(socket)
-		bridge.stop()
 	}()
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -690,16 +766,17 @@ func (b *acpBridge) readProviderOutput(stdout io.Reader) {
 }
 
 func readBoundedAcpLine(reader *bufio.Reader) ([]byte, error) {
+	return readBoundedProtocolLine(reader, acpMaxFrameBytes)
+}
+
+func readBoundedProtocolLine(reader *bufio.Reader, limit int) ([]byte, error) {
 	var line []byte
 	for {
 		fragment, err := reader.ReadSlice('\n')
-		if len(line)+len(fragment) > acpMaxFrameBytes {
-			if errors.Is(err, bufio.ErrBufferFull) {
-				for errors.Is(err, bufio.ErrBufferFull) {
-					_, err = reader.ReadSlice('\n')
-				}
-			}
-			return nil, errors.New("ACP frame exceeds limit")
+		if len(line)+len(fragment) > limit {
+			// Every caller terminates this stream on an oversized frame. Draining
+			// to a newline could block forever on a peer that stops sending.
+			return nil, &protocolFrameError{errors.New("protocol frame exceeds limit")}
 		}
 		line = append(line, fragment...)
 		if !errors.Is(err, bufio.ErrBufferFull) {
@@ -818,53 +895,81 @@ func (b *acpBridge) waitForProviderOutput() {
 	<-b.providerOutputDone
 }
 
-func (b *acpBridge) trackInitializeRequest(raw json.RawMessage) (string, bool) {
-	id, hasID, hasMethod := acpJSONRPCIdentity(raw)
-	if !hasID || !hasMethod {
+type acpEnvelope struct {
+	ID     json.RawMessage `json:"id"`
+	Method json.RawMessage `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  json.RawMessage `json:"error"`
+	method string
+}
+
+func parseAcpEnvelope(raw json.RawMessage) acpEnvelope {
+	var envelope acpEnvelope
+	if json.Unmarshal(raw, &envelope) != nil || len(envelope.ID) == 0 || string(envelope.ID) == "null" {
+		return acpEnvelope{}
+	}
+	if len(envelope.Method) > 0 {
+		_ = json.Unmarshal(envelope.Method, &envelope.method)
+	}
+	return envelope
+}
+
+func acpSessionID(raw json.RawMessage) string {
+	var session struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(raw, &session) != nil || !validAcpSessionID(session.SessionID) {
+		return ""
+	}
+	return session.SessionID
+}
+
+// Register requests before writing stdin: a provider can respond before Write
+// returns. Only a successful setup response commits the session identity;
+// failed writes release all registrations.
+func (b *acpBridge) trackClientRequest(envelope acpEnvelope) (string, bool) {
+	if len(envelope.ID) == 0 || len(envelope.Method) == 0 {
 		return "", false
 	}
-	method, _ := acpJSONRPCRequestSession(raw)
-	if method != "initialize" {
-		return "", false
-	}
+	id := string(envelope.ID)
 	b.mu.Lock()
-	if b.initializeRequestIDs == nil {
-		b.initializeRequestIDs = map[string]struct{}{}
+	b.inFlightTurns[id] = struct{}{}
+	if isAcpSessionSetupMethod(envelope.method) {
+		b.sessionSetupRequests[id] = acpSessionID(envelope.Params)
 	}
-	b.initializeRequestIDs[id] = struct{}{}
+	if envelope.method == "initialize" {
+		if b.initializeRequestIDs == nil {
+			b.initializeRequestIDs = map[string]struct{}{}
+		}
+		b.initializeRequestIDs[id] = struct{}{}
+	}
 	b.mu.Unlock()
 	return id, true
 }
 
-func (b *acpBridge) untrackInitializeRequest(id string) {
+func (b *acpBridge) untrackClientRequest(id string) {
 	b.mu.Lock()
+	delete(b.inFlightTurns, id)
+	delete(b.sessionSetupRequests, id)
 	delete(b.initializeRequestIDs, id)
 	b.mu.Unlock()
 }
 
-func (b *acpBridge) cachedInitializeResponse(raw json.RawMessage) json.RawMessage {
-	id, hasID, hasMethod := acpJSONRPCIdentity(raw)
-	if !hasID || !hasMethod {
-		return nil
-	}
-	method, _ := acpJSONRPCRequestSession(raw)
-	if method != "initialize" {
+func (b *acpBridge) cachedInitializeResponse(envelope acpEnvelope) json.RawMessage {
+	if len(envelope.ID) == 0 || envelope.method != "initialize" {
 		return nil
 	}
 	b.mu.Lock()
-	result := append(json.RawMessage(nil), b.initializeResult...)
+	result := b.initializeResult
 	b.mu.Unlock()
 	if len(result) == 0 {
 		return nil
 	}
-	response, err := json.Marshal(struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Result  json.RawMessage `json:"result"`
-	}{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(id),
-		Result:  result,
+	response, err := json.Marshal(map[string]json.RawMessage{
+		"jsonrpc": json.RawMessage(`"2.0"`),
+		"id":      envelope.ID,
+		"result":  result,
 	})
 	if err != nil {
 		return nil
@@ -872,40 +977,18 @@ func (b *acpBridge) cachedInitializeResponse(raw json.RawMessage) json.RawMessag
 	return response
 }
 
-func (b *acpBridge) observeClientMessage(raw json.RawMessage) {
-	id, hasID, hasMethod := acpJSONRPCIdentity(raw)
-	if !hasID {
+func (b *acpBridge) observeClientMessage(envelope acpEnvelope) {
+	if len(envelope.ID) == 0 {
 		return
 	}
-	method, sessionID := acpJSONRPCRequestSession(raw)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if hasMethod {
-		b.inFlightTurns[id] = struct{}{}
-		if isAcpSessionSetupMethod(method) {
-			b.sessionSetupRequests[id] = struct{}{}
-			if validAcpSessionID(sessionID) {
-				b.sessionID = sessionID
-			}
-		}
-	} else {
+	if len(envelope.Method) == 0 {
+		id := string(envelope.ID)
 		delete(b.pendingRequests, id)
 		b.releasePendingReplayLocked(id)
 	}
 	b.lastActivity = time.Now()
-}
-
-func acpJSONRPCRequestSession(raw json.RawMessage) (string, string) {
-	var envelope struct {
-		Method string `json:"method"`
-		Params struct {
-			SessionID string `json:"sessionId"`
-		} `json:"params"`
-	}
-	if json.Unmarshal(raw, &envelope) != nil {
-		return "", ""
-	}
-	return envelope.Method, envelope.Params.SessionID
 }
 
 func isAcpSessionSetupMethod(method string) bool {
@@ -922,43 +1005,6 @@ func validAcpSessionID(sessionID string) bool {
 		!strings.ContainsRune(sessionID, 0)
 }
 
-func acpJSONRPCResponseResult(raw json.RawMessage) (json.RawMessage, bool) {
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal(raw, &envelope) != nil || len(envelope.Error) > 0 ||
-		len(envelope.Result) == 0 || string(envelope.Result) == "null" {
-		return nil, false
-	}
-	return append(json.RawMessage(nil), envelope.Result...), true
-}
-
-func acpJSONRPCResponseSessionID(raw json.RawMessage) string {
-	var envelope struct {
-		Result struct {
-			SessionID string `json:"sessionId"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &envelope) != nil ||
-		!validAcpSessionID(envelope.Result.SessionID) {
-		return ""
-	}
-	return envelope.Result.SessionID
-}
-
-func acpJSONRPCIdentity(raw json.RawMessage) (string, bool, bool) {
-	var envelope struct {
-		ID     json.RawMessage `json:"id"`
-		Method json.RawMessage `json:"method"`
-	}
-	if json.Unmarshal(raw, &envelope) != nil || len(envelope.ID) == 0 ||
-		string(envelope.ID) == "null" {
-		return "", false, false
-	}
-	return string(envelope.ID), true, len(envelope.Method) > 0
-}
-
 func (b *acpBridge) publish(
 	eventType string,
 	data json.RawMessage,
@@ -967,12 +1013,14 @@ func (b *acpBridge) publish(
 ) bool {
 	pendingID := ""
 	providerResponseID := ""
+	var envelope acpEnvelope
 	if eventType == "output" {
-		if id, hasID, hasMethod := acpJSONRPCIdentity(data); hasID {
-			if hasMethod {
-				pendingID = id
+		envelope = parseAcpEnvelope(data)
+		if len(envelope.ID) > 0 {
+			if len(envelope.Method) > 0 {
+				pendingID = string(envelope.ID)
 			} else {
-				providerResponseID = id
+				providerResponseID = string(envelope.ID)
 			}
 		}
 	}
@@ -990,14 +1038,18 @@ func (b *acpBridge) publish(
 	if providerResponseID != "" {
 		delete(b.inFlightTurns, providerResponseID)
 		if _, ok := b.initializeRequestIDs[providerResponseID]; ok {
-			if result, valid := acpJSONRPCResponseResult(data); valid {
-				b.initializeResult = result
+			if len(envelope.Error) == 0 && len(envelope.Result) > 0 && string(envelope.Result) != "null" {
+				b.initializeResult = envelope.Result
 			}
 			delete(b.initializeRequestIDs, providerResponseID)
 		}
-		if _, ok := b.sessionSetupRequests[providerResponseID]; ok {
-			if sessionID := acpJSONRPCResponseSessionID(data); sessionID != "" {
-				b.sessionID = sessionID
+		if requestedSessionID, ok := b.sessionSetupRequests[providerResponseID]; ok {
+			if len(envelope.Error) == 0 && len(envelope.Result) > 0 {
+				if sessionID := acpSessionID(envelope.Result); sessionID != "" {
+					b.sessionID = sessionID
+				} else if validAcpSessionID(requestedSessionID) {
+					b.sessionID = requestedSessionID
+				}
 			}
 			delete(b.sessionSetupRequests, providerResponseID)
 		}
@@ -1080,38 +1132,41 @@ func (b *acpBridge) appendReplayLocked(message acpWireMessage, pendingID string)
 }
 
 func (b *acpBridge) trimReplayLocked() {
-	remainingEvents := len(b.replay)
-	remainingBytes := b.replayBytes
-	remove := make([]bool, len(b.replay))
-	removed := 0
-	for index, event := range b.replay {
-		overLimit := remainingEvents > acpReplayMaxEvents ||
-			(remainingBytes > acpReplayMaxBytes && remainingEvents > 1)
-		if !overLimit {
-			break
-		}
-		if event.pendingID != "" {
-			continue
-		}
-		remove[index] = true
-		removed++
-		remainingEvents--
-		remainingBytes -= event.bytes
-	}
-	if removed == 0 {
-		// Active provider requests (notably permissions) have to survive
-		// detachment verbatim. They are still memory-only and are released
-		// as soon as the app sends the matching response.
+	if len(b.replay) <= acpReplayMaxEvents &&
+		(b.replayBytes <= acpReplayMaxBytes || len(b.replay) <= 1) {
 		return
 	}
-	kept := make([]acpReplayEvent, 0, remainingEvents)
-	for index, event := range b.replay {
-		if !remove[index] {
-			kept = append(kept, event)
+	for len(b.replay) > acpReplayMaxEvents ||
+		(b.replayBytes > acpReplayMaxBytes && len(b.replay) > 1) {
+		if b.replay[0].pendingID != "" {
+			break
 		}
+		b.replayBytes -= b.replay[0].bytes
+		b.replay[0] = acpReplayEvent{}
+		b.replay = b.replay[1:]
 	}
-	b.replay = kept
-	b.replayBytes = remainingBytes
+	if len(b.replay) <= acpReplayMaxEvents &&
+		(b.replayBytes <= acpReplayMaxBytes || len(b.replay) <= 1) {
+		return
+	}
+	remainingEvents := len(b.replay)
+	kept := 0
+	for _, event := range b.replay {
+		// Leave room for streaming appends before another pinned compaction.
+		overLimit := remainingEvents > acpReplayMaxEvents*7/8 ||
+			(b.replayBytes > acpReplayMaxBytes*7/8 && remainingEvents > 1)
+		// Unresolved provider requests must survive detachment verbatim.
+		if overLimit && event.pendingID == "" {
+			remainingEvents--
+			b.replayBytes -= event.bytes
+			continue
+		}
+		b.replay[kept] = event
+		kept++
+	}
+	// Reuse the event array without retaining evicted payloads in its tail.
+	clear(b.replay[kept:])
+	b.replay = b.replay[:kept]
 }
 
 func (b *acpBridge) releasePendingReplayLocked(id string) {
@@ -1139,9 +1194,15 @@ func (b *acpBridge) releaseAllPendingReplayLocked() {
 
 func (b *acpBridge) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(socketTimeout)); err != nil {
+		return
+	}
 	reader := bufio.NewReader(conn)
 	first, err := readAcpWireFrame(reader)
 	if err != nil {
+		return
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
 	if first.Type == "command" {
@@ -1199,12 +1260,18 @@ func (b *acpBridge) handleAttach(
 		return
 	}
 	b.mu.Lock()
+	// A connection accepted before stop may not send its hello until afterward.
+	// Pair registration with stop's state transition under the same lock.
+	if b.state == "stopped" {
+		b.mu.Unlock()
+		return
+	}
 	if b.writerClientID == "" {
 		b.writerClientID = clientID
 	}
 	canSend := b.writerClientID == clientID
 	b.lastActivity = time.Now()
-	replay := append([]acpReplayEvent(nil), b.replay...)
+	replay := b.replay
 	retainedFrom := b.nextSequence + 1
 	if len(replay) > 0 {
 		retainedFrom = replay[0].message.Sequence
@@ -1323,14 +1390,15 @@ func (b *acpBridge) handleAttach(
 				})
 				continue
 			}
-			if response := b.cachedInitializeResponse(message.Data); len(response) > 0 {
+			envelope := parseAcpEnvelope(message.Data)
+			if response := b.cachedInitializeResponse(envelope); len(response) > 0 {
 				b.publish("output", response, "", nil)
 				continue
 			}
-			initializeID, trackedInitialize := b.trackInitializeRequest(message.Data)
+			requestID, trackedRequest := b.trackClientRequest(envelope)
 			if err := b.writeProvider(message.Data); err != nil {
-				if trackedInitialize {
-					b.untrackInitializeRequest(initializeID)
+				if trackedRequest {
+					b.untrackClientRequest(requestID)
 				}
 				b.enqueue(client, acpWireMessage{
 					Version: acpBridgeProtocolVersion,
@@ -1339,7 +1407,7 @@ func (b *acpBridge) handleAttach(
 				})
 				continue
 			}
-			b.observeClientMessage(message.Data)
+			b.observeClientMessage(envelope)
 		case "status":
 			info := b.snapshot()
 			b.enqueue(client, acpWireMessage{
@@ -1442,18 +1510,8 @@ func (b *acpBridge) enqueue(client *acpBridgeClient, message acpWireMessage) {
 	if !attached || current != client {
 		return
 	}
-	select {
-	case <-client.done:
-		return
-	default:
-	}
-	select {
-	case <-client.done:
-		return
-	case client.send <- message:
-	default:
-		// A slow SSH client must not block the provider or unbound the replay
-		// buffer. It can reconnect and resume from its last ACK.
+	if !tryEnqueueAcpClient(client, message) {
+		// A slow SSH client can reconnect and resume from its last ACK.
 		b.detachClient(client.id)
 	}
 }
@@ -1500,13 +1558,16 @@ func (b *acpBridge) recordAck(clientID string, sequence uint64) {
 func (b *acpBridge) writeProvider(data json.RawMessage) error {
 	b.stdinMu.Lock()
 	defer b.stdinMu.Unlock()
-	if b.stdin == nil {
+	b.mu.Lock()
+	stdin := b.stdin
+	b.mu.Unlock()
+	if stdin == nil {
 		return errors.New("closed")
 	}
-	if _, err := b.stdin.Write(data); err != nil {
+	if _, err := stdin.Write(data); err != nil {
 		return err
 	}
-	_, err := b.stdin.Write([]byte{'\n'})
+	_, err := stdin.Write([]byte{'\n'})
 	return err
 }
 
@@ -1562,13 +1623,15 @@ func (b *acpBridge) stop() {
 }
 
 func (b *acpBridge) closeProviderInput() {
-	b.stdinMu.Lock()
-	defer b.stdinMu.Unlock()
-	if b.stdin == nil {
-		return
-	}
-	_ = b.stdin.Close()
+	// Pipe Close must interrupt a blocked Write, not wait for its mutex.
+	// stdinMu only serializes frames; mu protects ownership of the pipe.
+	b.mu.Lock()
+	stdin := b.stdin
 	b.stdin = nil
+	b.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
 }
 
 func acpSocketPath(id string) (string, error) {
@@ -1587,7 +1650,7 @@ func dialAcpBridge(id string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return net.DialTimeout("unix", path, 500*time.Millisecond)
+	return net.DialTimeout("unix", path, acpRequestTimeout)
 }
 
 func listAcpBridgeIDs() ([]string, error) {
@@ -1624,6 +1687,13 @@ func acpBridgeStatus(id string) (acpBridgeInfo, error) {
 		return acpBridgeInfo{}, err
 	}
 	defer conn.Close()
+	return acpBridgeStatusFromConn(conn)
+}
+
+func acpBridgeStatusFromConn(conn net.Conn) (acpBridgeInfo, error) {
+	if err := conn.SetDeadline(time.Now().Add(acpRequestTimeout)); err != nil {
+		return acpBridgeInfo{}, err
+	}
 	if err := writeAcpWireFrame(conn, acpWireMessage{
 		Version: acpBridgeProtocolVersion,
 		Type:    "command",
@@ -1632,13 +1702,20 @@ func acpBridgeStatus(id string) (acpBridgeInfo, error) {
 		return acpBridgeInfo{}, err
 	}
 	message, err := readAcpWireFrame(bufio.NewReader(conn))
-	if err != nil || message.Bridge == nil {
-		return acpBridgeInfo{}, errors.New("invalid status response")
+	if err != nil {
+		return acpBridgeInfo{}, fmt.Errorf("invalid status response: %w", err)
+	}
+	if message.Type != "status" || message.Version != acpBridgeProtocolVersion || message.Bridge == nil {
+		return acpBridgeInfo{}, &protocolFrameError{errors.New("invalid status response")}
 	}
 	return *message.Bridge, nil
 }
 
 func gcAcpArtifacts(runDir string) {
+	gcAcpArtifactsWithSocketIdentity(runDir, socketFileIdentity)
+}
+
+func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (socketIdentity, error)) {
 	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		return
@@ -1655,11 +1732,15 @@ func gcAcpArtifacts(runDir string) {
 			_ = os.Remove(path)
 			continue
 		}
+		identity, _ := identify(path)
 		conn, err := dialAcpBridge(id)
 		if err != nil {
-			_ = os.Remove(path)
+			if isStaleUnixSocketError(err) {
+				removeSocketPathIfUnchanged(path, identity)
+			}
 			continue
 		}
+		_ = conn.SetDeadline(time.Now().Add(acpRequestTimeout))
 		_ = writeAcpWireFrame(conn, acpWireMessage{
 			Version: acpBridgeProtocolVersion,
 			Type:    "command",
@@ -1675,11 +1756,11 @@ func readAcpWireFrame(reader *bufio.Reader) (acpWireMessage, error) {
 		return acpWireMessage{}, err
 	}
 	if len(line) == 0 {
-		return acpWireMessage{}, errors.New("empty ACP bridge frame")
+		return acpWireMessage{}, &protocolFrameError{errors.New("empty ACP bridge frame")}
 	}
 	var message acpWireMessage
 	if err := json.Unmarshal(line, &message); err != nil {
-		return acpWireMessage{}, err
+		return acpWireMessage{}, &protocolFrameError{err}
 	}
 	return message, nil
 }
@@ -1689,7 +1770,7 @@ func writeAcpWireFrame(writer io.Writer, message acpWireMessage) error {
 	if err != nil {
 		return err
 	}
-	if len(data) > acpMaxFrameBytes {
+	if len(data)+1 > acpMaxFrameBytes {
 		return errors.New("ACP bridge frame exceeds limit")
 	}
 	_, err = writer.Write(append(data, '\n'))

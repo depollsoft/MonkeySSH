@@ -18,23 +18,26 @@ final class AcpSshExecTransport implements AcpTransport {
 
   final SSHSession _session;
   late final StreamSubscription<Uint8List> _stderrSubscription;
-  var _closed = false;
+  Future<void>? _closeFuture;
 
   @override
   Stream<List<int>> get incoming => _session.stdout.cast<List<int>>();
 
   @override
   Future<void> write(List<int> bytes) async {
-    if (_closed) throw StateError('ACP SSH transport is closed');
+    if (_closeFuture != null) throw StateError('ACP SSH transport is closed');
     _session.write(Uint8List.fromList(bytes));
   }
 
   @override
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    await _stderrSubscription.cancel();
-    _session.close();
+  Future<void> close() => _closeFuture ??= Future<void>.microtask(_close);
+
+  Future<void> _close() async {
+    try {
+      await _stderrSubscription.cancel();
+    } finally {
+      _session.close();
+    }
   }
 }
 

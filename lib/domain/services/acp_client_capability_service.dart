@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:collection/collection.dart';
 import 'package:dartssh2/dartssh2.dart';
 
 import '../models/acp_client_capabilities.dart';
@@ -14,6 +15,7 @@ import 'acp_client.dart';
 import 'acp_json_rpc_connection.dart';
 import 'diagnostics_log_service.dart';
 import 'remote_file_service.dart';
+import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
 
@@ -28,6 +30,7 @@ final class AcpClientCapabilityLimits {
     this.maxCommandCharacters = 8192,
     this.maxEnvironmentVariables = 64,
     this.maxTerminalOutputBytes = 1024 * 1024,
+    this.terminalOpenTimeout = const Duration(seconds: 10),
     this.maxTerminalLifetime = const Duration(minutes: 10),
   });
 
@@ -51,6 +54,9 @@ final class AcpClientCapabilityLimits {
 
   /// Largest output ring buffer retained for one terminal.
   final int maxTerminalOutputBytes;
+
+  /// Timeout for opening an SSH terminal command channel.
+  final Duration terminalOpenTimeout;
 
   /// Maximum lifetime for an unreleased terminal.
   final Duration maxTerminalLifetime;
@@ -81,10 +87,6 @@ abstract interface class AcpRemoteFileSystem {
 final class AcpSftpRemoteFileSystem implements AcpRemoteFileSystem {
   /// Creates an SFTP-backed filesystem.
   AcpSftpRemoteFileSystem(this._sftp);
-
-  /// Creates a filesystem using the active SSH session's SFTP channel.
-  factory AcpSftpRemoteFileSystem.fromSshSession(SshSession session) =>
-      AcpSftpRemoteFileSystem(session.sftp);
 
   final Future<SftpClient> Function() _sftp;
 
@@ -226,15 +228,33 @@ abstract interface class AcpTerminalExecutor {
 
 /// SSH implementation of [AcpTerminalExecutor].
 final class AcpSshTerminalExecutor implements AcpTerminalExecutor {
-  /// Creates a terminal executor over [session].
-  const AcpSshTerminalExecutor(this.session);
+  /// Creates a terminal executor that resolves the active same-host session.
+  const AcpSshTerminalExecutor(
+    this._session, {
+    required this.remoteIsWindows,
+    required this.openTimeout,
+  });
 
-  /// Active SSH session for the same remote host as ACP.
-  final SshSession session;
+  final Future<SshSession> Function() _session;
+
+  /// Whether the remote host requires Windows command syntax.
+  final bool remoteIsWindows;
+
+  /// Deadline for opening a terminal command channel.
+  final Duration openTimeout;
 
   @override
-  Future<AcpTerminalProcess> start(String command) async =>
-      _SshAcpTerminalProcess(await session.execute(command));
+  Future<AcpTerminalProcess> start(String command) async {
+    try {
+      return _SshAcpTerminalProcess(
+        await openSshExec((await _session()).execute(command), openTimeout),
+      );
+    } on TimeoutException {
+      throw const AcpClientCapabilityException(
+        'Terminal channel opening timed out',
+      );
+    }
+  }
 }
 
 /// Terminal exit status returned by ACP terminal methods.
@@ -279,7 +299,7 @@ final class AcpLimitExceededException extends AcpClientCapabilityException {
 /// grow local memory without limit: once [maxPendingRequests] outstanding new
 /// requests or [maxPendingContentBytes] of provider content are retained,
 /// [register] refuses further brand-new requests (a rebind of an already
-/// tracked request id is always accepted).
+/// tracked request is accepted only when its method and parameters match).
 final class AcpPendingRequestRegistry {
   /// Creates a pending-request registry.
   AcpPendingRequestRegistry({
@@ -315,18 +335,24 @@ final class AcpPendingRequestRegistry {
   /// request unanswered.
   T? register<T extends AcpPendingClientRequest>(T pending) {
     final existing = _requests[pending.id];
-    if (existing != null && existing.runtimeType == pending.runtimeType) {
+    if (existing != null) {
+      if (existing.runtimeType != pending.runtimeType ||
+          existing.request.method != pending.request.method ||
+          !const DeepCollectionEquality().equals(
+            existing.request.params,
+            pending.request.params,
+          )) {
+        throw const AcpClientCapabilityException(
+          'Pending request ID was reused with different parameters',
+        );
+      }
       existing.request = pending.request;
       _emit();
       return existing as T;
     }
-    if (existing == null && _requests.length >= maxPendingRequests) {
-      return null;
-    }
+    if (_requests.length >= maxPendingRequests) return null;
     final nextContentBytes =
-        _pendingContentBytes -
-        (existing?.retainedContentBytes ?? 0) +
-        pending.retainedContentBytes;
+        _pendingContentBytes + pending.retainedContentBytes;
     if (nextContentBytes > maxPendingContentBytes) {
       return null;
     }
@@ -451,7 +477,13 @@ final class AcpClientCapabilityService {
   final DiagnosticsLogger _diagnostics;
   final _terminals = <String, _ManagedAcpTerminal>{};
   var _terminalReservations = 0;
-  StreamSubscription<AcpServerRequest>? _subscription;
+  // Routing outlives the stream callback. Permanent teardown invalidates these
+  // continuations before awaiting cleanup; soft detach deliberately keeps them.
+  final _activeRequests = <AcpJsonRpcServerRequest, String?>{};
+  // Count overlapping teardowns so admission resumes only after all finish.
+  final _closingSessions = <String, int>{};
+  var _closed = false;
+  StreamSubscription<AcpJsonRpcServerRequest>? _subscription;
   var _nextTerminalId = 0;
 
   /// Capabilities that are safe to advertise for this service instance.
@@ -474,6 +506,7 @@ final class AcpClientCapabilityService {
   /// Detaching only cancels the stream subscription. It deliberately keeps
   /// [registry] and terminals alive for bridge replay after reconnect.
   void attach(AcpClient client) {
+    if (_closed) throw StateError('ACP capability service is closed');
     _subscription?.cancel();
     _subscription = client.serverRequests.listen(_handle);
   }
@@ -495,6 +528,8 @@ final class AcpClientCapabilityService {
 
   /// Explicitly destroys session-owned terminal resources and pending requests.
   Future<void> close() async {
+    _closed = true;
+    _activeRequests.clear();
     await detach();
     await Future.wait<void>(
       _terminals.values.map((terminal) => terminal.release()),
@@ -512,16 +547,30 @@ final class AcpClientCapabilityService {
   /// other live sessions still use: closing the whole capability service
   /// with [close] would incorrectly cancel those other sessions' pending
   /// requests too and stop routing their `fs`/`terminal` requests.
+  ///
+  /// Rejects new requests for this session until all overlapping teardowns
+  /// finish. The session may resume on this bridge afterward.
   Future<void> closeSession(String sessionId) async {
-    _sessionAutoApprovePermissions.remove(sessionId);
-    final owned = _terminals.entries
-        .where((entry) => entry.value.sessionId == sessionId)
-        .toList(growable: false);
-    for (final entry in owned) {
-      _terminals.remove(entry.key);
+    _closingSessions.update(sessionId, (count) => count + 1, ifAbsent: () => 1);
+    try {
+      _activeRequests.removeWhere((_, owner) => owner == sessionId);
+      _sessionAutoApprovePermissions.remove(sessionId);
+      final owned = _terminals.entries
+          .where((entry) => entry.value.sessionId == sessionId)
+          .toList(growable: false);
+      for (final entry in owned) {
+        _terminals.remove(entry.key);
+      }
+      await Future.wait<void>(owned.map((entry) => entry.value.release()));
+      await registry.cancelForSession(sessionId);
+    } finally {
+      final remaining = _closingSessions[sessionId]! - 1;
+      if (remaining == 0) {
+        _closingSessions.remove(sessionId);
+      } else {
+        _closingSessions[sessionId] = remaining;
+      }
     }
-    await Future.wait<void>(owned.map((entry) => entry.value.release()));
-    await registry.cancelForSession(sessionId);
   }
 
   /// Returns a pending write body for explicit in-memory review only.
@@ -576,8 +625,10 @@ final class AcpClientCapabilityService {
     if (pending is! AcpPendingPermission) {
       throw StateError('No pending permission for request');
     }
+    // Validation is synchronous. Keep an unanswered request if it fails.
+    final response = pending.select(optionId);
     try {
-      await pending.select(optionId);
+      await response;
     } finally {
       registry.remove(requestId);
     }
@@ -596,14 +647,21 @@ final class AcpClientCapabilityService {
     }
   }
 
-  void _handle(AcpServerRequest serverRequest) {
-    final request = serverRequest.raw;
+  void _handle(AcpJsonRpcServerRequest request) {
     unawaited(_route(request));
   }
 
   Future<void> _route(AcpJsonRpcServerRequest request) async {
     final startedAt = DateTime.now();
     try {
+      final sessionId = AcpJson.string(
+        AcpJson.object(request.params) ?? const <String, Object?>{},
+        'sessionId',
+      );
+      if (!_closed && !_closingSessions.containsKey(sessionId)) {
+        _activeRequests[request] = sessionId;
+      }
+      _ensureRequestActive(request);
       switch (request.method) {
         case 'session/request_permission':
           await _permission(request);
@@ -625,9 +683,9 @@ final class AcpClientCapabilityService {
           await request.respondError(-32601, 'Method not found');
       }
     } on AcpClientCapabilityException catch (error) {
-      await request.respondError(-32000, error.message);
+      await _respondRequestError(request, error.message);
     } on TimeoutException {
-      await request.respondError(-32000, 'Remote operation timed out');
+      await _respondRequestError(request, 'Remote operation timed out');
     } on Object catch (error) {
       _diagnostics.warning(
         'acp.capability',
@@ -638,7 +696,26 @@ final class AcpClientCapabilityService {
           'errorType': error.runtimeType,
         },
       );
-      await request.respondError(-32000, 'Remote operation failed');
+      await _respondRequestError(request, 'Remote operation failed');
+    } finally {
+      _activeRequests.remove(request);
+    }
+  }
+
+  void _ensureRequestActive(AcpJsonRpcServerRequest request) {
+    if (!_activeRequests.containsKey(request)) {
+      throw const AcpClientCapabilityException('Request was cancelled');
+    }
+  }
+
+  Future<void> _respondRequestError(
+    AcpJsonRpcServerRequest request,
+    String message,
+  ) async {
+    try {
+      await request.respondError(-32000, message);
+    } on Object {
+      // Teardown may close the response channel or already answer the request.
     }
   }
 
@@ -700,11 +777,13 @@ final class AcpClientCapabilityService {
       _requiredString(params, 'path'),
       forWrite: false,
     );
+    _ensureRequestActive(request);
     final line = _optionalPositiveInteger(params, 'line');
     final limit = _optionalPositiveInteger(params, 'limit');
     final bytes = await remoteFileSystem
         .read(path, maxBytes: limits.maxFileBytes)
         .timeout(limits.fileTimeout);
+    _ensureRequestActive(request);
     final content = _decodeUtf8(bytes);
     await request.respond(<String, Object?>{
       'content': _selectLines(content, line: line, limit: limit),
@@ -721,7 +800,11 @@ final class AcpClientCapabilityService {
       _requiredString(params, 'path'),
       forWrite: true,
     );
-    final content = _requiredString(params, 'content');
+    _ensureRequestActive(request);
+    final content = AcpJson.string(params, 'content');
+    if (content == null) {
+      throw const AcpClientCapabilityException('Invalid request parameters');
+    }
     if (utf8.encode(content).length > limits.maxWriteBytes) {
       throw const AcpLimitExceededException(
         'Write exceeds the configured limit',
@@ -729,6 +812,7 @@ final class AcpClientCapabilityService {
     }
     if (_autoApproveForSession(sessionId)) {
       await _writeFile(path, content);
+      _ensureRequestActive(request);
       await request.respond();
       _diagnostics.info('acp.capability', 'write_auto_approved');
       return;
@@ -814,15 +898,14 @@ final class AcpClientCapabilityService {
       arguments: arguments,
       environment: environment,
       cwd: cwd,
-      windows:
-          executor is AcpSshTerminalExecutor &&
-          executor.session.remoteIsWindows,
+      windows: executor is AcpSshTerminalExecutor && executor.remoteIsWindows,
     );
     if (remoteCommand.length > limits.maxCommandCharacters) {
       throw const AcpLimitExceededException(
         'Terminal command exceeds the limit',
       );
     }
+    _ensureRequestActive(request);
     if (_terminals.length + _terminalReservations >= limits.maxTerminals) {
       throw const AcpLimitExceededException('Too many active terminals');
     }
@@ -832,6 +915,10 @@ final class AcpClientCapabilityService {
       process = await executor.start(remoteCommand);
     } finally {
       _terminalReservations--;
+    }
+    if (!_activeRequests.containsKey(request)) {
+      process.kill();
+      _ensureRequestActive(request);
     }
     final id = 'acp-terminal-${++_nextTerminalId}';
     final terminal = _ManagedAcpTerminal(sessionId, process, outputLimit);

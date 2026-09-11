@@ -1,5 +1,6 @@
 package xyz.depollsoft.monkeyssh
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,16 +9,21 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationCompat.BigTextStyle
 import androidx.core.content.ContextCompat
+import java.util.concurrent.Executors
 
 /**
  * Shows a persistent notification and holds a wake lock while an SSH session
  * is active while the app is backgrounded.
+ * startForeground must be the first thing onStartCommand does, even for stop
+ * intents or revoked notification permission. Optional work follows promotion.
  */
 class SshConnectionService : Service() {
     data class ConnectionStatus(
@@ -33,18 +39,34 @@ class SshConnectionService : Service() {
         private const val ACTION_SYNC = "xyz.depollsoft.monkeyssh.action.SYNC"
         private const val ACTION_RESHOW_NOTIFICATION =
             "xyz.depollsoft.monkeyssh.action.RESHOW_NOTIFICATION"
-        private const val EXTRA_CONNECTION_COUNT = "connectionCount"
-        private const val EXTRA_CONNECTED_COUNT = "connectedCount"
+        private const val ACTION_STOP = "xyz.depollsoft.monkeyssh.action.STOP"
 
         private var latestStatus: ConnectionStatus? = null
         private var isAppForeground = true
 
-        @Volatile private var startRequested = false
+        // All lifecycle and method-channel state is confined to the main thread.
+        private val mainHandler = Handler(Looper.getMainLooper())
+        private var startRequested = false
+        private var instance: SshConnectionService? = null
+        private val notificationExecutor = Executors.newSingleThreadExecutor()
+        private var isActivityVisible = false
+
+        private fun onMain(action: () -> Unit) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                action()
+            } else {
+                mainHandler.post { action() }
+            }
+        }
+
+        fun setActivityVisible(visible: Boolean) = onMain {
+            isActivityVisible = visible
+        }
 
         fun updateStatus(
             context: Context,
             status: ConnectionStatus,
-        ) {
+        ) = onMain {
             latestStatus = status
             syncServiceState(context)
         }
@@ -52,54 +74,72 @@ class SshConnectionService : Service() {
         fun setForegroundState(
             context: Context,
             isForeground: Boolean,
-        ) {
+        ) = onMain {
             isAppForeground = isForeground
             syncServiceState(context)
         }
 
-        fun refresh(context: Context) {
+        fun refresh(context: Context) = onMain {
             syncServiceState(context)
         }
 
         fun hasActiveConnections(): Boolean = (latestStatus?.connectionCount ?: 0) > 0
 
-        fun stop(context: Context) {
+        fun stop(context: Context) = onMain {
             latestStatus = null
             stopServiceUnlessStarting(context)
         }
 
-        private fun syncServiceState(context: Context) {
-            val status = latestStatus
-            if (status == null || status.connectionCount <= 0 || isAppForeground) {
-                stopServiceUnlessStarting(context)
-                return
+        /** The status to present, or null when the service must not run. */
+        private fun presentableStatus(context: Context): ConnectionStatus? {
+            val status = latestStatus ?: return null
+            if (status.connectionCount <= 0 || isAppForeground) {
+                return null
             }
-            if (!hasNotificationPermission(context)) {
+            return status.takeIf { hasNotificationPermission(context) }
+        }
+
+        private fun syncServiceState(context: Context) {
+            val status = presentableStatus(context)
+            if (status == null) {
                 stopServiceUnlessStarting(context)
                 return
             }
 
-            val intent =
-                Intent(context, SshConnectionService::class.java).apply {
-                    action = ACTION_SYNC
-                    putExtra(EXTRA_CONNECTION_COUNT, status.connectionCount)
-                    putExtra(EXTRA_CONNECTED_COUNT, status.connectedCount)
-                }
+            instance?.let {
+                it.refreshPresentation()
+                return
+            }
+            if (startRequested) return
+            // Dart may deliver a status update long after onStop. Start during
+            // the native onPause transition instead, while the activity is visible.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !isActivityVisible) {
+                Log.w(TAG, "SSH foreground service start skipped: activity not visible")
+                return
+            }
+            val intent = Intent(context, SshConnectionService::class.java).apply {
+                action = ACTION_SYNC
+            }
             startRequested = true
             try {
                 ContextCompat.startForegroundService(context, intent)
             } catch (error: IllegalStateException) {
+                // ForegroundServiceStartNotAllowedException is an IllegalStateException.
+                // Android is authoritative if visibility changes during the request.
                 startRequested = false
-                Log.w(TAG, "Unable to start SSH foreground service", error)
-                context.stopService(Intent(context, SshConnectionService::class.java))
+                Log.w(TAG, "SSH foreground service start skipped: ${error.javaClass.simpleName}")
             } catch (error: SecurityException) {
                 startRequested = false
-                Log.w(TAG, "SSH foreground service start denied", error)
-                context.stopService(Intent(context, SshConnectionService::class.java))
+                Log.w(TAG, "SSH foreground service start denied")
             }
         }
 
         private fun stopServiceUnlessStarting(context: Context) {
+            instance?.let {
+                it.stopImmediately()
+                return
+            }
+            // A queued first start must promote before it observes the stop state.
             if (!startRequested) {
                 context.stopService(Intent(context, SshConnectionService::class.java))
             }
@@ -119,17 +159,41 @@ class SshConnectionService : Service() {
     private var isPresenting = false
     private var wakeLock: PowerManager.WakeLock? = null
 
+    private lateinit var startupNotification: Notification
+    private var lastPresentedStatus: ConnectionStatus? = null
+    private var presentationGeneration = 0
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val status =
-            Companion.latestStatus ?: ConnectionStatus(
-                connectionCount = 1,
-                connectedCount = 0,
-            )
-        startForeground(NOTIFICATION_ID, buildNotification(status))
-        isPresenting = true
-        Companion.startRequested = false
+        // No package lookup, PendingIntent binder calls, or Flutter startup on
+        // the promotion path. Keep a valid notification if rich rendering fails.
+        startupNotification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification_monkey)
+            .setContentTitle("Keeping SSH connections alive")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
+        if (promoteImmediately()) Companion.instance = this
+    }
+
+    private fun promoteImmediately(): Boolean {
+        return try {
+            startForeground(NOTIFICATION_ID, startupNotification)
+            isPresenting = true
+            true
+        } catch (error: RuntimeException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                error is ForegroundServiceStartNotAllowedException
+            ) {
+                Log.w(TAG, "SSH foreground promotion denied by background restrictions")
+                stopImmediately()
+                false
+            } else {
+                throw error
+            }
+        }
     }
 
     override fun onStartCommand(
@@ -137,7 +201,16 @@ class SshConnectionService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        if (!promoteImmediately()) {
+            Companion.startRequested = false
+            return START_NOT_STICKY
+        }
+        Companion.instance = this
+        lastPresentedStatus = null
         Companion.startRequested = false
+        if (intent?.action == ACTION_STOP) {
+            Companion.latestStatus = null
+        }
         if (intent?.action == ACTION_RESHOW_NOTIFICATION) {
             Log.d(TAG, "Re-showing SSH foreground notification after dismissal")
         }
@@ -149,14 +222,14 @@ class SshConnectionService : Service() {
     }
 
     override fun onDestroy() {
-        Companion.startRequested = false
+        if (Companion.instance === this) Companion.instance = null
         hidePresentation()
         super.onDestroy()
     }
 
     override fun onTimeout(startId: Int) {
         Log.w(TAG, "SSH foreground service timed out; stopping foreground service")
-        stopAfterForegroundServiceTimeout(startId)
+        stopAfterForegroundServiceTimeout()
     }
 
     override fun onTimeout(
@@ -167,44 +240,53 @@ class SshConnectionService : Service() {
             TAG,
             "SSH foreground service type timed out; stopping foreground service",
         )
-        stopAfterForegroundServiceTimeout(startId)
+        stopAfterForegroundServiceTimeout()
     }
 
-    private fun stopAfterForegroundServiceTimeout(startId: Int) {
+    private fun stopAfterForegroundServiceTimeout() {
         Companion.latestStatus = null
-        hidePresentation()
+        stopImmediately()
+    }
+
+    private fun stopImmediately() {
+        // Remove foreground state and stop before wake-lock cleanup or any Dart work.
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        isPresenting = false
+        if (Companion.instance === this) Companion.instance = null
         stopSelf()
+        hidePresentation()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun refreshPresentation() {
-        val status = Companion.latestStatus
-        if (status == null || status.connectionCount <= 0 || Companion.isAppForeground) {
-            hidePresentation()
-            stopSelf()
-            return
-        }
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.POST_NOTIFICATIONS,
-            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            hidePresentation()
-            stopSelf()
+        val status = Companion.presentableStatus(this)
+        if (status == null) {
+            stopImmediately()
             return
         }
 
-        MonkeySshApplication.from(this).ensureSharedFlutterEngine()
-        val manager = getSystemService(NotificationManager::class.java)
-        val notification = buildNotification(status)
-        if (!isPresenting) {
-            startForeground(NOTIFICATION_ID, notification)
-            isPresenting = true
-        } else {
-            manager.notify(NOTIFICATION_ID, notification)
+        // Status originates in the existing Dart engine. Never initialize an
+        // engine or register plugins while handling service lifecycle callbacks.
+        if (lastPresentedStatus != status) {
+            lastPresentedStatus = status
+            val generation = ++presentationGeneration
+            notificationExecutor.execute {
+                val notification = try {
+                    buildNotification(status)
+                } catch (error: RuntimeException) {
+                    // Presentation is optional; keep the valid startup notification.
+                    Log.w(TAG, "SSH notification rendering failed: ${error.javaClass.simpleName}")
+                    startupNotification
+                }
+                mainHandler.post {
+                    // A slow notification build must not resurrect a stopped service.
+                    if (instance === this && isPresenting && presentationGeneration == generation) {
+                        getSystemService(NotificationManager::class.java)
+                            .notify(NOTIFICATION_ID, notification)
+                    }
+                }
+            }
         }
 
         // Acquire a partial wake lock to keep the CPU running for SSH keepalives.
@@ -220,18 +302,15 @@ class SshConnectionService : Service() {
     }
 
     private fun buildNotification(status: ConnectionStatus): Notification {
-        val tapIntent = packageManager.getLaunchIntentForPackage(packageName)
-        val tapPendingIntent =
-            if (tapIntent != null) {
-                PendingIntent.getActivity(
-                    this,
-                    0,
-                    tapIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                )
-            } else {
-                null
-            }
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val tapPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val reShowNotificationIntent =
             PendingIntent.getService(
                 this,
@@ -284,17 +363,12 @@ class SshConnectionService : Service() {
     }
 
     private fun hidePresentation() {
-        val manager = getSystemService(NotificationManager::class.java)
         if (isPresenting) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
             isPresenting = false
         }
-        manager.cancel(NOTIFICATION_ID)
+        lastPresentedStatus = null
+        presentationGeneration++
 
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()

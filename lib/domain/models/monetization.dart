@@ -110,6 +110,9 @@ enum MonetizationFeature {
   /// Guided launch presets for coding-agent CLIs.
   agentLaunchPresets,
 
+  /// Remote agent installation, repair, version checks, and updates.
+  agentManagement,
+
   /// More than one concurrently live ACP coding-agent session.
   concurrentAcpSessions,
 
@@ -125,6 +128,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.migrationImportExport => 'Migration import/export',
     MonetizationFeature.autoConnectAutomation => 'Auto-connect automation',
     MonetizationFeature.agentLaunchPresets => 'Agent launch presets',
+    MonetizationFeature.agentManagement => 'Agent Management',
     MonetizationFeature.concurrentAcpSessions => 'Parallel native chats',
     MonetizationFeature.hostSpecificThemes => 'Host-specific themes',
   };
@@ -139,6 +143,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Run commands or saved snippets automatically after connect.',
     MonetizationFeature.agentLaunchPresets =>
       'Save repeatable startup flows for tools like Codex, Claude Code, Copilot CLI, or OpenCode.',
+    MonetizationFeature.agentManagement =>
+      'Install, repair, and update coding agents on your remote hosts.',
     MonetizationFeature.concurrentAcpSessions =>
       'Keep multiple native agent chats connected across hosts and providers.',
     MonetizationFeature.hostSpecificThemes =>
@@ -154,6 +160,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Save auto-connect commands and snippets',
     MonetizationFeature.agentLaunchPresets =>
       'Save coding-agent launch presets',
+    MonetizationFeature.agentManagement => 'Manage remote coding agents',
     MonetizationFeature.concurrentAcpSessions =>
       'Connect another native agent chat',
     MonetizationFeature.hostSpecificThemes => 'Save a host-specific theme',
@@ -173,6 +180,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Unlock Pro to keep multiple native chats connected, switch instantly, and fork active sessions.',
     MonetizationFeature.hostSpecificThemes =>
       'Unlock Pro to keep this host on its own terminal theme while preserving your app defaults.',
+    MonetizationFeature.agentManagement =>
+      'Unlock Pro to install, repair, and update agents, with automatic update checks.',
   };
 }
 
@@ -214,14 +223,6 @@ extension MonetizationBillingPeriodPresentation on MonetizationBillingPeriod {
     MonetizationBillingPeriod.annual => 'Annual',
     MonetizationBillingPeriod.lifetime => 'Lifetime',
     MonetizationBillingPeriod.unknown => 'MonkeySSH Pro',
-  };
-
-  /// Short suffix for billing copy.
-  String get billingSuffix => switch (this) {
-    MonetizationBillingPeriod.monthly => 'month',
-    MonetizationBillingPeriod.annual => 'year',
-    MonetizationBillingPeriod.lifetime => 'lifetime',
-    MonetizationBillingPeriod.unknown => 'billing period',
   };
 }
 
@@ -292,9 +293,6 @@ class MonetizationOffer {
 
   /// Introductory offer copy, such as a free trial.
   final String? introductoryOfferLabel;
-
-  /// Whether this offer includes an introductory discount or trial.
-  bool get hasIntroductoryOffer => introductoryOfferLabel != null;
 }
 
 /// Current billing and entitlement state for MonkeySSH Pro.

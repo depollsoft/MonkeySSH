@@ -48,12 +48,7 @@ extension AgentWindowModePreferencePresentation on AgentWindowModePreference {
 /// Host-scoped defaults for coding CLI launches.
 class HostCliLaunchPreferences {
   /// Creates a new [HostCliLaunchPreferences].
-  const HostCliLaunchPreferences({
-    this.startInYoloMode = false,
-    @Deprecated('Agent window mode is app-wide')
-    AgentWindowModePreference agentWindowMode =
-        AgentWindowModePreference.askEveryTime,
-  });
+  const HostCliLaunchPreferences({this.startInYoloMode = false});
 
   /// Decodes [HostCliLaunchPreferences] from JSON.
   factory HostCliLaunchPreferences.fromJson(Map<String, dynamic> json) =>
@@ -64,11 +59,6 @@ class HostCliLaunchPreferences {
   /// Whether supported coding CLIs should launch in YOLO mode for this host.
   final bool startInYoloMode;
 
-  /// Legacy compatibility view; launch mode is no longer host-scoped.
-  @Deprecated('Read agentWindowModePreferenceNotifierProvider instead')
-  AgentWindowModePreference get agentWindowMode =>
-      AgentWindowModePreference.askEveryTime;
-
   /// Whether this preferences record has no saved overrides.
   bool get isEmpty => !startInYoloMode;
 
@@ -76,10 +66,4 @@ class HostCliLaunchPreferences {
   Map<String, dynamic> toJson() => {
     if (startInYoloMode) 'startInYoloMode': true,
   };
-
-  /// Returns a copy of this record with selected fields replaced.
-  HostCliLaunchPreferences copyWith({bool? startInYoloMode}) =>
-      HostCliLaunchPreferences(
-        startInYoloMode: startInYoloMode ?? this.startInYoloMode,
-      );
 }

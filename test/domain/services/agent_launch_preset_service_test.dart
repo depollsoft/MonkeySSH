@@ -47,7 +47,68 @@ void main() {
     await service.deletePresetForHost(7);
 
     expect(await service.getPresetForHost(7), isNull);
+    expect(
+      await SettingsService(database).getJson(SettingKeys.agentLaunchPresets),
+      isNull,
+    );
   });
+
+  for (final delete in [false, true]) {
+    test(
+      'concurrent preset mutations preserve other hosts (delete=$delete)',
+      () async {
+        final settings = SettingsService(database);
+        final otherService = AgentLaunchPresetService(
+          SettingsService(database),
+        );
+        const legacy = {'tool': 'unknownFutureAgent'};
+        const preset = AgentLaunchPreset(tool: AgentLaunchTool.codex);
+        await settings.setJson(SettingKeys.agentLaunchPresets, {
+          '9': legacy,
+          if (delete) '7': preset.toJson(),
+        });
+        await Future.wait([
+          service.setPresetForHost(42, preset),
+          if (delete)
+            otherService.deletePresetForHost(7)
+          else
+            otherService.setPresetForHost(7, preset),
+        ]);
+        expect(await settings.getJson(SettingKeys.agentLaunchPresets), {
+          '9': legacy,
+          '42': preset.toJson(),
+          if (!delete) '7': preset.toJson(),
+        });
+      },
+    );
+  }
+
+  test(
+    'ignores a retired Gemini preset without rewriting saved settings',
+    () async {
+      final settings = SettingsService(database);
+      const legacy = {'tool': 'geminiCli', 'workingDirectory': '~/legacy'};
+      await settings.setJson(SettingKeys.agentLaunchPresets, {'9': legacy});
+      expect(await service.getPresetForHost(9), isNull);
+      expect((await service.getPresetStateForHost(9)).isUnsupported, isTrue);
+      expect((await service.getPresetStateForHost(11)).isUnsupported, isFalse);
+      await service.setPresetForHost(
+        10,
+        const AgentLaunchPreset(tool: AgentLaunchTool.antigravity),
+      );
+      expect(
+        (await settings.getJson(SettingKeys.agentLaunchPresets))!['9'],
+        legacy,
+      );
+      expect(
+        (await service.getPresetForHost(10))!.tool,
+        AgentLaunchTool.antigravity,
+      );
+      expect((await service.getPresetStateForHost(10)).isUnsupported, isFalse);
+      await service.deletePresetForHost(9);
+      expect((await service.getPresetStateForHost(9)).isUnsupported, isFalse);
+    },
+  );
 
   test('returns null for stored presets with unknown tool names', () async {
     final settings = SettingsService(database);

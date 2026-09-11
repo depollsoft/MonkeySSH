@@ -25,10 +25,11 @@ import threading
 import time
 import struct
 import termios
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 ADB: Path | None = None
@@ -36,11 +37,12 @@ READY_MARKER = 'STORE_SCREENSHOT_READY '
 DONE_MARKER = 'STORE_SCREENSHOT_DONE'
 ERROR_MARKER = 'STORE_SCREENSHOT_ERROR '
 ANSI_ESCAPE_PATTERN = re.compile(
-    r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))'
+    r'\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])'
 )
 KEY_BYTES = {
     'Enter': '\r',
     'Up': '\x1b[A',
+    'Down': '\x1b[B',
     'C-l': '\x0c',
 }
 CLEAR_SCREEN_SEQUENCES = (
@@ -127,10 +129,13 @@ TARGETS = {
 def main() -> None:
     _prefer_stable_xcode()
     args = _parse_args()
+    if args.gallery_only:
+        _write_iphone_gallery()
+        return
     targets = _targets_for_platform(args.platform)
     with StoreDemoEnvironment(seed_platform=args.platform) as demo:
         for target in targets:
-            _run_target(target, demo)
+            _run_target(target, demo, scene=args.scene)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -143,6 +148,16 @@ def _parse_args() -> argparse.Namespace:
         nargs='?',
         default='both',
         help='Which store screenshot set to generate.',
+    )
+    parser.add_argument(
+        '--scene',
+        choices=['terminal_copilot', 'hosts', 'snippets', 'monkeymux_windows',
+                 'sftp', 'terminal_claude', 'native_copilot', 'agent_management'],
+        help='Recapture one scene in place, preserving the other screenshots.',
+    )
+    parser.add_argument(
+        '--gallery-only', action='store_true',
+        help='Compose the README gallery from existing iPhone captures, without launching the app.',
     )
     return parser.parse_args()
 
@@ -159,35 +174,40 @@ def _targets_for_platform(platform: str) -> list[ScreenshotTarget]:
     return list(TARGETS.values())
 
 
-def _run_target(target: ScreenshotTarget, demo: StoreDemoEnvironment) -> None:
+def _run_target(
+    target: ScreenshotTarget, demo: StoreDemoEnvironment, *, scene: str | None = None,
+) -> None:
     print(f'Generating {target.name} screenshots...')
     demo.reset_monkeymux()
     if target.platform == 'ios':
         device_id = _boot_ios_simulator(_ios_simulator_name(target))
         _reset_ios_app_state(device_id)
-        restore_android = None
     else:
         device_id = _android_device_id()
-        restore_android = _configure_android_display(target, device_id)
 
-    try:
-        _run_flutter_capture(target, device_id, demo)
-    finally:
-        if restore_android is not None:
-            restore_android()
+    dart_defines = _capture_defines(target, demo)
+    dart_defines.append('--dart-define=STORE_SCREENSHOT_HIDE_KEYBOARD_TOOLBAR=true')
+    if scene is not None:
+        dart_defines.append(f'--dart-define=STORE_SCREENSHOT_SCENE={scene}')
+    if demo.demo_image_b64:
+        dart_defines.append(
+            f'--dart-define=STORE_SCREENSHOT_DEMO_IMAGE_B64={demo.demo_image_b64}',
+        )
+    with _android_display_override(target, device_id):
+        _run_flutter_capture(target, device_id, dart_defines)
 
 
-def _run_flutter_capture(
-    target: ScreenshotTarget,
-    device_id: str,
-    demo: StoreDemoEnvironment,
-) -> None:
+def _flutter_environment() -> dict[str, str]:
     env = os.environ.copy()
     java_home = _java_home_17()
     if java_home:
         env['JAVA_HOME'] = java_home
 
-    dart_defines = [
+    return env
+
+
+def _capture_defines(target: ScreenshotTarget, demo: StoreDemoEnvironment) -> list[str]:
+    return [
         f'--dart-define=STORE_SCREENSHOT_TARGET={target.name}',
         f'--dart-define=STORE_SCREENSHOT_SSH_PORT={demo.port}',
         f'--dart-define=STORE_SCREENSHOT_SSH_USERNAME={demo.username}',
@@ -197,13 +217,28 @@ def _run_flutter_capture(
         f'--dart-define=STORE_SCREENSHOT_MUX_SESSION={demo.mux_session}',
         f'--dart-define=STORE_SCREENSHOT_WORKSPACE_PATH={demo.demo_dir}',
         '--dart-define=STORE_SCREENSHOT_REDACT_IDENTITIES=true',
-        '--dart-define=STORE_SCREENSHOT_HIDE_KEYBOARD_TOOLBAR=true',
         '--dart-define=STORE_SCREENSHOT_DISABLE_NOTIFICATIONS=true',
     ]
-    if demo.demo_image_b64:
-        dart_defines.append(
-            f'--dart-define=STORE_SCREENSHOT_DEMO_IMAGE_B64={demo.demo_image_b64}',
-        )
+
+
+def _flutter_command(
+    target: ScreenshotTarget,
+    device_id: str,
+    env: dict[str, str],
+    dart_defines: list[str],
+) -> list[str]:
+    if target.platform == 'android':
+        apk_path = _build_android_screenshot_apk(env, dart_defines)
+        return [
+            'flutter',
+            'run',
+            '-d',
+            device_id,
+            '--use-application-binary',
+            str(apk_path),
+            '--no-pub',
+        ]
+
     command = [
         'flutter',
         'run',
@@ -214,19 +249,20 @@ def _run_flutter_capture(
         'tool/store_screenshot_app.dart',
         *dart_defines,
     ]
-    if target.platform in ('android', 'ios'):
+    if target.platform == 'ios':
         command.extend(['--flavor', 'production'])
-    if target.platform == 'android':
-        apk_path = _build_android_screenshot_apk(env, dart_defines)
-        command = [
-            'flutter',
-            'run',
-            '-d',
-            device_id,
-            '--use-application-binary',
-            str(apk_path),
-            '--no-pub',
-        ]
+    return command
+
+
+def _run_flutter_capture(
+    target: ScreenshotTarget,
+    device_id: str,
+    dart_defines: list[str],
+    *,
+    capture_delay: float = 0.4,
+) -> None:
+    env = _flutter_environment()
+    command = _flutter_command(target, device_id, env, dart_defines)
 
     process = subprocess.Popen(
         command,
@@ -248,11 +284,12 @@ def _run_flutter_capture(
             line = raw_line.strip()
             if READY_MARKER in line:
                 payload = json.loads(line.split(READY_MARKER, 1)[1])
-                time.sleep(0.4)
+                time.sleep(capture_delay)
                 _capture_native_screenshot(
                     target=target,
                     device_id=device_id,
                     paths=[ROOT / path for path in payload['paths']],
+                    scene=payload.get('scene'),
                 )
             if ERROR_MARKER in line:
                 failure = line.split(ERROR_MARKER, 1)[1].strip()
@@ -261,13 +298,7 @@ def _run_flutter_capture(
                 saw_done = True
                 break
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=20)
+        _terminate_process(process, timeout=20)
 
     if failure is not None:
         raise RuntimeError(f'{target.name} run failed in the app: {failure}')
@@ -568,16 +599,8 @@ class StoreDemoEnvironment:
               CLAUDE_CODE_HIDE_CWD=1 \\
               ANTHROPIC_API_KEY={dummy_anthropic_key} \\
               {self._shell_quote(self._claude)} \\
-              --bare \\
+              --bare --model sonnet \\
               --name 'Claude Code Workspace'
-            """,
-        )
-        self._write_pane_script(
-            'gemini',
-            """
-            clear
-            printf 'Gemini agent session ready\\n'
-            printf 'Open inside MonkeySSH when you need a second reviewer.\\n'
             """,
         )
         self._write_pane_script(
@@ -650,11 +673,10 @@ class StoreDemoEnvironment:
                     '',
                     'Windows:',
                     '1. copilot - GitHub Copilot CLI',
-                    '2. gemini  - Gemini CLI workspace',
-                    '3. claude  - Claude Code workspace',
-                    '4. codex   - Codex CLI workspace',
-                    '5. opencode - OpenCode CLI workspace',
-                    '6. antigravity - Antigravity CLI workspace',
+                    '2. claude  - Claude Code workspace',
+                    '3. codex   - Codex CLI workspace',
+                    '4. opencode - OpenCode CLI workspace',
+                    '5. antigravity - Antigravity CLI workspace',
                     '',
                 ]
             )
@@ -679,7 +701,7 @@ class StoreDemoEnvironment:
                     '',
                     '| Platform | Form factors | Scenes |',
                     '| --- | --- | --- |',
-                    '| App Store | iPhone 6.9, iPad 13 | Native Copilot, Copilot terminal, hosts, snippets, MonkeyMux selector with all supported agent windows, SFTP, Claude Code |',
+                    '| App Store | iPhone 6.9, iPad 13 | Copilot terminal, hosts, snippets, MonkeyMux selector, SFTP, Claude Code, native chat (Pro caption), Agent Management (Pro) |',
                     '| Google Play | Phone, 7-inch tablet, 10-inch tablet | Same scene order for production and private tracks |',
                     '',
                     'Validation checklist:',
@@ -706,107 +728,22 @@ class StoreDemoEnvironment:
         print(
             f'Capturing light-mode demo image on {target.name} at {output_path}...',
         )
-        restore_android = None
         if target.platform == 'ios':
             device_id = _boot_ios_simulator(_ios_simulator_name(target))
             _reset_ios_app_state(device_id)
         else:
             device_id = _android_device_id()
-            restore_android = _configure_android_display(target, device_id)
 
-        env = os.environ.copy()
-        java_home = _java_home_17()
-        if java_home:
-            env['JAVA_HOME'] = java_home
-        dart_defines = [
-            f'--dart-define=STORE_SCREENSHOT_TARGET={target.name}',
-            f'--dart-define=STORE_SCREENSHOT_SSH_PORT={self.port}',
-            f'--dart-define=STORE_SCREENSHOT_SSH_USERNAME={self.username}',
-            f'--dart-define=STORE_SCREENSHOT_SSH_PRIVATE_KEY_B64={self.private_key_b64}',
-            f'--dart-define=STORE_SCREENSHOT_SSH_HOST_KEY_B64={self.host_key_b64}',
-            (
-                '--dart-define=STORE_SCREENSHOT_SSH_HOST_KEY_FINGERPRINT='
-                f'{self.host_key_fingerprint}'
-            ),
-            f'--dart-define=STORE_SCREENSHOT_MUX_SESSION={self.mux_session}',
-            f'--dart-define=STORE_SCREENSHOT_WORKSPACE_PATH={self.demo_dir}',
+        dart_defines = _capture_defines(target, self) + [
             '--dart-define=STORE_SCREENSHOT_THEME_MODE=light',
             '--dart-define=STORE_SCREENSHOT_LIGHT_DEMO_IMAGE=true',
             f'--dart-define=STORE_SCREENSHOT_LIGHT_DEMO_OUTPUT={output_path}',
-            '--dart-define=STORE_SCREENSHOT_REDACT_IDENTITIES=true',
             '--dart-define=STORE_SCREENSHOT_HIDE_KEYBOARD_TOOLBAR=true',
-            '--dart-define=STORE_SCREENSHOT_DISABLE_NOTIFICATIONS=true',
             '--dart-define=STORE_SCREENSHOT_SCENE_HOLD_MS=1800',
         ]
-        command = [
-            'flutter',
-            'run',
-            '--debug',
-            '-d',
-            device_id,
-            '-t',
-            'tool/store_screenshot_app.dart',
-            '--flavor',
-            'production',
-            *dart_defines,
-        ]
-        if target.platform == 'android':
-            apk_path = _build_android_screenshot_apk(env, dart_defines)
-            command = [
-                'flutter',
-                'run',
-                '-d',
-                device_id,
-                '--use-application-binary',
-                str(apk_path),
-                '--no-pub',
-            ]
-        process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert process.stdout is not None
-        saw_done = False
-        failure: str | None = None
-        try:
-            for raw_line in process.stdout:
-                print(raw_line, end='')
-                line = raw_line.strip()
-                if READY_MARKER in line:
-                    payload = json.loads(line.split(READY_MARKER, 1)[1])
-                    time.sleep(0.5)
-                    _capture_native_screenshot(
-                        target=target,
-                        device_id=device_id,
-                        paths=[Path(path) for path in payload['paths']],
-                    )
-                if ERROR_MARKER in line:
-                    failure = line.split(ERROR_MARKER, 1)[1].strip()
-                    break
-                if DONE_MARKER in line:
-                    saw_done = True
-                    break
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=20)
-            if restore_android is not None:
-                restore_android()
+        with _android_display_override(target, device_id):
+            _run_flutter_capture(target, device_id, dart_defines, capture_delay=0.5)
 
-        if failure is not None:
-            raise RuntimeError(f'Light-mode demo image capture failed: {failure}')
-        if not saw_done:
-            raise RuntimeError('Light-mode demo image capture ended before DONE.')
         if not output_path.is_file() or output_path.stat().st_size < 10_000:
             raise RuntimeError(
                 f'Light-mode demo image was not written: {output_path}',
@@ -920,7 +857,7 @@ class StoreDemoEnvironment:
         )
         self._monkeymux_control = self._open_monkeymux_control()
         self._refresh_monkeymux_windows()
-        for window in ('gemini', 'claude', 'codex', 'opencode', 'antigravity'):
+        for window in ('claude', 'codex', 'opencode', 'antigravity'):
             response = self._monkeymux_request(
                 {
                     'type': 'create_window',
@@ -1054,6 +991,10 @@ class StoreDemoEnvironment:
             elif _visible_text_contains_marker(text, 'Detected a custom API key'):
                 self._monkeymux_send_keys('claude', 'Up', 'Enter')
             elif _visible_text_contains_marker(text, 'Yes, I trust this folder'):
+                # Newer Claude versions default to No, exit. Only trust the
+                # disposable workspace created and owned by this generator.
+                if re.search(r'❯\s*No,\s*exit', _strip_terminal_output(text)):
+                    self._monkeymux_send_keys('claude', 'Down')
                 self._monkeymux_send_keys('claude', 'Enter')
             elif _visible_text_contains_marker(text, 'Press Ente'):
                 self._monkeymux_send_keys('claude', 'Enter')
@@ -1272,7 +1213,7 @@ class StoreDemoEnvironment:
     def _capture_monkeymux_attach_replay(self) -> bytes:
         master_fd = -1
         slave_fd = -1
-        process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
         try:
             master_fd, slave_fd = pty.openpty()
             _set_pty_size(slave_fd, rows=40, columns=120)
@@ -1465,7 +1406,11 @@ class _MonkeyMuxControl:
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._counter = 0
         self._reader.start()
-        self._wait_for_hello()
+        try:
+            self._wait_for_hello()
+        except BaseException:
+            self.close()
+            raise
 
     def request(
         self,
@@ -1969,11 +1914,87 @@ def _free_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
+# Only entirely Pro-only features get store badges. Features with any free
+# access, including native chat, use the unbadged app capture.
+PRO_SCENE_CAPTIONS = {
+    'agent_management': (
+        'Agent Management',
+        'Check versions. Install, update & repair remote agents.',
+    ),
+}
+
+
+def _add_pro_caption(screenshot: Image.Image, scene: str) -> Image.Image:
+    title, subtitle = PRO_SCENE_CAPTIONS[scene]
+    width, height = screenshot.size
+    band_height = round(width * 0.16)
+    canvas = Image.new('RGB', screenshot.size, '#0D0D12')
+    app = ImageOps.contain(
+        screenshot, (width, height - band_height), Image.Resampling.LANCZOS,
+    )
+    canvas.paste(app, ((width - app.width) // 2, 0))
+    draw = ImageDraw.Draw(canvas)
+    margin = round(width * 0.035)
+    top = height - band_height
+    draw.line((margin, top, width - margin, top), fill='#2A2A3A', width=2)
+    title_font = ImageFont.load_default(size=round(width * 0.035))
+    subtitle_font = ImageFont.load_default(size=round(width * 0.023))
+    badge_font = ImageFont.load_default(size=round(width * 0.026))
+    badge_width, badge_height = round(width * 0.105), round(width * 0.05)
+    badge_x, badge_y = width - margin - badge_width, top + margin
+    draw.rounded_rectangle(
+        (badge_x, badge_y, badge_x + badge_width, badge_y + badge_height),
+        radius=round(width * 0.009), fill='#58A38C',
+    )
+    draw.text(
+        (badge_x + badge_width / 2, badge_y + badge_height / 2),
+        'PRO', font=badge_font, fill='#0D0D12', anchor='mm',
+    )
+    draw.text((margin, badge_y), title, font=title_font, fill='#F0F0F5')
+    draw.text(
+        (margin, top + round(width * 0.103)), subtitle,
+        font=subtitle_font, fill='#B8BDC8',
+    )
+    return canvas
+
+
+def _write_iphone_gallery() -> Path:
+    folder = ROOT / 'ios/fastlane/screenshots/en-US'
+    width, height, margin = 660, 1434, 12
+    canvas = Image.new('RGB', (width * 2 + margin * 3, height + margin * 2), '#0D0D12')
+    for column, index in enumerate((7, 8)):
+        with Image.open(folder / f'{index:02d}_iphone_6_9.png') as image:
+            shot = ImageOps.contain(
+                image.convert('RGB'), (width, height), Image.Resampling.LANCZOS,
+            )
+            canvas.paste(shot, (margin + column * (width + margin), margin))
+    output = ROOT / 'build/store-screenshots/monkeyssh-agent-workspace.png'
+    output.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output, optimize=True)
+    print(f'Wrote {output.relative_to(ROOT)}')
+    return output
+
+def _assert_android_capture_foreground(device_id: str) -> None:
+    activities = subprocess.check_output(
+        [str(_adb_path()), '-s', device_id, 'shell', 'dumpsys', 'activity', 'activities'],
+        text=True, timeout=10,
+    )
+    lines = activities.splitlines()
+    resumed = [line for line in lines if 'topResumedActivity=' in line]
+    if not resumed:
+        resumed = [line for line in lines if 'mResumedActivity:' in line]
+    if not resumed or not all('xyz.depollsoft.monkeyssh/' in line for line in resumed):
+        raise RuntimeError(
+            'Android capture lost the MonkeySSH foreground activity. '
+            'Use a dedicated emulator selected with ANDROID_SERIAL.',
+        )
+
 def _capture_native_screenshot(
     *,
     target: ScreenshotTarget,
     device_id: str,
     paths: list[Path],
+    scene: str | None = None,
 ) -> None:
     with tempfile.NamedTemporaryFile(suffix='.png') as tmp:
         tmp_path = Path(tmp.name)
@@ -1984,6 +2005,7 @@ def _capture_native_screenshot(
                 check=True,
             )
         else:
+            _assert_android_capture_foreground(device_id)
             result = subprocess.run(
                 [str(_adb_path()), '-s', device_id, 'exec-out', 'screencap', '-p'],
                 cwd=ROOT,
@@ -2000,6 +2022,13 @@ def _capture_native_screenshot(
                     target.size,
                     method=Image.Resampling.LANCZOS,
                 )
+            if scene in PRO_SCENE_CAPTIONS:
+                raw_path = (
+                    ROOT / 'build/store-screenshots/raw' / target.name / f'{scene}.png'
+                )
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                screenshot.save(raw_path)
+                screenshot = _add_pro_caption(screenshot, scene)
             for path in paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 screenshot.save(path, optimize=True)
@@ -2084,59 +2113,40 @@ def _android_device_id() -> str:
     raise RuntimeError('No running Android device or emulator found')
 
 
-def _configure_android_display(
-    target: ScreenshotTarget,
-    device_id: str,
-):
-    adb = _adb_path()
-    original_size = subprocess.check_output(
-        [str(adb), '-s', device_id, 'shell', 'wm', 'size'],
-        text=True,
-    )
-    original_density = subprocess.check_output(
-        [str(adb), '-s', device_id, 'shell', 'wm', 'density'],
-        text=True,
-    )
+@contextmanager
+def _android_display_override(target: ScreenshotTarget, device_id: str):
+    if target.platform != 'android':
+        yield
+        return
 
-    subprocess.run(
-        [str(adb), '-s', device_id, 'shell', 'wm', 'size', target.android_size or 'reset'],
-        check=True,
-    )
-    subprocess.run(
-        [
-            str(adb),
-            '-s',
-            device_id,
-            'shell',
-            'wm',
-            'density',
-            target.android_density or 'reset',
-        ],
-        check=True,
-    )
+    adb_command = [str(_adb_path()), '-s', device_id, 'shell', 'wm']
+    originals = {}
+    for setting in ('size', 'density'):
+        output = subprocess.check_output([*adb_command, setting], text=True)
+        marker = f'Override {setting}:'
+        originals[setting] = (
+            output.split(marker, 1)[1].splitlines()[0].strip()
+            if marker in output else 'reset'
+        )
 
-    def restore() -> None:
-        if 'Override size:' in original_size:
-            size = original_size.split('Override size:', 1)[1].splitlines()[0].strip()
-            subprocess.run([str(adb), '-s', device_id, 'shell', 'wm', 'size', size], check=True)
-        else:
-            subprocess.run([str(adb), '-s', device_id, 'shell', 'wm', 'size', 'reset'], check=True)
-
-        if 'Override density:' in original_density:
-            density = (
-                original_density.split('Override density:', 1)[1].splitlines()[0].strip()
-            )
-            subprocess.run(
-                [str(adb), '-s', device_id, 'shell', 'wm', 'density', density],
-                check=True,
-            )
-        else:
-            subprocess.run(
-                [str(adb), '-s', device_id, 'shell', 'wm', 'density', 'reset'],
-                check=True,
-            )
-
-    return restore
+    try:
+        for setting, value in (
+            ('size', target.android_size), ('density', target.android_density),
+        ):
+            subprocess.run([*adb_command, setting, value or 'reset'], check=True)
+        yield
+    finally:
+        failed = sys.exc_info()[0] is not None
+        restore_error = None
+        for setting, value in originals.items():
+            try:
+                subprocess.run([*adb_command, setting, value], check=True)
+            except Exception as error:
+                print(f'Warning: could not restore Android {setting}', file=sys.stderr)
+                if restore_error is None:
+                    restore_error = error
+        if restore_error is not None and not failed:
+            raise restore_error
 
 
 def _adb_path() -> Path:

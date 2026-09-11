@@ -8,15 +8,6 @@ import (
 	"time"
 )
 
-// newAcpProviderCommand deliberately uses ordinary pipes, not a terminal. ACP
-// is an NDJSON protocol and a PTY would corrupt framing and terminal semantics.
-func newAcpProviderCommand(command string) *exec.Cmd {
-	// The ACP launch command is intentionally interpreted by the remote user's shell; provider presets validate/quote their arguments before this boundary.
-	cmd := exec.Command(commandShellPath(), "-c", command) // nosemgrep: dangerous-exec-command
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	return cmd
-}
-
 func stopAcpProvider(cmd *exec.Cmd, providerOutputDone <-chan struct{}) {
 	stopAcpProviderAfter(cmd, providerOutputDone, 2*time.Second, forceStopAcpProvider)
 }

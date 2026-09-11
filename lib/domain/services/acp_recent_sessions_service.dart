@@ -38,11 +38,6 @@ class AcpRecentSessionsService {
     return _decode(raw);
   }
 
-  /// Streams the persisted recent-session references, re-emitting whenever
-  /// storage changes.
-  Stream<List<AcpRecentSessionRef>> watch() =>
-      _settings.watchString(SettingKeys.acpRecentSessions).map(_decode);
-
   /// Inserts or updates [ref], moving it to the front and bounding the list.
   ///
   /// A reference with the same [AcpSessionKey] replaces the previous entry so
@@ -73,20 +68,11 @@ class AcpRecentSessionsService {
     await _write(updated);
   });
 
-  /// Removes every persisted recent-session reference.
-  Future<void> clear() => _withMutationLock(() async {
-    await _settings.delete(SettingKeys.acpRecentSessions);
-  });
-
   /// Loads the last selected session key, or `null` when none is stored.
   Future<AcpSessionKey?> getLastSelected() async {
     final raw = await _settings.getString(SettingKeys.acpLastSelectedSession);
     return _decodeKey(raw);
   }
-
-  /// Streams the last selected session key.
-  Stream<AcpSessionKey?> watchLastSelected() =>
-      _settings.watchString(SettingKeys.acpLastSelectedSession).map(_decodeKey);
 
   /// Persists [key] as the last selected session, or clears it when `null`.
   Future<void> setLastSelected(AcpSessionKey? key) =>
@@ -183,9 +169,4 @@ class AcpRecentSessionsService {
 /// Provider for [AcpRecentSessionsService].
 final acpRecentSessionsServiceProvider = Provider<AcpRecentSessionsService>(
   (ref) => AcpRecentSessionsService(ref.watch(settingsServiceProvider)),
-);
-
-/// Streams persisted recent ACP session references.
-final acpRecentSessionsProvider = StreamProvider<List<AcpRecentSessionRef>>(
-  (ref) => ref.watch(acpRecentSessionsServiceProvider).watch(),
 );

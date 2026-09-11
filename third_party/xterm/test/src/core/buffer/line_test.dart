@@ -2,6 +2,43 @@ import 'package:test/test.dart';
 import 'package:xterm/xterm.dart';
 
 void main() {
+  group('BufferLine.eraseRange()', () {
+    test('empty ranges do not access or erase adjacent cells', () {
+      final line = BufferLine(4);
+      line.setCell(0, 0x754c, 2, CursorStyle());
+      for (final index in [0, 1, 4]) {
+        line.eraseRange(index, index, CursorStyle());
+      }
+      expect(line.getCodePoint(0), 0x754c);
+    });
+
+    for (final start in [0, 1]) {
+      test('erasing wide cell half $start clears both halves and anchors', () {
+        final terminal = Terminal()..resize(4, 2);
+        terminal.write('\x1b[41m界Z');
+        final line = terminal.buffer.lines[0];
+        final left = line.createAnchor(0);
+        final right = line.createAnchor(1);
+        final outside = line.createAnchor(2);
+        final physicalPlacement = line.createAnchor(0);
+        final erasedStyle = CursorStyle(background: 42);
+
+        line.eraseRange(start, start + 1, erasedStyle,
+            preservedAnchors: {physicalPlacement});
+
+        for (var x = 0; x < 2; x++) {
+          expect(line.getContent(x), 0);
+          expect(line.getBackground(x), 42);
+        }
+        expect(line.getCodePoint(2), 'Z'.codeUnitAt(0));
+        expect(left.attached, isFalse);
+        expect(right.attached, isFalse);
+        expect(outside.attached, isTrue);
+        expect(physicalPlacement.attached, isTrue);
+      });
+    }
+  });
+
   group('BufferLine.getText()', () {
     test('should return the text', () {
       final terminal = Terminal();

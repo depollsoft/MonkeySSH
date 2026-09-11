@@ -5,6 +5,8 @@ import 'package:integration_test/integration_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:xterm/xterm.dart';
 
+import '../test/helpers/terminal_input_helpers.dart';
+
 const _deleteDetectionMarker = '\u200B\u200B';
 
 Duration _validationSummaryHoldDuration(int seconds) =>
@@ -18,71 +20,12 @@ Duration? _holdValidationSummaryDuration() {
   return _validationSummaryHoldDuration(seconds);
 }
 
-({String text, int cursorOffset}) _terminalStateFromEvents(
-  Iterable<String> events,
-) {
-  final visibleCharacters = <String>[];
-  var cursorOffset = 0;
-  for (final event in events) {
-    var offset = 0;
-    while (offset < event.length) {
-      if (event.startsWith('\u001b[D', offset)) {
-        if (cursorOffset > 0) {
-          cursorOffset--;
-        }
-        offset += 3;
-        continue;
-      }
-      if (event.startsWith('\u001b[C', offset)) {
-        if (cursorOffset < visibleCharacters.length) {
-          cursorOffset++;
-        }
-        offset += 3;
-        continue;
-      }
-
-      final character = event.substring(offset).characters.first;
-      offset += character.length;
-      if (character == '\x7f') {
-        if (cursorOffset > 0) {
-          visibleCharacters.removeAt(cursorOffset - 1);
-          cursorOffset--;
-        }
-        continue;
-      }
-      visibleCharacters.insert(cursorOffset, character);
-      cursorOffset++;
-    }
-  }
-  return (text: visibleCharacters.join(), cursorOffset: cursorOffset);
-}
-
-Future<void> _commitSwipeText(WidgetTester tester, String text) async {
-  final selection = TextSelection.collapsed(offset: text.length);
-  tester.testTextInput.updateEditingValue(
-    TextEditingValue(
-      text: text,
-      selection: selection,
-      composing: TextRange(
-        start: _deleteDetectionMarker.length,
-        end: text.length,
-      ),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    TextEditingValue(text: text, selection: selection),
-  );
-  await tester.pump();
-}
-
 class _ValidationCase {
   const _ValidationCase({
     required this.id,
     required this.title,
     required this.expectedVisibleText,
-    required this.run,
+    required this.steps,
     this.resolveTextBeforeCursor,
     this.expectedRawOutput,
     this.expectedEditingText,
@@ -98,7 +41,7 @@ class _ValidationCase {
   final int? expectedSelectionOffset;
   final int? expectedTerminalCursorOffset;
   final String? Function()? resolveTextBeforeCursor;
-  final Future<void> Function(WidgetTester tester) run;
+  final List<(String, int, int, TextRange?)> steps;
 }
 
 class _ValidationResult {
@@ -250,12 +193,25 @@ Future<_ValidationResult> _runCase(
 
   focusNode.requestFocus();
   await tester.pump();
-  await testCase.run(tester);
+  for (final (text, selectionBase, selectionExtent, composing)
+      in testCase.steps) {
+    tester.testTextInput.updateEditingValue(
+      TextEditingValue(
+        text: text,
+        selection: TextSelection(
+          baseOffset: selectionBase,
+          extentOffset: selectionExtent,
+        ),
+        composing: composing ?? TextRange.empty,
+      ),
+    );
+    await tester.pump();
+  }
 
   final client =
       tester.state(find.byType(TerminalTextInputHandler)) as TextInputClient;
   final editingValue = client.currentTextEditingValue;
-  final terminalState = _terminalStateFromEvents(terminalOutput);
+  final terminalState = terminalStateFromEvents(terminalOutput);
   final result = _ValidationResult(
     testCase: testCase,
     visibleText: terminalState.text,
@@ -355,7 +311,23 @@ void main() {
           '$_deleteDetectionMarker'
           'hello',
       expectedSelectionOffset: 7,
-      run: _runFirstSwipeWordCase,
+      steps: [
+        (
+          '$_deleteDetectionMarker\nhello',
+          '$_deleteDetectionMarker\nhello'.length,
+          '$_deleteDetectionMarker\nhello'.length,
+          TextRange(
+            start: _deleteDetectionMarker.length,
+            end: '$_deleteDetectionMarker\nhello'.length,
+          ),
+        ),
+        (
+          '$_deleteDetectionMarker\nhello',
+          '$_deleteDetectionMarker\nhello'.length,
+          '$_deleteDetectionMarker\nhello'.length,
+          null,
+        ),
+      ],
     ),
     _ValidationCase(
       id: '02-resume-swipe-separator',
@@ -367,7 +339,23 @@ void main() {
           ' world',
       expectedSelectionOffset: 8,
       resolveTextBeforeCursor: _resolveTerminalTextWithoutTrailingSpace,
-      run: _runResumeSwipeSeparatorCase,
+      steps: [
+        (
+          '$_deleteDetectionMarker world',
+          '$_deleteDetectionMarker world'.length,
+          '$_deleteDetectionMarker world'.length,
+          TextRange(
+            start: _deleteDetectionMarker.length,
+            end: '$_deleteDetectionMarker world'.length,
+          ),
+        ),
+        (
+          '$_deleteDetectionMarker world',
+          '$_deleteDetectionMarker world'.length,
+          '$_deleteDetectionMarker world'.length,
+          null,
+        ),
+      ],
     ),
     _ValidationCase(
       id: '03-no-duplicate-separator',
@@ -379,7 +367,23 @@ void main() {
           'world',
       expectedSelectionOffset: 7,
       resolveTextBeforeCursor: _resolveTerminalTextWithTrailingSpace,
-      run: _runNoDuplicateSeparatorCase,
+      steps: [
+        (
+          '$_deleteDetectionMarker world',
+          '$_deleteDetectionMarker world'.length,
+          '$_deleteDetectionMarker world'.length,
+          TextRange(
+            start: _deleteDetectionMarker.length,
+            end: '$_deleteDetectionMarker world'.length,
+          ),
+        ),
+        (
+          '$_deleteDetectionMarker world',
+          '$_deleteDetectionMarker world'.length,
+          '$_deleteDetectionMarker world'.length,
+          null,
+        ),
+      ],
     ),
     _ValidationCase(
       id: '04-replacement-after-delete',
@@ -390,7 +394,12 @@ void main() {
           'the ',
       expectedSelectionOffset: 6,
       expectedTerminalCursorOffset: 'the '.length,
-      run: _runReplacementAfterDeleteCase,
+      steps: [
+        ('${_deleteDetectionMarker}teh world ', 12, 12, null),
+        ('${_deleteDetectionMarker}teh ', 6, 6, null),
+        ('${_deleteDetectionMarker}the ', 2, 5, null),
+        ('${_deleteDetectionMarker}the ', 6, 6, null),
+      ],
     ),
     _ValidationCase(
       id: '05-single-emoji-backspace',
@@ -399,7 +408,10 @@ void main() {
       expectedRawOutput: '👍\x7f',
       expectedEditingText: _deleteDetectionMarker,
       expectedSelectionOffset: 2,
-      run: _runSingleEmojiDeleteCase,
+      steps: [
+        ('$_deleteDetectionMarker👍', 4, 4, null),
+        (_deleteDetectionMarker, 2, 2, null),
+      ],
     ),
     _ValidationCase(
       id: '06-combining-grapheme-backspace',
@@ -409,7 +421,10 @@ void main() {
       expectedRawOutput: 'e\u0301\x7f',
       expectedEditingText: _deleteDetectionMarker,
       expectedSelectionOffset: 2,
-      run: _runCombiningGraphemeDeleteCase,
+      steps: [
+        ('${_deleteDetectionMarker}e\u0301', 4, 4, null),
+        (_deleteDetectionMarker, 2, 2, null),
+      ],
     ),
     _ValidationCase(
       id: '07-cursor-move-only',
@@ -420,7 +435,10 @@ void main() {
           'echo teh world',
       expectedSelectionOffset: 11,
       expectedTerminalCursorOffset: 'echo teh '.length,
-      run: _runCursorMoveOnlyCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 11, 11, null),
+      ],
     ),
     _ValidationCase(
       id: '08-midline-replace-backspace',
@@ -432,7 +450,12 @@ void main() {
           'echo th world',
       expectedSelectionOffset: 9,
       expectedTerminalCursorOffset: 'echo th'.length,
-      run: _runMidlineReplaceThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo th world', 9, 9, null),
+      ],
     ),
     _ValidationCase(
       id: '09-space-boundary-insert',
@@ -444,7 +467,11 @@ void main() {
           'foo Xbar',
       expectedSelectionOffset: 7,
       expectedTerminalCursorOffset: 'foo X'.length,
-      run: _runSpaceBoundaryInsertCase,
+      steps: [
+        ('${_deleteDetectionMarker}foo bar', 9, 9, null),
+        ('${_deleteDetectionMarker}foo bar', 6, 6, null),
+        ('${_deleteDetectionMarker}foo Xbar', 7, 7, null),
+      ],
     ),
     _ValidationCase(
       id: '10-punctuation-boundary-replace',
@@ -455,7 +482,11 @@ void main() {
           'hello; world',
       expectedSelectionOffset: 8,
       expectedTerminalCursorOffset: 'hello;'.length,
-      run: _runPunctuationBoundaryReplaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}hello, world', 14, 14, null),
+        ('${_deleteDetectionMarker}hello, world', 8, 8, null),
+        ('${_deleteDetectionMarker}hello; world', 8, 8, null),
+      ],
     ),
     _ValidationCase(
       id: '11-repeated-word-replace',
@@ -467,7 +498,11 @@ void main() {
           'go gone go',
       expectedSelectionOffset: 9,
       expectedTerminalCursorOffset: 'go gone'.length,
-      run: _runRepeatedWordReplaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}go go go', 10, 10, null),
+        ('${_deleteDetectionMarker}go go go', 5, 7, null),
+        ('${_deleteDetectionMarker}go gone go', 9, 9, null),
+      ],
     ),
     _ValidationCase(
       id: '12-space-boundary-insert-backspace',
@@ -479,7 +514,12 @@ void main() {
           'foo bar',
       expectedSelectionOffset: 6,
       expectedTerminalCursorOffset: 'foo '.length,
-      run: _runSpaceBoundaryInsertThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}foo bar', 9, 9, null),
+        ('${_deleteDetectionMarker}foo bar', 6, 6, null),
+        ('${_deleteDetectionMarker}foo Xbar', 7, 7, null),
+        ('${_deleteDetectionMarker}foo bar', 6, 6, null),
+      ],
     ),
     _ValidationCase(
       id: '13-double-space-insert-backspace',
@@ -491,7 +531,12 @@ void main() {
           'foo  bar',
       expectedSelectionOffset: 6,
       expectedTerminalCursorOffset: 'foo '.length,
-      run: _runDoubleSpaceInsertThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}foo  bar', 10, 10, null),
+        ('${_deleteDetectionMarker}foo  bar', 6, 6, null),
+        ('${_deleteDetectionMarker}foo X bar', 7, 7, null),
+        ('${_deleteDetectionMarker}foo  bar', 6, 6, null),
+      ],
     ),
     _ValidationCase(
       id: '14-repeated-word-replace-backspace',
@@ -503,7 +548,12 @@ void main() {
           'go gon go',
       expectedSelectionOffset: 8,
       expectedTerminalCursorOffset: 'go gon'.length,
-      run: _runRepeatedWordReplaceThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}go go go', 10, 10, null),
+        ('${_deleteDetectionMarker}go go go', 5, 7, null),
+        ('${_deleteDetectionMarker}go gone go', 9, 9, null),
+        ('${_deleteDetectionMarker}go gon go', 8, 8, null),
+      ],
     ),
     _ValidationCase(
       id: '15-marker-loss-clear',
@@ -514,7 +564,7 @@ void main() {
       expectedEditingText: _deleteDetectionMarker,
       expectedSelectionOffset: 2,
       expectedTerminalCursorOffset: 0,
-      run: _runMarkerLossClearCase,
+      steps: [('${_deleteDetectionMarker}hello', 7, 7, null), ('', 0, 0, null)],
     ),
     _ValidationCase(
       id: '16-replacement-selection-backspace',
@@ -526,7 +576,12 @@ void main() {
           'echo th world',
       expectedSelectionOffset: 9,
       expectedTerminalCursorOffset: 'echo th'.length,
-      run: _runReplacementSelectionThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 7, 10, null),
+        ('${_deleteDetectionMarker}echo the world', 7, 10, null),
+        ('${_deleteDetectionMarker}echo th world', 9, 9, null),
+      ],
     ),
     _ValidationCase(
       id: '17-identical-char-insert',
@@ -538,7 +593,11 @@ void main() {
           'aaaaa',
       expectedSelectionOffset: 4,
       expectedTerminalCursorOffset: 2,
-      run: _runIdenticalCharacterInsertCase,
+      steps: [
+        ('${_deleteDetectionMarker}aaaa', 6, 6, null),
+        ('${_deleteDetectionMarker}aaaa', 3, 3, null),
+        ('${_deleteDetectionMarker}aaaaa', 4, 4, null),
+      ],
     ),
     _ValidationCase(
       id: '18-identical-char-delete',
@@ -550,7 +609,11 @@ void main() {
           'aaaa',
       expectedSelectionOffset: 3,
       expectedTerminalCursorOffset: 1,
-      run: _runIdenticalCharacterDeleteCase,
+      steps: [
+        ('${_deleteDetectionMarker}aaaaa', 7, 7, null),
+        ('${_deleteDetectionMarker}aaaaa', 4, 4, null),
+        ('${_deleteDetectionMarker}aaaa', 3, 3, null),
+      ],
     ),
     _ValidationCase(
       id: '19-repeated-selection-replace-backspace',
@@ -562,7 +625,14 @@ void main() {
           'echo th world',
       expectedSelectionOffset: 9,
       expectedTerminalCursorOffset: 'echo th'.length,
-      run: _runRepeatedSelectionReplaceThenBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 7, 10, null),
+        ('${_deleteDetectionMarker}echo the world', 7, 10, null),
+        ('${_deleteDetectionMarker}echo then world', 7, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 7, 10, null),
+        ('${_deleteDetectionMarker}echo th world', 9, 9, null),
+      ],
     ),
     _ValidationCase(
       id: '20-replace-move-later-backspace',
@@ -574,7 +644,13 @@ void main() {
           'echo the worl',
       expectedSelectionOffset: 15,
       expectedTerminalCursorOffset: 'echo the worl'.length,
-      run: _runReplaceThenLaterBackspaceCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo the worl', 15, 15, null),
+      ],
     ),
     _ValidationCase(
       id: '21-replacement-separator-reinsert',
@@ -586,7 +662,13 @@ void main() {
           'echo the world',
       expectedSelectionOffset: 11,
       expectedTerminalCursorOffset: 'echo the '.length,
-      run: _runReplacementSeparatorReinsertCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 7, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo theworld', 10, 10, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 11, null),
+      ],
     ),
     _ValidationCase(
       id: '22-replace-elsewhere',
@@ -598,7 +680,13 @@ void main() {
           'echo the earth',
       expectedSelectionOffset: 16,
       expectedTerminalCursorOffset: 'echo the earth'.length,
-      run: _runReplaceThenLaterReplacementCase,
+      steps: [
+        ('${_deleteDetectionMarker}echo teh world', 16, 16, null),
+        ('${_deleteDetectionMarker}echo teh world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 11, null),
+        ('${_deleteDetectionMarker}echo the world', 11, 16, null),
+        ('${_deleteDetectionMarker}echo the earth', 16, 16, null),
+      ],
     ),
     _ValidationCase(
       id: '23-shorter-prefix-replacement',
@@ -610,7 +698,12 @@ void main() {
           'I stink',
       expectedSelectionOffset: 9,
       expectedTerminalCursorOffset: 'I stink'.length,
-      run: _runShorterPrefixReplacementCase,
+      steps: [
+        ('${_deleteDetectionMarker}I still have', 14, 14, null),
+        ('${_deleteDetectionMarker}I sti', 7, 7, null),
+        ('${_deleteDetectionMarker}I stink', 4, 9, null),
+        ('${_deleteDetectionMarker}I stink', 9, 9, null),
+      ],
     ),
   ];
 
@@ -647,775 +740,6 @@ void main() {
   });
 }
 
-Future<void> _runFirstSwipeWordCase(WidgetTester tester) async {
-  await _commitSwipeText(tester, '$_deleteDetectionMarker\nhello');
-}
-
 String _resolveTerminalTextWithoutTrailingSpace() => 'echo ready';
 
-Future<void> _runResumeSwipeSeparatorCase(WidgetTester tester) async {
-  await _commitSwipeText(tester, '$_deleteDetectionMarker world');
-}
-
 String _resolveTerminalTextWithTrailingSpace() => 'echo ready ';
-
-Future<void> _runNoDuplicateSeparatorCase(WidgetTester tester) async {
-  await _commitSwipeText(tester, '$_deleteDetectionMarker world');
-}
-
-Future<void> _runReplacementAfterDeleteCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'teh world ',
-      selection: TextSelection.collapsed(offset: 12),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'teh ',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'the ',
-      selection: TextSelection(baseOffset: 2, extentOffset: 5),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'the ',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runSingleEmojiDeleteCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text: '$_deleteDetectionMarker👍',
-      selection: TextSelection.collapsed(offset: 4),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text: _deleteDetectionMarker,
-      selection: TextSelection.collapsed(offset: 2),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runCombiningGraphemeDeleteCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'e\u0301',
-      selection: TextSelection.collapsed(offset: 4),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text: _deleteDetectionMarker,
-      selection: TextSelection.collapsed(offset: 2),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runCursorMoveOnlyCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runMidlineReplaceThenBackspaceCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo th world',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runSpaceBoundaryInsertCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo bar',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo bar',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo Xbar',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runPunctuationBoundaryReplaceCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'hello, world',
-      selection: TextSelection.collapsed(offset: 14),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'hello, world',
-      selection: TextSelection.collapsed(offset: 8),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'hello; world',
-      selection: TextSelection.collapsed(offset: 8),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runRepeatedWordReplaceCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go go go',
-      selection: TextSelection.collapsed(offset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go go go',
-      selection: TextSelection(baseOffset: 5, extentOffset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go gone go',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runSpaceBoundaryInsertThenBackspaceCase(
-  WidgetTester tester,
-) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo bar',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo bar',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo Xbar',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo bar',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runDoubleSpaceInsertThenBackspaceCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo  bar',
-      selection: TextSelection.collapsed(offset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo  bar',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo X bar',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'foo  bar',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runRepeatedWordReplaceThenBackspaceCase(
-  WidgetTester tester,
-) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go go go',
-      selection: TextSelection.collapsed(offset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go go go',
-      selection: TextSelection(baseOffset: 5, extentOffset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go gone go',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'go gon go',
-      selection: TextSelection.collapsed(offset: 8),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runMarkerLossClearCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'hello',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(selection: TextSelection.collapsed(offset: 0)),
-  );
-  await tester.pump();
-}
-
-Future<void> _runReplacementSelectionThenBackspaceCase(
-  WidgetTester tester,
-) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo th world',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runIdenticalCharacterInsertCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaa',
-      selection: TextSelection.collapsed(offset: 6),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaa',
-      selection: TextSelection.collapsed(offset: 3),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaaa',
-      selection: TextSelection.collapsed(offset: 4),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runIdenticalCharacterDeleteCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaaa',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaaa',
-      selection: TextSelection.collapsed(offset: 4),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'aaaa',
-      selection: TextSelection.collapsed(offset: 3),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runRepeatedSelectionReplaceThenBackspaceCase(
-  WidgetTester tester,
-) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo then world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo th world',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runReplaceThenLaterBackspaceCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the worl',
-      selection: TextSelection.collapsed(offset: 15),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runReplacementSeparatorReinsertCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection(baseOffset: 7, extentOffset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo theworld',
-      selection: TextSelection.collapsed(offset: 10),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runReplaceThenLaterReplacementCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo teh world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection.collapsed(offset: 11),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the world',
-      selection: TextSelection(baseOffset: 11, extentOffset: 16),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'echo the earth',
-      selection: TextSelection.collapsed(offset: 16),
-    ),
-  );
-  await tester.pump();
-}
-
-Future<void> _runShorterPrefixReplacementCase(WidgetTester tester) async {
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'I still have',
-      selection: TextSelection.collapsed(offset: 14),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'I sti',
-      selection: TextSelection.collapsed(offset: 7),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'I stink',
-      selection: TextSelection(baseOffset: 4, extentOffset: 9),
-    ),
-  );
-  await tester.pump();
-
-  tester.testTextInput.updateEditingValue(
-    const TextEditingValue(
-      text:
-          '$_deleteDetectionMarker'
-          'I stink',
-      selection: TextSelection.collapsed(offset: 9),
-    ),
-  );
-  await tester.pump();
-}

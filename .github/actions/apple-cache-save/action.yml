@@ -1,0 +1,76 @@
+name: Save Apple caches
+description: Save missing Apple cache entries within the size limits.
+inputs:
+  phase:
+    description: swiftpm or build
+    required: true
+  platform:
+    description: ios or macos for build caches
+    default: ''
+  compilation-limit-kib:
+    description: Maximum uncompressed compilation cache size
+    default: '1048576'
+  workspace-limit-kib:
+    description: Maximum uncompressed resolved package size
+    default: '2097152'
+  compilation-key:
+    description: Restored compilation primary key
+    default: ''
+  compilation-hit:
+    description: Whether compilation restore matched exactly
+    default: ''
+  workspace-key:
+    description: Restored resolved package primary key
+    default: ''
+  workspace-hit:
+    description: Whether resolved package restore matched exactly
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Measure Apple build caches
+      id: sizes
+      if: inputs.phase == 'build'
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        COMPILATION_LIMIT_KIB: ${{ inputs.compilation-limit-kib }}
+        WORKSPACE_LIMIT_KIB: ${{ inputs.workspace-limit-kib }}
+      run: |
+        compilation_kib=$(du -sk "$HOME/Library/Caches/monkeyssh-xcode" | cut -f1)
+        workspace_kib=0
+        if [ -d "build/$PLATFORM/SourcePackages" ]; then
+          workspace_kib=$(du -sk "build/$PLATFORM/SourcePackages" | cut -f1)
+        fi
+        echo "Compilation cache: ${compilation_kib} KiB; Swift packages: ${workspace_kib} KiB" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$compilation_kib" -gt 0 ] && [ "$compilation_kib" -le "$COMPILATION_LIMIT_KIB" ]; then
+          echo "compilation=true" >> "$GITHUB_OUTPUT"
+        fi
+        if [ "$workspace_kib" -gt 0 ] && [ "$workspace_kib" -le "$WORKSPACE_LIMIT_KIB" ]; then
+          echo "workspace=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save Apple compilation cache
+      if: steps.sizes.outputs.compilation == 'true' && inputs.compilation-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: ~/Library/Caches/monkeyssh-xcode
+        key: ${{ inputs.compilation-key }}
+
+    - name: Save resolved Swift packages
+      if: steps.sizes.outputs.workspace == 'true' && inputs.workspace-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: |
+          build/${{ inputs.platform }}/SourcePackages/checkouts
+          build/${{ inputs.platform }}/SourcePackages/repositories
+          build/${{ inputs.platform }}/SourcePackages/artifacts
+          build/${{ inputs.platform }}/SourcePackages/workspace-state.json
+        key: ${{ inputs.workspace-key }}
+
+    - name: Save SwiftPM cache
+      if: inputs.phase == 'swiftpm'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: ~/Library/Caches/org.swift.swiftpm
+        key: spm-${{ runner.os }}-${{ hashFiles('ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}

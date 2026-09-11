@@ -7,26 +7,28 @@ product
 ## Users
 
 Remote developers who run modern coding agents (Claude Code, Copilot CLI, Codex,
-Gemini CLI, OpenCode, Antigravity) and need to keep that work moving from a
-phone, away from a laptop. They are comfortable in a terminal and expect power:
-they connect to a box, attach to a persistent MonkeyMux/tmux workspace, resume
-the right agent session, switch remote windows, browse and edit files over SFTP,
-forward ports, and paste commands safely. Their context is mobile and often
-one-handed — on the move, between meetings, or away from their desk — so speed,
-reach, and trust matter more than decoration.
+OpenCode, Antigravity, Cursor Agent, and others) and need to keep that work
+moving from a phone, away from a laptop. They are comfortable in a terminal and
+expect power: they connect to a box, attach to a persistent MonkeyMux/tmux
+workspace, open an agent as a native chat or a terminal, resume the right agent
+session, switch remote windows, browse and edit files over SFTP, forward ports,
+and paste commands safely. Their context is mobile and often one-handed, on the
+move, between meetings, or away from their desk, so speed, reach, and trust
+matter more than decoration.
 
 ## Product Purpose
 
 MonkeySSH is the mobile SSH workspace for agentic coding. It exists to make
-serious remote development practical from a phone: a real xterm-256color
-terminal, an SFTP workspace, MonkeyMux/tmux remote windows, and first-class
-launch/resume flows for coding agents — without requiring a laptop or cloud
-sync. Success is a developer reconnecting and being back in the right agent
-session, in the right window, in seconds, then staying productive with gestures,
-modifier keys, snippets, and clickable paths. It is local-first and private by
-default (PIN/biometrics, on-device storage, host-key verification, encrypted
-transfers, opt-in telemetry that starts off), with a Pro tier for power and
-multi-device workflows.
+serious remote development practical from a phone: native chat windows for
+coding agents, a real xterm-256color terminal, an SFTP workspace, MonkeyMux/tmux
+remote windows, and launch, resume, and update flows for the agents themselves,
+without requiring a laptop or cloud sync. Success is a developer reconnecting and
+being back in the right agent conversation, in the right window, in seconds, then
+staying productive with gestures, modifier keys, snippets, and clickable paths.
+It is local-first and private by default (PIN/biometrics, on-device storage,
+host-key verification, encrypted transfers, opt-in telemetry that starts off).
+One connected native chat is free; the Pro tier covers parallel chats, launch
+presets, Agent Management, and multi-device workflows.
 
 ## Brand Personality
 

@@ -15,9 +15,6 @@ enum AgentLaunchTool {
   /// OpenCode CLI.
   openCode,
 
-  /// Google Gemini CLI.
-  geminiCli,
-
   /// Antigravity CLI.
   antigravity,
 
@@ -44,7 +41,6 @@ enum AgentLaunchTool {
     claudeCode,
     copilotCli,
     codex,
-    geminiCli,
     openCode,
     antigravity,
     cursorAgent,
@@ -63,7 +59,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.copilotCli => 'Copilot CLI',
     AgentLaunchTool.codex => 'Codex',
     AgentLaunchTool.openCode => 'OpenCode',
-    AgentLaunchTool.geminiCli => 'Gemini CLI',
     AgentLaunchTool.antigravity => 'Antigravity',
     AgentLaunchTool.cursorAgent => 'Cursor Agent',
     AgentLaunchTool.pi => 'Pi',
@@ -78,7 +73,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.copilotCli => 'copilot',
     AgentLaunchTool.codex => 'codex',
     AgentLaunchTool.openCode => 'opencode',
-    AgentLaunchTool.geminiCli => 'gemini',
     AgentLaunchTool.antigravity => 'agy',
     AgentLaunchTool.cursorAgent => 'cursor-agent',
     AgentLaunchTool.pi => 'pi',
@@ -103,7 +97,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.copilotCli => const ['copilot', 'github-copilot'],
     AgentLaunchTool.codex => const ['codex', 'codex-cli'],
     AgentLaunchTool.openCode => const ['opencode', 'open-code'],
-    AgentLaunchTool.geminiCli => const ['gemini', 'gemini-cli'],
     AgentLaunchTool.antigravity => const [
       'agy',
       'antigravity',
@@ -116,12 +109,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.grokBuild => const ['grok'],
   };
 
-  /// Whether this tool supports session resume.
-  ///
-  /// All currently supported agents expose a resume/continue path. Keep the
-  /// flag so callers can gate UI without hard-coding tool identity.
-  bool get supportsResume => true;
-
   /// Matching discovered-session provider name, if this tool supports recent
   /// session discovery.
   String? get discoveredSessionToolName => switch (this) {
@@ -129,7 +116,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.copilotCli => 'Copilot CLI',
     AgentLaunchTool.codex => 'Codex',
     AgentLaunchTool.openCode => 'OpenCode',
-    AgentLaunchTool.geminiCli => 'Gemini CLI',
     AgentLaunchTool.antigravity => 'Antigravity',
     AgentLaunchTool.cursorAgent => 'Cursor Agent',
     AgentLaunchTool.pi => 'Pi',
@@ -154,7 +140,6 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.copilotCli => const ['--yolo'],
     AgentLaunchTool.codex => const ['--yolo'],
     AgentLaunchTool.openCode => const [],
-    AgentLaunchTool.geminiCli => const ['--yolo'],
     AgentLaunchTool.antigravity => const ['--dangerously-skip-permissions'],
     AgentLaunchTool.cursorAgent => const ['--force'],
     // Pi has no approval layer to bypass: it acts with the permissions of the
@@ -205,7 +190,6 @@ AgentLaunchTool? agentLaunchToolForCommandName(String? commandName) {
     'copilot' || 'github-copilot' => AgentLaunchTool.copilotCli,
     'codex' || 'codex-cli' || 'codex-acp' => AgentLaunchTool.codex,
     'opencode' || 'open-code' => AgentLaunchTool.openCode,
-    'gemini' || 'gemini-cli' => AgentLaunchTool.geminiCli,
     'agy' ||
     'antigravity' ||
     'antigravity-cli' ||
@@ -261,18 +245,6 @@ class AgentLaunchPreset {
     this.tmuxDisableStatusBar = false,
     this.additionalArguments,
   });
-
-  /// Decodes an [AgentLaunchPreset] from JSON.
-  ///
-  /// Throws [FormatException] when the stored tool name is missing or unknown
-  /// instead of silently rewriting it to another agent.
-  factory AgentLaunchPreset.fromJson(Map<String, dynamic> json) {
-    final preset = AgentLaunchPreset.tryFromJson(json);
-    if (preset == null) {
-      throw FormatException('Unknown agent launch tool: ${json['tool']}');
-    }
-    return preset;
-  }
 
   /// Decodes an [AgentLaunchPreset] from JSON, or `null` when invalid.
   static AgentLaunchPreset? tryFromJson(Map<String, dynamic> json) {
@@ -354,25 +326,6 @@ class AgentLaunchPreset {
     if (additionalArguments case final value? when value.trim().isNotEmpty)
       'additionalArguments': value.trim(),
   };
-
-  /// Returns a copy of this preset with selected fields replaced.
-  AgentLaunchPreset copyWith({
-    AgentLaunchTool? tool,
-    String? workingDirectory,
-    String? tmuxSessionName,
-    RemoteMuxBackend? remoteMuxBackend,
-    String? tmuxExtraFlags,
-    bool? tmuxDisableStatusBar,
-    String? additionalArguments,
-  }) => AgentLaunchPreset(
-    tool: tool ?? this.tool,
-    workingDirectory: workingDirectory ?? this.workingDirectory,
-    tmuxSessionName: tmuxSessionName ?? this.tmuxSessionName,
-    remoteMuxBackend: remoteMuxBackend ?? this.remoteMuxBackend,
-    tmuxExtraFlags: tmuxExtraFlags ?? this.tmuxExtraFlags,
-    tmuxDisableStatusBar: tmuxDisableStatusBar ?? this.tmuxDisableStatusBar,
-    additionalArguments: additionalArguments ?? this.additionalArguments,
-  );
 }
 
 enum _ShellQuoteMode { none, single, double }
@@ -460,7 +413,6 @@ final _copilotAllowAllPathsPattern = RegExp(
   r'(?<!\S)--allow-all-paths(?=\s|$)',
 );
 final _copilotAllowAllUrlsPattern = RegExp(r'(?<!\S)--allow-all-urls(?=\s|$)');
-final _geminiYoloPattern = RegExp(r'(?<!\S)(?:--yolo|-y)(?=\s|$)');
 final _antigravityDangerouslySkipPermissionsPattern = RegExp(
   r'(?<!\S)--dangerously-skip-permissions(?=\s|$)',
 );
@@ -602,7 +554,6 @@ List<String> _buildAgentResumeArguments(
   AgentLaunchTool.claudeCode => ['--resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.copilotCli => ['--resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.codex => ['resume', _quoteShellArgument(sessionId)],
-  AgentLaunchTool.geminiCli => ['--resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.antigravity =>
     sessionId == '_continue'
         ? const ['--continue']
@@ -666,10 +617,6 @@ String? _normalizeAgentToolArguments({
     AgentLaunchTool.openCode => _stripArgumentPatterns(
       trimmedAdditionalArguments,
       [_openCodeDangerouslySkipPermissionsPattern],
-    ),
-    AgentLaunchTool.geminiCli => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [_geminiYoloPattern],
     ),
     AgentLaunchTool.antigravity => _stripArgumentPatterns(
       trimmedAdditionalArguments,

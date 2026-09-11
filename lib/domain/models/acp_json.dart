@@ -33,6 +33,22 @@ abstract final class AcpJson {
     return List<Object?>.unmodifiable(value.map(_freeze));
   }
 
+  /// Parses object entries, applying [limit] before traversing discarded data.
+  static List<T> objectList<T>(
+    Object? value,
+    T Function(AcpJsonMap) parse, {
+    int? limit,
+  }) {
+    if (value is! List) return List<T>.unmodifiable(const []);
+    final result = <T>[];
+    for (final item in value) {
+      if (limit != null && result.length >= limit) break;
+      final json = object(item);
+      if (json != null) result.add(parse(json));
+    }
+    return List<T>.unmodifiable(result);
+  }
+
   /// Returns a JSON string field.
   static String? string(AcpJsonMap json, String key) {
     final value = json[key];

@@ -1,1 +1,1 @@
-ssh,terminal,sftp,tmux,ai,coding,agent,server,shell,monkeymux,remote,developer\n
+ssh,terminal,sftp,tmux,ai,coding,agent,server,shell,monkeymux,remote,developer

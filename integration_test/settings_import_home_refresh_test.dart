@@ -34,227 +34,127 @@ Future<void> _openSettings(WidgetTester tester) async {
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'replace import refreshes the mounted home screen after returning from settings',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(400, 1400));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+  for (final testCase in const [
+    (name: 'mounted', size: Size(400, 1400), checkConnections: false),
+    (name: 'wide', size: Size(1200, 900), checkConnections: true),
+  ]) {
+    testWidgets(
+      'replace import refreshes the ${testCase.name} home screen after returning from settings',
+      (tester) async {
+        await tester.binding.setSurfaceSize(testCase.size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
 
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final encryptionService = SecretEncryptionService();
-      final hostRepository = HostRepository(db, encryptionService);
-      final keyRepository = KeyRepository(db, encryptionService);
-      await hostRepository.insert(
-        HostsCompanion.insert(
-          label: 'Current Host',
-          hostname: 'current.example.com',
-          username: 'tester',
-          password: const Value('before-import'),
-        ),
-      );
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final encryptionService = SecretEncryptionService();
+        final hostRepository = HostRepository(db, encryptionService);
+        final keyRepository = KeyRepository(db, encryptionService);
+        await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Current Host',
+            hostname: 'current.example.com',
+            username: 'tester',
+            password: const Value('before-import'),
+          ),
+        );
 
-      final sourceDb = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(sourceDb.close);
-      final sourceEncryptionService = SecretEncryptionService.forTesting();
-      final sourceHostRepository = HostRepository(
-        sourceDb,
-        sourceEncryptionService,
-      );
-      final sourceKeyRepository = KeyRepository(
-        sourceDb,
-        sourceEncryptionService,
-      );
-      await sourceHostRepository.insert(
-        HostsCompanion.insert(
-          label: 'Imported Host',
-          hostname: 'imported.example.com',
-          username: 'importer',
-          password: const Value('hunter2'),
-        ),
-      );
-      final sourceTransferService = SecureTransferService(
-        sourceDb,
-        sourceKeyRepository,
-        sourceHostRepository,
-      );
-      final encodedPayload = await sourceTransferService
-          .createFullMigrationPayload(transferPassphrase: '1234');
+        final sourceDb = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(sourceDb.close);
+        final sourceEncryptionService = SecretEncryptionService.forTesting();
+        final sourceHostRepository = HostRepository(
+          sourceDb,
+          sourceEncryptionService,
+        );
+        final sourceKeyRepository = KeyRepository(
+          sourceDb,
+          sourceEncryptionService,
+        );
+        await sourceHostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Imported Host',
+            hostname: 'imported.example.com',
+            username: 'importer',
+            password: const Value('hunter2'),
+          ),
+        );
+        final sourceTransferService = SecureTransferService(
+          sourceDb,
+          sourceKeyRepository,
+          sourceHostRepository,
+        );
+        final encodedPayload = await sourceTransferService
+            .createFullMigrationPayload(transferPassphrase: '1234');
 
-      final transferService = SecureTransferService(
-        db,
-        keyRepository,
-        hostRepository,
-      );
-      final container = ProviderContainer(
-        overrides: [
-          databaseProvider.overrideWithValue(db),
-          authServiceProvider.overrideWithValue(FakeAuthService()),
-          authStateProvider.overrideWith(MockAuthStateNotifier.new),
-          secureTransferServiceProvider.overrideWithValue(transferService),
-        ],
-      );
-      addTearDown(container.dispose);
+        final transferService = SecureTransferService(
+          db,
+          keyRepository,
+          hostRepository,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            authServiceProvider.overrideWithValue(FakeAuthService()),
+            authStateProvider.overrideWith(MockAuthStateNotifier.new),
+            secureTransferServiceProvider.overrideWithValue(transferService),
+          ],
+        );
+        addTearDown(container.dispose);
 
-      await tester.pumpWidget(_buildApp(container));
-      await tester.pumpAndSettle();
+        await tester.pumpWidget(_buildApp(container));
+        await tester.pumpAndSettle();
 
-      expect(find.text('Current Host'), findsOneWidget);
+        expect(find.text('Current Host'), findsOneWidget);
 
-      await _openSettings(tester);
+        await _openSettings(tester);
 
-      final payload = await transferService.decryptPayload(
-        encodedPayload: encodedPayload,
-        transferPassphrase: '1234',
-      );
-      await transferService.importFullMigrationPayload(
-        payload: payload,
-        mode: MigrationImportMode.replace,
-      );
-      container
-        ..invalidate(themeModeNotifierProvider)
-        ..invalidate(fontSizeNotifierProvider)
-        ..invalidate(fontFamilyNotifierProvider)
-        ..invalidate(cursorStyleNotifierProvider)
-        ..invalidate(bellSoundNotifierProvider)
-        ..invalidate(sharedClipboardNotifierProvider)
-        ..invalidate(sharedClipboardProvider)
-        ..invalidate(terminalThemeSettingsProvider);
-      invalidateImportedEntityProviders(container.invalidate);
-      await tester.pumpAndSettle();
+        final payload = await transferService.decryptPayload(
+          encodedPayload: encodedPayload,
+          transferPassphrase: '1234',
+        );
+        await transferService.importFullMigrationPayload(
+          payload: payload,
+          mode: MigrationImportMode.replace,
+        );
+        container
+          ..invalidate(themeModeNotifierProvider)
+          ..invalidate(fontSizeNotifierProvider)
+          ..invalidate(fontFamilyNotifierProvider)
+          ..invalidate(cursorStyleNotifierProvider)
+          ..invalidate(bellSoundNotifierProvider)
+          ..invalidate(sharedClipboardNotifierProvider)
+          ..invalidate(sharedClipboardProvider)
+          ..invalidate(terminalThemeSettingsProvider);
+        invalidateImportedEntityProviders(container.invalidate);
+        await tester.pumpAndSettle();
 
-      await tester.pageBack();
-      await tester.pumpAndSettle();
+        await tester.pageBack();
+        await tester.pumpAndSettle();
 
-      final storedHosts = await hostRepository.getAll();
-      expect(
-        storedHosts.map((host) => host.label),
-        isNot(contains('Current Host')),
-      );
-      expect(storedHosts.map((host) => host.label), contains('Imported Host'));
+        final storedHosts = await hostRepository.getAll();
+        expect(
+          storedHosts.map((host) => host.label),
+          isNot(contains('Current Host')),
+        );
+        expect(
+          storedHosts.map((host) => host.label),
+          contains('Imported Host'),
+        );
 
-      final hostsState = container.read(allHostsProvider);
-      expect(hostsState.hasValue, isTrue);
-      expect(
-        hostsState.asData?.value.map((host) => host.label).toList(),
-        contains('Imported Host'),
-      );
+        final hostsState = container.read(allHostsProvider);
+        expect(hostsState.hasValue, isTrue);
+        expect(
+          hostsState.asData?.value.map((host) => host.label).toList(),
+          contains('Imported Host'),
+        );
 
-      expect(find.text('Imported Host'), findsOneWidget);
-    },
-  );
+        expect(find.text('Imported Host'), findsOneWidget);
 
-  testWidgets(
-    'replace import refreshes the wide home screen after returning from settings',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(1200, 900));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final encryptionService = SecretEncryptionService();
-      final hostRepository = HostRepository(db, encryptionService);
-      final keyRepository = KeyRepository(db, encryptionService);
-      await hostRepository.insert(
-        HostsCompanion.insert(
-          label: 'Current Host',
-          hostname: 'current.example.com',
-          username: 'tester',
-          password: const Value('before-import'),
-        ),
-      );
-
-      final sourceDb = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(sourceDb.close);
-      final sourceEncryptionService = SecretEncryptionService.forTesting();
-      final sourceHostRepository = HostRepository(
-        sourceDb,
-        sourceEncryptionService,
-      );
-      final sourceKeyRepository = KeyRepository(
-        sourceDb,
-        sourceEncryptionService,
-      );
-      await sourceHostRepository.insert(
-        HostsCompanion.insert(
-          label: 'Imported Host',
-          hostname: 'imported.example.com',
-          username: 'importer',
-          password: const Value('hunter2'),
-        ),
-      );
-      final sourceTransferService = SecureTransferService(
-        sourceDb,
-        sourceKeyRepository,
-        sourceHostRepository,
-      );
-      final encodedPayload = await sourceTransferService
-          .createFullMigrationPayload(transferPassphrase: '1234');
-
-      final transferService = SecureTransferService(
-        db,
-        keyRepository,
-        hostRepository,
-      );
-      final container = ProviderContainer(
-        overrides: [
-          databaseProvider.overrideWithValue(db),
-          authServiceProvider.overrideWithValue(FakeAuthService()),
-          authStateProvider.overrideWith(MockAuthStateNotifier.new),
-          secureTransferServiceProvider.overrideWithValue(transferService),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await tester.pumpWidget(_buildApp(container));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Current Host'), findsOneWidget);
-
-      await _openSettings(tester);
-
-      final payload = await transferService.decryptPayload(
-        encodedPayload: encodedPayload,
-        transferPassphrase: '1234',
-      );
-      await transferService.importFullMigrationPayload(
-        payload: payload,
-        mode: MigrationImportMode.replace,
-      );
-      container
-        ..invalidate(themeModeNotifierProvider)
-        ..invalidate(fontSizeNotifierProvider)
-        ..invalidate(fontFamilyNotifierProvider)
-        ..invalidate(cursorStyleNotifierProvider)
-        ..invalidate(bellSoundNotifierProvider)
-        ..invalidate(sharedClipboardNotifierProvider)
-        ..invalidate(sharedClipboardProvider)
-        ..invalidate(terminalThemeSettingsProvider);
-      invalidateImportedEntityProviders(container.invalidate);
-      await tester.pumpAndSettle();
-
-      await tester.pageBack();
-      await tester.pumpAndSettle();
-
-      final storedHosts = await hostRepository.getAll();
-      expect(
-        storedHosts.map((host) => host.label),
-        isNot(contains('Current Host')),
-      );
-      expect(storedHosts.map((host) => host.label), contains('Imported Host'));
-
-      final hostsState = container.read(allHostsProvider);
-      expect(hostsState.hasValue, isTrue);
-      expect(
-        hostsState.asData?.value.map((host) => host.label).toList(),
-        contains('Imported Host'),
-      );
-
-      expect(find.text('Imported Host'), findsOneWidget);
-
-      await tester.tap(find.text('Connections').first);
-      await tester.pumpAndSettle();
-      expect(find.text('No active connections'), findsOneWidget);
-    },
-  );
+        if (testCase.checkConnections) {
+          await tester.tap(find.text('Connections').first);
+          await tester.pumpAndSettle();
+          expect(find.text('No active connections'), findsOneWidget);
+        }
+      },
+    );
+  }
 }

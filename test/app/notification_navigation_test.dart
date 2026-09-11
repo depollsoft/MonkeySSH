@@ -5,6 +5,66 @@ import 'package:monkeyssh/app/notification_navigation.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
 void main() {
+  testWidgets('scheduler holds locked taps and delivers latest after unlock', (
+    tester,
+  ) async {
+    var unlocked = false;
+    final opened = <String>[];
+    final queue =
+        NotificationNavigationScheduler<String>(
+            canNavigate: () => unlocked,
+            open: opened.add,
+          )
+          ..add('first')
+          ..add('latest');
+    await tester.pump();
+    expect(opened, isEmpty);
+    unlocked = true;
+    queue
+      ..flush()
+      ..flush();
+    await tester.pump();
+    expect(opened, ['latest']);
+  });
+
+  testWidgets('scheduler rechecks lock and disposal before navigation', (
+    tester,
+  ) async {
+    var mounted = true;
+    var unlocked = true;
+    final opened = <String>[];
+    final queue = NotificationNavigationScheduler<String>(
+      canNavigate: () => mounted && unlocked,
+      open: opened.add,
+    )..add('locked before frame');
+    unlocked = false;
+    await tester.pump();
+    expect(opened, isEmpty);
+    unlocked = true;
+    queue.flush();
+    mounted = false;
+    await tester.pump();
+    expect(opened, isEmpty);
+  });
+
+  testWidgets('scheduler retains independent notification types', (
+    tester,
+  ) async {
+    final opened = <String>[];
+    final terminal = NotificationNavigationScheduler<String>(
+      canNavigate: () => true,
+      open: opened.add,
+    );
+    final acp = NotificationNavigationScheduler<int>(
+      canNavigate: () => true,
+      open: (id) => opened.add('acp:$id'),
+    );
+    terminal.add('terminal');
+    acp.add(7);
+    await tester.pump();
+    expect(opened, ['terminal', 'acp:7']);
+  });
+
   testWidgets('tmux alert opens terminal above the connections screen', (
     tester,
   ) async {

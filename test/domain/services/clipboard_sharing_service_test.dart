@@ -15,6 +15,24 @@ void main() {
   group('ClipboardSharingService', () {
     group('handleOsc52', () {
       test(
+        'ignores platform failures while answering clipboard queries',
+        () async {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+                throw PlatformException(code: 'clipboard_unavailable');
+              });
+
+          expect(
+            await const ClipboardSharingService().handleOsc52([
+              'c',
+              '?',
+            ], allowLocalClipboardRead: true),
+            isNull,
+          );
+        },
+      );
+
+      test(
         'does not answer clipboard queries when local read is disabled',
         () async {
           var clipboardRead = false;

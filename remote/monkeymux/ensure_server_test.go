@@ -15,10 +15,7 @@ import (
 )
 
 func TestReadWriteSessionPIDFileRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("pid-roundtrip-%d", time.Now().UnixNano())
 	if err := writeSessionPIDFile(session, os.Getpid()); err != nil {
@@ -34,10 +31,7 @@ func TestReadWriteSessionPIDFileRoundTrip(t *testing.T) {
 }
 
 func TestRemoveSessionPIDFileKeepsOtherOwners(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("pid-other-%d", time.Now().UnixNano())
 	if err := writeSessionPIDFile(session, os.Getpid()+100000); err != nil {
@@ -50,10 +44,7 @@ func TestRemoveSessionPIDFileKeepsOtherOwners(t *testing.T) {
 }
 
 func TestAcquireSessionLockSerializesAndClearsStaleLocks(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("lock-%d", time.Now().UnixNano())
 	unlock, err := acquireSessionLock(session)
@@ -103,10 +94,7 @@ func TestAcquireSessionLockSerializesAndClearsStaleLocks(t *testing.T) {
 }
 
 func TestEnsureServerRefusesToStealLivePIDWithoutSocket(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("steal-%d", time.Now().UnixNano())
 	if err := writeSessionPIDFile(session, os.Getpid()); err != nil {
@@ -322,36 +310,13 @@ func TestServerExitWaitAllowsWindowWatcherShutdownMargin(t *testing.T) {
 	}
 }
 
-func shortUnixSocketDir(t *testing.T) string {
-	t.Helper()
-	// Keep the path well under the AF_UNIX sun_path limit. t.TempDir() on
-	// macOS lives under a long /var/folders prefix and bind() fails there.
-	root := os.TempDir()
-	if runtime.GOOS != "windows" {
-		if _, err := os.Stat("/tmp"); err == nil {
-			root = "/tmp"
-		}
-	}
-	dir, err := os.MkdirTemp(root, "mmx-")
-	if err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(dir)
-	})
-	return dir
-}
-
 func TestPrepareRunningServerReplacementKeepsServerWithoutSnapshot(
 	t *testing.T,
 ) {
 	// A version-skewed server that cannot be dialed yields no restore snapshot.
 	// Replacement must be refused rather than green-lighting an empty recreate
 	// (the lost-windows failure mode after auto-connect attach).
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("nosnap-%d", time.Now().UnixNano())
 	outcome, err := prepareRunningServerReplacement(
@@ -394,6 +359,58 @@ func TestPrepareRunningServerReplacementNoopsForCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestPrepareRunningServerReplacementForceRequiresSnapshotForCurrentVersion(t *testing.T) {
+	isolateTestRuntime(t)
+	outcome, err := prepareRunningServerReplacement(
+		fmt.Sprintf("force-nosnap-%d", time.Now().UnixNano()),
+		runningServerStatus{version: monkeyMuxVersion},
+		serverUpdatePolicyForce,
+		false,
+	)
+	if !errors.Is(err, errServerUpdateNoSnapshot) || outcome != nil {
+		t.Fatalf("forced replacement = (%#v, %v), want (nil, %v)", outcome, err, errServerUpdateNoSnapshot)
+	}
+}
+
+func TestKeepRespondingServerBeforeReplacement(t *testing.T) {
+	shutdown := &ensureServerReplacement{oldPID: pidRecord{pid: 10}}
+	legacy := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true}
+	native := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true, keepOldProcess: true}
+	for _, test := range []struct {
+		name        string
+		policy      string
+		version     string
+		pid         int
+		replacement *ensureServerReplacement
+		keep        bool
+		wantErr     error
+	}{
+		{"no replacement", serverUpdatePolicyForce, monkeyMuxVersion, 10, nil, true, nil},
+		{"normal concurrent replacement", serverUpdatePolicyAlways, monkeyMuxVersion, 20, shutdown, true, nil},
+		{"normal old server", serverUpdatePolicyAlways, "0.1.0", 10, legacy, false, nil},
+		{"force same pid same version", serverUpdatePolicyForce, monkeyMuxVersion, 10, shutdown, false, errServerUpdateStillAlive},
+		{"force same pid old version", serverUpdatePolicyForce, "0.1.0", 10, shutdown, false, errServerUpdateStillAlive},
+		{"force different pid same version", serverUpdatePolicyForce, monkeyMuxVersion, 20, shutdown, true, nil},
+		{"force different pid old version", serverUpdatePolicyForce, "0.1.0", 20, shutdown, true, nil},
+		{"force current pid unknown", serverUpdatePolicyForce, monkeyMuxVersion, 0, shutdown, false, errServerUpdateStillAlive},
+		{"force outgoing pid unknown", serverUpdatePolicyForce, monkeyMuxVersion, 20, &ensureServerReplacement{}, false, errServerUpdateStillAlive},
+		{"force legacy outgoing", serverUpdatePolicyForce, monkeyMuxVersion, 10, legacy, false, nil},
+		{"force legacy unknown pid", serverUpdatePolicyForce, monkeyMuxVersion, 0, legacy, false, nil},
+		{"force legacy concurrent replacement", serverUpdatePolicyForce, monkeyMuxVersion, 20, legacy, true, nil},
+		{"force native outgoing", serverUpdatePolicyForce, monkeyMuxVersion, 10, native, false, nil},
+		{"force native concurrent replacement", serverUpdatePolicyForce, monkeyMuxVersion, 20, native, true, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			keep, err := keepRespondingServerBeforeReplacement(
+				runningServerStatus{version: test.version}, pidRecord{pid: test.pid}, test.replacement, test.policy,
+			)
+			if keep != test.keep || !errors.Is(err, test.wantErr) {
+				t.Fatalf("guard = (%t, %v), want (%t, %v)", keep, err, test.keep, test.wantErr)
+			}
+		})
+	}
+}
+
 // startForeignProcess starts a long-lived process that is not a MonkeyMux
 // helper, so tests can exercise the recycled-pid paths with a pid that really
 // is alive on this host.
@@ -416,10 +433,7 @@ func startForeignProcess(t *testing.T) int {
 }
 
 func TestSessionServerOwnerKeepsCurrentOwner(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("owner-%d", time.Now().UnixNano())
 	if err := writeSessionPIDFile(session, os.Getpid()); err != nil {
@@ -435,10 +449,7 @@ func TestSessionServerOwnerKeepsCurrentOwner(t *testing.T) {
 }
 
 func TestSessionServerOwnerClearsDeadOwner(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("dead-%d", time.Now().UnixNano())
 	path, err := sessionPIDPath(session)
@@ -464,10 +475,7 @@ func TestSessionServerOwnerClearsDeadOwner(t *testing.T) {
 // unrelated process. Otherwise every attach falls back to a login shell with
 // "is running (pid N) but not accepting connections".
 func TestSessionServerOwnerClearsRecycledPID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("recycled-%d", time.Now().UnixNano())
 	path, err := sessionPIDPath(session)
@@ -503,10 +511,7 @@ func TestSessionServerOwnerClearsRecycledPID(t *testing.T) {
 // Pid files written before identities were recorded carry only a number, so a
 // recycled pid is detected by checking the running process image instead.
 func TestSessionServerOwnerClearsLegacyForeignPID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("legacy-%d", time.Now().UnixNano())
 	path, err := sessionPIDPath(session)
@@ -530,10 +535,7 @@ func TestSessionServerOwnerClearsLegacyForeignPID(t *testing.T) {
 }
 
 func TestAcquireSessionLockClearsLockHeldByRecycledPID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("lock-recycled-%d", time.Now().UnixNano())
 	path, err := sessionLockPath(session)
@@ -556,10 +558,7 @@ func TestAcquireSessionLockClearsLockHeldByRecycledPID(t *testing.T) {
 }
 
 func TestAcquireSessionLockClearsAbandonedUnparseableLock(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("lock-corrupt-%d", time.Now().UnixNano())
 	path, err := sessionLockPath(session)
@@ -585,10 +584,7 @@ func TestAcquireSessionLockClearsAbandonedUnparseableLock(t *testing.T) {
 }
 
 func TestGCKeepsPIDAndLockFilesOfLiveOwners(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("gc-%d", time.Now().UnixNano())
 	if err := writeSessionPIDFile(session, os.Getpid()); err != nil {
@@ -618,11 +614,49 @@ func TestGCKeepsPIDAndLockFilesOfLiveOwners(t *testing.T) {
 	}
 }
 
+func TestGCSocketFailures(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", shortUnixSocketDir(t))
+	dir, err := runtimeDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, live := range []bool{true, false} {
+		path := filepath.Join(dir, fmt.Sprintf("monkeymux-%t.sock", live))
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disableUnixListenerUnlink(listener)
+		t.Cleanup(func() { _ = listener.Close() })
+		if !live {
+			_ = listener.Close()
+		}
+		gcCommand()
+		_, err = os.Stat(path)
+		if live && err != nil {
+			t.Fatalf("gc removed a live socket: %v", err)
+		}
+		if !live && !os.IsNotExist(err) {
+			t.Fatalf("gc kept an abandoned socket: %v", err)
+		}
+	}
+	t.Run("unconfirmed failure", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows reports symlink loops as connection refused, a confirmed stale-socket error")
+		}
+		path := filepath.Join(dir, "monkeymux-loop.sock")
+		if err := os.Symlink(path, path); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		gcCommand()
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("gc removed a path after an unconfirmed failure: %v", err)
+		}
+	})
+}
+
 func TestGCKeepsInFlightRestoreSnapshots(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("restore-gc-%d", time.Now().UnixNano())
 	fresh, err := writeRestoreFile(session, &serverRestore{})
@@ -673,71 +707,86 @@ func agePIDFileBeforeThisProcess(t *testing.T, path string) {
 // another helper has already taken over, or two helpers would hold the same
 // session lock at once and could both start a server for it.
 func TestAcquireSessionLockIsExclusiveUnderContention(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	for _, test := range []struct {
+		name, contents string
+		aged           bool
+	}{
+		{"stale PID", "99999999\n", false},
+		{"abandoned lock", "   \n", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolateTestRuntime(t)
 
-	session := fmt.Sprintf("lock-race-%d", time.Now().UnixNano())
-	path, err := sessionLockPath(session)
-	if err != nil {
-		t.Fatalf("sessionLockPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	// Seed a stale lock so every contender races through the reclaim path.
-	if err := os.WriteFile(path, []byte("99999999\n"), 0o600); err != nil {
-		t.Fatalf("write stale lock: %v", err)
-	}
-
-	const (
-		contenders = 4
-		rounds     = 3
-	)
-	var (
-		mu        sync.Mutex
-		held      int
-		conflicts int
-		wg        sync.WaitGroup
-	)
-	for i := 0; i < contenders; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for r := 0; r < rounds; r++ {
-				unlock, err := acquireSessionLock(session)
-				if err != nil {
-					t.Errorf("acquireSessionLock: %v", err)
-					return
-				}
-				mu.Lock()
-				held++
-				if held > 1 {
-					conflicts++
-				}
-				mu.Unlock()
-				mu.Lock()
-				held--
-				mu.Unlock()
-				unlock()
+			session := fmt.Sprintf("lock-race-%d", time.Now().UnixNano())
+			path, err := sessionLockPath(session)
+			if err != nil {
+				t.Fatalf("sessionLockPath: %v", err)
 			}
-		}()
-	}
-	wg.Wait()
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatalf("write stale lock: %v", err)
+			}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if conflicts > 0 {
-		t.Fatalf("session lock was held by more than one holder %d times", conflicts)
+			if test.aged {
+				old := time.Now().Add(-time.Hour)
+				if err := os.Chtimes(path, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			const (
+				contenders = 4
+				rounds     = 3
+			)
+			var (
+				mu        sync.Mutex
+				held      int
+				conflicts int
+				wg        sync.WaitGroup
+			)
+			start := make(chan struct{})
+			for i := 0; i < contenders; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					for r := 0; r < rounds; r++ {
+						unlock, err := acquireSessionLock(session)
+						if err != nil {
+							t.Errorf("acquireSessionLock: %v", err)
+							return
+						}
+						mu.Lock()
+						held++
+						if held > 1 {
+							conflicts++
+						}
+						mu.Unlock()
+						// Yield while counted so overlapping acquisitions are observable.
+						time.Sleep(time.Millisecond)
+						mu.Lock()
+						held--
+						mu.Unlock()
+						unlock()
+					}
+				}()
+			}
+			close(start)
+			wg.Wait()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if conflicts > 0 {
+				t.Fatalf("session lock was held by more than one holder %d times", conflicts)
+			}
+		})
 	}
 }
 
 func TestAcquireSessionLockUnlockDoesNotDeleteAnotherSameProcessHolder(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("lock-same-pid-%d", time.Now().UnixNano())
 	firstUnlock, err := acquireSessionLock(session)
@@ -809,10 +858,7 @@ func TestAcquireSessionLockUnlockDoesNotDeleteAnotherSameProcessHolder(t *testin
 // A lock file is installed already populated, so a contender can never observe
 // an empty one and mistake a live holder for the residue of a crash.
 func TestInstallSessionLockFileIsNeverEmpty(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
+	isolateTestRuntime(t)
 
 	session := fmt.Sprintf("lock-install-%d", time.Now().UnixNano())
 	path, err := sessionLockPath(session)
@@ -854,71 +900,6 @@ func TestInstallSessionLockFileIsNeverEmpty(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("staging files left behind: %v", matches)
-	}
-}
-
-// The abandoned-file path must be as safe as the parseable one: a corrupt lock
-// reclaimed concurrently must never unlink the file a winner just installed.
-func TestAcquireSessionLockIsExclusiveOverAbandonedLock(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_RUNTIME_DIR", "")
-
-	session := fmt.Sprintf("lock-abandoned-race-%d", time.Now().UnixNano())
-	path, err := sessionLockPath(session)
-	if err != nil {
-		t.Fatalf("sessionLockPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	// An aged, unparseable lock: the residue of a crash mid-install.
-	if err := os.WriteFile(path, []byte("   \n"), 0o600); err != nil {
-		t.Fatalf("write abandoned lock: %v", err)
-	}
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-
-	const (
-		contenders = 4
-		rounds     = 3
-	)
-	var (
-		mu        sync.Mutex
-		held      int
-		conflicts int
-		wg        sync.WaitGroup
-	)
-	for i := 0; i < contenders; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for r := 0; r < rounds; r++ {
-				unlock, err := acquireSessionLock(session)
-				if err != nil {
-					t.Errorf("acquireSessionLock: %v", err)
-					return
-				}
-				mu.Lock()
-				held++
-				if held > 1 {
-					conflicts++
-				}
-				held--
-				mu.Unlock()
-				unlock()
-			}
-		}()
-	}
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if conflicts > 0 {
-		t.Fatalf("session lock was held by more than one holder %d times", conflicts)
 	}
 }
 

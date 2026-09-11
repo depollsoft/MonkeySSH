@@ -62,6 +62,7 @@ jobs:
   validate-pr:
     name: Validate PR source
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: read
     outputs:
@@ -131,6 +132,7 @@ jobs:
     name: Compute Version
     needs: validate-pr
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       build-name: ${{ steps.provided-version.outputs.build-name || steps.source-version.outputs.build-name }}
       build-number: ${{ steps.provided-version.outputs.build-number || steps.source-version.outputs.build-number }}
@@ -198,6 +200,7 @@ jobs:
     needs: [validate-pr, compute-version]
     if: needs.validate-pr.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       actions: read
     outputs:
@@ -235,7 +238,7 @@ jobs:
               'deploy-private.yml',
               'develop.yml',
             ];
-            const markerArtifactPattern = /^private-deploy-build-number-(\d+)$/;
+            const markerArtifactPattern = /^private-deploy-build-number-(\d+)(?:-(?:android|ios))?$/;
             const legacyArtifactPattern = /^(?:android|ios)-private-.+-(\d+)(?:\.(?:aab|apk|ipa))?$/;
             const maxDiscoveredBuildNumbersPerWorkflow = 20;
             const maxWorkflowRunPages = 3;
@@ -378,132 +381,55 @@ jobs:
       reuse-ios-artifact: ${{ steps.resolve.outputs.reuse-ios-artifact }}
       ios-run-id: ${{ steps.resolve.outputs.ios-run-id }}
       ios-artifact-name: ${{ steps.resolve.outputs.ios-artifact-name }}
+    timeout-minutes: 5
     steps:
-      - name: Find or start reusable artifact build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Resolve completed or active matching preview
         id: resolve
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DEPLOY_SHA: ${{ needs.validate-pr.outputs.deploy-sha }}
+          BUILD_NAME: ${{ needs.finalize-version.outputs.build-name }}
+          BUILD_NUMBER: ${{ needs.finalize-version.outputs.build-number }}
+          REBUILD_REQUIRED: ${{ needs.finalize-version.outputs.rebuild-required }}
         with:
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const deploySha = '${{ needs.validate-pr.outputs.deploy-sha }}';
-            const buildName = '${{ needs.finalize-version.outputs.build-name }}';
-            const buildNumber = '${{ needs.finalize-version.outputs.build-number }}';
-            const rebuildRequired =
-              '${{ needs.finalize-version.outputs.rebuild-required }}' === 'true';
-            const iosArtifactName =
-              `ios-unsigned-private-${buildName}-${buildNumber}-${deploySha}.ipa`;
-            const maxWaitAttempts = 40;
-            const waitDelayMs = 30_000;
-
-            const setOutputs = ({
-              reuseIosArtifact = 'false',
-              iosRunId = '',
-              iosArtifactName = '',
-            }) => {
-              core.setOutput('reuse-ios-artifact', reuseIosArtifact);
-              core.setOutput('ios-run-id', iosRunId);
-              core.setOutput('ios-artifact-name', iosArtifactName);
-            };
-
-            if (rebuildRequired) {
-              core.notice(
-                `Skipping preview artifact reuse for ${deploySha} because deploy build ` +
-                  `${buildNumber} was regenerated to stay ahead of prior private deploys.`,
-              );
-              setOutputs({});
-              return;
+            let artifact = null;
+            if (process.env.REBUILD_REQUIRED !== 'true') {
+              const {resolve} = require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/resolve_preview_artifact.cjs'));
+              artifact = await resolve({
+                github, ...context.repo, sha: process.env.DEPLOY_SHA,
+                buildName: process.env.BUILD_NAME, buildNumber: process.env.BUILD_NUMBER,
+              });
             }
-
-            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            const {data: previewIosWorkflow} = await github.rest.actions.getWorkflow({
-              owner,
-              repo,
-              workflow_id: 'preview-ios.yml',
-            });
-
-            // Returns the run id of a non-expired artifact with the exact name that
-            // was produced by the trusted iOS preview workflow.
-            const findIosArtifact = async () => {
-              const artifacts = await github.paginate(
-                github.rest.actions.listArtifactsForRepo,
-                {owner, repo, name: iosArtifactName, per_page: 100},
-              );
-              const candidates = artifacts.filter(
-                (artifact) =>
-                  !artifact.expired &&
-                  artifact.name === iosArtifactName,
-              );
-
-              for (const artifact of candidates) {
-                const workflowRun = artifact.workflow_run;
-                if (!workflowRun?.id) {
-                  continue;
-                }
-                const {data: run} = await github.rest.actions.getWorkflowRun({
-                  owner,
-                  repo,
-                  run_id: workflowRun.id,
-                });
-                if (
-                  run.workflow_id !== previewIosWorkflow.id ||
-                  run.event !== 'workflow_run'
-                ) {
-                  continue;
-                }
-                return {
-                  name: artifact.name,
-                  runId: String(workflowRun.id),
-                };
-              }
-
-              return null;
-            };
-
-            let iosArtifact = null;
-            for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
-              // PR Preview iOS is triggered by workflow_run, so its run head SHA
-              // is the default-branch workflow definition rather than the PR SHA.
-              // The source-qualified artifact name binds it to the PR commit,
-              // while the workflow id verifies the trusted producer.
-              if (!iosArtifact) {
-                iosArtifact = await findIosArtifact();
-              }
-              if (iosArtifact) {
-                break;
-              }
-              core.notice(
-                `Waiting for reusable iOS preview artifact for ${deploySha}.`,
-              );
-              if (attempt + 1 < maxWaitAttempts) {
-                await sleep(waitDelayMs);
-              }
-            }
-
-            if (!iosArtifact) {
-              core.notice(
-                `Reusable iOS preview artifact for ${deploySha} did not appear in time; ` +
-                  `deploy will build fresh iOS and Android artifacts.`,
-              );
-              setOutputs({});
-              return;
-            }
-
-            setOutputs({
-              reuseIosArtifact: 'true',
-              iosRunId: iosArtifact.runId,
-              iosArtifactName: iosArtifact.name,
-            });
+            core.setOutput('reuse-ios-artifact', artifact ? 'true' : 'false');
+            core.setOutput('ios-run-id', artifact?.runId ?? '');
+            core.setOutput('ios-artifact-name', artifact?.name ?? '');
+            if (!artifact) core.notice('No matching ready preview; building deployment artifacts.');
 
   comment-start:
     name: Update PR deploy comment (start)
     needs: [validate-pr, finalize-version, resolve-preview-artifacts]
     if: needs.validate-pr.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
+      contents: read
       issues: write
       pull-requests: write
     steps:
+      - name: Checkout comment tooling from the workflow commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/preview_deploy_comments.cjs
+          sparse-checkout-cone-mode: false
+
       - name: Mark deploy as running
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -512,76 +438,15 @@ jobs:
             const repo = context.repo.repo;
             const issueNumber = Number('${{ inputs.pr-number }}');
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const previewMarker = '<!-- Sticky Pull Request Commentpreview-build -->';
-            const statusMarker = '<!-- preview-deploy-status -->';
-            const noPreviewCommentUrl = '__NO_PREVIEW_COMMENT__';
-
-             const readMeta = (body, key) => {
-               const pattern = new RegExp(`<!-- ${key}:(.*?) -->`);
-               return body.match(pattern)?.[1] ?? '';
-             };
-
-             const findStatusComment = (comments, targetRequestKey) =>
-               [...comments].reverse().find(
-                 (comment) =>
-                   comment.body?.includes(statusMarker) &&
-                   readMeta(comment.body, 'preview-deploy-request-key') === targetRequestKey,
-               );
-
-             const resolvePreviewCommentUrl = ({comments, deploySha, fallbackUrl}) => {
-               const latestPreviewComment = [...comments].reverse().find((comment) => {
-                 if (!comment.body?.includes(previewMarker)) {
-                   return false;
-                 }
-
-                if (!deploySha) {
-                  return true;
-                }
-
-                return readMeta(comment.body, 'preview-build-source-sha') === deploySha;
-              });
-
-              return latestPreviewComment?.html_url ?? fallbackUrl;
-            };
-
-             const comments = await github.paginate(github.rest.issues.listComments, {
-               owner,
-               repo,
-               issue_number: issueNumber,
-               per_page: 100,
-             });
-             const requestCommentIdInput = '${{ inputs.request-comment-id }}'.trim();
-             const requestKey = requestCommentIdInput
-               ? `comment-${requestCommentIdInput}`
-               : `workflow-${context.runId}`;
-             const existing = findStatusComment(comments, requestKey);
-             const existingBody = existing?.body ?? '';
-
-             const requestedBy =
-               '${{ inputs.request-comment-user }}' ||
-               readMeta(existingBody, 'preview-deploy-requested-by') ||
-               '${{ github.actor }}';
-             const requestedAt =
-               '${{ inputs.request-comment-at }}' ||
-               readMeta(existingBody, 'preview-deploy-requested-at');
-             const requestCommentId =
-               requestCommentIdInput ||
-               readMeta(existingBody, 'preview-deploy-last-command-comment-id');
-             const requestCommentUrl =
-               '${{ inputs.request-comment-url }}' ||
-               readMeta(existingBody, 'preview-deploy-request-comment-url');
-            const requestedPreviewCommentUrl =
-              '${{ inputs.request-preview-comment-url }}' === noPreviewCommentUrl
-                ? ''
-                : '${{ inputs.request-preview-comment-url }}' ||
-                  readMeta(existingBody, 'preview-deploy-preview-comment-url');
-            const deploySha =
-              '${{ needs.validate-pr.outputs.deploy-sha }}' ||
-              readMeta(existingBody, 'preview-deploy-source-sha');
-            const previewCommentUrl = resolvePreviewCommentUrl({
-              comments,
-              deploySha,
-              fallbackUrl: requestedPreviewCommentUrl,
+            const {statusMarker, resolveRequestContext, upsertStatusComment} =
+              require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/preview_deploy_comments.cjs'));
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issueNumber, per_page: 100,
+            });
+            const {requestKey, requestedBy, requestedAt, requestCommentId,
+              requestCommentUrl, deploySha, previewCommentUrl} = resolveRequestContext({
+              comments, inputs: ${{ toJSON(inputs) }}, runId: context.runId,
+              actor: context.actor, sourceSha: ${{ toJSON(needs.validate-pr.outputs.deploy-sha) }},
             });
             const requestDetails = requestCommentId
               ? `@${requestedBy} via \`/deploy\` comment`
@@ -640,21 +505,7 @@ jobs:
               .filter(Boolean)
               .join('\n');
 
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                body,
-              });
-            }
+            await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
 
   deploy:
     name: Deploy to TestFlight & Play Internal
@@ -681,7 +532,6 @@ jobs:
       ios-reuse-ipa-artifact-name: ${{ needs.resolve-preview-artifacts.outputs.reuse-ios-artifact == 'true' && needs.resolve-preview-artifacts.outputs.ios-artifact-name || '' }}
       ios-reuse-ipa-is-unsigned: ${{ needs.resolve-preview-artifacts.outputs.reuse-ios-artifact == 'true' }}
       ios-reuse-source-sha: ${{ needs.resolve-preview-artifacts.outputs.reuse-ios-artifact == 'true' && needs.validate-pr.outputs.deploy-sha || '' }}
-      update-pr-deploy-comment: true
     secrets:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -703,6 +553,7 @@ jobs:
     name: Verify PR source ref
     needs: [validate-pr, deploy]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Ensure deployed mobile builds used requested preview SHA
         env:
@@ -743,10 +594,20 @@ jobs:
     needs: [validate-pr, finalize-version, resolve-preview-artifacts, comment-start, deploy, verify-pr-source]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
+      contents: read
       issues: write
       pull-requests: write
     steps:
+      - name: Checkout comment tooling from the workflow commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/preview_deploy_comments.cjs
+          sparse-checkout-cone-mode: false
+
       - name: Mark deploy as complete
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -755,77 +616,16 @@ jobs:
             const repo = context.repo.repo;
             const issueNumber = Number('${{ inputs.pr-number }}');
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const previewMarker = '<!-- Sticky Pull Request Commentpreview-build -->';
-            const statusMarker = '<!-- preview-deploy-status -->';
-            const noPreviewCommentUrl = '__NO_PREVIEW_COMMENT__';
-
-             const readMeta = (body, key) => {
-               const pattern = new RegExp(`<!-- ${key}:(.*?) -->`);
-               return body.match(pattern)?.[1] ?? '';
-             };
-
-             const findStatusComment = (comments, targetRequestKey) =>
-               [...comments].reverse().find(
-                 (comment) =>
-                   comment.body?.includes(statusMarker) &&
-                   readMeta(comment.body, 'preview-deploy-request-key') === targetRequestKey,
-               );
-
-             const resolvePreviewCommentUrl = ({comments, deploySha, fallbackUrl}) => {
-               const latestPreviewComment = [...comments].reverse().find((comment) => {
-                 if (!comment.body?.includes(previewMarker)) {
-                   return false;
-                 }
-
-                if (!deploySha) {
-                  return true;
-                }
-
-                return readMeta(comment.body, 'preview-build-source-sha') === deploySha;
-              });
-
-              return latestPreviewComment?.html_url ?? fallbackUrl;
-            };
-
-             const comments = await github.paginate(github.rest.issues.listComments, {
-               owner,
-               repo,
-               issue_number: issueNumber,
-               per_page: 100,
-             });
-             const requestCommentIdInput = '${{ inputs.request-comment-id }}'.trim();
-             const requestKey = requestCommentIdInput
-               ? `comment-${requestCommentIdInput}`
-               : `workflow-${context.runId}`;
-             const existing = findStatusComment(comments, requestKey);
-             const existingBody = existing?.body ?? '';
-
-             const requestedBy =
-               '${{ inputs.request-comment-user }}' ||
-               readMeta(existingBody, 'preview-deploy-requested-by') ||
-               '${{ github.actor }}';
-             const requestedAt =
-               '${{ inputs.request-comment-at }}' ||
-               readMeta(existingBody, 'preview-deploy-requested-at');
-             const requestCommentId =
-               requestCommentIdInput ||
-               readMeta(existingBody, 'preview-deploy-last-command-comment-id');
-             const requestCommentUrl =
-               '${{ inputs.request-comment-url }}' ||
-               readMeta(existingBody, 'preview-deploy-request-comment-url');
-            const requestedPreviewCommentUrl =
-              '${{ inputs.request-preview-comment-url }}' === noPreviewCommentUrl
-                ? ''
-                : '${{ inputs.request-preview-comment-url }}' ||
-                  readMeta(existingBody, 'preview-deploy-preview-comment-url');
-            const deploySha =
-              '${{ needs.validate-pr.outputs.deploy-sha }}' ||
-              readMeta(existingBody, 'preview-deploy-source-sha') ||
-              '${{ inputs.source-sha }}';
-            const previewCommentUrl = resolvePreviewCommentUrl({
-              comments,
-              deploySha,
-              fallbackUrl: requestedPreviewCommentUrl,
+            const {statusMarker, resolveRequestContext, upsertStatusComment} =
+              require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/preview_deploy_comments.cjs'));
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issueNumber, per_page: 100,
+            });
+            const {requestKey, requestedBy, requestedAt, requestCommentId,
+              requestCommentUrl, deploySha, previewCommentUrl} = resolveRequestContext({
+              comments, inputs: ${{ toJSON(inputs) }}, runId: context.runId,
+              actor: context.actor, sourceSha: ${{ toJSON(needs.validate-pr.outputs.deploy-sha) }},
+              fallbackSha: ${{ toJSON(inputs.source-sha) }},
             });
             const requestDetails = requestCommentId
               ? `@${requestedBy} via \`/deploy\` comment`
@@ -995,21 +795,7 @@ jobs:
               .filter(Boolean)
               .join('\n');
 
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                body,
-              });
-            }
+            await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
 
             try {
               await syncRequestCommentReaction(targetReaction);

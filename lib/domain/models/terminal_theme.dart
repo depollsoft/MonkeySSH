@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
@@ -53,13 +51,6 @@ String buildTerminalThemeDefaultColorReports(TerminalThemeData theme) => [
   buildTerminalThemeOscResponse(theme: theme, code: '10', args: const ['?']),
   buildTerminalThemeOscResponse(theme: theme, code: '11', args: const ['?']),
 ].whereType<String>().join();
-
-/// Builds an unsolicited default background color report.
-///
-/// Theme-aware TUIs listen for OSC 11 responses when deciding whether their
-/// default theme should switch between light and dark.
-String buildTerminalThemeBackgroundColorReport(TerminalThemeData theme) =>
-    buildTerminalThemeOscResponse(theme: theme, code: '11', args: const ['?'])!;
 
 /// Builds an xterm-compatible response for terminal theme OSC color queries.
 ///
@@ -381,12 +372,6 @@ class TerminalThemeData {
             : null,
       );
 
-  /// Creates a theme from a JSON string.
-  factory TerminalThemeData.fromJsonString(String jsonString) =>
-      TerminalThemeData.fromJson(
-        jsonDecode(jsonString) as Map<String, dynamic>,
-      );
-
   /// Safely creates a theme from decoded JSON, or null when invalid.
   static TerminalThemeData? tryFromJson(Object? json) {
     if (json is! Map || json.keys.any((key) => key is! String)) {
@@ -568,9 +553,6 @@ class TerminalThemeData {
     Color? brightMagenta,
     Color? brightCyan,
     Color? brightWhite,
-    Color? searchHitBackground,
-    Color? searchHitBackgroundCurrent,
-    Color? searchHitForeground,
     Map<int, Color>? paletteOverrides,
   }) => TerminalThemeData(
     id: id ?? this.id,
@@ -598,10 +580,9 @@ class TerminalThemeData {
     brightCyan: brightCyan ?? this.brightCyan,
     brightWhite: brightWhite ?? this.brightWhite,
     paletteOverrides: paletteOverrides ?? this.paletteOverrides,
-    searchHitBackground: searchHitBackground ?? this.searchHitBackground,
-    searchHitBackgroundCurrent:
-        searchHitBackgroundCurrent ?? this.searchHitBackgroundCurrent,
-    searchHitForeground: searchHitForeground ?? this.searchHitForeground,
+    searchHitBackground: searchHitBackground,
+    searchHitBackgroundCurrent: searchHitBackgroundCurrent,
+    searchHitForeground: searchHitForeground,
   );
 
   /// Converts this theme to a JSON map for storage.
@@ -637,9 +618,6 @@ class TerminalThemeData {
     if (searchHitForeground != null)
       'searchHitForeground': searchHitForeground!.toARGB32(),
   };
-
-  /// Serializes this theme to a JSON string.
-  String toJsonString() => jsonEncode(toJson());
 
   @override
   bool operator ==(Object other) =>

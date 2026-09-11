@@ -1,0 +1,84 @@
+name: Restore Apple caches
+description: Restore SwiftPM downloads or platform compilation and package caches.
+inputs:
+  phase:
+    description: swiftpm or build
+    required: true
+  platform:
+    description: ios or macos for build caches
+    default: ''
+  configuration:
+    description: Build flavor or configuration
+    default: ''
+  flutter-version:
+    description: Flutter toolchain version
+    default: ''
+  dependency-fingerprint:
+    description: Hash of pubspec.lock and the platform Package.resolved
+    default: ''
+  restore-swiftpm:
+    description: Restore downloads before invalidating manifests
+    default: 'true'
+outputs:
+  swiftpm-hit:
+    description: Whether the SwiftPM download key matched exactly
+    value: ${{ steps.swiftpm.outputs.cache-hit }}
+  compilation-key:
+    description: Compilation cache primary key
+    value: ${{ steps.compilation.outputs.cache-primary-key }}
+  compilation-hit:
+    description: Whether the compilation key matched exactly
+    value: ${{ steps.compilation.outputs.cache-hit }}
+  workspace-key:
+    description: Resolved package cache primary key
+    value: ${{ steps.workspace.outputs.cache-primary-key }}
+  workspace-hit:
+    description: Whether the resolved package key matched exactly
+    value: ${{ steps.workspace.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      id: swiftpm
+      if: inputs.phase == 'swiftpm' && inputs.restore-swiftpm == 'true'
+      with:
+        path: ~/Library/Caches/org.swift.swiftpm
+        key: spm-${{ runner.os }}-${{ hashFiles('ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+        restore-keys: spm-${{ runner.os }}-
+
+    - name: Drop cached SwiftPM manifest evaluations
+      if: inputs.phase == 'swiftpm'
+      shell: bash
+      # Package.swift derives permission macros from Info.plist, which SwiftPM
+      # does not track as a manifest input.
+      run: rm -rf ~/Library/Caches/org.swift.swiftpm/manifests
+
+    - name: Identify Apple build caches
+      id: toolchain
+      if: inputs.phase == 'build'
+      shell: bash
+      run: |
+        xcodebuild -version
+        xcode_key=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f1)
+        echo "xcode=$xcode_key" >> "$GITHUB_OUTPUT"
+        mkdir -p "$HOME/Library/Caches/monkeyssh-xcode"
+
+    - name: Restore resolved Swift packages
+      id: workspace
+      if: inputs.phase == 'build'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: |
+          build/${{ inputs.platform }}/SourcePackages/checkouts
+          build/${{ inputs.platform }}/SourcePackages/repositories
+          build/${{ inputs.platform }}/SourcePackages/artifacts
+          build/${{ inputs.platform }}/SourcePackages/workspace-state.json
+        key: spm-workspace-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}-${{ inputs.platform }}-${{ inputs.dependency-fingerprint }}
+
+    - name: Restore Apple compilation cache
+      id: compilation
+      if: inputs.phase == 'build'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: ~/Library/Caches/monkeyssh-xcode
+        key: ${{ inputs.platform }}-compile-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}

@@ -48,12 +48,7 @@ abstract interface class RemoteMultiplexerService {
     String sessionName, {
     SshExecPriority priority = SshExecPriority.normal,
     String? extraFlags,
-  }) async => (await currentPaneContext(
-    session,
-    sessionName,
-    priority: priority,
-    extraFlags: extraFlags,
-  ))?.currentPath;
+  });
 
   /// Creates a new remote window.
   Future<void> createWindow(
@@ -85,6 +80,7 @@ abstract interface class RemoteMultiplexerService {
     SshSession session,
     String sessionName,
     int windowIndex, {
+    String? windowId,
     String? extraFlags,
   });
 
@@ -119,158 +115,7 @@ abstract interface class RemoteMultiplexerService {
   });
 }
 
-/// tmux-backed implementation of [RemoteMultiplexerService].
-class TmuxRemoteMultiplexerService implements RemoteMultiplexerService {
-  /// Creates a tmux-backed multiplexer adapter.
-  const TmuxRemoteMultiplexerService(this._tmuxService);
-
-  final TmuxService _tmuxService;
-
-  @override
-  Future<String?> detectedVersion(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) => _tmuxService.detectedVersion(
-    session,
-    sessionName,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<List<TmuxWindow>> listWindows(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) => _tmuxService.listWindows(session, sessionName, extraFlags: extraFlags);
-
-  @override
-  Stream<TmuxWindowChangeEvent> watchWindowChanges(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) => _tmuxService.watchWindowChanges(
-    session,
-    sessionName,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<TmuxPaneContext?> currentPaneContext(
-    SshSession session,
-    String sessionName, {
-    SshExecPriority priority = SshExecPriority.normal,
-    String? extraFlags,
-  }) => _tmuxService.currentPaneContext(
-    session,
-    sessionName,
-    priority: priority,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<String?> currentPanePath(
-    SshSession session,
-    String sessionName, {
-    SshExecPriority priority = SshExecPriority.normal,
-    String? extraFlags,
-  }) => _tmuxService.currentPanePath(
-    session,
-    sessionName,
-    priority: priority,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<void> createWindow(
-    SshSession session,
-    String sessionName, {
-    String? command,
-    String? name,
-    String? workingDirectory,
-    String? extraFlags,
-  }) => _tmuxService.createWindow(
-    session,
-    sessionName,
-    command: command,
-    name: name,
-    workingDirectory: workingDirectory,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<void> selectWindow(
-    SshSession session,
-    String sessionName,
-    int windowIndex, {
-    String? windowId,
-    String? extraFlags,
-    Map<int, int>? clientImageSignatures,
-    bool suppressReplay = false,
-  }) => _tmuxService.selectWindow(
-    session,
-    sessionName,
-    windowIndex,
-    windowId: windowId,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<void> killWindow(
-    SshSession session,
-    String sessionName,
-    int windowIndex, {
-    String? extraFlags,
-  }) => _tmuxService.killWindow(
-    session,
-    sessionName,
-    windowIndex,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  bool isExecChannelCoolingDown(SshSession session) =>
-      _tmuxService.isExecChannelCoolingDown(session);
-
-  @override
-  Future<bool> hasForegroundClientOrThrow(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) => _tmuxService.hasForegroundClientOrThrow(
-    session,
-    sessionName,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<String?> foregroundSessionNameOrThrow(
-    SshSession session, {
-    String? extraFlags,
-  }) => _tmuxService.foregroundSessionNameOrThrow(
-    session,
-    extraFlags: extraFlags,
-  );
-
-  @override
-  Future<void> refreshTerminalTheme(
-    SshSession session,
-    String sessionName,
-    TerminalThemeData theme, {
-    String? extraFlags,
-    bool forceForegroundRedraw = false,
-  }) =>
-      // Classic tmux forces its own foreground repaint via refresh-client in
-      // buildTmuxRefreshTerminalThemeCommand, so the flag is a no-op here.
-      _tmuxService.refreshTerminalTheme(
-        session,
-        sessionName,
-        theme,
-        extraFlags: extraFlags,
-      );
-}
-
-/// tmux adapter provider for generic multiplexer consumers.
+/// tmux service provider for generic multiplexer consumers.
 final tmuxRemoteMultiplexerServiceProvider = Provider<RemoteMultiplexerService>(
-  (ref) => TmuxRemoteMultiplexerService(ref.watch(tmuxServiceProvider)),
+  (ref) => ref.watch(tmuxServiceProvider),
 );

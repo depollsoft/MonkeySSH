@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -236,8 +237,6 @@ func TestResizeRepublishesGridForUnchangedRequest(t *testing.T) {
 	server.mu.Lock()
 	server.attachClients[conn] = client
 	server.attachConn = conn
-	client.terminalWidth = 80
-	client.terminalHeight = 24
 	server.mu.Unlock()
 
 	server.resizeForClient("phone", 80, 24, false)
@@ -396,5 +395,60 @@ func TestRedrawFallbackRejectsFrameWithoutVisibleContent(t *testing.T) {
 			"pause retained a frame with nothing to paint: %q",
 			string(captured),
 		)
+	}
+}
+
+func TestAttachBarrierDeadlineReleasesDisconnectedAndQueuedAttaches(t *testing.T) {
+	server := newMuxServerWithSize("test", 59, 47)
+	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	window.observeTerminalOutputStateLocked([]byte("\x1b]0;unfinished"))
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	firstConn, peer := net.Pipe()
+	defer firstConn.Close()
+	defer peer.Close()
+	firstDone := make(chan struct{})
+	go func() {
+		server.handleAttach(firstConn, bufio.NewReader(firstConn), controlMessage{Width: 69, Height: 55})
+		close(firstDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		waiting := server.attachViewportTransitionWindowID == window.id
+		server.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first attach did not enter transition")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = peer.Close()
+	secondConn := &recordingConn{}
+	secondDone := make(chan struct{})
+	started := time.Now()
+	go func() {
+		server.handleAttach(secondConn, bufio.NewReader(strings.NewReader("")), controlMessage{Width: 69, Height: 55})
+		close(secondDone)
+	}()
+	for _, done := range []chan struct{}{firstDone, secondDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Until(started.Add(attachTransitionTimeout + time.Second))):
+			t.Fatal("incomplete OSC retained an attach beyond its absolute deadline")
+		}
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.attachViewportTransitionWindowID != "" || server.attachCountLocked() != 0 {
+		t.Fatal("timed-out attach retained transition state")
+	}
+	if server.publishedWidth != 59 || server.publishedHeight != 47 || secondConn.String() != "" {
+		t.Fatal("timed-out attach injected a viewport transition into incomplete output")
+	}
+	if window.terminalOutputIsGroundLocked() {
+		t.Fatal("timeout changed the incomplete parser state")
 	}
 }

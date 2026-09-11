@@ -61,6 +61,29 @@ void main() {
       );
     });
 
+    test('separates anonymous subagent and top-level chunks', () {
+      final timeline = _run(AcpTimelineBuilder(), [
+        const AcpContentChunkUpdate(
+          kind: 'agent_message_chunk',
+          content: AcpTextContent('nested'),
+          meta: {
+            'claudeCode': {'parentToolUseId': 'agent-launch'},
+          },
+        ),
+        _chunk('agent_message_chunk', 'top-level'),
+      ]);
+
+      final messages = timeline.entries.cast<AcpMessageEntry>();
+      expect(messages.map((entry) => entry.parentToolCallId), [
+        'agent-launch',
+        null,
+      ]);
+      expect(
+        messages.map((entry) => (entry.content.single as AcpTextContent).text),
+        ['nested', 'top-level'],
+      );
+    });
+
     test('resumes an earlier message id after an interruption', () {
       final timeline = _run(AcpTimelineBuilder(), [
         _chunk('agent_message_chunk', 'a', messageId: 'm1'),
@@ -92,6 +115,48 @@ void main() {
       expect(
         (timeline.entries.last as AcpMessageEntry).role,
         AcpMessageRole.agent,
+      );
+    });
+
+    test('does not suppress unrelated user updates after non-echoed turns', () {
+      final builder = AcpTimelineBuilder();
+      for (var turn = 0; turn < 600; turn++) {
+        builder
+          ..appendLocalUserPrompt([AcpTextContent('prompt-$turn')])
+          ..apply(_chunk('agent_message_chunk', 'reply-$turn'));
+      }
+      builder.apply(_chunk('user_message_chunk', 'another client'));
+
+      final timeline = builder.snapshot();
+      expect(timeline.overflowed, isTrue);
+      final last = timeline.entries.last as AcpMessageEntry;
+      expect(last.role, AcpMessageRole.user);
+      expect((last.content.single as AcpTextContent).text, 'another client');
+    });
+
+    test('suppresses queued prompt echoes only after dispatch', () {
+      final builder = AcpTimelineBuilder();
+      final first = builder.appendLocalUserPrompt(const [
+        AcpTextContent('one'),
+      ]);
+      final second = builder.appendLocalUserPrompt(const [
+        AcpTextContent('two'),
+      ], queued: true);
+      builder
+        ..apply(_chunk('user_message_chunk', 'one', messageId: 'remote-one'))
+        ..apply(_chunk('agent_message_chunk', 'reply'))
+        ..apply(_chunk('user_message_chunk', 'unrelated', messageId: 'other'))
+        ..markLocalUserPromptDispatched(second)
+        ..apply(_chunk('user_message_chunk', 'two', messageId: 'remote-two'));
+
+      expect(
+        builder
+            .snapshot()
+            .entries
+            .whereType<AcpMessageEntry>()
+            .where((entry) => entry.role == AcpMessageRole.user)
+            .map((entry) => entry.messageId),
+        [first, second, 'other'],
       );
     });
 
@@ -246,7 +311,7 @@ void main() {
     test('keeps a safe pasted image instead of replacing it with a marker', () {
       final builder = AcpTimelineBuilder(
         limits: const AcpTimelineLimits(
-          maxEntryBytes: 16,
+          maxEntryBytes: 512,
           maxRetainedImageBytes: 2 * 1024 * 1024,
           maxTotalBytes: 8 * 1024 * 1024,
         ),
@@ -267,7 +332,7 @@ void main() {
     test('keeps an image while bounding accompanying pasted text', () {
       final builder = AcpTimelineBuilder(
         limits: const AcpTimelineLimits(
-          maxEntryBytes: 32,
+          maxEntryBytes: 512,
           maxRetainedImageBytes: 2048,
           maxTotalBytes: 8192,
         ),
@@ -282,6 +347,132 @@ void main() {
       expect(
         content.whereType<AcpTextContent>().single.text,
         contains('truncated'),
+      );
+    });
+
+    for (final field in ['annotations', 'meta', 'extensions']) {
+      for (final image in [true, false]) {
+        test('bounds ${image ? 'image' : 'text'} $field', () {
+          final large = {'payload': 'x' * 4096};
+          final meta = field == 'meta' ? large : <String, Object?>{};
+          final extensions = field == 'extensions'
+              ? large
+              : <String, Object?>{};
+          final annotations = field != 'annotations'
+              ? null
+              : image
+              ? AcpAnnotations(extensions: large)
+              : AcpAnnotations(meta: large);
+          final content = image
+              ? AcpImageContent(
+                  data: 'AAAA',
+                  mimeType: 'image/png',
+                  annotations: annotations,
+                  meta: meta,
+                  extensions: extensions,
+                )
+              : AcpTextContent(
+                  'short',
+                  annotations: annotations,
+                  meta: meta,
+                  extensions: extensions,
+                );
+          if (image) {
+            expect(approximateContentBlockBytes(content), greaterThan(4096));
+          }
+          final builder = AcpTimelineBuilder(
+            limits: const AcpTimelineLimits(maxEntryBytes: 512),
+          )..appendLocalUserPrompt([content]);
+          final entry = _expectBounded(builder) as AcpMessageEntry;
+          if (!image) {
+            final text = entry.content.single as AcpTextContent;
+            expect(text.text, 'short');
+            expect(text.annotations, isNull);
+            expect(text.meta, isEmpty);
+            expect(text.extensions, isEmpty);
+          }
+        });
+      }
+    }
+
+    for (final field in ['meta', 'extensions']) {
+      for (final kind in ['content', 'diff', 'terminal']) {
+        test('bounds tool $kind wrapper $field', () {
+          final large = {'payload': 'x' * 4096};
+          final meta = field == 'meta' ? large : <String, Object?>{};
+          final extensions = field == 'extensions'
+              ? large
+              : <String, Object?>{};
+          final content = switch (kind) {
+            'diff' => AcpToolDiff(
+              path: '/file',
+              newText: 'x',
+              meta: meta,
+              extensions: extensions,
+            ),
+            'terminal' => AcpToolTerminal(
+              terminalId: 't1',
+              meta: meta,
+              extensions: extensions,
+            ),
+            _ => AcpToolContentBlock(
+              content: const AcpTextContent('short'),
+              meta: meta,
+              extensions: extensions,
+            ),
+          };
+          final builder =
+              AcpTimelineBuilder(
+                limits: const AcpTimelineLimits(maxEntryBytes: 512),
+              )..apply(
+                AcpToolCallUpdate(
+                  toolCallId: 'tool',
+                  isInitial: true,
+                  content: [content],
+                ),
+              );
+          _expectBounded(builder);
+        });
+      }
+    }
+
+    test('bounds a single image message to the total budget', () {
+      final builder =
+          AcpTimelineBuilder(
+            limits: const AcpTimelineLimits(
+              maxEntryBytes: 8192,
+              maxTotalBytes: 512,
+            ),
+          )..appendLocalUserPrompt([
+            AcpImageContent(data: 'A' * 4096, mimeType: 'image/png'),
+          ]);
+      _expectBounded(builder);
+    });
+
+    test('retained image metadata counts toward the total budget', () {
+      final builder = AcpTimelineBuilder(
+        limits: const AcpTimelineLimits(
+          maxEntryBytes: 2048,
+          maxTotalBytes: 4096,
+        ),
+      );
+      for (var index = 0; index < 10; index++) {
+        builder.appendLocalUserPrompt([
+          AcpImageContent(
+            data: 'AAAA',
+            mimeType: 'image/png',
+            meta: {'payload': '$index${'x' * 1024}'},
+          ),
+        ]);
+      }
+      final timeline = builder.snapshot();
+      expect(timeline.droppedEntryCount, greaterThan(0));
+      expect(
+        timeline.entries.fold<int>(
+          0,
+          (sum, entry) => sum + approximateTimelineEntryBytes(entry),
+        ),
+        lessThanOrEqualTo(4096),
       );
     });
 
@@ -423,6 +614,51 @@ void main() {
       expect(entry.rawOutput, isNot('y' * 1000));
     });
 
+    for (final field in ['path', 'meta', 'extensions', 'title', 'total']) {
+      test('bounds oversized tool $field and preserves update identity', () {
+        final large = '😀' * (field == 'total' ? 150 : 1024 * 1024);
+        final titleOnly = field == 'title' || field == 'total';
+        const smallLocation = AcpToolLocation(path: '/keep.dart', line: 7);
+        final location = AcpToolLocation(
+          path: field == 'path' ? large : '/large.dart',
+          meta: field == 'meta' ? {'payload': large} : const {},
+          extensions: field == 'extensions' ? {'payload': large} : const {},
+        );
+        final builder =
+            AcpTimelineBuilder(
+              limits: const AcpTimelineLimits(
+                maxEntryBytes: 1024,
+                maxTotalBytes: 512,
+              ),
+            )..apply(
+              AcpToolCallUpdate(
+                toolCallId: 'bounded',
+                isInitial: true,
+                title: titleOnly ? large : 'Read',
+                status: AcpToolStatus.inProgress,
+                locations: [if (!titleOnly) location, smallLocation],
+              ),
+            );
+        final snapshot = builder.snapshot();
+        final entry = snapshot.entries.single as AcpToolCallEntry;
+        expect(snapshot.overflowed, isTrue);
+        expect(approximateTimelineEntryBytes(entry), lessThanOrEqualTo(512));
+        expect(entry.locations, [smallLocation]);
+        expect(entry.title, titleOnly ? '😀' * 64 : 'Read');
+        builder.apply(
+          const AcpToolCallUpdate(
+            toolCallId: 'bounded',
+            status: AcpToolStatus.completed,
+          ),
+        );
+        final merged = builder.snapshot().entries.single as AcpToolCallEntry;
+        expect(merged.toolCallId, 'bounded');
+        expect(merged.order, entry.order);
+        expect(merged.status, AcpToolStatus.completed);
+        expect(merged.locations, [smallLocation]);
+      });
+    }
+
     test('never drops below one entry even when it alone exceeds the '
         'total byte budget', () {
       final builder = AcpTimelineBuilder(
@@ -472,4 +708,12 @@ void main() {
       },
     );
   });
+}
+
+AcpTimelineEntry _expectBounded(AcpTimelineBuilder builder) {
+  final timeline = builder.snapshot();
+  expect(timeline.overflowed, isTrue);
+  final entry = timeline.entries.single;
+  expect(approximateTimelineEntryBytes(entry), lessThanOrEqualTo(512));
+  return entry;
 }

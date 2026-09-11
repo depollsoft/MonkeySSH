@@ -4,10 +4,13 @@ require 'fileutils'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../scripts/preview_release_notes'
+require_relative '../../scripts/store_metadata'
+require_relative '../../scripts/testflight_delivery'
+require_relative '../../scripts/match_git_persistence'
 
 platform :ios do
   before_all do
-    setup_ci if ENV['CI']
+    setup_ci if ENV['CI'] && RUBY_PLATFORM.include?('darwin')
   end
 
   APP_IDS = {
@@ -190,6 +193,12 @@ platform :ios do
   end
 
   desc 'Sync certificates and profiles for a given type and app identifier'
+  private_lane :check_match_persistence do
+    require 'match'
+    storage = Match::Storage::GitStorage
+    storage.prepend(MatchGitPersistence) unless storage.ancestors.include?(MatchGitPersistence)
+  end
+
   private_lane :sync_certs do |options|
     app_id = options[:app_identifier]
     match_type = options[:type] || 'appstore'
@@ -197,34 +206,49 @@ platform :ios do
     force = options[:force] == true
 
     api_key = get_api_key
+    check_match_persistence unless readonly
+
+    write_credentials = {}
+    unless readonly || ENV['MATCH_GIT_WRITE_BASIC_AUTHORIZATION'].to_s.empty?
+      write_credentials[:git_basic_authorization] = ENV.fetch('MATCH_GIT_WRITE_BASIC_AUTHORIZATION')
+    end
 
     match(
+      **write_credentials,
       type: match_type,
       app_identifier: app_id,
       api_key: api_key,
       readonly: readonly,
       force: force,
+      # Ad hoc profiles embed the registered device list, so a profile minted
+      # before a tester registered their device cannot install on it. Let match
+      # regenerate when the device count changes; App Store profiles have no
+      # device list and ignore this.
+      force_for_new_devices: match_type == 'adhoc' && !readonly,
     )
   end
 
   private_lane :build_and_sign do |options|
     scheme = options[:scheme]
+    export_method = options[:export_method] || 'app-store'
+    match_type = export_method == 'ad-hoc' ? 'adhoc' : 'appstore'
+    match_profile_prefix = export_method == 'ad-hoc' ? 'AdHoc' : 'AppStore'
     app_id = APP_IDS[scheme]
     live_activity_app_id = LIVE_ACTIVITY_APP_IDS[scheme]
 
     sync_certs(
       app_identifier: [app_id, live_activity_app_id],
-      type: 'appstore',
-      readonly: false,
+      type: match_type,
+      readonly: match_type == 'appstore',
     )
 
-    profile_name = ENV["sigh_#{app_id}_appstore_profile-name"] ||
-                   ENV["sigh_#{app_id}_appstore_profile_name"] ||
-                   "match AppStore #{app_id}"
+    profile_name = ENV["sigh_#{app_id}_#{match_type}_profile-name"] ||
+                   ENV["sigh_#{app_id}_#{match_type}_profile_name"] ||
+                   "match #{match_profile_prefix} #{app_id}"
     live_activity_profile_name =
-      ENV["sigh_#{live_activity_app_id}_appstore_profile-name"] ||
-      ENV["sigh_#{live_activity_app_id}_appstore_profile_name"] ||
-      "match AppStore #{live_activity_app_id}"
+      ENV["sigh_#{live_activity_app_id}_#{match_type}_profile-name"] ||
+      ENV["sigh_#{live_activity_app_id}_#{match_type}_profile_name"] ||
+      "match #{match_profile_prefix} #{live_activity_app_id}"
 
     update_code_signing_settings(
       use_automatic_signing: false,
@@ -252,7 +276,7 @@ platform :ios do
       workspace: 'Runner.xcworkspace',
       scheme: scheme,
       configuration: "Release-#{scheme}",
-      export_method: 'app-store',
+      export_method: export_method,
       output_directory: '../build/ios/ipa',
       archive_path: '../build/ios/archive/Runner.xcarchive',
       xcargs: "DEVELOPMENT_TEAM=#{TEAM_ID}",
@@ -278,10 +302,16 @@ platform :ios do
     ]
   end
 
+  private_lane :firebase_release_notes do
+    notes = ENV['FLUTTY_DISTRIBUTION_RELEASE_NOTES'].to_s.strip
+    notes.empty? ? PreviewReleaseNotes.current(max_length: 16_000) : notes
+  end
+
   private_lane :resolved_profile_path do |options|
     app_id = options[:app_identifier]
-    profile_path = ENV["sigh_#{app_id}_appstore_profile-path"] ||
-                   ENV["sigh_#{app_id}_appstore_profile_path"]
+    match_type = options[:type] || 'appstore'
+    profile_path = ENV["sigh_#{app_id}_#{match_type}_profile-path"] ||
+                   ENV["sigh_#{app_id}_#{match_type}_profile_path"]
 
     UI.user_error!("Missing installed provisioning profile path for #{app_id}") if profile_path.to_s.empty?
     UI.user_error!("Provisioning profile not found at #{profile_path} for #{app_id}") unless File.exist?(profile_path)
@@ -291,8 +321,9 @@ platform :ios do
 
   private_lane :resolved_certificate_name do |options|
     app_id = options[:app_identifier]
-    certificate_name = ENV["sigh_#{app_id}_appstore_certificate-name"] ||
-                       ENV["sigh_#{app_id}_appstore_certificate_name"]
+    match_type = options[:type] || 'appstore'
+    certificate_name = ENV["sigh_#{app_id}_#{match_type}_certificate-name"] ||
+                       ENV["sigh_#{app_id}_#{match_type}_certificate_name"]
 
     UI.user_error!("Missing installed certificate name for #{app_id}") if certificate_name.to_s.empty?
 
@@ -402,9 +433,12 @@ platform :ios do
   desc 'Force-regenerate provisioning profiles for both bundle IDs and their ' \
        'live activity extensions. Run this after enabling a new App ID ' \
        'capability (e.g. Access WiFi Information) so the new entitlement is ' \
-       'baked into the profile stored in the match git repo.'
+       'baked into the profile stored in the match git repo. Pass type:adhoc ' \
+       'to refresh the Firebase App Distribution profiles (e.g. after ' \
+       'registering a new tester device).'
   lane :regenerate_profiles do |options|
     schemes = options[:scheme] ? [options[:scheme]] : APP_IDS.keys
+    match_type = options[:type] || 'appstore'
     schemes.each do |scheme|
       app_id = APP_IDS[scheme]
       live_activity_app_id = LIVE_ACTIVITY_APP_IDS[scheme]
@@ -412,7 +446,7 @@ platform :ios do
 
       sync_certs(
         app_identifier: [app_id, live_activity_app_id],
-        type: 'appstore',
+        type: match_type,
         readonly: false,
         force: true,
       )
@@ -425,11 +459,15 @@ platform :ios do
     build_and_sign(scheme: scheme)
   end
 
-  desc 'Re-sign an existing IPA for App Store Connect upload'
+  desc 'Re-sign an existing IPA with App Store or ad hoc match profiles'
   lane :resign_ipa do |options|
     scheme = options[:scheme] || 'Private'
     unsigned_ipa_path = options[:unsigned_ipa_path].to_s
     output_ipa_path = options[:output_ipa_path].to_s
+    match_type = options[:match_type].to_s
+    match_type = 'appstore' if match_type.empty?
+    match_readonly = options[:match_readonly].to_s == 'true'
+    UI.user_error!("Unsupported match_type '#{match_type}'") unless %w[appstore adhoc].include?(match_type)
     supported_schemes = APP_IDS.keys & LIVE_ACTIVITY_APP_IDS.keys
     unless APP_IDS.key?(scheme) && LIVE_ACTIVITY_APP_IDS.key?(scheme)
       UI.user_error!("Unknown scheme '#{scheme}'. Supported schemes: #{supported_schemes.join(', ')}")
@@ -444,8 +482,9 @@ platform :ios do
 
     sync_certs(
       app_identifier: [app_id, live_activity_app_id],
-      type: 'appstore',
-      readonly: false,
+      type: match_type,
+      readonly: match_type == 'appstore' || match_readonly,
+      force_for_new_devices: match_type == 'adhoc' && !match_readonly,
     )
 
     resigned_ipa_path = unsigned_ipa_path
@@ -455,9 +494,15 @@ platform :ios do
       resigned_ipa_path = output_ipa_path
     end
 
-    signing_identity = resolved_certificate_name(app_identifier: app_id)
-    app_profile_path = resolved_profile_path(app_identifier: app_id)
-    live_activity_profile_path = resolved_profile_path(app_identifier: live_activity_app_id)
+    signing_identity = resolved_certificate_name(
+      app_identifier: app_id,
+      type: match_type,
+    )
+    app_profile_path = resolved_profile_path(app_identifier: app_id, type: match_type)
+    live_activity_profile_path = resolved_profile_path(
+      app_identifier: live_activity_app_id,
+      type: match_type,
+    )
 
     Dir.mktmpdir('flutty-resign-ipa') do |tmpdir|
       sh("unzip -q #{resigned_ipa_path.shellescape} -d #{tmpdir.shellescape}")
@@ -538,6 +583,27 @@ platform :ios do
 
     build_and_sign(scheme: scheme) if provided_ipa_path.empty?
 
+    followup_path = ENV['FLUTTY_TESTFLIGHT_METADATA_PATH'].to_s
+    unless followup_path.empty?
+      FileUtils.mkdir_p(File.dirname(followup_path))
+      File.write(followup_path, JSON.generate(TestflightDelivery.metadata(
+        app_identifier: app_id,
+        version: ENV.fetch('FLUTTY_BUILD_NAME'),
+        build_number: ENV.fetch('BUILD_NUMBER'),
+        changelog: changelog,
+        localized_build_info: localized_build_info,
+      )))
+      pilot(
+        api_key: get_api_key,
+        app_identifier: app_id,
+        ipa: resolved_ipa_path(ipa_path: provided_ipa_path),
+        uses_non_exempt_encryption: false,
+        **TestflightDelivery.upload_options,
+      )
+      sync_metadata(app_identifier: app_id, app_version: ENV['FLUTTY_BUILD_NAME']) unless skip_meta
+      next
+    end
+
     pilot(
       api_key: get_api_key,
       app_identifier: app_id,
@@ -554,6 +620,82 @@ platform :ios do
       app_identifier: app_id,
       app_version: ENV['FLUTTY_BUILD_NAME'],
     ) unless skip_meta
+  end
+
+  desc 'Wait for an uploaded build and finish TestFlight distribution without Xcode'
+  lane :finish_testflight do |options|
+    scheme = options[:scheme] || 'Private'
+    data = TestflightDelivery.read(
+      options.fetch(:metadata_path),
+      app_identifier: APP_IDS.fetch(scheme),
+      version: ENV.fetch('FLUTTY_BUILD_NAME'),
+      build_number: ENV.fetch('BUILD_NUMBER'),
+    )
+    api_key = get_api_key
+    app = Spaceship::ConnectAPI::App.find(data.fetch(:app_identifier))
+    UI.user_error!('TestFlight application was not found') unless app
+    require 'fastlane_core/build_watcher'
+    processed = FastlaneCore::BuildWatcher.wait_for_build_processing_to_be_complete(
+      app_id: app.id,
+      platform: 'IOS',
+      app_version: data.fetch(:app_version),
+      build_version: data.fetch(:build_number),
+      poll_interval: 30,
+      timeout_duration: 1200,
+      select_latest: false,
+      return_spaceship_testflight_build: false,
+      wait_for_build_beta_detail_processing: true,
+    )
+    # Apple treats 1.2 and 1.2.0 as the same marketing version.
+    unless Gem::Version.new(processed.app_version) == Gem::Version.new(data[:app_version]) &&
+           processed.version == data[:build_number]
+      UI.user_error!('App Store Connect returned a different TestFlight build')
+    end
+    pilot(
+      api_key: api_key,
+      distribute_only: true,
+      app_platform: 'ios',
+      distribute_external: false,
+      skip_submission: false,
+      uses_non_exempt_encryption: false,
+      **data.merge(app_version: processed.app_version),
+    )
+  end
+
+  desc 'Build, sign with ad hoc profiles, and upload to Firebase App Distribution'
+  lane :firebase do |options|
+    scheme = options[:scheme] || 'Private'
+    provided_ipa_path = options[:ipa_path].to_s
+    groups = options[:groups].to_s
+    groups = ENV['FIREBASE_TESTER_GROUPS'].to_s if groups.empty?
+    UI.user_error!('Set FIREBASE_TESTER_GROUPS or pass groups: to distribute') if groups.empty?
+
+    # Resolve the Firebase app id up front so a misconfigured plist fails in
+    # seconds rather than after the archive. Passing :app also avoids the
+    # plugin's archive-relative plist lookup, which resolves
+    # googleservice_info_plist_path inside the built .app bundle rather than
+    # against the source tree.
+    flavor_dir = scheme == 'Private' ? 'private' : 'production'
+    plist_path = File.expand_path(
+      "../Runner/Firebase/#{flavor_dir}/GoogleService-Info.plist",
+      __dir__,
+    )
+    UI.user_error!("Missing Firebase iOS config at #{plist_path}") unless File.exist?(plist_path)
+
+    app_id = sh(
+      "/usr/libexec/PlistBuddy -c 'Print :GOOGLE_APP_ID' #{plist_path.shellescape}",
+      log: false,
+    ).strip
+    UI.user_error!("No GOOGLE_APP_ID in #{plist_path}") if app_id.empty?
+
+    build_and_sign(scheme: scheme, export_method: 'ad-hoc') if provided_ipa_path.empty?
+
+    firebase_app_distribution(
+      app: app_id,
+      ipa_path: resolved_ipa_path(ipa_path: provided_ipa_path),
+      groups: groups,
+      release_notes: firebase_release_notes,
+    )
   end
 
   desc 'Build, sign, and upload to App Store'
@@ -593,6 +735,13 @@ platform :ios do
   end
 
   desc 'Upload metadata, screenshots, previews, and an optional build'
+  lane :check_metadata_editable do |options|
+    patch_app_store_ready_for_review_lookup
+    get_api_key
+    app = Spaceship::ConnectAPI::App.find(options[:app_identifier])
+    StoreMetadata.editable_version!(app, requested_version: options[:app_version])
+  end
+
   lane :sync_metadata do |options|
     app_id = options[:app_identifier] || 'xyz.depollsoft.monkeyssh'
     app_version = options[:app_version].to_s
@@ -600,6 +749,9 @@ platform :ios do
     submit_for_review = options[:submit_for_review].to_s == 'true'
     automatic_release = options[:automatic_release].to_s == 'true'
     meta_path = METADATA_DIRS[app_id] || './fastlane/metadata-production'
+
+    app_version = check_metadata_editable(app_identifier: app_id, app_version: app_version)
+    include_media = StoreMetadata.include_media?(options)
 
     patch_app_store_ready_for_review_lookup
     patch_deliver_review_attachment_fetch
@@ -618,13 +770,13 @@ platform :ios do
       metadata_path: meta_path,
       screenshots_path: SCREENSHOTS_PATH,
       skip_binary_upload: ipa_path.empty?,
-      skip_screenshots: false,
+      skip_screenshots: !include_media,
       # Clear previously uploaded screenshots and app previews before
       # uploading the current set. Without this, deliver *appends* the new
       # screenshots to whatever is already on App Store Connect, so each sync
       # leaves stale screenshots from older versions behind and the listing
       # ends up with duplicates from different versions.
-      overwrite_screenshots: true,
+      overwrite_screenshots: include_media,
       submit_for_review: submit_for_review,
       run_precheck_before_submit: false,
       automatic_release: automatic_release,
@@ -638,7 +790,7 @@ platform :ios do
     unless review_contact_information.empty?
       deliver_options[:app_review_information] = review_contact_information
     end
-    if Dir.glob(File.join(APP_PREVIEWS_PATH, '**', '*.{mov,mp4,m4v}')).any?
+    if include_media && Dir.glob(File.join(APP_PREVIEWS_PATH, '**', '*.{mov,mp4,m4v}')).any?
       deliver_options[:app_previews_path] = APP_PREVIEWS_PATH
       deliver_options[:overwrite_preview_videos] = true
     end

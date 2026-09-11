@@ -147,7 +147,7 @@ count_media_files() {
 
 normalize_platform() {
   case "${1:-}" in
-    ios|android|both) printf '%s\n' "$1" ;;
+    ios | android | both) printf '%s\n' "$1" ;;
     *) fail "platform must be ios, android, or both (got: ${1:-})" ;;
   esac
 }
@@ -248,7 +248,7 @@ cmd_package() {
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -o|--output)
+      -o | --output)
         shift
         [ "$#" -gt 0 ] || fail "--output requires a path"
         output="$1"
@@ -264,7 +264,7 @@ cmd_package() {
         [ "$#" -gt 0 ] || fail "--platform requires ios|android|both"
         platform="$(normalize_platform "$1")"
         ;;
-      -h|--help)
+      -h | --help)
         usage
         exit 0
         ;;
@@ -376,17 +376,19 @@ def is_allowed(path: str) -> bool:
 
 
 def clear_managed(dest_root: Path) -> None:
-    roots = [
-        'ios/fastlane/screenshots',
-        'ios/fastlane/app-previews',
-        'store/demo-videos',
-        'android/fastlane/metadata-private/android/en-US/images/phoneScreenshots',
-        'android/fastlane/metadata-private/android/en-US/images/sevenInchScreenshots',
-        'android/fastlane/metadata-private/android/en-US/images/tenInchScreenshots',
-        'android/fastlane/metadata-production/android/en-US/images/phoneScreenshots',
-        'android/fastlane/metadata-production/android/en-US/images/sevenInchScreenshots',
-        'android/fastlane/metadata-production/android/en-US/images/tenInchScreenshots',
-    ]
+    roots = [prefix.rstrip('/') for prefix in ALLOWED_PREFIXES]
+    # Preflight every root before clearing any media. A safe archive path can
+    # still escape dest through an existing ancestor symlink. Root symlinks
+    # themselves are safe to unlink below; their targets are never traversed.
+    for rel in roots:
+        for parent in reversed(Path(rel).parents):
+            target = dest_root / parent
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise SystemExit(f'Refusing unsafe destination ancestor: {target}')
+    manifest = dest_root / 'store-assets-manifest.json'
+    if manifest.is_dir() and not manifest.is_symlink():
+        raise SystemExit(f'Refusing destination manifest directory: {manifest}')
+
     for rel in roots:
         target = dest_root / rel
         if target.exists() or target.is_symlink():
@@ -394,7 +396,6 @@ def clear_managed(dest_root: Path) -> None:
                 shutil.rmtree(target)
             else:
                 target.unlink()
-    manifest = dest_root / 'store-assets-manifest.json'
     if manifest.exists() or manifest.is_symlink():
         manifest.unlink()
 
@@ -454,11 +455,32 @@ def main() -> None:
                 entries = payload.get('files') or []
                 if not isinstance(entries, list) or not entries:
                     raise SystemExit('store-assets-manifest.json is missing file entries')
-                by_path = {
-                    entry['path']: entry
-                    for entry in entries
-                    if isinstance(entry, dict) and 'path' in entry
+                file_count = payload.get('file_count')
+                if type(file_count) is not int or file_count != len(entries):
+                    raise SystemExit(
+                        'store-assets-manifest.json file_count must be an integer '
+                        'matching its file entries',
+                    )
+                by_path = {}
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(
+                        entry.get('path'), str,
+                    ):
+                        raise SystemExit('Invalid store-assets-manifest.json file entry')
+                    rel = entry['path']
+                    if rel in by_path:
+                        raise SystemExit(f'Duplicate manifest file entry: {rel}')
+                    by_path[rel] = entry
+                media_paths = {
+                    path.relative_to(tmp_path).as_posix()
+                    for path in extracted_files
+                    if path != manifest_path
                 }
+                missing = by_path.keys() - media_paths
+                if missing:
+                    raise SystemExit(
+                        f'Manifest file missing from archive: {sorted(missing)[0]}',
+                    )
                 for path in extracted_files:
                     rel = path.relative_to(tmp_path).as_posix()
                     if rel == 'store-assets-manifest.json':
@@ -498,7 +520,7 @@ install_extracted_tree() {
   # shellcheck disable=SC2064
   trap "rm -f $(printf %q "$tmp_archive")" RETURN
   require_command tar
-  tar -C "$source" -czf "$tmp_archive" .
+  tar -C "$source" -czf "$tmp_archive" . || return
   extract_archive "$tmp_archive" "$dest"
 }
 
@@ -511,7 +533,7 @@ cmd_download() {
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -o|--output)
+      -o | --output)
         shift
         [ "$#" -gt 0 ] || fail "--output requires a directory"
         dest="$1"
@@ -536,7 +558,7 @@ cmd_download() {
         [ "$#" -gt 0 ] || fail "--run-id requires a workflow run id"
         run_id="$1"
         ;;
-      -h|--help)
+      -h | --help)
         usage
         exit 0
         ;;
@@ -552,7 +574,8 @@ cmd_download() {
 
   if [ -n "$archive" ]; then
     [ -f "$archive" ] || fail "Archive not found: $archive"
-    extract_archive "$archive" "$dest"
+    # This function is also called in a conditional, where errexit is disabled.
+    extract_archive "$archive" "$dest" || return
     echo "Extracted $archive into $dest"
     return 0
   fi
@@ -570,13 +593,13 @@ cmd_download() {
     gh run download "$run_id" \
       --repo "$repo" \
       --name store-assets \
-      --dir "$tmp"
+      --dir "$tmp" || return
     if [ -f "$tmp/$ASSET_NAME" ]; then
-      extract_archive "$tmp/$ASSET_NAME" "$dest"
+      extract_archive "$tmp/$ASSET_NAME" "$dest" || return
     elif [ -f "$tmp/store-assets/$ASSET_NAME" ]; then
-      extract_archive "$tmp/store-assets/$ASSET_NAME" "$dest"
+      extract_archive "$tmp/store-assets/$ASSET_NAME" "$dest" || return
     elif [ -d "$tmp/ios" ] || [ -d "$tmp/store" ] || [ -d "$tmp/android" ]; then
-      install_extracted_tree "$tmp" "$dest"
+      install_extracted_tree "$tmp" "$dest" || return
     else
       fail "Could not find store assets inside workflow artifact for run $run_id"
     fi
@@ -592,7 +615,7 @@ cmd_download() {
     --clobber; then
     fail "Failed to download $ASSET_NAME from release '$tag'. Publish store assets first with scripts/store_assets.sh publish"
   fi
-  extract_archive "$tmp/$ASSET_NAME" "$dest"
+  extract_archive "$tmp/$ASSET_NAME" "$dest" || return
   echo "Restored store assets from release $tag into $dest"
 }
 
@@ -608,7 +631,7 @@ ensure_canonical_output_name() {
 restore_current_release_if_present() {
   local repo="$1"
   if gh release view "$RELEASE_TAG" --repo "$repo" >/dev/null 2>&1; then
-    echo "Restoring current $RELEASE_TAG release before partial generation/publish..."
+    echo "Restoring current $RELEASE_TAG release before partial generation..."
     if ! cmd_download --repo "$repo"; then
       echo "warning: could not restore current $RELEASE_TAG release; continuing with local media only" >&2
     fi
@@ -628,7 +651,7 @@ cmd_publish() {
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -o|--output)
+      -o | --output)
         shift
         [ "$#" -gt 0 ] || fail "--output requires a path"
         output="$1"
@@ -657,7 +680,7 @@ cmd_publish() {
       --no-workflow)
         dispatch_workflow=false
         ;;
-      -h|--help)
+      -h | --help)
         usage
         exit 0
         ;;
@@ -669,11 +692,11 @@ cmd_publish() {
   done
 
   case "$app" in
-    private|production|both) ;;
+    private | production | both) ;;
     *) fail "--app must be private, production, or both" ;;
   esac
   case "$generate" in
-    none|screenshots|videos|all) ;;
+    none | screenshots | videos | all) ;;
     *) fail "--generate must be one of: none, screenshots, videos, all" ;;
   esac
 
@@ -685,9 +708,9 @@ cmd_publish() {
   local repo
   repo="$(repo_slug)"
 
-  # Partial generation/platform must start from the current complete archive so
-  # we never clobber the rolling release with a one-platform subset.
-  if [ "$generate" != none ] || [ "$platform" != both ]; then
+  # Restore only before partial generation here; local captures must survive
+  # publishing without generation. Packaging validates the complete archive.
+  if [ "$generate" != none ] && { [ "$generate" != all ] || [ "$platform" != both ]; }; then
     restore_current_release_if_present "$repo"
   fi
 
@@ -709,12 +732,17 @@ cmd_publish() {
   local package_args=(--platform both)
   if [ "$skip_validate" = false ]; then
     package_args+=(--require-screenshots)
-    if video_globs | expand_existing | grep -E '\.(mov|mp4|m4v)$' >/dev/null 2>&1 \
-      || [ "$generate" = videos ] || [ "$generate" = all ]; then
+    if video_globs | expand_existing | grep -E '\.(mov|mp4|m4v)$' >/dev/null 2>&1 ||
+      [ "$generate" = videos ] || [ "$generate" = all ]; then
       package_args+=(--require-videos)
     fi
   fi
   cmd_package -o "$output" "${package_args[@]}"
+
+  # Rebuild the release-hosted README image from the exact captured files we
+  # just packaged, never a stale contact sheet left in the build directory.
+  "$(validation_python)" scripts/generate_store_screenshots.py --gallery-only
+  local gallery="$ROOT_DIR/build/store-screenshots/monkeyssh-agent-workspace.png"
 
   local notes
   notes="$(mktemp)"
@@ -744,8 +772,9 @@ EOF
       --prerelease \
       --latest=false
   fi
+  gh release upload "$RELEASE_TAG" "$gallery" --repo "$repo" --clobber
   rm -f "$notes"
-  echo "Published $output to release $RELEASE_TAG on $repo"
+  echo "Published $output and README gallery to release $RELEASE_TAG on $repo"
 
   if [ "$dispatch_workflow" = true ]; then
     local sync_value=false
@@ -780,7 +809,7 @@ main() {
     package) cmd_package "$@" ;;
     download) cmd_download "$@" ;;
     publish) cmd_publish "$@" ;;
-    -h|--help|help) usage ;;
+    -h | --help | help) usage ;;
     *)
       usage >&2
       fail "Unknown command: $command"

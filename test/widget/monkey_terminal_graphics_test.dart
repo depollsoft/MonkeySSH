@@ -13,30 +13,23 @@ Future<String> _buildSolidPngBase64(Color color, int size) async {
     Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
     Paint()..color = color,
   );
-  final image = await recorder.endRecording().toImage(size, size);
-  final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-  return base64.encode(bytes!.buffer.asUint8List());
+  final picture = recorder.endRecording();
+  ui.Image? image;
+  try {
+    image = await picture.toImage(size, size);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    return base64.encode(bytes!.buffer.asUint8List());
+  } finally {
+    image?.dispose();
+    picture.dispose();
+  }
 }
 
 Future<bool> _boundaryHasRed(GlobalKey key) async =>
     await _boundaryRedPixelCount(key) > 0;
 
-Future<int> _boundaryRedPixelCount(GlobalKey key) async {
-  final boundary =
-      key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-  final shot = await boundary.toImage();
-  final data = (await shot.toByteData())!;
-  var count = 0;
-  for (var i = 0; i + 4 <= data.lengthInBytes; i += 4) {
-    final r = data.getUint8(i);
-    final g = data.getUint8(i + 1);
-    final b = data.getUint8(i + 2);
-    if (r > 150 && g < 90 && b < 90) {
-      count += 1;
-    }
-  }
-  return count;
-}
+Future<int> _boundaryRedPixelCount(GlobalKey key) =>
+    _boundaryPixelCount(key, (r, g, b) => r > 150 && g < 90 && b < 90);
 
 /// Counts red pixels within the vertical pixel band [topY, bottomY).
 Future<int> _boundaryRedPixelCountInBand(
@@ -47,24 +40,28 @@ Future<int> _boundaryRedPixelCountInBand(
   final boundary =
       key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
   final shot = await boundary.toImage();
-  final width = shot.width;
-  final data = (await shot.toByteData())!;
-  var count = 0;
-  for (var y = topY; y < bottomY; y++) {
-    for (var x = 0; x < width; x++) {
-      final i = (y * width + x) * 4;
-      if (i + 4 > data.lengthInBytes) {
-        continue;
-      }
-      final r = data.getUint8(i);
-      final g = data.getUint8(i + 1);
-      final b = data.getUint8(i + 2);
-      if (r > 150 && g < 90 && b < 90) {
-        count += 1;
+  try {
+    final width = shot.width;
+    final data = (await shot.toByteData())!;
+    var count = 0;
+    for (var y = topY; y < bottomY; y++) {
+      for (var x = 0; x < width; x++) {
+        final i = (y * width + x) * 4;
+        if (i + 4 > data.lengthInBytes) {
+          continue;
+        }
+        final r = data.getUint8(i);
+        final g = data.getUint8(i + 1);
+        final b = data.getUint8(i + 2);
+        if (r > 150 && g < 90 && b < 90) {
+          count += 1;
+        }
       }
     }
+    return count;
+  } finally {
+    shot.dispose();
   }
-  return count;
 }
 
 /// Counts boundary pixels matching [predicate] (r, g, b).
@@ -75,18 +72,22 @@ Future<int> _boundaryPixelCount(
   final boundary =
       key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
   final shot = await boundary.toImage();
-  final data = (await shot.toByteData())!;
-  var count = 0;
-  for (var i = 0; i + 4 <= data.lengthInBytes; i += 4) {
-    if (predicate(
-      data.getUint8(i),
-      data.getUint8(i + 1),
-      data.getUint8(i + 2),
-    )) {
-      count += 1;
+  try {
+    final data = (await shot.toByteData())!;
+    var count = 0;
+    for (var i = 0; i + 4 <= data.lengthInBytes; i += 4) {
+      if (predicate(
+        data.getUint8(i),
+        data.getUint8(i + 1),
+        data.getUint8(i + 2),
+      )) {
+        count += 1;
+      }
     }
+    return count;
+  } finally {
+    shot.dispose();
   }
-  return count;
 }
 
 bool _isBlue(int r, int g, int b) => b > 150 && r < 90 && g < 90;
@@ -127,9 +128,16 @@ Future<String> _buildSplitPngBase64(
       Rect.fromLTWH(half, 0, half, imageHeight.toDouble()),
       Paint()..color = right,
     );
-  final image = await recorder.endRecording().toImage(width, imageHeight);
-  final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-  return base64.encode(bytes!.buffer.asUint8List());
+  final picture = recorder.endRecording();
+  ui.Image? image;
+  try {
+    image = await picture.toImage(width, imageHeight);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    return base64.encode(bytes!.buffer.asUint8List());
+  } finally {
+    image?.dispose();
+    picture.dispose();
+  }
 }
 
 /// Kitty row/column placeholder diacritics (rowcolumn-diacritics order),
@@ -182,27 +190,11 @@ String _placeholderRow(int imageId, {required int row, required int cols}) {
 /// [rows] x [cols] cells, exactly as a kitty-aware client (e.g. Copilot CLI)
 /// emits them: a 24-bit foreground color carrying the image id, then a
 /// U+10EEEE cell per position carrying its row/column diacritics.
-String _placeholderGrid(int imageId, {required int cols, required int rows}) {
-  final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
-  final r = (imageId >> 16) & 0xFF;
-  final g = (imageId >> 8) & 0xFF;
-  final b = imageId & 0xFF;
-  final buffer = StringBuffer();
-  for (var row = 0; row < rows; row++) {
-    buffer.write('\x1b[38;2;$r;$g;${b}m');
-    for (var col = 0; col < cols; col++) {
-      buffer
-        ..write(placeholder)
-        ..writeCharCode(_kittyDiacritics[row])
-        ..writeCharCode(_kittyDiacritics[col]);
-    }
-    buffer.write('\x1b[39m');
-    if (row < rows - 1) {
-      buffer.write('\r\n');
-    }
-  }
-  return buffer.toString();
-}
+String _placeholderGrid(int imageId, {required int cols, required int rows}) =>
+    List.generate(
+      rows,
+      (row) => _placeholderRow(imageId, row: row, cols: cols),
+    ).join('\r\n');
 
 /// Store-only (`a=t`) and virtual (`a=T,U=1`) images decode lazily, on the
 /// first paint that references them. In a real app that paint runs in the real
@@ -227,10 +219,62 @@ Future<void> _pumpUntilImagesDecoded(
       waited += 20;
     }
   });
+  for (final id in imageIds) {
+    expect(
+      terminal.graphics.imageById(id),
+      isNotNull,
+      reason: 'image $id must finish decoding before layout assertions',
+    );
+  }
   await tester.pump();
 }
 
 void main() {
+  testWidgets('pixel scanners and PNG builders dispose captured resources', (
+    tester,
+  ) async {
+    final boundaryKey = GlobalKey();
+    await tester.pumpWidget(_graphicsHost(boundaryKey, Terminal()));
+    final images = <ui.Image>[];
+    final pictures = <ui.Picture>[];
+    final onImageCreate = ui.Image.onCreate;
+    final onPictureCreate = ui.Picture.onCreate;
+    addTearDown(() {
+      ui.Image.onCreate = onImageCreate;
+      ui.Picture.onCreate = onPictureCreate;
+    });
+    ui.Image.onCreate = (image) {
+      images.add(image);
+      onImageCreate?.call(image);
+    };
+
+    await tester.runAsync(() async {
+      await _boundaryRedPixelCount(boundaryKey);
+      await _boundaryPixelCount(boundaryKey, _isBlue);
+      await _boundaryRedPixelCountInBand(boundaryKey, 0, 1);
+      await expectLater(
+        _boundaryPixelCount(boundaryKey, (_, _, _) => throw StateError('scan')),
+        throwsStateError,
+      );
+      await expectLater(
+        _boundaryRedPixelCountInBand(boundaryKey, -1, 0),
+        throwsRangeError,
+      );
+
+      ui.Picture.onCreate = (picture) {
+        pictures.add(picture);
+        onPictureCreate?.call(picture);
+      };
+      await _buildSolidPngBase64(Colors.red, 2);
+      await _buildSplitPngBase64(Colors.red, Colors.blue, 2);
+    });
+
+    expect(images, hasLength(7));
+    expect(images.every((image) => image.debugDisposed), isTrue);
+    expect(pictures, hasLength(2));
+    expect(pictures.every((picture) => picture.debugDisposed), isTrue);
+  });
+
   testWidgets('only visible pending Kitty placeholders start lazy decoding', (
     tester,
   ) async {
@@ -309,25 +353,9 @@ void main() {
     final boundaryKey = GlobalKey();
     final terminal = Terminal();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Center(
-            child: SizedBox(
-              width: 400,
-              height: 300,
-              child: RepaintBoundary(
-                key: boundaryKey,
-                child: MonkeyTerminalView(terminal, hardwareKeyboardOnly: true),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
     await tester.pump();
 
-    var hasRed = false;
     await tester.runAsync(() async {
       final png = await _buildSolidPngBase64(const Color(0xFFFF0000), 24);
       terminal.write('\x1b_Ga=T,f=100,c=8,r=4;$png\x1b\\');
@@ -340,22 +368,7 @@ void main() {
     });
     await tester.pump();
 
-    await tester.runAsync(() async {
-      final boundary =
-          boundaryKey.currentContext!.findRenderObject()!
-              as RenderRepaintBoundary;
-      final shot = await boundary.toImage();
-      final data = (await shot.toByteData())!;
-      for (var i = 0; i + 4 <= data.lengthInBytes; i += 4) {
-        final r = data.getUint8(i);
-        final g = data.getUint8(i + 1);
-        final b = data.getUint8(i + 2);
-        if (r > 150 && g < 90 && b < 90) {
-          hasRed = true;
-          break;
-        }
-      }
-    });
+    final hasRed = await tester.runAsync(() => _boundaryHasRed(boundaryKey));
 
     expect(
       terminal.graphics.hasPlacements,
@@ -822,25 +835,7 @@ void main() {
       final boundaryKey = GlobalKey();
       final terminal = Terminal();
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Center(
-              child: SizedBox(
-                width: 400,
-                height: 300,
-                child: RepaintBoundary(
-                  key: boundaryKey,
-                  child: MonkeyTerminalView(
-                    terminal,
-                    hardwareKeyboardOnly: true,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
       await tester.pump();
 
       await tester.runAsync(() async {
@@ -883,25 +878,7 @@ void main() {
       final boundaryKey = GlobalKey();
       final terminal = Terminal();
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Center(
-              child: SizedBox(
-                width: 400,
-                height: 300,
-                child: RepaintBoundary(
-                  key: boundaryKey,
-                  child: MonkeyTerminalView(
-                    terminal,
-                    hardwareKeyboardOnly: true,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
       await tester.pump();
 
       // Copilot CLI emits the image with a virtual placement (U=1) and then
@@ -975,14 +952,8 @@ void main() {
       terminal
         ..write('\x1b_Ga=T,U=1,i=$imageId,f=100,c=8,r=4,q=2;$png\x1b\\')
         ..write(_placeholderGrid(imageId, cols: 8, rows: 4));
-
-      var waited = 0;
-      while (terminal.graphics.imageById(imageId) == null && waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
     });
-    await tester.pump();
+    await _pumpUntilImagesDecoded(tester, terminal, [imageId]);
 
     final placeholdersBeforeScroll = terminal.graphics.placeholders.length;
     expect(
@@ -1017,22 +988,7 @@ void main() {
     final boundaryKey = GlobalKey();
     final terminal = Terminal();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Center(
-            child: SizedBox(
-              width: 400,
-              height: 300,
-              child: RepaintBoundary(
-                key: boundaryKey,
-                child: MonkeyTerminalView(terminal, hardwareKeyboardOnly: true),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
     await tester.pump();
 
     const imageId = 0xA5E30B;
@@ -1218,81 +1174,6 @@ void main() {
   );
 
   testWidgets(
-    'Kitty same-id image: stale holey copy is dismissed, fresh copy renders',
-    (tester) async {
-      final boundaryKey = GlobalKey();
-      final terminal = Terminal(maxLines: 100);
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Center(
-              child: SizedBox(
-                width: 400,
-                height: 520,
-                child: RepaintBoundary(
-                  key: boundaryKey,
-                  child: MonkeyTerminalView(
-                    terminal,
-                    hardwareKeyboardOnly: true,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      const imageId = 0xA5E30B;
-      terminal
-        ..resize(8, 22)
-        ..write('\x1b[?1049h');
-      await tester.runAsync(() async {
-        final png = await _buildSolidPngBase64(const Color(0xFFFF0000), 24);
-        terminal.write('\x1b_Ga=T,U=1,i=$imageId,c=8,r=4,f=100,q=2;$png\x1b\\');
-        // Draw one display of the image near the top (rows 1-4)...
-        for (var row = 0; row < 4; row++) {
-          terminal
-            ..write('\x1b[${row + 1};1H')
-            ..write(_placeholderRow(imageId, row: row, cols: 8));
-        }
-        // ...then a second, fresh display lower down (rows 12-15).
-        for (var row = 0; row < 4; row++) {
-          terminal
-            ..write('\x1b[${row + 12};1H')
-            ..write(_placeholderRow(imageId, row: row, cols: 8));
-        }
-      });
-      await _pumpUntilImagesDecoded(tester, terminal, [imageId]);
-      expect(
-        await tester.runAsync(() => _boundaryRedPixelCount(boundaryKey)),
-        greaterThan(0),
-        reason: 'both displays of the image render initially',
-      );
-
-      // Tear down only the top display (the "closed" one): punch holes through
-      // its rows so it becomes a sparse ghost, while the lower display stays
-      // intact. The ghost must be dismissed; the fresh copy must still render.
-      for (var row = 0; row < 4; row++) {
-        terminal
-          ..write('\x1b[${row + 1};3H')
-          ..write('    ');
-      }
-      await tester.pump();
-
-      // The lower, intact display is a separate placement instance and must
-      // still render — proving the ghost is dismissed per-instance, not by
-      // hiding the whole image id.
-      expect(
-        await tester.runAsync(() => _boundaryHasRed(boundaryKey)),
-        isTrue,
-        reason: 'the intact lower copy must keep rendering',
-      );
-    },
-  );
-
-  testWidgets(
     'Kitty same-id image: only the most recent dense copy renders (ghost gone)',
     (tester) async {
       // Reproduces the full-screen-viewer ghost: an image is shown, then the
@@ -1370,6 +1251,31 @@ void main() {
         lessThan(100),
         reason: 'the older ghost copy of the same image must be dismissed',
       );
+      // Punch holes through the old copy while the current copy stays intact.
+      for (var row = 0; row < 4; row++) {
+        terminal
+          ..write('\x1b[${row + 1};3H')
+          ..write('    ');
+      }
+      await tester.pump();
+      expect(
+        await tester.runAsync(
+          () => _boundaryRedPixelCountInBand(boundaryKey, 0, topBandBottom),
+        ),
+        lessThan(100),
+        reason: 'the holey older copy must remain dismissed',
+      );
+      expect(
+        await tester.runAsync(
+          () => _boundaryRedPixelCountInBand(
+            boundaryKey,
+            topBandBottom,
+            height.round(),
+          ),
+        ),
+        greaterThan(100),
+        reason: 'the intact lower copy must keep rendering',
+      );
     },
   );
 
@@ -1379,25 +1285,7 @@ void main() {
       final boundaryKey = GlobalKey();
       final terminal = Terminal();
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Center(
-              child: SizedBox(
-                width: 400,
-                height: 300,
-                child: RepaintBoundary(
-                  key: boundaryKey,
-                  child: MonkeyTerminalView(
-                    terminal,
-                    hardwareKeyboardOnly: true,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
       await tester.pump();
 
       await tester.runAsync(() async {
@@ -1446,22 +1334,7 @@ void main() {
     final boundaryKey = GlobalKey();
     final terminal = Terminal();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Center(
-            child: SizedBox(
-              width: 400,
-              height: 300,
-              child: RepaintBoundary(
-                key: boundaryKey,
-                child: MonkeyTerminalView(terminal, hardwareKeyboardOnly: true),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_graphicsHost(boundaryKey, terminal));
     await tester.pump();
 
     const imageId = 42 + (2 << 24);
@@ -1638,12 +1511,7 @@ void main() {
       fontSize = fs;
       await tester.pumpWidget(build());
       await tester.pump();
-      await tester.runAsync(() async {
-        final boundary =
-            boundaryKey.currentContext!.findRenderObject()!
-                as RenderRepaintBoundary;
-        await (await boundary.toImage()).toByteData();
-      });
+      await tester.runAsync(() => _boundaryHasRed(boundaryKey));
       expect(
         tester.takeException(),
         isNull,

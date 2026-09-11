@@ -403,8 +403,6 @@ _LiveMaterialPage<void> _buildTerminalPage({
 class _LiveMaterialPage<T> extends Page<T> {
   const _LiveMaterialPage({
     required this.child,
-    this.maintainState = true,
-    this.fullscreenDialog = false,
     super.key,
     super.name,
     super.arguments,
@@ -412,8 +410,6 @@ class _LiveMaterialPage<T> extends Page<T> {
   });
 
   final Widget child;
-  final bool maintainState;
-  final bool fullscreenDialog;
 
   @override
   Route<T> createRoute(BuildContext context) =>
@@ -423,11 +419,7 @@ class _LiveMaterialPage<T> extends Page<T> {
 class _LiveMaterialPageRoute<T> extends PageRoute<T>
     with MaterialRouteTransitionMixin<T> {
   _LiveMaterialPageRoute({required _LiveMaterialPage<T> page})
-    : super(
-        settings: page,
-        fullscreenDialog: page.fullscreenDialog,
-        allowSnapshotting: false,
-      );
+    : super(settings: page, allowSnapshotting: false);
 
   _LiveMaterialPage<T> get _page => settings as _LiveMaterialPage<T>;
 
@@ -435,7 +427,7 @@ class _LiveMaterialPageRoute<T> extends PageRoute<T>
   bool get opaque => false;
 
   @override
-  bool get maintainState => _page.maintainState;
+  bool get maintainState => true;
 
   @override
   Widget buildContent(BuildContext context) => _page.child;

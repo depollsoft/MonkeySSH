@@ -35,7 +35,6 @@ class AcpResourceChip extends StatelessWidget {
     super.key,
     this.onOpen,
     this.onCopy,
-    this.showCopyButton = true,
   });
 
   /// The resource to render.
@@ -46,9 +45,6 @@ class AcpResourceChip extends StatelessWidget {
 
   /// Called after the resource URI is copied to the clipboard.
   final ValueChanged<AcpResourceRef>? onCopy;
-
-  /// Whether to render the trailing copy button.
-  final bool showCopyButton;
 
   IconData get _icon {
     final mime = resource.mimeType ?? '';
@@ -156,23 +152,22 @@ class AcpResourceChip extends StatelessWidget {
                       child: body,
                     ),
             ),
-            if (showCopyButton)
-              Tooltip(
-                message: 'Copy path',
-                child: InkWell(
-                  onTap: _copy,
-                  borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-                  child: Padding(
-                    padding: const EdgeInsets.all(FluttyTheme.spacingSm),
-                    child: Icon(
-                      Icons.copy_rounded,
-                      size: 16,
-                      color: scheme.onSurfaceVariant,
-                      semanticLabel: 'Copy path',
-                    ),
+            Tooltip(
+              message: 'Copy path',
+              child: InkWell(
+                onTap: _copy,
+                borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+                child: Padding(
+                  padding: const EdgeInsets.all(FluttyTheme.spacingSm),
+                  child: Icon(
+                    Icons.copy_rounded,
+                    size: 16,
+                    color: scheme.onSurfaceVariant,
+                    semanticLabel: 'Copy path',
                   ),
                 ),
               ),
+            ),
           ],
         ),
       ),

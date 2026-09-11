@@ -45,8 +45,13 @@ class AcpSftpClientCache {
     return connectionId == _connectionId ? _client : null;
   }
 
-  /// Drops the cached client if it is not owned by [connectionId].
+  /// Drops cached and in-flight clients not owned by [connectionId].
   void invalidateIfStale(int? connectionId) {
+    if (_opening != null && _openingConnectionId != connectionId) {
+      _generation++;
+      _opening = null;
+      _openingConnectionId = null;
+    }
     if (connectionId != _connectionId) {
       _client = null;
       _connectionId = null;
@@ -66,9 +71,7 @@ class AcpSftpClientCache {
     required AcpSftpClientOpener open,
   }) async {
     if (connectionId == null) {
-      _generation++;
-      _client = null;
-      _connectionId = null;
+      invalidateIfStale(null);
       return null;
     }
     if (_client != null && _connectionId == connectionId) {

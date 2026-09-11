@@ -1,7 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'dart:async';
-
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,32 +8,9 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/port_proxy_name.dart';
+import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 
-class _PausingSecretEncryptionService extends SecretEncryptionService {
-  _PausingSecretEncryptionService({required this.pausePlaintext})
-    : super.forTesting();
-
-  final String pausePlaintext;
-  final _paused = Completer<void>();
-  final _resume = Completer<void>();
-
-  Future<void> get paused => _paused.future;
-
-  void resume() {
-    if (!_resume.isCompleted) {
-      _resume.complete();
-    }
-  }
-
-  @override
-  Future<String?> encryptNullable(String? plaintext) async {
-    if (plaintext == pausePlaintext && !_paused.isCompleted) {
-      _paused.complete();
-      await _resume.future;
-    }
-    return super.encryptNullable(plaintext);
-  }
-}
+import '../../helpers/pausing_secret_encryption_service.dart';
 
 Map<String, dynamic> _hostConfiguration(Host host) =>
     Map<String, dynamic>.from(host.toJson())
@@ -351,32 +326,91 @@ void main() {
     });
 
     test(
-      'getById migrates malformed ENCv1-prefixed plaintext password',
+      'all host read paths tolerate a corrupt envelope without rewriting it',
       () async {
-        const plaintextPassword = 'ENCv1:not-a-valid-password-envelope';
+        final diagnostics = DiagnosticsLogService(enabled: true);
+        addTearDown(diagnostics.dispose);
+        repository = HostRepository(
+          db,
+          encryptionService,
+          diagnosticsLog: diagnostics,
+        );
+        const corruptPassword = 'ENCv1:not-a-valid-password-envelope';
         final id = await db
             .into(db.hosts)
             .insert(
               HostsCompanion.insert(
-                label: 'Legacy Host',
-                hostname: '192.168.1.12',
+                label: 'Damaged Host',
+                hostname: 'example.com',
                 username: 'admin',
-                password: const Value(plaintextPassword),
+                password: const Value(corruptPassword),
               ),
             );
+        final healthyId = await repository.insert(
+          HostsCompanion.insert(
+            label: 'Healthy Host',
+            hostname: 'healthy.example.com',
+            username: 'admin',
+            password: const Value('healthy-secret'),
+          ),
+        );
 
-        final host = await repository.getById(id);
-        expect(host!.password, plaintextPassword);
+        final host = (await repository.getById(id))!;
+        expect(host.password, isNull);
+        expect(repository.hasUnreadablePassword(id), isTrue);
+        expect((await repository.getAll()).map((h) => h.password), [
+          null,
+          'healthy-secret',
+        ]);
+        expect((await repository.watchAll().first).map((h) => h.password), [
+          null,
+          'healthy-secret',
+        ]);
+        expect((await repository.watchById(id).first)!.password, isNull);
+        expect(
+          (await repository.getById(healthyId))!.password,
+          'healthy-secret',
+        );
 
-        final storedHost = await (db.select(
+        // Locking clears plaintext, but must retain the unreadable marker so a
+        // metadata save cannot erase the original ciphertext or log it again.
+        repository.clearDecryptionCache();
+        await repository.update(host.copyWith(label: 'Renamed Host'));
+        expect((await repository.getById(id))!.password, isNull);
+        final stored = await (db.select(
           db.hosts,
         )..where((h) => h.id.equals(id))).getSingle();
-        expect(storedHost.password, startsWith('ENCv1:'));
-        expect(storedHost.password, isNot(plaintextPassword));
-        await expectLater(
-          encryptionService.decryptNullable(storedHost.password),
-          completion(plaintextPassword),
+        expect(stored.password, corruptPassword);
+        final entries = diagnostics.snapshot();
+        expect(entries, hasLength(1));
+        expect(entries.single.message, 'password_decryption_failed');
+        expect(entries.single.fields, {
+          'hostId': id,
+          'errorType': 'FormatException',
+        });
+        expect(diagnostics.exportText(), isNot(contains(corruptPassword)));
+
+        await repository.update(
+          host.copyWith(password: const Value('replacement')),
         );
+        expect((await repository.getById(id))!.password, 'replacement');
+        expect(repository.hasUnreadablePassword(id), isFalse);
+      },
+    );
+
+    test(
+      'new passwords may literally start with the envelope prefix',
+      () async {
+        const password = 'ENCv1:not-a-valid-password-envelope';
+        final id = await repository.insert(
+          HostsCompanion.insert(
+            label: 'New Host',
+            hostname: 'example.com',
+            username: 'admin',
+            password: const Value(password),
+          ),
+        );
+        expect((await repository.getById(id))!.password, password);
       },
     );
 
@@ -406,7 +440,10 @@ void main() {
 
       expect(host, isNotNull);
       expect(host!.password, isNull);
-      await repository.toggleFavorite(id);
+      await repository.updateFields(
+        id,
+        const HostsCompanion(isFavorite: Value(true)),
+      );
       await repository.updateLastConnected(id);
       await repository.update(host.copyWith(label: 'Renamed Host'));
 
@@ -432,7 +469,7 @@ void main() {
     });
 
     test('legacy password migration does not overwrite newer writes', () async {
-      final encryptionService = _PausingSecretEncryptionService(
+      final encryptionService = PausingSecretEncryptionService(
         pausePlaintext: 'legacy-secret',
       );
       repository = HostRepository(db, encryptionService);
@@ -496,6 +533,30 @@ void main() {
       expect(host.autoConnectSnippetId, snippetId);
       expect(host.autoConnectRequiresConfirmation, isTrue);
     });
+
+    test(
+      'duplicate assigns a new proxy name instead of copying the alias',
+      () async {
+        final id = await repository.insert(
+          HostsCompanion.insert(
+            label: 'Production',
+            hostname: 'example.com',
+            username: 'deploy',
+            portProxyName: const Value('prod'),
+          ),
+        );
+        final source = (await repository.getById(id))!;
+        final copyId = await repository.duplicate(source);
+        final copy = (await repository.getById(copyId))!;
+
+        expect(copy.portProxyName, isNull);
+        expect((await repository.getById(id))!.portProxyName, 'prod');
+        expect(
+          await repository.resolveProxyName(hostId: copyId, label: copy.label),
+          'production-c',
+        );
+      },
+    );
 
     test('duplicate copies all host configuration and port forwards', () async {
       final keyId = await db
@@ -800,7 +861,7 @@ void main() {
       expect(decrypted!.password, plaintextPassword);
     });
 
-    test('toggleFavorite does not double-encrypt the password', () async {
+    test('favorite field updates do not double-encrypt the password', () async {
       const plaintextPassword = 'fav-password';
       final id = await repository.insert(
         HostsCompanion.insert(
@@ -812,8 +873,14 @@ void main() {
       );
 
       // Two toggles to exercise the full update cycle twice.
-      await repository.toggleFavorite(id);
-      await repository.toggleFavorite(id);
+      await repository.updateFields(
+        id,
+        const HostsCompanion(isFavorite: Value(true)),
+      );
+      await repository.updateFields(
+        id,
+        const HostsCompanion(isFavorite: Value(false)),
+      );
 
       final rawHost = await (db.select(
         db.hosts,
@@ -922,34 +989,6 @@ void main() {
       expect(deleted, 0);
     });
 
-    test('toggleFavorite toggles favorite status', () async {
-      final id = await repository.insert(
-        HostsCompanion.insert(
-          label: 'Test Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-        ),
-      );
-
-      var host = await repository.getById(id);
-      expect(host!.isFavorite, isFalse);
-
-      await repository.toggleFavorite(id);
-
-      host = await repository.getById(id);
-      expect(host!.isFavorite, isTrue);
-
-      await repository.toggleFavorite(id);
-
-      host = await repository.getById(id);
-      expect(host!.isFavorite, isFalse);
-    });
-
-    test('toggleFavorite returns false when host not exists', () async {
-      final result = await repository.toggleFavorite(999);
-      expect(result, isFalse);
-    });
-
     test('setAutoForwardPorts persists automatic port detection', () async {
       final id = await repository.insert(
         HostsCompanion.insert(
@@ -1056,224 +1095,8 @@ void main() {
       expect(await repository.setAutoForwardPorts(999, enabled: true), isFalse);
     });
 
-    test('getFavorites returns only favorite hosts', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Server 1',
-          hostname: '192.168.1.1',
-          username: 'admin',
-        ),
-      );
-      final id2 = await repository.insert(
-        HostsCompanion.insert(
-          label: 'Server 2',
-          hostname: '192.168.1.2',
-          username: 'admin',
-        ),
-      );
-
-      await repository.toggleFavorite(id2);
-
-      final favorites = await repository.getFavorites();
-      expect(favorites, hasLength(1));
-      expect(favorites.first.label, 'Server 2');
-    });
-
-    test('search finds hosts by label', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Production Server',
-          hostname: '10.0.0.1',
-          username: 'admin',
-        ),
-      );
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Dev Server',
-          hostname: '192.168.1.1',
-          username: 'dev',
-        ),
-      );
-
-      final results = await repository.search('Production');
-      expect(results, hasLength(1));
-      expect(results.first.label, 'Production Server');
-    });
-
-    test('search finds hosts by hostname', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Server 1',
-          hostname: 'prod.example.com',
-          username: 'admin',
-        ),
-      );
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Server 2',
-          hostname: 'dev.example.com',
-          username: 'dev',
-        ),
-      );
-
-      final results = await repository.search('prod');
-      expect(results, hasLength(1));
-      expect(results.first.hostname, 'prod.example.com');
-    });
-
-    test('search finds hosts by tags', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Tagged Server',
-          hostname: 'tagged.example.com',
-          username: 'admin',
-          tags: const Value('prod,critical'),
-        ),
-      );
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Other Server',
-          hostname: 'other.example.com',
-          username: 'admin',
-          tags: const Value('dev'),
-        ),
-      );
-
-      final results = await repository.search('critical');
-      expect(results, hasLength(1));
-      expect(results.first.label, 'Tagged Server');
-    });
-
     // Wildcard-safety tests: % and _ in the query must be treated as
     // literal characters, not as SQL LIKE metacharacters.
-
-    test(
-      'search treats percent as a literal character, not a wildcard',
-      () async {
-        await repository.insert(
-          HostsCompanion.insert(
-            label: '99% uptime',
-            hostname: 'uptime.example.com',
-            username: 'admin',
-          ),
-        );
-        await repository.insert(
-          HostsCompanion.insert(
-            label: 'No special chars',
-            hostname: 'normal.example.com',
-            username: 'admin',
-          ),
-        );
-
-        // Without escaping, '%' would match every host; with escaping it
-        // matches only hosts that literally contain '%'.
-        final results = await repository.search('%');
-        expect(results, hasLength(1));
-        expect(results.first.label, '99% uptime');
-      },
-    );
-
-    test(
-      'search treats underscore as a literal character, not a wildcard',
-      () async {
-        await repository.insert(
-          HostsCompanion.insert(
-            label: 'web_server',
-            hostname: 'web.example.com',
-            username: 'admin',
-          ),
-        );
-        await repository.insert(
-          HostsCompanion.insert(
-            label: 'api server',
-            hostname: 'api.example.com',
-            username: 'admin',
-          ),
-        );
-
-        // 'web_' should match only the host whose label contains the literal
-        // substring "web_", not "web" followed by any single character.
-        final results = await repository.search('web_');
-        expect(results, hasLength(1));
-        expect(results.first.label, 'web_server');
-      },
-    );
-
-    test(
-      'search with percent does not return hosts that lack a literal percent',
-      () async {
-        await repository.insert(
-          HostsCompanion.insert(
-            label: 'Normal Server',
-            hostname: 'normal.example.com',
-            username: 'admin',
-          ),
-        );
-
-        // A bare '%' query should return nothing when no host data contains '%'.
-        final results = await repository.search('%');
-        expect(results, isEmpty);
-      },
-    );
-
-    test(
-      'search with underscore does not cross-match non-underscore hosts',
-      () async {
-        await repository.insert(
-          HostsCompanion.insert(
-            label: 'abc',
-            hostname: 'abc.example.com',
-            username: 'admin',
-          ),
-        );
-
-        // Without escaping, 'a_c' would match 'abc' (any single char between
-        // a and c). With escaping it should return nothing.
-        final results = await repository.search('a_c');
-        expect(results, isEmpty);
-      },
-    );
-
-    test('getByGroup returns hosts with null groupId', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Ungrouped Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-        ),
-      );
-
-      final hosts = await repository.getByGroup(null);
-      expect(hosts, hasLength(1));
-      expect(hosts.first.label, 'Ungrouped Server');
-    });
-
-    test('getByGroup returns hosts with specific groupId', () async {
-      // Create a group first
-      final groupId = await db
-          .into(db.groups)
-          .insert(GroupsCompanion.insert(name: 'Test Group'));
-
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Grouped Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-          groupId: Value(groupId),
-        ),
-      );
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Ungrouped Server',
-          hostname: '192.168.1.2',
-          username: 'admin',
-        ),
-      );
-
-      final hosts = await repository.getByGroup(groupId);
-      expect(hosts, hasLength(1));
-      expect(hosts.first.label, 'Grouped Server');
-    });
 
     test('updateLastConnected updates timestamp', () async {
       final id = await repository.insert(
@@ -1308,54 +1131,6 @@ void main() {
       );
 
       final stream = repository.watchAll();
-      final firstValue = await stream.first;
-      expect(firstValue, hasLength(1));
-    });
-
-    test('watchFavorites emits updates', () async {
-      final id = await repository.insert(
-        HostsCompanion.insert(
-          label: 'Test Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-        ),
-      );
-      await repository.toggleFavorite(id);
-
-      final stream = repository.watchFavorites();
-      final firstValue = await stream.first;
-      expect(firstValue, hasLength(1));
-    });
-
-    test('watchByGroup emits for null group', () async {
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Ungrouped Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-        ),
-      );
-
-      final stream = repository.watchByGroup(null);
-      final firstValue = await stream.first;
-      expect(firstValue, hasLength(1));
-    });
-
-    test('watchByGroup emits for specific group', () async {
-      final groupId = await db
-          .into(db.groups)
-          .insert(GroupsCompanion.insert(name: 'Test Group'));
-
-      await repository.insert(
-        HostsCompanion.insert(
-          label: 'Grouped Server',
-          hostname: '192.168.1.1',
-          username: 'admin',
-          groupId: Value(groupId),
-        ),
-      );
-
-      final stream = repository.watchByGroup(groupId);
       final firstValue = await stream.first;
       expect(firstValue, hasLength(1));
     });

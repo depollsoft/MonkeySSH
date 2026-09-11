@@ -114,6 +114,51 @@ platform :android do
     [tmpdir, true]
   end
 
+  private_lane :firebase_release_notes do
+    notes = ENV['FLUTTY_DISTRIBUTION_RELEASE_NOTES'].to_s.strip
+    notes.empty? ? PreviewReleaseNotes.current(max_length: 16_000) : notes
+  end
+
+  desc 'Upload flavor APK to Firebase App Distribution'
+  lane :firebase do |options|
+    package = options[:package_name] || 'xyz.depollsoft.monkeyssh.private'
+    allowed_packages = METADATA_DIRS.keys.sort.join(', ')
+    flavor =
+      case package
+      when 'xyz.depollsoft.monkeyssh'
+        'production'
+      when 'xyz.depollsoft.monkeyssh.private'
+        'private'
+      else
+        UI.user_error!("Unsupported package_name '#{package}'. Expected one of: #{allowed_packages}")
+      end
+
+    groups = options[:groups].to_s
+    groups = ENV['FIREBASE_TESTER_GROUPS'].to_s if groups.empty?
+    UI.user_error!('Set FIREBASE_TESTER_GROUPS or pass groups: to distribute') if groups.empty?
+
+    google_services_path = File.expand_path("../app/src/#{flavor}/google-services.json", __dir__)
+    unless File.exist?(google_services_path)
+      UI.user_error!("Missing Firebase Android config at #{google_services_path}")
+    end
+
+    require 'json'
+    config = JSON.parse(File.read(google_services_path))
+    client = Array(config['client']).find do |entry|
+      entry.dig('client_info', 'android_client_info', 'package_name') == package
+    end
+    app_id = client&.dig('client_info', 'mobilesdk_app_id').to_s
+    UI.user_error!("No Firebase Android app for #{package} in google-services.json") if app_id.empty?
+
+    firebase_app_distribution(
+      app: app_id,
+      android_artifact_type: 'APK',
+      android_artifact_path: ENV['APK_PATH'] || "../build/app/outputs/flutter-apk/app-#{flavor}-release.apk",
+      groups: groups,
+      release_notes: firebase_release_notes,
+    )
+  end
+
   desc 'Upload flavor AAB to Play Store internal testing'
   lane :internal do |options|
     skip_meta = options[:skip_metadata].to_s == 'true'
@@ -233,6 +278,7 @@ platform :android do
     package = options[:package_name] || 'xyz.depollsoft.monkeyssh'
     meta_path = METADATA_DIRS[package] || File.expand_path('metadata-production/android', __dir__)
 
+    include_media = options[:skip_media].to_s != 'true'
     patch_supply_metadata_only_upload
     upload_to_play_store(
       package_name: package,
@@ -242,8 +288,8 @@ platform :android do
       skip_upload_aab: true,
       skip_upload_metadata: false,
       skip_upload_changelogs: true,
-      skip_upload_images: false,
-      skip_upload_screenshots: false,
+      skip_upload_images: !include_media,
+      skip_upload_screenshots: !include_media,
       changes_not_sent_for_review: true,
     )
     UI.success("Successfully synced metadata for #{package}")

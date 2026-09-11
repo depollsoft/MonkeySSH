@@ -12,8 +12,6 @@ class UnsavedChangesGuard extends StatefulWidget {
     this.title = 'Discard changes?',
     this.message =
         'You have unsaved changes. If you leave now, those changes will be lost.',
-    this.keepEditingLabel = 'Keep editing',
-    this.discardLabel = 'Discard',
     super.key,
   });
 
@@ -28,12 +26,6 @@ class UnsavedChangesGuard extends StatefulWidget {
 
   /// Dialog body shown when the user tries to leave.
   final String message;
-
-  /// Label for the action that keeps the user on the page.
-  final String keepEditingLabel;
-
-  /// Label for the destructive action that discards changes.
-  final String discardLabel;
 
   @override
   State<UnsavedChangesGuard> createState() => _UnsavedChangesGuardState();
@@ -75,14 +67,14 @@ class _UnsavedChangesGuardState extends State<UnsavedChangesGuard> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: Text(widget.keepEditingLabel),
+            child: const Text('Keep editing'),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(dialogContext).colorScheme.error,
             ),
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(widget.discardLabel),
+            child: const Text('Discard'),
           ),
         ],
       ),

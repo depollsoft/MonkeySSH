@@ -17,6 +17,7 @@ Widget _buildRemoteEditorWithKeyboardInset({
           context,
         ).copyWith(viewInsets: EdgeInsets.only(bottom: inset)),
         child: buildRemoteTextEditorScreenForTesting(
+          onSave: (_) async {},
           fileName: 'notes.txt',
           controller: controller,
           horizontalScrollController: horizontalScrollController,
@@ -51,12 +52,6 @@ class _WideTokenController extends TextEditingController {
 }
 
 void main() {
-  group('currentLinePrefixAtTextOffset', () {
-    test('returns the current line prefix for a multiline selection', () {
-      expect(currentLinePrefixAtTextOffset('alpha\nbeta\ngamma', 10), 'beta');
-    });
-  });
-
   group('resolveRemoteEditorGutterDigitSlots', () {
     test('keeps four digits by default and grows for larger files', () {
       expect(resolveRemoteEditorGutterDigitSlots(1), 4);
@@ -85,82 +80,6 @@ void main() {
       expect(
         resolveRemoteEditorVisualScale(fontSize: 14, pinchFontSize: 21),
         1.5,
-      );
-    });
-  });
-
-  group('resolveUnwrappedEditorSelectionScrollOffset', () {
-    test('scrolls right when the caret moves beyond the viewport', () {
-      expect(
-        resolveUnwrappedEditorSelectionScrollOffset(
-          text: '0123456789',
-          selection: const TextSelection.collapsed(offset: 10),
-          style: const TextStyle(),
-          textDirection: TextDirection.ltr,
-          textScaler: TextScaler.noScaling,
-          viewportWidth: 40,
-          trailingSlack: 5,
-          measureLineWidth: (line, _) => (line.length * 10).toDouble(),
-        ),
-        65,
-      );
-    });
-
-    test('scrolls left when the caret moves before the viewport', () {
-      expect(
-        resolveUnwrappedEditorSelectionScrollOffset(
-          text: '0123456789',
-          selection: const TextSelection.collapsed(offset: 2),
-          style: const TextStyle(),
-          textDirection: TextDirection.ltr,
-          textScaler: TextScaler.noScaling,
-          viewportWidth: 40,
-          currentOffset: 70,
-          trailingSlack: 5,
-          measureLineWidth: (line, _) => (line.length * 10).toDouble(),
-        ),
-        15,
-      );
-    });
-
-    test('measures rich text spans when resolving nowrap content width', () {
-      const plainStyle = TextStyle(fontSize: 14);
-      const line = 'plain wide wide wide';
-      final plainWidth = measureUnwrappedEditorContentWidth(
-        lines: const [line],
-        style: plainStyle,
-        textDirection: TextDirection.ltr,
-        textScaler: TextScaler.noScaling,
-        trailingSlack: 0,
-      );
-      final richWidth = measureUnwrappedEditorTextSpanContentWidth(
-        textSpan: TextSpan(
-          style: plainStyle,
-          children: [
-            const TextSpan(text: 'plain '),
-            TextSpan(
-              text: 'wide wide wide',
-              style: plainStyle.copyWith(letterSpacing: 10),
-            ),
-          ],
-        ),
-        textDirection: TextDirection.ltr,
-        textScaler: TextScaler.noScaling,
-        trailingSlack: 0,
-      );
-
-      expect(richWidth, greaterThan(plainWidth + 50));
-    });
-  });
-
-  group('resolveRemoteEditorCaretPosition', () {
-    test('returns the current line and column from the selection offset', () {
-      expect(
-        resolveRemoteEditorCaretPosition(
-          'alpha\nbeta\ngamma',
-          const TextSelection.collapsed(offset: 7),
-        ),
-        (line: 2, column: 2),
       );
     });
   });
@@ -195,6 +114,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: buildRemoteTextEditorScreenForTesting(
+            onSave: (_) async {},
             fileName: 'notes.txt',
             controller: controller,
           ),
@@ -215,6 +135,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: buildRemoteTextEditorScreenForTesting(
+            onSave: (_) async {},
             fileName: 'notes.txt',
             filePath: '/home/demo/project/notes.txt',
             controller: controller,
@@ -240,6 +161,7 @@ void main() {
                 Navigator.of(context).push(
                   MaterialPageRoute<String>(
                     builder: (_) => buildRemoteTextEditorScreenForTesting(
+                      onSave: (_) async {},
                       fileName: 'notes.txt',
                       controller: controller,
                     ),
@@ -273,6 +195,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             home: buildRemoteTextEditorScreenForTesting(
+              onSave: (_) async {},
               fileName: 'notes.txt',
               controller: controller,
             ),
@@ -303,6 +226,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             home: buildRemoteTextEditorScreenForTesting(
+              onSave: (_) async {},
               fileName: 'notes.txt',
               controller: controller,
               horizontalScrollController: horizontalScrollController,
@@ -437,6 +361,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: buildRemoteTextEditorScreenForTesting(
+            onSave: (_) async {},
             fileName: 'notes.txt',
             controller: controller,
           ),
@@ -472,6 +397,7 @@ void main() {
         MaterialApp(
           theme: ThemeData(platform: TargetPlatform.macOS),
           home: buildRemoteTextEditorScreenForTesting(
+            onSave: (_) async {},
             fileName: 'notes.txt',
             controller: controller,
           ),
@@ -501,6 +427,7 @@ void main() {
         MaterialApp(
           theme: ThemeData(platform: TargetPlatform.iOS),
           home: buildRemoteTextEditorScreenForTesting(
+            onSave: (_) async {},
             fileName: 'notes.txt',
             controller: controller,
           ),
@@ -522,6 +449,7 @@ void main() {
           MaterialApp(
             theme: ThemeData(platform: TargetPlatform.iOS),
             home: buildRemoteTextEditorScreenForTesting(
+              onSave: (_) async {},
               fileName: 'notes.txt',
               controller: controller,
             ),

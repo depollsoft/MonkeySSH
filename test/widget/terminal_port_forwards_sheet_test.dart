@@ -110,9 +110,17 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   final List<int> reconfiguredHostIds = [];
 
   @override
-  Map<int, SshConnectionState> build() => {
-    for (final session in sessions) session.connectionId: connectionState,
-  };
+  Map<int, SshConnectionState> build() {
+    for (final session in sessions) {
+      final subscription = session.portForwardChanges.listen((_) {
+        state = {...state};
+      });
+      ref.onDispose(subscription.cancel);
+    }
+    return {
+      for (final session in sessions) session.connectionId: connectionState,
+    };
+  }
 
   @override
   SshSession? getSession(int connectionId) {
@@ -208,6 +216,59 @@ void main() {
         remotePort: 1,
       ),
     );
+  });
+
+  testWidgets('closing releases host streams and reopening loads again', (
+    tester,
+  ) async {
+    final repository = _MockPortForwardRepository();
+    final hostRepository = _MockHostRepository();
+    final session = _LiveTestSession(
+      connectionId: 7,
+      hostId: 10,
+      client: _MockSshClient(),
+    );
+    addTearDown(session.changes.close);
+    var hostListens = 0;
+    var forwardListens = 0;
+    var hostCancels = 0;
+    var forwardCancels = 0;
+    final hosts = StreamController<Host?>.broadcast(
+      onListen: () => hostListens++,
+      onCancel: () => hostCancels++,
+    );
+    final forwards = StreamController<List<PortForward>>.broadcast(
+      onListen: () => forwardListens++,
+      onCancel: () => forwardCancels++,
+    );
+    addTearDown(hosts.close);
+    addTearDown(forwards.close);
+    when(() => repository.watchByHostId(10)).thenAnswer((_) => forwards.stream);
+    await tester.pumpWidget(
+      _buildSheetHost(
+        session: session,
+        notifier: _TestActiveSessionsNotifier([session]),
+        portForwardRepository: repository,
+        hostRepository: hostRepository,
+        hostStream: hosts.stream,
+      ),
+    );
+    for (var visit = 1; visit <= 2; visit++) {
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      expect(hostListens, visit);
+      expect(forwardListens, visit);
+      expect(find.byType(BrandListSkeleton), findsWidgets);
+      hosts.add(_host());
+      forwards.add([_portForward()]);
+      await tester.pumpAndSettle();
+      expect(find.text('Web preview'), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.pump();
+      expect(hostCancels, visit);
+      expect(forwardCancels, visit);
+    }
   });
 
   testWidgets('live switch starts and stops the current session rule', (
@@ -339,12 +400,30 @@ void main() {
     await tester.pump();
 
     expect(openedTunnels.map((tunnel) => tunnel.portForwardId), [-3000, 1]);
+    final activeTunnel = session.tunnels[1]!;
 
     await tester.tap(find.byKey(const Key('port-forward-switch-1')));
     await tester.pumpAndSettle();
 
     expect(session.stops, [1]);
     expect(find.text('Stopped • Auto-start'), findsOneWidget);
+
+    session.tunnels[1] = activeTunnel;
+    session.changes.add(null);
+    await tester.pumpAndSettle();
+    expect(find.text('Active now • Auto-start'), findsOneWidget);
+    session.tunnels.remove(1);
+    session.changes.add(null);
+    await tester.pumpAndSettle();
+    expect(find.text('Stopped • Auto-start'), findsOneWidget);
+
+    automaticOwner.tunnels.clear();
+    automaticOwner.changes.add(null);
+    await tester.pumpAndSettle();
+    expect(find.text('Port 3000'), findsNothing);
+    expect(find.text('Port 4000'), findsNothing);
+    expect(find.text('this saved host'), findsNothing);
+    expect(find.text('shared host services'), findsNothing);
 
     await tester.tap(find.text('Add Forward'));
     await tester.pumpAndSettle();

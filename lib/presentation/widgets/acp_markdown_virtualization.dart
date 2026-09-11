@@ -32,6 +32,7 @@ List<String> splitAcpMarkdownForVirtualization(
   var current = StringBuffer();
   String? fenceMarker;
   String? fenceOpening;
+  var hasPayload = false;
 
   void flush({bool reopenFence = false}) {
     if (current.isEmpty) return;
@@ -43,6 +44,7 @@ List<String> splitAcpMarkdownForVirtualization(
     }
     chunks.add(current.toString());
     current = StringBuffer();
+    hasPayload = false;
     if (reopenFence && fenceOpening != null) {
       current
         ..write(fenceOpening)
@@ -51,6 +53,28 @@ List<String> splitAcpMarkdownForVirtualization(
   }
 
   for (final originalLine in lines) {
+    var isFenceLine = false;
+    _updateFenceState(
+      originalLine,
+      currentFence: fenceMarker,
+      onOpen: (marker, opening) {
+        if (current.length + originalLine.length > targetChars) flush();
+        fenceMarker = marker;
+        fenceOpening = opening;
+        isFenceLine = true;
+      },
+      onClose: () {
+        fenceMarker = null;
+        fenceOpening = null;
+        isFenceLine = true;
+      },
+    );
+    if (isFenceLine) {
+      // Fence delimiters stay atomic even when the requested budget is tiny.
+      current.write(originalLine);
+      if (fenceMarker == null && current.length >= targetChars) flush();
+      continue;
+    }
     var line = originalLine;
     while (line.isNotEmpty) {
       if (fenceMarker == null &&
@@ -65,41 +89,28 @@ List<String> splitAcpMarkdownForVirtualization(
         continue;
       }
       final remaining = targetChars - current.length;
-      if (remaining <= 0) {
-        flush(reopenFence: fenceMarker != null);
-        continue;
-      }
-
-      if (line.length > remaining && current.isNotEmpty) {
-        // Prefer a natural Markdown block boundary. A fence is made valid on
-        // both sides by [flush], so code remains code rather than leaking into
-        // the rest of the conversation.
-        flush(reopenFence: fenceMarker != null);
-        continue;
-      }
-
-      if (line.length > targetChars) {
+      if (line.length > remaining) {
+        if (current.isNotEmpty && (fenceMarker == null || hasPayload)) {
+          // Prefer a line boundary, but never flush just a reopened fence.
+          flush(reopenFence: fenceMarker != null);
+          continue;
+        }
+        // A fence can exhaust a tiny budget. Still consume at least one
+        // complete code point so every overflow iteration makes progress.
         final splitAt = _safeLineSplit(line, remaining);
-        final part = line.substring(0, splitAt);
-        current.write(part);
+        current.write(line.substring(0, splitAt));
+        hasPayload = true;
         line = line.substring(splitAt);
-        flush(reopenFence: fenceMarker != null);
+        if (fenceMarker != null && (line == '\n' || line == '\r\n')) {
+          current.write(line);
+          line = '';
+        }
+        if (line.isNotEmpty) flush(reopenFence: fenceMarker != null);
         continue;
       }
 
       current.write(line);
-      _updateFenceState(
-        line,
-        currentFence: fenceMarker,
-        onOpen: (marker, opening) {
-          fenceMarker = marker;
-          fenceOpening = opening;
-        },
-        onClose: () {
-          fenceMarker = null;
-          fenceOpening = null;
-        },
-      );
+      hasPayload = true;
       line = '';
 
       if (current.length >= targetChars && fenceMarker == null) {
@@ -181,7 +192,7 @@ int _safeLineSplit(String line, int preferred) {
   }
   // Avoid separating a UTF-16 surrogate pair at an emergency hard boundary.
   if (limit < line.length && _isHighSurrogate(line.codeUnitAt(limit - 1))) {
-    return limit - 1;
+    return limit == 1 ? 2 : limit - 1;
   }
   return limit;
 }

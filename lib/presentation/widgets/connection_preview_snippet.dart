@@ -12,6 +12,12 @@ import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 import 'monkey_terminal_view.dart';
 
+/// Called once per styled-preview fitting search for measurement tests.
+@visibleForTesting
+VoidCallback? debugOnStyledPreviewFontFit;
+
+typedef _StyledPreviewMeasurement = ({double fontSize, Size cellSize});
+
 const _previewMaxLines = 17;
 const _previewMinFontSize = 6.5;
 const _previewMaxFontSize = 10.5;
@@ -155,8 +161,6 @@ class ConnectionPreviewSnippet extends StatelessWidget {
     this.lastExitCode,
     this.endpointStyle,
     this.terminalTheme,
-    this.showEndpoint = true,
-    this.previewMaxLines = _previewMaxLines,
     super.key,
   });
 
@@ -197,12 +201,6 @@ class ConnectionPreviewSnippet extends StatelessWidget {
   /// Terminal theme used to tint the preview surface.
   final TerminalThemeData? terminalTheme;
 
-  /// Whether to render the endpoint metadata line above the preview.
-  final bool showEndpoint;
-
-  /// Maximum number of preview lines to render before truncating.
-  final int previewMaxLines;
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -233,9 +231,9 @@ class ConnectionPreviewSnippet extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (showEndpoint) Text(endpoint, style: endpointStyle),
+        Text(endpoint, style: endpointStyle),
         if (activityTitle != null) ...[
-          if (showEndpoint) const SizedBox(height: 2),
+          const SizedBox(height: 2),
           Text(
             'Active: $activityTitle',
             maxLines: 1,
@@ -248,7 +246,7 @@ class ConnectionPreviewSnippet extends StatelessWidget {
         ],
         if ((workingDirectoryLabel?.isNotEmpty ?? false) ||
             (shellStatusLabel?.isNotEmpty ?? false)) ...[
-          if (showEndpoint || activityTitle != null) const SizedBox(height: 2),
+          const SizedBox(height: 2),
           Text(
             [
               if ((workingDirectoryLabel ?? '').isNotEmpty)
@@ -264,11 +262,7 @@ class ConnectionPreviewSnippet extends StatelessWidget {
         ],
         if ((previewText != null && previewText.isNotEmpty) ||
             nativeAcpPreviewSnapshot != null) ...[
-          if (showEndpoint ||
-              activityTitle != null ||
-              (workingDirectoryLabel?.isNotEmpty ?? false) ||
-              (shellStatusLabel?.isNotEmpty ?? false))
-            const SizedBox(height: 4),
+          const SizedBox(height: 4),
           Container(
             width: double.infinity,
             constraints: const BoxConstraints(minHeight: 48),
@@ -284,7 +278,7 @@ class ConnectionPreviewSnippet extends StatelessWidget {
                     previewSnapshot: previewSnapshot,
                     terminalTheme: terminalTheme,
                     color: previewTextColor,
-                    maxLines: previewMaxLines,
+                    maxLines: _previewMaxLines,
                   )
                 : _NativeAcpConnectionPreview(
                     snapshot: nativeAcpPreviewSnapshot!,
@@ -352,26 +346,10 @@ class ConnectionPreviewStackEntry {
 /// Renders one or more connection preview cards in a visibly offset stack.
 class ConnectionPreviewStack extends StatelessWidget {
   /// Creates a [ConnectionPreviewStack].
-  const ConnectionPreviewStack({
-    required this.entries,
-    this.cardHeight = _stackPreviewCardHeight,
-    this.verticalOffset = 14,
-    this.horizontalOffset = 10,
-    this.onTap,
-    super.key,
-  });
+  const ConnectionPreviewStack({required this.entries, this.onTap, super.key});
 
   /// Cards to render in the stack, ordered from oldest to newest.
   final List<ConnectionPreviewStackEntry> entries;
-
-  /// Height of each stacked preview card.
-  final double cardHeight;
-
-  /// Vertical offset applied between stacked cards.
-  final double verticalOffset;
-
-  /// Horizontal offset applied between stacked cards.
-  final double horizontalOffset;
 
   /// Called when the preview stack is tapped.
   final VoidCallback? onTap;
@@ -384,24 +362,24 @@ class ConnectionPreviewStack extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final maxHorizontalInset = (entries.length - 1) * horizontalOffset;
+        final maxHorizontalInset = (entries.length - 1) * 10.0;
         final cardWidth = constraints.maxWidth > maxHorizontalInset
             ? constraints.maxWidth - maxHorizontalInset
             : 0.0;
-        final cardHeights = [
+        final cardLayouts = [
           for (final entry in entries)
-            _stackPreviewCardHeightForEntry(
+            _measureStackPreviewCard(
               context: context,
               entry: entry,
               cardWidth: cardWidth,
               maxHeight:
-                  cardHeight +
+                  _stackPreviewCardHeight +
                   (entry.metadata != null ? _stackPreviewMetadataHeight : 0),
             ),
         ];
         final stackHeight = [
-          for (var index = 0; index < cardHeights.length; index++)
-            cardHeights[index] + (index * verticalOffset),
+          for (var index = 0; index < cardLayouts.length; index++)
+            cardLayouts[index].height + (index * 14.0),
         ].reduce(math.max);
 
         final stack = SizedBox(
@@ -412,12 +390,13 @@ class ConnectionPreviewStack extends StatelessWidget {
             children: [
               for (var index = 0; index < entries.length; index++)
                 Positioned(
-                  top: index * verticalOffset,
-                  left: index * horizontalOffset,
+                  top: index * 14.0,
+                  left: index * 10.0,
                   width: cardWidth,
                   child: _ConnectionPreviewStackCard(
                     entry: entries[index],
-                    height: cardHeights[index],
+                    height: cardLayouts[index].height,
+                    styledMeasurement: cardLayouts[index].styledMeasurement,
                     opacity: index == entries.length - 1
                         ? 1
                         : 0.9 - ((entries.length - index - 2) * 0.05),
@@ -446,11 +425,13 @@ class _ConnectionPreviewStackCard extends StatelessWidget {
   const _ConnectionPreviewStackCard({
     required this.entry,
     required this.height,
+    required this.styledMeasurement,
     required this.opacity,
     this.onTap,
   });
 
   final ConnectionPreviewStackEntry entry;
+  final _StyledPreviewMeasurement? styledMeasurement;
   final double height;
   final double opacity;
   final VoidCallback? onTap;
@@ -508,6 +489,7 @@ class _ConnectionPreviewStackCard extends StatelessWidget {
                   child: entry.nativeAcpPreviewSnapshot == null
                       ? _AdaptiveTerminalPreviewText(
                           text: entry.body,
+                          styledMeasurement: styledMeasurement,
                           previewSnapshot: entry.previewSnapshot,
                           terminalTheme: entry.terminalTheme,
                           color: textColor,
@@ -647,7 +629,8 @@ Color _previewBorderColor(
   );
 }
 
-double _stackPreviewCardHeightForEntry({
+({double height, _StyledPreviewMeasurement? styledMeasurement})
+_measureStackPreviewCard({
   required BuildContext context,
   required ConnectionPreviewStackEntry entry,
   required double cardWidth,
@@ -685,24 +668,27 @@ double _stackPreviewCardHeightForEntry({
     cardWidth - _stackPreviewCardHorizontalPadding,
   );
 
-  if (entry.nativeAcpPreviewSnapshot != null) return maxHeight;
+  if (entry.nativeAcpPreviewSnapshot != null) {
+    return (height: maxHeight, styledMeasurement: null);
+  }
 
   final styledSnapshot = entry.previewSnapshot;
   final styledTheme = entry.terminalTheme;
   double previewHeight;
+  _StyledPreviewMeasurement? styledMeasurement;
   if (styledSnapshot != null && styledTheme != null) {
     final lineCount = math.max(
       1,
       math.min(styledSnapshot.lines.length, _previewMaxLines),
     );
     final columnCount = _styledContentColumns(styledSnapshot);
-    final cellHeight = _styledPreviewCellHeight(
+    styledMeasurement = _measureStyledPreview(
       terminalTheme: styledTheme,
       columnCount: columnCount,
       maxWidth: previewTextMaxWidth,
       textScaler: textScaler,
     );
-    final naturalHeight = cellHeight * lineCount;
+    final naturalHeight = styledMeasurement.cellSize.height * lineCount;
     previewHeight =
         math.min(naturalHeight, previewTextMaxHeight) +
         _stackPreviewTextTopInset;
@@ -726,9 +712,12 @@ double _stackPreviewCardHeightForEntry({
         ) +
         _stackPreviewTextTopInset;
   }
-  return (chromeHeight + math.min(previewHeight, previewMaxHeight)).clamp(
-    _stackPreviewMinCardHeight,
-    maxHeight,
+  return (
+    height: (chromeHeight + math.min(previewHeight, previewMaxHeight)).clamp(
+      _stackPreviewMinCardHeight,
+      maxHeight,
+    ),
+    styledMeasurement: styledMeasurement,
   );
 }
 
@@ -753,9 +742,11 @@ class _AdaptiveTerminalPreviewText extends StatelessWidget {
     required this.terminalTheme,
     required this.color,
     required this.maxLines,
+    this.styledMeasurement,
   });
 
   final String text;
+  final _StyledPreviewMeasurement? styledMeasurement;
   final TerminalPreviewSnapshot? previewSnapshot;
   final TerminalThemeData? terminalTheme;
   final Color color;
@@ -764,6 +755,26 @@ class _AdaptiveTerminalPreviewText extends StatelessWidget {
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
+      final styledPreview = previewSnapshot;
+      final resolvedTerminalTheme = terminalTheme;
+      if (styledPreview != null && resolvedTerminalTheme != null) {
+        return _StyledTerminalPreviewText(
+          measurement:
+              styledMeasurement ??
+              _measureStyledPreview(
+                terminalTheme: resolvedTerminalTheme,
+                columnCount: _styledContentColumns(styledPreview),
+                maxWidth: constraints.maxWidth,
+                textScaler: MediaQuery.textScalerOf(context),
+              ),
+          preview: styledPreview,
+          terminalTheme: resolvedTerminalTheme,
+          maxLines: maxLines,
+          maxWidth: constraints.maxWidth,
+          maxHeight: constraints.maxHeight,
+        );
+      }
+
       final style = FluttyTheme.monoStyle.copyWith(
         fontSize: _previewMaxFontSize,
         color: color,
@@ -774,18 +785,6 @@ class _AdaptiveTerminalPreviewText extends StatelessWidget {
         maxLines: maxLines,
         constraints: constraints,
       );
-
-      final styledPreview = previewSnapshot;
-      final resolvedTerminalTheme = terminalTheme;
-      if (styledPreview != null && resolvedTerminalTheme != null) {
-        return _StyledTerminalPreviewText(
-          preview: styledPreview,
-          terminalTheme: resolvedTerminalTheme,
-          maxLines: maxLines,
-          maxWidth: constraints.maxWidth,
-          maxHeight: constraints.maxHeight,
-        );
-      }
 
       return Text(
         text,
@@ -801,6 +800,7 @@ class _AdaptiveTerminalPreviewText extends StatelessWidget {
 class _StyledTerminalPreviewText extends StatelessWidget {
   const _StyledTerminalPreviewText({
     required this.preview,
+    required this.measurement,
     required this.terminalTheme,
     required this.maxLines,
     required this.maxWidth,
@@ -808,6 +808,7 @@ class _StyledTerminalPreviewText extends StatelessWidget {
   });
 
   final TerminalPreviewSnapshot preview;
+  final _StyledPreviewMeasurement measurement;
   final TerminalThemeData terminalTheme;
   final int maxLines;
   final double maxWidth;
@@ -817,19 +818,12 @@ class _StyledTerminalPreviewText extends StatelessWidget {
   Widget build(BuildContext context) {
     final textScaler = MediaQuery.textScalerOf(context);
     final lineCount = math.max(1, math.min(preview.lines.length, maxLines));
-    final columnCount = _styledContentColumns(preview);
-    final fontSize = _fitStyledPreviewFontSize(
-      terminalTheme: terminalTheme,
-      columnCount: columnCount,
-      maxWidth: maxWidth,
-      textScaler: textScaler,
-    );
     final painter = _buildStyledPreviewPainter(
       terminalTheme: terminalTheme,
-      fontSize: fontSize,
+      fontSize: measurement.fontSize,
       textScaler: textScaler,
     );
-    final naturalHeight = painter.cellSize.height * lineCount;
+    final naturalHeight = measurement.cellSize.height * lineCount;
     final height = maxHeight.isFinite
         ? math.min(maxHeight, naturalHeight)
         : naturalHeight;
@@ -869,7 +863,9 @@ double _fitStyledPreviewFontSize({
       fontSize: midpoint,
       textScaler: textScaler,
     );
-    if (painter.cellSize.width * columnCount <= maxWidth) {
+    final cellWidth = painter.cellSize.width;
+    painter.dispose();
+    if (cellWidth * columnCount <= maxWidth) {
       low = midpoint;
     } else {
       high = midpoint;
@@ -893,23 +889,27 @@ MonkeyTerminalPainter _buildStyledPreviewPainter({
   textScaler: textScaler,
 );
 
-double _styledPreviewCellHeight({
+_StyledPreviewMeasurement _measureStyledPreview({
   required TerminalThemeData terminalTheme,
   required int columnCount,
   required double maxWidth,
   required TextScaler textScaler,
 }) {
+  debugOnStyledPreviewFontFit?.call();
   final fontSize = _fitStyledPreviewFontSize(
     terminalTheme: terminalTheme,
     columnCount: columnCount,
     maxWidth: maxWidth,
     textScaler: textScaler,
   );
-  return _buildStyledPreviewPainter(
+  final painter = _buildStyledPreviewPainter(
     terminalTheme: terminalTheme,
     fontSize: fontSize,
     textScaler: textScaler,
-  ).cellSize.height;
+  );
+  final cellSize = painter.cellSize;
+  painter.dispose();
+  return (fontSize: fontSize, cellSize: cellSize);
 }
 
 int _styledContentColumns(TerminalPreviewSnapshot snapshot) {

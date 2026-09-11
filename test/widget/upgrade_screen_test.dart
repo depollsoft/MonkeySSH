@@ -3,14 +3,41 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/presentation/screens/upgrade_screen.dart';
+// ignore: depend_on_referenced_packages
+import 'package:url_launcher_platform_interface/link.dart';
+// ignore: depend_on_referenced_packages
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 
 class _MockMonetizationService extends Mock implements MonetizationService {}
+
+class _FakeUrlLauncher extends UrlLauncherPlatform {
+  Future<bool> Function() launchResult = () async => true;
+  final launchedUrls = <String>[];
+  int canLaunchCalls = 0;
+
+  @override
+  LinkDelegate? get linkDelegate => null;
+
+  @override
+  Future<bool> canLaunch(String url) async {
+    canLaunchCalls++;
+    return false;
+  }
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) {
+    expect(options.mode, PreferredLaunchMode.externalApplication);
+    launchedUrls.add(url);
+    return launchResult();
+  }
+}
 
 Future<MonetizationActionResult> _cancelledPurchaseResult(Invocation _) =>
     Future.value(
@@ -26,6 +53,111 @@ void _stubRestorePurchases(_MockMonetizationService service) {
 }
 
 void main() {
+  group('external links', () {
+    late _FakeUrlLauncher launcher;
+
+    setUp(() {
+      final previousLauncher = UrlLauncherPlatform.instance;
+      launcher = _FakeUrlLauncher();
+      UrlLauncherPlatform.instance = launcher;
+      addTearDown(() {
+        UrlLauncherPlatform.instance = previousLauncher;
+      });
+    });
+
+    Future<void> showUpgrade(WidgetTester tester) async {
+      final service = _MockMonetizationService();
+      const state = MonetizationState(
+        billingAvailability: MonetizationBillingAvailability.available,
+        entitlements: MonetizationEntitlements.free(),
+        offers: [],
+        debugUnlockAvailable: false,
+        debugUnlocked: false,
+      );
+      when(() => service.currentState).thenReturn(state);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            monetizationServiceProvider.overrideWithValue(service),
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(state),
+            ),
+          ],
+          child: const MaterialApp(home: UpgradeScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    for (final link in [
+      (button: 'Privacy Policy', label: 'the privacy policy'),
+      (button: 'Terms of Use (EULA)', label: 'the Terms of Use'),
+      (
+        button: 'Manage subscription',
+        label: 'the subscription management page',
+      ),
+    ]) {
+      for (final throwsException in [false, true]) {
+        testWidgets(
+          '${link.button} reports ${throwsException ? 'an exception' : 'a refused launch'}',
+          (tester) async {
+            launcher.launchResult = () async {
+              if (throwsException) {
+                throw PlatformException(code: 'ACTIVITY_NOT_FOUND');
+              }
+              return false;
+            };
+            await showUpgrade(tester);
+            await tester.scrollUntilVisible(find.text(link.button), 300);
+            await tester.tap(find.text(link.button));
+            await tester.pumpAndSettle();
+
+            expect(launcher.launchedUrls, hasLength(1));
+            expect(launcher.canLaunchCalls, 0);
+            expect(find.text('Could not open ${link.label}.'), findsOneWidget);
+            expect(tester.takeException(), isNull);
+          },
+          variant: TargetPlatformVariant.only(TargetPlatform.android),
+        );
+      }
+
+      testWidgets(
+        '${link.button} handles a launch failure after disposal',
+        (tester) async {
+          final launch = Completer<bool>();
+          launcher.launchResult = () => launch.future;
+          await showUpgrade(tester);
+          await tester.scrollUntilVisible(find.text(link.button), 300);
+          await tester.tap(find.text(link.button));
+          await tester.pumpWidget(const SizedBox.shrink());
+          launch.completeError(PlatformException(code: 'ACTIVITY_NOT_FOUND'));
+          await tester.pump();
+
+          expect(launcher.launchedUrls, hasLength(1));
+          expect(tester.takeException(), isNull);
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'management launches when the visibility query would return false',
+      (tester) async {
+        await showUpgrade(tester);
+        await tester.scrollUntilVisible(find.text('Manage subscription'), 300);
+        await tester.tap(find.text('Manage subscription'));
+        await tester.pumpAndSettle();
+
+        expect(launcher.launchedUrls, [
+          'https://play.google.com/store/account/subscriptions',
+        ]);
+        expect(launcher.canLaunchCalls, 0);
+        expect(find.byType(SnackBar), findsNothing);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+  });
+
   testWidgets('feature-triggered paywall leads with the blocked action', (
     tester,
   ) async {
@@ -490,58 +622,74 @@ void main() {
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
 
-  testWidgets('purchase completion after disposal does not read ref', (
-    tester,
-  ) async {
-    final service = _MockMonetizationService();
-    final purchase = Completer<MonetizationActionResult>();
-    const state = MonetizationState(
-      billingAvailability: MonetizationBillingAvailability.available,
-      entitlements: MonetizationEntitlements.free(),
-      offers: [
-        MonetizationOffer(
-          id: 'monthly',
-          productId: 'monkeyssh_pro_monthly',
-          billingPeriod: MonetizationBillingPeriod.monthly,
-          planLabel: 'Monthly',
-          priceLabel: r'$5.00',
-          displayPriceLabel: r'$5.00 / month',
-          rawPrice: 5,
-          currencyCode: 'USD',
-          currencySymbol: r'$',
-        ),
-      ],
-      debugUnlockAvailable: false,
-      debugUnlocked: false,
-    );
-    when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer('monthly'),
-    ).thenAnswer((_) => purchase.future);
-    _stubRestorePurchases(service);
+  for (final result in [
+    const MonetizationActionResult.cancelled('Purchase cancelled.'),
+    const MonetizationActionResult.failure(
+      'Could not start the purchase flow.',
+    ),
+    const MonetizationActionResult.success('Purchased Pro.'),
+  ]) {
+    for (final disposeBeforeCompletion in [false, true]) {
+      testWidgets(
+        'purchase result with disposed=$disposeBeforeCompletion: ${result.message}',
+        (tester) async {
+          final service = _MockMonetizationService();
+          final purchase = Completer<MonetizationActionResult>();
+          const state = MonetizationState(
+            billingAvailability: MonetizationBillingAvailability.available,
+            entitlements: MonetizationEntitlements.free(),
+            offers: [
+              MonetizationOffer(
+                id: 'monthly',
+                productId: 'monkeyssh_pro_monthly',
+                billingPeriod: MonetizationBillingPeriod.monthly,
+                planLabel: 'Monthly',
+                priceLabel: r'$5.00',
+                displayPriceLabel: r'$5.00 / month',
+                rawPrice: 5,
+                currencyCode: 'USD',
+                currencySymbol: r'$',
+              ),
+            ],
+            debugUnlockAvailable: false,
+            debugUnlocked: false,
+          );
+          when(() => service.currentState).thenReturn(state);
+          when(
+            () => service.purchaseOffer('monthly'),
+          ).thenAnswer((_) => purchase.future);
+          _stubRestorePurchases(service);
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          monetizationServiceProvider.overrideWithValue(service),
-          monetizationStateProvider.overrideWith((ref) => Stream.value(state)),
-        ],
-        child: const MaterialApp(home: UpgradeScreen()),
-      ),
-    );
-    await tester.pump();
-    await tester.scrollUntilVisible(find.text('Subscribe monthly'), 300);
-    await tester.tap(find.text('Subscribe monthly'));
-    await tester.pump();
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                monetizationServiceProvider.overrideWithValue(service),
+                monetizationStateProvider.overrideWith(
+                  (ref) => Stream.value(state),
+                ),
+              ],
+              child: const MaterialApp(home: UpgradeScreen()),
+            ),
+          );
+          await tester.pump();
+          await tester.scrollUntilVisible(find.text('Subscribe monthly'), 300);
+          await tester.tap(find.text('Subscribe monthly'));
+          await tester.pump();
 
-    await tester.pumpWidget(const SizedBox.shrink());
-    purchase.complete(
-      const MonetizationActionResult.cancelled('Purchase cancelled.'),
-    );
-    await tester.pump();
+          if (disposeBeforeCompletion) {
+            await tester.pumpWidget(const SizedBox.shrink());
+          }
+          purchase.complete(result);
+          await tester.pump();
 
-    expect(tester.takeException(), isNull);
-  });
+          if (!disposeBeforeCompletion) {
+            expect(find.text(result.message), findsOneWidget);
+          }
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
 
   testWidgets(
     'shows lifetime ownership info and hides recurring plan actions',

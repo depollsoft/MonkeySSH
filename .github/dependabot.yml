@@ -46,3 +46,12 @@ updates:
     labels:
       - "android"
     multi-ecosystem-group: "all-dependencies"
+
+  # MonkeyMux remote helper
+  - package-ecosystem: "gomod"
+    directory: "/remote/monkeymux"
+    patterns:
+      - "*"
+    labels:
+      - "go"
+    multi-ecosystem-group: "all-dependencies"

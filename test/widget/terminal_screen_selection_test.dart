@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:dartssh2/dartssh2.dart' show SftpError;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,7 +16,89 @@ import 'package:xterm/xterm.dart';
 
 class _FakeImagePickerPlatform extends ImagePickerPlatform {}
 
+final class _StreamOnlyFile extends PlatformFile {
+  _StreamOnlyFile(this.stream);
+
+  final Stream<Uint8List> stream;
+
+  @override
+  Future<int> length() async => 2;
+
+  @override
+  XFile get xFile => throw StateError('Must stream');
+
+  @override
+  String get name => 'stream.txt';
+
+  @override
+  Uri get uri => Uri.parse('memory:stream.txt');
+
+  @override
+  Future<Uint8List> readAsBytes() => throw StateError('Must stream');
+
+  @override
+  Stream<Uint8List> readAsByteStream() => stream;
+}
+
 void main() {
+  test('picked-file failures preserve category and safe messages', () {
+    for (final (error, category) in <(Object, String)>[
+      (PlatformException(code: 'denied'), 'picker_failed'),
+      (const FileSystemException('private path'), 'picked_file_failed'),
+      (SftpError('private remote path'), 'picked_remote_upload_failed'),
+      (StateError('private details'), 'picked_upload_failed'),
+    ]) {
+      final failure = pickedFileFailure(error, 'File picker');
+      expect(failure.category, category);
+      expect(
+        failure.message,
+        error is SftpError
+            ? 'Remote upload failed. Check permissions and try again.'
+            : 'File picker failed. Try again.',
+      );
+    }
+  });
+
+  group('tmux window snapshot matching', () {
+    const first = TmuxWindow(
+      index: 0,
+      id: '@1',
+      name: 'first',
+      isActive: true,
+      panePid: 10,
+    );
+    const second = TmuxWindow(
+      index: 1,
+      id: '@2',
+      name: 'second',
+      isActive: false,
+    );
+    test('reordered snapshots keep identity', () {
+      expect(
+        shouldRefreshTmuxThemeAfterWindowChange(
+          [first, second],
+          [second, first],
+        ),
+        isFalse,
+      );
+    });
+    test('missing IDs match by index and present IDs do not fall back', () {
+      const noId = TmuxWindow(index: 0, name: 'first', isActive: true);
+      expect(shouldRefreshTmuxThemeAfterWindowChange([noId], [noId]), isFalse);
+      expect(shouldRefreshTmuxThemeAfterWindowChange([noId], [first]), isTrue);
+      expect(shouldRefreshTmuxThemeAfterWindowChange([first], [noId]), isTrue);
+    });
+    test('pane identity changes trigger refresh', () {
+      expect(
+        shouldRefreshTmuxThemeAfterWindowChange(
+          [first],
+          [first.copyWith(panePid: 11)],
+        ),
+        isTrue,
+      );
+    });
+  });
+
   group('trimTerminalSelectionText', () {
     test('trims trailing padding on each line only', () {
       expect(
@@ -291,6 +374,24 @@ void main() {
   });
 
   group('resolvePickedTerminalUploadReadStream', () {
+    test('streams a pathless file without reading all bytes', () async {
+      final file = _StreamOnlyFile(Stream.value(Uint8List.fromList([1, 2])));
+      expect(file.path, isNull);
+      expect(await resolvePickedTerminalUploadReadStream(file).toList(), [
+        [1, 2],
+      ]);
+    });
+
+    test('propagates a pathless stream error', () async {
+      final file = _StreamOnlyFile(
+        Stream.error(const FileSystemException('read')),
+      );
+      await expectLater(
+        resolvePickedTerminalUploadReadStream(file).drain<void>(),
+        throwsA(isA<FileSystemException>()),
+      );
+    });
+
     test('opens a stream from the picked file path when needed', () async {
       final tempDirectory = await Directory.systemTemp.createTemp(
         'terminal-upload-test',
@@ -309,7 +410,7 @@ void main() {
 
       expect(stream, isNotNull);
       expect(
-        await stream!.transform(const SystemEncoding().decoder).join(),
+        await stream.transform(const SystemEncoding().decoder).join(),
         'copilot',
       );
     });
@@ -2044,118 +2145,49 @@ void main() {
   });
 
   group('isTerminalPathContinuationAcrossLines', () {
-    test('joins explicit paths split by unindented rendered line breaks', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText:
-              'Edit ~/Code/flutty.worktrees/fix-sftp-local-path-link',
-          nextLineText: 's/lib/presentation/screens/terminal_screen.dart',
-        ),
-        isTrue,
-      );
-    });
-
-    test('does not join unrelated rendered lines', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Read terminal_screen.dart',
-          nextLineText: 'Read sftp_screen.dart',
-        ),
-        isFalse,
-      );
-    });
-
-    test('does not join file labels to a following explicit path row', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Read terminal_screen.dart',
-          nextLineText:
-              '~/Code/flutty.worktrees/session-resumption-all-provide',
-        ),
-        isFalse,
-      );
-    });
-
-    test('does not join standalone view metadata rows after a path', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText:
-              '~/Code/flutty.worktrees/session-resumption-all-provide',
-          nextLineText: '└ L330:390 (61 lines read)',
-        ),
-        isFalse,
-      );
-    });
-
-    test('does not join separate absolute path starts across lines', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: '/tmp/foo',
-          nextLineText: '/var/log/app.log',
-        ),
-        isFalse,
-      );
-    });
-
-    test('joins relative paths split after a directory separator', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Open lib/presentation/',
-          nextLineText: 'screens/terminal_screen.dart',
-        ),
-        isTrue,
-      );
-    });
-
-    test('joins tilde-root prefixes split before the next segment', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Open ~/',
-          nextLineText: 'Code/flutty',
-        ),
-        isTrue,
-      );
-    });
-
-    test('joins slash-root prefixes split before the next segment', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Open /',
-          nextLineText: 'var/log/app.log',
-        ),
-        isTrue,
-      );
-    });
-
-    test('joins absolute path continuations that resume with a slash', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'Open /Users/tester',
-          nextLineText: '/project/lib/main.dart',
-        ),
-        isTrue,
-      );
-    });
-
-    test('does not join separate relative path starts across lines', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'lib/presentation/screens/terminal_screen.dart',
-          nextLineText: 'test/widget/terminal_screen_selection_test.dart',
-        ),
-        isFalse,
-      );
-    });
-
-    test('does not join ordinary prose rows to a following prompt path', () {
-      expect(
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: 'metadata rows no longer get folded into the path',
-          nextLineText: '~/Code/flutty [⇢main]',
-        ),
-        isFalse,
-      );
-    });
+    for (final (previous, next, expected) in <(String, String, bool)>[
+      (
+        'Edit ~/Code/flutty.worktrees/fix-sftp-local-path-link',
+        's/lib/presentation/screens/terminal_screen.dart',
+        true,
+      ),
+      ('Read terminal_screen.dart', 'Read sftp_screen.dart', false),
+      (
+        'Read terminal_screen.dart',
+        '~/Code/flutty.worktrees/session-resumption-all-provide',
+        false,
+      ),
+      (
+        '~/Code/flutty.worktrees/session-resumption-all-provide',
+        '└ L330:390 (61 lines read)',
+        false,
+      ),
+      ('/tmp/foo', '/var/log/app.log', false),
+      ('Open lib/presentation/', 'screens/terminal_screen.dart', true),
+      ('Open ~/', 'Code/flutty', true),
+      ('Open /', 'var/log/app.log', true),
+      ('Open /Users/tester', '/project/lib/main.dart', true),
+      (
+        'lib/presentation/screens/terminal_screen.dart',
+        'test/widget/terminal_screen_selection_test.dart',
+        false,
+      ),
+      (
+        'metadata rows no longer get folded into the path',
+        '~/Code/flutty [⇢main]',
+        false,
+      ),
+    ]) {
+      test('joins "$previous" to "$next": $expected', () {
+        expect(
+          isTerminalPathContinuationAcrossLines(
+            previousLineText: previous,
+            nextLineText: next,
+          ),
+          expected,
+        );
+      });
+    }
   });
 
   group('terminalRowMayContainPath', () {
@@ -2267,32 +2299,6 @@ void main() {
     });
   });
 
-  group('selectedNativeOverlayText', () {
-    test('returns the selected overlay substring', () {
-      expect(
-        selectedNativeOverlayText(
-          const TextEditingValue(
-            text: 'copilot cli',
-            selection: TextSelection(baseOffset: 0, extentOffset: 7),
-          ),
-        ),
-        'copilot',
-      );
-    });
-
-    test('returns empty text for a collapsed overlay selection', () {
-      expect(
-        selectedNativeOverlayText(
-          const TextEditingValue(
-            text: 'copilot cli',
-            selection: TextSelection.collapsed(offset: 7),
-          ),
-        ),
-        isEmpty,
-      );
-    });
-  });
-
   group('applyTerminalCursorInsertion', () {
     test('appends inserted text at the current cursor offset', () {
       final nextValue = applyTerminalCursorInsertion(
@@ -2329,6 +2335,85 @@ void main() {
     });
   });
 
+  group('terminalSensitivePromptTextBeforeCursor', () {
+    test('rejects the entire overlong wrapped prefix, not just its suffix', () {
+      final terminal = Terminal(maxLines: 10000)
+        ..resize(80, 24)
+        ..write('${'x' * 100000} Password:');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), isNull);
+    });
+
+    test('keeps the 220 UTF-16 boundary and ignores trailing whitespace', () {
+      final terminal = Terminal()
+        ..resize(20, 24)
+        ..write('${'x' * 210} Password:${' ' * 400}');
+      expect(
+        terminalSensitivePromptTextBeforeCursor(terminal),
+        '${'x' * 210} Password:',
+      );
+      expect(
+        terminalTextLooksLikeSensitiveInputPrompt(
+          terminalSensitivePromptTextBeforeCursor(terminal),
+        ),
+        isTrue,
+      );
+      terminal.write('x');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), isNull);
+    });
+
+    test('counts supplementary characters as two UTF-16 code units', () {
+      // Move past the final column so the colon is before the reported cursor.
+      final terminal = Terminal()
+        ..resize(20, 24)
+        ..write('${'😀' * 105} Password: ');
+      expect(
+        terminalSensitivePromptTextBeforeCursor(terminal),
+        '${'😀' * 105} Password:',
+      );
+      terminal.write('x');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), isNull);
+    });
+
+    test('stops at the cursor and the start of its wrapped group', () {
+      final terminal = Terminal()
+        ..resize(10, 24)
+        ..write('${'x' * 300}\r\nPassword: ignored')
+        ..write('\x1b[1A\x1b[10G');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), 'Password:');
+    });
+
+    test(
+      'preserves wrapped padding after a wide character at the row edge',
+      () {
+        // The trailing space wraps the cursor onto a third row, past the colon.
+        final terminal = Terminal()
+          ..resize(10, 24)
+          ..write('123456789界Password: ');
+        expect(
+          terminalSensitivePromptTextBeforeCursor(terminal),
+          '123456789界 Password:',
+        );
+        terminal.write('\x1b[2A\x1b[10G');
+        expect(terminalSensitivePromptTextBeforeCursor(terminal), '123456789');
+      },
+    );
+
+    test('excludes a wide character when the cursor is inside its cell', () {
+      final terminal = Terminal()
+        ..resize(10, 24)
+        ..write('12界Password:')
+        ..write('\x1b[1A\x1b[4G');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), '12');
+    });
+
+    test('returns an empty prefix for a blank line', () {
+      final terminal = Terminal()
+        ..resize(10, 24)
+        ..write('   ');
+      expect(terminalSensitivePromptTextBeforeCursor(terminal), isEmpty);
+    });
+  });
+
   group('resolveTerminalLineSnapshotTextLength', () {
     test('preserves trailing spaces through the cursor offset', () {
       expect(
@@ -2349,119 +2434,6 @@ void main() {
           preserveTrailingPadding: true,
         ),
         8,
-      );
-    });
-  });
-
-  group('hasActiveNativeOverlaySelection', () {
-    test('recognizes expanded native overlay selections as active', () {
-      expect(
-        hasActiveNativeOverlaySelection(
-          const TextSelection(baseOffset: 2, extentOffset: 8),
-        ),
-        isTrue,
-      );
-    });
-
-    test('treats collapsed native overlay selections as inactive', () {
-      expect(
-        hasActiveNativeOverlaySelection(
-          const TextSelection.collapsed(offset: 8),
-        ),
-        isFalse,
-      );
-    });
-  });
-
-  group('shouldShowNativeSelectionOverlay', () {
-    test('keeps overlay hidden until native selection mode is entered', () {
-      expect(
-        shouldShowNativeSelectionOverlay(
-          isNativeSelectionMode: false,
-          routesTouchScrollToTerminal: false,
-          revealOverlayInTouchScrollMode: false,
-        ),
-        isFalse,
-      );
-    });
-
-    test(
-      'shows overlay when touch scrolling is not routed to the terminal',
-      () {
-        expect(
-          shouldShowNativeSelectionOverlay(
-            isNativeSelectionMode: true,
-            routesTouchScrollToTerminal: false,
-            revealOverlayInTouchScrollMode: false,
-          ),
-          isTrue,
-        );
-      },
-    );
-
-    test(
-      'shows overlay during tmux touch scrolling after selection begins',
-      () {
-        expect(
-          shouldShowNativeSelectionOverlay(
-            isNativeSelectionMode: true,
-            routesTouchScrollToTerminal: true,
-            revealOverlayInTouchScrollMode: true,
-          ),
-          isTrue,
-        );
-      },
-    );
-
-    test(
-      'keeps overlay visible in native mode during tmux touch scrolling',
-      () {
-        expect(
-          shouldShowNativeSelectionOverlay(
-            isNativeSelectionMode: true,
-            routesTouchScrollToTerminal: true,
-            revealOverlayInTouchScrollMode: false,
-          ),
-          isTrue,
-        );
-      },
-    );
-  });
-
-  group('resolveNativeSelectionOverlayChange', () {
-    test('exits mobile selection mode when selection collapses', () {
-      expect(
-        resolveNativeSelectionOverlayChange(
-          isMobilePlatform: true,
-          isNativeSelectionMode: true,
-          revealOverlayInTouchScrollMode: false,
-          selection: const TextSelection.collapsed(offset: 3),
-        ),
-        NativeSelectionOverlayChange.exitSelectionMode,
-      );
-    });
-
-    test('exits mobile selection mode when a tmux selection collapses', () {
-      expect(
-        resolveNativeSelectionOverlayChange(
-          isMobilePlatform: true,
-          isNativeSelectionMode: true,
-          revealOverlayInTouchScrollMode: true,
-          selection: const TextSelection.collapsed(offset: 3),
-        ),
-        NativeSelectionOverlayChange.exitSelectionMode,
-      );
-    });
-
-    test('keeps overlay state when selection remains expanded', () {
-      expect(
-        resolveNativeSelectionOverlayChange(
-          isMobilePlatform: true,
-          isNativeSelectionMode: true,
-          revealOverlayInTouchScrollMode: false,
-          selection: const TextSelection(baseOffset: 1, extentOffset: 4),
-        ),
-        NativeSelectionOverlayChange.none,
       );
     });
   });

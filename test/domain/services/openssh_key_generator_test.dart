@@ -52,9 +52,9 @@ Future<String> _sshKeygenPublicKey(String pem, String passphrase) async {
 void main() {
   final sshKeygen = _sshKeygenAvailable();
 
-  group('generateOpenSshPrivateKeyPem', () {
+  group('generateOpenSshKey', () {
     test('generates a parseable unencrypted Ed25519 key', () async {
-      final pem = await generateOpenSshPrivateKeyPem(
+      final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
       );
@@ -64,6 +64,7 @@ void main() {
 
       final keyPairs = SSHKeyPair.fromPem(pem);
       expect(keyPairs, hasLength(1));
+      expect(publicKeyBlob, keyPairs.first.toPublicKey().encode());
 
       final keyPair = keyPairs.first;
       expect(_algorithm(keyPair.toPublicKey().encode()), 'ssh-ed25519');
@@ -72,13 +73,14 @@ void main() {
     });
 
     test('generates a parseable unencrypted RSA key', () async {
-      final pem = await generateOpenSshPrivateKeyPem(
+      final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
         keyType: SshKeyType.rsa2048,
         comment: 'unit@test',
       );
 
       final keyPairs = SSHKeyPair.fromPem(pem);
       expect(keyPairs, hasLength(1));
+      expect(publicKeyBlob, keyPairs.first.toPublicKey().encode());
       expect(_algorithm(keyPairs.first.toPublicKey().encode()), 'ssh-rsa');
       expect(
         keyPairs.first.sign(Uint8List.fromList([1, 2, 3])).encode(),
@@ -88,7 +90,7 @@ void main() {
 
     test('encrypts the key with the passphrase (Ed25519)', () async {
       const passphrase = 'correct horse battery staple';
-      final pem = await generateOpenSshPrivateKeyPem(
+      final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
         passphrase: passphrase,
@@ -104,6 +106,7 @@ void main() {
       // Correct passphrase decrypts to a usable key.
       final keyPairs = SSHKeyPair.fromPem(pem, passphrase);
       expect(keyPairs, hasLength(1));
+      expect(publicKeyBlob, keyPairs.first.toPublicKey().encode());
       expect(
         keyPairs.first.sign(Uint8List.fromList([9, 9, 9])).encode(),
         isNotEmpty,
@@ -112,7 +115,7 @@ void main() {
 
     test('encrypts the key with the passphrase (RSA)', () async {
       const passphrase = 'p@ss with spaces';
-      final pem = await generateOpenSshPrivateKeyPem(
+      final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
         keyType: SshKeyType.rsa2048,
         comment: 'unit@test',
         passphrase: passphrase,
@@ -120,27 +123,29 @@ void main() {
 
       expect(SSHKeyPair.isEncryptedPem(pem), isTrue);
       expect(() => SSHKeyPair.fromPem(pem, 'nope'), throwsA(isA<Object>()));
-      expect(SSHKeyPair.fromPem(pem, passphrase), hasLength(1));
+      final keyPairs = SSHKeyPair.fromPem(pem, passphrase);
+      expect(keyPairs, hasLength(1));
+      expect(publicKeyBlob, keyPairs.first.toPublicKey().encode());
     });
 
     test('produces a different key on each call', () async {
-      final a = await generateOpenSshPrivateKeyPem(
+      final a = (await generateOpenSshKey(
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
-      );
-      final b = await generateOpenSshPrivateKeyPem(
+      )).privateKeyPem;
+      final b = (await generateOpenSshKey(
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
-      );
+      )).privateKeyPem;
       expect(a, isNot(equals(b)));
     });
 
     test('treats an empty passphrase as no passphrase', () async {
-      final pem = await generateOpenSshPrivateKeyPem(
+      final pem = (await generateOpenSshKey(
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
         passphrase: '',
-      );
+      )).privateKeyPem;
       expect(SSHKeyPair.isEncryptedPem(pem), isFalse);
       expect(SSHKeyPair.fromPem(pem), hasLength(1));
     });
@@ -150,10 +155,10 @@ void main() {
     test(
       'ssh-keygen accepts an unencrypted Ed25519 key',
       () async {
-        final pem = await generateOpenSshPrivateKeyPem(
+        final pem = (await generateOpenSshKey(
           keyType: SshKeyType.ed25519,
           comment: 'unit@test',
-        );
+        )).privateKeyPem;
         final publicKey = await _sshKeygenPublicKey(pem, '');
         expect(publicKey, startsWith('ssh-ed25519 '));
       },
@@ -164,11 +169,11 @@ void main() {
       'ssh-keygen accepts a passphrase-encrypted RSA key',
       () async {
         const passphrase = 'interop-secret';
-        final pem = await generateOpenSshPrivateKeyPem(
+        final pem = (await generateOpenSshKey(
           keyType: SshKeyType.rsa2048,
           comment: 'unit@test',
           passphrase: passphrase,
-        );
+        )).privateKeyPem;
         final publicKey = await _sshKeygenPublicKey(pem, passphrase);
         expect(publicKey, startsWith('ssh-rsa '));
       },

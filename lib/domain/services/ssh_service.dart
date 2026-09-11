@@ -31,8 +31,10 @@ import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'interactive_auth_prompt.dart';
 import 'local_notification_service.dart';
+import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
 import 'settings_service.dart';
+import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'telemetry_service.dart';
 import 'terminal_command_mark_tracker.dart';
@@ -67,64 +69,67 @@ typedef TerminalControlModeState = ({
   bool sgrMouseReportMode,
 });
 
-/// Unwraps tmux DCS passthrough sequences from shell output.
-///
-/// Apps running inside tmux wrap terminal queries as
-/// `DCS tmux; <escaped sequence> ST`. The inner ESC bytes are doubled by tmux;
-/// this returns a stream that xterm can parse normally while preserving split
-/// passthrough sequences across chunks.
-({String output, String pendingInput}) unwrapTerminalTmuxPassthroughSequences({
-  required String input,
-  required String pendingInput,
-}) {
-  final combinedInput = pendingInput + input;
-  final output = StringBuffer();
-  var cursor = 0;
+/// Incrementally unwraps tmux DCS passthroughs, including doubled ESC bytes.
+class TerminalTmuxPassthroughDecoder {
+  int _prefixLength = 0;
+  StringBuffer? _payload;
+  bool _escaped = false;
 
-  while (cursor < combinedInput.length) {
-    final startIndex = combinedInput.indexOf(
-      _terminalTmuxPassthroughStart,
-      cursor,
-    );
-    if (startIndex == -1) {
-      output.write(combinedInput.substring(cursor));
-      final outputValue = output.toString();
-      final pendingSuffix = _terminalTmuxPassthroughPendingSuffix(outputValue);
-      if (pendingSuffix.isEmpty) {
-        return (output: outputValue, pendingInput: '');
-      }
-
-      return (
-        output: outputValue.substring(
-          0,
-          outputValue.length - pendingSuffix.length,
-        ),
-        pendingInput: pendingSuffix,
-      );
-    }
-
-    output.write(combinedInput.substring(cursor, startIndex));
-    final payloadStart = startIndex + _terminalTmuxPassthroughStart.length;
-    final endIndex = _terminalTmuxPassthroughEndIndex(
-      combinedInput,
-      payloadStart,
-    );
-    if (endIndex == -1) {
-      return (
-        output: output.toString(),
-        pendingInput: combinedInput.substring(startIndex),
-      );
-    }
-
-    output.write(
-      combinedInput
-          .substring(payloadStart, endIndex)
-          .replaceAll(_escapedTerminalEscape, _terminalEscape),
-    );
-    cursor = endIndex + _terminalStringTerminator.length;
+  /// Discards an incomplete sequence when the shell is reset.
+  void reset() {
+    _prefixLength = 0;
+    _payload = null;
+    _escaped = false;
   }
 
-  return (output: output.toString(), pendingInput: '');
+  /// Decodes a chunk, retaining incomplete passthroughs until their terminator.
+  String add(String input) {
+    final output = StringBuffer();
+    var cursor = 0;
+    while (cursor < input.length) {
+      final payload = _payload;
+      if (payload != null) {
+        if (_escaped) {
+          final code = input.codeUnitAt(cursor++);
+          _escaped = false;
+          if (code == _terminalStringTerminatorCodeUnit) {
+            output.write(payload);
+            _payload = null;
+          } else {
+            payload.write(_terminalEscape);
+            if (code != _terminalEscapeCodeUnit) payload.writeCharCode(code);
+          }
+        } else {
+          final escape = input.indexOf(_terminalEscape, cursor);
+          final end = escape < 0 ? input.length : escape;
+          payload.write(input.substring(cursor, end));
+          _escaped = escape >= 0;
+          cursor = end + (_escaped ? 1 : 0);
+        }
+      } else if (_prefixLength > 0) {
+        if (input.codeUnitAt(cursor) ==
+            _terminalTmuxPassthroughStart.codeUnitAt(_prefixLength)) {
+          cursor++;
+          if (++_prefixLength == _terminalTmuxPassthroughStart.length) {
+            _prefixLength = 0;
+            _payload = StringBuffer();
+          }
+        } else {
+          output.write(
+            _terminalTmuxPassthroughStart.substring(0, _prefixLength),
+          );
+          _prefixLength = 0;
+        }
+      } else {
+        final escape = input.indexOf(_terminalEscape, cursor);
+        final end = escape < 0 ? input.length : escape;
+        output.write(input.substring(cursor, end));
+        _prefixLength = escape < 0 ? 0 : 1;
+        cursor = end + _prefixLength;
+      }
+    }
+    return output.toString();
+  }
 }
 
 /// Builds responses for terminal window/cell size and theme reports in shell
@@ -295,8 +300,7 @@ String normalizeTerminalOutputForRemoteShell(String data) =>
 /// xterm.dart 4.0.0 tracks IRM (`CSI 4 h/l`) but does not shift existing cells
 /// when printable characters arrive while the mode is active. Injecting ICH
 /// before each printable cell preserves behavior from editors such as nano,
-/// while [pendingInput] keeps split escape sequences from leaking printable
-/// bytes into the renderer.
+/// while the decoder retains split escape sequences until complete.
 ///
 /// xterm.dart 4.0.0 also corrupts its line buffer when RI (`ESC M`) scrolls a
 /// vertical margin region down. When cursor state is provided, that RI is
@@ -306,89 +310,134 @@ String normalizeTerminalOutputForRemoteShell(String data) =>
 /// xterm.dart also treats private `CSI > ... m` keyboard modifier controls as
 /// SGR attributes. Dropping those controls prevents TUIs such as OpenCode from
 /// accidentally enabling underline/bold while painting spaces.
-@visibleForTesting
-({String output, String pendingInput, bool insertMode, int pendingScanOffset})
-adaptTerminalInsertModeOutputForXterm({
-  required String input,
-  required String pendingInput,
-  required bool insertMode,
-  int pendingScanOffset = 0,
-  int? terminalColumns,
-  int? terminalRows,
-  int? cursorColumn,
-  int? cursorRow,
-  int? marginTop,
-  int? marginBottom,
-  bool originMode = false,
-}) {
-  final combinedInput = pendingInput + input;
-  final output = StringBuffer();
-  var cursor = 0;
-  var nextInsertMode = insertMode;
-  final cursorTracker = _TerminalOutputCursorTracker(
-    columns: terminalColumns,
-    rows: terminalRows,
-    cursorColumn: cursorColumn,
-    cursorRow: cursorRow,
-    marginTop: marginTop,
-    marginBottom: marginBottom,
-    originMode: originMode,
-  );
+class TerminalXtermOutputDecoder {
+  final _sequence = StringBuffer();
+  _TerminalSequenceState? _state;
+  bool _previousEscape = false;
+  String _pendingSurrogate = '';
+  bool _insertMode = false;
 
-  while (cursor < combinedInput.length) {
-    final codeUnit = combinedInput.codeUnitAt(cursor);
-    if (codeUnit == _terminalEscapeCodeUnit) {
-      // Only the carried-over incomplete sequence (always at index 0) can
-      // resume a prior scan; later sequences scan from their own body.
-      final endIndex = _terminalEscapeSequenceEndIndex(
-        combinedInput,
-        cursor,
-        resumeBodyFrom: cursor == 0 ? pendingScanOffset : 0,
-      );
-      if (endIndex == null) {
-        // Still incomplete: we have now scanned to the end, so the next call
-        // resumes one character back (to catch a split `ESC \` terminator).
-        final scanned = combinedInput.length - cursor;
-        return (
-          output: output.toString(),
-          pendingInput: combinedInput.substring(cursor),
-          insertMode: nextInsertMode,
-          pendingScanOffset: scanned > 1 ? scanned - 1 : 0,
-        );
-      }
+  /// Number of code units retained until a sequence or surrogate completes.
+  int get pendingCodeUnits => _sequence.length + _pendingSurrogate.length;
 
-      final sequence = combinedInput.substring(cursor, endIndex);
-      if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
-        output.write(cursorTracker.adaptEscapeSequence(sequence));
-        final insertModeUpdate = _terminalInsertModeUpdate(sequence);
-        if (insertModeUpdate != null) {
-          nextInsertMode = insertModeUpdate;
-        }
-      }
-      cursor = endIndex;
-      continue;
-    }
+  /// Counts sequence code units materialized for the renderer.
+  @visibleForTesting
+  int materializedSequenceCodeUnits = 0;
 
-    final rune = _terminalRuneAt(combinedInput, cursor);
-    final runeLength = _terminalRuneLength(rune);
-    if (nextInsertMode && _isTerminalGraphicRune(rune)) {
-      final width = _terminalCellWidth(rune);
-      for (var cell = 0; cell < width; cell += 1) {
-        output.write(_terminalInsertBlankCharacterSequence);
-      }
-    }
-    output.write(combinedInput.substring(cursor, cursor + runeLength));
-    cursorTracker.writeRune(rune);
-    cursor += runeLength;
+  /// Discards partial output and resets insert mode for a new shell.
+  void reset() {
+    _sequence.clear();
+    _state = null;
+    _previousEscape = false;
+    _pendingSurrogate = '';
+    _insertMode = false;
+    materializedSequenceCodeUnits = 0;
   }
 
-  return (
-    output: output.toString(),
-    pendingInput: '',
-    insertMode: nextInsertMode,
-    pendingScanOffset: 0,
-  );
+  /// Adapts the next chunk using the renderer's current cursor state.
+  ({String output, bool insertMode}) add({
+    required String input,
+    int? terminalColumns,
+    int? terminalRows,
+    int? cursorColumn,
+    int? cursorRow,
+    int? marginTop,
+    int? marginBottom,
+    bool originMode = false,
+  }) {
+    final combinedInput = _pendingSurrogate.isEmpty
+        ? input
+        : _pendingSurrogate + input;
+    _pendingSurrogate = '';
+    final output = StringBuffer();
+    var cursor = 0;
+    final cursorTracker = _TerminalOutputCursorTracker(
+      columns: terminalColumns,
+      rows: terminalRows,
+      cursorColumn: cursorColumn,
+      cursorRow: cursorRow,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
+      originMode: originMode,
+    );
+    while (cursor < combinedInput.length) {
+      if (_state != null) {
+        final start = cursor;
+        while (cursor < combinedInput.length && _state != null) {
+          _scanSequenceCodeUnit(combinedInput.codeUnitAt(cursor++));
+        }
+        _sequence.write(combinedInput.substring(start, cursor));
+        if (_state != null) break;
+        final sequence = _sequence.toString();
+        materializedSequenceCodeUnits += sequence.length;
+        _sequence.clear();
+        if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
+          output.write(cursorTracker.adaptEscapeSequence(sequence));
+          _insertMode = _terminalInsertModeUpdate(sequence) ?? _insertMode;
+        }
+        continue;
+      }
+      final codeUnit = combinedInput.codeUnitAt(cursor);
+      if (codeUnit == _terminalEscapeCodeUnit) {
+        _sequence.write(_terminalEscape);
+        _state = _TerminalSequenceState.escape;
+        cursor++;
+        continue;
+      }
+      if (cursor == combinedInput.length - 1 &&
+          codeUnit >= 0xD800 &&
+          codeUnit <= 0xDBFF) {
+        _pendingSurrogate = combinedInput.substring(cursor);
+        break;
+      }
+      final rune = _terminalRuneAt(combinedInput, cursor);
+      final runeLength = _terminalRuneLength(rune);
+      if (_insertMode && _isTerminalGraphicRune(rune)) {
+        for (var cell = 0; cell < _terminalCellWidth(rune); cell++) {
+          output.write(_terminalInsertBlankCharacterSequence);
+        }
+      }
+      output.write(combinedInput.substring(cursor, cursor + runeLength));
+      cursorTracker.writeRune(rune);
+      cursor += runeLength;
+    }
+    return (output: output.toString(), insertMode: _insertMode);
+  }
+
+  void _scanSequenceCodeUnit(int codeUnit) {
+    switch (_state!) {
+      case _TerminalSequenceState.escape:
+        switch (codeUnit) {
+          case _terminalCsiIntroducerCodeUnit:
+            _state = _TerminalSequenceState.csi;
+          case _terminalDcsIntroducerCodeUnit:
+          case _terminalOscIntroducerCodeUnit:
+          case _terminalSosIntroducerCodeUnit:
+          case _terminalPmIntroducerCodeUnit:
+          case _terminalApcIntroducerCodeUnit:
+            _state = _TerminalSequenceState.string;
+            _previousEscape = false;
+          default:
+            _state = _isTerminalEscapeIntermediate(codeUnit)
+                ? _TerminalSequenceState.intermediate
+                : null;
+        }
+      case _TerminalSequenceState.csi:
+        if (codeUnit >= 0x40 && codeUnit <= 0x7E) _state = null;
+      case _TerminalSequenceState.string:
+        if (codeUnit == _terminalBellCodeUnit ||
+            (_previousEscape &&
+                codeUnit == _terminalStringTerminatorCodeUnit)) {
+          _state = null;
+        }
+        _previousEscape = codeUnit == _terminalEscapeCodeUnit;
+      case _TerminalSequenceState.intermediate:
+        if (!_isTerminalEscapeIntermediate(codeUnit)) _state = null;
+    }
+  }
 }
+
+enum _TerminalSequenceState { escape, csi, string, intermediate }
 
 class _TerminalOutputCursorTracker {
   _TerminalOutputCursorTracker({
@@ -753,124 +802,10 @@ const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
 const _terminalInsertBlankCharacterSequence = '\x1b[@';
 const _terminalReverseIndexSequence = '\x1bM';
 const _terminalInsertLineSequence = '\x1b[L';
-const _escapedTerminalEscape = '$_terminalEscape$_terminalEscape';
-const _terminalStringTerminator = '$_terminalEscape\\';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
 
 String _formatTerminalModeReport(int mode, int status) =>
     '\x1b[?$mode;$status\$y';
-
-int _terminalTmuxPassthroughEndIndex(String input, int payloadStart) {
-  var index = payloadStart;
-  while (index < input.length - 1) {
-    if (input[index] != _terminalEscape) {
-      index += 1;
-      continue;
-    }
-
-    final next = input[index + 1];
-    if (next == _terminalEscape) {
-      index += 2;
-      continue;
-    }
-    if (next == r'\') {
-      return index;
-    }
-    index += 1;
-  }
-  return -1;
-}
-
-String _terminalTmuxPassthroughPendingSuffix(String input) {
-  final maxSuffixLength =
-      input.length < _terminalTmuxPassthroughStart.length - 1
-      ? input.length
-      : _terminalTmuxPassthroughStart.length - 1;
-  for (var length = maxSuffixLength; length > 0; length -= 1) {
-    final suffix = input.substring(input.length - length);
-    if (_terminalTmuxPassthroughStart.startsWith(suffix)) {
-      return suffix;
-    }
-  }
-  return '';
-}
-
-/// Finds the end index of the escape sequence beginning at [start].
-///
-/// [resumeBodyFrom] lets a caller that already scanned part of an incomplete
-/// sequence (carried as `pendingInput`) resume the terminator search instead of
-/// rescanning from the sequence body. This keeps re-feeding a long sequence
-/// (e.g. a multi-megabyte Kitty graphics APC split across slices) O(n) overall
-/// rather than O(n^2). The caller must include a one-character overlap so a
-/// two-byte ST terminator (`ESC \`) split across the boundary is still found.
-int? _terminalEscapeSequenceEndIndex(
-  String input,
-  int start, {
-  int resumeBodyFrom = 0,
-}) {
-  if (start + 1 >= input.length) {
-    return null;
-  }
-
-  final introducer = input.codeUnitAt(start + 1);
-  switch (introducer) {
-    case _terminalCsiIntroducerCodeUnit:
-      return _terminalCsiEndIndex(input, math.max(start + 2, resumeBodyFrom));
-    case _terminalDcsIntroducerCodeUnit:
-    case _terminalOscIntroducerCodeUnit:
-    case _terminalSosIntroducerCodeUnit:
-    case _terminalPmIntroducerCodeUnit:
-    case _terminalApcIntroducerCodeUnit:
-      return _terminalStringEndIndex(
-        input,
-        math.max(start + 2, resumeBodyFrom),
-      );
-  }
-
-  var cursor = math.max(start + 1, resumeBodyFrom);
-  while (cursor < input.length &&
-      _isTerminalEscapeIntermediate(input.codeUnitAt(cursor))) {
-    cursor += 1;
-  }
-  if (cursor >= input.length) {
-    return null;
-  }
-  return cursor + 1;
-}
-
-int? _terminalCsiEndIndex(String input, int start) {
-  var cursor = start;
-  while (cursor < input.length) {
-    final codeUnit = input.codeUnitAt(cursor);
-    if (codeUnit >= 0x40 && codeUnit <= 0x7E) {
-      return cursor + 1;
-    }
-    cursor += 1;
-  }
-  return null;
-}
-
-int? _terminalStringEndIndex(String input, int start) {
-  var cursor = start;
-  while (cursor < input.length) {
-    final codeUnit = input.codeUnitAt(cursor);
-    if (codeUnit == _terminalBellCodeUnit) {
-      return cursor + 1;
-    }
-    if (codeUnit == _terminalEscapeCodeUnit) {
-      if (cursor + 1 >= input.length) {
-        return null;
-      }
-      if (input.codeUnitAt(cursor + 1) == _terminalStringTerminatorCodeUnit) {
-        return cursor + 2;
-      }
-      cursor += 1;
-      continue;
-    }
-    cursor += 1;
-  }
-  return null;
-}
 
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;
@@ -1385,11 +1320,30 @@ class SshConnectionResult {
   final List<SSHClient> dependentClients;
 
   /// Closes [client] and any dependent jump-host clients.
-  Future<void> closeAll() async {
-    await client?.close();
-    for (final dependentClient in dependentClients) {
-      await dependentClient.close();
+  Future<void> closeAll() => _closeSshClients(client, dependentClients);
+}
+
+Future<void> _closeSshClients(
+  SSHClient? client,
+  List<SSHClient> dependentClients,
+) async {
+  Future<void> closeClient(SSHClient client) async {
+    try {
+      await client.close();
+    } on SSHStateError catch (error, stackTrace) {
+      if (!isExpectedSshChannelTeardownError(error, stackTrace)) rethrow;
+      DiagnosticsLogService.instance.debug(
+        'ssh.session',
+        'client_already_disconnected',
+        fields: {'errorType': error.runtimeType},
+      );
     }
+  }
+
+  try {
+    if (client != null) await closeClient(client);
+  } finally {
+    await Future.wait(dependentClients.map(closeClient));
   }
 }
 
@@ -1450,7 +1404,8 @@ class SshConnectionCancellationToken {
       }
       try {
         onAbandonedValue(value);
-      } on Exception catch (error) {
+      } on Object catch (error) {
+        if (error is! Exception && error is! SSHError) rethrow;
         DiagnosticsLogService.instance.debug(
           'ssh.connect',
           'cancel_cleanup_failed',
@@ -1760,7 +1715,13 @@ class SshService {
             },
           );
         }
-        final keys = keyLoadResult.keys;
+        final keys = keyLoadResult.keys
+            .where(
+              (key) =>
+                  !keyRepository!.hasUnreadablePrivateKey(key.id) &&
+                  !keyRepository!.hasUnreadablePassphrase(key.id),
+            )
+            .toList();
         if (keys.isEmpty) {
           return null;
         }
@@ -1777,6 +1738,10 @@ class SshService {
       if (host.keyId != null && keyRepository != null) {
         preflightPhase = 'load_host_key';
         key = await keyRepository!.getById(host.keyId!);
+        if (keyRepository!.hasUnreadablePrivateKey(host.keyId!) ||
+            keyRepository!.hasUnreadablePassphrase(host.keyId!)) {
+          throw const FormatException('Unreadable SSH key secret');
+        }
         if (key == null && host.password == null) {
           identityKeys = await loadAutoKeys();
         }
@@ -1835,6 +1800,10 @@ class SshService {
             if (jumpHost.keyId != null && keyRepository != null) {
               preflightPhase = 'load_jump_host_key';
               jumpKey = await keyRepository!.getById(jumpHost.keyId!);
+              if (keyRepository!.hasUnreadablePrivateKey(jumpHost.keyId!) ||
+                  keyRepository!.hasUnreadablePassphrase(jumpHost.keyId!)) {
+                throw const FormatException('Unreadable SSH key secret');
+              }
               if (jumpKey == null && jumpHost.password == null) {
                 jumpIdentityKeys = await loadAutoKeys();
               }
@@ -1893,8 +1862,7 @@ class SshService {
               : null,
         );
 
-        // Update last connected timestamp
-        await hostRepository!.updateLastConnected(hostId);
+        unawaited(_updateLastConnected(hostId));
         DiagnosticsLogService.instance.info(
           'ssh.connect',
           'connect_to_host_success',
@@ -1948,6 +1916,18 @@ class SshService {
     }
   }
 
+  Future<void> _updateLastConnected(int hostId) async {
+    try {
+      await hostRepository?.updateLastConnected(hostId);
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'ssh.connect',
+        'last_connected_update_failed',
+        fields: {'hostId': hostId, 'errorType': error.runtimeType},
+      );
+    }
+  }
+
   Future<SshConnectionResult> _connectToAppReviewDemoHost(
     Host host, {
     required bool useHostThemeOverrides,
@@ -1990,7 +1970,7 @@ class SshService {
           ? host.terminalThemeDarkId
           : null,
     );
-    await hostRepository?.updateLastConnected(host.id);
+    unawaited(_updateLastConnected(host.id));
     DiagnosticsLogService.instance.info(
       'ssh.connect',
       'app_review_demo_connected',
@@ -2015,6 +1995,8 @@ class SshService {
     SshConnectionCancellationToken? cancellationToken,
   }) async {
     SSHClient? client;
+    SSHSocket? unownedSocket;
+    var connected = false;
     final dependentClients = <SSHClient>[];
     SSHClient? jumpClient;
     void report(SshConnectionState state, String message) {
@@ -2056,6 +2038,49 @@ class SshService {
       final verificationService = _createHostKeyVerificationService(config);
       final authGate = _InteractiveAuthGate();
       final authHandlers = _buildInteractiveAuthHandlers(config, authGate);
+
+      final identities = await guard(_parseIdentities(config));
+      cancellationToken?.throwIfCancelled();
+
+      Future<void> authenticate(
+        SSHSocket socket,
+        SSHHostkeyVerifyHandler verify,
+      ) async {
+        unownedSocket = socket;
+        report(
+          SshConnectionState.authenticating,
+          isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
+        );
+        final createdClient = _clientFactory(
+          socket,
+          username: config.username,
+          onVerifyHostKey: verify,
+          onPasswordRequest: authHandlers.onPasswordRequest,
+          onUserInfoRequest: authHandlers.onUserInfoRequest,
+          identities: identities,
+          keepAliveInterval: config.keepAliveInterval,
+        );
+        client = createdClient;
+        unownedSocket = null;
+        await _awaitAuthentication(
+          createdClient,
+          authGate,
+          timeout: config.connectionTimeout,
+          isJumpHost: isJumpHost,
+          cancellationToken: cancellationToken,
+        );
+      }
+
+      SSHHostkeyVerifyHandler verifyProbedKey(VerifiedHostKey key) =>
+          (_, fingerprint) {
+            if (!_probedHostKeyMatchesCallback(key, fingerprint)) {
+              throw HostKeyVerificationException(
+                'The host key for ${config.hostname}:${config.port} changed '
+                'between verification and authentication.',
+              );
+            }
+            return true;
+          };
 
       // Handle jump host
       if (config.jumpHost != null) {
@@ -2116,6 +2141,7 @@ class SshService {
         knownHosts.getByHost(config.hostname, config.port),
       );
 
+      PendingHostTrustUpdate? pendingHostTrustUpdate;
       if (trustedHost == null) {
         report(
           SshConnectionState.connecting,
@@ -2126,190 +2152,88 @@ class SshService {
           config: config,
           cancellationToken: cancellationToken,
         );
-        final pendingHostTrustUpdate = await guard(
+        pendingHostTrustUpdate = await guard(
           verificationService.verify(presentedHostKey),
         );
-        await pendingHostTrustUpdate.persistTrustDecision(knownHosts);
-
-        final socket = await openEndpointSocket();
-
-        report(
-          SshConnectionState.authenticating,
-          isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
+        await pendingHostTrustUpdate!.persistTrustDecision(knownHosts);
+        await authenticate(
+          await openEndpointSocket(),
+          verifyProbedKey(presentedHostKey),
         );
-        client = _clientFactory(
-          socket,
-          username: config.username,
-          onVerifyHostKey: (_, fingerprint) {
-            if (!_probedHostKeyMatchesCallback(presentedHostKey, fingerprint)) {
-              throw HostKeyVerificationException(
-                'The host key for ${config.hostname}:${config.port} changed '
-                'between verification and authentication.',
-              );
-            }
-            return true;
-          },
-          onPasswordRequest: authHandlers.onPasswordRequest,
-          onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: _parseIdentities(config),
-          keepAliveInterval: config.keepAliveInterval,
-        );
-
-        // Bound authentication waits so the progress dialog can surface a
-        // recoverable error instead of hanging indefinitely.
-        await _awaitAuthentication(
-          client,
-          authGate,
-          timeout: config.connectionTimeout,
-          isJumpHost: isJumpHost,
-          cancellationToken: cancellationToken,
-        );
-        report(
-          SshConnectionState.connected,
-          isJumpHost ? 'Jump host connected.' : 'SSH connection established.',
-        );
-        await pendingHostTrustUpdate.commitAfterAuthentication(knownHosts);
-
-        DiagnosticsLogService.instance.info(
-          'ssh.connect',
-          'connect_success',
-          fields: {'isJumpHost': isJumpHost, 'trustedHostKnown': false},
-        );
-        return SshConnectionResult(
-          success: true,
-          client: client,
-          dependentClients: dependentClients,
-        );
-      }
-
-      final preparedSocket = _prepareHostKeyCapture(await openEndpointSocket());
-      String? callbackKeyType;
-      String? rejectedCallbackFingerprint;
-      var rejectedTrustedHostKey = false;
-
-      report(
-        SshConnectionState.authenticating,
-        isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
-      );
-      client = _clientFactory(
-        preparedSocket.socket,
-        username: config.username,
-        onVerifyHostKey: (type, fingerprint) {
-          callbackKeyType = type;
-          final trusted = _trustedHostMatchesCallback(trustedHost, fingerprint);
-          rejectedTrustedHostKey = !trusted;
-          if (!trusted) {
-            rejectedCallbackFingerprint = _formatCallbackHostKeyFingerprint(
+      } else {
+        unownedSocket = await openEndpointSocket();
+        final preparedSocket = _prepareHostKeyCapture(unownedSocket!);
+        String? callbackKeyType;
+        String? rejectedCallbackFingerprint;
+        var rejectedTrustedHostKey = false;
+        try {
+          await authenticate(preparedSocket.socket, (type, fingerprint) {
+            callbackKeyType = type;
+            final trusted = _trustedHostMatchesCallback(
+              trustedHost,
               fingerprint,
             );
-          }
-          return trusted;
-        },
-        onPasswordRequest: authHandlers.onPasswordRequest,
-        onUserInfoRequest: authHandlers.onUserInfoRequest,
-        identities: _parseIdentities(config),
-        keepAliveInterval: config.keepAliveInterval,
-      );
-
-      try {
-        await _awaitAuthentication(
-          client,
-          authGate,
-          timeout: config.connectionTimeout,
-          isJumpHost: isJumpHost,
-          cancellationToken: cancellationToken,
-        );
-      } on SSHHostkeyError {
-        if (!rejectedTrustedHostKey) {
-          rethrow;
-        }
-
-        await client.close();
-        client = null;
-
-        report(
-          SshConnectionState.connecting,
-          isJumpHost ? 'Verifying jump host key…' : 'Verifying host key…',
-        );
-        final changedHostKey = await _readPresentedHostKey(
-          preparedSocket.hostKeySource,
-          config: config,
-          keyType: callbackKeyType,
-          cancellationToken: cancellationToken,
-        );
-        _confirmCapturedHostKeyMatchesCallback(
-          changedHostKey,
-          rejectedCallbackFingerprint,
-          config: config,
-        );
-        final pendingHostTrustUpdate = await guard(
-          verificationService.verify(changedHostKey),
-        );
-
-        final retrySocket = await openEndpointSocket();
-        report(
-          SshConnectionState.authenticating,
-          isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
-        );
-        client = _clientFactory(
-          retrySocket,
-          username: config.username,
-          onVerifyHostKey: (_, fingerprint) {
-            if (!_probedHostKeyMatchesCallback(changedHostKey, fingerprint)) {
-              throw HostKeyVerificationException(
-                'The host key for ${config.hostname}:${config.port} changed '
-                'between verification and authentication.',
+            rejectedTrustedHostKey = !trusted;
+            if (!trusted) {
+              rejectedCallbackFingerprint = _formatCallbackHostKeyFingerprint(
+                fingerprint,
               );
             }
-            return true;
-          },
-          onPasswordRequest: authHandlers.onPasswordRequest,
-          onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: _parseIdentities(config),
-          keepAliveInterval: config.keepAliveInterval,
-        );
-
-        await _awaitAuthentication(
-          client,
-          authGate,
-          timeout: config.connectionTimeout,
-          isJumpHost: isJumpHost,
-          cancellationToken: cancellationToken,
-        );
-        report(
-          SshConnectionState.connected,
-          isJumpHost ? 'Jump host connected.' : 'SSH connection established.',
-        );
-        await pendingHostTrustUpdate.commitAfterAuthentication(knownHosts);
-
-        DiagnosticsLogService.instance.info(
-          'ssh.connect',
-          'connect_success',
-          fields: {'isJumpHost': isJumpHost, 'trustedHostKnown': true},
-        );
-        return SshConnectionResult(
-          success: true,
-          client: client,
-          dependentClients: dependentClients,
-        );
+            return trusted;
+          });
+        } on SSHHostkeyError {
+          if (!rejectedTrustedHostKey) rethrow;
+          await client!.close();
+          client = null;
+          report(
+            SshConnectionState.connecting,
+            isJumpHost ? 'Verifying jump host key…' : 'Verifying host key…',
+          );
+          final changedHostKey = await _readPresentedHostKey(
+            preparedSocket.hostKeySource,
+            config: config,
+            keyType: callbackKeyType,
+            cancellationToken: cancellationToken,
+          );
+          _confirmCapturedHostKeyMatchesCallback(
+            changedHostKey,
+            rejectedCallbackFingerprint,
+            config: config,
+          );
+          pendingHostTrustUpdate = await guard(
+            verificationService.verify(changedHostKey),
+          );
+          await authenticate(
+            await openEndpointSocket(),
+            verifyProbedKey(changedHostKey),
+          );
+        }
       }
 
       report(
         SshConnectionState.connected,
         isJumpHost ? 'Jump host connected.' : 'SSH connection established.',
       );
-      await knownHosts.markTrustedHostSeen(
-        hostname: trustedHost.hostname,
-        port: trustedHost.port,
-        keyType: trustedHost.keyType,
-        fingerprint: trustedHost.fingerprint,
-        encodedHostKey: trustedHost.hostKey,
-      );
+      if (pendingHostTrustUpdate != null) {
+        await pendingHostTrustUpdate.commitAfterAuthentication(knownHosts);
+      } else {
+        await knownHosts.markTrustedHostSeen(
+          hostname: trustedHost!.hostname,
+          port: trustedHost.port,
+          keyType: trustedHost.keyType,
+          fingerprint: trustedHost.fingerprint,
+          encodedHostKey: trustedHost.hostKey,
+        );
+      }
+      connected = true;
 
       DiagnosticsLogService.instance.info(
         'ssh.connect',
         'connect_success',
-        fields: {'isJumpHost': isJumpHost, 'trustedHostKnown': true},
+        fields: {
+          'isJumpHost': isJumpHost,
+          'trustedHostKnown': trustedHost != null,
+        },
       );
       return SshConnectionResult(
         success: true,
@@ -2322,78 +2246,38 @@ class SshService {
         'connect_cancelled',
         fields: {'isJumpHost': isJumpHost},
       );
-      await client?.close();
-      await _closeClients(dependentClients);
       return const SshConnectionResult.userCancelled();
-    } on HostKeyVerificationException catch (e) {
+    } on Object catch (e) {
+      final error = switch (e) {
+        HostKeyVerificationException(:final message) => message,
+        FormatException(:final message) => message,
+        SSHHostkeyError(:final message) =>
+          'Host key verification failed: $message',
+        SSHAuthFailError(:final message) => 'Authentication failed: $message',
+        SSHChannelOpenError() =>
+          'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
+        SSHError() => 'The SSH connection failed. Reconnect to try again.',
+        SocketException(:final message) => 'Connection failed: $message',
+        TimeoutException(:final message) => message ?? 'Connection timed out',
+        Exception() =>
+          'Connection failed. Check the host settings and try again.',
+        _ => null,
+      };
+      if (error == null) rethrow;
       DiagnosticsLogService.instance.warning(
         'ssh.connect',
         'connect_failed',
         fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
       );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return SshConnectionResult(success: false, error: e.message);
-    } on SSHHostkeyError catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.connect',
-        'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
-      );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return SshConnectionResult(
-        success: false,
-        error: 'Host key verification failed: ${e.message}',
-      );
-    } on SSHAuthFailError catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.connect',
-        'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
-      );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return SshConnectionResult(
-        success: false,
-        error: 'Authentication failed: ${e.message}',
-      );
-    } on SocketException catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.connect',
-        'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
-      );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return SshConnectionResult(
-        success: false,
-        error: 'Connection failed: ${e.message}',
-      );
-    } on TimeoutException catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.connect',
-        'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
-      );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return SshConnectionResult(
-        success: false,
-        error: e.message ?? 'Connection timed out',
-      );
-    } on Exception catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.connect',
-        'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
-      );
-      await client?.close();
-      await _closeClients(dependentClients);
-      return const SshConnectionResult(
-        success: false,
-        error: 'Connection failed. Check the host settings and try again.',
-      );
+      return SshConnectionResult(success: false, error: error);
+    } finally {
+      if (!connected) {
+        try {
+          unownedSocket?.destroy();
+        } finally {
+          await _closeSshClients(client, dependentClients);
+        }
+      }
     }
   }
 
@@ -2631,20 +2515,22 @@ class SshService {
     String? callbackKeyType;
     String? callbackFingerprint;
 
-    if (socket is! HostKeySource) {
-      probeClient = _clientFactory(
-        verificationSocket.socket,
-        username: config.username,
-        onVerifyHostKey: (type, fingerprint) {
-          callbackKeyType = type;
-          callbackFingerprint = _formatCallbackHostKeyFingerprint(fingerprint);
-          return true;
-        },
-      );
-      probeAuthentication = _drainHostKeyProbeAuthentication(probeClient);
-    }
-
     try {
+      if (socket is! HostKeySource) {
+        probeClient = _clientFactory(
+          verificationSocket.socket,
+          username: config.username,
+          onVerifyHostKey: (type, fingerprint) {
+            callbackKeyType = type;
+            callbackFingerprint = _formatCallbackHostKeyFingerprint(
+              fingerprint,
+            );
+            return true;
+          },
+        );
+        probeAuthentication = _drainHostKeyProbeAuthentication(probeClient);
+      }
+
       final presentedHostKey = await _readPresentedHostKey(
         verificationSocket.hostKeySource,
         config: config,
@@ -2801,10 +2687,9 @@ class SshService {
       'disconnect_all',
       fields: {'connectionCount': _sessions.length},
     );
-    for (final session in _sessions.values) {
-      await session.close();
-    }
+    final sessions = _sessions.values.toList(growable: false);
     _sessions.clear();
+    await Future.wait(sessions.map((session) async => session.close()));
   }
 
   /// Get a session by connection ID.
@@ -2818,40 +2703,35 @@ class SshService {
   /// Check if a connection ID is active.
   bool isConnected(int connectionId) => _sessions.containsKey(connectionId);
 
-  List<SSHKeyPair>? _parseIdentities(SshConnectionConfig config) {
-    final identityKeyPairs = <SSHKeyPair>[];
-    if (config.identityKeys != null) {
-      for (final key in config.identityKeys!) {
-        final parsed = _parsePrivateKey(key.privateKey, key.passphrase);
-        if (parsed != null) {
-          identityKeyPairs.addAll(parsed);
-        }
+  Future<List<SSHKeyPair>?> _parseIdentities(SshConnectionConfig config) async {
+    final identities = <SSHKeyPair>[];
+    for (final key in config.identityKeys ?? const <SshKey>[]) {
+      try {
+        identities.addAll(
+          await parseOpenSshPrivateKey(key.privateKey, key.passphrase),
+        );
+      } on FormatException {
+        continue;
+      } on SSHError {
+        continue;
       }
     }
-    if (identityKeyPairs.isNotEmpty) {
-      return identityKeyPairs;
-    }
-    if (config.privateKey != null) {
-      return _parsePrivateKey(config.privateKey!, config.passphrase);
-    }
-    return null;
-  }
-
-  List<SSHKeyPair>? _parsePrivateKey(String privateKey, String? passphrase) {
+    if (identities.isNotEmpty) return identities;
+    if (config.privateKey == null) return null;
     try {
-      if (passphrase != null && passphrase.isNotEmpty) {
-        return SSHKeyPair.fromPem(privateKey, passphrase);
-      }
-      return SSHKeyPair.fromPem(privateKey);
+      final parsed = await parseOpenSshPrivateKey(
+        config.privateKey!,
+        config.passphrase,
+      );
+      if (parsed.isNotEmpty) return parsed;
     } on FormatException {
-      return null;
+      // Report an unusable explicitly selected key below.
+    } on SSHError {
+      // Includes missing or incorrect passphrases.
     }
-  }
-
-  static Future<void> _closeClients(List<SSHClient> clients) async {
-    for (final client in clients) {
-      await client.close();
-    }
+    throw const FormatException(
+      'The selected SSH key is invalid or its passphrase is incorrect.',
+    );
   }
 
   static SSHClient _defaultClientFactory(
@@ -2986,27 +2866,146 @@ class _PreparedHostKeySocket {
   final HostKeySource hostKeySource;
 }
 
-class _NonClosingStreamSink<T> implements StreamSink<T> {
-  const _NonClosingStreamSink(this._delegate);
+Future<void> _relayForward(
+  Socket socket,
+  FutureOr<SSHForwardChannel?> Function() openChannel, {
+  Future<void>? stopped,
+  Duration? openTimeout,
+  void Function(SSHForwardChannel)? destroyChannel,
+}) async {
+  SSHForwardChannel? forward;
+  StreamIterator<Uint8List>? incoming;
+  StreamIterator<Uint8List>? outgoing;
+  Future<void>? socketFlush;
+  var finished = false;
+  var forwardSinkClosed = false;
+  var closingForwardSink = false;
+  var socketClosed = false;
+  var closingSocket = false;
+  final unexpectedClose = Completer<void>();
+  void closed() {
+    if (!unexpectedClose.isCompleted) unexpectedClose.complete();
+  }
 
-  final StreamSink<T> _delegate;
+  void failed(Object error, StackTrace stackTrace) {
+    if (!unexpectedClose.isCompleted) {
+      unexpectedClose.completeError(error, stackTrace);
+    }
+  }
 
-  @override
-  void add(T data) => _delegate.add(data);
+  void destroy(SSHForwardChannel channel) {
+    if (destroyChannel != null) {
+      destroyChannel(channel);
+    } else {
+      channel.destroy();
+    }
+  }
 
-  @override
-  void addError(Object error, [StackTrace? stackTrace]) =>
-      _delegate.addError(error, stackTrace);
-
-  @override
-  Future<void> addStream(Stream<T> stream) => _delegate.addStream(stream);
-
-  @override
-  Future<void> close() async {}
-
-  @override
-  Future<void> get done => _delegate.done;
+  // Observe write-side errors before awaiting channel creation.
+  unawaited(
+    socket.done.then<void>((_) {
+      socketClosed = true;
+      if (!closingSocket) closed();
+    }, onError: failed),
+  );
+  try {
+    final opening = Future<SSHForwardChannel?>.sync(openChannel).then((
+      channel,
+    ) {
+      if (channel == null) return null;
+      if (finished) {
+        destroy(channel);
+        return null;
+      }
+      unawaited(
+        channel.sink.done.then<void>(
+          (_) {
+            forwardSinkClosed = true;
+            if (!closingForwardSink) closed();
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            forwardSinkClosed = true;
+            failed(error, stackTrace);
+          },
+        ),
+      );
+      return forward = channel;
+    });
+    outgoing = StreamIterator(socket);
+    final source = outgoing;
+    final socketToForward = () async {
+      while (await source.moveNext()) {
+        final channel = await opening;
+        // A delivered channel may already have a completed sink.done future.
+        // Let its observer run before writing queued socket bytes.
+        await Future<void>.value();
+        if (channel == null || finished || forwardSinkClosed) return;
+        channel.sink.add(source.current);
+        await channel.flush();
+      }
+      final channel = forward;
+      if (channel != null && !finished && !forwardSinkClosed) {
+        // EOF closes only this direction. The peer can still send a response.
+        closingForwardSink = true;
+        await channel.sink.close();
+      }
+    }();
+    final pending = Future.any<SSHForwardChannel?>([
+      opening,
+      socketToForward.then((_) => null),
+      unexpectedClose.future.then((_) => null),
+      if (stopped != null) stopped.then((_) => null),
+    ]);
+    final channel = await (openTimeout == null
+        ? pending
+        : pending.timeout(openTimeout));
+    if (channel == null) return;
+    incoming = StreamIterator(channel.stream);
+    final response = incoming;
+    final forwardToSocket = () async {
+      while (await response.moveNext()) {
+        if (finished || socketClosed) return;
+        socket.add(response.current);
+        await (socketFlush = socket.flush());
+      }
+      closingSocket = true;
+      await socket.close();
+    }();
+    // Normal EOF preserves the opposite direction; errors, external sink
+    // closure, and tunnel cancellation terminate both pumps.
+    await Future.any<void>([
+      Future.wait([forwardToSocket, socketToForward], eagerError: true),
+      unexpectedClose.future,
+      ?stopped,
+    ]);
+  } finally {
+    finished = true;
+    try {
+      try {
+        if (socketFlush != null) await socketFlush;
+        if (!closingSocket) {
+          closingSocket = true;
+          await socket.close();
+        }
+      } finally {
+        await Future.wait([
+          if (incoming != null) incoming.cancel(),
+          if (outgoing != null) outgoing.cancel(),
+        ]);
+      }
+    } on SocketException {
+      socket.destroy();
+      rethrow;
+    } finally {
+      if (forward != null) destroy(forward!);
+    }
+  }
 }
+
+bool _isClosedForwardSinkError(Object error) =>
+    error is StateError &&
+    (error.message == 'Cannot add event after closing' ||
+        error.message == 'StreamSink is closed');
 
 Map<String, Object?> _diagnosticSshExecErrorFields(Object error) => {
   'errorType': error.runtimeType,
@@ -3429,12 +3428,6 @@ Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
   return listeners;
 }
 
-/// Extracts only port numbers from remote listener output.
-Set<int> parseRemoteListeningTcpPorts(String output) =>
-    parseRemoteListeningTcpListeners(
-      output,
-    ).values.map((listener) => listener.port).toSet();
-
 /// Canonical listener identity used by discovery and manual-forward exclusions.
 RemoteTcpListenerKey remoteTcpListenerKey(String host, int port) =>
     (host: _canonicalRemoteTcpListenerHost(host), port: port);
@@ -3460,6 +3453,19 @@ Set<RemoteTcpListenerKey> remoteTcpListenerExclusionKeys(
   }
   return {remoteTcpListenerKey(host, port)};
 }
+
+Set<RemoteTcpListenerKey> _manualListenerExclusions(
+  Iterable<ActiveTunnelInfo> tunnels,
+) => tunnels
+    .where(
+      (tunnel) =>
+          !tunnel.isAutomatic && isPortForwardLoopbackHost(tunnel.remoteHost),
+    )
+    .expand(
+      (tunnel) =>
+          remoteTcpListenerExclusionKeys(tunnel.remoteHost, tunnel.remotePort),
+    )
+    .toSet();
 
 String _canonicalRemoteTcpListenerHost(String host) {
   final normalized = host
@@ -3928,7 +3934,6 @@ class SshSession {
   Future<void> _automaticPortForwardConfiguration = Future<void>.value();
   final Map<RemoteTcpListenerKey, int>
   _automaticPortForwardIdsByRemoteListener = {};
-  final Set<RemoteTcpListenerKey> _automaticPortForwardShellRelated = {};
   final Map<RemoteTcpListenerKey, int> _automaticPortForwardMisses = {};
   Set<RemoteTcpListenerKey> _automaticPortForwardExcludedListeners = const {};
   Set<String> _automaticPortForwardShellTokens = const {};
@@ -4016,6 +4021,9 @@ class SshSession {
   }
 
   /// Starts a saved [portForward] on this SSH session.
+  ///
+  /// Dispatches through the public per-type methods so subclasses (including
+  /// test fakes) can intercept each forward kind.
   Future<bool> startPortForward(PortForward portForward) {
     switch (portForward.forwardType) {
       case 'local':
@@ -4934,7 +4942,6 @@ class SshSession {
       await stopForward(id);
     }
     _automaticPortForwardIdsByRemoteListener.clear();
-    _automaticPortForwardShellRelated.clear();
     _automaticPortForwardMisses.clear();
   }
 
@@ -5055,21 +5062,7 @@ class SshSession {
       return;
     }
 
-    final manualRemoteListeners = _activeTunnels.values
-        .where(
-          (tunnel) =>
-              // Reverse forwards listen on the SSH host, so their listener must
-              // never be auto-forwarded back to this device.
-              !tunnel.isAutomatic &&
-              isPortForwardLoopbackHost(tunnel.remoteHost),
-        )
-        .expand(
-          (tunnel) => remoteTcpListenerExclusionKeys(
-            tunnel.remoteHost,
-            tunnel.remotePort,
-          ),
-        )
-        .toSet();
+    final manualRemoteListeners = _manualListenerExclusions(activeTunnels);
     final blockedListeners = {
       ...manualRemoteListeners,
       ..._automaticPortForwardExcludedListeners,
@@ -5097,20 +5090,11 @@ class SshSession {
       final targetListener = targetListeners[entry.key];
       if (targetListener != null) {
         _automaticPortForwardMisses.remove(entry.key);
-        final wasShellRelated = _automaticPortForwardShellRelated.contains(
-          entry.key,
-        );
-        if (wasShellRelated != targetListener.isShellRelated) {
-          if (targetListener.isShellRelated) {
-            _automaticPortForwardShellRelated.add(entry.key);
-          } else {
-            _automaticPortForwardShellRelated.remove(entry.key);
-          }
-          final tunnel = _activeTunnels[entry.value];
-          if (tunnel != null) {
-            tunnel.isShellRelated = targetListener.isShellRelated;
-            _notifyPortForwardsChanged();
-          }
+        final tunnel = _activeTunnels[entry.value];
+        if (tunnel != null &&
+            tunnel.isShellRelated != targetListener.isShellRelated) {
+          tunnel.isShellRelated = targetListener.isShellRelated;
+          _notifyPortForwardsChanged();
         }
         continue;
       }
@@ -5152,12 +5136,7 @@ class SshSession {
         portForwardId: portForwardId,
         remoteHost: listener.host,
         remotePort: listener.port,
-        proxyHost: automaticPortForwardBrowserHost(
-          hostDomain: proxyHost,
-          hostId: hostId,
-          remoteHost: listener.host,
-          remotePort: listener.port,
-        ),
+        proxyHost: proxyHost,
         isShellRelated: listener.isShellRelated,
       );
       if (_isClosing || generation != _automaticPortForwardGeneration) {
@@ -5168,9 +5147,6 @@ class SshSession {
       }
       if (started) {
         _automaticPortForwardIdsByRemoteListener[listenerKey] = portForwardId;
-        if (listener.isShellRelated) {
-          _automaticPortForwardShellRelated.add(listenerKey);
-        }
       }
     }
   }
@@ -5451,7 +5427,10 @@ class SshSession {
         ? _windowsAutomaticPortDiscoveryCommand()
         : _posixAutomaticPortDiscoveryCommand();
     final output = await runQueuedExec(() async {
-      final execSession = await execute(command);
+      final execSession = await openSshExec(
+        execute(command),
+        _automaticPortDiscoveryTimeout,
+      );
       try {
         execSession.stderr.drain<void>().ignore();
         return await _readAutomaticPortDiscoveryOutput(execSession);
@@ -5646,27 +5625,26 @@ while($true){
     SSHSession execSession,
   ) async {
     final output = StringBuffer();
-    try {
-      await for (final chunk
-          in execSession.stdout
-              .cast<List<int>>()
-              .transform(utf8.decoder)
-              .timeout(_automaticPortDiscoveryTimeout)) {
-        output.write(chunk);
-        final text = output.toString();
-        final markerIndex = text.indexOf(_automaticPortDiscoveryDoneMarker);
-        if (markerIndex >= 0) {
-          return text.substring(0, markerIndex);
-        }
+    await for (final chunk
+        in execSession.stdout
+            .cast<List<int>>()
+            .transform(utf8.decoder)
+            .timeout(_automaticPortDiscoveryTimeout)) {
+      output.write(chunk);
+      final text = output.toString();
+      final markerIndex = text.indexOf(_automaticPortDiscoveryDoneMarker);
+      if (markerIndex >= 0) {
+        return text.substring(0, markerIndex);
       }
-    } on TimeoutException {
-      rethrow;
     }
     throw StateError('Remote listener scan ended before its completion marker');
   }
 
-  /// Start an SFTP session.
-  Future<SftpClient> sftp() async {
+  /// Start an SFTP session, sharing the same future while an open is pending.
+  Future<SftpClient> sftp() {
+    if (_isClosing) {
+      return Future<SftpClient>.error(SSHStateError('SSH session is closing'));
+    }
     final cachedSftp = _sftpClient;
     if (cachedSftp != null) {
       DiagnosticsLogService.instance.debug(
@@ -5674,7 +5652,7 @@ while($true){
         'reuse_client',
         fields: {'connectionId': connectionId, 'hostId': hostId},
       );
-      return cachedSftp;
+      return Future.value(cachedSftp);
     }
 
     final inFlight = _sftpClientFuture;
@@ -5682,19 +5660,27 @@ while($true){
       return inFlight;
     }
 
-    final future = _openSftpClient();
+    // Share the ownership check with every waiter, not just the caller that
+    // initiated the open. A timed-out open may finish after its replacement.
+    late final Future<SftpClient> future;
+    future = _openSftpClient()
+        .then((sftpClient) {
+          if (_isClosing || !identical(_sftpClientFuture, future)) {
+            _closeSftpClientBestEffort(sftpClient);
+            // dartssh2 errors do not implement Exception or Error.
+            // ignore: only_throw_errors
+            throw SSHStateError('SFTP open was superseded');
+          }
+          _sftpClient = sftpClient;
+          return sftpClient;
+        })
+        .whenComplete(() {
+          if (identical(_sftpClientFuture, future)) {
+            _sftpClientFuture = null;
+          }
+        });
     _sftpClientFuture = future;
-    try {
-      final sftpClient = await future;
-      if (identical(_sftpClientFuture, future)) {
-        _sftpClient = sftpClient;
-      }
-      return sftpClient;
-    } finally {
-      if (identical(_sftpClientFuture, future)) {
-        _sftpClientFuture = null;
-      }
-    }
+    return future;
   }
 
   /// Open a one-off SFTP client without using the session cache.
@@ -5704,21 +5690,34 @@ while($true){
   /// install superseding a probe-only install.
   Future<SftpClient> openStandaloneSftp() => _openSftpClient();
 
-  /// Discard the cached SFTP client for this session.
+  /// Abandon a timed-out [sftp] open without invalidating a replacement.
+  ///
+  /// Pass the original future returned by [sftp], not a timeout wrapper.
+  void discardSftpOpen(Future<SftpClient> open) {
+    if (identical(_sftpClientFuture, open)) {
+      _sftpClientFuture = null;
+    }
+    // Also release a client that finished opening just before timeout cleanup.
+    // Superseded opens close their own late client and reject this callback.
+    open.then(discardSftpClient).ignore();
+  }
+
+  /// Discard only the supplied SFTP client. A null client is a no-op.
   ///
   /// Use this only when an SFTP operation timed out or failed in a way that may
-  /// have left pending requests behind. Normal consumers should leave the
-  /// session-owned client open so future SFTP work can reuse the same channel.
+  /// have left pending requests behind. For an open that timed out before
+  /// returning a client, use [discardSftpOpen]. Normal consumers should leave
+  /// the session-owned client open so future SFTP work can reuse the channel.
   void discardSftpClient(SftpClient? sftpClient) {
+    if (sftpClient == null) {
+      return;
+    }
     final cachedSftp = _sftpClient;
-    if (sftpClient != null) {
-      if (cachedSftp == null) {
-        _closeSftpClientBestEffort(sftpClient);
-        return;
-      }
-      if (!identical(sftpClient, cachedSftp)) {
-        return;
-      }
+    if (!identical(sftpClient, cachedSftp)) {
+      // A late timeout callback must release its client without invalidating
+      // a newer cached client or an in-flight replacement.
+      _closeSftpClientBestEffort(sftpClient);
+      return;
     }
     _sftpClient = null;
     _sftpClientFuture = null;
@@ -5760,8 +5759,19 @@ while($true){
     );
 
     for (var attempt = 0; ; attempt += 1) {
+      if (_isClosing) {
+        // dartssh2 errors do not implement Exception or Error.
+        // ignore: only_throw_errors
+        throw SSHStateError('SSH session is closing');
+      }
       try {
         final sftpClient = await client.sftp();
+        if (_isClosing) {
+          _closeSftpClientBestEffort(sftpClient);
+          // dartssh2 errors do not implement Exception or Error.
+          // ignore: only_throw_errors
+          throw SSHStateError('SSH session is closing');
+        }
         DiagnosticsLogService.instance.info(
           'ssh.sftp',
           'open_success',
@@ -5963,6 +5973,7 @@ while($true){
 
       tunnel.subscription = _listenToLocalForwardConnections(
         primaryServerSocket,
+        tunnel: tunnel,
         remoteHost: remoteHost,
         remotePort: remotePort,
       );
@@ -5970,6 +5981,7 @@ while($true){
         tunnel.browserSubscriptions.add(
           _listenToLocalForwardConnections(
             browserServerSocket,
+            tunnel: tunnel,
             remoteHost: remoteHost,
             remotePort: remotePort,
           ),
@@ -6108,54 +6120,75 @@ while($true){
 
   StreamSubscription<Socket> _listenToLocalForwardConnections(
     ServerSocket serverSocket, {
+    required _ActiveTunnel tunnel,
     required String remoteHost,
     required int remotePort,
-  }) => serverSocket.listen((socket) async {
-    SSHForwardChannel? forward;
-    try {
-      forward = await client.forwardLocal(remoteHost, remotePort);
-      final forwardToSocket = forward.stream.cast<List<int>>().pipe(socket);
-      final socketToForward = socket.cast<List<int>>().pipe(
-        _NonClosingStreamSink(forward.sink),
+  }) => serverSocket.listen(
+    (socket) {
+      final connection = _handleLocalForwardConnection(
+        socket,
+        tunnel: tunnel,
+        remoteHost: remoteHost,
+        remotePort: remotePort,
       );
+      tunnel.localConnections.add(connection);
+      unawaited(
+        connection.whenComplete(() {
+          tunnel.localConnections.remove(connection);
+        }),
+      );
+    },
+    onError: (Object error, StackTrace stackTrace) {
+      _logLocalForwardFailure(error);
+    },
+  );
 
-      await Future.any<void>([forwardToSocket, socketToForward]);
-    } on SSHError catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.forward',
-        'local_connection_failed',
-        fields: {
-          'connectionId': connectionId,
-          'hostId': hostId,
-          ..._diagnosticSshExecErrorFields(e),
-        },
-      );
-      _reportConnectionHealthFailureIfClosed(e, operation: 'forward_local');
-      if (kDebugMode) {
-        debugPrint('Port forward connection error: $e');
-      }
-    } on Exception catch (e) {
-      DiagnosticsLogService.instance.warning(
-        'ssh.forward',
-        'local_connection_failed',
-        fields: {'errorType': e.runtimeType},
-      );
-      if (kDebugMode) {
-        debugPrint('Port forward connection error: $e');
-      }
-    } finally {
-      try {
-        forward?.destroy();
-      } on SSHError catch (_) {
-        // The transport may already be closed during channel teardown.
-      }
-      try {
-        socket.destroy();
-      } on Exception catch (_) {
-        // Ignore errors during cleanup.
-      }
+  void _logLocalForwardFailure(Object error) {
+    DiagnosticsLogService.instance.warning(
+      'ssh.forward',
+      'local_connection_failed',
+      fields: {
+        'connectionId': connectionId,
+        'hostId': hostId,
+        ..._diagnosticSshExecErrorFields(error),
+      },
+    );
+    _reportConnectionHealthFailureIfClosed(error, operation: 'forward_local');
+  }
+
+  void _destroyLocalForwardChannel(SSHForwardChannel channel) {
+    try {
+      channel.destroy();
+    } on SSHError catch (error) {
+      _logLocalForwardFailure(error);
     }
-  });
+  }
+
+  Future<void> _handleLocalForwardConnection(
+    Socket socket, {
+    required _ActiveTunnel tunnel,
+    required String remoteHost,
+    required int remotePort,
+  }) async {
+    try {
+      await _relayForward(
+        socket,
+        () => _isClosing || tunnel.stopped.isCompleted
+            ? null
+            : client.forwardLocal(remoteHost, remotePort),
+        stopped: tunnel.stopped.future,
+        openTimeout: portForwardStartTimeout,
+        destroyChannel: _destroyLocalForwardChannel,
+      );
+    } on Object catch (error) {
+      if (error is! SSHError &&
+          error is! Exception &&
+          !_isClosedForwardSinkError(error)) {
+        rethrow;
+      }
+      _logLocalForwardFailure(error);
+    }
+  }
 
   /// Start a remote port forward tunnel.
   ///
@@ -6242,12 +6275,13 @@ while($true){
         Socket? socket;
         try {
           socket = await Socket.connect(localHost, localPort);
-          final remoteToLocal = channel.stream.cast<List<int>>().pipe(socket);
-          final localToRemote = socket.cast<List<int>>().pipe(
-            _NonClosingStreamSink(channel.sink),
-          );
-          await Future.any<void>([remoteToLocal, localToRemote]);
-        } on Exception catch (e) {
+          await _relayForward(socket, () => channel);
+        } on Object catch (e) {
+          if (e is! Exception &&
+              e is! SSHError &&
+              !_isClosedForwardSinkError(e)) {
+            rethrow;
+          }
           DiagnosticsLogService.instance.warning(
             'ssh.forward',
             'remote_connection_failed',
@@ -6257,10 +6291,12 @@ while($true){
             debugPrint('Remote forward connection error: $e');
           }
         } finally {
-          try {
-            channel.destroy();
-          } on SSHError catch (_) {
-            // The transport may already be closed during channel teardown.
+          if (socket == null) {
+            try {
+              channel.destroy();
+            } on SSHError catch (_) {
+              // The transport may already be closed during channel teardown.
+            }
           }
           try {
             socket?.destroy();
@@ -6332,12 +6368,12 @@ while($true){
     )) {
       if (entry.value == portForwardId) {
         _automaticPortForwardIdsByRemoteListener.remove(entry.key);
-        _automaticPortForwardShellRelated.remove(entry.key);
         _automaticPortForwardMisses.remove(entry.key);
       }
     }
     final tunnel = _activeTunnels.remove(portForwardId);
     if (tunnel != null) {
+      tunnel.stopped.complete();
       await tunnel.subscription?.cancel();
       for (final browserSubscription in tunnel.browserSubscriptions) {
         await browserSubscription.cancel();
@@ -6347,6 +6383,7 @@ while($true){
         await browserServerSocket.close();
       }
       tunnel.remoteForward?.close();
+      await Future.wait(tunnel.localConnections);
       _notifyPortForwardsChanged();
     }
   }
@@ -6395,24 +6432,12 @@ while($true){
     }
   }
 
-  /// Forward a local port (legacy method for jump hosts).
-  Future<SSHForwardChannel> forwardLocal(
-    String remoteHost,
-    int remotePort, {
-    String localHost = 'localhost',
-    int localPort = 0,
-  }) async {
-    try {
-      return await client.forwardLocal(remoteHost, remotePort);
-    } on SSHError catch (e) {
-      _reportConnectionHealthFailureIfClosed(e, operation: 'forward_local');
-      rethrow;
-    }
-  }
-
   /// Close the session.
   Future<void> close() async {
     _isClosing = true;
+    if (!_closeStarted.isCompleted) {
+      _closeStarted.complete();
+    }
     _automaticPortForwardGeneration++;
     _automaticPortForwardTimer?.cancel();
     _automaticPortForwardTimer = null;
@@ -6426,19 +6451,14 @@ while($true){
     if (pendingSnapshot != null) {
       await pendingSnapshot;
     }
-    if (!_closeStarted.isCompleted) {
-      _closeStarted.complete();
-    }
     await stopAllForwards();
     await closeShell();
-    discardSftpClient(null);
+    _sftpClientFuture = null;
+    discardSftpClient(_sftpClient);
     await _portForwardChanges.close();
     await _connectionHealthFailures.close();
     await _terminalNotifications.close();
-    await client.close();
-    for (final dependentClient in dependentClients) {
-      await dependentClient.close();
-    }
+    await _closeSshClients(client, dependentClients);
   }
 
   void _reportConnectionHealthFailureIfClosed(
@@ -6682,6 +6702,8 @@ class _ActiveTunnel {
        isShellRelated = false,
        isLocal = false;
 
+  final stopped = Completer<void>();
+  final localConnections = <Future<void>>{};
   final ServerSocket? serverSocket;
   final List<ServerSocket> browserServerSockets;
   final SSHRemoteForward? remoteForward;
@@ -7145,7 +7167,48 @@ class _AppReviewDemoSftpFile implements SftpFile {
   bool get isClosed => _isClosed;
 
   @override
-  Future<SftpFileAttrs> stat() async => _attrs;
+  Future<SftpFileAttrs> stat() async {
+    _ensureOpen();
+    return _attrs;
+  }
+
+  void _ensureOpen() {
+    if (_isClosed) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpError('File is closed');
+    }
+  }
+
+  @override
+  Future<void> setStat(SftpFileAttrs attrs) async {
+    _ensureOpen();
+    final size = attrs.size;
+    if (size != null) {
+      if (size < 0) {
+        // ignore: only_throw_errors
+        throw SftpError('File size must not be negative');
+      }
+      final previous = _readContent();
+      _writeContent(
+        Uint8List(size)..setRange(0, math.min(size, previous.length), previous),
+      );
+    }
+    _attrs = SftpFileAttrs(
+      size: size ?? _readContent().length,
+      mode: attrs.mode ?? _attrs.mode,
+      userID: attrs.userID ?? _attrs.userID,
+      groupID: attrs.groupID ?? _attrs.groupID,
+      accessTime: attrs.accessTime ?? _attrs.accessTime,
+      modifyTime: attrs.modifyTime ?? _attrs.modifyTime,
+    );
+  }
+
+  @override
+  Future<Never> statvfs() async {
+    _ensureOpen();
+    // ignore: only_throw_errors
+    throw SftpExtensionUnsupportedError('fstatvfs@openssh.com');
+  }
 
   @override
   Stream<Uint8List> read({
@@ -7155,14 +7218,24 @@ class _AppReviewDemoSftpFile implements SftpFile {
     int chunkSize = 16 * 1024,
     int maxPendingRequests = 64,
   }) async* {
+    _ensureOpen();
+    if (offset < 0 || (length != null && length < 0)) {
+      // ignore: only_throw_errors
+      throw SftpError('Read offset and length must not be negative');
+    }
+    if (chunkSize <= 0 || maxPendingRequests <= 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Read chunk size and request count must be positive');
+    }
     final bytes = Uint8List.fromList(_readContent());
     final start = offset.clamp(0, bytes.length);
     final requestedLength = length ?? bytes.length - start;
     final end = (start + requestedLength).clamp(start, bytes.length);
-    final chunk = Uint8List.sublistView(bytes, start, end);
-    if (chunk.isNotEmpty) {
-      onProgress?.call(chunk.length);
-      yield chunk;
+    for (var position = start; position < end; position += chunkSize) {
+      _ensureOpen();
+      final chunkEnd = math.min(position + chunkSize, end);
+      onProgress?.call(chunkEnd - start);
+      yield Uint8List.sublistView(bytes, position, chunkEnd);
     }
   }
 
@@ -7180,17 +7253,29 @@ class _AppReviewDemoSftpFile implements SftpFile {
     Stream<Uint8List> stream, {
     int offset = 0,
     void Function(int total)? onProgress,
-  }) => SftpFileWriter(this, stream, offset, onProgress);
+  }) {
+    _ensureOpen();
+    if (offset < 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write offset must not be negative');
+    }
+    return _AppReviewDemoSftpFileWriter(this, stream, offset, onProgress);
+  }
 
   @override
   Future<void> writeBytes(Uint8List data, {int offset = 0}) async {
+    _ensureOpen();
+    if (offset < 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write offset must not be negative');
+    }
     final previousBytes = _readContent();
     final requiredLength = offset + data.length;
     final bytes = Uint8List(math.max(previousBytes.length, requiredLength))
       ..setRange(0, previousBytes.length, previousBytes)
       ..setRange(offset, requiredLength, data);
     _writeContent(bytes);
-    _attrs = _demoFileAttrs(bytes.length);
+    await setStat(SftpFileAttrs(size: bytes.length));
   }
 
   @override
@@ -7199,7 +7284,142 @@ class _AppReviewDemoSftpFile implements SftpFile {
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  Future<int> downloadTo(
+    StreamSink<List<int>> destination, {
+    int? length,
+    int offset = 0,
+    void Function(int bytesRead)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+    bool closeDestination = false,
+  }) async {
+    var total = 0;
+    try {
+      await destination.addStream(
+        read(
+          length: length,
+          offset: offset,
+          chunkSize: chunkSize,
+          maxPendingRequests: maxPendingRequests,
+          onProgress: (count) {
+            total = count;
+            onProgress?.call(count);
+          },
+        ),
+      );
+      return total;
+    } finally {
+      if (closeDestination) await destination.close();
+    }
+  }
+
+  @override
+  Future<int> downloadToRandomAccess(
+    RandomAccessFile destination, {
+    int? length,
+    int offset = 0,
+    void Function(int bytesRead)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+  }) async {
+    var total = 0;
+    await for (final chunk in read(
+      length: length,
+      offset: offset,
+      chunkSize: chunkSize,
+      maxPendingRequests: maxPendingRequests,
+    )) {
+      await destination.setPosition(offset + total);
+      await destination.writeFrom(chunk);
+      total += chunk.length;
+      onProgress?.call(total);
+    }
+    return total;
+  }
+}
+
+// dartssh2's writer does not route source/write errors to done. Keep the demo
+// writer's asynchronous work owned by the upload caller, including cancellation.
+class _AppReviewDemoSftpFileWriter implements SftpFileWriter {
+  _AppReviewDemoSftpFileWriter(
+    this.file,
+    this.stream,
+    this.offset,
+    this.onProgress,
+  ) {
+    _source = StreamIterator(stream);
+    done = _write();
+  }
+
+  @override
+  final SftpFile file;
+  @override
+  final Stream<Uint8List> stream;
+  @override
+  final int offset;
+  @override
+  final void Function(int)? onProgress;
+  late final StreamIterator<Uint8List> _source;
+  Completer<void>? _resume;
+  var _progress = 0;
+  var _aborted = false;
+
+  Future<void> _write() async {
+    try {
+      while (!_aborted && await _source.moveNext()) {
+        await _resume?.future;
+        if (_aborted) break;
+        final chunk = _source.current;
+        await file.writeBytes(chunk, offset: offset + _progress);
+        _progress += chunk.length;
+        onProgress?.call(_progress);
+      }
+    } finally {
+      await _source.cancel();
+    }
+  }
+
+  @override
+  late final Future<void> done;
+  @override
+  int get progress => _progress;
+  @override
+  void pause() {
+    _resume ??= Completer<void>();
+  }
+
+  @override
+  void resume() {
+    _resume?.complete();
+    _resume = null;
+  }
+
+  @override
+  Future<void> abort() async {
+    _aborted = true;
+    resume();
+    await _source.cancel();
+    await done;
+  }
+
+  @override
+  Stream<void> asStream() => done.asStream();
+  @override
+  Future<void> catchError(Function onError, {bool Function(Object)? test}) =>
+      done.catchError(onError, test: test);
+  @override
+  Future<T> then<T>(
+    FutureOr<T> Function(dynamic) onValue, {
+    Function? onError,
+  }) => done.then(onValue, onError: onError);
+  @override
+  Future<void> whenComplete(FutureOr<void> Function() action) =>
+      done.whenComplete(action);
+  @override
+  Future<void> timeout(
+    Duration timeLimit, {
+    FutureOr<void> Function()? onTimeout,
+  }) => done.timeout(timeLimit, onTimeout: onTimeout);
 }
 
 class _AppReviewDemoForwardChannel implements SSHForwardChannel {
@@ -7227,6 +7447,9 @@ class _AppReviewDemoForwardChannel implements SSHForwardChannel {
   StreamSink<List<int>> get sink => _sinkController.sink;
 
   @override
+  Future<void> flush() async {}
+
+  @override
   Future<void> get done => _done.future;
 
   @override
@@ -7235,8 +7458,9 @@ class _AppReviewDemoForwardChannel implements SSHForwardChannel {
       return;
     }
     _closed = true;
-    await _sinkController.close();
+    // Keep accepting request bytes while the response drains to the socket.
     await _streamController.close();
+    await _sinkController.close();
     if (!_done.isCompleted) {
       _done.complete();
     }
@@ -7461,6 +7685,9 @@ String _telemetryAuthMethodFromHost(Host? host) {
 
 String _telemetryConnectionFailureCategory(String? error) {
   final normalized = error?.toLowerCase() ?? '';
+  if (normalized.contains('host key')) {
+    return 'host_key';
+  }
   if (normalized.contains('auth') ||
       normalized.contains('password') ||
       normalized.contains('key') ||
@@ -7469,9 +7696,6 @@ String _telemetryConnectionFailureCategory(String? error) {
   }
   if (normalized.contains('timeout') || normalized.contains('timed out')) {
     return 'timeout';
-  }
-  if (normalized.contains('host key')) {
-    return 'host_key';
   }
   if (normalized.contains('network') ||
       normalized.contains('socket') ||
@@ -7547,7 +7771,6 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   final Map<int, Future<void>> _automaticForwardHostReconfigurationQueues = {};
   final Map<String, Future<void>> _automaticForwardReconfigurationQueues = {};
   Timer? _previewStateRefreshTimer;
-  bool _previewStateRefreshQueued = false;
   Future<void> _backgroundStatusSyncQueue = Future<void>.value();
 
   @override
@@ -7556,7 +7779,6 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     ref.onDispose(() {
       _previewStateRefreshTimer?.cancel();
       _previewStateRefreshTimer = null;
-      _previewStateRefreshQueued = false;
       for (final subscription in _disconnectSubscriptions.values) {
         unawaited(subscription.cancel());
       }
@@ -7798,72 +8020,117 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   }
 
   /// Disconnect from a connection.
-  Future<void> disconnect(int connectionId) async {
+  Future<void> disconnect(int connectionId) => _disconnect(connectionId);
+
+  Future<void> _disconnect(int connectionId, {String? message}) async {
     final session = _sshService.getSession(connectionId);
     final hostId = _connectionHostIds[connectionId] ?? session?.hostId;
     final endpointKey = session == null
         ? null
         : _sshEndpointKey(session.config);
-    DiagnosticsLogService.instance.info(
-      'ssh.active',
-      'disconnect',
-      fields: {'connectionId': connectionId},
+    if (message != null &&
+        hostId == null &&
+        session == null &&
+        !state.containsKey(connectionId)) {
+      DiagnosticsLogService.instance.debug(
+        'ssh.active',
+        'unexpected_disconnect_ignored',
+        fields: {'connectionId': connectionId},
+      );
+      return;
+    }
+    if (message == null) {
+      DiagnosticsLogService.instance.info(
+        'ssh.active',
+        'disconnect',
+        fields: {'connectionId': connectionId},
+      );
+    } else {
+      DiagnosticsLogService.instance.warning(
+        'ssh.active',
+        'unexpected_disconnect',
+        fields: {'connectionId': connectionId, 'hostId': hostId},
+      );
+    }
+    _detachConnection(
+      connectionId,
+      session,
+      message == null ? 'user' : 'unexpected',
     );
-    _detachSessionListeners(connectionId);
+    try {
+      final closing = _sshService.disconnect(connectionId);
+      state = {...state}..remove(connectionId);
+      if (hostId != null && message != null) {
+        reportConnectionAttemptError(hostId, message);
+      }
+      await closing;
+    } finally {
+      try {
+        if (hostId != null) {
+          await _reconfigureAutomaticPortForwardingAfterSessionRemoval(
+            hostId,
+            endpointKey,
+          );
+        }
+      } finally {
+        await _queueBackgroundStatusSync();
+      }
+    }
+  }
+
+  void _detachConnection(int connectionId, SshSession? session, String reason) {
+    _detachSessionListeners(connectionId, session: session);
     if (session != null) {
       unawaited(
         ref
             .read(telemetryServiceProvider)
             .logTerminalSessionEnded(
               duration: DateTime.now().difference(session.createdAt),
-              disconnectCategory: 'user',
+              disconnectCategory: reason,
               usedBackgroundService: false,
             ),
       );
     }
-    await _sshService.disconnect(connectionId);
     _connectionHostIds.remove(connectionId);
     _connectionSessionTitles.remove(connectionId);
-    final next = {...state}..remove(connectionId);
-    state = next;
-    if (hostId != null) {
-      await _reconfigureAutomaticPortForwardingAfterSessionRemoval(
-        hostId,
-        endpointKey,
-      );
-    }
-    await _queueBackgroundStatusSync();
   }
 
   /// Disconnect all active sessions.
   Future<void> disconnectAll() async {
+    final sessions = _sshService.sessions;
     DiagnosticsLogService.instance.info(
       'ssh.active',
       'disconnect_all',
-      fields: {'connectionCount': _sshService.sessions.length},
+      fields: {'connectionCount': sessions.length},
     );
-    for (final session in _sshService.sessions.values) {
-      _detachSessionListeners(session.connectionId, session: session);
-      unawaited(
-        ref
-            .read(telemetryServiceProvider)
-            .logTerminalSessionEnded(
-              duration: DateTime.now().difference(session.createdAt),
-              disconnectCategory: 'disconnect_all',
-              usedBackgroundService: false,
-            ),
-      );
+    for (final session in sessions.values) {
+      _detachConnection(session.connectionId, session, 'disconnect_all');
     }
-    await _sshService.disconnectAll();
-    _connectionHostIds.clear();
-    _connectionSessionTitles.clear();
     _connectionAttempts.clear();
     _automaticForwardDesiredExclusionsByHost.clear();
     _automaticForwardShellOwnedByEndpoint.clear();
-    _automaticForwardHostReconfigurationQueues.clear();
-    _automaticForwardReconfigurationQueues.clear();
-    state = {};
-    await _queueBackgroundStatusSync();
+    try {
+      final closing = _sshService.disconnectAll();
+      state = {...state}..removeWhere((id, _) => sessions.containsKey(id));
+      await closing;
+    } finally {
+      try {
+        await Future.wait(
+          {
+            for (final session in sessions.values)
+              (session.hostId, _sshEndpointKey(session.config)),
+          }.map(
+            (endpoint) =>
+                _reconfigureAutomaticPortForwardingAfterSessionRemoval(
+                  endpoint.$1,
+                  endpoint.$2,
+                ),
+          ),
+        );
+      } finally {
+        await _queueBackgroundStatusSync();
+      }
+    }
   }
 
   /// Get the state of a connection.
@@ -7955,22 +8222,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     final processRoots = sessions
         .expand((session) => session.automaticPortForwardProcessRoots)
         .toSet();
-    final activeManualRemoteListeners = sessions
-        .expand((session) => session.activeTunnels)
-        .where(
-          (tunnel) =>
-              // Reverse forwards listen on the SSH host, so their listener must
-              // never be auto-forwarded back to this device.
-              !tunnel.isAutomatic &&
-              isPortForwardLoopbackHost(tunnel.remoteHost),
-        )
-        .expand(
-          (tunnel) => remoteTcpListenerExclusionKeys(
-            tunnel.remoteHost,
-            tunnel.remotePort,
-          ),
-        )
-        .toSet();
+    final activeManualRemoteListeners = _manualListenerExclusions(
+      sessions.expand((session) => session.activeTunnels),
+    );
     if (sessions.isEmpty) {
       _automaticForwardDesiredExclusionsByHost.remove(host.id);
       return;
@@ -8383,49 +8637,12 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   /// Get all active connection metadata for UI rendering.
   List<ActiveConnection> getActiveConnections() {
-    final connections = <ActiveConnection>[];
-    for (final entry in state.entries) {
-      final connectionId = entry.key;
-      final session = _sshService.getSession(connectionId);
-      final hostId = _connectionHostIds[connectionId];
-      if (session == null || hostId == null) {
-        continue;
-      }
-      final nativeFocusTitle = _activeNativeAcpConnectionTitle(session);
-      connections.add(
-        ActiveConnection(
-          connectionId: connectionId,
-          hostId: hostId,
-          state: entry.value,
-          createdAt: session.createdAt,
-          config: session.config,
-          preview: nativeFocusTitle == null
-              ? session.terminalPreview
-              : session.activeNativeAcpPreview,
-          previewSnapshot: nativeFocusTitle == null
-              ? session.terminalPreviewSnapshot
-              : null,
-          nativeAcpPreviewSnapshot: nativeFocusTitle == null
-              ? null
-              : session.activeNativeAcpPreviewSnapshot,
-          terminalTheme: session.terminalTheme,
-          sessionTitle:
-              nativeFocusTitle ?? _connectionSessionTitles[connectionId],
-          windowTitle: nativeFocusTitle == null ? session.windowTitle : null,
-          iconName: nativeFocusTitle == null ? session.iconName : null,
-          workingDirectory: nativeFocusTitle == null
-              ? session.workingDirectory
-              : null,
-          shellStatus: nativeFocusTitle == null ? session.shellStatus : null,
-          lastExitCode: nativeFocusTitle == null ? session.lastExitCode : null,
-          remoteMuxBackend: session.remoteMuxBackend,
-          remoteMuxSessionName: session.remoteMuxSessionName,
-          terminalThemeLightId: session.terminalThemeLightId,
-          terminalThemeDarkId: session.terminalThemeDarkId,
-        ),
-      );
-    }
-    connections.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final connections =
+        state.keys
+            .map(getActiveConnection)
+            .whereType<ActiveConnection>()
+            .toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return connections;
   }
 
@@ -8440,17 +8657,12 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     session
       ..removePreviewListener(_schedulePreviewStateRefresh)
       ..addPreviewListener(_schedulePreviewStateRefresh);
-    final existingSubscription = _disconnectSubscriptions.remove(
-      session.connectionId,
+    unawaited(_disconnectSubscriptions.remove(session.connectionId)?.cancel());
+    unawaited(
+      _connectionHealthFailureSubscriptions
+          .remove(session.connectionId)
+          ?.cancel(),
     );
-    if (existingSubscription != null) {
-      unawaited(existingSubscription.cancel());
-    }
-    final existingHealthFailureSubscription =
-        _connectionHealthFailureSubscriptions.remove(session.connectionId);
-    if (existingHealthFailureSubscription != null) {
-      unawaited(existingHealthFailureSubscription.cancel());
-    }
     _disconnectSubscriptions[session.connectionId] = session.client.done
         .asStream()
         .listen(
@@ -8477,19 +8689,15 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
             ),
           ),
         );
-    final existingNotificationSubscription = _terminalNotificationSubscriptions
-        .remove(session.connectionId);
-    if (existingNotificationSubscription != null) {
-      unawaited(existingNotificationSubscription.cancel());
-    }
+    unawaited(
+      _terminalNotificationSubscriptions.remove(session.connectionId)?.cancel(),
+    );
     _terminalNotificationSubscriptions[session.connectionId] = session
         .terminalNotifications
         .listen((request) => _queueTerminalNotification(session, request));
-    final existingPortForwardSubscription = _portForwardChangeSubscriptions
-        .remove(session.connectionId);
-    if (existingPortForwardSubscription != null) {
-      unawaited(existingPortForwardSubscription.cancel());
-    }
+    unawaited(
+      _portForwardChangeSubscriptions.remove(session.connectionId)?.cancel(),
+    );
     _portForwardChangeSubscriptions[session.connectionId] = session
         .portForwardChanges
         .listen((_) => _handleSessionPortForwardsChanged(session.hostId));
@@ -8679,17 +8887,12 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     (session ?? _sshService.getSession(connectionId))?.removePreviewListener(
       _schedulePreviewStateRefresh,
     );
-    final subscription = _disconnectSubscriptions.remove(connectionId);
-    if (subscription != null) {
-      unawaited(subscription.cancel());
-    }
-    final healthFailureSubscription = _connectionHealthFailureSubscriptions
-        .remove(connectionId);
-    if (healthFailureSubscription != null) {
-      unawaited(healthFailureSubscription.cancel());
-    }
-    final notificationSubscription = _terminalNotificationSubscriptions.remove(
-      connectionId,
+    unawaited(_disconnectSubscriptions.remove(connectionId)?.cancel());
+    unawaited(
+      _connectionHealthFailureSubscriptions.remove(connectionId)?.cancel(),
+    );
+    unawaited(
+      _terminalNotificationSubscriptions.remove(connectionId)?.cancel(),
     );
     final expiries = _terminalNotificationExpiries.entries
         .where((entry) => entry.key.connectionId == connectionId)
@@ -8701,15 +8904,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       (key, _) => key.connectionId == connectionId,
     );
     _terminalNotificationQueues.remove(connectionId)?.pending.clear();
-    if (notificationSubscription != null) {
-      unawaited(notificationSubscription.cancel());
-    }
-    final portForwardSubscription = _portForwardChangeSubscriptions.remove(
-      connectionId,
-    );
-    if (portForwardSubscription != null) {
-      unawaited(portForwardSubscription.cancel());
-    }
+    unawaited(_portForwardChangeSubscriptions.remove(connectionId)?.cancel());
   }
 
   void _schedulePreviewStateRefresh() {
@@ -8717,21 +8912,14 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       return;
     }
     if (_previewStateRefreshTimer?.isActive ?? false) {
-      _previewStateRefreshQueued = true;
       return;
     }
     _previewStateRefreshTimer = Timer(_previewStateRefreshInterval, () {
       _previewStateRefreshTimer = null;
       if (!ref.mounted) {
-        _previewStateRefreshQueued = false;
         return;
       }
-      final shouldReschedule = _previewStateRefreshQueued;
-      _previewStateRefreshQueued = false;
       state = {...state};
-      if (shouldReschedule) {
-        _schedulePreviewStateRefresh();
-      }
     });
   }
 
@@ -8777,19 +8965,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     final hostSessions = getConnectionsForHost(
       hostId,
     ).map(getSession).whereType<SshSession>().toList(growable: false);
-    final manualRemoteListeners = hostSessions
-        .expand((session) => session.activeTunnels)
-        .where(
-          (tunnel) =>
-              tunnel.isLocal &&
-              !tunnel.isAutomatic &&
-              isPortForwardLoopbackHost(tunnel.remoteHost),
-        )
-        .map(
-          (tunnel) =>
-              remoteTcpListenerKey(tunnel.remoteHost, tunnel.remotePort),
-        )
-        .toSet();
+    final manualRemoteListeners = _manualListenerExclusions(
+      hostSessions.expand((session) => session.activeTunnels),
+    );
     final endpointSession = hostSessions.isEmpty ? null : hostSessions.first;
     final endpointKey = endpointSession == null
         ? null
@@ -8904,13 +9082,6 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     return true;
   }
 
-  /// Whether [hostId] currently has a cancellable connection attempt.
-  bool canCancelConnectionAttempt(int hostId) =>
-      _connectionCancellationTokens[hostId]?.any(
-        (token) => !token.isCancelled,
-      ) ??
-      false;
-
   /// Surface an unexpected connection failure in the shared attempt state.
   void reportConnectionAttemptError(int hostId, String message) {
     _updateConnectionAttempt(
@@ -8926,54 +9097,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   Future<void> handleUnexpectedDisconnect(
     int connectionId, {
     required String message,
-  }) async {
-    final hostId = _connectionHostIds[connectionId];
-    final session = _sshService.getSession(connectionId);
-    final endpointKey = session == null
-        ? null
-        : _sshEndpointKey(session.config);
-    if (hostId == null && session == null && !state.containsKey(connectionId)) {
-      DiagnosticsLogService.instance.debug(
-        'ssh.active',
-        'unexpected_disconnect_ignored',
-        fields: {'connectionId': connectionId},
-      );
-      return;
-    }
-
-    DiagnosticsLogService.instance.warning(
-      'ssh.active',
-      'unexpected_disconnect',
-      fields: {'connectionId': connectionId, 'hostId': hostId},
-    );
-    _detachSessionListeners(connectionId, session: session);
-    if (session != null) {
-      unawaited(
-        ref
-            .read(telemetryServiceProvider)
-            .logTerminalSessionEnded(
-              duration: DateTime.now().difference(session.createdAt),
-              disconnectCategory: 'unexpected',
-              usedBackgroundService: false,
-            ),
-      );
-    }
-    await _sshService.disconnect(connectionId);
-    _connectionHostIds.remove(connectionId);
-    _connectionSessionTitles.remove(connectionId);
-    final next = {...state}..remove(connectionId);
-    state = next;
-    if (hostId != null) {
-      reportConnectionAttemptError(hostId, message);
-      await _reconfigureAutomaticPortForwardingAfterSessionRemoval(
-        hostId,
-        endpointKey,
-      );
-    } else {
-      state = {...state};
-    }
-    await _queueBackgroundStatusSync();
-  }
+  }) => _disconnect(connectionId, message: message);
 
   /// Update the session-specific terminal theme for an active connection.
   void updateSessionTheme(

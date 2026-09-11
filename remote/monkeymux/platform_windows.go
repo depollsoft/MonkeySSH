@@ -249,10 +249,13 @@ func clampConPtyDimension(value int) int16 {
 // winPty wraps a Windows pseudo console (ConPTY) and the two pipe endpoints the
 // parent uses to talk to the attached child process.
 type winPty struct {
-	hpc       windows.Handle
-	backend   *conPtyBackend
-	writeFile *os.File // parent writes child's stdin (input pipe write end)
-	readFile  *os.File // parent reads child's stdout (output pipe read end)
+	inputModeMu     sync.Mutex
+	inputModeReader *consoleInputModeReader
+	pid             uint32
+	hpc             windows.Handle
+	backend         *conPtyBackend
+	writeFile       *os.File // parent writes child's stdin (input pipe write end)
+	readFile        *os.File // parent reads child's stdout (output pipe read end)
 
 	mu        sync.Mutex
 	closed    bool
@@ -281,6 +284,7 @@ func (p *winPty) Close() error {
 		p.mu.Lock()
 		p.closed = true
 		p.mu.Unlock()
+		p.closeConsoleInputModeReader()
 		// Closing the pseudo console terminates the attached process tree and
 		// causes the output pipe to reach EOF (after any final frame is
 		// flushed), so the reader goroutine unblocks and exits.
@@ -322,8 +326,28 @@ func (p *winProcess) Hangup() {
 	}
 }
 
+func (p *winProcess) Kill() {
+	// The handle still belongs to this unwatched process, even if it exited
+	// already. Do not use taskkill with a numeric PID that could be recycled.
+	_ = windows.TerminateProcess(p.handle, 1)
+	if p.pty != nil {
+		// Rejected windows have no readWindow goroutine. ConPTY close can wait
+		// for its final output to drain before terminating the attached tree.
+		drained := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, p.pty)
+			close(drained)
+		}()
+		_ = p.pty.Close()
+		<-drained
+	}
+}
+
 // startWindow launches cmd attached to a new ConPTY sized to cols x rows.
 func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) {
+	if cmd.Err != nil {
+		return nil, nil, cmd.Err
+	}
 	if cols <= 0 {
 		cols = defaultColumns
 	}
@@ -352,6 +376,7 @@ func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) 
 	}
 
 	windowPty := &winPty{
+		pid:       pid,
 		hpc:       hpc,
 		backend:   backend,
 		writeFile: os.NewFile(uintptr(writeHandle), "monkeymux-conpty-in"),
@@ -477,39 +502,65 @@ func startConPtyWithBackend(
 		}
 	}
 
+	commandLinePtr, cmdErr := windows.UTF16PtrFromString(commandLine)
+	if cmdErr != nil {
+		err = fmt.Errorf("encode command line: %w", cmdErr)
+		return
+	}
+
+	var dirPtr *uint16
+	if strings.TrimSpace(workdir) != "" {
+		dirPtr, err = windows.UTF16PtrFromString(workdir)
+		if err != nil {
+			err = fmt.Errorf("encode working directory: %w", err)
+			return
+		}
+	}
+
+	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT)
+	var envBlock *uint16
+	if len(env) > 0 {
+		creationFlags |= uint32(windows.CREATE_UNICODE_ENVIRONMENT)
+		envBlock, err = buildEnvBlock(env)
+		if err != nil {
+			err = fmt.Errorf("encode environment: %w", err)
+			return
+		}
+	}
+
 	// input pipe:  ptyIn (read)  -> ConPTY,   cmdIn (write)  -> parent
 	// output pipe: cmdOut (read) -> parent,   ptyOut (write) -> ConPTY
 	var ptyIn, ptyOut, cmdIn, cmdOut windows.Handle
+	defer func() {
+		if err != nil {
+			if hpcon != 0 {
+				backend.close(hpcon)
+				hpcon = 0
+			}
+			for _, handle := range []windows.Handle{ptyIn, ptyOut, cmdIn, cmdOut} {
+				if handle != 0 {
+					windows.CloseHandle(handle)
+				}
+			}
+		}
+	}()
 	if err = windows.CreatePipe(&ptyIn, &cmdIn, nil, 0); err != nil {
 		err = fmt.Errorf("create input pipe: %w", err)
 		return
 	}
 	if err = windows.CreatePipe(&cmdOut, &ptyOut, nil, 0); err != nil {
-		windows.CloseHandle(ptyIn)
-		windows.CloseHandle(cmdIn)
 		err = fmt.Errorf("create output pipe: %w", err)
 		return
 	}
 
-	closeAll := func() {
-		windows.CloseHandle(ptyIn)
-		windows.CloseHandle(ptyOut)
-		windows.CloseHandle(cmdIn)
-		windows.CloseHandle(cmdOut)
-	}
-
 	size := conPtyCoord(cols, rows)
 	if err = backend.create(size, ptyIn, ptyOut, 0, &hpcon); err != nil {
-		closeAll()
 		err = fmt.Errorf("create %s pseudo console: %w", backend.name, err)
 		return
 	}
 
 	attrs, attrErr := windows.NewProcThreadAttributeList(1)
 	if attrErr != nil {
-		backend.close(hpcon)
-		hpcon = 0
-		closeAll()
 		err = fmt.Errorf("allocate attribute list: %w", attrErr)
 		return
 	}
@@ -525,9 +576,6 @@ func startConPtyWithBackend(
 		pseudoConsoleValue,
 		unsafe.Sizeof(hpcon),
 	); err != nil {
-		backend.close(hpcon)
-		hpcon = 0
-		closeAll()
 		err = fmt.Errorf("set pseudo console attribute: %w", err)
 		return
 	}
@@ -542,41 +590,6 @@ func startConPtyWithBackend(
 	// immediately. With the flag set and the std handles left zero, the pseudo
 	// console attribute connects the child's stdio to the ConPTY instead.
 	startupInfo.Flags |= windows.STARTF_USESTDHANDLES
-
-	commandLinePtr, cmdErr := windows.UTF16PtrFromString(commandLine)
-	if cmdErr != nil {
-		backend.close(hpcon)
-		hpcon = 0
-		closeAll()
-		err = fmt.Errorf("encode command line: %w", cmdErr)
-		return
-	}
-
-	var dirPtr *uint16
-	if strings.TrimSpace(workdir) != "" {
-		dirPtr, err = windows.UTF16PtrFromString(workdir)
-		if err != nil {
-			backend.close(hpcon)
-			hpcon = 0
-			closeAll()
-			err = fmt.Errorf("encode working directory: %w", err)
-			return
-		}
-	}
-
-	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT)
-	var envBlock *uint16
-	if len(env) > 0 {
-		creationFlags |= uint32(windows.CREATE_UNICODE_ENVIRONMENT)
-		envBlock, err = buildEnvBlock(env)
-		if err != nil {
-			backend.close(hpcon)
-			hpcon = 0
-			closeAll()
-			err = fmt.Errorf("encode environment: %w", err)
-			return
-		}
-	}
 
 	var procInfo windows.ProcessInformation
 	// Inheritable security attributes match the reference ConPTY launchers
@@ -595,9 +608,6 @@ func startConPtyWithBackend(
 		&startupInfo.StartupInfo,
 		&procInfo,
 	); err != nil {
-		backend.close(hpcon)
-		hpcon = 0
-		closeAll()
 		err = fmt.Errorf("create process: %w", err)
 		return
 	}
@@ -705,6 +715,8 @@ func killCommandProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+func processGroupAlive(pgid int) bool { return false }
+
 // processIDAlive reports whether a process with this pid exists. An access
 // error means it exists but cannot be opened by this caller, which is still
 // evidence that the pid is taken; only a missing process counts as gone.
@@ -797,6 +809,10 @@ const prefersVerticalForegroundRedrawResize = true
 // signalForegroundResize is a no-op on Windows: ResizePseudoConsole already
 // notifies the attached child of size changes.
 var signalForegroundResize = func(processGroup int) {}
+
+// killProcessGroup is a no-op on Windows: the window's process handle covers
+// the whole ConPTY job, so muxProcess.Kill already reaches every child.
+func killProcessGroup(processGroup int) {}
 
 // attachOutputWriter wraps the attach process's stdout so win32-input-mode
 // requests emitted by the window's child are hidden from the SSH server's own
@@ -939,17 +955,6 @@ func readProcessTable() map[int]processInfo {
 	return processes
 }
 
-func commandNameForPID(pid int) string {
-	if pid <= 0 {
-		return ""
-	}
-	table := cachedProcessTable(time.Now())
-	if info, ok := table[pid]; ok {
-		return commandNameFromProcessFields(info.comm, info.args)
-	}
-	return ""
-}
-
 type memoryStatusEx struct {
 	length               uint32
 	memoryLoad           uint32
@@ -1046,3 +1051,6 @@ func isStaleUnixSocketError(err error) bool {
 	return errors.Is(err, windows.WSAECONNREFUSED) ||
 		errors.Is(err, windows.ERROR_CONNECTION_REFUSED)
 }
+
+// ConPTY has no Unix slave device path for detached hooks.
+func writeAgentIdentityMarker(marker string) {}

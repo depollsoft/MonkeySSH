@@ -9,68 +9,9 @@ import 'package:monkeyssh/domain/models/acp_attachment.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
-import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 
-class _RecordingDiagnostics implements DiagnosticsLogger {
-  final events =
-      <
-        ({
-          String level,
-          String category,
-          String message,
-          Map<String, Object?> fields,
-        })
-      >[];
-
-  @override
-  void debug(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((
-    level: 'debug',
-    category: category,
-    message: message,
-    fields: fields,
-  ));
-
-  @override
-  void error(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((
-    level: 'error',
-    category: category,
-    message: message,
-    fields: fields,
-  ));
-
-  @override
-  void info(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((
-    level: 'info',
-    category: category,
-    message: message,
-    fields: fields,
-  ));
-
-  @override
-  void warning(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((
-    level: 'warning',
-    category: category,
-    message: message,
-    fields: fields,
-  ));
-}
+import '../../helpers/recording_diagnostics_logger.dart';
 
 class _RecordingUploader implements AcpAttachmentUploader {
   final uploadedBytes = <int>[];
@@ -368,6 +309,28 @@ void main() {
       );
     });
 
+    for (final size in [6 * 1024 * 1024, kAcpAttachmentImageDisplayMaxBytes]) {
+      test('accepts a $size byte image for inline display', () async {
+        final bytes = Uint8List(size)
+          ..setRange(0, _pngHeader.length, _pngHeader);
+        final blocks = await const AcpAttachmentPreparationService().prepare(
+          draft: AcpPromptDraft([
+            AcpAttachmentDraft(
+              candidate: AcpAttachmentCandidate.memory(
+                name: 'large.png',
+                bytes: bytes,
+              ),
+            ),
+          ]),
+          capabilities: const AcpPromptCapabilities(image: true),
+        );
+        expect(
+          base64Decode((blocks.single as AcpImageContent).data).length,
+          size,
+        );
+      });
+    }
+
     test('enforces the 10 MiB image display cap', () async {
       final bytes = Uint8List(kAcpAttachmentImageDisplayMaxBytes + 1)
         ..setRange(0, _pngHeader.length, _pngHeader);
@@ -392,6 +355,105 @@ void main() {
         ),
       );
     });
+
+    test(
+      'image upload fallback preserves bytes beyond the sniff prefix',
+      () async {
+        final uploader = _RecordingUploader();
+        final payload = <int>[..._pngHeader, 1, 2, 3, 4, 5, 6, 7, 8];
+        final blocks =
+            await const AcpAttachmentPreparationService(
+              limits: AcpAttachmentLimits(
+                maxImageBytes: 32,
+                maxEmbeddedBytes: 10,
+                mimeSniffBytes: 8,
+              ),
+            ).prepare(
+              draft: AcpPromptDraft([
+                AcpAttachmentDraft(
+                  candidate: AcpAttachmentCandidate.localFile(
+                    name: 'image.png',
+                    openRead: () => Stream<List<int>>.fromIterable([
+                      payload.sublist(0, 8),
+                      payload.sublist(8),
+                    ]),
+                  ),
+                  fallback: AcpAttachmentFallback.remoteUpload,
+                ),
+              ]),
+              capabilities: const AcpPromptCapabilities(embeddedContext: true),
+              uploader: uploader,
+            );
+        expect(uploader.uploadedPayloads, [payload]);
+        expect((blocks.single as AcpResourceLinkContent).size, payload.length);
+      },
+    );
+
+    test(
+      'local images can use the larger advertised embedded budget',
+      () async {
+        final payload = <int>[..._pngHeader, 1, 2, 3, 4];
+        final blocks =
+            await const AcpAttachmentPreparationService(
+              limits: AcpAttachmentLimits(
+                maxImageBytes: 8,
+                maxEmbeddedBytes: 32,
+                mimeSniffBytes: 8,
+              ),
+            ).prepare(
+              draft: AcpPromptDraft([
+                AcpAttachmentDraft(
+                  candidate: AcpAttachmentCandidate.localFile(
+                    name: 'image.png',
+                    sizeBytes: payload.length,
+                    openRead: () => Stream<List<int>>.value(payload),
+                  ),
+                ),
+              ]),
+              capabilities: capabilities,
+            );
+        final resource =
+            (blocks.single as AcpResourceContent).resource as AcpBlobResource;
+        expect(base64Decode(resource.blob), payload);
+      },
+    );
+
+    test(
+      'cancellation during the final local read rejects preparation',
+      () async {
+        final token = AcpAttachmentCancellationToken();
+        var sourceClosed = false;
+        await expectLater(
+          const AcpAttachmentPreparationService().prepare(
+            draft: AcpPromptDraft([
+              AcpAttachmentDraft(
+                candidate: AcpAttachmentCandidate.localFile(
+                  name: 'notes.txt',
+                  openRead: () async* {
+                    try {
+                      yield utf8.encode('hello');
+                      token.cancel();
+                    } finally {
+                      sourceClosed = true;
+                    }
+                  },
+                ),
+              ),
+            ]),
+            capabilities: const AcpPromptCapabilities(embeddedContext: true),
+            cancellationToken: token,
+          ),
+          throwsA(
+            isA<AcpAttachmentException>().having(
+              (error) => error.failure,
+              'failure',
+              AcpAttachmentFailure.cancelled,
+            ),
+          ),
+        );
+        expect(sourceClosed, isTrue);
+      },
+    );
 
     test('reads local candidates lazily and accepts chunked streams', () async {
       var opens = 0;
@@ -644,7 +706,7 @@ void main() {
     });
 
     test('diagnostics contain no names, paths, or content', () async {
-      final diagnostics = _RecordingDiagnostics();
+      final diagnostics = RecordingDiagnosticsLogger();
       await AcpAttachmentPreparationService(diagnostics: diagnostics).prepare(
         draft: AcpPromptDraft(const [
           AcpPromptTextDraft('PRIVATE PROMPT'),
@@ -660,13 +722,12 @@ void main() {
         capabilities: const AcpPromptCapabilities(),
       );
 
+      expect(
+        diagnostics.events.map((event) => event.message),
+        contains('prepare_completed'),
+      );
       final logged = diagnostics.events
-          .map(
-            (event) =>
-                '${event.category} ${event.message} '
-                '${event.fields.keys.join(' ')} '
-                '${event.fields.values.join(' ')}',
-          )
+          .map((event) => event.searchableText)
           .join('\n');
       expect(logged, isNot(contains('PRIVATE PROMPT')));
       expect(logged, isNot(contains('secret-name')));

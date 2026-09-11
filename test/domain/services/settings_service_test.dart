@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,10 +17,13 @@ class _DelayedBoolSettingsService extends SettingsService {
   _DelayedBoolSettingsService(super.database);
 
   final loadedValue = Completer<bool>();
+  final readStarted = Completer<void>();
 
   @override
-  Future<bool> getBool(String key, {bool defaultValue = false}) =>
-      loadedValue.future;
+  Future<bool> getBool(String key, {bool defaultValue = false}) {
+    if (!readStarted.isCompleted) readStarted.complete();
+    return loadedValue.future;
+  }
 }
 
 void main() {
@@ -204,16 +208,9 @@ void main() {
       );
       expect(SettingKeys.terminalFont, 'terminal_font');
       expect(SettingKeys.terminalFontSize, 'terminal_font_size');
-      expect(SettingKeys.terminalColorScheme, 'terminal_color_scheme');
       expect(SettingKeys.cursorStyle, 'cursor_style');
       expect(SettingKeys.bellSound, 'bell_sound');
       expect(SettingKeys.shellCompletions, 'shell_completions');
-      expect(SettingKeys.hapticFeedback, 'haptic_feedback');
-      expect(SettingKeys.keyboardToolbar, 'keyboard_toolbar');
-      expect(SettingKeys.autoReconnect, 'auto_reconnect');
-      expect(SettingKeys.keepAliveInterval, 'keep_alive_interval');
-      expect(SettingKeys.defaultPort, 'default_port');
-      expect(SettingKeys.defaultUsername, 'default_username');
       expect(SettingKeys.autoLockTimeout, 'auto_lock_timeout');
     });
   });
@@ -264,31 +261,163 @@ void main() {
       await testDb.close();
     });
 
-    group('confirmMuxWindowCloseNotifierProvider', () {
-      test('a late startup read cannot overwrite a newer choice', () async {
+    for (final (provider, notifierProvider, key) in [
+      (
+        sharedClipboardProvider,
+        sharedClipboardNotifierProvider,
+        SettingKeys.sharedClipboard,
+      ),
+      (
+        sharedClipboardLocalReadProvider,
+        sharedClipboardLocalReadNotifierProvider,
+        SettingKeys.sharedClipboardLocalRead,
+      ),
+    ]) {
+      for (final enabled in [true, false]) {
+        test('$key future follows permission change to $enabled', () async {
+          await container
+              .read(settingsServiceProvider)
+              .setBool(key, value: !enabled);
+          expect(await container.read(provider.future), !enabled);
+
+          await container
+              .read(notifierProvider.notifier)
+              .setEnabled(enabled: enabled);
+
+          expect(await container.read(provider.future), enabled);
+        });
+      }
+    }
+
+    test(
+      'a previous settings generation cannot replace a newer value',
+      () async {
         container.dispose();
-        final delayedSettings = _DelayedBoolSettingsService(testDb);
+        final oldSettings = _DelayedBoolSettingsService(testDb);
+        final newSettings = _DelayedBoolSettingsService(testDb);
+        var currentSettings = oldSettings;
         container = ProviderContainer(
           overrides: [
-            settingsServiceProvider.overrideWithValue(delayedSettings),
+            settingsServiceProvider.overrideWith((ref) => currentSettings),
           ],
         );
         final notifier = container.read(
-          confirmMuxWindowCloseNotifierProvider.notifier,
+          sharedClipboardLocalReadNotifierProvider.notifier,
         );
+        final oldInitialization = notifier.initializedValue();
+        await oldSettings.readStarted.future;
 
-        await notifier.setEnabled(enabled: false);
-        delayedSettings.loadedValue.complete(true);
-        await notifier.initializedValue();
-
-        expect(container.read(confirmMuxWindowCloseNotifierProvider), isFalse);
+        currentSettings = newSettings;
+        container.invalidate(settingsServiceProvider);
         expect(
-          await SettingsService(
-            testDb,
-          ).getBool(SettingKeys.confirmMuxWindowClose, defaultValue: true),
+          container.read(sharedClipboardLocalReadNotifierProvider.notifier),
+          same(notifier),
+        );
+        newSettings.loadedValue.complete(false);
+        expect(await notifier.initializedValue(), isFalse);
+
+        oldSettings.loadedValue.complete(true);
+        await oldInitialization;
+        expect(
+          container.read(sharedClipboardLocalReadNotifierProvider),
           isFalse,
         );
+      },
+    );
+
+    for (final (provider, key, defaultValue) in [
+      (
+        terminalThemesApplyToAppNotifierProvider,
+        SettingKeys.terminalThemesApplyToApp,
+        true,
+      ),
+      (
+        confirmMuxWindowCloseNotifierProvider,
+        SettingKeys.confirmMuxWindowClose,
+        true,
+      ),
+      (bellSoundNotifierProvider, SettingKeys.bellSound, true),
+      (
+        terminalNotificationsNotifierProvider,
+        SettingKeys.terminalNotifications,
+        true,
+      ),
+      (
+        agentUpdateNotificationsNotifierProvider,
+        SettingKeys.agentUpdateNotifications,
+        true,
+      ),
+      (terminalWakeLockNotifierProvider, SettingKeys.terminalWakeLock, false),
+      (terminalPathLinksNotifierProvider, SettingKeys.terminalPathLinks, true),
+      (
+        terminalPathLinkUnderlinesNotifierProvider,
+        SettingKeys.terminalPathLinkUnderlines,
+        true,
+      ),
+      (
+        portForwardBrowserLinksNotifierProvider,
+        SettingKeys.portForwardBrowserLinks,
+        true,
+      ),
+      (shellCompletionsNotifierProvider, SettingKeys.shellCompletions, true),
+      (sharedClipboardNotifierProvider, SettingKeys.sharedClipboard, false),
+      (
+        sharedClipboardLocalReadNotifierProvider,
+        SettingKeys.sharedClipboardLocalRead,
+        false,
+      ),
+      (tapToShowKeyboardNotifierProvider, SettingKeys.tapToShowKeyboard, true),
+    ]) {
+      test('$key uses its default and persistence key', () async {
+        final settings = container.read(settingsServiceProvider);
+        final notifier = container.read(provider.notifier);
+        expect(container.read(provider), defaultValue);
+        expect(await notifier.initializedValue(), defaultValue);
+
+        await settings.setBool(key, value: !defaultValue);
+        container.invalidate(provider);
+        final reloaded = container.read(provider.notifier);
+        expect(await reloaded.initializedValue(), !defaultValue);
+
+        for (final enabled in [defaultValue, !defaultValue]) {
+          await reloaded.setEnabled(enabled: enabled);
+          expect(container.read(provider), enabled);
+          expect(await settings.getString(key), enabled.toString());
+        }
       });
+    }
+
+    group('confirmMuxWindowCloseNotifierProvider', () {
+      for (final (provider, key) in [
+        (
+          terminalNotificationsNotifierProvider,
+          SettingKeys.terminalNotifications,
+        ),
+        (shellCompletionsNotifierProvider, SettingKeys.shellCompletions),
+        (
+          confirmMuxWindowCloseNotifierProvider,
+          SettingKeys.confirmMuxWindowClose,
+        ),
+      ]) {
+        test('$key ignores a stale startup read', () async {
+          container.dispose();
+          final delayedSettings = _DelayedBoolSettingsService(testDb);
+          container = ProviderContainer(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(delayedSettings),
+            ],
+          );
+          final notifier = container.read(provider.notifier);
+          await notifier.setEnabled(enabled: false);
+          delayedSettings.loadedValue.complete(true);
+          await notifier.initializedValue();
+          expect(container.read(provider), isFalse);
+          expect(
+            await SettingsService(testDb).getBool(key, defaultValue: true),
+            isFalse,
+          );
+        });
+      }
 
       test('loads disabled preference after provider reconstruction', () async {
         final settings = container.read(settingsServiceProvider);
@@ -311,110 +440,59 @@ void main() {
       });
     });
 
-    group('themeModeProvider', () {
+    group('themeModeNotifierProvider', () {
       test('returns system by default', () async {
-        final result = await container.read(themeModeProvider.future);
-        expect(result, 'system');
+        final result = await container
+            .read(themeModeNotifierProvider.notifier)
+            .initializedValue();
+        expect(result, ThemeMode.system);
       });
 
       test('returns stored value when set', () async {
         final settings = container.read(settingsServiceProvider);
         await settings.setString(SettingKeys.themeMode, 'dark');
-        container.invalidate(themeModeProvider);
-        final result = await container.read(themeModeProvider.future);
-        expect(result, 'dark');
+        container.invalidate(themeModeNotifierProvider);
+        final result = await container
+            .read(themeModeNotifierProvider.notifier)
+            .initializedValue();
+        expect(result, ThemeMode.dark);
       });
     });
 
-    group('terminalThemesApplyToAppProvider', () {
-      test('returns true by default', () async {
-        final result = await container.read(
-          terminalThemesApplyToAppProvider.future,
-        );
-        expect(result, isTrue);
-      });
-
-      test('returns stored false when disabled', () async {
-        final settings = container.read(settingsServiceProvider);
-        await settings.setBool(
-          SettingKeys.terminalThemesApplyToApp,
-          value: false,
-        );
-        container.invalidate(terminalThemesApplyToAppProvider);
-
-        final result = await container.read(
-          terminalThemesApplyToAppProvider.future,
-        );
-
-        expect(result, isFalse);
-      });
-    });
-
-    group('terminalThemesApplyToAppNotifierProvider', () {
-      test('starts enabled by default', () {
-        expect(
-          container.read(terminalThemesApplyToAppNotifierProvider),
-          isTrue,
-        );
-      });
-
-      test('persists disabled state', () async {
-        final notifier = container.read(
-          terminalThemesApplyToAppNotifierProvider.notifier,
-        );
-
-        await notifier.setEnabled(enabled: false);
-
-        expect(
-          container.read(terminalThemesApplyToAppNotifierProvider),
-          isFalse,
-        );
-        expect(
-          await container
-              .read(settingsServiceProvider)
-              .getBool(SettingKeys.terminalThemesApplyToApp),
-          isFalse,
-        );
-        expect(
-          await container.read(terminalThemesApplyToAppProvider.future),
-          isFalse,
-        );
-      });
-    });
-
-    group('fontSizeProvider', () {
+    group('fontSizeNotifierProvider', () {
       test('returns 14.0 by default', () async {
-        final result = await container.read(fontSizeProvider.future);
+        final result = await container
+            .read(fontSizeNotifierProvider.notifier)
+            .initializedValue();
         expect(result, 14.0);
       });
     });
 
-    group('fontFamilyProvider', () {
+    group('fontFamilyNotifierProvider', () {
       test('returns monospace by default', () async {
-        final result = await container.read(fontFamilyProvider.future);
+        final result = await container
+            .read(fontFamilyNotifierProvider.notifier)
+            .initializedValue();
         expect(result, 'monospace');
       });
     });
 
-    group('hapticFeedbackProvider', () {
-      test('returns true by default', () async {
-        final result = await container.read(hapticFeedbackProvider.future);
-        expect(result, isTrue);
-      });
-    });
-
-    group('autoLockTimeoutProvider', () {
+    group('autoLockTimeoutNotifierProvider', () {
       test('returns 5 by default', () async {
-        final result = await container.read(autoLockTimeoutProvider.future);
+        final result = await container
+            .read(autoLockTimeoutNotifierProvider.notifier)
+            .initializedValue();
         expect(result, 5);
       });
 
       test('returns stored zero when auto-lock is disabled', () async {
         final settings = container.read(settingsServiceProvider);
         await settings.setInt(SettingKeys.autoLockTimeout, 0);
-        container.invalidate(autoLockTimeoutProvider);
+        container.invalidate(autoLockTimeoutNotifierProvider);
 
-        final result = await container.read(autoLockTimeoutProvider.future);
+        final result = await container
+            .read(autoLockTimeoutNotifierProvider.notifier)
+            .initializedValue();
 
         expect(result, 0);
       });
@@ -438,17 +516,46 @@ void main() {
       });
     });
 
-    group('cursorStyleProvider', () {
+    group('cursorStyleNotifierProvider', () {
       test('returns block by default', () async {
-        final result = await container.read(cursorStyleProvider.future);
+        final result = await container
+            .read(cursorStyleNotifierProvider.notifier)
+            .initializedValue();
         expect(result, 'block');
       });
     });
 
-    group('bellSoundProvider', () {
+    group('bellSoundNotifierProvider', () {
       test('returns true by default', () async {
-        final result = await container.read(bellSoundProvider.future);
+        final result = await container
+            .read(bellSoundNotifierProvider.notifier)
+            .initializedValue();
         expect(result, isTrue);
+      });
+    });
+
+    group('agentUpdateNotificationsNotifierProvider', () {
+      test('defaults to enabled and persists changes', () async {
+        final notifier = container.read(
+          agentUpdateNotificationsNotifierProvider.notifier,
+        );
+
+        expect(await notifier.initializedValue(), isTrue);
+        await notifier.setEnabled(enabled: false);
+
+        expect(
+          container.read(agentUpdateNotificationsNotifierProvider),
+          isFalse,
+        );
+        expect(
+          await container
+              .read(settingsServiceProvider)
+              .getBool(
+                SettingKeys.agentUpdateNotifications,
+                defaultValue: true,
+              ),
+          isFalse,
+        );
       });
     });
 

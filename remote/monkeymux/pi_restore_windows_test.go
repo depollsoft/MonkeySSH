@@ -88,6 +88,12 @@ func TestPiRestoreCommandIsSafeForCmd(t *testing.T) {
 	if got, ok := shellArgument(`C:\Program Files\Pi Sessions`); !ok || got != `"C:\Program Files\Pi Sessions"` {
 		t.Fatalf("cmd path argument = %q, %v", got, ok)
 	}
+	if got := piResumeCommand("session-id", `C:\%TEMP%\sessions`, ""); got != "" {
+		t.Fatalf("expanding cmd session directory resumed in default directory: %q", got)
+	}
+	if got := piResumeCommand("session-id", `C:\%TEMP%\sessions`, `C:\safe\session.jsonl`); got != piLaunchCommand("")+` --session C:\safe\session.jsonl` {
+		t.Fatalf("exact session path did not take priority over invalid directory: %q", got)
+	}
 	if got, ok := shellArgument(`C:\%TEMP%\sessions`); ok || got != "" {
 		t.Fatalf("expanding cmd path argument = %q, %v, want refusal", got, ok)
 	}

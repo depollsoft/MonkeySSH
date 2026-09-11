@@ -120,6 +120,47 @@ Widget _wrap(
 }
 
 void main() {
+  testWidgets('unrelated session updates do not rebuild the conversation', (
+    tester,
+  ) async {
+    final current = fakeAcpSession(
+      timeline: fakeAcpTimeline('Current conversation'),
+    );
+    final other = fakeAcpSession(key: fakeAcpKey(acpSessionId: 'other'));
+    final manager = FakeAcpSessionManager(sessions: [current, other]);
+    await tester.pumpWidget(_wrap(manager));
+    await tester.pumpAndSettle();
+    final thread = tester.widget<AcpMessageThread>(
+      find.byType(AcpMessageThread),
+    );
+    manager.emit(
+      AcpSessionManagerState(
+        sessions: [
+          current,
+          other.copyWith(timeline: fakeAcpTimeline('Unrelated update')),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      identical(
+        tester.widget<AcpMessageThread>(find.byType(AcpMessageThread)),
+        thread,
+      ),
+      isTrue,
+    );
+    manager.emit(
+      AcpSessionManagerState(
+        sessions: [
+          current.copyWith(timeline: fakeAcpTimeline('Current updated')),
+          other,
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Current updated'), findsOneWidget);
+  });
+
   testWidgets('renders the live timeline and composer on mobile', (
     tester,
   ) async {
@@ -283,164 +324,228 @@ void main() {
     expect(find.text('google/Gemini Pro'), findsOneWidget);
   });
 
-  testWidgets('composer toolbar keeps all session controls inline', (
-    tester,
-  ) async {
-    final manager = FakeAcpSessionManager(
-      sessions: [
-        fakeAcpSession(
-          configOptions: const [
-            AcpSelectConfigOption(
-              id: 'model',
-              name: 'Model',
-              currentValue: 'sonnet',
-              category: 'model',
-              options: [
-                AcpConfigValue(value: 'sonnet', name: 'Sonnet'),
-                AcpConfigValue(value: 'opus', name: 'Opus'),
-              ],
-            ),
-            AcpSelectConfigOption(
-              id: 'effort',
-              name: 'Reasoning effort',
-              currentValue: 'medium',
-              category: 'thought',
-              options: [
-                AcpConfigValue(value: 'medium', name: 'Medium'),
-                AcpConfigValue(value: 'high', name: 'High'),
-              ],
-            ),
-            AcpBooleanConfigOption(
-              id: 'yolo',
-              name: 'Auto-approve',
-              category: 'permissions',
-              currentValue: false,
-            ),
-            AcpSelectConfigOption(
-              id: 'fast-mode',
-              name: 'Fast mode',
-              currentValue: 'off',
-              category: 'model_config',
-              options: [
-                AcpConfigValue(value: 'off', name: 'Off'),
-                AcpConfigValue(value: 'on', name: 'On'),
-              ],
-            ),
-          ],
-          modeState: const AcpSessionModeState(
-            currentModeId: 'code',
-            availableModes: [
-              AcpSessionMode(id: 'code', name: 'Code'),
-              AcpSessionMode(id: 'ask', name: 'Ask'),
+  testWidgets(
+    'keeps session controls reachable in a scrollable row at 320 px',
+    (tester) async {
+      final manager = FakeAcpSessionManager(
+        sessions: [
+          fakeAcpSession(
+            configOptions: const [
+              AcpSelectConfigOption(
+                id: 'model',
+                name: 'Model',
+                currentValue: 'sonnet',
+                category: 'model',
+                options: [
+                  AcpConfigValue(value: 'sonnet', name: 'Sonnet'),
+                  AcpConfigValue(value: 'opus', name: 'Opus'),
+                ],
+              ),
+              AcpSelectConfigOption(
+                id: 'effort',
+                name: 'Reasoning effort',
+                currentValue: 'medium',
+                category: 'thought',
+                options: [
+                  AcpConfigValue(value: 'medium', name: 'Medium'),
+                  AcpConfigValue(value: 'high', name: 'High'),
+                ],
+              ),
+              AcpBooleanConfigOption(
+                id: 'yolo',
+                name: 'Auto-approve',
+                category: 'permissions',
+                currentValue: false,
+              ),
+              AcpSelectConfigOption(
+                id: 'fast-mode',
+                name: 'Fast mode',
+                currentValue: 'off',
+                category: 'model_config',
+                options: [
+                  AcpConfigValue(value: 'off', name: 'Off'),
+                  AcpConfigValue(value: 'on', name: 'On'),
+                ],
+              ),
             ],
+            modeState: const AcpSessionModeState(
+              currentModeId: 'code',
+              availableModes: [
+                AcpSessionMode(id: 'code', name: 'Code'),
+                AcpSessionMode(id: 'ask', name: 'Ask'),
+              ],
+            ),
           ),
+        ],
+      );
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(320, 640));
+      await tester.pumpWidget(
+        _wrap(
+          manager,
+          size: const Size(320, 640),
+          embedded: true,
+          preferredFontSize: 20,
         ),
-      ],
-    );
-    await tester.pumpWidget(
-      _wrap(
-        manager,
-        size: const Size(320, 640),
-        embedded: true,
-        preferredFontSize: 20,
-      ),
-    );
-    await tester.pumpAndSettle();
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getSize(find.byType(AgentChatScreen)).width, 320);
+      expect(tester.takeException(), isNull);
 
-    expect(find.byType(AppBar), findsNothing);
-    expect(find.text('Sonnet'), findsOneWidget);
-    expect(find.text('Medium'), findsOneWidget);
-    expect(find.text('Code'), findsOneWidget);
-    expect(find.text('Ask'), findsOneWidget);
-    expect(find.text('Model'), findsNothing);
-    expect(find.text('Effort'), findsNothing);
-    expect(find.text('Mode'), findsNothing);
-    expect(find.text('Permission'), findsNothing);
-    final permissionPill = find.byKey(const ValueKey('permission-mode-pill'));
-    expect(tester.getSize(permissionPill).height, 44);
-    final modelPill = find.byKey(
-      const ValueKey('acp-quick-selector-pill-Model'),
-    );
-    final effortPill = find.byKey(
-      const ValueKey('acp-quick-selector-pill-Effort'),
-    );
-    expect(tester.getSize(modelPill).height, 40);
-    expect(
-      tester.getTopLeft(effortPill).dx - tester.getTopRight(modelPill).dx,
-      FluttyTheme.spacingXs,
-      reason: 'selector pills should flow without fixed-width dead space',
-    );
-    final selectorContext = tester.element(find.text('Sonnet'));
-    final modelInk = tester.widget<Ink>(modelPill);
-    final modelDecoration = modelInk.decoration! as BoxDecoration;
-    expect(
-      modelDecoration.color,
-      Theme.of(selectorContext).colorScheme.surfaceContainerHighest,
-    );
-    expect(modelDecoration.border, isNull);
-    expect(modelDecoration.borderRadius, BorderRadius.circular(12));
-    final modelLabel = tester.widget<Text>(find.text('Sonnet'));
-    expect(
-      modelLabel.style?.fontFamily,
-      isNot(AcpChatTypography.monoStyleOf(selectorContext).fontFamily),
-    );
-    expect(modelLabel.style?.fontSize, 12);
-    expect(modelLabel.style?.height, 1.15);
-    expect(modelLabel.style?.fontWeight, FontWeight.w600);
-    expect(
-      find.ancestor(of: permissionPill, matching: find.byType(ListView)),
-      findsOneWidget,
-      reason: 'permission belongs in the same scrolling row as every selector',
-    );
-    expect(MediaQuery.of(selectorContext).textScaler.scale(14), 14);
-    final controls = find.byKey(const ValueKey('acp-composer-controls'));
-    final surface = find.byKey(const ValueKey('acp-composer-surface'));
-    expect(find.ancestor(of: controls, matching: surface), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('Sonnet')).dy,
-      greaterThan(tester.getTopLeft(find.byType(AcpComposer)).dy),
-    );
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.text('Sonnet'), findsOneWidget);
+      expect(find.text('Medium'), findsOneWidget);
+      final controls = find.byKey(const ValueKey('acp-composer-controls'));
+      final scrollable = find.descendant(
+        of: controls,
+        matching: find.byType(Scrollable),
+      );
+      expect(scrollable, findsOneWidget);
+      final scrollState = tester.state<ScrollableState>(scrollable);
+      expect(scrollState.position.pixels, 0);
+      expect(scrollState.position.maxScrollExtent, greaterThan(0));
+      final viewport = tester.getRect(controls);
+      for (final label in ['Sonnet', 'Medium']) {
+        expect(find.text(label).hitTestable(), findsOneWidget);
+        expect(
+          viewport.overlaps(tester.getRect(find.text(label))),
+          isTrue,
+          reason: '$label should be visible before scrolling',
+        );
+      }
+      expect(find.text('Model'), findsNothing);
+      expect(find.text('Effort'), findsNothing);
+      expect(find.text('Mode'), findsNothing);
+      expect(find.text('Permission'), findsNothing);
+      final permissionPill = find.byKey(const ValueKey('permission-mode-pill'));
+      final modelPill = find.byKey(
+        const ValueKey('acp-quick-selector-pill-Model'),
+      );
+      final effortPill = find.byKey(
+        const ValueKey('acp-quick-selector-pill-Effort'),
+      );
+      expect(tester.getSize(modelPill).height, 40);
+      expect(
+        tester.getTopLeft(effortPill).dx - tester.getTopRight(modelPill).dx,
+        FluttyTheme.spacingXs,
+        reason: 'selector pills should flow without fixed-width dead space',
+      );
+      final selectorContext = tester.element(find.text('Sonnet'));
+      final modelInk = tester.widget<Ink>(modelPill);
+      final modelDecoration = modelInk.decoration! as BoxDecoration;
+      expect(
+        modelDecoration.color,
+        Theme.of(selectorContext).colorScheme.surfaceContainerHighest,
+      );
+      expect(modelDecoration.border, isNull);
+      expect(modelDecoration.borderRadius, BorderRadius.circular(12));
+      final modelLabel = tester.widget<Text>(find.text('Sonnet'));
+      expect(
+        modelLabel.style?.fontFamily,
+        isNot(AcpChatTypography.monoStyleOf(selectorContext).fontFamily),
+      );
+      expect(modelLabel.style?.fontSize, 12);
+      expect(modelLabel.style?.height, 1.15);
+      expect(modelLabel.style?.fontWeight, FontWeight.w600);
+      expect(MediaQuery.of(selectorContext).textScaler.scale(14), 14);
 
-    await tester.tap(find.byTooltip('Change model'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Opus').last);
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('model', 'opus')));
+      // Scroll the actual selector viewport so lazy children must be built and
+      // revealed, rather than counting cached children outside the viewport.
+      for (final entry in const {
+        'model': 'Sonnet',
+        'effort': 'Medium',
+        'mode': 'Code',
+        'permission': 'Ask',
+      }.entries) {
+        final pill = find.byTooltip('Change ${entry.key}');
+        final pillLabel = find.text(entry.value);
+        await tester.scrollUntilVisible(pill, 80, scrollable: scrollable);
+        await tester.pumpAndSettle();
+        expect(pillLabel, findsOneWidget);
+        expect(pillLabel.hitTestable(), findsOneWidget);
+        expect(pill.hitTestable(), findsOneWidget);
+        final pillRect = tester.getRect(pill);
+        expect(pillRect.left, greaterThanOrEqualTo(viewport.left));
+        expect(pillRect.right, lessThanOrEqualTo(viewport.right));
+      }
+      expect(tester.getSize(permissionPill).height, 44);
+      expect(
+        find.ancestor(of: permissionPill, matching: find.byType(ListView)),
+        findsOneWidget,
+        reason:
+            'permission belongs in the same scrolling row as every selector',
+      );
+      final surface = find.byKey(const ValueKey('acp-composer-surface'));
+      expect(find.ancestor(of: controls, matching: surface), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Change effort'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('High').last);
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('effort', 'high')));
+      await tester.scrollUntilVisible(
+        find.byTooltip('Change model'),
+        -80,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('Sonnet')).dy,
+        greaterThan(tester.getTopLeft(find.byType(AcpComposer)).dy),
+      );
 
-    await tester.tap(find.byTooltip('Change mode'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Ask').last);
-    await tester.pumpAndSettle();
-    expect(manager.modeSets, contains('ask'));
+      await tester.tap(find.byTooltip('Change model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Opus').last);
+      await tester.pumpAndSettle();
+      expect(manager.configOptionSets, contains(('model', 'opus')));
 
-    await tester.drag(
-      find.byKey(const ValueKey('acp-composer-controls')),
-      const Offset(-260, 0),
-    );
-    await tester.pump();
-    expect(find.text('Off'), findsOneWidget);
-    await tester.ensureVisible(find.byTooltip('Change fast mode'));
-    await tester.pump();
-    await tester.tap(find.byTooltip('Change fast mode'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('On').last);
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('fast-mode', 'on')));
+      await tester.scrollUntilVisible(
+        find.byTooltip('Change effort'),
+        80,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Change effort'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('High').last);
+      await tester.pumpAndSettle();
+      expect(manager.configOptionSets, contains(('effort', 'high')));
 
-    await tester.ensureVisible(find.byTooltip('Change permission'));
-    await tester.pump();
-    await tester.tap(find.byTooltip('Change permission'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('YOLO').last);
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('yolo', true)));
-  });
+      await tester.scrollUntilVisible(
+        find.byTooltip('Change mode'),
+        80,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Change mode'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Ask').last);
+      await tester.pumpAndSettle();
+      expect(manager.modeSets, contains('ask'));
+
+      await tester.scrollUntilVisible(
+        find.byTooltip('Change fast mode'),
+        80,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Off'), findsOneWidget);
+      await tester.tap(find.byTooltip('Change fast mode'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('On').last);
+      await tester.pumpAndSettle();
+      expect(manager.configOptionSets, contains(('fast-mode', 'on')));
+
+      await tester.scrollUntilVisible(
+        find.byTooltip('Change permission'),
+        -80,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Change permission'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('YOLO').last);
+      await tester.pumpAndSettle();
+      expect(manager.configOptionSets, contains(('yolo', true)));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('permission pill preserves provider-supported modes', (
     tester,
@@ -639,6 +744,8 @@ void main() {
     tester,
   ) async {
     final session = fakeAcpSession();
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(1100, 800));
     await tester.pumpWidget(
       _wrap(
         FakeAcpSessionManager(sessions: [session]),
@@ -646,6 +753,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(AgentChatScreen)).width, 1100);
+    expect(tester.takeException(), isNull);
 
     expect(find.text('sessions'), findsOneWidget);
     expect(find.text('ready when you are'), findsOneWidget);
@@ -917,6 +1026,8 @@ void main() {
       final session = fakeAcpSession(
         timeline: fakeAcpTimeline('Scaled native response'),
       );
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1100, 800));
       await tester.pumpWidget(
         _wrap(
           FakeAcpSessionManager(sessions: [session]),
@@ -927,6 +1038,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      expect(tester.getSize(find.byType(AgentChatScreen)).width, 1100);
+      expect(tester.takeException(), isNull);
 
       expect(find.text('sessions'), findsNothing);
       expect(find.byType(AppBar), findsNothing);

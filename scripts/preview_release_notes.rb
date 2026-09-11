@@ -6,7 +6,7 @@ module PreviewReleaseNotes
   def current(max_length: nil)
     pr_number = normalize(ENV['FLUTTY_PR_NUMBER'])
     pr_title = normalize(ENV['FLUTTY_PR_TITLE'])
-    return nil if pr_number.nil? && pr_title.nil?
+    branch_name = normalize(ENV['FLUTTY_BRANCH_NAME'])
 
     build_name = normalize(ENV['FLUTTY_BUILD_NAME'])
     version_codename = normalize(ENV['FLUTTY_VERSION_CODENAME'])
@@ -14,16 +14,25 @@ module PreviewReleaseNotes
     repository = normalize(ENV['GITHUB_REPOSITORY'])
     server_url = normalize(ENV['GITHUB_SERVER_URL']) || 'https://github.com'
     pr_commits = normalize(ENV['FLUTTY_PR_COMMITS'])
+    last_commit = normalize(ENV['FLUTTY_LAST_COMMIT']) ||
+                  first_commit(pr_commits) ||
+                  source_sha&.slice(0, 7)
+    return nil if pr_number.nil? && pr_title.nil? && branch_name.nil? && last_commit.nil?
 
-    lines = [headline(pr_number: pr_number, pr_title: pr_title)]
+    identity = if pr_number || pr_title
+                 headline(pr_number: pr_number, pr_title: pr_title)
+               else
+                 "Branch: #{branch_name}"
+               end
+    identity = "Main build: #{identity}" if branch_name == 'main' && (pr_number || pr_title)
+    required_lines = [identity]
+    required_lines << "Last commit: #{last_commit}" if last_commit
+    lines = fit_required_lines(required_lines, max_length)
+
+    lines << "Branch: #{branch_name}" if branch_name && (pr_number || pr_title)
     version_line = format_version(build_name: build_name, version_codename: version_codename)
     lines << version_line if version_line
-
-    if repository && pr_number
-      lines << "PR: #{server_url}/#{repository}/pull/#{pr_number}"
-    end
-
-    lines << "Commit: #{source_sha[0, 7]}" if source_sha
+    lines << "PR: #{server_url}/#{repository}/pull/#{pr_number}" if repository && pr_number
 
     header = lines.join("\n")
 
@@ -44,6 +53,17 @@ module PreviewReleaseNotes
     return "Version: #{build_name}" if build_name
 
     "Codename: #{version_codename}"
+  end
+
+  def first_commit(raw_commits)
+    raw_commits&.split("\n")&.find { |line| !line.empty? }
+  end
+
+  def fit_required_lines(lines, max_length)
+    return lines if max_length.nil? || lines.join("\n").length <= max_length
+
+    line_limit = [(max_length - lines.length + 1) / lines.length, 1].max
+    lines.map { |line| line.length <= line_limit ? line : line[0, line_limit] }
   end
 
   def append_commits(header, raw_commits, max_length:)

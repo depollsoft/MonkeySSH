@@ -178,6 +178,19 @@ void main() {
     });
 
     group('robustness', () {
+      test('numeric saturation survives chunking and resets per parameter', () {
+        for (final digits in ['2147483647', '2147483648', '9' * 300]) {
+          final handler = MockEscapeHandler();
+          final parser = EscapeParser(handler)..write('\x1b[');
+          for (final digit in digits.split('')) {
+            parser.write(digit);
+          }
+          parser.write(';5H\x1b[3C');
+          verify(handler.setCursor(4, 0x7ffffffe)).called(1);
+          verify(handler.moveCursorX(3)).called(1);
+        }
+      });
+
       test('designates G2 and G3 charsets', () {
         final parser = EscapeParser(MockEscapeHandler());
         parser.write('\x1b*0\x1b+B');

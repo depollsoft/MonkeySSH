@@ -36,35 +36,16 @@ class KeyService {
   }) async {
     try {
       // Parse the key to validate and extract public key
-      final keyPairs = passphrase != null && passphrase.isNotEmpty
-          ? SSHKeyPair.fromPem(privateKeyPem, passphrase)
-          : SSHKeyPair.fromPem(privateKeyPem);
+      final keyPairs = await parseOpenSshPrivateKey(privateKeyPem, passphrase);
 
       if (keyPairs.isEmpty) return null;
 
-      final keyPair = keyPairs.first;
-      // Convert public key to OpenSSH format: type + space + base64-encoded key
-      final publicKeyBytes = keyPair.toPublicKey().encode();
-      // The algorithm name embedded at the start of the public-key blob is the
-      // canonical OpenSSH type token (e.g. 'ssh-rsa', 'ssh-ed25519') — the
-      // value expected in authorized_keys. keyPair.type is a signature type
-      // such as 'rsa-sha2-256', which is not a valid authorized_keys prefix.
-      final keyType = _readPublicKeyAlgorithm(publicKeyBytes);
-      final publicKey = '$keyType ${base64.encode(publicKeyBytes)}';
-      final fingerprint = computeOpenSshPublicKeyFingerprint(publicKey);
-
-      final id = await _keyRepository.insert(
-        SshKeysCompanion.insert(
-          name: name,
-          keyType: keyType,
-          publicKey: publicKey,
-          privateKey: privateKeyPem,
-          passphrase: Value(passphrase),
-          fingerprint: Value(fingerprint),
-        ),
+      return await _insertKey(
+        name: name,
+        privateKeyPem: privateKeyPem,
+        publicKeyBlob: keyPairs.first.toPublicKey().encode(),
+        passphrase: passphrase,
       );
-
-      return _keyRepository.getById(id);
     } on FormatException {
       return null;
     } on SSHError {
@@ -90,116 +71,39 @@ class KeyService {
         ? null
         : passphrase;
 
-    final privateKeyPem = await generateOpenSshPrivateKeyPem(
+    final generated = await generateOpenSshKey(
       keyType: keyType,
       comment: name,
       passphrase: normalizedPassphrase,
     );
 
-    return importKey(
+    return _insertKey(
       name: name,
-      privateKeyPem: privateKeyPem,
+      privateKeyPem: generated.privateKeyPem,
+      publicKeyBlob: generated.publicKeyBlob,
       passphrase: normalizedPassphrase,
     );
   }
 
-  /// Import a public key only (for reference).
-  Future<SshKey?> importPublicKey({
+  Future<SshKey?> _insertKey({
     required String name,
-    required String publicKey,
+    required String privateKeyPem,
+    required List<int> publicKeyBlob,
+    String? passphrase,
   }) async {
-    try {
-      final fingerprint = computeOpenSshPublicKeyFingerprint(publicKey);
-      final keyType = _detectKeyType(publicKey);
-
-      final id = await _keyRepository.insert(
-        SshKeysCompanion.insert(
-          name: name,
-          keyType: keyType,
-          publicKey: publicKey,
-          privateKey: '', // No private key
-          fingerprint: Value(fingerprint),
-        ),
-      );
-
-      return _keyRepository.getById(id);
-    } on FormatException {
-      return null;
-    }
-  }
-
-  /// Export a key's public key in OpenSSH format.
-  String exportPublicKey(SshKey key, {String? comment}) {
-    if (comment != null && comment.isNotEmpty) {
-      return '${key.publicKey} $comment';
-    }
-    return key.publicKey;
-  }
-
-  /// Export a key's private key in PEM format.
-  String exportPrivateKey(SshKey key) => key.privateKey;
-
-  /// Validate a private key.
-  ///
-  /// Returns false for malformed input, and for an encrypted key when no (or an
-  /// incorrect) [passphrase] is supplied.
-  bool validatePrivateKey(String pem, {String? passphrase}) {
-    try {
-      final keys = passphrase != null && passphrase.isNotEmpty
-          ? SSHKeyPair.fromPem(pem, passphrase)
-          : SSHKeyPair.fromPem(pem);
-      return keys.isNotEmpty;
-    } on FormatException {
-      return false;
-    } on SSHError {
-      // e.g. SSHKeyDecryptError for an encrypted key with a missing/wrong
-      // passphrase.
-      return false;
-    }
-  }
-
-  /// Delete a key.
-  Future<void> deleteKey(int id) => _keyRepository.delete(id);
-
-  /// Get all keys.
-  Future<List<SshKey>> getAllKeys() => _keyRepository.getAll();
-
-  /// Watch all keys.
-  Stream<List<SshKey>> watchAllKeys() => _keyRepository.watchAll();
-
-  /// Get a key by ID.
-  Future<SshKey?> getById(int id) => _keyRepository.getById(id);
-
-  String _detectKeyType(String publicKey) {
-    final trimmed = publicKey.trim();
-    if (trimmed.startsWith('ssh-ed25519')) {
-      return 'ed25519';
-    } else if (trimmed.startsWith('ssh-rsa')) {
-      return 'rsa';
-    } else if (trimmed.startsWith('ecdsa-sha2-nistp256')) {
-      return 'ecdsa-256';
-    } else if (trimmed.startsWith('ecdsa-sha2-nistp384')) {
-      return 'ecdsa-384';
-    } else if (trimmed.startsWith('ecdsa-sha2-nistp521')) {
-      return 'ecdsa-521';
-    } else if (trimmed.startsWith('ecdsa-')) {
-      return 'ecdsa';
-    } else if (trimmed.startsWith('ssh-dss')) {
-      return 'dsa';
-    } else if (trimmed.startsWith('sk-ssh-ed25519')) {
-      return 'ed25519-sk';
-    } else if (trimmed.startsWith('sk-ecdsa-')) {
-      return 'ecdsa-sk';
-    }
-    // Try to extract type from first space-separated token
-    final firstSpace = trimmed.indexOf(' ');
-    if (firstSpace > 0) {
-      final typePrefix = trimmed.substring(0, firstSpace);
-      if (typePrefix.startsWith('ssh-') || typePrefix.startsWith('ecdsa-')) {
-        return typePrefix.replaceFirst('ssh-', '');
-      }
-    }
-    return 'unknown';
+    final keyType = _readPublicKeyAlgorithm(publicKeyBlob);
+    final publicKey = '$keyType ${base64Encode(publicKeyBlob)}';
+    final id = await _keyRepository.insert(
+      SshKeysCompanion.insert(
+        name: name,
+        keyType: keyType,
+        publicKey: publicKey,
+        privateKey: privateKeyPem,
+        passphrase: Value(passphrase),
+        fingerprint: Value(computeOpenSshPublicKeyFingerprint(publicKey)),
+      ),
+    );
+    return _keyRepository.getById(id);
   }
 
   /// Reads the algorithm name embedded at the start of an OpenSSH public-key

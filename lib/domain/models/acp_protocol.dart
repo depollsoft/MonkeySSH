@@ -55,18 +55,6 @@ final class AcpFileSystemCapabilities implements AcpExtensible {
     this.extensions = const <String, Object?>{},
   });
 
-  /// Parses file-system capabilities.
-  factory AcpFileSystemCapabilities.fromJson(AcpJsonMap json) =>
-      AcpFileSystemCapabilities(
-        readTextFile: AcpJson.boolean(json, 'readTextFile') ?? false,
-        writeTextFile: AcpJson.boolean(json, 'writeTextFile') ?? false,
-        meta: AcpJson.meta(json),
-        extensions: AcpJson.extensions(json, const [
-          'readTextFile',
-          'writeTextFile',
-        ]),
-      );
-
   /// Whether `fs/read_text_file` is supported.
   final bool readTextFile;
 
@@ -98,25 +86,6 @@ final class AcpClientCapabilities implements AcpExtensible {
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
-
-  /// Parses client capabilities.
-  factory AcpClientCapabilities.fromJson(AcpJsonMap json) {
-    final fileSystem = AcpJson.objectField(json, 'fs');
-    final session = AcpJson.objectField(json, 'session');
-    final configOptions = session == null
-        ? null
-        : AcpJson.objectField(session, 'configOptions');
-    return AcpClientCapabilities(
-      fileSystem: fileSystem == null
-          ? null
-          : AcpFileSystemCapabilities.fromJson(fileSystem),
-      terminal: AcpJson.boolean(json, 'terminal') ?? false,
-      booleanConfigOptions:
-          configOptions != null && configOptions['boolean'] is Map,
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const ['fs', 'terminal', 'session']),
-    );
-  }
 
   /// Optional file-system capabilities.
   final AcpFileSystemCapabilities? fileSystem;
@@ -436,17 +405,15 @@ final class AcpInitializeResult implements AcpExtensible {
   factory AcpInitializeResult.fromJson(AcpJsonMap json) {
     final capabilities = AcpJson.objectField(json, 'agentCapabilities');
     final info = AcpJson.objectField(json, 'agentInfo');
-    final authMethods = <AcpAuthMethod>[];
-    for (final item in AcpJson.listField(json, 'authMethods') ?? const []) {
-      final method = AcpJson.object(item);
-      if (method != null) authMethods.add(AcpAuthMethod.fromJson(method));
-    }
     return AcpInitializeResult(
       protocolVersion: AcpJson.integer(json, 'protocolVersion') ?? 0,
       agentCapabilities: capabilities == null
           ? const AcpAgentCapabilities()
           : AcpAgentCapabilities.fromJson(capabilities),
-      authMethods: List<AcpAuthMethod>.unmodifiable(authMethods),
+      authMethods: AcpJson.objectList(
+        json['authMethods'],
+        AcpAuthMethod.fromJson,
+      ),
       agentInfo: info == null ? null : AcpImplementation.fromJson(info),
       meta: AcpJson.meta(json),
       extensions: AcpJson.extensions(json, const [
@@ -591,22 +558,18 @@ final class AcpSessionModeState implements AcpExtensible {
   });
 
   /// Parses session mode state.
-  factory AcpSessionModeState.fromJson(AcpJsonMap json) {
-    final modes = <AcpSessionMode>[];
-    for (final item in AcpJson.listField(json, 'availableModes') ?? const []) {
-      final mode = AcpJson.object(item);
-      if (mode != null) modes.add(AcpSessionMode.fromJson(mode));
-    }
-    return AcpSessionModeState(
-      currentModeId: AcpJson.identifier(json, 'currentModeId') ?? '',
-      availableModes: List<AcpSessionMode>.unmodifiable(modes),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const [
-        'currentModeId',
-        'availableModes',
-      ]),
-    );
-  }
+  factory AcpSessionModeState.fromJson(AcpJsonMap json) => AcpSessionModeState(
+    currentModeId: AcpJson.identifier(json, 'currentModeId') ?? '',
+    availableModes: AcpJson.objectList(
+      json['availableModes'],
+      AcpSessionMode.fromJson,
+    ),
+    meta: AcpJson.meta(json),
+    extensions: AcpJson.extensions(json, const [
+      'currentModeId',
+      'availableModes',
+    ]),
+  );
 
   /// Active mode identifier.
   final String currentModeId;
@@ -770,20 +733,13 @@ final class AcpConfigValueGroup implements AcpExtensible {
   });
 
   /// Parses a configuration value group.
-  factory AcpConfigValueGroup.fromJson(AcpJsonMap json) {
-    final options = <AcpConfigValue>[];
-    for (final item in AcpJson.listField(json, 'options') ?? const []) {
-      final option = AcpJson.object(item);
-      if (option != null) options.add(AcpConfigValue.fromJson(option));
-    }
-    return AcpConfigValueGroup(
-      id: AcpJson.identifier(json, 'group') ?? '',
-      name: AcpJson.string(json, 'name') ?? '',
-      options: List<AcpConfigValue>.unmodifiable(options),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const ['group', 'name', 'options']),
-    );
-  }
+  factory AcpConfigValueGroup.fromJson(AcpJsonMap json) => AcpConfigValueGroup(
+    id: AcpJson.identifier(json, 'group') ?? '',
+    name: AcpJson.string(json, 'name') ?? '',
+    options: AcpJson.objectList(json['options'], AcpConfigValue.fromJson),
+    meta: AcpJson.meta(json),
+    extensions: AcpJson.extensions(json, const ['group', 'name', 'options']),
+  );
 
   /// Group identifier.
   final String id;
@@ -1092,20 +1048,16 @@ final class AcpSessionSetupResult implements AcpExtensible {
         AcpJson.objectField(json, 'models') ??
         AcpJson.objectField(json, 'modelState') ??
         (AcpJson.listField(json, 'models') == null ? null : json);
-    final configOptions = <AcpSessionConfigOption>[];
-    for (final item in AcpJson.listField(json, 'configOptions') ?? const []) {
-      final option = AcpJson.object(item);
-      if (option != null) {
-        configOptions.add(AcpSessionConfigOption.fromJson(option));
-      }
-    }
     return AcpSessionSetupResult(
       sessionId: AcpJson.identifier(json, 'sessionId'),
       modes: modes == null
           ? _modeStateFromProviderMeta(meta)
           : AcpSessionModeState.fromJson(modes),
       models: models == null ? null : AcpModelState.fromJson(models),
-      configOptions: List<AcpSessionConfigOption>.unmodifiable(configOptions),
+      configOptions: AcpJson.objectList(
+        json['configOptions'],
+        AcpSessionConfigOption.fromJson,
+      ),
       meta: meta,
       extensions: AcpJson.extensions(json, const [
         'sessionId',
@@ -1183,9 +1135,6 @@ extension type const AcpStopReason(String value) {
 
   /// The agent reached its token limit.
   static const maxTokens = AcpStopReason('max_tokens');
-
-  /// The agent reached its request limit.
-  static const maxTurnRequests = AcpStopReason('max_turn_requests');
 
   /// The agent refused the prompt.
   static const refusal = AcpStopReason('refusal');

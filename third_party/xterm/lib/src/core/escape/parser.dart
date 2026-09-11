@@ -278,7 +278,7 @@ class EscapeParser {
   final _csi = _Csi(finalByte: 0, params: []);
 
   /// Parse a CSI from the head of the queue. Returns [_SeqParse.incomplete] if
-  /// the CSI isn't complete and [_SeqParse.aborted] if an ESC cut it short.
+  /// the CSI isn't complete and [_SeqParse.aborted] if ESC, CAN or SUB cut it short.
   /// After a CSI is successfully parsed, [_csi] is updated.
   _SeqParse _consumeCsi() {
     if (_queue.isEmpty) {
@@ -290,7 +290,7 @@ class EscapeParser {
 
     // test whether the csi is a `CSI ? Ps ...` or `CSI Ps ...`
     final prefix = _queue.peek();
-    if (prefix >= Ascii.colon && prefix <= Ascii.questionMark) {
+    if (prefix >= Ascii.lessThan && prefix <= Ascii.questionMark) {
       _csi.prefix = prefix;
       _queue.consume();
     } else {
@@ -338,6 +338,12 @@ class EscapeParser {
         return _SeqParse.aborted;
       }
 
+      // CAN and SUB cancel the sequence and return to ground state. Unlike
+      // ESC, the cancellation byte is consumed rather than reprocessed.
+      if (char == Ascii.CAN || char == Ascii.SUB) {
+        return _SeqParse.aborted;
+      }
+
       if (char == Ascii.semicolon) {
         commitParam(emptyAsZero: true);
         pendingEmptyParam = true;
@@ -366,8 +372,8 @@ class EscapeParser {
       if (char >= Ascii.num0 && char <= Ascii.num9) {
         hasParam = true;
         pendingEmptyParam = false;
-        param *= 10;
-        param += char - Ascii.num0;
+        // Saturate before integer overflow can turn a count or position negative.
+        param = (param * 10 + char - Ascii.num0).clamp(0, 0x7fffffff);
         continue;
       }
 
@@ -516,15 +522,9 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sf/
   void _csiHandleCursorPosition() {
-    var row = 1;
-    var col = 1;
-
-    if (_csi.params.length == 2) {
-      row = _csi.params[0];
-      col = _csi.params[1];
-    }
-
-    handler.setCursor(col - 1, row - 1);
+    final row = _csi.params.isNotEmpty ? _csi.params[0] : 1;
+    final col = _csi.params.length > 1 ? _csi.params[1] : 1;
+    handler.setCursor(col > 0 ? col - 1 : 0, row > 0 ? row - 1 : 0);
   }
 
   /// `ESC [ Ps g` Tab Clear (TBC)

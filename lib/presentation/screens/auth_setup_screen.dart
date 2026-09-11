@@ -67,12 +67,18 @@ class _AuthSetupScreenState extends ConsumerState<AuthSetupScreen> {
     return 'Enroll fingerprint or face in system settings, then return and re-check';
   }
 
-  Future<void> _setupPin() async {
-    if (_pinController.text.length < 6) {
-      setState(() => _error = 'PIN must be at least 6 digits');
-      return;
-    }
+  static const _minimumPinLength = 6;
 
+  void _advancePin() {
+    if (_pinController.text.length < _minimumPinLength) return;
+    setState(() {
+      _step = 2;
+      _error = null;
+      _confirmPinController.clear();
+    });
+  }
+
+  Future<void> _setupPin() async {
     if (_pinController.text != _confirmPinController.text) {
       setState(() => _error = 'PINs do not match');
       _confirmPinController.clear();
@@ -155,9 +161,9 @@ class _AuthSetupScreenState extends ConsumerState<AuthSetupScreen> {
       case 0:
         return _buildChooseStep(theme, colorScheme);
       case 1:
-        return _buildEnterPinStep(theme, colorScheme);
+        return _buildPinStep(theme, colorScheme, confirming: false);
       case 2:
-        return _buildConfirmPinStep(theme, colorScheme);
+        return _buildPinStep(theme, colorScheme, confirming: true);
       default:
         return const SizedBox.shrink();
     }
@@ -217,11 +223,15 @@ class _AuthSetupScreenState extends ConsumerState<AuthSetupScreen> {
     ],
   );
 
-  Widget _buildEnterPinStep(ThemeData theme, ColorScheme colorScheme) => Column(
+  Widget _buildPinStep(
+    ThemeData theme,
+    ColorScheme colorScheme, {
+    required bool confirming,
+  }) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Text(
-        'Create PIN',
+        confirming ? 'Confirm PIN' : 'Create PIN',
         style: FluttyTheme.displayMono(
           fontSize: 24,
           color: colorScheme.onSurface,
@@ -229,138 +239,88 @@ class _AuthSetupScreenState extends ConsumerState<AuthSetupScreen> {
       ),
       const SizedBox(height: 8),
       Text(
-        'Enter a 6-8 digit PIN.',
+        confirming
+            ? 'Enter your PIN again to confirm.'
+            : 'Enter a 6-8 digit PIN.',
         style: theme.textTheme.bodyLarge?.copyWith(
           color: colorScheme.onSurface.withValues(alpha: 0.72),
         ),
       ),
       const SizedBox(height: 32),
       TextField(
-        controller: _pinController,
+        key: ValueKey(confirming),
+        controller: confirming ? _confirmPinController : _pinController,
         keyboardType: TextInputType.number,
         obscureText: true,
         maxLength: 8,
         autofocus: true,
-        decoration: InputDecoration(labelText: 'PIN', errorText: _error),
+        decoration: InputDecoration(
+          labelText: confirming ? 'Confirm PIN' : 'PIN',
+          errorText: _error,
+        ),
         inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (_) => setState(() => _error = null),
-        onSubmitted: (_) {
-          if (_pinController.text.length >= 4) {
-            setState(() {
-              _step = 2;
-              _error = null;
-            });
-          }
-        },
+        onSubmitted: (_) => confirming ? _setupPin() : _advancePin(),
       ),
+      if (confirming && (_isCheckingBiometric || _biometricSupported)) ...[
+        const SizedBox(height: 16),
+        SwitchListTile(
+          value: _enableBiometric,
+          onChanged: _biometricAvailable
+              ? (v) => setState(() => _enableBiometric = v)
+              : null,
+          title: const Text('Enable biometrics'),
+          subtitle: Text(
+            _biometricAvailable
+                ? 'Also allow fingerprint/face unlock'
+                : _biometricSetupGuidance,
+          ),
+          contentPadding: EdgeInsets.zero,
+        ),
+        if (_needsBiometricEnrollment)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () {
+                setState(() => _isCheckingBiometric = true);
+                unawaited(_checkBiometric());
+              },
+              icon: const Icon(Icons.refresh),
+              label: const Text('Re-check biometric status'),
+            ),
+          ),
+      ],
       const SizedBox(height: 24),
       Row(
         children: [
           TextButton(
-            onPressed: () => setState(() => _step = 0),
+            onPressed: () => setState(() {
+              _step = confirming ? 1 : 0;
+              _error = null;
+            }),
             child: const Text('Back'),
           ),
           const Spacer(),
           ElevatedButton(
-            onPressed: _pinController.text.length >= 4
-                ? () => setState(() {
-                    _step = 2;
-                    _error = null;
-                  })
+            onPressed: _isLoading
+                ? null
+                : confirming
+                ? _setupPin
+                : _pinController.text.length >= _minimumPinLength
+                ? _advancePin
                 : null,
-            child: const Text('Next'),
+            child: _isLoading
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(confirming ? 'Complete' : 'Next'),
           ),
         ],
       ),
     ],
   );
-
-  Widget _buildConfirmPinStep(ThemeData theme, ColorScheme colorScheme) =>
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Confirm PIN',
-            style: FluttyTheme.displayMono(
-              fontSize: 24,
-              color: colorScheme.onSurface,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Enter your PIN again to confirm.',
-            style: theme.textTheme.bodyLarge?.copyWith(
-              color: colorScheme.onSurface.withValues(alpha: 0.72),
-            ),
-          ),
-          const SizedBox(height: 32),
-          TextField(
-            controller: _confirmPinController,
-            keyboardType: TextInputType.number,
-            obscureText: true,
-            maxLength: 8,
-            autofocus: true,
-            decoration: InputDecoration(
-              labelText: 'Confirm PIN',
-              errorText: _error,
-            ),
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            onChanged: (_) => setState(() => _error = null),
-            onSubmitted: (_) => _setupPin(),
-          ),
-          if (_isCheckingBiometric || _biometricSupported) ...[
-            const SizedBox(height: 16),
-            SwitchListTile(
-              value: _enableBiometric,
-              onChanged: _biometricAvailable
-                  ? (v) => setState(() => _enableBiometric = v)
-                  : null,
-              title: const Text('Enable biometrics'),
-              subtitle: Text(
-                _biometricAvailable
-                    ? 'Also allow fingerprint/face unlock'
-                    : _biometricSetupGuidance,
-              ),
-              contentPadding: EdgeInsets.zero,
-            ),
-            if (_needsBiometricEnrollment)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  onPressed: () {
-                    setState(() => _isCheckingBiometric = true);
-                    unawaited(_checkBiometric());
-                  },
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Re-check biometric status'),
-                ),
-              ),
-          ],
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              TextButton(
-                onPressed: () => setState(() {
-                  _step = 1;
-                  _error = null;
-                }),
-                child: const Text('Back'),
-              ),
-              const Spacer(),
-              ElevatedButton(
-                onPressed: _isLoading ? null : _setupPin,
-                child: _isLoading
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Complete'),
-              ),
-            ],
-          ),
-        ],
-      );
 }
 
 class _OptionCard extends StatelessWidget {

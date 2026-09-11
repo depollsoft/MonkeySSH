@@ -81,12 +81,14 @@ class _LockScreenState extends ConsumerState<LockScreen> {
     final success = await ref
         .read(authStateProvider.notifier)
         .unlockWithBiometrics();
+    if (!mounted) return;
 
-    setState(() => _isLoading = false);
-
-    if (!success && mounted) {
-      setState(() => _error = 'Biometric authentication failed');
-    }
+    setState(() {
+      _isLoading = false;
+      if (!success) {
+        _error = 'Biometric authentication failed';
+      }
+    });
   }
 
   Future<void> _authenticateWithPin() async {
@@ -103,11 +105,15 @@ class _LockScreenState extends ConsumerState<LockScreen> {
     final success = await ref
         .read(authStateProvider.notifier)
         .unlockWithPin(_pinController.text);
+    if (!mounted) return;
 
-    setState(() => _isLoading = false);
-
-    if (!success && mounted) {
-      setState(() => _error = 'Incorrect PIN');
+    setState(() {
+      _isLoading = false;
+      if (!success) {
+        _error = 'Incorrect PIN';
+      }
+    });
+    if (!success) {
       _pinController.clear();
       unawaited(HapticFeedback.heavyImpact());
     }

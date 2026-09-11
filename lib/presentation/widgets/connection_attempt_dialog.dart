@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -37,8 +39,16 @@ Future<SshConnectionResult> connectToHostWithProgressDialog(
       useHostThemeOverrides: useHostThemeOverrides,
     );
   } catch (error, stackTrace) {
-    // Authentication and transport failures already have an in-app result.
-    if (!isExpectedSshOperationError(error)) {
+    // Everything caught here comes from connect, so raw transport failures
+    // are expected even when their stack has no SSH frame.
+    final expectedFailure =
+        isExpectedSshOperationError(error, stackTrace) ||
+        error is SocketException ||
+        error is HandshakeException ||
+        error is TlsException ||
+        error is OSError ||
+        error is SshConnectionCancelledException;
+    if (!expectedFailure) {
       FlutterError.reportError(
         FlutterErrorDetails(
           exception: error,
@@ -48,9 +58,17 @@ Future<SshConnectionResult> connectToHostWithProgressDialog(
         ),
       );
     }
-    const message = 'Connection failed. Check the host settings and try again.';
-    sessionsNotifier.reportConnectionAttemptError(host.id, message);
-    result = const SshConnectionResult(success: false, error: message);
+    if (error is SshConnectionCancelledException ||
+        (expectedFailure &&
+            (sessionsNotifier.getConnectionAttempt(host.id)?.cancelRequested ??
+                false))) {
+      result = const SshConnectionResult.userCancelled();
+    } else {
+      const message =
+          'Connection failed. Check the host settings and try again.';
+      sessionsNotifier.reportConnectionAttemptError(host.id, message);
+      result = const SshConnectionResult(success: false, error: message);
+    }
   }
 
   final closesDialog =

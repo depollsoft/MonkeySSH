@@ -244,7 +244,8 @@ class _AcpComposerState extends State<AcpComposer> {
   }
 
   void _syncFieldFromController() {
-    if (_controller.text != _text.text) {
+    if (_controller.text != _text.text ||
+        _controller.caret != _text.selection.baseOffset) {
       _syncing = true;
       _text.value = TextEditingValue(
         text: _controller.text,

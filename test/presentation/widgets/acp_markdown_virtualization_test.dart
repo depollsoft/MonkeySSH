@@ -82,16 +82,48 @@ void main() {
     expect(chunks.join(), source);
   });
 
-  test('closes and reopens fenced code across segment boundaries', () {
-    final source =
-        '```dart\n${List.generate(1200, (index) => 'print($index);').join('\n')}\n```\n';
+  for (final (payload, budget) in [
+    (
+      List.generate(1200, (index) => 'print($index);').join('\n'),
+      kAcpMarkdownVirtualChunkChars,
+    ),
+    ('x' * 9000, kAcpMarkdownVirtualChunkChars),
+    ('x' * 25, 32),
+    ('🙂' * 12, 1),
+    ('🙂' * 12, 9),
+    ('x' * 12, 4),
+  ]) {
+    test('splits fenced line of ${payload.length} units at budget $budget', () {
+      final chunks = splitAcpMarkdownForVirtualization(
+        '```dart\n$payload\n```${payload.contains('\n') ? '\n' : ''}',
+        targetChars: budget,
+      );
 
-    final chunks = splitAcpMarkdownForVirtualization(source);
+      expect(chunks.length, greaterThan(1));
+      final recovered = StringBuffer();
+      for (final chunk in chunks) {
+        expect(chunk, startsWith('```dart\n'));
+        expect(chunk.trimRight(), endsWith('```'));
+        final code = chunk.substring(8, chunk.lastIndexOf('\n```'));
+        expect(code, isNotEmpty);
+        expect(
+          chunk.runes.any((rune) => rune >= 0xD800 && rune <= 0xDFFF),
+          isFalse,
+        );
+        expect(chunk.length, lessThanOrEqualTo(budget + 14));
+        recovered.write(code);
+      }
+      if (!payload.contains('\n')) expect(recovered.toString(), payload);
+    });
+  }
 
-    expect(chunks.length, greaterThan(1));
-    for (final chunk in chunks) {
-      expect(chunk.trimLeft(), startsWith('```dart'));
-      expect(chunk.trimRight(), endsWith('```'));
+  test('tiny budgets preserve complete code points in Markdown and text', () {
+    const source = '🙂🙂x';
+    for (final chunks in [
+      splitAcpMarkdownForVirtualization(source, targetChars: 1),
+      splitAcpTextForVirtualization(source, targetChars: 1),
+    ]) {
+      expect(chunks, ['🙂', '🙂', 'x']);
     }
   });
 

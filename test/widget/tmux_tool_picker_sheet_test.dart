@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
+import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/tmux_window_navigator.dart';
 
 Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
@@ -78,6 +80,102 @@ void main() {
   });
 
   group('TmuxToolPickerSheet', () {
+    test('uses native visibility before inset geometry', () {
+      expect(
+        resolvePlatformKeyboardInset(
+          bottomInset: 300,
+          platformKeyboardVisible: null,
+        ),
+        300,
+      );
+      expect(
+        resolvePlatformKeyboardInset(
+          bottomInset: 300,
+          platformKeyboardVisible: true,
+        ),
+        300,
+      );
+      expect(
+        resolvePlatformKeyboardInset(
+          bottomInset: 300,
+          platformKeyboardVisible: false,
+        ),
+        0,
+      );
+      expect(
+        resolvePlatformKeyboardInset(
+          bottomInset: 0,
+          platformKeyboardVisible: true,
+        ),
+        0,
+      );
+    });
+
+    testWidgets(
+      'new-window route tracks native visibility with stale geometry',
+      (tester) async {
+        tester.view
+          ..physicalSize = const Size(390, 844)
+          ..devicePixelRatio = 1
+          ..viewInsets = const FakeViewPadding(bottom: 300);
+        final keyboard = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: false);
+        addTearDown(() {
+          keyboard.debugSetVisible(visible: null);
+          tester.view
+            ..resetPhysicalSize()
+            ..resetDevicePixelRatio()
+            ..resetViewInsets();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (context) => Scaffold(
+                resizeToAvoidBottomInset: false,
+                body: TextButton(
+                  onPressed: () => unawaited(
+                    showTmuxNewWindowPicker(
+                      context: context,
+                      isProUser: true,
+                      startClisInYoloMode: false,
+                    ),
+                  ),
+                  child: const Text('Open picker'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open picker'));
+        await tester.pumpAndSettle();
+
+        final pickerPadding = find.descendant(
+          of: find.byType(TmuxToolPickerSheet),
+          matching: find.byType(AnimatedPadding),
+        );
+
+        expect(
+          tester.widget<AnimatedPadding>(pickerPadding).padding,
+          EdgeInsets.zero,
+        );
+
+        keyboard.debugSetVisible(visible: true);
+        await tester.pumpAndSettle();
+
+        expect(keyboard.visible, isTrue);
+        expect(
+          MediaQuery.of(
+            tester.element(find.byType(TmuxToolPickerSheet)),
+          ).viewInsets.bottom,
+          300,
+        );
+        expect(
+          tester.widget<AnimatedPadding>(pickerPadding).padding,
+          const EdgeInsets.only(bottom: 300),
+        );
+      },
+    );
     testWidgets('shows loading indicator while detection is pending', (
       tester,
     ) async {
@@ -102,6 +200,26 @@ void main() {
       completer.complete({AgentLaunchTool.claudeCode});
       await tester.pump();
       expect(find.text('Detecting installed CLIs…'), findsNothing);
+    });
+
+    testWidgets('omits Gemini while keeping Antigravity selectable', (
+      tester,
+    ) async {
+      AgentLaunchTool? selected;
+      await tester.pumpWidget(
+        _wrap(
+          TmuxToolPickerSheet(
+            installedToolsFuture: Future.value(AgentLaunchTool.values.toSet()),
+            onToolSelected: (tool) => selected = tool,
+            onEmptyWindow: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Gemini CLI'), findsNothing);
+      await tester.ensureVisible(find.text('Antigravity'));
+      await tester.tap(find.text('Antigravity'));
+      expect(selected, AgentLaunchTool.antigravity);
     });
 
     testWidgets('renders only detected tools', (tester) async {

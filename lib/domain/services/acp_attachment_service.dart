@@ -345,6 +345,7 @@ final class AcpAttachmentPreparationService {
               remainingTotalBytes: remainingTotal,
               onUploadProgress: onUploadProgress,
             );
+            cancellation._throwIfCancelled();
             totalBytes += prepared.bytes;
             blocks.add(prepared.block);
             attachmentIndex++;
@@ -575,9 +576,14 @@ final class AcpAttachmentPreparationService {
         headerBytes: sniffBytes.takeBytes(),
       );
       final knownSize = candidate.sizeBytes;
-      final inlineLimit = mimeType.startsWith('image/')
-          ? limits.maxImageBytes
-          : limits.maxEmbeddedBytes;
+      // Buffer only up to a format the agent can actually accept. Images
+      // may also fit as embedded blobs when that capability is advertised.
+      final inlineLimit = math.max(
+        mimeType.startsWith('image/') && capabilities.image
+            ? limits.maxImageBytes
+            : 0,
+        capabilities.embeddedContext ? limits.maxEmbeddedBytes : 0,
+      );
       final canInlineByCapability =
           (mimeType.startsWith('image/') && capabilities.image) ||
           capabilities.embeddedContext;

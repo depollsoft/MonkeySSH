@@ -98,16 +98,35 @@ func (p *unixProcess) Hangup() {
 	signalCommandProcessGroup(p.cmd, syscall.SIGHUP)
 }
 
+func (p *unixProcess) Kill() {
+	killCommandProcessGroup(p.cmd)
+}
+
 // startWindow launches cmd attached to a new pty sized to cols x rows.
 func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) {
-	file, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-	})
+	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return nil, nil, err
 	}
-	return &unixPty{file: file}, &unixProcess{cmd: cmd}, nil
+	defer tty.Close()
+	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+		_ = ptmx.Close()
+		return nil, nil, err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty = true, true
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = withPaneTTYEnvironment(cmd.Env, tty.Name())
+	if err := cmd.Start(); err != nil {
+		_ = ptmx.Close()
+		return nil, nil, err
+	}
+	return &unixPty{file: ptmx}, &unixProcess{cmd: cmd}, nil
 }
 
 // detachedDaemonSysProcAttrs returns the SysProcAttr to use when starting the
@@ -150,6 +169,15 @@ func processIDAlive(pid int) bool {
 		return false
 	}
 	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// processGroupAlive includes surviving members whose group leader has exited.
+func processGroupAlive(pgid int) bool {
+	if pgid <= 0 {
+		return false
+	}
+	err := syscall.Kill(-pgid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
@@ -376,6 +404,16 @@ var signalForegroundResize = func(processGroup int) {
 	_ = syscall.Kill(-processGroup, syscall.SIGWINCH)
 }
 
+// killProcessGroup force-terminates every process in processGroup. Shutdown
+// uses it for a pane's foreground group, which an interactive pane shell keeps
+// separate from its own group under job control.
+func killProcessGroup(processGroup int) {
+	if processGroup <= 0 {
+		return
+	}
+	_ = syscall.Kill(-processGroup, syscall.SIGKILL)
+}
+
 // attachOutputWriter returns w unchanged: POSIX pseudo-terminals do not
 // interpret win32-input-mode (DEC private mode 9001) requests, so the outer
 // conhost corruption the Windows implementation guards against cannot occur.
@@ -517,31 +555,6 @@ func readProcessTable() map[int]processInfo {
 	return processes
 }
 
-func commandNameForPID(pid int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), processMetadataTimeout)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=", "-o", "args=").Output()
-	if err == nil && ctx.Err() == nil {
-		for _, line := range strings.Split(string(output), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			if command := commandNameFromProcessFields(fields[0], strings.Join(fields[1:], " ")); command != "" {
-				return command
-			}
-		}
-	}
-
-	ctx, cancel = context.WithTimeout(context.Background(), processMetadataTimeout)
-	defer cancel()
-	output, err = exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil || ctx.Err() != nil {
-		return ""
-	}
-	return cleanProcessCommandName(string(output))
-}
-
 // detectSystemMemoryBytes returns total physical memory in bytes, or 0 when it
 // cannot be determined on this platform.
 func detectSystemMemoryBytes() uint64 {
@@ -601,9 +614,9 @@ func forwardResizeSignals(
 	initialHeight int,
 	explicitSize bool,
 ) func() {
-	_ = initialWidth
-	_ = initialHeight
-	_ = explicitSize
+	if explicitSize && initialWidth > 0 && initialHeight > 0 {
+		return func() {}
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGWINCH)
 	done := make(chan struct{})
@@ -640,4 +653,25 @@ func socketInfoIdentity(info os.FileInfo) (socketIdentity, error) {
 
 func isStaleUnixSocketError(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// Hooks may run without a controlling terminal. The pane slave is inherited
+// through the environment and must still be a real terminal when opened.
+func writeAgentIdentityMarker(marker string) {
+	path, set := os.LookupEnv("MONKEYMUX_PANE_TTY")
+	if !set {
+		path = "/dev/tty"
+	} else if !strings.HasPrefix(path, "/dev/") || path == "/dev/tty" || filepath.Clean(path) != path {
+		return
+	}
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFCHR || !term.IsTerminal(fd) {
+		return
+	}
+	_, _ = unix.Write(fd, []byte(marker))
 }

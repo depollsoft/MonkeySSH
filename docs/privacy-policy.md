@@ -1,6 +1,6 @@
 # MonkeySSH Privacy Policy
 
-MonkeySSH is a local-first SSH client. The app is designed to help you connect to servers you configure, manage SSH keys, browse remote files, and resume terminal workflows without requiring a MonkeySSH cloud account.
+MonkeySSH is a local-first SSH client. The app is designed to help you connect to servers you configure, manage SSH keys, browse remote files, run coding agents on those servers in native chat or terminal windows, and resume terminal workflows without requiring a MonkeySSH cloud account.
 
 ## Information you provide
 
@@ -14,7 +14,13 @@ Saved credentials and private keys are stored locally using platform security fe
 
 ## Files and clipboard
 
-If you use SFTP, remote editing, transfer bundles, clipboard sync, or document import/export features, MonkeySSH processes the files or text you select to complete that action. File and clipboard data is handled for the requested transfer or edit operation and is not sent to MonkeySSH-operated cloud services.
+If you use SFTP, remote editing, transfer bundles, clipboard sync, agent attachments, or document import/export features, MonkeySSH processes the files or text you select to complete that action. File and clipboard data is handled for the requested transfer, attachment, or edit operation and is not sent to MonkeySSH-operated cloud services.
+
+## Coding agents
+
+Native agent windows and terminal launches run coding agents that are installed and signed in on your own server. Prompts, attachments you add, permission decisions, and the agent's responses travel over your SSH connection between your device and that server. The agent and its provider handle model requests under their own terms; MonkeySSH does not relay agent conversations through MonkeySSH-operated services.
+
+Agent Management runs package-manager commands (npm, pipx, Homebrew, or the agent's own update command) on your server over SSH to install, repair, or update agents. Those commands download packages from the corresponding registries from your server, not from your device. Version checks query the same registries from your server.
 
 ## Purchases
 
@@ -33,9 +39,10 @@ App store platforms may also provide aggregate crash, purchase, and usage inform
 MonkeySSH may request device permissions only when needed for a feature you choose to use, such as:
 
 - biometric authentication for unlocking the app
-- files or document access for import, export, upload, download, and transfer packages
-- camera access for scanning sync recovery key QR codes
-- notifications or Live Activities for connection status
+- files, documents, or photo library access for import, export, upload, download, transfer packages, and agent attachments
+- camera, microphone, and location access only for pages in the in-app browser that you explicitly allow
+- the current Wi-Fi network name, only when a host is configured to skip its jump host on networks you list
+- notifications or Live Activities for connection status, terminal alerts, and agent activity such as a finished turn or a pending permission request
 
 You can manage these permissions in your device settings.
 

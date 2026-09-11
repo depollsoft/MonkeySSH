@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -14,13 +15,61 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockSshExecSession extends Mock implements SSHSession {}
+class _MockSshExecSession extends MockSessionWithChannel {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
 void main() {
+  for (final useTmux in [false, true]) {
+    testWidgets('stalled client command open releases queue, tmux=$useTmux', (
+      tester,
+    ) async {
+      final opening = Completer<SSHSession>();
+      final client = _MockSshClient();
+      when(
+        () => client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((_) => opening.future);
+      final session = _buildSession(client);
+      if (useTmux) {
+        session
+          ..remoteMuxBackend = RemoteMuxBackend.tmux
+          ..remoteMuxSessionName = 'dev';
+      }
+      final backend = TerminalConnectionBackendService(
+        tmuxMultiplexer: _FakeRemoteMultiplexerService(),
+        monkeyMuxService: _MockMonkeyMuxService(),
+      ).resolve(session);
+      final result = backend.runClientCommand(
+        'probe',
+        priority: SshExecPriority.low,
+      );
+      final failed = expectLater(result, throwsA(isA<TimeoutException>()));
+      var nextRan = false;
+      final next = session.runQueuedExec(() async {
+        nextRan = true;
+      }, priority: SshExecPriority.low);
+      await tester.pump();
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 1);
+      expect(pendingQueuedSshExecCountForTesting(session.connectionId), 1);
+      await tester.pump(const Duration(milliseconds: 9999));
+      expect(nextRan, isFalse);
+      await tester.pump(const Duration(milliseconds: 1));
+      await failed;
+      await next;
+      expect(nextRan, isTrue);
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 0);
+      expect(pendingQueuedSshExecCountForTesting(session.connectionId), 0);
+      final late = _buildExecSession();
+      opening.complete(late);
+      await tester.pump();
+      verify(late.channel.destroy).called(1);
+    });
+  }
+
   tearDown(resetQueuedSshExecsForTesting);
 
   group('TerminalConnectionBackendService', () {
@@ -60,10 +109,7 @@ void main() {
 
       expect(result.output, 'ok');
       expect(result.exitCode, isNull);
-      expect(
-        commands,
-        contains("cd '/tmp/user'\"'\"'s repo' && ( printf hi )"),
-      );
+      expect(commands, contains(r"cd '/tmp/user'\''s repo' && ( printf hi )"));
     });
 
     test('delegates tmux window operations through the multiplexer', () async {
@@ -92,6 +138,7 @@ void main() {
       );
       await backend.createWindow(command: 'codex', workingDirectory: '/repo');
       await backend.killWindow(3);
+      await backend.killWindow(3, windowId: '@8');
 
       expect(backend.type, TerminalBackendType.tmux);
       expect(backend.capabilities.supportsWindows, isTrue);
@@ -103,7 +150,8 @@ void main() {
           'select:dev:2:@7:-L flutty:null:false',
           'select:dev:4:@9:-L flutty:2:true',
           'create:dev:codex:/repo:-L flutty',
-          'kill:dev:3:-L flutty',
+          'kill:dev:3:null:-L flutty',
+          'kill:dev:3:@8:-L flutty',
         ]),
       );
     });
@@ -260,9 +308,10 @@ class _FakeRemoteMultiplexerService implements RemoteMultiplexerService {
     SshSession session,
     String sessionName,
     int windowIndex, {
+    String? windowId,
     String? extraFlags,
   }) async {
-    calls.add('kill:$sessionName:$windowIndex:$extraFlags');
+    calls.add('kill:$sessionName:$windowIndex:$windowId:$extraFlags');
   }
 
   @override

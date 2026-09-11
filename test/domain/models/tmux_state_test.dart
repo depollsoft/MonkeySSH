@@ -6,50 +6,6 @@ import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 
 void main() {
-  group('TmuxSession', () {
-    test('parses from tmux format string', () {
-      const line = 'dev|3|1|1712930000';
-      final session = TmuxSession.fromTmuxFormat(line);
-
-      expect(session.name, 'dev');
-      expect(session.windowCount, 3);
-      expect(session.isAttached, true);
-      expect(session.lastActivity, isNotNull);
-    });
-
-    test('parses unattached session', () {
-      const line = 'build|1|0|1712920000';
-      final session = TmuxSession.fromTmuxFormat(line);
-
-      expect(session.name, 'build');
-      expect(session.windowCount, 1);
-      expect(session.isAttached, false);
-    });
-
-    test('handles missing activity field', () {
-      const line = 'test|2|0';
-      final session = TmuxSession.fromTmuxFormat(line);
-
-      expect(session.name, 'test');
-      expect(session.windowCount, 2);
-      expect(session.lastActivity, isNull);
-    });
-
-    test('throws on too few fields', () {
-      expect(() => TmuxSession.fromTmuxFormat('bad|1'), throwsFormatException);
-    });
-
-    test('equality works correctly', () {
-      const a = TmuxSession(name: 'dev', windowCount: 3, isAttached: true);
-      const b = TmuxSession(name: 'dev', windowCount: 3, isAttached: true);
-      const c = TmuxSession(name: 'prod', windowCount: 1, isAttached: false);
-
-      expect(a, equals(b));
-      expect(a, isNot(equals(c)));
-      expect(a.hashCode, b.hashCode);
-    });
-  });
-
   group('TmuxWindow', () {
     test('parses from tmux format string with all fields', () {
       const sep = tmuxWindowFieldSeparator;
@@ -89,18 +45,105 @@ void main() {
       expect(window.hasAlert, false);
     });
 
-    test('still parses legacy pipe-delimited window snapshots', () {
-      const line = '0|vim|1|vim|/home/user/project|*|Editing main.dart';
-      final window = TmuxWindow.fromTmuxFormat(line);
-
-      expect(window.index, 0);
-      expect(window.id, isNull);
-      expect(window.name, 'vim');
-      expect(window.displayTitle, 'Editing main.dart');
+    test('drops session metadata only for explicitly unsupported tools', () {
+      for (final tool in ['gemini', 'future-agent', 'copilot', '']) {
+        final window = TmuxWindow.fromTmuxFormat(
+          [
+            '0',
+            'Project shell',
+            '1',
+            'zsh',
+            '/tmp/project',
+            '',
+            '',
+            '',
+            '',
+            tool,
+            '@1',
+            '123',
+            'legacy-session',
+            'Stale conversation title',
+            'high',
+          ].join(tmuxWindowFieldSeparator),
+        );
+        if (tool == 'gemini' || tool == 'future-agent') {
+          expect(window.agentTool, isNull);
+          expect(window.activeAgentSessionId, isNull);
+          expect(window.agentSessionTitle, isNull);
+          expect(window.activeAgentSessionConfidence, isNull);
+          expect(window.displayTitle, 'Project shell');
+        } else {
+          expect(window.activeAgentSessionId, 'legacy-session');
+          expect(window.agentSessionTitle, 'Stale conversation title');
+          expect(
+            window.activeAgentSessionConfidence,
+            AgentSessionConfidence.high,
+          );
+        }
+      }
     });
 
-    test('preserves pipe characters in legacy pane titles', () {
-      const line = '1|logs|0|tail|/var/log|-|api | worker | errors|1712930000';
+    test(
+      'unsupported tool markers block weak inference and survive updates',
+      () {
+        for (final command in ['node', 'zsh', 'copilot']) {
+          final window = TmuxWindow.fromTmuxFormat(
+            [
+              '0',
+              'Codex',
+              '1',
+              command,
+              '/tmp/project',
+              '',
+              'Claude Code',
+              '',
+              'gemini --resume old-session',
+              'gemini',
+              '@1',
+              '123',
+              'legacy-session',
+              'Stale title',
+              'high',
+            ].join(tmuxWindowFieldSeparator),
+          );
+          final expected = command == 'copilot'
+              ? AgentLaunchTool.copilotCli
+              : null;
+          expect(window.hasUnsupportedAgentTool, isTrue);
+          expect(window.agentSessionId, isNull);
+          expect(window.foregroundAgentTool, expected);
+          expect(window.activeAgentSessionId, isNull);
+          expect(window.agentSessionTitle, isNull);
+          expect(
+            window.copyWith(isActive: false).foregroundAgentTool,
+            expected,
+          );
+          expect(window.copyWith(), window);
+          expect(window.copyWith().hashCode, window.hashCode);
+          final supported = window.copyWith(agentTool: AgentLaunchTool.codex);
+          expect(supported.hasUnsupportedAgentTool, isFalse);
+          expect(supported, isNot(window));
+          final old = window.copyWith(
+            hasUnsupportedAgentTool: false,
+            activeAgentSessionId: 'old-session',
+            agentSessionTitle: 'Old title',
+          );
+          for (final event in [
+            TmuxWindowSnapshotEvent(window),
+            TmuxWindowListEvent([window]),
+          ]) {
+            final merged = applyTmuxWindowChangeEvent([old], event).single;
+            expect(merged.hasUnsupportedAgentTool, isTrue);
+            expect(merged.activeAgentSessionId, isNull);
+            expect(merged.agentSessionTitle, isNull);
+          }
+        }
+      },
+    );
+
+    test('preserves pipe characters in pane titles', () {
+      const line =
+          '1\x1flogs\x1f0\x1ftail\x1f/var/log\x1f-\x1fapi | worker | errors\x1f1712930000';
       final window = TmuxWindow.fromTmuxFormat(line);
 
       expect(window.paneTitle, 'api | worker | errors');
@@ -109,7 +152,7 @@ void main() {
     });
 
     test('parses with minimal fields', () {
-      const line = '2|bash|0';
+      const line = '2\x1fbash\x1f0';
       final window = TmuxWindow.fromTmuxFormat(line);
 
       expect(window.index, 2);
@@ -277,10 +320,10 @@ void main() {
       expect(window.secondaryTitle, isNull);
     });
 
-    test('uses agent context when Gemini only reports ready status', () {
+    test('uses agent context when an agent only reports ready status', () {
       const window = TmuxWindow(
         index: 1,
-        name: 'gemini',
+        name: 'cursor-agent',
         isActive: false,
         currentCommand: 'node',
         currentPath: '/Users/depoll/Code/flutty',
@@ -288,8 +331,8 @@ void main() {
             '◇  Ready (flutty)                                                               ',
       );
 
-      expect(window.displayTitle, 'Gemini CLI · flutty');
-      expect(window.handleTitle, 'Gemini CLI · flutty');
+      expect(window.displayTitle, 'Cursor Agent · flutty');
+      expect(window.handleTitle, 'Cursor Agent · flutty');
       expect(window.secondaryTitle, isNull);
     });
 
@@ -305,14 +348,14 @@ void main() {
         'mac-mini.home',
         '1712930000',
         'zsh',
-        'gemini',
+        'cursor-agent',
       ].join(sep);
       final window = TmuxWindow.fromTmuxFormat(line);
 
-      expect(window.agentTool, AgentLaunchTool.geminiCli);
-      expect(window.foregroundAgentTool, AgentLaunchTool.geminiCli);
-      expect(window.displayTitle, 'Gemini CLI · flutty');
-      expect(window.handleTitle, 'Gemini CLI · flutty');
+      expect(window.agentTool, AgentLaunchTool.cursorAgent);
+      expect(window.foregroundAgentTool, AgentLaunchTool.cursorAgent);
+      expect(window.displayTitle, 'Cursor Agent · flutty');
+      expect(window.handleTitle, 'Cursor Agent · flutty');
     });
 
     test('shows resumed agent session metadata from pane start commands', () {
@@ -482,7 +525,7 @@ void main() {
     });
 
     test('handles empty command and path', () {
-      const line = '1|shell|0||';
+      const line = '1\x1fshell\x1f0\x1f\x1f';
       final window = TmuxWindow.fromTmuxFormat(line);
 
       expect(window.currentCommand, isNull);
@@ -490,7 +533,7 @@ void main() {
     });
 
     test('detects alert flag', () {
-      const line = '3|build|0|make|/tmp|#|Building project';
+      const line = '3\x1fbuild\x1f0\x1fmake\x1f/tmp\x1f#\x1fBuilding project';
       final window = TmuxWindow.fromTmuxFormat(line);
 
       expect(window.hasAlert, true);
@@ -501,7 +544,7 @@ void main() {
       final activityEpoch =
           (DateTime.now().millisecondsSinceEpoch ~/ 1000) - 20;
       final window = TmuxWindow.fromTmuxFormat(
-        '3|claude|1|claude|/tmp|*|Waiting|$activityEpoch',
+        '3\x1fclaude\x1f1\x1fclaude\x1f/tmp\x1f*\x1fWaiting\x1f$activityEpoch',
       );
 
       expect(window.lastActivityEpochSeconds, activityEpoch);
@@ -511,7 +554,10 @@ void main() {
     });
 
     test('throws on too few fields', () {
-      expect(() => TmuxWindow.fromTmuxFormat('0|vim'), throwsFormatException);
+      expect(
+        () => TmuxWindow.fromTmuxFormat('0\x1fvim'),
+        throwsFormatException,
+      );
     });
 
     test('statusLabel returns correct values', () {
@@ -700,6 +746,75 @@ void main() {
       },
     );
 
+    test('retains inactive objects and sorts an unsorted snapshot input', () {
+      const first = TmuxWindow(
+        index: 0,
+        id: '@1',
+        name: 'first',
+        isActive: false,
+      );
+      const second = TmuxWindow(
+        index: 1,
+        id: '@2',
+        name: 'second',
+        isActive: false,
+      );
+      final updated = applyTmuxWindowChangeEvent([
+        second,
+        first,
+      ], TmuxWindowSnapshotEvent(second.copyWith(isActive: true)));
+      expect(updated.map((window) => window.index), [0, 1]);
+      expect(updated.first, same(first));
+      expect(updated.clear, throwsUnsupportedError);
+    });
+
+    test('full lists retain first ID/index metadata without ID fallback', () {
+      const first = TmuxWindow(
+        index: 0,
+        id: '@1',
+        name: 'first',
+        isActive: false,
+        currentCommand: 'copilot',
+        agentSessionTitle: 'First title',
+      );
+      final windows = [
+        first,
+        first.copyWith(agentSessionTitle: 'Duplicate title'),
+      ];
+      final updated = applyTmuxWindowChangeEvent(
+        windows,
+        const TmuxWindowListEvent([
+          TmuxWindow(
+            index: 2,
+            id: '@1',
+            name: 'first',
+            isActive: false,
+            currentCommand: 'copilot',
+          ),
+          TmuxWindow(
+            index: 0,
+            name: 'index',
+            isActive: false,
+            currentCommand: 'copilot',
+          ),
+          TmuxWindow(
+            index: 0,
+            id: '@2',
+            name: 'new',
+            isActive: false,
+            currentCommand: 'copilot',
+          ),
+        ]),
+      );
+      expect(updated.map((window) => window.agentSessionTitle), [
+        'First title',
+        'First title',
+        null,
+      ]);
+      expect(updated.map((window) => window.index), [2, 0, 0]);
+      expect(updated.clear, throwsUnsupportedError);
+    });
+
     test('matches snapshots by stable window ID when indexes changed', () {
       const windows = <TmuxWindow>[
         TmuxWindow(index: 1, id: '@7', name: 'agent', isActive: false),
@@ -815,6 +930,66 @@ void main() {
       expect(updated.single.activeAgentSessionId, 'session-1');
       expect(updated.single.agentSessionTitle, 'Fix tmux session labels');
     });
+
+    for (final fullList in [false, true]) {
+      test('session metadata merge respects identity, list=$fullList', () {
+        const existing = TmuxWindow(
+          index: 1,
+          id: '@7',
+          panePid: 42,
+          name: 'codex',
+          isActive: true,
+          currentCommand: 'codex',
+          activeAgentSessionId: 'session-1',
+          agentSessionTitle: 'Original title',
+          activeAgentSessionConfidence: AgentSessionConfidence.medium,
+        );
+        final snapshot = existing
+            .copyWith(clearActiveAgentSessionMetadata: true)
+            .copyWith(activeAgentSessionId: 'session-1');
+        for (final (incoming, expectedTitle, expectedConfidence) in [
+          (snapshot, 'Original title', AgentSessionConfidence.medium),
+          (
+            snapshot.copyWith(
+              activeAgentSessionConfidence: AgentSessionConfidence.high,
+            ),
+            'Original title',
+            AgentSessionConfidence.high,
+          ),
+          (
+            snapshot.copyWith(agentSessionTitle: 'Renamed session'),
+            'Renamed session',
+            null,
+          ),
+          (snapshot.copyWith(activeAgentSessionId: 'session-2'), null, null),
+          (snapshot.copyWith(panePid: 43), null, null),
+          (snapshot.copyWith(currentCommand: 'claude'), null, null),
+          (snapshot.copyWith(hasUnsupportedAgentTool: true), null, null),
+        ]) {
+          final updated = applyTmuxWindowChangeEvent(
+            [existing],
+            fullList
+                ? TmuxWindowListEvent([incoming])
+                : TmuxWindowSnapshotEvent(incoming),
+          ).single;
+          expect(updated.agentSessionTitle, expectedTitle);
+          expect(updated.activeAgentSessionId, incoming.activeAgentSessionId);
+          expect(updated.activeAgentSessionConfidence, expectedConfidence);
+        }
+
+        // A title without a known session ID cannot be assigned to a new ID.
+        final unknownSession = existing
+            .copyWith(clearActiveAgentSessionMetadata: true)
+            .copyWith(agentSessionTitle: 'Unbound title');
+        final updated = applyTmuxWindowChangeEvent(
+          [unknownSession],
+          fullList
+              ? TmuxWindowListEvent([snapshot])
+              : TmuxWindowSnapshotEvent(snapshot),
+        ).single;
+        expect(updated.agentSessionTitle, isNull);
+      });
+    }
   });
 
   group('resolveTmuxReloadedWindows', () {

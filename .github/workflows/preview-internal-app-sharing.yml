@@ -17,6 +17,7 @@ jobs:
     name: Upload Android Internal App Sharing
     if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Resolve preview artifacts
         id: preview

@@ -352,8 +352,8 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
         );
       }
     } finally {
-      _passphraseController.clear();
       if (mounted) {
+        _passphraseController.clear();
         _notifyUnsavedChangesChanged();
         setState(() => _isGenerating = false);
       }
@@ -583,8 +583,8 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
         );
       }
     } finally {
-      _passphraseController.clear();
       if (mounted) {
+        _passphraseController.clear();
         _notifyUnsavedChangesChanged();
         setState(() => _isImporting = false);
       }

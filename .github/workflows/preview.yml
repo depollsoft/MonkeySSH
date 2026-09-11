@@ -2,8 +2,42 @@ name: PR Preview
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main]
     types: [opened, reopened, synchronize]
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'assets/**'
+      - 'remote/monkeymux/**'
+      - '!remote/monkeymux/**/*_test.go'
+      - 'remote/monkeymux/conpty/**'
+      - '!remote/monkeymux/README.md'
+      - 'third_party/**'
+      - 'android/**'
+      - '!android/fastlane/metadata-*/**'
+      - 'ios/**'
+      - '!ios/fastlane/metadata-*/**'
+      - 'scripts/build_monkeymux_assets.sh'
+      - 'scripts/deterministic_gzip.go'
+      - 'scripts/ensure_monkeymux_assets.sh'
+      - 'scripts/verify_monkeymux_assets.py'
+      - 'scripts/cache_sqlite3_native_assets.sh'
+      - 'scripts/version_codename.py'
+      - 'scripts/preview_release_notes.rb'
+      - 'scripts/preview_build_number.py'
+      - 'scripts/store_metadata.rb'
+      - 'scripts/match_git_persistence.rb'
+      - 'scripts/testflight_delivery.rb'
+      - 'Gemfile'
+      - 'Gemfile.lock'
+      - '.github/workflows/build-deploy.yml'
+      - '.github/workflows/deploy-private.yml'
+      - '.github/workflows/firebase-distribution.yml'
+      - '.github/workflows/preview.yml'
+      - '.github/workflows/preview-ios.yml'
+      - '.github/actions/apple-cache-restore/**'
+      - '.github/actions/apple-cache-save/**'
 
 concurrency:
   group: preview-${{ github.event.pull_request.number }}
@@ -17,7 +51,9 @@ permissions:
 jobs:
   compute-version:
     name: Compute Version
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       build-name: ${{ steps.version.outputs.build-name }}
       build-number: ${{ steps.version.outputs.build-number }}
@@ -28,13 +64,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Preserve preview version helper
+        run: cp scripts/preview_build_number.py "$RUNNER_TEMP/preview_build_number.py"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Compute version
         id: version
         run: |
           BASE_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
-          BUILD_NUMBER=$(( $(date +%s) / 10 ))
+          BUILD_NUMBER=$(python3 "$RUNNER_TEMP/preview_build_number.py")
           BUILD_CODENAME=$(python3 scripts/version_codename.py "$BASE_VERSION")
           BUILD_DISPLAY="$BASE_VERSION"
           if [ -n "$BUILD_CODENAME" ]; then
@@ -62,6 +106,7 @@ jobs:
       - name: Upload version metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          compression-level: 0
           name: preview-version-metadata
           path: preview-metadata/version.json
           retention-days: 1
@@ -106,6 +151,7 @@ jobs:
   comment-initial:
     name: PR Comment (Queued)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: compute-version
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
@@ -175,6 +221,7 @@ jobs:
   comment-android:
     name: PR Comment (Android)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [compute-version, build-android]
     if: always() && github.event.pull_request.head.repo.full_name == github.repository
     permissions:

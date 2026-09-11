@@ -8,7 +8,6 @@ import '../../data/repositories/key_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../../data/repositories/snippet_repository.dart';
 import '../../domain/services/settings_service.dart';
-import '../../domain/services/terminal_theme_service.dart';
 
 /// Shared stream of all saved hosts for presentation screens.
 final allHostsProvider = StreamProvider<List<Host>>((ref) {
@@ -17,7 +16,10 @@ final allHostsProvider = StreamProvider<List<Host>>((ref) {
 });
 
 /// Stream of a single saved host, or `null` when it no longer exists.
-final hostByIdProvider = StreamProvider.family<Host?, int>((ref, hostId) {
+final hostByIdProvider = StreamProvider.autoDispose.family<Host?, int>((
+  ref,
+  hostId,
+) {
   final repo = ref.watch(hostRepositoryProvider);
   return repo.watchById(hostId);
 });
@@ -53,8 +55,8 @@ final allPortForwardsProvider = StreamProvider<List<PortForward>>((ref) {
 });
 
 /// Stream of saved port forwards for a single host.
-final portForwardsForHostProvider =
-    StreamProvider.family<List<PortForward>, int>((ref, hostId) {
+final portForwardsForHostProvider = StreamProvider.autoDispose
+    .family<List<PortForward>, int>((ref, hostId) {
       final repo = ref.watch(portForwardRepositoryProvider);
       return repo.watchByHostId(hostId);
     });
@@ -75,17 +77,8 @@ void invalidateImportedEntityProviders(ProviderInvalidator invalidate) {
 
 /// Refreshes presentation providers that depend on synced settings and data.
 void invalidateSyncedDataProviders(ProviderInvalidator invalidate) {
-  invalidate(themeModeNotifierProvider);
-  invalidate(terminalThemesApplyToAppNotifierProvider);
-  invalidate(terminalThemesApplyToAppProvider);
-  invalidate(fontSizeNotifierProvider);
-  invalidate(fontFamilyNotifierProvider);
-  invalidate(cursorStyleNotifierProvider);
-  invalidate(bellSoundNotifierProvider);
-  invalidate(terminalNotificationsNotifierProvider);
-  invalidate(shellCompletionsNotifierProvider);
-  invalidate(terminalThemeSettingsProvider);
-  invalidate(allTerminalThemesProvider);
-  invalidate(customTerminalThemesProvider);
+  // Settings notifiers and theme providers watch this service. Recreating it
+  // reloads all persisted settings, including those added after this helper.
+  invalidate(settingsServiceProvider);
   invalidateImportedEntityProviders(invalidate);
 }

@@ -58,7 +58,6 @@ void main() {
       );
       expect(plan.totalCount, 4);
       expect(plan.completedCount, 2);
-      expect(plan.inProgressCount, 1);
       expect(plan.progress, 0.5);
     });
 

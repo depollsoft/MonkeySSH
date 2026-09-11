@@ -207,40 +207,16 @@ class AcpSessionManager {
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
-  }) => _serialize(() async {
-    _telemetry.featureOpened();
-    final launch = await _resolveLaunch(
-      providerId,
-      launchCommandOverride: launchCommandOverride,
-    );
-    if (launch is _LaunchError) {
-      return AcpSessionLaunchFailed(null, launch.error);
-    }
-    final resolved = _withProviderLabel(
-      launch as _ResolvedLaunch,
-      providerLabelOverride,
-    );
-    final workingDirectory = await _resolveWorkingDirectory(hostId, cwd);
-    if (workingDirectory.error case final error?) {
-      return AcpSessionLaunchFailed(null, error);
-    }
-
-    await _stopAll(replace);
-
-    final decision = _evaluate('\u0000new');
-    if (decision is AcpConcurrencyRequiresChoice) {
-      return AcpSessionLaunchBlocked(decision);
-    }
-
-    return _startBridgeAndSession(
-      hostId: hostId,
-      launch: resolved,
-      cwd: workingDirectory.value!,
-      confirmInstall: confirmInstall,
-      existingSessionId: null,
-      autoApprovePermissions: autoApprovePermissions,
-    );
-  });
+  }) => _launchProviderSession(
+    hostId: hostId,
+    providerId: providerId,
+    cwd: cwd,
+    confirmInstall: confirmInstall,
+    launchCommandOverride: launchCommandOverride,
+    providerLabelOverride: providerLabelOverride,
+    autoApprovePermissions: autoApprovePermissions,
+    replace: replace,
+  );
 
   /// Starts a fresh provider bridge and loads/resumes [acpSessionId].
   ///
@@ -257,6 +233,28 @@ class AcpSessionManager {
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+  }) => _launchProviderSession(
+    hostId: hostId,
+    providerId: providerId,
+    cwd: cwd,
+    confirmInstall: confirmInstall,
+    launchCommandOverride: launchCommandOverride,
+    providerLabelOverride: providerLabelOverride,
+    autoApprovePermissions: autoApprovePermissions,
+    replace: replace,
+    existingSessionId: acpSessionId,
+  );
+
+  Future<AcpSessionLaunchResult> _launchProviderSession({
+    required int hostId,
+    required String providerId,
+    required String cwd,
+    required bool autoApprovePermissions,
+    required List<AcpSessionKey> replace,
+    MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpLaunchCommand? launchCommandOverride,
+    String? providerLabelOverride,
+    String? existingSessionId,
   }) => _serialize(() async {
     _telemetry.featureOpened();
     final launch = await _resolveLaunch(
@@ -277,7 +275,9 @@ class AcpSessionManager {
 
     await _stopAll(replace);
 
-    final decision = _evaluate('\u0000resume');
+    final decision = _evaluate(
+      existingSessionId == null ? '\u0000new' : '\u0000resume',
+    );
     if (decision is AcpConcurrencyRequiresChoice) {
       return AcpSessionLaunchBlocked(decision);
     }
@@ -287,7 +287,7 @@ class AcpSessionManager {
       launch: resolved,
       cwd: workingDirectory.value!,
       confirmInstall: confirmInstall,
-      existingSessionId: acpSessionId,
+      existingSessionId: existingSessionId,
       autoApprovePermissions: autoApprovePermissions,
     );
   });
@@ -604,61 +604,6 @@ class AcpSessionManager {
   Future<List<AcpRecentSessionRef>> loadRecentSessions() =>
       _recentSessions.list();
 
-  /// Loads host-scoped native sessions from both local recents and the remote
-  /// MonkeyMux bridge registry. Current helper metadata is persisted locally so
-  /// the same session remains navigable through transient SSH disconnects.
-  Future<List<AcpRecentSessionRef>> loadNavigableSessions(int hostId) async {
-    final local = (await _recentSessions.list())
-        .where((recent) => recent.hostId == hostId)
-        .toList(growable: true);
-    try {
-      final providers = await _providerService.listAllProviders();
-      final providerByLabel = <String, String>{
-        for (final provider in providers) provider.label: provider.id,
-      };
-      final remote = await _connector.listBridges(hostId);
-      for (final bridge in remote) {
-        final sessionId = bridge.sessionId;
-        final providerId =
-            bridge.providerId ?? providerByLabel[bridge.provider];
-        if (sessionId == null ||
-            sessionId.isEmpty ||
-            providerId == null ||
-            providerId.isEmpty) {
-          continue;
-        }
-        final recent = AcpRecentSessionRef(
-          hostId: hostId,
-          providerId: providerId,
-          bridgeId: bridge.id,
-          acpSessionId: sessionId,
-          cwd: bridge.cwd,
-          createdAt: bridge.startedAt,
-          lastActivityAt: bridge.lastActivity,
-        );
-        final index = local.indexWhere(
-          (candidate) => candidate.key.value == recent.key.value,
-        );
-        final merged = index >= 0
-            ? local[index].copyWith(
-                cwd: recent.cwd,
-                lastActivityAt: recent.lastActivityAt,
-              )
-            : recent;
-        if (index >= 0) {
-          local[index] = merged;
-        } else {
-          local.add(merged);
-        }
-        await _recentSessions.record(merged);
-      }
-    } on Object {
-      // Local recents remain available while SSH/helper discovery is offline.
-    }
-    local.sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
-    return List<AcpRecentSessionRef>.unmodifiable(local);
-  }
-
   /// Loads the persisted last-selected session key.
   Future<AcpSessionKey?> loadLastSelected() =>
       _recentSessions.getLastSelected();
@@ -667,6 +612,7 @@ class AcpSessionManager {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    await _mutationQueue;
     final controllers = _controllers.values.toList(growable: false);
     _controllers.clear();
     for (final controller in controllers) {
@@ -695,6 +641,7 @@ class AcpSessionManager {
     final startedAt = _clock();
     MonkeyMuxAcpBridgeStartResult startResult;
     try {
+      if (_disposed) throw const AcpConnectionClosedException();
       startResult = await _connector.startBridge(
         hostId: hostId,
         providerId: launch.providerId,
@@ -710,6 +657,17 @@ class AcpSessionManager {
         fields: {'hostId': hostId, 'errorType': error.runtimeType},
       );
       return AcpSessionLaunchFailed(null, _mapBridgeError(error));
+    }
+    if (_disposed) {
+      await _maybeStopOrphanBridge(
+        startedBridge: true,
+        hostId: hostId,
+        bridgeId: startResult.bridgeId,
+      );
+      return AcpSessionLaunchFailed(
+        null,
+        _mapBridgeError(const AcpConnectionClosedException()),
+      );
     }
     return _attachAndOpen(
       hostId: hostId,
@@ -812,6 +770,7 @@ class AcpSessionManager {
         }
       }
       final key = await openFuture;
+      if (_disposed) throw const AcpConnectionClosedException();
       final previousPublishedKey = provisionalKeyValue;
       if (previousPublishedKey != null &&
           previousPublishedKey != key.value &&
@@ -1172,7 +1131,10 @@ class AcpSessionManager {
   }
 
   Future<T> _serialize<T>(Future<T> Function() action) {
-    final operation = _mutationQueue.then((_) => action());
+    final operation = _mutationQueue.then((_) {
+      if (_disposed) throw const AcpConnectionClosedException();
+      return action();
+    });
     _mutationQueue = operation.then<void>((_) {}, onError: (_) {});
     return operation;
   }
@@ -1303,9 +1265,6 @@ class _BridgeAttachment {
   /// Whether the underlying transport has terminally failed or been closed and
   /// this attachment must be replaced rather than reused on reconnect.
   bool get isTerminated => _terminated || _closeFuture != null;
-
-  /// Current lease count. Exposed only for assertions and diagnostics.
-  int get refCount => _refCount;
 
   /// Marks the transport as terminally unusable without releasing a lease, so
   /// the next reconnect replaces it. Idempotent.
@@ -1880,7 +1839,7 @@ class _SessionController {
         var turnCount = 0;
         do {
           final queued = _removeNextSessionUpdate();
-          _applySessionUpdate(queued.notification, notifyManager: false);
+          _applySessionUpdate(queued.notification);
           _sessionUpdatesApplied += queued.consumedCount;
           updateCount += queued.consumedCount;
           turnCount += 1;
@@ -1903,6 +1862,7 @@ class _SessionController {
         if (_historyReplayPublicationHeld) {
           _managerNotificationPending = true;
         } else {
+          _state = _state.copyWith(timeline: _timelineBuilder.snapshot());
           _managerNotificationPending = false;
           _manager._onControllerChanged(this);
         }
@@ -2036,18 +1996,11 @@ class _SessionController {
     }
   }
 
-  void _applySessionUpdate(
-    AcpSessionNotification notification, {
-    bool notifyManager = true,
-  }) {
+  void _applySessionUpdate(AcpSessionNotification notification) {
     final update = notification.update;
-    final timeline = _timelineBuilder.apply(
-      update,
-      createSnapshot: !_historyReplayPublicationHeld,
-    );
+    _timelineBuilder.apply(update, createSnapshot: false);
     _update((s) {
       var next = s.copyWith(lastActivityAt: _clock());
-      if (timeline != null) next = next.copyWith(timeline: timeline);
       switch (update) {
         case AcpPlanUpdate(:final entries):
           next = next.copyWith(plan: _bounded(entries, _maxSessionListEntries));
@@ -2097,7 +2050,7 @@ class _SessionController {
           break;
       }
       return next;
-    }, notifyManager: notifyManager);
+    }, notifyManager: false);
     _scheduleRecentPersistence();
   }
 
@@ -2802,7 +2755,9 @@ class _SessionController {
   Future<void> _cleanUpAfterTerminalTransport() async {
     _stopDetachedTurnMonitor();
     await _cancelSubscriptions();
-    await _releaseLease();
+    await _releaseLease(
+      permanent: _state.status == AcpConnectionStatus.providerExited,
+    );
   }
 
   void _onTransportError(MonkeyMuxAcpBridgeException error) {
@@ -2877,8 +2832,6 @@ class _SessionController {
 
   Future<void> _cancelSubscriptions() async {
     await _updatesSub?.cancel();
-    _pendingSessionUpdates.clear();
-    _sessionUpdatesApplied = _sessionUpdatesEnqueued;
     final updatePump = _sessionUpdatePumpFuture;
     if (updatePump != null) await updatePump;
     _pendingSessionUpdates.clear();

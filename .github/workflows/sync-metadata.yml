@@ -9,11 +9,14 @@ on:
       - 'ios/fastlane/metadata-*/**'
       - '.github/workflows/sync-metadata.yml'
       - 'scripts/store_assets.sh'
+      - 'scripts/store_media.py'
       - 'scripts/validate_store_screenshots.py'
       - 'scripts/validate_store_demo_videos.py'
       - 'scripts/validate_app_store_metadata.py'
       - 'scripts/validate_play_store_metadata.py'
       - 'scripts/sync_play_store_icons.py'
+      - 'scripts/metadata_changes.py'
+      - 'scripts/store_metadata.rb'
   workflow_dispatch:
     inputs:
       platform:
@@ -34,6 +37,11 @@ on:
           - production
   workflow_call:
     inputs:
+      use-validated-store-assets:
+        description: Reuse the validated store-assets artifact from this caller run
+        required: false
+        type: boolean
+        default: false
       platform:
         description: 'Platform to sync'
         required: true
@@ -44,12 +52,14 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
   changes:
     name: Detect Changed Metadata
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       ios: ${{ steps.filter.outputs.ios }}
       ios_app_previews: ${{ steps.filter.outputs.ios_app_previews }}
@@ -57,10 +67,11 @@ jobs:
       android: ${{ steps.filter.outputs.android }}
       android_screenshots: ${{ steps.filter.outputs.android_screenshots }}
       app: ${{ steps.filter.outputs.app }}
+      apps: ${{ steps.filter.outputs.apps }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
 
       - id: filter
@@ -70,100 +81,61 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_PLATFORM: ${{ inputs.platform || '' }}
           INPUT_APP: ${{ inputs.app || '' }}
-          BEFORE_SHA: ${{ github.event.before || '' }}
-          AFTER_SHA: ${{ github.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 scripts/metadata_changes.py
+
+  preflight-ios:
+    name: Check iOS Metadata Editability
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      apps: ${{ steps.editable.outputs.apps }}
+      blocked: ${{ steps.editable.outputs.blocked }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+      - name: Check editable App Store version
+        id: editable
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          REQUESTED_APPS: ${{ needs.changes.outputs.apps }}
+          BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
         run: |
-          ios=false
-          ios_app_previews=false
-          ios_screenshots=false
-          android=false
-          android_screenshots=false
-          app='both'
-
-          # workflow_dispatch and reusable workflow_call both provide inputs.*.
-          # github.event_name stays the caller's event for workflow_call, so key off
-          # the platform input instead of event_name.
-          if [[ -n "$INPUT_PLATFORM" ]]; then
-            app="${INPUT_APP:-both}"
-            case "${INPUT_PLATFORM}" in
-              both)
-                ios=true
-                ios_screenshots=true
-                ios_app_previews=true
-                android=true
-                android_screenshots=true
-                ;;
-              ios)
-                ios=true
-                ios_screenshots=true
-                ios_app_previews=true
-                ;;
-              android)
-                android=true
-                android_screenshots=true
-                ;;
-              *)
-                echo "::error title=Invalid platform::Unsupported platform '${INPUT_PLATFORM}'"
-                exit 1
-                ;;
-            esac
-          else
-            # Push to main: text metadata / icons changed. Always refresh media from
-            # the published store-assets release so screenshots stay in sync.
-            changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")"
-            while IFS= read -r changed_path; do
-              case "$changed_path" in
-                ios/fastlane/metadata-*|ios/fastlane/metadata-*/*)
-                  ios=true
-                  ios_screenshots=true
-                  ios_app_previews=true
-                  ;;
-              esac
-              case "$changed_path" in
-                assets/icons/*|android/fastlane/metadata-*|android/fastlane/metadata-*/*)
-                  android=true
-                  android_screenshots=true
-                  ;;
-              esac
-              case "$changed_path" in
-                scripts/store_assets.sh|scripts/validate_store_screenshots.py|scripts/validate_store_demo_videos.py|.github/workflows/sync-metadata.yml)
-                  ios=true
-                  ios_screenshots=true
-                  ios_app_previews=true
-                  android=true
-                  android_screenshots=true
-                  ;;
-              esac
-              case "$changed_path" in
-                scripts/validate_app_store_metadata.py)
-                  ios=true
-                  ios_screenshots=true
-                  ios_app_previews=true
-                  ;;
-              esac
-              case "$changed_path" in
-                scripts/validate_play_store_metadata.py|scripts/sync_play_store_icons.py)
-                  android=true
-                  android_screenshots=true
-                  ;;
-              esac
-            done <<< "$changed_files"
-          fi
-
-          echo "ios=$ios" >> "$GITHUB_OUTPUT"
-          echo "ios_app_previews=$ios_app_previews" >> "$GITHUB_OUTPUT"
-          echo "ios_screenshots=$ios_screenshots" >> "$GITHUB_OUTPUT"
-          echo "android=$android" >> "$GITHUB_OUTPUT"
-          echo "android_screenshots=$android_screenshots" >> "$GITHUB_OUTPUT"
-          echo "app=$app" >> "$GITHUB_OUTPUT"
+          cd ios
+          eligible=()
+          blocked=false
+          while IFS= read -r app; do
+            identifier=xyz.depollsoft.monkeyssh
+            if [ "$app" = private ]; then identifier="$identifier.private"; fi
+            if bundle exec fastlane check_metadata_editable app_identifier:"$identifier"; then
+              eligible+=("\"$app\"")
+            else
+              blocked=true
+            fi
+          done < <(printf '%s' "$REQUESTED_APPS" | jq -r '.[]')
+          joined=$(IFS=,; echo "${eligible[*]}")
+          echo "apps=[$joined]" >> "$GITHUB_OUTPUT"
+          echo "blocked=$blocked" >> "$GITHUB_OUTPUT"
 
   restore-store-assets:
     name: Restore Store Assets
     needs: changes
     if: >-
-      needs.changes.outputs.ios == 'true' ||
-      needs.changes.outputs.android == 'true'
+      needs.changes.outputs.ios_screenshots == 'true' ||
+      needs.changes.outputs.ios_app_previews == 'true' ||
+      needs.changes.outputs.android_screenshots == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -174,11 +146,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           chmod +x scripts/store_assets.sh
-          scripts/store_assets.sh download
+          if [ '${{ inputs.use-validated-store-assets }}' = 'true' ]; then
+            scripts/store_assets.sh download --run-id "$GITHUB_RUN_ID"
+          else
+            scripts/store_assets.sh download
+          fi
 
       - name: Upload restored store-assets workspace
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          compression-level: 0
           name: restored-store-assets
           path: |
             ios/fastlane/screenshots/
@@ -196,9 +173,10 @@ jobs:
 
   validate_ios_screenshots:
     name: Validate iOS Store Screenshots
-    needs: [changes, restore-store-assets]
-    if: needs.changes.outputs.ios_screenshots == 'true'
+    needs: [changes, restore-store-assets, preflight-ios]
+    if: ${{ !inputs.use-validated-store-assets && needs.changes.outputs.ios_screenshots == 'true' && needs.preflight-ios.outputs.apps != '[]' }}
     runs-on: macos-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,8 +200,9 @@ jobs:
   validate_android_screenshots:
     name: Validate Android Store Screenshots
     needs: [changes, restore-store-assets]
-    if: needs.changes.outputs.android_screenshots == 'true'
+    if: ${{ !inputs.use-validated-store-assets && needs.changes.outputs.android_screenshots == 'true' }}
     runs-on: macos-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -246,9 +225,10 @@ jobs:
 
   validate_ios_app_previews:
     name: Validate iOS App Previews
-    needs: [changes, restore-store-assets]
-    if: needs.changes.outputs.ios_app_previews == 'true'
+    needs: [changes, restore-store-assets, preflight-ios]
+    if: ${{ !inputs.use-validated-store-assets && needs.changes.outputs.ios_app_previews == 'true' && needs.preflight-ios.outputs.apps != '[]' }}
     runs-on: macos-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -271,24 +251,38 @@ jobs:
 
   sync-ios:
     name: Sync iOS Metadata
-    needs: [changes, restore-store-assets, validate_ios_screenshots, validate_ios_app_previews]
+    needs: [changes, restore-store-assets, validate_ios_screenshots, validate_ios_app_previews, preflight-ios]
     if: >-
       !cancelled() &&
-      needs.changes.outputs.ios == 'true' &&
+      needs.changes.result == 'success' &&
+      (needs.restore-store-assets.result == 'success' || needs.restore-store-assets.result == 'skipped') &&
+      needs.changes.outputs.ios == 'true' && needs.preflight-ios.result == 'success' && needs.preflight-ios.outputs.apps != '[]' &&
       needs.validate_ios_screenshots.result != 'failure' &&
       needs.validate_ios_screenshots.result != 'cancelled' &&
       needs.validate_ios_app_previews.result != 'failure' &&
       needs.validate_ios_app_previews.result != 'cancelled'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.preflight-ios.outputs.apps) }}
+    concurrency:
+      group: app-store-${{ matrix.app }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       deployments: write
+    env:
+      APP_IDENTIFIER: ${{ matrix.app == 'private' && 'xyz.depollsoft.monkeyssh.private' || 'xyz.depollsoft.monkeyssh' }}
+      APP_LABEL: ${{ matrix.app == 'private' && 'Private' || 'Production' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download restored store assets
+        if: needs.changes.outputs.ios_screenshots == 'true' || needs.changes.outputs.ios_app_previews == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: restored-store-assets
@@ -300,23 +294,21 @@ jobs:
           bundler-cache: true
 
       - name: Validate App Store metadata
-        run: python3 scripts/validate_app_store_metadata.py ${{ needs.changes.outputs.app }}
+        run: python3 scripts/validate_app_store_metadata.py ${{ matrix.app }}
 
-      - name: Start private App Store metadata GitHub deployment
-        id: start-private-ios-metadata-deployment
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private'
+      - name: Start App Store metadata GitHub deployment
+        id: start-metadata-deployment
         continue-on-error: true
         uses: ./.github/actions/deployment-status
         with:
           action: start
           ref: ${{ github.sha }}
-          environment: iOS Private / App Store Metadata
+          environment: iOS ${{ env.APP_LABEL }} / App Store Metadata
           state: in_progress
-          description: Syncing private App Store metadata.
+          description: Syncing ${{ matrix.app }} App Store metadata.
 
-      - name: Sync private app metadata
-        id: sync-private-ios-metadata
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private'
+      - name: Sync app metadata
+        id: sync-metadata
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
@@ -326,78 +318,54 @@ jobs:
           APP_REVIEW_CONTACT_EMAIL: ${{ secrets.APP_REVIEW_CONTACT_EMAIL }}
           APP_REVIEW_CONTACT_PHONE: ${{ secrets.APP_REVIEW_CONTACT_PHONE }}
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+          SKIP_MEDIA: ${{ (needs.changes.outputs.ios_screenshots == 'true' || needs.changes.outputs.ios_app_previews == 'true') && 'false' || 'true' }}
         run: |
           cd ios
-          bundle exec fastlane sync_metadata app_identifier:xyz.depollsoft.monkeyssh.private
+          bundle exec fastlane sync_metadata app_identifier:"$APP_IDENTIFIER" skip_media:"$SKIP_MEDIA"
 
-      - name: Finish private App Store metadata GitHub deployment
-        if: always() && (needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private') && steps.start-private-ios-metadata-deployment.outputs['deployment-id'] != ''
+      - name: Finish App Store metadata GitHub deployment
+        if: always() && steps.start-metadata-deployment.outputs['deployment-id'] != ''
         continue-on-error: true
         uses: ./.github/actions/deployment-status
         with:
           action: finish
-          deployment-id: ${{ steps.start-private-ios-metadata-deployment.outputs['deployment-id'] }}
-          environment: iOS Private / App Store Metadata
-          state: ${{ steps.sync-private-ios-metadata.outcome == 'success' && 'success' || 'failure' }}
-          description: ${{ steps.sync-private-ios-metadata.outcome == 'success' && 'Private App Store metadata synced.' || 'Private App Store metadata sync failed.' }}
-
-      - name: Start production App Store metadata GitHub deployment
-        id: start-production-ios-metadata-deployment
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production'
-        continue-on-error: true
-        uses: ./.github/actions/deployment-status
-        with:
-          action: start
-          ref: ${{ github.sha }}
-          environment: iOS Production / App Store Metadata
-          state: in_progress
-          description: Syncing production App Store metadata.
-
-      - name: Sync production app metadata
-        id: sync-production-ios-metadata
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production'
-        env:
-          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
-          APP_REVIEW_CONTACT_FIRST_NAME: ${{ secrets.APP_REVIEW_CONTACT_FIRST_NAME }}
-          APP_REVIEW_CONTACT_LAST_NAME: ${{ secrets.APP_REVIEW_CONTACT_LAST_NAME }}
-          APP_REVIEW_CONTACT_EMAIL: ${{ secrets.APP_REVIEW_CONTACT_EMAIL }}
-          APP_REVIEW_CONTACT_PHONE: ${{ secrets.APP_REVIEW_CONTACT_PHONE }}
-          BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
-        run: |
-          cd ios
-          bundle exec fastlane sync_metadata app_identifier:xyz.depollsoft.monkeyssh
-
-      - name: Finish production App Store metadata GitHub deployment
-        if: always() && (needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production') && steps.start-production-ios-metadata-deployment.outputs['deployment-id'] != ''
-        continue-on-error: true
-        uses: ./.github/actions/deployment-status
-        with:
-          action: finish
-          deployment-id: ${{ steps.start-production-ios-metadata-deployment.outputs['deployment-id'] }}
-          environment: iOS Production / App Store Metadata
-          state: ${{ steps.sync-production-ios-metadata.outcome == 'success' && 'success' || 'failure' }}
-          description: ${{ steps.sync-production-ios-metadata.outcome == 'success' && 'Production App Store metadata synced.' || 'Production App Store metadata sync failed.' }}
+          deployment-id: ${{ steps.start-metadata-deployment.outputs['deployment-id'] }}
+          environment: iOS ${{ env.APP_LABEL }} / App Store Metadata
+          state: ${{ steps.sync-metadata.outcome == 'success' && 'success' || 'failure' }}
+          description: ${{ steps.sync-metadata.outcome == 'success' && format('{0} App Store metadata synced.', env.APP_LABEL) || format('{0} App Store metadata sync failed.', env.APP_LABEL) }}
 
   sync-android:
     name: Sync Android Metadata
     needs: [changes, restore-store-assets, validate_android_screenshots]
     if: >-
       !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.restore-store-assets.result == 'success' || needs.restore-store-assets.result == 'skipped') &&
       needs.changes.outputs.android == 'true' &&
       needs.validate_android_screenshots.result != 'failure' &&
       needs.validate_android_screenshots.result != 'cancelled'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.changes.outputs.apps) }}
+    concurrency:
+      group: play-store-${{ matrix.app }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       deployments: write
+    env:
+      APP_IDENTIFIER: ${{ matrix.app == 'private' && 'xyz.depollsoft.monkeyssh.private' || 'xyz.depollsoft.monkeyssh' }}
+      APP_LABEL: ${{ matrix.app == 'private' && 'Private' || 'Production' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download restored store assets
+        if: needs.changes.outputs.android_screenshots == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: restored-store-assets
@@ -409,6 +377,7 @@ jobs:
           bundler-cache: true
 
       - name: Refresh Play Store icon metadata
+        if: needs.changes.outputs.android_screenshots == 'true'
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet --upgrade pip
@@ -416,74 +385,57 @@ jobs:
           .venv/bin/python scripts/sync_play_store_icons.py
 
       - name: Validate Play Store metadata
-        run: python3 scripts/validate_play_store_metadata.py ${{ needs.changes.outputs.app }}
+        run: python3 scripts/validate_play_store_metadata.py ${{ matrix.app }}
 
-      - name: Start private Play Store metadata GitHub deployment
-        id: start-private-android-metadata-deployment
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private'
+      - name: Start Play Store metadata GitHub deployment
+        id: start-metadata-deployment
         continue-on-error: true
         uses: ./.github/actions/deployment-status
         with:
           action: start
           ref: ${{ github.sha }}
-          environment: Android Private / Play Store Metadata
+          environment: Android ${{ env.APP_LABEL }} / Play Store Metadata
           state: in_progress
-          description: Syncing private Play Store metadata.
+          description: Syncing ${{ matrix.app }} Play Store metadata.
+          environment-url: ${{ matrix.app == 'production' && 'https://play.google.com/store/apps/details?id=xyz.depollsoft.monkeyssh' || '' }}
+          production-environment: ${{ matrix.app == 'production' && 'true' || 'false' }}
 
-      - name: Sync private app metadata
-        id: sync-private-android-metadata
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private'
+      - name: Sync app metadata
+        id: sync-metadata
         env:
           PLAY_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+          SKIP_MEDIA: ${{ (needs.changes.outputs.android_screenshots == 'true') && 'false' || 'true' }}
         run: |
           cd android
-          bundle exec fastlane sync_metadata package_name:xyz.depollsoft.monkeyssh.private
+          bundle exec fastlane sync_metadata package_name:"$APP_IDENTIFIER" skip_media:"$SKIP_MEDIA"
 
-      - name: Finish private Play Store metadata GitHub deployment
-        if: always() && (needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'private') && steps.start-private-android-metadata-deployment.outputs['deployment-id'] != ''
+      - name: Finish Play Store metadata GitHub deployment
+        if: always() && steps.start-metadata-deployment.outputs['deployment-id'] != ''
         continue-on-error: true
         uses: ./.github/actions/deployment-status
         with:
           action: finish
-          deployment-id: ${{ steps.start-private-android-metadata-deployment.outputs['deployment-id'] }}
-          environment: Android Private / Play Store Metadata
-          state: ${{ steps.sync-private-android-metadata.outcome == 'success' && 'success' || 'failure' }}
-          description: ${{ steps.sync-private-android-metadata.outcome == 'success' && 'Private Play Store metadata synced.' || 'Private Play Store metadata sync failed.' }}
+          deployment-id: ${{ steps.start-metadata-deployment.outputs['deployment-id'] }}
+          environment: Android ${{ env.APP_LABEL }} / Play Store Metadata
+          state: ${{ steps.sync-metadata.outcome == 'success' && 'success' || 'failure' }}
+          description: ${{ steps.sync-metadata.outcome == 'success' && format('{0} Play Store metadata synced.', env.APP_LABEL) || format('{0} Play Store metadata sync failed.', env.APP_LABEL) }}
+          environment-url: ${{ matrix.app == 'production' && 'https://play.google.com/store/apps/details?id=xyz.depollsoft.monkeyssh' || '' }}
+          production-environment: ${{ matrix.app == 'production' && 'true' || 'false' }}
 
-      - name: Start production Play Store metadata GitHub deployment
-        id: start-production-android-metadata-deployment
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production'
-        continue-on-error: true
-        uses: ./.github/actions/deployment-status
-        with:
-          action: start
-          ref: ${{ github.sha }}
-          environment: Android Production / Play Store Metadata
-          state: in_progress
-          description: Syncing production Play Store metadata.
-          environment-url: https://play.google.com/store/apps/details?id=xyz.depollsoft.monkeyssh
-          production-environment: 'true'
-
-      - name: Sync production app metadata
-        id: sync-production-android-metadata
-        if: needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production'
+  metadata-result:
+    name: Check Metadata Results
+    if: always() && !cancelled()
+    needs: [changes, preflight-ios, sync-ios, sync-android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Report blocked listings and failed uploads
         env:
-          PLAY_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}
-          BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+          BLOCKED: ${{ needs.preflight-ios.outputs.blocked }}
+          RESULTS: ${{ join(needs.*.result, ',') }}
         run: |
-          cd android
-          bundle exec fastlane sync_metadata package_name:xyz.depollsoft.monkeyssh
-
-      - name: Finish production Play Store metadata GitHub deployment
-        if: always() && (needs.changes.outputs.app == 'both' || needs.changes.outputs.app == 'production') && steps.start-production-android-metadata-deployment.outputs['deployment-id'] != ''
-        continue-on-error: true
-        uses: ./.github/actions/deployment-status
-        with:
-          action: finish
-          deployment-id: ${{ steps.start-production-android-metadata-deployment.outputs['deployment-id'] }}
-          environment: Android Production / Play Store Metadata
-          state: ${{ steps.sync-production-android-metadata.outcome == 'success' && 'success' || 'failure' }}
-          description: ${{ steps.sync-production-android-metadata.outcome == 'success' && 'Production Play Store metadata synced.' || 'Production Play Store metadata sync failed.' }}
-          environment-url: https://play.google.com/store/apps/details?id=xyz.depollsoft.monkeyssh
-          production-environment: 'true'
+          if [ "$BLOCKED" = true ] || [[ "$RESULTS" == *failure* ]] || [[ "$RESULTS" == *cancelled* ]]; then
+            echo '::error::Some requested listings could not be updated. Check editability and upload results above.'
+            exit 1
+          fi

@@ -10,12 +10,14 @@ import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
+import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_controller.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
+import 'package:xterm/xterm.dart';
 
 class _FakeConnector extends Fake implements AcpBridgeConnector {}
 
@@ -115,9 +117,12 @@ Future<void> _pump(
 AcpComposerController _makeController(
   _RecordingManager manager, {
   AcpSessionState? session,
+  AcpAttachmentPreparationService preparationService =
+      const AcpAttachmentPreparationService(),
 }) => AcpComposerController(
   manager: manager,
   sessionKey: _key(),
+  preparationService: preparationService,
   initialSession: session ?? _session(),
 );
 
@@ -140,28 +145,53 @@ void main() {
     expect(manager.promptCount, 1);
   });
 
-  testWidgets('unsupported arbitrary file immediately offers private upload', (
-    tester,
-  ) async {
-    final manager = _RecordingManager();
-    final controller = _makeController(manager)
-      ..addAttachment(
-        AcpAttachmentCandidate.memory(
-          name: 'notes.bin',
-          bytes: Uint8List.fromList(const [1, 2, 3]),
-          mimeType: 'application/octet-stream',
-        ),
-      );
-    addTearDown(controller.dispose);
-    await _pump(tester, controller);
+  for (final oversizedImage in [false, true]) {
+    testWidgets(
+      '${oversizedImage ? 'oversized image' : 'unsupported arbitrary file'} '
+      'immediately offers private upload',
+      (tester) async {
+        final manager = _RecordingManager();
+        final controller =
+            _makeController(
+              manager,
+              session: _session().copyWith(
+                initialization: const AcpInitializeResult(
+                  protocolVersion: 1,
+                  agentCapabilities: AcpAgentCapabilities(
+                    prompt: AcpPromptCapabilities(image: true),
+                  ),
+                ),
+              ),
+              preparationService: const AcpAttachmentPreparationService(
+                limits: AcpAttachmentLimits(maxImageBytes: 2),
+              ),
+            )..addAttachment(
+              AcpAttachmentCandidate.memory(
+                name: oversizedImage ? 'large.png' : 'notes.bin',
+                bytes: Uint8List.fromList(const [1, 2, 3]),
+                mimeType: oversizedImage
+                    ? 'image/png'
+                    : 'application/octet-stream',
+              ),
+            );
+        addTearDown(controller.dispose);
+        await _pump(tester, controller);
 
-    await tester.tap(find.bySemanticsLabel('Send'));
-    await tester.pumpAndSettle();
+        await tester.tap(find.bySemanticsLabel('Send'));
+        await tester.pumpAndSettle();
 
-    expect(find.text('Upload to the server?'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Upload'), findsOneWidget);
-    expect(manager.promptCount, 0);
-  });
+        expect(
+          controller.error?.attachmentFailure,
+          oversizedImage
+              ? AcpAttachmentFailure.imageSizeLimit
+              : AcpAttachmentFailure.unsupportedCapability,
+        );
+        expect(find.text('Upload to the server?'), findsOneWidget);
+        expect(find.widgetWithText(FilledButton, 'Upload'), findsOneWidget);
+        expect(manager.promptCount, 0);
+      },
+    );
+  }
 
   testWidgets('streaming with an empty draft uses one primary Stop control', (
     tester,
@@ -700,6 +730,48 @@ void main() {
     expect(tester.getBottomLeft(send).dy, closeTo(initialSendBottom, 0.1));
     expect(tester.takeException(), isNull);
   });
+
+  for (final (key, caret, expected) in [
+    (TerminalKey.arrowLeft, 3, 'abXc'),
+    (TerminalKey.arrowRight, 1, 'abXc'),
+    (TerminalKey.home, 2, 'Xabc'),
+    (TerminalKey.end, 1, 'abcX'),
+    (null, 0, 'aX'),
+  ]) {
+    testWidgets(
+      '${key ?? 'ordinary selection'} preserves the field caret before insertion',
+      (tester) async {
+        final controller = _makeController(_RecordingManager());
+        final focusController = AcpComposerFocusController();
+        addTearDown(controller.dispose);
+        await _pump(tester, controller, focusController: focusController);
+        await tester.enterText(find.byType(TextField), 'abc');
+        final field = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        if (key != null) {
+          field.selection = TextSelection.collapsed(offset: caret);
+          focusController.sendSpecialKey(key);
+          await tester.pump();
+          expect(field.selection.baseOffset, controller.caret);
+        } else {
+          for (final selection in [
+            const TextSelection(baseOffset: 1, extentOffset: 3),
+            const TextSelection(baseOffset: 3, extentOffset: 1),
+          ]) {
+            field.selection = selection;
+            controller.updateSession(_session());
+            await tester.pump();
+            expect(field.selection, selection);
+          }
+        }
+        focusController.insertText('X');
+        await tester.pump();
+        expect(field.text, expected);
+        expect(controller.text, expected);
+      },
+    );
+  }
 
   testWidgets('external focus controller opens and dismisses the composer', (
     tester,

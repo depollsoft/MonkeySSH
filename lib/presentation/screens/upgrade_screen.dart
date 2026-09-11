@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -212,35 +213,24 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
   };
 
   Future<void> _openManageSubscriptions() async {
-    final messenger = ScaffoldMessenger.of(context);
     final url = _manageSubscriptionUrl();
     if (url == null) {
       return;
     }
-    final canOpen = await canLaunchUrl(url);
-    if (!canOpen) {
-      if (mounted) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Could not open the subscription management page.'),
-          ),
-        );
-      }
-      return;
-    }
-    final didOpen = await launchUrl(url, mode: LaunchMode.externalApplication);
-    if (!didOpen && mounted) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Could not open the subscription management page.'),
-        ),
-      );
-    }
+    await _openLegalUrl(url, 'the subscription management page');
   }
 
   Future<void> _openLegalUrl(Uri url, String label) async {
     final messenger = ScaffoldMessenger.of(context);
-    final didOpen = await launchUrl(url, mode: LaunchMode.externalApplication);
+    var didOpen = false;
+    try {
+      // Attempt the launch directly: Android package visibility can make a
+      // canLaunchUrl check fail even when a browser can open the page.
+      didOpen = await launchUrl(url, mode: LaunchMode.externalApplication);
+    } on PlatformException {
+      // A missing browser or refused launch can throw instead of returning false.
+      didOpen = false;
+    }
     if (!didOpen && mounted) {
       messenger.showSnackBar(SnackBar(content: Text('Could not open $label.')));
     }
@@ -360,6 +350,12 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
             title: 'Recent terminal sessions',
             subtitle:
                 'Discover agent work across windows and jump back in without hunting for it.',
+          ),
+          const _UpgradeBenefitTile(
+            icon: Icons.system_update_alt_rounded,
+            title: 'Agent Management',
+            subtitle:
+                'Install, repair, and update remote coding agents, with automatic update checks.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.rocket_launch_outlined,

@@ -10,6 +10,8 @@ class _SshSessionRuntime {
   static const _stdinCloseTimeout = Duration(milliseconds: 250);
 
   SSHSession? _shell;
+  Future<SSHSession>? _shellOpening;
+  Future<void>? _shellClosing;
   StreamController<String>? _shellStdoutController;
   StreamController<String>? _shellStderrController;
   StreamController<void>? _shellDoneController;
@@ -46,13 +48,13 @@ class _SshSessionRuntime {
   int _shellStdinCharCount = 0;
   TerminalWindowMetrics? _terminalWindowMetrics;
   String _terminalWindowQueryPendingInput = '';
-  String _terminalTmuxPassthroughPendingInput = '';
+  final _terminalTmuxPassthroughDecoder = TerminalTmuxPassthroughDecoder();
   String _terminalControlModeUpdatePendingInput = '';
-  String _terminalInsertModePendingInput = '';
-  int _terminalInsertModePendingScanOffset = 0;
+  final _terminalOutputDecoder = TerminalXtermOutputDecoder();
   String _monkeyMuxReplayDetectionTail = '';
   DateTime? _monkeyMuxReplayCoalesceDeadline;
-  String _terminalParseBacklog = '';
+  final _terminalParseBacklog = Queue<String>();
+  int _terminalParsePendingChars = 0;
   int _terminalParseOffset = 0;
   // Wall-clock time of the last repaint notification emitted while draining the
   // parse backlog. Null when the backlog is idle, so the first slice of a new
@@ -63,7 +65,6 @@ class _SshSessionRuntime {
   bool _isCoalescingMonkeyMuxReplay = false;
   bool _terminalColorSchemeUpdatesMode = false;
   bool _terminalWin32InputMode = false;
-  bool _terminalInsertMode = false;
 
   Terminal? _terminal;
 
@@ -89,13 +90,6 @@ class _SshSessionRuntime {
   // builds) while keeping any single turn short enough to stay responsive.
   // Image decoding is already async, so it does not count against this budget.
   static const _maxTerminalParseSliceChars = 32 * 1024;
-  // While a single escape sequence is still incomplete (e.g. a multi-megabyte
-  // Kitty image APC), the held bytes aren't rendered until the terminator
-  // arrives, and re-feeding them in 32KB slices makes `adapt` re-copy the
-  // growing pending buffer each call (O(n^2)). Take much larger slices in that
-  // state so the sequence is gathered in a few calls; the time budget still
-  // yields between slices.
-  static const _maxTerminalParseSequenceSliceChars = 256 * 1024;
   static const _terminalParseFrameBudget = Duration(milliseconds: 8);
   static const _terminalParseContinuationDelay = Duration(milliseconds: 1);
   // While draining a multi-frame backlog (a large switch/reconnect replay),
@@ -275,13 +269,34 @@ if(!$__flResolved){$__flResolved='cmd'}
     }
     if (forceNew) {
       await closeShell();
+    } else {
+      final closing = _shellClosing;
+      if (closing != null) await closing;
     }
+    final opening = _shellOpening ??= _getOrOpenShell(
+      pty: pty,
+      requestPty: requestPty,
+      command: command,
+      returnToLoginShell: returnToLoginShell,
+    );
+    try {
+      return await opening;
+    } finally {
+      // A cancelled older negotiation must not clear a replacement's future.
+      if (identical(_shellOpening, opening)) _shellOpening = null;
+    }
+  }
+
+  Future<SSHSession> _getOrOpenShell({
+    required bool requestPty,
+    required bool returnToLoginShell,
+    SSHPtyConfig? pty,
+    String? command,
+  }) async {
     if (_shell == null) {
+      final generation = _shellGeneration;
       _isReplacingShell = true;
       final shellPty = pty ?? const SSHPtyConfig();
-      _shellPty = shellPty;
-      _shellHasPty = requestPty;
-      _syncKittyGraphicsAvailability();
       final commandKind = command == null
           ? 'interactive_shell'
           : _diagnosticSshCommandKind(command);
@@ -302,6 +317,14 @@ if(!$__flResolved){$__flResolved='cmd'}
           pty: requestPty ? shellPty : null,
           command: command,
         );
+        // Closing or replacing the shell while channel negotiation is pending
+        // invalidates this result. Never install it over a newer shell.
+        if (generation != _shellGeneration || _session._isClosing) {
+          throw StateError('Shell opening was cancelled');
+        }
+        _shellPty = shellPty;
+        _shellHasPty = requestPty;
+        _syncKittyGraphicsAvailability();
         if (requestPty) {
           _applyLatestTerminalWindowMetrics(openedShell);
         }
@@ -321,8 +344,10 @@ if(!$__flResolved){$__flResolved='cmd'}
         if (openedShell != null) {
           _closeShellBestEffort(openedShell);
         }
-        _isReplacingShell = false;
-        _pendingReplacementInput.clear();
+        if (generation == _shellGeneration) {
+          _isReplacingShell = false;
+          _pendingReplacementInput.clear();
+        }
         DiagnosticsLogService.instance.error(
           'ssh.shell',
           'open_failed',
@@ -451,7 +476,10 @@ if(!$__flResolved){$__flResolved='cmd'}
     );
     SSHSession? detectionSession;
     try {
-      detectionSession = await _session.client.execute(command);
+      detectionSession = await openSshExec(
+        _session.client.execute(command),
+        _windowsShellDetectionTimeout,
+      );
       final output = await _shellStreamDecoder
           .bind(detectionSession.stdout)
           .join()
@@ -519,8 +547,14 @@ if(!$__flResolved){$__flResolved='cmd'}
   }
 
   /// Close only the interactive shell channel while keeping the SSH client.
-  Future<void> closeShell({bool waitForStreams = true}) async {
+  Future<void> closeShell({bool waitForStreams = true}) => _shellClosing ??=
+      _closeShell(waitForStreams: waitForStreams).whenComplete(() {
+        _shellClosing = null;
+      });
+
+  Future<void> _closeShell({required bool waitForStreams}) async {
     _shellGeneration += 1;
+    _shellOpening = null;
     _returnToLoginShell = false;
     _isReplacingShell = false;
     _pendingReplacementInput.clear();
@@ -650,7 +684,7 @@ if(!$__flResolved){$__flResolved='cmd'}
           (data) {
             _recordShellIo(stdoutChars: data.length);
             _shellOutputChunkSequence += 1;
-            final terminalData = _unwrapTerminalTmuxPassthrough(data);
+            final terminalData = _terminalTmuxPassthroughDecoder.add(data);
             if (identical(_shell, shell) &&
                 (terminalData.isNotEmpty || data.isNotEmpty)) {
               _enqueueShellOutput(
@@ -896,7 +930,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     _clearPendingShellOutput();
     _session._resetShellRuntimeMetadata();
     _terminalWindowQueryPendingInput = '';
-    _terminalTmuxPassthroughPendingInput = '';
+    _terminalTmuxPassthroughDecoder.reset();
     _terminalControlModeUpdatePendingInput = '';
     _terminalColorSchemeUpdatesMode = false;
     _terminalWin32InputMode = false;
@@ -1187,14 +1221,14 @@ if(!$__flResolved){$__flResolved='cmd'}
       // MonkeyMux redraw is requested when terminal mode returns, so retaining
       // megabytes here only competes with native scrolling and risks a large
       // catch-up drain.
-      _terminalParseBacklog = '';
+      _terminalParseBacklog.clear();
+      _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
       return;
     }
     _lastTerminalParseNotifyAtMs = null;
     final terminal = _terminal;
-    if (terminal != null &&
-        _terminalParseOffset < _terminalParseBacklog.length) {
+    if (terminal != null && _terminalParseBacklog.isNotEmpty) {
       _pumpTerminalParse(terminal);
     }
     terminal?.notifyListeners();
@@ -1204,15 +1238,8 @@ if(!$__flResolved){$__flResolved='cmd'}
     if (_terminalParsingPaused || data.isEmpty) {
       return;
     }
-    // Drop already-consumed prefix before appending so the backing string does
-    // not grow without bound across successive flushes.
-    if (_terminalParseOffset > 0) {
-      _terminalParseBacklog = _terminalParseBacklog.substring(
-        _terminalParseOffset,
-      );
-      _terminalParseOffset = 0;
-    }
-    _terminalParseBacklog += data;
+    _terminalParseBacklog.add(data);
+    _terminalParsePendingChars += data.length;
     if (!_terminalParsingPaused) _pumpTerminalParse(terminal);
   }
 
@@ -1221,18 +1248,19 @@ if(!$__flResolved){$__flResolved='cmd'}
     _terminalParsePumpTimer = null;
     if (_terminalParsingPaused) return;
     if (!identical(_terminal, terminal)) {
-      _terminalParseBacklog = '';
+      _terminalParseBacklog.clear();
+      _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
       return;
     }
 
     final diagnosticsEnabled = DiagnosticsLogService.instance.enabled;
-    final startOffset = _terminalParseOffset;
+    final pendingBefore = _terminalParsePendingChars;
     final stopwatch = Stopwatch()..start();
     var processedAny = false;
     var sliceCount = 0;
     var worstSliceMicros = 0;
-    while (_terminalParseOffset < _terminalParseBacklog.length) {
+    while (_terminalParseBacklog.isNotEmpty) {
       final sliceStartMicros = diagnosticsEnabled
           ? stopwatch.elapsedMicroseconds
           : 0;
@@ -1250,12 +1278,13 @@ if(!$__flResolved){$__flResolved='cmd'}
       }
     }
 
-    final processedChars = _terminalParseOffset - startOffset;
-    final remaining = _terminalParseBacklog.length - _terminalParseOffset;
+    final processedChars = pendingBefore - _terminalParsePendingChars;
+    final remaining = _terminalParsePendingChars;
     if (remaining > 0) {
       _scheduleTerminalParsePump(terminal);
     } else {
-      _terminalParseBacklog = '';
+      _terminalParseBacklog.clear();
+      _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
     }
     if (processedAny) {
@@ -1310,32 +1339,25 @@ if(!$__flResolved){$__flResolved='cmd'}
 
   String _takeTerminalParseSlice() {
     final start = _terminalParseOffset;
-    // A larger slice while mid-sequence keeps gathering a long escape sequence
-    // (image APC) in O(n) instead of O(n^2); otherwise a small slice keeps each
-    // frame's parse/image work bounded.
-    final sliceChars = _terminalInsertModePendingInput.isEmpty
-        ? _maxTerminalParseSliceChars
-        : _maxTerminalParseSequenceSliceChars;
-    var end = math.min(start + sliceChars, _terminalParseBacklog.length);
-    // Avoid cutting a surrogate pair; the parser tolerates split escape
-    // sequences via rollback but a lone surrogate corrupts the code point.
-    if (end < _terminalParseBacklog.length &&
-        _isHighSurrogate(_terminalParseBacklog.codeUnitAt(end - 1))) {
-      end -= 1;
+    final head = _terminalParseBacklog.first;
+    var end = math.min(start + _maxTerminalParseSliceChars, head.length);
+    if (end < head.length && _isHighSurrogate(head.codeUnitAt(end - 1))) {
+      end--;
     }
-    if (end <= start) {
-      end = _terminalParseBacklog.length;
+    final slice = head.substring(start, end);
+    _terminalParsePendingChars -= slice.length;
+    if (end == head.length) {
+      _terminalParseBacklog.removeFirst();
+      _terminalParseOffset = 0;
+    } else {
+      _terminalParseOffset = end;
     }
-    _terminalParseOffset = end;
-    return _terminalParseBacklog.substring(start, end);
+    return slice;
   }
 
   void _processTerminalParseSlice(Terminal terminal, String slice) {
-    final terminalOutput = adaptTerminalInsertModeOutputForXterm(
+    final terminalOutput = _terminalOutputDecoder.add(
       input: slice,
-      pendingInput: _terminalInsertModePendingInput,
-      pendingScanOffset: _terminalInsertModePendingScanOffset,
-      insertMode: _terminalInsertMode,
       terminalColumns: terminal.viewWidth,
       terminalRows: terminal.viewHeight,
       cursorColumn: terminal.buffer.cursorX,
@@ -1344,9 +1366,6 @@ if(!$__flResolved){$__flResolved='cmd'}
       marginBottom: terminal.buffer.marginBottom,
       originMode: terminal.originMode,
     );
-    _terminalInsertModePendingInput = terminalOutput.pendingInput;
-    _terminalInsertModePendingScanOffset = terminalOutput.pendingScanOffset;
-    _terminalInsertMode = terminalOutput.insertMode;
     // Track control-mode updates before the xterm parser dispatches any OSC
     // queries in this slice, so a query that arrives in the same chunk as a
     // mode change (for example ConPTY's win32-input-mode request) is answered
@@ -1429,12 +1448,11 @@ if(!$__flResolved){$__flResolved='cmd'}
     // bytes render into a reconnected shell's terminal.
     _terminalParsePumpTimer?.cancel();
     _terminalParsePumpTimer = null;
-    _terminalParseBacklog = '';
+    _terminalParseBacklog.clear();
+    _terminalParsePendingChars = 0;
     _terminalParseOffset = 0;
     _lastTerminalParseNotifyAtMs = null;
-    _terminalInsertModePendingInput = '';
-    _terminalInsertModePendingScanOffset = 0;
-    _terminalInsertMode = false;
+    _terminalOutputDecoder.reset();
   }
 
   /// Drains any queued terminal parse backlog immediately, ignoring the frame
@@ -1445,15 +1463,17 @@ if(!$__flResolved){$__flResolved='cmd'}
     _terminalParsePumpTimer = null;
     final terminal = _terminal;
     if (terminal == null) {
-      _terminalParseBacklog = '';
+      _terminalParseBacklog.clear();
+      _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
       return;
     }
-    final hadBacklog = _terminalParseOffset < _terminalParseBacklog.length;
-    while (_terminalParseOffset < _terminalParseBacklog.length) {
+    final hadBacklog = _terminalParseBacklog.isNotEmpty;
+    while (_terminalParseBacklog.isNotEmpty) {
       _processTerminalParseSlice(terminal, _takeTerminalParseSlice());
     }
-    _terminalParseBacklog = '';
+    _terminalParseBacklog.clear();
+    _terminalParsePendingChars = 0;
     _terminalParseOffset = 0;
     if (hadBacklog) {
       // Slices are written silently, so repaint the drained result once.
@@ -1504,15 +1524,6 @@ if(!$__flResolved){$__flResolved='cmd'}
     }
 
     _shell?.write(utf8.encode(response));
-  }
-
-  String _unwrapTerminalTmuxPassthrough(String data) {
-    final result = unwrapTerminalTmuxPassthroughSequences(
-      input: data,
-      pendingInput: _terminalTmuxPassthroughPendingInput,
-    );
-    _terminalTmuxPassthroughPendingInput = result.pendingInput;
-    return result.output;
   }
 
   TerminalControlModeState _terminalModeState(Terminal terminal) => (

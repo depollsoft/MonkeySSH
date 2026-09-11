@@ -117,26 +117,6 @@ void main() {
       });
     });
 
-    group('getDarkThemes', () {
-      test('returns only dark themes', () async {
-        final themes = await themeService.getDarkThemes();
-        expect(themes, isNotEmpty);
-        for (final theme in themes) {
-          expect(theme.isDark, isTrue);
-        }
-      });
-    });
-
-    group('getLightThemes', () {
-      test('returns only light themes', () async {
-        final themes = await themeService.getLightThemes();
-        expect(themes, isNotEmpty);
-        for (final theme in themes) {
-          expect(theme.isDark, isFalse);
-        }
-      });
-    });
-
     group('getCustomThemes', () {
       test('returns empty list initially', () async {
         final themes = await themeService.getCustomThemes();

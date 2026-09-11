@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/theme.dart';
-import '../../domain/models/acp_client_capabilities.dart' as client;
 import '../../domain/models/acp_session_state.dart' as session;
 import '../../domain/models/acp_updates.dart';
 import 'acp_chat_typography.dart';
@@ -102,63 +101,6 @@ AcpToolPermissionPrompt acpToolPromptFromSession(
   onSelect: onSelect,
   onCancel: onCancel,
 );
-
-/// Builds permission/write prompts from client-capability pending requests.
-///
-/// The callbacks resolve each request by its stable JSON-RPC id, so a prompt
-/// keeps resolving correctly across a bridge reconnect.
-List<AcpPermissionPrompt> acpPromptsFromClientRequests(
-  List<client.AcpPendingClientRequest> requests, {
-  required Future<void> Function(String requestId, String optionId)
-  selectPermission,
-  required Future<void> Function(String requestId) cancelPermission,
-  required Future<void> Function(String requestId) approveWrite,
-  required Future<void> Function(String requestId) rejectWrite,
-}) {
-  final prompts = <AcpPermissionPrompt>[];
-  for (final request in requests) {
-    switch (request) {
-      case client.AcpPendingPermission():
-        final id = request.id;
-        prompts.add(
-          AcpToolPermissionPrompt(
-            stableKey: 'client:$id',
-            title: request.permission.toolCall.title == null
-                ? 'Allow this tool action?'
-                : 'Allow ${request.permission.toolCall.title}?',
-            contextLine:
-                request.permission.toolCall.title ??
-                'Tool ${request.permission.toolCall.toolCallId}',
-            options: request.permission.options,
-            onSelect: (optionId) => selectPermission(id, optionId),
-            onCancel: () => cancelPermission(id),
-          ),
-        );
-      case client.AcpPendingFileWrite():
-        final id = request.id;
-        prompts.add(
-          AcpWritePermissionPrompt(
-            stableKey: 'client:$id',
-            fileName: _basename(request.path),
-            contentBytes: request.content.length,
-            onApprove: () => approveWrite(id),
-            onReject: () => rejectWrite(id),
-            revealContent: () => request.content,
-          ),
-        );
-    }
-  }
-  return prompts;
-}
-
-String _basename(String path) {
-  final trimmed = path.endsWith('/')
-      ? path.substring(0, path.length - 1)
-      : path;
-  final separator = trimmed.lastIndexOf(RegExp(r'[/\\]'));
-  final segment = separator >= 0 ? trimmed.substring(separator + 1) : trimmed;
-  return segment.isEmpty ? path : segment;
-}
 
 /// Renders pending [AcpPermissionPrompt]s as an anchored action surface.
 ///

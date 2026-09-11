@@ -208,20 +208,6 @@ class AcpLaunchCommand {
     List<String> arguments = const [],
   }) : arguments = List.unmodifiable(arguments);
 
-  /// Decodes an [AcpLaunchCommand] from JSON.
-  ///
-  /// This assumes [json] was already produced by [toJson] or validated with
-  /// [tryFromJson]; malformed input should use [tryFromJson] instead.
-  factory AcpLaunchCommand.fromJson(Map<String, dynamic> json) {
-    final rawArguments = json['arguments'];
-    return AcpLaunchCommand(
-      executable: json['executable'] as String? ?? '',
-      arguments: rawArguments is List
-          ? List.unmodifiable(rawArguments.map((value) => value.toString()))
-          : const [],
-    );
-  }
-
   /// Decodes an [AcpLaunchCommand] from untrusted JSON, returning `null`
   /// instead of throwing when [json] is malformed or fails validation.
   static AcpLaunchCommand? tryFromJson(Object? json) {
@@ -437,7 +423,7 @@ bool isValidAcpLaunchProfileName(String name) =>
 /// Built-in providers ship with the app and never require user approval;
 /// only [AcpCustomProviderDefinition] tracks command approval state.
 @immutable
-class AcpBuiltinProvider {
+class AcpBuiltinProvider implements AcpProvider {
   /// Creates a new [AcpBuiltinProvider].
   const AcpBuiltinProvider({
     required this.id,
@@ -450,12 +436,15 @@ class AcpBuiltinProvider {
   });
 
   /// Stable identifier for this provider.
+  @override
   final String id;
 
   /// Human-readable label shown in provider pickers.
+  @override
   final String label;
 
   /// Default stdio ACP launch command for this provider.
+  @override
   final AcpLaunchCommand launchCommand;
 
   /// Executable probe metadata used to detect whether this provider is
@@ -475,6 +464,9 @@ class AcpBuiltinProvider {
 
   /// Optional capability for discovering and selecting isolated CLI profiles.
   final AcpLaunchProfileSupport? launchProfileSupport;
+
+  @override
+  bool get isCustom => false;
 
   @override
   bool operator ==(Object other) =>
@@ -848,7 +840,7 @@ class AcpCommandApproval {
 /// [isCommandApproved] becomes `false` and the UI must require the user to
 /// review and re-approve the command again before it can launch.
 @immutable
-class AcpCustomProviderDefinition {
+class AcpCustomProviderDefinition implements AcpProvider {
   const AcpCustomProviderDefinition._({
     required this.id,
     required this.label,
@@ -935,12 +927,15 @@ class AcpCustomProviderDefinition {
   }
 
   /// Stable identifier for this custom provider.
+  @override
   final String id;
 
   /// User-provided display label.
+  @override
   final String label;
 
   /// The exact launch command the user reviewed and approved.
+  @override
   final AcpLaunchCommand launchCommand;
 
   /// Approval record for [launchCommand].
@@ -959,56 +954,6 @@ class AcpCustomProviderDefinition {
       approval.commandFingerprint ==
       computeAcpLaunchCommandFingerprint(launchCommand);
 
-  /// Returns a copy of this definition with [label] and/or [launchCommand]
-  /// replaced.
-  ///
-  /// This never silently re-approves a changed command: [approval] is
-  /// always preserved as-is, so changing [launchCommand] to a different
-  /// value makes [isCommandApproved] become `false` until the UI explicitly
-  /// calls [approveCurrentCommand] after the user reviews and confirms the
-  /// new exact command text. Throws a [FormatException] if the new [label]
-  /// or [launchCommand] fail validation.
-  AcpCustomProviderDefinition update({
-    String? label,
-    AcpLaunchCommand? launchCommand,
-    DateTime? now,
-  }) {
-    final normalizedLabel = label == null
-        ? this.label
-        : validateAcpProviderLabel(label);
-    final nextCommand = launchCommand ?? this.launchCommand;
-    if (launchCommand != null) {
-      validateAcpLaunchCommand(launchCommand);
-    }
-    final timestamp = (now ?? DateTime.now()).toUtc();
-    return AcpCustomProviderDefinition._(
-      id: id,
-      label: normalizedLabel,
-      launchCommand: nextCommand,
-      approval: approval,
-      createdAt: createdAt,
-      updatedAt: timestamp,
-    );
-  }
-
-  /// Approves the current [launchCommand] as of [now] (defaulting to the
-  /// current UTC time), making [isCommandApproved] become `true`.
-  ///
-  /// The UI must call this only after the user has reviewed and explicitly
-  /// confirmed the exact current command text; it must never be called
-  /// automatically as a side effect of [update].
-  AcpCustomProviderDefinition approveCurrentCommand({DateTime? now}) {
-    final timestamp = (now ?? DateTime.now()).toUtc();
-    return AcpCustomProviderDefinition._(
-      id: id,
-      label: label,
-      launchCommand: launchCommand,
-      approval: AcpCommandApproval.approve(launchCommand, now: timestamp),
-      createdAt: createdAt,
-      updatedAt: timestamp,
-    );
-  }
-
   /// Encodes this definition as JSON.
   Map<String, dynamic> toJson() => {
     'schemaVersion': 1,
@@ -1019,6 +964,9 @@ class AcpCustomProviderDefinition {
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
   };
+
+  @override
+  bool get isCustom => true;
 
   @override
   bool operator ==(Object other) =>
@@ -1041,11 +989,9 @@ class AcpCustomProviderDefinition {
       'approved: $isCommandApproved)';
 }
 
-/// Read-only view over any ACP provider available to launch, whether it is
+/// An ACP provider available to launch, whether it is
 /// built into the app or defined by the user.
 sealed class AcpProvider {
-  const AcpProvider();
-
   /// Stable identifier for this provider.
   String get id;
 
@@ -1058,64 +1004,4 @@ sealed class AcpProvider {
   /// Whether this provider was defined by the user rather than bundled with
   /// the app.
   bool get isCustom;
-}
-
-/// An [AcpProvider] view over a bundled [AcpBuiltinProvider].
-@immutable
-final class AcpBuiltinProviderView extends AcpProvider {
-  /// Creates a view over [provider].
-  const AcpBuiltinProviderView(this.provider);
-
-  /// The underlying built-in provider definition.
-  final AcpBuiltinProvider provider;
-
-  @override
-  String get id => provider.id;
-
-  @override
-  String get label => provider.label;
-
-  @override
-  AcpLaunchCommand get launchCommand => provider.launchCommand;
-
-  @override
-  bool get isCustom => false;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AcpBuiltinProviderView && provider == other.provider;
-
-  @override
-  int get hashCode => provider.hashCode;
-}
-
-/// An [AcpProvider] view over a persisted [AcpCustomProviderDefinition].
-@immutable
-final class AcpCustomProviderView extends AcpProvider {
-  /// Creates a view over [definition].
-  const AcpCustomProviderView(this.definition);
-
-  /// The underlying custom provider definition.
-  final AcpCustomProviderDefinition definition;
-
-  @override
-  String get id => definition.id;
-
-  @override
-  String get label => definition.label;
-
-  @override
-  AcpLaunchCommand get launchCommand => definition.launchCommand;
-
-  @override
-  bool get isCustom => true;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AcpCustomProviderView && definition == other.definition;
-
-  @override
-  int get hashCode => definition.hashCode;
 }

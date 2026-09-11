@@ -267,11 +267,11 @@ enum AcpImageSourceKind {
 
 /// An image referenced by a prompt or embedded in assistant Markdown.
 ///
-/// An image carries at least one of [bytes] or [uri]. Network URIs are never
-/// fetched automatically; callers must provide a resolver.
+/// An image carries at least one of [bytes], [dataUri], or [uri]. Network URIs
+/// are never fetched automatically; callers must provide a resolver.
 @immutable
 class AcpImageContent extends Equatable {
-  /// Creates image content from in-memory [bytes] and/or a [uri].
+  /// Creates image content from in-memory [bytes], encoded [dataUri], or a [uri].
   ///
   /// [bytes], when provided, is defensively cloned and stored privately so the
   /// model's published state cannot be mutated by the caller after
@@ -279,14 +279,15 @@ class AcpImageContent extends Equatable {
   AcpImageContent({
     Uint8List? bytes,
     this.uri,
+    this.dataUri,
     this.mimeType,
     this.label,
     this.decodeWidth,
     this.decodeHeight,
   }) : _bytes = bytes == null ? null : Uint8List.fromList(bytes),
        assert(
-         bytes != null || uri != null,
-         'AcpImageContent requires bytes or a uri',
+         bytes != null || dataUri != null || uri != null,
+         'AcpImageContent requires bytes, a data URI, or a URI',
        );
 
   // Privately owned clone; never handed out directly.
@@ -297,6 +298,10 @@ class AcpImageContent extends Equatable {
   /// Returns an unmodifiable view: attempts to mutate it (e.g. `bytes[0] = x`)
   /// throw, so published state stays immutable.
   Uint8List? get bytes => _bytes?.asUnmodifiableView();
+
+  /// Encoded inline image data, decoded by the image widget off the UI isolate
+  /// for large payloads. [uri] remains available as a fallback.
+  final String? dataUri;
 
   /// The image URI (`data:`, `file:`, `http:`/`https:`), when not in memory.
   final String? uri;
@@ -318,7 +323,7 @@ class AcpImageContent extends Equatable {
     if (_bytes != null) {
       return AcpImageSourceKind.bytes;
     }
-    final value = uri ?? '';
+    final value = dataUri ?? uri ?? '';
     if (value.startsWith('data:')) {
       return AcpImageSourceKind.dataUri;
     }
@@ -331,6 +336,7 @@ class AcpImageContent extends Equatable {
   @override
   List<Object?> get props => [
     _bytes,
+    dataUri,
     uri,
     mimeType,
     label,
@@ -597,10 +603,6 @@ class AcpPlan extends Equatable {
   /// The number of completed items.
   int get completedCount =>
       items.where((i) => i.status == AcpPlanItemStatus.completed).length;
-
-  /// The number of in-progress items.
-  int get inProgressCount =>
-      items.where((i) => i.status == AcpPlanItemStatus.inProgress).length;
 
   /// The total number of items.
   int get totalCount => items.length;

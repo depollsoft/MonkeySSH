@@ -17,6 +17,7 @@ import 'terminal_key_input.dart';
 const _deleteDetectionMarker = '\u200B\u200B';
 final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
+final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
 const _androidTerminalImeKeyChannel = MethodChannel(
   'xyz.depollsoft.monkeyssh/terminal_ime_keys',
@@ -225,7 +226,6 @@ bool shouldRequestKeyboardForTerminalPointerUp({
   required int activeTouchPointers,
   required bool hadMultipleTouchPointers,
   required bool movedBeyondTapSlop,
-  required bool pressedBeyondLongPressTimeout,
   required bool readOnly,
   Duration? touchPressDuration,
 }) {
@@ -240,7 +240,6 @@ bool shouldRequestKeyboardForTerminalPointerUp({
   return activeTouchPointers == 1 &&
       !hadMultipleTouchPointers &&
       !movedBeyondTapSlop &&
-      !pressedBeyondLongPressTimeout &&
       (touchPressDuration == null ||
           touchPressDuration < terminalKeyboardTapLongPressTimeout);
 }
@@ -448,9 +447,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   final Set<int> _activeTouchPointers = <int>{};
   final Map<int, Offset> _touchPointerDownPositions = <int, Offset>{};
   final Map<int, Duration> _touchPointerDownTimestamps = <int, Duration>{};
-  final Map<int, Timer> _touchLongPressTimers = <int, Timer>{};
   final Set<int> _touchPointersMovedBeyondTapSlop = <int>{};
-  final Set<int> _touchPointersPressedBeyondLongPressTimeout = <int>{};
   bool _touchSequenceHadMultiplePointers = false;
   bool _skipNextTouchKeyboardRequest = false;
   bool _sawImeComposition = false;
@@ -515,6 +512,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   @override
   void didUpdateWidget(TerminalTextInputHandler oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(widget.terminal, oldWidget.terminal)) {
+      // Key repeats and IME deltas belong to the terminal that received the input.
+      // Reset in place so switching sessions does not dismiss the keyboard.
+      _stopHardwareKeyRepeat();
+      _clearImeBufferForFreshInput(flushPlatformContext: true);
+    }
     if (widget.focusNode != oldWidget.focusNode) {
       oldWidget.focusNode.removeListener(_onFocusChange);
       widget.focusNode.addListener(_onFocusChange);
@@ -560,15 +563,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     widget.focusNode.removeListener(_onFocusChange);
     _stopHardwareKeyRepeat();
     _cancelDeferredTrailingBackspaceImeClear();
-    for (final timer in _touchLongPressTimers.values) {
-      timer.cancel();
-    }
     _activeTouchPointers.clear();
     _touchPointerDownPositions.clear();
     _touchPointerDownTimestamps.clear();
-    _touchLongPressTimers.clear();
     _touchPointersMovedBeyondTapSlop.clear();
-    _touchPointersPressedBeyondLongPressTimeout.clear();
     _closeInputConnectionIfNeeded();
     _AndroidTerminalImeKeyBridge.detach(this);
     super.dispose();
@@ -609,27 +607,11 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       _activeTouchPointers.add(event.pointer);
       _touchPointerDownPositions[event.pointer] = event.position;
       _touchPointerDownTimestamps[event.pointer] = event.timeStamp;
-      _touchLongPressTimers[event.pointer]?.cancel();
-      _touchLongPressTimers[event.pointer] = Timer(
-        terminalKeyboardTapLongPressTimeout,
-        () {
-          if (!_isTouchSelectionIntentCandidate(event.pointer)) {
-            return;
-          }
-          _touchPointersPressedBeyondLongPressTimeout.add(event.pointer);
-        },
-      );
       if (_activeTouchPointers.length > 1) {
         _touchSequenceHadMultiplePointers = true;
       }
     }
   }
-
-  bool _isTouchSelectionIntentCandidate(int pointer) =>
-      _activeTouchPointers.length == 1 &&
-      _activeTouchPointers.contains(pointer) &&
-      !_touchSequenceHadMultiplePointers &&
-      !_touchPointersMovedBeyondTapSlop.contains(pointer);
 
   void _handlePointerMove(PointerMoveEvent event) {
     if (event.kind != PointerDeviceKind.touch ||
@@ -656,9 +638,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       movedBeyondTapSlop: _touchPointersMovedBeyondTapSlop.contains(
         event.pointer,
       ),
-      pressedBeyondLongPressTimeout:
-          event.kind == PointerDeviceKind.touch &&
-          _touchPointersPressedBeyondLongPressTimeout.contains(event.pointer),
       readOnly: widget.readOnly,
       touchPressDuration: event.kind == PointerDeviceKind.touch
           ? _touchPressDuration(event)
@@ -697,9 +676,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     _activeTouchPointers.remove(event.pointer);
     _touchPointerDownPositions.remove(event.pointer);
     _touchPointerDownTimestamps.remove(event.pointer);
-    _touchLongPressTimers.remove(event.pointer)?.cancel();
     _touchPointersMovedBeyondTapSlop.remove(event.pointer);
-    _touchPointersPressedBeyondLongPressTimeout.remove(event.pointer);
     if (_activeTouchPointers.isEmpty) {
       _touchSequenceHadMultiplePointers = false;
     }
@@ -834,48 +811,36 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       meta: meta,
       hasShortcutModifier: hasShortcutModifier,
     );
+    bool dispatchRepeat() {
+      if (!mounted) {
+        _stopHardwareKeyRepeat();
+        return false;
+      }
+      final repeatInput = _hardwareRepeatInput;
+      if (repeatInput == null) {
+        return false;
+      }
+      _sendHardwareTerminalKey(
+        repeatInput.key,
+        ctrl: repeatInput.ctrl,
+        alt: repeatInput.alt,
+        shift: repeatInput.shift,
+        meta: repeatInput.meta,
+        hasShortcutModifier: repeatInput.hasShortcutModifier,
+        type: TerminalKeyEventType.repeat,
+      );
+      return true;
+    }
+
     _hardwareKeyRepeatStartTimer = Timer(
       terminalIosHardwareKeyRepeatStartDelay,
       () {
-        if (!mounted) {
-          _stopHardwareKeyRepeat();
-          return;
+        if (dispatchRepeat()) {
+          _hardwareKeyRepeatTimer = Timer.periodic(
+            terminalIosHardwareKeyRepeatInterval,
+            (_) => dispatchRepeat(),
+          );
         }
-        final repeatInput = _hardwareRepeatInput;
-        if (repeatInput == null) {
-          return;
-        }
-        _sendHardwareTerminalKey(
-          repeatInput.key,
-          ctrl: repeatInput.ctrl,
-          alt: repeatInput.alt,
-          shift: repeatInput.shift,
-          meta: repeatInput.meta,
-          hasShortcutModifier: repeatInput.hasShortcutModifier,
-          type: TerminalKeyEventType.repeat,
-        );
-        _hardwareKeyRepeatTimer = Timer.periodic(
-          terminalIosHardwareKeyRepeatInterval,
-          (_) {
-            if (!mounted) {
-              _stopHardwareKeyRepeat();
-              return;
-            }
-            final repeatInput = _hardwareRepeatInput;
-            if (repeatInput == null) {
-              return;
-            }
-            _sendHardwareTerminalKey(
-              repeatInput.key,
-              ctrl: repeatInput.ctrl,
-              alt: repeatInput.alt,
-              shift: repeatInput.shift,
-              meta: repeatInput.meta,
-              hasShortcutModifier: repeatInput.hasShortcutModifier,
-              type: TerminalKeyEventType.repeat,
-            );
-          },
-        );
       },
     );
   }
@@ -1545,25 +1510,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         _connection!.show();
         _setInputConnectionShown(shown: true);
       }
-      _invalidatePendingEditingUpdates();
-      _sawImeComposition = false;
-      _lastProcessedUserSelectionWasValid = false;
-      _lastProcessedSelectionWasCollapsed = true;
-      _trimLeadingSuggestionSpaceAfterDelete = false;
-      _trimLeadingSwipeSpaceAfterBufferClear = false;
-      _allowSplitLeadingTokenNormalization = false;
-      _hasPendingPromptOutputImeReset = false;
-      _modifierChordResetTime = null;
-      _clearPendingDeleteResetBaseline();
-      _lastSentText = '';
-      _lastSentCursorOffset = 0;
-      _iosBackspaceRunwayLength = 0;
-      _clearPendingComposingEnterAction();
-      _pendingPerformedEnterText = null;
-      _pendingEnterActionSuppressions = 0;
-      _pendingAndroidHardwareBackspaces = 0;
-      _activeAndroidImeBackspace = null;
-      _currentEditingState = _initEditingState.copyWith();
+      _resetConnectionEditingState();
       _connection!.setEditingState(_initEditingState);
     }
   }
@@ -1600,6 +1547,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       _connection = null;
     }
     _setInputConnectionShown(shown: false);
+    _resetConnectionEditingState();
+  }
+
+  void _resetConnectionEditingState() {
     _invalidatePendingEditingUpdates();
     _sawImeComposition = false;
     _lastProcessedUserSelectionWasValid = false;
@@ -1677,54 +1628,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   int _longestCommonCaseInsensitiveGraphemeSubsequenceLength(
     List<String> previousGraphemes,
     List<String> currentGraphemes, {
-    int? maxLength,
+    required int maxLength,
   }) {
     if (previousGraphemes.isEmpty || currentGraphemes.isEmpty) {
       return 0;
     }
 
-    final cappedMaxLength = maxLength == null || maxLength < 1
-        ? null
-        : maxLength;
-    if (cappedMaxLength != null && cappedMaxLength <= 2) {
-      return _longestCommonCaseInsensitiveGraphemeSubsequenceLengthUpToTwo(
-        previousGraphemes,
-        currentGraphemes,
-        maxLength: cappedMaxLength,
-      );
-    }
-    final normalizedCurrentGraphemes = currentGraphemes
-        .map((grapheme) => grapheme.toLowerCase())
-        .toList(growable: false);
-    var previousRow = List<int>.filled(currentGraphemes.length + 1, 0);
-    for (final previousGrapheme in previousGraphemes) {
-      final currentRow = List<int>.filled(currentGraphemes.length + 1, 0);
-      final normalizedPreviousGrapheme = previousGrapheme.toLowerCase();
-      for (var index = 0; index < currentGraphemes.length; index++) {
-        final nextLength =
-            normalizedPreviousGrapheme == normalizedCurrentGraphemes[index]
-            ? previousRow[index] + 1
-            : (previousRow[index + 1] > currentRow[index]
-                  ? previousRow[index + 1]
-                  : currentRow[index]);
-        currentRow[index +
-            1] = cappedMaxLength != null && nextLength > cappedMaxLength
-            ? cappedMaxLength
-            : nextLength;
-      }
-      previousRow = currentRow;
-      if (cappedMaxLength != null && previousRow.last >= cappedMaxLength) {
-        return cappedMaxLength;
-      }
-    }
-    return previousRow.last;
-  }
-
-  int _longestCommonCaseInsensitiveGraphemeSubsequenceLengthUpToTwo(
-    List<String> previousGraphemes,
-    List<String> currentGraphemes, {
-    required int maxLength,
-  }) {
     final currentPositionsByGrapheme = <String, List<int>>{};
     for (var index = 0; index < currentGraphemes.length; index++) {
       final normalizedCurrentGrapheme = currentGraphemes[index].toLowerCase();
@@ -1747,12 +1656,9 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       }
 
       hasLengthOneMatch = true;
-      if (shortestLengthOneEndIndex != null) {
-        for (final position in positions) {
-          if (position > shortestLengthOneEndIndex) {
-            return 2;
-          }
-        }
+      if (shortestLengthOneEndIndex != null &&
+          positions.last > shortestLengthOneEndIndex) {
+        return 2;
       }
 
       final firstPosition = positions.first;
@@ -1889,6 +1795,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     String currentText,
     ({int deletedCount, String appendedText, int deleteCursorOffset}) delta, {
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
+    bool beforeEnter = false,
   }) {
     _moveTerminalCursorTo(delta.deleteCursorOffset);
 
@@ -1902,6 +1809,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
       enterModifiers: enterModifiers,
+      beforeEnter: beforeEnter,
     );
 
     _lastSentText = currentText;
@@ -1935,6 +1843,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   int _sendAppendedTerminalInput(
     String text, {
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
+    bool beforeEnter = false,
   }) {
     if (text.isEmpty) {
       return 0;
@@ -1960,7 +1869,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         continue;
       }
 
-      _sendTerminalTextSegment(text.substring(segmentStart, index));
+      _sendTerminalTextSegment(
+        text.substring(segmentStart, index),
+        beforeEnter: true,
+      );
       _sendTerminalEnterFromTextInput(
         modifiers: newlineCount == modifierNewlineIndex ? enterModifiers : null,
       );
@@ -1969,15 +1881,32 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       segmentStart = index;
     }
 
-    _sendTerminalTextSegment(text.substring(segmentStart));
+    _sendTerminalTextSegment(
+      text.substring(segmentStart),
+      beforeEnter: beforeEnter,
+    );
     return newlineCount;
   }
 
-  void _sendTerminalTextSegment(String text) {
+  void _sendTerminalTextSegment(String text, {bool beforeEnter = false}) {
     if (text.isEmpty) {
       return;
     }
-    widget.terminal.textInput(_applyTerminalTextInputModifiers(text));
+    final input = _applyTerminalTextInputModifiers(text);
+    if (widget.terminal.bracketedPasteMode &&
+        input == text &&
+        (beforeEnter || text.runes.length > 1) &&
+        !_terminalTextControlPattern.hasMatch(text)) {
+      // IMEs commit whole words at once. Without explicit batch boundaries,
+      // prompt TUIs such as Codex infer a paste from the rapid characters and
+      // absorb the following Return as a pasted newline. Keep Enter outside
+      // the batch, and keep shortcuts/control input on the key input path.
+      // Even a single character can be held by the TUI's paste detector when
+      // an IME commits it together with Return.
+      widget.terminal.paste(text);
+    } else {
+      widget.terminal.textInput(input);
+    }
   }
 
   void _sendTerminalEnterFromTextInput({
@@ -3357,7 +3286,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       value = _stripIosBackspaceRunway(value);
       _currentEditingState = value;
 
-      if (_editingPrefixLength(value.text) < _initEditingState.text.length) {
+      // IMEs can replace the whole editing buffer, including the hidden
+      // backspace markers, when committing dictation or replacement text.
+      // Only marker loss without remaining text is a delete signal. Otherwise
+      // process the text normally and restore the markers during the sync below.
+      if (_editingPrefixLength(value.text) < _initEditingState.text.length &&
+          _extractRawInputText(value.text).isEmpty) {
         final deletedCount = _textLengthInGraphemes(_lastSentText);
         final clearedBufferedInput = deletedCount > 0;
         if (_pendingAndroidHardwareBackspaces > 0) {
@@ -3581,6 +3515,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       final newlineCount = _sendInputDelta(
         effectiveCurrentText,
         delta,
+        beforeEnter: pendingEnterActionArrived,
         enterModifiers: pendingEnterRepresentedByPayloadNewline
             ? _pendingComposingEnterModifiers
             : null,
@@ -3833,24 +3768,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     _AndroidTerminalImeKeyBridge.setEnabled(this, enabled: false);
     _stopHardwareKeyRepeat();
     _cancelDeferredTrailingBackspaceImeClear();
-    _invalidatePendingEditingUpdates();
-    _sawImeComposition = false;
-    _hasPendingPromptOutputImeReset = false;
-    _lastSentText = '';
-    _lastSentCursorOffset = 0;
-    _iosBackspaceRunwayLength = 0;
-    _clearPendingComposingEnterAction();
-    _pendingPerformedEnterText = null;
-    _lastProcessedUserSelectionWasValid = false;
-    _lastProcessedSelectionWasCollapsed = true;
-    _trimLeadingSuggestionSpaceAfterDelete = false;
-    _trimLeadingSwipeSpaceAfterBufferClear = false;
-    _allowSplitLeadingTokenNormalization = false;
-    _modifierChordResetTime = null;
-    _pendingEnterActionSuppressions = 0;
-    _pendingAndroidHardwareBackspaces = 0;
-    _activeAndroidImeBackspace = null;
-    _currentEditingState = _initEditingState.copyWith();
+    _resetConnectionEditingState();
   }
 
   @override

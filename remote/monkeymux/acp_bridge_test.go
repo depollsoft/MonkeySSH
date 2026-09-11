@@ -20,47 +20,8 @@ import (
 	"time"
 )
 
-func TestStartAcpBridgeInProcessHostsProviderInServer(t *testing.T) {
-	dir := testAcpRuntimeDirectory(t)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	id, err := startAcpBridgeInProcess(
-		ctx,
-		"test:cat-acp",
-		"Test Agent",
-		"cat",
-		".",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := acpBridgeStatus(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.ProviderID != "test:cat-acp" || info.State != "running" {
-		t.Fatalf("unexpected bridge metadata: %+v", info)
-	}
-
-	conn, err := dialAcpBridge(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeAcpWireFrame(conn, acpWireMessage{
-		Version: acpBridgeProtocolVersion,
-		Type:    "command",
-		Command: "stop",
-	}); err != nil {
-		_ = conn.Close()
-		t.Fatal(err)
-	}
-	_ = conn.Close()
-}
-
 func TestRequestAcpBridgeStopAndWaitTreatsMissingBridgeAsStopped(t *testing.T) {
-	runtimeRoot := testAcpRuntimeDirectory(t)
+	runtimeRoot := shortUnixSocketDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
 	const bridgeID = "0123456789abcdef0123456789abcdef"
@@ -70,7 +31,7 @@ func TestRequestAcpBridgeStopAndWaitTreatsMissingBridgeAsStopped(t *testing.T) {
 }
 
 func TestRequestAcpBridgeStopAndWaitPropagatesRuntimePathFailure(t *testing.T) {
-	runtimeRoot := testAcpRuntimeDirectory(t)
+	runtimeRoot := shortUnixSocketDir(t)
 	brokenRuntime := filepath.Join(runtimeRoot, "broken-runtime")
 	if err := os.Symlink(filepath.Join(runtimeRoot, "missing", "runtime"), brokenRuntime); err != nil {
 		t.Fatal(err)
@@ -84,7 +45,7 @@ func TestRequestAcpBridgeStopAndWaitPropagatesRuntimePathFailure(t *testing.T) {
 }
 
 func TestRequestAcpBridgeStopAndWaitRemovesAbandonedSocket(t *testing.T) {
-	runtimeRoot := testAcpRuntimeDirectory(t)
+	runtimeRoot := shortUnixSocketDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
 	const bridgeID = "abcdef0123456789abcdef0123456789"
@@ -112,6 +73,162 @@ func TestRequestAcpBridgeStopAndWaitRemovesAbandonedSocket(t *testing.T) {
 	}
 }
 
+func TestRequestAcpBridgeStopAndWaitPreservesStatusFailures(t *testing.T) {
+	for _, response := range []string{"", "invalid\n", `{"version":1,"type":"status"}` + "\n",
+		`{"version":1,"type":"error","bridge":{}}` + "\n",
+		`{"version":2,"type":"status","bridge":{}}` + "\n"} {
+		t.Run(response, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", shortUnixSocketDir(t))
+			bridge := newTestAcpBridge()
+			socket, err := acpSocketPath(bridge.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.SetDeadline(time.Now().Add(2 * socketTimeout))
+					message, err := readAcpWireFrame(bufio.NewReader(conn))
+					if err == nil && message.Command == "status" {
+						if response == "" {
+							_, _ = io.Copy(io.Discard, conn)
+						} else {
+							_, _ = io.WriteString(conn, response)
+						}
+					}
+					_ = conn.Close()
+				}
+			}()
+			server := newMuxServer("test")
+			server.windows = []*muxWindow{{id: "@1", nativeAcpBridgeID: bridge.id}}
+			server.activeID = "@1"
+			for _, stop := range []func() error{
+				func() error { return requestAcpBridgeStopAndWait(bridge.id) },
+				func() error {
+					shutdown, err := server.closeWindow("@1")
+					if shutdown || server.windows[0].closed || server.windows[0].closing {
+						t.Error("status failure did not preserve a retryable window")
+					}
+					return err
+				},
+			} {
+				started := time.Now()
+				err := stop()
+				if err == nil {
+					t.Fatal("status failure was treated as successful shutdown")
+				}
+				if response == "" {
+					var timeout net.Error
+					if !errors.As(err, &timeout) || !timeout.Timeout() {
+						t.Fatalf("status error = %v, want preserved timeout", err)
+					}
+				}
+				if response == "invalid\n" {
+					var syntax *json.SyntaxError
+					if !errors.As(err, &syntax) {
+						t.Fatalf("status error = %v, want preserved JSON error", err)
+					}
+				}
+				if time.Since(started) > 2*acpRequestTimeout {
+					t.Error("status request exceeded its deadline")
+				}
+			}
+			_ = listener.Close()
+			<-done
+			if _, err := server.closeWindow("@1"); err != nil {
+				t.Fatalf("retry after bridge disappeared: %v", err)
+			}
+		})
+	}
+}
+
+func TestGCAcpArtifactsPreservesUnconfirmedSockets(t *testing.T) {
+	for _, state := range []string{"live", "abandoned", "live_without_identity", "abandoned_without_identity", "runtime_error", "permission"} {
+		t.Run(state, func(t *testing.T) {
+			runtimeRoot := shortUnixSocketDir(t)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+			socket, err := acpSocketPath(newTestAcpBridge().id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener.SetUnlinkOnClose(false)
+			defer listener.Close()
+			switch state {
+			case "abandoned", "abandoned_without_identity":
+				_ = listener.Close()
+			case "runtime_error":
+				t.Setenv("XDG_RUNTIME_DIR", socket)
+			case "permission":
+				private := filepath.Join(runtimeRoot, "private")
+				if err := os.Mkdir(private, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target, err := filepath.Abs(filepath.Join(private, "bridge.sock"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(socket, target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, socket); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(private, 0); err != nil {
+					t.Fatal(err)
+				}
+				defer os.Chmod(private, 0o700)
+				conn, err := dialAcpBridge(newTestAcpBridge().id)
+				if err == nil {
+					_ = conn.Close()
+					t.Skip("current user bypasses directory permissions")
+				}
+				if !errors.Is(err, os.ErrPermission) {
+					t.Fatalf("dial = %v, want permission error", err)
+				}
+			}
+			if strings.HasSuffix(state, "_without_identity") {
+				// Windows cannot identify socket inodes. Exercise its fallback
+				// against real Unix sockets, including a still-live listener.
+				identityRequested := false
+				gcAcpArtifactsWithSocketIdentity(filepath.Dir(socket), func(path string) (socketIdentity, error) {
+					identityRequested = true
+					if path != socket {
+						t.Fatalf("identity path = %q, want %q", path, socket)
+					}
+					return socketIdentity{}, errors.New("windows socket identity unavailable")
+				})
+				if !identityRequested {
+					t.Fatal("GC did not attempt socket identity lookup")
+				}
+			} else {
+				gcAcpArtifacts(filepath.Dir(socket))
+			}
+			_, err = os.Lstat(socket)
+			if state == "abandoned" || state == "abandoned_without_identity" {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("abandoned socket remains: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("unconfirmed socket was removed: %v", err)
+			}
+		})
+	}
+}
+
 func TestAcpWireFramingRoundTrip(t *testing.T) {
 	var buffer bytes.Buffer
 	want := acpWireMessage{
@@ -131,6 +248,29 @@ func TestAcpWireFramingRoundTrip(t *testing.T) {
 		!bytes.Equal(got.Data, want.Data) {
 		t.Fatalf("wire frame = %#v, want %#v", got, want)
 	}
+	want.Data = nil
+	base, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int{acpMaxFrameBytes - 1, acpMaxFrameBytes, acpMaxFrameBytes + 1} {
+		want.Type = strings.Repeat("x", size-len(base)+len("input"))
+		buffer.Reset()
+		err := writeAcpWireFrame(&buffer, want)
+		if size >= acpMaxFrameBytes {
+			if err == nil || buffer.Len() != 0 {
+				t.Fatalf("accepted oversized JSON payload of %d bytes", size)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readAcpWireFrame(bufio.NewReader(&buffer)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 }
 
 func TestAcpAdaptiveReplayPolicy(t *testing.T) {
@@ -168,7 +308,7 @@ func TestAcpAdaptiveReplayPolicy(t *testing.T) {
 }
 
 func TestAcpResolvedClientRequestRemainsUnsafeForDirectReplay(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.publish(
 		"output",
 		json.RawMessage(`{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission"}`),
@@ -189,11 +329,22 @@ func TestAcpResolvedClientRequestRemainsUnsafeForDirectReplay(t *testing.T) {
 }
 
 func TestAcpCachedInitializeResponseAvoidsDuplicateProviderRequest(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	providerInput := &testWriteCloser{}
 	bridge.stdin = providerInput
 	firstInitialize := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	if _, ok := bridge.trackInitializeRequest(firstInitialize); !ok {
+	for _, response := range []string{
+		`{"id":1}`, `{"id":1,"result":null}`, `{"id":"1","result":{}}`,
+		`{"id":1,"result":{},"error":null}`, `{"id":1,"error":{"code":-1}}`,
+	} {
+		bridge := newTestAcpBridge()
+		bridge.trackClientRequest(parseAcpEnvelope(firstInitialize))
+		bridge.publish("output", json.RawMessage(response), "", nil)
+		if got := bridge.cachedInitializeResponse(parseAcpEnvelope(firstInitialize)); got != nil {
+			t.Fatalf("cached unsuccessful or mismatched initialize %s: %s", response, got)
+		}
+	}
+	if _, ok := bridge.trackClientRequest(parseAcpEnvelope(firstInitialize)); !ok {
 		t.Fatal("first initialize request was not tracked")
 	}
 	bridge.publish(
@@ -256,7 +407,7 @@ func TestAcpCachedInitializeResponseAvoidsDuplicateProviderRequest(t *testing.T)
 }
 
 func TestAcpAttachQueuesHelloBeforeConcurrentLiveEvent(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	peer, primed, release, attachDone := startPrimedTestAttach(t, bridge)
 	defer finishPrimedTestAttach(t, peer, release, attachDone)
 	<-primed
@@ -286,7 +437,7 @@ func TestAcpAttachQueuesHelloBeforeConcurrentLiveEvent(t *testing.T) {
 }
 
 func TestAcpAttachQueuesReplayBeforeConcurrentLiveEvent(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.publish("output", json.RawMessage(`{"jsonrpc":"2.0","method":"one"}`), "", nil)
 	bridge.publish("output", json.RawMessage(`{"jsonrpc":"2.0","method":"two"}`), "", nil)
 	peer, primed, release, attachDone := startPrimedTestAttach(t, bridge)
@@ -330,7 +481,7 @@ func TestAcpAttachQueuesReplayBeforeConcurrentLiveEvent(t *testing.T) {
 }
 
 func TestAcpAdaptiveAttachEchoesDirectForSafeShortReplay(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.publish(
 		"output",
 		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update"}`),
@@ -372,7 +523,7 @@ func TestAcpAdaptiveAttachEchoesDirectForSafeShortReplay(t *testing.T) {
 }
 
 func TestAcpFreshAttachSkipsHistoricalReplayButKeepsPending(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.publish(
 		"output",
 		json.RawMessage(`{"jsonrpc":"2.0","method":"historical"}`),
@@ -440,7 +591,7 @@ func TestAcpFreshAttachSkipsHistoricalReplayButKeepsPending(t *testing.T) {
 }
 
 func TestAcpPendingReplayModeRequiresFreshAck(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.publish(
 		"output",
 		json.RawMessage(`{"jsonrpc":"2.0","method":"one"}`),
@@ -490,7 +641,7 @@ func TestAcpPendingReplayModeRequiresFreshAck(t *testing.T) {
 }
 
 func TestAcpAttachPrimesMaximumPinnedReplay(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	pinnedCount := acpPendingReplayMaxEvents
 	for index := range pinnedCount {
 		request := json.RawMessage(fmt.Sprintf(
@@ -540,7 +691,7 @@ func TestAcpAttachPrimesMaximumPinnedReplay(t *testing.T) {
 }
 
 func TestAcpPublishSerializesSequenceAndClientVisibility(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	client := &acpBridgeClient{
 		id:         "client",
 		send:       make(chan acpWireMessage, 2),
@@ -599,7 +750,7 @@ func TestAcpPublishSerializesSequenceAndClientVisibility(t *testing.T) {
 }
 
 func TestAcpDetachedClientCannotReclaimWriter(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	if bridge.clientCanSend("detached") {
 		t.Fatal("detached client was allowed to send")
 	}
@@ -609,12 +760,12 @@ func TestAcpDetachedClientCannotReclaimWriter(t *testing.T) {
 }
 
 func TestAcpBridgeCapturesSessionIdentityForDurableListing(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.providerID = "builtin:pi-acp"
 	bridge.cwd = "/repo"
-	bridge.observeClientMessage(json.RawMessage(
+	bridge.trackClientRequest(parseAcpEnvelope(json.RawMessage(
 		`{"jsonrpc":"2.0","id":7,"method":"session/new","params":{"cwd":"/repo"}}`,
-	))
+	)))
 	bridge.publish("output", json.RawMessage(
 		`{"jsonrpc":"2.0","id":7,"result":{"sessionId":"session-7"}}`,
 	), "", nil)
@@ -631,7 +782,7 @@ func TestAcpProviderExitWaitsForFinalOutputDrain(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.cmd = cmd
 	bridge.providerDone = make(chan struct{})
 	bridge.providerOutputDone = make(chan struct{})
@@ -772,7 +923,7 @@ func TestAcpProviderExitDrainsRealPipeBeforePublishingExit(t *testing.T) {
 }
 
 func TestAcpPendingProviderRequestsAreBoundedByCount(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	for index := range acpPendingReplayMaxEvents {
 		request := json.RawMessage(fmt.Sprintf(
 			`{"jsonrpc":"2.0","id":"permission-%d","method":"session/request_permission"}`,
@@ -808,7 +959,7 @@ func TestAcpPendingProviderRequestsAreBoundedByCount(t *testing.T) {
 }
 
 func TestAcpPendingProviderRequestsAreBoundedByBytes(t *testing.T) {
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	value := strings.Repeat("x", acpMaxFrameBytes/2)
 	rejected := false
 	for index := range acpPendingReplayMaxEvents {
@@ -845,20 +996,6 @@ type testWriteCloser struct {
 }
 
 func (*testWriteCloser) Close() error { return nil }
-
-func newOrderingTestBridge() *acpBridge {
-	now := time.Now()
-	return &acpBridge{
-		id:                   "0123456789abcdef0123456789abcdef",
-		state:                "running",
-		startedAt:            now,
-		lastActivity:         now,
-		clients:              map[string]*acpBridgeClient{},
-		pendingRequests:      map[string]struct{}{},
-		inFlightTurns:        map[string]struct{}{},
-		sessionSetupRequests: map[string]struct{}{},
-	}
-}
 
 func startPrimedTestAttach(
 	t *testing.T,
@@ -933,7 +1070,7 @@ func TestAcpProviderReapGateBlocksWaitUntilGroupCleanup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	bridge := newOrderingTestBridge()
+	bridge := newTestAcpBridge()
 	bridge.cmd = cmd
 	bridge.providerDone = make(chan struct{})
 	bridge.providerOutputDone = make(chan struct{})
@@ -1091,51 +1228,41 @@ func TestAcpProviderForceWaitsForProcessGroupExit(t *testing.T) {
 	reaped = true
 }
 
-func TestAcpConcurrentStopAndProviderWrite(t *testing.T) {
+func TestAcpConcurrentProviderWritesKeepFramesIntact(t *testing.T) {
 	providerInput, peer := net.Pipe()
 	defer peer.Close()
-	bridge := &acpBridge{
-		stdin:        providerInput,
-		clients:      map[string]*acpBridgeClient{},
-		providerDone: make(chan struct{}),
-		done:         make(chan struct{}),
+	bridge := &acpBridge{stdin: providerInput}
+	defer bridge.closeProviderInput()
+	payloads := []json.RawMessage{
+		json.RawMessage(`{"jsonrpc":"2.0","method":"first"}`),
+		json.RawMessage(`{"jsonrpc":"2.0","method":"second"}`),
 	}
-	payload := json.RawMessage(`{"jsonrpc":"2.0","method":"session/prompt"}`)
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		_ = bridge.writeProvider(payload)
-	}()
-
-	// net.Pipe writes block until the peer reads, deterministically overlapping
-	// the provider write with stop's attempt to close stdin.
-	select {
-	case <-writerDone:
-		t.Fatal("provider write unexpectedly completed before peer read")
-	case <-time.After(20 * time.Millisecond):
+	writerDone := make(chan error, len(payloads))
+	for _, payload := range payloads {
+		go func() { writerDone <- bridge.writeProvider(payload) }()
 	}
-	stopDone := make(chan struct{})
-	go func() {
-		bridge.stop()
-		close(stopDone)
-	}()
-	got := make([]byte, len(payload)+1)
-	if _, err := io.ReadFull(peer, got); err != nil {
-		t.Fatal(err)
+	peer.SetReadDeadline(time.Now().Add(time.Second))
+	reader := bufio.NewReader(peer)
+	seen := make(map[string]bool)
+	for range payloads {
+		line, err := readBoundedAcpLine(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[string(line)] = true
 	}
-	if !bytes.Equal(got, append(append([]byte(nil), payload...), '\n')) {
-		t.Fatalf("provider input = %q", got)
-	}
-
-	select {
-	case <-writerDone:
-	case <-time.After(time.Second):
-		t.Fatal("provider write did not finish after peer read")
-	}
-	select {
-	case <-stopDone:
-	case <-time.After(time.Second):
-		t.Fatal("provider stop did not finish after write")
+	for _, payload := range payloads {
+		if !seen[string(payload)] {
+			t.Fatalf("provider did not receive intact frame %s", payload)
+		}
+		select {
+		case err := <-writerDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("provider write did not finish")
+		}
 	}
 }
 
@@ -1175,14 +1302,9 @@ func TestAcpBridgeStartConnectListStatusAndStop(t *testing.T) {
 	if hello.Type != "hello" || !hello.CanSend || hello.Bridge == nil {
 		t.Fatalf("attach hello = %#v", hello)
 	}
-	if err := writeAcpWireFrame(conn, acpWireMessage{
-		Version: acpBridgeProtocolVersion,
-		Type:    "command",
-		Command: "stop",
-	}); err != nil {
+	if err := requestAcpBridgeStopAndWait(bridge.id); err != nil {
 		t.Fatal(err)
 	}
-	bridge.stop()
 	select {
 	case <-bridge.done:
 	case <-time.After(time.Second):
@@ -1246,14 +1368,11 @@ func TestAcpReconnectReplaysAfterAck(t *testing.T) {
 }
 
 func TestAcpReplayRetainsManyTinyStreamingUpdates(t *testing.T) {
-	bridge, cleanup := startTestAcpBridge(t, "cat")
-	defer cleanup()
+	bridge := newTestAcpBridge()
 	const updates = 4096
 	for range updates {
 		bridge.publish("output", json.RawMessage(`{"jsonrpc":"2.0","method":"update"}`), "", nil)
 	}
-	bridge.mu.Lock()
-	defer bridge.mu.Unlock()
 	if len(bridge.replay) != updates || bridge.replay[0].message.Sequence != 1 {
 		t.Fatalf("retained replay = %d events from %d, want %d events from 1", len(bridge.replay), bridge.replay[0].message.Sequence, updates)
 	}
@@ -1293,15 +1412,12 @@ func TestAcpReplayOverflowSignalsRetainedSequence(t *testing.T) {
 }
 
 func TestAcpPendingProviderRequestSurvivesDetachAndBlocksIdleCleanup(t *testing.T) {
-	bridge, cleanup := startTestAcpBridge(t, "cat")
-	defer cleanup()
+	bridge := newTestAcpBridge()
 	bridge.publish("output", json.RawMessage(
 		`{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission"}`,
 	), "", nil)
-	bridge.mu.Lock()
 	bridge.lastActivity = time.Now().Add(-acpIdleTimeout - time.Second)
 	pending := len(bridge.pendingRequests)
-	bridge.mu.Unlock()
 	if pending != 1 {
 		t.Fatalf("pending request count = %d, want 1", pending)
 	}
@@ -1311,13 +1427,11 @@ func TestAcpPendingProviderRequestSurvivesDetachAndBlocksIdleCleanup(t *testing.
 }
 
 func TestAcpReplayRetainsPendingProviderRequest(t *testing.T) {
-	bridge, cleanup := startTestAcpBridge(t, "cat")
-	defer cleanup()
+	bridge := newTestAcpBridge()
 	permission := json.RawMessage(
 		`{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission"}`,
 	)
 	bridge.publish("output", permission, "", nil)
-	bridge.mu.Lock()
 	bridge.replay = append(bridge.replay, acpReplayEvent{
 		message: acpWireMessage{Sequence: 2},
 		bytes:   acpReplayMaxBytes,
@@ -1331,32 +1445,24 @@ func TestAcpReplayRetainsPendingProviderRequest(t *testing.T) {
 			found = true
 		}
 	}
-	bridge.mu.Unlock()
 	if !found {
 		t.Fatal("pending provider request was evicted from replay")
 	}
-	bridge.observeClientMessage(json.RawMessage(
+	bridge.observeClientMessage(parseAcpEnvelope(json.RawMessage(
 		`{"jsonrpc":"2.0","id":"permission-1","result":{"outcome":"selected"}}`,
-	))
-	bridge.mu.Lock()
-	defer bridge.mu.Unlock()
+	)))
 	if len(bridge.pendingRequests) != 0 {
 		t.Fatal("provider request remained pending after its real response")
 	}
 }
 
 func TestAcpIdleCleanupRequiresTrueIdle(t *testing.T) {
-	bridge, cleanup := startTestAcpBridge(t, "cat")
-	defer cleanup()
-	bridge.mu.Lock()
+	bridge := newTestAcpBridge()
 	bridge.lastActivity = time.Now().Add(-acpIdleTimeout - time.Second)
-	bridge.mu.Unlock()
 	if !bridge.shouldIdleShutdown(time.Now()) {
 		t.Fatal("true idle bridge was not eligible for cleanup")
 	}
-	bridge.mu.Lock()
 	bridge.inFlightTurns["turn"] = struct{}{}
-	bridge.mu.Unlock()
 	if bridge.shouldIdleShutdown(time.Now()) {
 		t.Fatal("in-flight turn allowed idle shutdown")
 	}
@@ -1411,7 +1517,7 @@ func TestStartAcpBridgePreservesLockedKeychainError(t *testing.T) {
 }
 
 func TestAcpProviderExitPublishesExitedState(t *testing.T) {
-	dir := testAcpRuntimeDirectory(t)
+	dir := shortUnixSocketDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	bridge, err := newAcpBridge(
 		"0123456789abcdef0123456789abcdef",
@@ -1502,7 +1608,7 @@ func TestReadProviderOutputFailsMalformedAndOversizedFrames(t *testing.T) {
 
 func startTestAcpBridge(t *testing.T, command string) (*acpBridge, func()) {
 	t.Helper()
-	dir := testAcpRuntimeDirectory(t)
+	dir := shortUnixSocketDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	id, err := newAcpBridgeID()
 	if err != nil {
@@ -1530,7 +1636,6 @@ func startTestAcpBridge(t *testing.T, command string) (*acpBridge, func()) {
 				case <-time.After(time.Second):
 					t.Error("ACP server did not stop")
 				}
-				_ = os.RemoveAll(dir)
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1538,16 +1643,6 @@ func startTestAcpBridge(t *testing.T, command string) (*acpBridge, func()) {
 	bridge.stop()
 	t.Fatal("ACP socket did not start")
 	return nil, nil
-}
-
-func testAcpRuntimeDirectory(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp(".", ".acp-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Clean(dir)
 }
 
 func readTestAcpFrame(
@@ -1562,4 +1657,210 @@ func readTestAcpFrame(
 		t.Fatal(err)
 	}
 	return message
+}
+
+func TestAcpWaitRejectsInvalidStatusFrame(t *testing.T) {
+	for _, response := range []string{
+		"invalid\n", "\n", `{"type":1}` + "\n",
+		`{"version":1,"type":"status"}` + "\n",
+		`{"version":1,"type":"error","bridge":{}}` + "\n",
+		`{"version":2,"type":"status","bridge":{}}` + "\n",
+	} {
+		t.Run(response, func(t *testing.T) {
+			polls := 0
+			status := func(string) (acpBridgeInfo, error) {
+				polls++
+				if polls > acpWaitMaxFailures {
+					t.Fatal("waiter kept polling invalid status frames")
+				}
+				client, server := net.Pipe()
+				defer client.Close()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					defer server.Close()
+					_ = server.SetDeadline(time.Now().Add(time.Second))
+					request, err := readAcpWireFrame(bufio.NewReader(server))
+					if err != nil || request.Command != "status" {
+						t.Errorf("request = %+v, error = %v, want status only", request, err)
+						return
+					}
+					_, _ = io.WriteString(server, response)
+				}()
+				info, err := acpBridgeStatusFromConn(client)
+				<-done
+				return info, err
+			}
+			// A ready clock avoids real polling delays while bounding a regression.
+			ticks := make(chan time.Time)
+			close(ticks)
+			var output bytes.Buffer
+			err := waitForAcpBridge("test", status, ticks, &output)
+			var protocolErr *protocolFrameError
+			if !errors.As(err, &protocolErr) {
+				t.Fatalf("wait error = %v, want protocol error", err)
+			}
+			if polls != 1 {
+				t.Fatalf("status polls = %d, want immediate exit after 1", polls)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("introduction printed without successful status: %q", output.String())
+			}
+		})
+	}
+}
+
+func TestAcpWaitBoundsNonTransientFailures(t *testing.T) {
+	for _, failure := range []error{errors.New("status unavailable"), io.EOF, os.ErrPermission} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			polls := 0
+			var lastErr error
+			status := func(string) (acpBridgeInfo, error) {
+				polls++
+				if polls > acpWaitMaxFailures {
+					t.Fatal("waiter exceeded failure limit")
+				}
+				lastErr = fmt.Errorf("poll %d: %w", polls, failure)
+				return acpBridgeInfo{}, lastErr
+			}
+			ticks := make(chan time.Time)
+			close(ticks)
+			if err := waitForAcpBridge("test", status, ticks, io.Discard); err == nil || err != lastErr {
+				t.Fatalf("wait error = %v, want last error %v", err, lastErr)
+			}
+			if polls != acpWaitMaxFailures {
+				t.Fatalf("status polls = %d, want %d", polls, acpWaitMaxFailures)
+			}
+		})
+	}
+}
+
+func TestAcpWaitResetsFailuresAfterTransientTimeoutsAndSuccess(t *testing.T) {
+	for _, terminalState := range []string{"exited", "stopped", "protocol_error"} {
+		t.Run(terminalState, func(t *testing.T) {
+			var failures []error
+			// Timeouts must not consume the bounded failure budget. A successful
+			// status between two near-limit runs must reset that budget.
+			for range 2 {
+				for range acpWaitMaxFailures - 1 {
+					failures = append(failures, io.EOF)
+				}
+				for range acpWaitMaxFailures + 1 {
+					failures = append(failures, fmt.Errorf("status read: %w", os.ErrDeadlineExceeded))
+				}
+				failures = append(failures, nil)
+			}
+			var output bytes.Buffer
+			polls := 0
+			status := func(string) (acpBridgeInfo, error) {
+				if polls >= len(failures) {
+					t.Fatal("waiter polled after terminal status")
+				}
+				failure := failures[polls]
+				polls++
+				if polls <= len(failures)/2 && output.Len() != 0 {
+					t.Fatal("introduction printed before first successful status")
+				}
+				state := "running"
+				if polls == len(failures) {
+					state = terminalState
+				}
+				return acpBridgeInfo{State: state, Provider: "Test agent"}, failure
+			}
+			ticks := make(chan time.Time)
+			close(ticks)
+			if err := waitForAcpBridge("test", status, ticks, &output); err != nil {
+				t.Fatalf("wait error = %v, want recovery and normal exit", err)
+			}
+			if polls != len(failures) {
+				t.Fatalf("status polls = %d, want %d", polls, len(failures))
+			}
+			if strings.Count(output.String(), "Native agent window: Test agent\r\n") != 1 {
+				t.Fatalf("want exactly one introduction, got %q", output.String())
+			}
+		})
+	}
+}
+
+type acpWaitTemporaryError struct{}
+
+func (acpWaitTemporaryError) Error() string   { return "temporary network failure" }
+func (acpWaitTemporaryError) Timeout() bool   { return false }
+func (acpWaitTemporaryError) Temporary() bool { return true }
+
+func TestAcpWaitClassifiesTransientStatusErrors(t *testing.T) {
+	for _, err := range []error{
+		context.DeadlineExceeded, os.ErrDeadlineExceeded, syscall.ECONNRESET,
+		syscall.EAGAIN, syscall.EWOULDBLOCK, syscall.EINTR, acpWaitTemporaryError{},
+	} {
+		t.Run(err.Error(), func(t *testing.T) {
+			if !isTransientAcpStatusError(fmt.Errorf("status: %w", err)) {
+				t.Fatalf("%v was not classified as transient", err)
+			}
+		})
+	}
+	for _, err := range []error{io.EOF, os.ErrPermission, errors.New("unknown failure")} {
+		if isTransientAcpStatusError(err) {
+			t.Errorf("%v was classified as transient", err)
+		}
+	}
+}
+
+func TestAcpWaitSurvivesTransientStatusTimeout(t *testing.T) {
+	for _, timeoutRequest := range []int{0, 1} {
+		t.Run(fmt.Sprintf("timeout request %d", timeoutRequest), func(t *testing.T) {
+			polls := 0
+			status := func(string) (acpBridgeInfo, error) {
+				index := polls
+				polls++
+				if polls > timeoutRequest+3 {
+					t.Fatal("waiter polled after terminal status")
+				}
+				client, server := net.Pipe()
+				defer client.Close()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					defer server.Close()
+					_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+					request, err := readAcpWireFrame(bufio.NewReader(server))
+					if err != nil || request.Command != "status" {
+						t.Errorf("request = %+v, error = %v, want status only", request, err)
+						return
+					}
+					if index == timeoutRequest {
+						// Wait for the client's actual status deadline, then its close.
+						_, _ = io.Copy(io.Discard, server)
+						return
+					}
+					state := "running"
+					if index == timeoutRequest+2 {
+						state = "exited"
+					}
+					_ = writeAcpWireFrame(server, acpWireMessage{
+						Version: acpBridgeProtocolVersion, Type: "status",
+						Bridge: &acpBridgeInfo{State: state, Provider: "Test agent"},
+					})
+				}()
+				info, err := acpBridgeStatusFromConn(client)
+				_ = client.Close()
+				<-done
+				if index == timeoutRequest {
+					var netErr net.Error
+					if !errors.As(err, &netErr) || !netErr.Timeout() {
+						t.Fatalf("status error = %v, want timeout", err)
+					}
+				}
+				return info, err
+			}
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			if err := waitForAcpBridge("test", status, ticker.C, io.Discard); err != nil {
+				t.Fatalf("wait error = %v, want recovery and normal exit", err)
+			}
+			if polls != timeoutRequest+3 {
+				t.Fatalf("status requests = %d, waiter exited before recovery", polls)
+			}
+		})
+	}
 }

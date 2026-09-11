@@ -22,13 +22,6 @@ extension TerminalBackendTypePresentation on TerminalBackendType {
     TerminalBackendType.tmux => RemoteMuxBackend.tmux,
     TerminalBackendType.monkeyMux => RemoteMuxBackend.monkeyMux,
   };
-
-  /// Stable diagnostics value.
-  String get diagnosticsValue => switch (this) {
-    TerminalBackendType.direct => 'direct',
-    TerminalBackendType.tmux => 'tmux',
-    TerminalBackendType.monkeyMux => 'monkey_mux',
-  };
 }
 
 /// Capabilities exposed by a terminal backend.

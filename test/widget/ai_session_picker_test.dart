@@ -26,42 +26,11 @@ void main() {
     );
   });
 
-  group('buildAiSessionProviderEntries', () {
-    test('derives loading, failure, and loaded provider states', () {
-      const codexSession = ToolSessionInfo(
-        toolName: 'Codex',
-        sessionId: 'session-1',
-        summary: 'Fix the tmux menu refresh',
-      );
-
-      final entries = buildAiSessionProviderEntries(
-        orderedTools: const ['Claude Code', 'Codex', 'Gemini CLI'],
-        groupedSessions: const {
-          'Codex': <ToolSessionInfo>[codexSession],
-        },
-        attemptedTools: const ['Codex'],
-        failedTools: const ['Claude Code'],
-        isLoading: true,
-      );
-
-      expect(entries[0].hasFailure, isTrue);
-      expect(entries[0].statusLabel, 'Could not load recent sessions');
-      expect(entries[1].hasSessions, isTrue);
-      expect(entries[1].statusLabel, 'Recent sessions available');
-      expect(entries[2].isLoading, isTrue);
-      expect(entries[2].compactStatusLabel, 'loading');
-    });
-
+  group('AiSessionProviderEntry', () {
     test('keeps provider availability visible while refreshing', () {
       const entry = AiSessionProviderEntry(
         toolName: 'Codex',
-        sessions: <ToolSessionInfo>[
-          ToolSessionInfo(
-            toolName: 'Codex',
-            sessionId: 'session-1',
-            summary: 'Refresh in place',
-          ),
-        ],
+        hasSessions: true,
         wasAttempted: true,
         hasFailure: false,
         isLoading: true,

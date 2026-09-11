@@ -57,53 +57,27 @@ void main() {
       );
     });
 
-    test('uses platform IME state over stale inset geometry', () {
-      expect(
-        resolveTerminalSystemKeyboardVisible(
-          bottomInset: 300,
-          platformKeyboardVisible: null,
-          terminalInputConnectionVisible: false,
-          nativeComposerInputOwner: true,
-        ),
-        isTrue,
-      );
-      expect(
-        resolveTerminalSystemKeyboardVisible(
-          bottomInset: 300,
-          platformKeyboardVisible: false,
-          terminalInputConnectionVisible: true,
-          nativeComposerInputOwner: true,
-        ),
-        isFalse,
-      );
-      expect(
-        resolveTerminalSystemKeyboardVisible(
-          bottomInset: 300,
-          platformKeyboardVisible: null,
-          terminalInputConnectionVisible: false,
-          nativeComposerInputOwner: false,
-        ),
-        isFalse,
-      );
-      expect(
-        resolveTerminalSystemKeyboardVisible(
-          bottomInset: 300,
-          platformKeyboardVisible: true,
-          terminalInputConnectionVisible: false,
-          nativeComposerInputOwner: false,
-        ),
-        isTrue,
-      );
-      expect(
-        resolveTerminalSystemKeyboardVisible(
-          bottomInset: 0,
-          platformKeyboardVisible: true,
-          terminalInputConnectionVisible: true,
-          nativeComposerInputOwner: true,
-        ),
-        isFalse,
-      );
-    });
+    for (final (inset, platformVisible, inputVisible, nativeOwner, expected)
+        in <(double, bool?, bool, bool, bool)>[
+          (300, null, false, true, true),
+          (300, false, true, true, false),
+          (300, null, false, false, false),
+          (300, true, false, false, true),
+          (0, true, true, true, false),
+        ]) {
+      test('keyboard visibility: inset=$inset, platform=$platformVisible, '
+          'input=$inputVisible, native owner=$nativeOwner', () {
+        expect(
+          resolveTerminalSystemKeyboardVisible(
+            bottomInset: inset,
+            platformKeyboardVisible: platformVisible,
+            terminalInputConnectionVisible: inputVisible,
+            nativeComposerInputOwner: nativeOwner,
+          ),
+          expected,
+        );
+      });
+    }
 
     test('moves tmux controls to a sidebar only when width allows it', () {
       const breakpoint = tmuxSidebarExpandedWidth + tmuxSidebarMinTerminalWidth;
@@ -521,43 +495,25 @@ void main() {
       );
     });
 
-    test(
-      'terminal theme view-ready retries are bounded and skip native UI',
-      () {
+    for (final (nativeActive, currentRoute, attempt, expected)
+        in <(bool, bool, int, bool)>[
+          (false, true, 2, true),
+          (false, true, 3, false),
+          (true, true, 0, false),
+          (false, false, 0, false),
+        ]) {
+      test('theme retry: native=$nativeActive, current route=$currentRoute, '
+          'attempt=$attempt', () {
         expect(
           shouldRetryTerminalThemeWhenViewMounts(
-            nativeAgentActive: false,
-            routeIsCurrent: true,
-            attempt: 2,
+            nativeAgentActive: nativeActive,
+            routeIsCurrent: currentRoute,
+            attempt: attempt,
           ),
-          isTrue,
+          expected,
         );
-        expect(
-          shouldRetryTerminalThemeWhenViewMounts(
-            nativeAgentActive: false,
-            routeIsCurrent: true,
-            attempt: 3,
-          ),
-          isFalse,
-        );
-        expect(
-          shouldRetryTerminalThemeWhenViewMounts(
-            nativeAgentActive: true,
-            routeIsCurrent: true,
-            attempt: 0,
-          ),
-          isFalse,
-        );
-        expect(
-          shouldRetryTerminalThemeWhenViewMounts(
-            nativeAgentActive: false,
-            routeIsCurrent: false,
-            attempt: 0,
-          ),
-          isFalse,
-        );
-      },
-    );
+      });
+    }
 
     test('preserves tmux state after tmux is confirmed active', () {
       expect(
@@ -831,119 +787,69 @@ void main() {
       );
     });
 
-    test('reopens only an established lost MonkeyMux attach', () {
-      expect(
-        shouldReopenLostMonkeyMuxAttach(
-          backend: RemoteMuxBackend.monkeyMux,
-          attachEstablished: true,
-          hasForegroundClient: false,
-        ),
-        isTrue,
-      );
-      expect(
-        shouldReopenLostMonkeyMuxAttach(
-          backend: RemoteMuxBackend.monkeyMux,
-          attachEstablished: false,
-          hasForegroundClient: false,
-        ),
-        isFalse,
-      );
-      expect(
-        shouldReopenLostMonkeyMuxAttach(
-          backend: RemoteMuxBackend.tmux,
-          attachEstablished: true,
-          hasForegroundClient: false,
-        ),
-        isFalse,
-      );
-      expect(
-        shouldReopenLostMonkeyMuxAttach(
-          backend: RemoteMuxBackend.monkeyMux,
-          attachEstablished: true,
-          hasForegroundClient: true,
-        ),
-        isFalse,
-      );
-    });
+    for (final (backend, established, foreground, expected)
+        in <(RemoteMuxBackend, bool, bool, bool)>[
+          (RemoteMuxBackend.monkeyMux, true, false, true),
+          (RemoteMuxBackend.monkeyMux, false, false, false),
+          (RemoteMuxBackend.tmux, true, false, false),
+          (RemoteMuxBackend.monkeyMux, true, true, false),
+        ]) {
+      test('reopen attach: backend=$backend, established=$established, '
+          'foreground=$foreground', () {
+        expect(
+          shouldReopenLostMonkeyMuxAttach(
+            backend: backend,
+            attachEstablished: established,
+            hasForegroundClient: foreground,
+          ),
+          expected,
+        );
+      });
+    }
 
-    test('reattaches tmux window actions only when tmux lost foreground', () {
-      expect(
-        shouldReattachTmuxAfterWindowAction(
-          hasForegroundClient: true,
-          shellStatus: TerminalShellStatus.prompt,
-        ),
-        isFalse,
+    for (final (foreground, status, expected)
+        in <(bool, TerminalShellStatus?, bool)>[
+          (true, TerminalShellStatus.prompt, false),
+          (false, TerminalShellStatus.prompt, true),
+          (false, TerminalShellStatus.editingCommand, false),
+          (false, TerminalShellStatus.runningCommand, false),
+          (false, null, false),
+        ]) {
+      test(
+        'reattach after window action: foreground=$foreground, shell=$status',
+        () {
+          expect(
+            shouldReattachTmuxAfterWindowAction(
+              hasForegroundClient: foreground,
+              shellStatus: status,
+            ),
+            expected,
+          );
+        },
       );
-      expect(
-        shouldReattachTmuxAfterWindowAction(
-          hasForegroundClient: false,
-          shellStatus: TerminalShellStatus.prompt,
-        ),
-        isTrue,
-      );
-      expect(
-        shouldReattachTmuxAfterWindowAction(
-          hasForegroundClient: false,
-          shellStatus: TerminalShellStatus.editingCommand,
-        ),
-        isFalse,
-      );
-      expect(
-        shouldReattachTmuxAfterWindowAction(
-          hasForegroundClient: false,
-          shellStatus: TerminalShellStatus.runningCommand,
-        ),
-        isFalse,
-      );
-      expect(
-        shouldReattachTmuxAfterWindowAction(
-          hasForegroundClient: false,
-          shellStatus: null,
-        ),
-        isFalse,
-      );
-    });
+    }
 
-    test('reviews terminal command insertion at shell prompts', () {
-      expect(
-        shouldReviewTerminalCommandInsertion(
-          shellStatus: TerminalShellStatus.prompt,
-          isUsingAltBuffer: false,
-        ),
-        isTrue,
+    for (final (status, altBuffer, expected)
+        in <(TerminalShellStatus?, bool, bool)>[
+          (TerminalShellStatus.prompt, false, true),
+          (TerminalShellStatus.editingCommand, false, true),
+          (null, false, true),
+          (TerminalShellStatus.runningCommand, false, false),
+          (TerminalShellStatus.prompt, true, false),
+        ]) {
+      test(
+        'review command insertion: shell=$status, alt buffer=$altBuffer',
+        () {
+          expect(
+            shouldReviewTerminalCommandInsertion(
+              shellStatus: status,
+              isUsingAltBuffer: altBuffer,
+            ),
+            expected,
+          );
+        },
       );
-      expect(
-        shouldReviewTerminalCommandInsertion(
-          shellStatus: TerminalShellStatus.editingCommand,
-          isUsingAltBuffer: false,
-        ),
-        isTrue,
-      );
-      expect(
-        shouldReviewTerminalCommandInsertion(
-          shellStatus: null,
-          isUsingAltBuffer: false,
-        ),
-        isTrue,
-      );
-    });
-
-    test('suppresses terminal command insertion review in CLI contexts', () {
-      expect(
-        shouldReviewTerminalCommandInsertion(
-          shellStatus: TerminalShellStatus.runningCommand,
-          isUsingAltBuffer: false,
-        ),
-        isFalse,
-      );
-      expect(
-        shouldReviewTerminalCommandInsertion(
-          shellStatus: TerminalShellStatus.prompt,
-          isUsingAltBuffer: true,
-        ),
-        isFalse,
-      );
-    });
+    }
 
     test('identifies shell-like tmux foreground commands for completions', () {
       expect(isShellCompletionTmuxShellCommand('zsh'), isTrue);
@@ -960,86 +866,52 @@ void main() {
       expect(isShellCompletionTmuxShellCommand(null), isFalse);
     });
 
-    test('allows shell completion triggers inside active tmux alt buffer', () {
-      expect(
-        canTerminalOutputTriggerShellCompletion(
-          output: 'g',
-          isUsingAltBuffer: true,
-          isTmuxActive: true,
-          showsNativeSelectionOverlay: false,
-        ),
-        isTrue,
+    for (final (output, altBuffer, tmuxActive, selection, expected)
+        in <(String, bool, bool, bool, bool)>[
+          ('g', true, true, false, true),
+          ('g', true, false, false, false),
+          ('\r', true, true, false, false),
+        ]) {
+      test(
+        'completion trigger: output=${output.codeUnits}, alt buffer=$altBuffer, '
+        'tmux=$tmuxActive, selection=$selection',
+        () {
+          expect(
+            canTerminalOutputTriggerShellCompletion(
+              output: output,
+              isUsingAltBuffer: altBuffer,
+              isTmuxActive: tmuxActive,
+              showsNativeSelectionOverlay: selection,
+            ),
+            expected,
+          );
+        },
       );
-      expect(
-        canTerminalOutputTriggerShellCompletion(
-          output: 'g',
-          isUsingAltBuffer: true,
-          isTmuxActive: false,
-          showsNativeSelectionOverlay: false,
-        ),
-        isFalse,
-      );
-      expect(
-        canTerminalOutputTriggerShellCompletion(
-          output: '\r',
-          isUsingAltBuffer: true,
-          isTmuxActive: true,
-          showsNativeSelectionOverlay: false,
-        ),
-        isFalse,
-      );
-    });
+    }
 
-    test('allows completions only in shell prompt contexts', () {
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.prompt,
-          isTmuxActive: false,
-          tmuxCurrentCommand: null,
-        ),
-        isTrue,
+    for (final (status, tmuxActive, command, expected)
+        in <(TerminalShellStatus?, bool, String?, bool)>[
+          (TerminalShellStatus.prompt, false, null, true),
+          (TerminalShellStatus.editingCommand, false, null, true),
+          (TerminalShellStatus.runningCommand, false, null, false),
+          (TerminalShellStatus.runningCommand, true, 'zsh', true),
+          (TerminalShellStatus.prompt, true, 'codex', false),
+          (TerminalShellStatus.prompt, true, null, false),
+        ]) {
+      test(
+        'completion prompt: shell=$status, tmux=$tmuxActive, command=$command',
+        () {
+          expect(
+            isShellCompletionPromptContext(
+              shellStatus: status,
+              isTmuxActive: tmuxActive,
+              tmuxCurrentCommand: command,
+            ),
+            expected,
+          );
+        },
       );
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.editingCommand,
-          isTmuxActive: false,
-          tmuxCurrentCommand: null,
-        ),
-        isTrue,
-      );
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.runningCommand,
-          isTmuxActive: false,
-          tmuxCurrentCommand: null,
-        ),
-        isFalse,
-      );
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.runningCommand,
-          isTmuxActive: true,
-          tmuxCurrentCommand: 'zsh',
-        ),
-        isTrue,
-      );
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.prompt,
-          isTmuxActive: true,
-          tmuxCurrentCommand: 'codex',
-        ),
-        isFalse,
-      );
-      expect(
-        isShellCompletionPromptContext(
-          shellStatus: TerminalShellStatus.prompt,
-          isTmuxActive: true,
-          tmuxCurrentCommand: null,
-        ),
-        isFalse,
-      );
-    });
+    }
 
     test('applies printable completion input before remote echo arrives', () {
       final snapshot = applyShellCompletionOutputToSnapshot(

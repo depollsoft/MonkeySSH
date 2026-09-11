@@ -279,6 +279,41 @@ void main() {
       expect(find.text('Deleted folder "Deploy"'), findsOneWidget);
     });
 
+    for (final fails in [false, true]) {
+      testWidgets(
+        'full editor handles ${fails ? 'failed' : 'missing'} snippet',
+        (tester) async {
+          final repository = _MockSnippetRepository();
+          when(repository.getAllFolders).thenAnswer((_) async => []);
+          when(() => repository.getById(99)).thenAnswer((_) async {
+            if (fails) throw StateError('load failed');
+            return null;
+          });
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                snippetRepositoryProvider.overrideWithValue(repository),
+              ],
+              child: const MaterialApp(home: SnippetEditScreen(snippetId: 99)),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(find.byType(CircularProgressIndicator), findsNothing);
+          expect(find.byType(TextFormField), findsNothing);
+          expect(
+            find.text(
+              fails
+                  ? 'Could not load snippet. Try again.'
+                  : 'Snippet not found.',
+            ),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
     testWidgets('full editor updates variable preview as command changes', (
       tester,
     ) async {

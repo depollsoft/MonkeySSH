@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func resetPiMetadataForTest(t *testing.T) {
+	t.Helper()
+	originalOpenFiles := processOpenFilePathsForMetadata
+	originalProcessStart := processStartedAtForMetadata
+	t.Cleanup(func() {
+		processOpenFilePathsForMetadata = originalOpenFiles
+		processStartedAtForMetadata = originalProcessStart
+	})
+	processOpenFilePathsForMetadata = func(int) []string { return nil }
+}
+
 func TestMonkeyMuxAgentLaunchCommandWrapsPiWithCurrentExecutable(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -22,8 +33,8 @@ func TestMonkeyMuxAgentLaunchCommandWrapsPiWithCurrentExecutable(t *testing.T) {
 	if got, want := monkeyMuxAgentLaunchCommand("pi --session-dir sessions"), invocation+" pi-agent --session-dir sessions"; got != want {
 		t.Fatalf("Pi create command = %q, want %q", got, want)
 	}
-	if got := monkeyMuxAgentLaunchCommand("opencode"); got != "opencode" {
-		t.Fatalf("non-Pi command was rewritten: %q", got)
+	if got := monkeyMuxAgentLaunchCommand("agy"); got != "agy" {
+		t.Fatalf("unsupported command was rewritten: %q", got)
 	}
 }
 
@@ -108,13 +119,7 @@ func writePiTestRelocatedSession(
 // parentSession pointing at the pane's working directory. The pane must still
 // resume that session after a helper upgrade rather than launching a fresh Pi.
 func TestDiscoverPiSessionsResumesSessionRelocatedToWorktree(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -171,13 +176,7 @@ func TestDiscoverPiSessionsResumesSessionRelocatedToWorktree(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsUsesPublishedTitleWhenSessionCreationIsDelayed(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -219,13 +218,7 @@ func TestDiscoverPiSessionsUsesPublishedTitleWhenSessionCreationIsDelayed(t *tes
 }
 
 func TestDiscoverPiSessionsMatchesTitleWithMoreThan32Candidates(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -289,13 +282,7 @@ func TestPiSessionOriginResolvesChainAndFileNameTimestamp(t *testing.T) {
 // file on disk, so the pane's chain has several links that all resolve to the
 // same origin. The pane must resume the leaf it is actually on.
 func TestDiscoverPiSessionsResumesLeafOfRelocatedThenRotatedChain(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -330,13 +317,7 @@ func TestDiscoverPiSessionsResumesLeafOfRelocatedThenRotatedChain(t *testing.T) 
 // Forks share a parent without superseding each other, so a branched history
 // has no single leaf and must decline rather than guess a conversation.
 func TestDiscoverPiSessionsDeclinesForkedChainBranches(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -591,13 +572,7 @@ func TestDiscoverPiSessionsDeclinesAmbiguousCwdFallback(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsUsesProcessStartWhenPiClosesSessionFile(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -653,89 +628,41 @@ func TestPiSessionsCreatedForProcessStartDeclinesAmbiguousMatches(t *testing.T) 
 	}
 }
 
-func TestDiscoverPiSessionsDeclinesInitialSessionAfterRotation(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
-
-	root := t.TempDir()
-	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
-	project := filepath.Join(root, "project")
-	started := time.Now().Add(-time.Hour).UTC()
-	writePiTestSessionTimes(
-		t,
-		filepath.Join(root, "project", "initial.jsonl"),
-		"initial-session",
-		project,
-		started.Add(500*time.Millisecond),
-		started.Add(10*time.Minute),
-	)
-	writePiTestSessionTimes(
-		t,
-		filepath.Join(root, "project", "rotated.jsonl"),
-		"rotated-session",
-		project,
-		started.Add(20*time.Minute),
-		started.Add(30*time.Minute),
-	)
-	processStartedAtForMetadata = func(int) time.Time { return started }
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {pid: 200, ppid: 100, comm: "pi", args: "pi"},
-	}
-	restore := &serverRestore{Windows: []restoreWindowState{{
-		PanePid: 100, CurrentCommand: "pi", AgentTool: "pi", Cwd: project,
-	}}}
-
-	if got := discoverPiSessions(restore, processes, map[int]struct{}{100: {}}); len(got) != 0 {
-		t.Fatalf("rotated Pi session match = %#v, want fresh fallback", got)
-	}
-}
-
-func TestDiscoverPiSessionsDeclinesInitialSessionAfterResume(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
-
-	root := t.TempDir()
-	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
-	project := filepath.Join(root, "project")
-	started := time.Now().Add(-time.Hour).UTC()
-	writePiTestSessionTimes(
-		t,
-		filepath.Join(root, "project", "initial.jsonl"),
-		"initial-session",
-		project,
-		started.Add(500*time.Millisecond),
-		started.Add(5*time.Minute),
-	)
-	writePiTestSessionTimes(
-		t,
-		filepath.Join(root, "project", "resumed.jsonl"),
-		"resumed-session",
-		project,
-		started.Add(-time.Hour),
-		started.Add(30*time.Minute),
-	)
-	processStartedAtForMetadata = func(int) time.Time { return started }
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {pid: 200, ppid: 100, comm: "pi", args: "pi"},
-	}
-	restore := &serverRestore{Windows: []restoreWindowState{{
-		PanePid: 100, CurrentCommand: "pi", AgentTool: "pi", Cwd: project,
-	}}}
-
-	if got := discoverPiSessions(restore, processes, map[int]struct{}{100: {}}); len(got) != 0 {
-		t.Fatalf("resumed Pi session match = %#v, want fresh fallback rather than initial session", got)
+func TestDiscoverPiSessionsDeclinesInitialSessionAfterChange(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		initialModified time.Duration
+		otherFilename   string
+		otherID         string
+		otherCreated    time.Duration
+		otherModified   time.Duration
+		failure         string
+	}{
+		{"Rotation", 10 * time.Minute, "rotated.jsonl", "rotated-session", 20 * time.Minute, 30 * time.Minute, "rotated Pi session match = %#v, want fresh fallback"},
+		{"Resume", 5 * time.Minute, "resumed.jsonl", "resumed-session", -time.Hour, 30 * time.Minute, "resumed Pi session match = %#v, want fresh fallback rather than initial session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetPiMetadataForTest(t)
+			root := t.TempDir()
+			t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
+			project := filepath.Join(root, "project")
+			started := time.Now().Add(-time.Hour).UTC()
+			writePiTestSessionTimes(t, filepath.Join(root, "project", "initial.jsonl"),
+				"initial-session", project, started.Add(500*time.Millisecond), started.Add(test.initialModified))
+			writePiTestSessionTimes(t, filepath.Join(root, "project", test.otherFilename),
+				test.otherID, project, started.Add(test.otherCreated), started.Add(test.otherModified))
+			processStartedAtForMetadata = func(int) time.Time { return started }
+			processes := map[int]processInfo{
+				100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
+				200: {pid: 200, ppid: 100, comm: "pi", args: "pi"},
+			}
+			restore := &serverRestore{Windows: []restoreWindowState{{
+				PanePid: 100, CurrentCommand: "pi", AgentTool: "pi", Cwd: project,
+			}}}
+			if got := discoverPiSessions(restore, processes, map[int]struct{}{100: {}}); len(got) != 0 {
+				t.Fatalf(test.failure, got)
+			}
+		})
 	}
 }
 
@@ -780,13 +707,7 @@ func TestDiscoverPiSessionsPrefersExactExtensionIdentity(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsRestoresInteractiveResumeIntoWorktree(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -848,13 +769,7 @@ func TestDiscoverPiSessionsRestoresInteractiveResumeIntoWorktree(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsAssignsTwoKnownNodeProcessesMutually(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -982,13 +897,7 @@ func TestDiscoverPiSessionsUsesLiveOpenFileAndSkipsNestedPiProcess(t *testing.T)
 }
 
 func TestDiscoverPiSessionsHonorsProcessSessionDir(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	project := t.TempDir()
 	custom := filepath.Join(project, ".sessions")
 	now := time.Now()
@@ -1008,7 +917,7 @@ func TestDiscoverPiSessionsHonorsProcessSessionDir(t *testing.T) {
 	}}}
 
 	got := discoverPiSessions(restore, processes, map[int]struct{}{100: {}})[0]
-	if want := filepath.Join(normalizedPiWorkingDirectory(project), ".sessions"); got.sessionID != "custom-session" || got.sessionDir != want {
+	if want := filepath.Join(normalizedWorkingDirectory(project), ".sessions"); got.sessionID != "custom-session" || got.sessionDir != want {
 		t.Fatalf("custom-dir Pi session = %#v, want custom session in %q", got, want)
 	}
 	options := createWindowOptionsForRestore(restoreWindowState{
@@ -1038,7 +947,7 @@ func TestDiscoverPiSessionsReservesExplicitProcessSession(t *testing.T) {
 		PanePid: 100, CurrentCommand: "pi", AgentTool: "pi", Cwd: project,
 	}}}
 	got := discoverPiSessions(restore, processes, map[int]struct{}{100: {}})[0]
-	if want := filepath.Join(normalizedPiWorkingDirectory(project), "sessions"); got.sessionID != "exact-session" || got.sessionDir != want || got.sessionPath != filepath.Join(want, "exact.jsonl") {
+	if want := filepath.Join(normalizedWorkingDirectory(project), "sessions"); got.sessionID != "exact-session" || got.sessionDir != want || got.sessionPath != filepath.Join(want, "exact.jsonl") {
 		t.Fatalf("explicit Pi session = %#v, want exact-session in %q", got, want)
 	}
 
@@ -1067,7 +976,7 @@ func TestPiSessionRootUsesProjectThenGlobalSettings(t *testing.T) {
 	if err := os.WriteFile(projectSettings, []byte(`{"sessionDir":".project-sessions"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := piSessionRootForWorkingDirectory(project), filepath.Join(normalizedPiWorkingDirectory(project), ".project-sessions"); got != want {
+	if got, want := piSessionRootForWorkingDirectory(project), filepath.Join(normalizedWorkingDirectory(project), ".project-sessions"); got != want {
 		t.Fatalf("project sessionDir = %q, want %q", got, want)
 	}
 	if err := os.Remove(projectSettings); err != nil {
@@ -1086,7 +995,7 @@ func TestReadPiSessionEntrySkipsLeadingNonHeaderLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry, ok := readPiSessionEntry(path)
-	if !ok || entry.sessionID != "session-id" || entry.cwd != normalizedPiWorkingDirectory(project) {
+	if !ok || entry.sessionID != "session-id" || entry.cwd != normalizedWorkingDirectory(project) {
 		t.Fatalf("Pi session entry = %#v, %v", entry, ok)
 	}
 }
@@ -1132,13 +1041,7 @@ func TestPiLatestSessionNameUsesLateMetadataAndSkipsOversizedRecords(t *testing.
 }
 
 func TestPiSessionIdentitySurvivesSecondUpgradeAndRejectsRotation(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
@@ -1202,13 +1105,7 @@ func TestPiSessionIdentitySurvivesSecondUpgradeAndRejectsRotation(t *testing.T) 
 }
 
 func TestDiscoverPiSessionsRejectsPersistedPathWithoutCurrentProcessWrite(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
 	project := filepath.Join(root, "project")
@@ -1236,13 +1133,7 @@ func TestDiscoverPiSessionsRejectsPersistedPathWithoutCurrentProcessWrite(t *tes
 }
 
 func TestDiscoverPiSessionsUsesWindowActivityForUnnamedSameCwdSessions(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
@@ -1333,13 +1224,7 @@ func TestPiWindowActivityCorrelationRejectsAmbiguity(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsUsesSingleCurrentCwdFallback(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
 	project := filepath.Join(root, "project")
@@ -1362,13 +1247,7 @@ func TestDiscoverPiSessionsUsesSingleCurrentCwdFallback(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsActivityDeclinesLaterUnownedSession(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
 	project := filepath.Join(root, "project")
@@ -1408,13 +1287,7 @@ func TestPiActivityAssignmentsRejectPartialOverlap(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsDoesNotCollapseMultiPaneCwdFallback(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
 	project := filepath.Join(root, "project")
@@ -1442,13 +1315,7 @@ func TestDiscoverPiSessionsDoesNotCollapseMultiPaneCwdFallback(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsIgnoresUnconfirmedShellPane(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processStartedAtForMetadata = originalProcessStart
-	})
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
+	resetPiMetadataForTest(t)
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", root)
 	project := filepath.Join(root, "project")

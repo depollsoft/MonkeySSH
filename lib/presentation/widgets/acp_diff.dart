@@ -52,16 +52,12 @@ class AcpDiffView extends StatefulWidget {
   const AcpDiffView({
     required this.diff,
     super.key,
-    this.showPathHeader = true,
     this.initialLineCap = kAcpDiffInitialLineCap,
     this.maxSourceChars = kAcpDiffMaxSourceChars,
   });
 
   /// The diff to render.
   final AcpDiff diff;
-
-  /// Whether to show the file path header above the diff body.
-  final bool showPathHeader;
 
   /// Number of lines shown before the show-more control appears.
   final int initialLineCap;
@@ -192,25 +188,24 @@ class _AcpDiffViewState extends State<AcpDiffView> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (widget.showPathHeader)
-                Container(
-                  width: double.infinity,
-                  color: scheme.surfaceContainerHighest,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: FluttyTheme.spacingSm,
-                    vertical: 6,
-                  ),
-                  child: Text(
-                    widget.diff.path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AcpChatTypography.monoStyleOf(context).copyWith(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: scheme.onSurface,
-                    ),
+              Container(
+                width: double.infinity,
+                color: scheme.surfaceContainerHighest,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: FluttyTheme.spacingSm,
+                  vertical: 6,
+                ),
+                child: Text(
+                  widget.diff.path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AcpChatTypography.monoStyleOf(context).copyWith(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface,
                   ),
                 ),
+              ),
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: IntrinsicWidth(

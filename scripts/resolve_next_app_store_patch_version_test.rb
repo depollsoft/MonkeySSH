@@ -50,16 +50,12 @@ class FakeAppStoreApp
   end
 
   def get_in_progress_review_submission(platform:, includes: nil)
-    platform
-    includes
     return if @submission&.canceled?
 
     @submission
   end
 
   def get_app_store_versions(filter:, includes:)
-    filter
-    includes
     versions
   end
 end
@@ -72,9 +68,9 @@ class AppStorePatchVersionTest < Minitest::Test
         '0.2.0',
         [
           version('0.2.0', 'READY_FOR_DISTRIBUTION'),
-          version('0.2.2', 'REPLACED_WITH_NEW_VERSION'),
-        ],
-      ),
+          version('0.2.2', 'REPLACED_WITH_NEW_VERSION')
+        ]
+      )
     )
   end
 
@@ -86,9 +82,31 @@ class AppStorePatchVersionTest < Minitest::Test
         [
           version('0.1.9', 'REJECTED'),
           version('0.2.0', 'READY_FOR_DISTRIBUTION'),
-          version('0.2.1', 'PREPARE_FOR_SUBMISSION'),
-        ],
-      ),
+          version('0.2.1', 'PREPARE_FOR_SUBMISSION')
+        ]
+      )
+    )
+  end
+
+  def test_ignores_a_stale_editable_patch_below_a_used_patch
+    %w[READY_FOR_DISTRIBUTION REPLACED_WITH_NEW_VERSION IN_REVIEW].each do |state|
+      entries = [
+        version('0.2.1', 'REJECTED'),
+        version('0.2.3', state)
+      ]
+      [entries, entries.reverse].each do |versions|
+        assert_equal('0.2.4', resolve('0.2.0', versions), state)
+      end
+    end
+  end
+
+  def test_stale_editable_patch_does_not_override_the_base_floor
+    assert_equal(
+      '0.2.5',
+      resolve(
+        '0.2.5',
+        [version('0.2.1', 'REJECTED'), version('0.2.3', 'READY_FOR_DISTRIBUTION')]
+      )
     )
   end
 
@@ -99,9 +117,9 @@ class AppStorePatchVersionTest < Minitest::Test
         '0.2.0',
         [
           version('0.2.0', 'READY_FOR_DISTRIBUTION'),
-          version('0.2.1', 'IN_REVIEW'),
-        ],
-      ),
+          version('0.2.1', 'IN_REVIEW')
+        ]
+      )
     )
   end
 
@@ -112,9 +130,9 @@ class AppStorePatchVersionTest < Minitest::Test
         '0.2.0',
         [
           version('0.2.0', 'READY_FOR_DISTRIBUTION'),
-          version('0.2.1', 'WAITING_FOR_REVIEW'),
-        ],
-      ),
+          version('0.2.1', 'WAITING_FOR_REVIEW')
+        ]
+      )
     )
   end
 
@@ -123,8 +141,8 @@ class AppStorePatchVersionTest < Minitest::Test
       '0.2.5',
       resolve(
         '0.2.5',
-        [version('0.2.0', 'READY_FOR_DISTRIBUTION')],
-      ),
+        [version('0.2.0', 'READY_FOR_DISTRIBUTION')]
+      )
     )
   end
 
@@ -133,8 +151,8 @@ class AppStorePatchVersionTest < Minitest::Test
       '0.3.0',
       resolve(
         '0.3.0',
-        [version('0.2.9', 'READY_FOR_DISTRIBUTION')],
-      ),
+        [version('0.2.9', 'READY_FOR_DISTRIBUTION')]
+      )
     )
   end
 
@@ -145,9 +163,9 @@ class AppStorePatchVersionTest < Minitest::Test
         '0.2.0',
         [
           version('0.1.9', 'REJECTED'),
-          version('0.2.0', 'READY_FOR_DISTRIBUTION'),
-        ],
-      ),
+          version('0.2.0', 'READY_FOR_DISTRIBUTION')
+        ]
+      )
     )
   end
 
@@ -155,7 +173,7 @@ class AppStorePatchVersionTest < Minitest::Test
     error = assert_raises(AppStorePatchVersion::ResolutionError) do
       resolve(
         '0.2.0',
-        [version('0.3.0', 'PREPARE_FOR_SUBMISSION')],
+        [version('0.3.0', 'PREPARE_FOR_SUBMISSION')]
       )
     end
 
@@ -166,7 +184,7 @@ class AppStorePatchVersionTest < Minitest::Test
     error = assert_raises(AppStorePatchVersion::ResolutionError) do
       resolve(
         '0.2.0',
-        [version('0.3.0', 'WAITING_FOR_REVIEW')],
+        [version('0.3.0', 'WAITING_FOR_REVIEW')]
       )
     end
 
@@ -185,8 +203,8 @@ class AppStorePatchVersionTest < Minitest::Test
       resolve(
         '0.2.0',
         [version('0.2.1', 'READY_FOR_DISTRIBUTION')],
-        requested_version: '0.4.7',
-      ),
+        requested_version: '0.4.7'
+      )
     )
   end
 
@@ -196,8 +214,8 @@ class AppStorePatchVersionTest < Minitest::Test
       resolve(
         '0.2.0',
         [version('0.2.1', 'WAITING_FOR_REVIEW')],
-        requested_version: '0.2.1',
-      ),
+        requested_version: '0.2.1'
+      )
     )
   end
 
@@ -206,7 +224,7 @@ class AppStorePatchVersionTest < Minitest::Test
       resolve(
         '0.2.0',
         [version('0.2.1', 'READY_FOR_DISTRIBUTION')],
-        requested_version: '0.2.1',
+        requested_version: '0.2.1'
       )
     end
 
@@ -218,7 +236,7 @@ class AppStorePatchVersionTest < Minitest::Test
       resolve(
         '0.2.0',
         [version('0.3.0', 'READY_FOR_DISTRIBUTION')],
-        requested_version: '0.2.9',
+        requested_version: '0.2.9'
       )
     end
 
@@ -240,13 +258,13 @@ class AppStorePatchVersionTest < Minitest::Test
     submission = FakeReviewSubmission.new(version: reviewed)
     app = FakeAppStoreApp.new(
       versions: [reviewed],
-      submission: submission,
+      submission: submission
     )
 
     result = prepare(
       app: app,
       versions: [reviewed],
-      resolved_version: '0.2.2',
+      resolved_version: '0.2.2'
     )
 
     assert_equal(:prepared, result)
@@ -260,13 +278,13 @@ class AppStorePatchVersionTest < Minitest::Test
     submission = FakeReviewSubmission.new(version: reviewed)
     app = FakeAppStoreApp.new(
       versions: [reviewed],
-      submission: submission,
+      submission: submission
     )
 
     result = prepare(
       app: app,
       versions: [reviewed],
-      resolved_version: '0.2.1',
+      resolved_version: '0.2.1'
     )
 
     assert_equal(:prepared, result)
@@ -288,7 +306,7 @@ class AppStorePatchVersionTest < Minitest::Test
       creator: lambda do |_app_id, version_string, _platform|
         created = fake_version(version_string, 'PREPARE_FOR_SUBMISSION')
         app.versions << created
-      end,
+      end
     )
 
     assert_equal(:prepared, result)
@@ -302,7 +320,7 @@ class AppStorePatchVersionTest < Minitest::Test
     result = prepare(
       app: app,
       versions: [editable],
-      resolved_version: '0.4.0',
+      resolved_version: '0.4.0'
     )
 
     assert_equal(:prepared, result)
@@ -313,11 +331,11 @@ class AppStorePatchVersionTest < Minitest::Test
     reviewed = fake_version('0.2.1', 'WAITING_FOR_REVIEW')
     submission = FakeReviewSubmission.new(
       version: reviewed,
-      unlock_on_cancel: false,
+      unlock_on_cancel: false
     )
     app = FakeAppStoreApp.new(
       versions: [reviewed],
-      submission: submission,
+      submission: submission
     )
     ticks = [0, 2]
 
@@ -327,7 +345,7 @@ class AppStorePatchVersionTest < Minitest::Test
         versions: [reviewed],
         resolved_version: '0.2.2',
         review_timeout: 1,
-        clock: -> { ticks.shift || 2 },
+        clock: -> { ticks.shift || 2 }
       )
     end
 
@@ -340,7 +358,7 @@ class AppStorePatchVersionTest < Minitest::Test
     AppStorePatchVersion.resolve(
       base_version: base_version,
       app_store_versions: versions,
-      requested_version: requested_version,
+      requested_version: requested_version
     )
   end
 
@@ -352,7 +370,7 @@ class AppStorePatchVersionTest < Minitest::Test
     FakeAppStoreVersion.new(
       id: "version-#{value}",
       version_string: value,
-      state: state,
+      state: state
     )
   end
 
@@ -380,7 +398,7 @@ class AppStorePatchVersionTest < Minitest::Test
       version_preparation_timeout_seconds: 10,
       clock: clock,
       sleeper: ->(_seconds) {},
-      logger: ->(_message) {},
+      logger: ->(_message) {}
     )
   end
 end

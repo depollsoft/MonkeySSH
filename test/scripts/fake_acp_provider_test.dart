@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_json.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
@@ -87,8 +88,7 @@ void main() {
     expect((await client.listSessions()).sessions.single.sessionId, sessionId);
 
     final permissionFuture = requests
-        .where((request) => request is AcpPermissionServerRequest)
-        .cast<AcpPermissionServerRequest>()
+        .where((request) => request.method == 'session/request_permission')
         .first;
     final imageFuture = updates.firstWhere(
       (value) =>
@@ -106,9 +106,9 @@ void main() {
     );
     final permission = await permissionFuture;
     expect(
-      permission.permission.options.map(
-        (option) => (option.id, option.name, option.kind.value),
-      ),
+      AcpPermissionRequest.fromJson(
+        AcpJson.object(permission.params)!,
+      ).options.map((option) => (option.id, option.name, option.kind.value)),
       [
         ('allow-once', 'Allow once', 'allow_once'),
         ('allow-always', 'Always allow', 'allow_always'),
@@ -116,7 +116,9 @@ void main() {
         ('reject-always', 'Always reject', 'reject_always'),
       ],
     );
-    await permission.select('allow-once');
+    await permission.respond({
+      'outcome': const AcpSelectedPermissionOutcome('allow-once').toJson(),
+    });
     expect((await prompt).stopReason, AcpStopReason.endTurn);
 
     final image =

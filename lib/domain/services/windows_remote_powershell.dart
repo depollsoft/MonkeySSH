@@ -18,6 +18,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 /// Encodes [script] for `powershell.exe -EncodedCommand`.
@@ -35,14 +36,54 @@ String encodePowerShellCommand(String script) {
   return base64.encode(bytes);
 }
 
+const _windowsEncodedCommandPrefix =
+    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+    '-EncodedCommand ';
+
 /// Wraps a PowerShell [script] into a remote command that runs it via
 /// `powershell -EncodedCommand`.
 ///
 /// The result is safe to hand to a plain SSH exec channel or the MonkeyMux
 /// control channel on a Windows host without any further quoting.
 String buildWindowsPowerShellCommand(String script) =>
-    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass '
-    '-EncodedCommand ${encodePowerShellCommand(script)}';
+    '$_windowsEncodedCommandPrefix${encodePowerShellCommand(script)}';
+
+/// Compresses large management scripts to fit Windows OpenSSH command lines.
+///
+/// Unlike UTF-16 EncodedCommand (which expands scripts by roughly 8/3), the
+/// payload is gzip-compressed UTF-8. The fixed ASCII bootstrap contains only a
+/// base64 literal, so it is safe through both cmd.exe and PowerShell. Keep small
+/// scripts in the usual form to avoid unnecessary decompression.
+///
+/// Set [plainTextOutput] for streamed installer output. Windows PowerShell 5.1
+/// serializes stderr as CLIXML with EncodedCommand even with OutputFormat Text,
+/// so installers must use the Command bootstrap even for small scripts.
+String buildCompactWindowsPowerShellCommand(
+  String script, {
+  bool plainTextOutput = false,
+}) {
+  // Dart string length counts UTF-16 code units: two bytes each, with base64
+  // rounded up to groups of three bytes. Avoid encoding an oversized command
+  // just to discard it (and skip the calculation for text-only installers).
+  if (!plainTextOutput &&
+      _windowsEncodedCommandPrefix.length + ((script.length * 2 + 2) ~/ 3) * 4 <
+          7500) {
+    return buildWindowsPowerShellCommand(script);
+  }
+  final payload = base64.encode(
+    GZipCodec(level: 9).encode(utf8.encode(script)),
+  );
+  // No variable expansion or backticks in the bootstrap: it must survive an
+  // outer PowerShell shell as well as cmd.exe. ::new is available in PS 5.1.
+  // These streams own only memory and die with the short-lived probe process.
+  // Generated PowerShell intentionally joins adjacent tokens.
+  return 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+      // ignore: missing_whitespace_between_adjacent_strings
+      '-OutputFormat Text -Command "& ([scriptblock]::Create([IO.StreamReader]::new('
+      '[IO.Compression.GZipStream]::new([IO.MemoryStream]::new('
+      '[Convert]::FromBase64String(\'$payload\')),'
+      '[IO.Compression.CompressionMode]::Decompress)).ReadToEnd()))"';
+}
 
 /// Quotes [value] as a single-quoted PowerShell string literal.
 ///
@@ -106,6 +147,15 @@ String powerShellUtf8OutputScript(String body) =>
 /// the caller's stdout, and the preferences are re-asserted afterwards in case a
 /// profile changed them.
 const String powerShellProfilePathPreamble =
+    // Module auto-loading while evaluating profiles can emit CLIXML progress
+    // before the preferences at the end of this preamble take effect.
+    r"$ProgressPreference = 'SilentlyContinue'; "
+    // SSH servers can retain an old environment after an installer adds to
+    // User PATH. Re-read it so verification works on the existing connection.
+    r"foreach ($__flEntry in ([Environment]::GetEnvironmentVariable('Path','User') -split ';')) { "
+    r'if (![string]::IsNullOrWhiteSpace($__flEntry)) { '
+    r'$__flEntry=[Environment]::ExpandEnvironmentVariables($__flEntry); '
+    r"if (($env:Path -split ';') -notcontains $__flEntry) {$env:Path+=';'+$__flEntry} } }; "
     r'$__flProfilePaths = @($PROFILE.AllUsersAllHosts, '
     r'$PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, '
     r'$PROFILE.CurrentUserCurrentHost) | Where-Object { $_ } | '

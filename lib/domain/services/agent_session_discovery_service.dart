@@ -11,7 +11,9 @@ import '../models/tmux_state.dart';
 import 'acp_client.dart';
 import 'acp_json_rpc_connection.dart';
 import 'acp_ssh_exec_transport.dart';
+import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
+import 'remote_file_service.dart' show shellEscapePosix;
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'terminal_connection_backend_service.dart';
@@ -35,7 +37,6 @@ const _profileSourcingPrefix =
     'esac; '
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 const _remoteFileSnapshotBatchSize = 40;
-const _geminiSessionMetadataMaxBytes = 64 * 1024;
 const _grokSessionMetadataMaxBytes = 64 * 1024;
 const _openCodeStorageSessionMetadataMaxBytes = 64 * 1024;
 const _piSessionLabelExtractorScript = r'''
@@ -311,10 +312,13 @@ String? _sanitizeSessionSummary(
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) return null;
 
-  final unquoted = trimmed
-      .replaceAll(RegExp(r"""^["'`]+|["'`]+$"""), '')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
+  var unquoted = trimmed.replaceAll(RegExp(r'\s+'), ' ').trim();
+  // Only remove enclosing pairs; a quote at one edge may belong to the title.
+  while (unquoted.length >= 2 &&
+      (unquoted[0] == '"' || unquoted[0] == "'" || unquoted[0] == '`') &&
+      unquoted.endsWith(unquoted[0])) {
+    unquoted = unquoted.substring(1, unquoted.length - 1).trim();
+  }
   if (unquoted.isEmpty) return null;
 
   final lowered = unquoted.toLowerCase();
@@ -331,7 +335,7 @@ String? _sanitizeSessionSummary(
   }
 
   final strippedSeparators = unquoted.replaceAll(
-    RegExp(r'[\s\-_./\\[\](){}:;,*"`~]+'),
+    RegExp(r'''[\s\-_./\\[\](){}:;,*"'`~]+'''),
     '',
   );
   if (strippedSeparators.isEmpty) return null;
@@ -504,6 +508,33 @@ int _calculateDiscoveryScanLimit(
   if (scaledLimit > maximum) return maximum;
   return scaledLimit;
 }
+
+Iterable<String> _nonEmptyLines(String output) => output
+    .trim()
+    .split('\n')
+    .map((line) => line.trim())
+    .where((line) => line.isNotEmpty);
+
+int _sessionScanLimit(
+  int max, {
+  required bool previewOnly,
+  int previewMultiplier = 8,
+  int previewMinimum = 24,
+  int previewMaximum = 40,
+  int multiplier = 10,
+  int minimum = 60,
+  int maximum = 120,
+}) => _calculateDiscoveryScanLimit(
+  max,
+  multiplier: previewOnly ? previewMultiplier : multiplier,
+  minimum: previewOnly ? previewMinimum : minimum,
+  maximum: previewOnly ? previewMaximum : maximum,
+);
+
+int _sessionMetadataReadLimit(int max, {required bool previewOnly}) =>
+    previewOnly
+    ? _calculateDiscoveryScanLimit(max, multiplier: 4, minimum: 6, maximum: 12)
+    : calculateRecentSessionMetadataReadLimit(max);
 
 /// Parses Copilot CLI workspace metadata from `workspace.yaml`.
 ({String? summary, String? workingDirectory, DateTime? updatedAt})
@@ -1045,100 +1076,6 @@ _parsePartialAntigravitySessionMetadata(String raw) {
   );
 }
 
-/// Parses Gemini session metadata from a saved chat JSON file.
-@visibleForTesting
-({
-  String? sessionId,
-  String? summary,
-  String? workingDirectory,
-  DateTime? updatedAt,
-  bool isSubagent,
-  bool parsedAny,
-})
-parseGeminiSessionMetadata(
-  String raw, {
-  String? activeWorkingDirectory,
-  String? fallbackWorkingDirectory,
-}) {
-  final decoded = _decodeJsonOrJsonlObject(raw);
-  if (decoded == null) {
-    return _parsePartialGeminiSessionMetadata(
-      raw,
-      activeWorkingDirectory: activeWorkingDirectory,
-      fallbackWorkingDirectory: fallbackWorkingDirectory,
-    );
-  }
-
-  final storedSummary = _readStringField(decoded, 'summary');
-  final summary = (storedSummary?.trim().isNotEmpty ?? false)
-      ? _summarizeSessionText(storedSummary!)
-      : _extractGeminiUserSummary(_readListField(decoded, 'messages'));
-  final directories = _readListField(decoded, 'directories');
-  final resolvedWorkingDirectory =
-      _resolveGeminiWorkingDirectory(
-        directories,
-        activeWorkingDirectory: activeWorkingDirectory,
-      ) ??
-      fallbackWorkingDirectory;
-
-  return (
-    sessionId: _readStringField(decoded, 'sessionId'),
-    summary: summary,
-    workingDirectory: resolvedWorkingDirectory,
-    updatedAt:
-        _parseDateTimeValue(decoded['lastUpdated']) ??
-        _parseDateTimeValue(decoded['startTime']),
-    isSubagent: _readStringField(decoded, 'kind') == 'subagent',
-    parsedAny: true,
-  );
-}
-
-({
-  String? sessionId,
-  String? summary,
-  String? workingDirectory,
-  DateTime? updatedAt,
-  bool isSubagent,
-  bool parsedAny,
-})
-_parsePartialGeminiSessionMetadata(
-  String raw, {
-  String? activeWorkingDirectory,
-  String? fallbackWorkingDirectory,
-}) {
-  final sessionId = _readJsonStringFromRaw(raw, 'sessionId');
-  final storedSummary = _readJsonStringFromRaw(raw, 'summary');
-  final kind = _readJsonStringFromRaw(raw, 'kind');
-  final directories = _readJsonStringArrayFromRaw(raw, 'directories');
-  final resolvedWorkingDirectory =
-      _resolveGeminiWorkingDirectory(
-        directories,
-        activeWorkingDirectory: activeWorkingDirectory,
-      ) ??
-      fallbackWorkingDirectory;
-  final summary = (storedSummary?.trim().isNotEmpty ?? false)
-      ? _summarizeSessionText(storedSummary!)
-      : null;
-  final updatedAt =
-      _parseDateTimeValue(_readJsonStringFromRaw(raw, 'lastUpdated')) ??
-      _parseDateTimeValue(_readJsonStringFromRaw(raw, 'startTime'));
-  final parsedAny =
-      sessionId != null ||
-      summary != null ||
-      kind != null ||
-      directories != null ||
-      updatedAt != null;
-
-  return (
-    sessionId: sessionId,
-    summary: summary,
-    workingDirectory: resolvedWorkingDirectory,
-    updatedAt: updatedAt,
-    isSubagent: kind == 'subagent',
-    parsedAny: parsedAny,
-  );
-}
-
 String? _readJsonStringFromRaw(String raw, String key) {
   final pattern = RegExp(
     '"${RegExp.escape(key)}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"',
@@ -1162,56 +1099,6 @@ int? _readJsonNumberFromRaw(String raw, String key) {
   final match = pattern.firstMatch(raw);
   if (match == null) return null;
   return int.tryParse(match.group(1)!);
-}
-
-List<Object?>? _readJsonStringArrayFromRaw(String raw, String key) {
-  final startPattern = RegExp(
-    '"${RegExp.escape(key)}"\\s*:\\s*\\[',
-    multiLine: true,
-  );
-  final startMatch = startPattern.firstMatch(raw);
-  if (startMatch == null) return null;
-  final start = startMatch.end;
-  final closingIndex = raw.indexOf(']', start);
-  final segment = raw.substring(
-    start,
-    closingIndex == -1 ? raw.length : closingIndex,
-  );
-  final values = <Object?>[];
-  final stringPattern = RegExp(r'"((?:\\.|[^"\\])*)"');
-  for (final match in stringPattern.allMatches(segment)) {
-    try {
-      final decoded = jsonDecode('"${match.group(1)}"');
-      if (decoded is String) {
-        values.add(decoded);
-      }
-    } on FormatException {
-      continue;
-    }
-  }
-  return values.isEmpty ? null : values;
-}
-
-/// Parses ACP `session/list` responses into unified session metadata.
-@visibleForTesting
-List<ToolSessionInfo> parseAcpSessionListResult(
-  String toolName,
-  Map<String, dynamic> result,
-) {
-  final parsed = AcpSessionListResult.fromJson(result);
-  final sessions = <ToolSessionInfo>[];
-  for (final session in parsed.sessions) {
-    sessions.add(
-      ToolSessionInfo(
-        toolName: toolName,
-        sessionId: session.sessionId,
-        workingDirectory: session.cwd.isEmpty ? null : session.cwd,
-        lastActive: _parseDateTimeValue(session.updatedAt),
-        summary: session.title ?? _truncateSessionIdValue(session.sessionId),
-      ),
-    );
-  }
-  return sessions;
 }
 
 /// Parses OpenCode's JSON storage session metadata from
@@ -1377,18 +1264,25 @@ String normalizeWorkingDirectoryForComparison(String value) {
       : normalized;
 }
 
+String _workingDirectoryPrefix(String path) =>
+    path.endsWith('/') ? path : '$path/';
+
 String? _relativeWorkingDirectoryPath(String child, String root) {
   if (child == root) return '';
-  final prefix = '$root/';
+  final prefix = _workingDirectoryPrefix(root);
   if (!child.startsWith(prefix)) return null;
   return child.substring(prefix.length);
 }
 
 String _joinWorkingDirectoryPath(String root, String relativePath) =>
-    relativePath.isEmpty ? root : '$root/$relativePath';
+    relativePath.isEmpty
+    ? root
+    : '${_workingDirectoryPrefix(root)}$relativePath';
 
 bool _workingDirectoriesOverlap(String a, String b) =>
-    a == b || a.startsWith('$b/') || b.startsWith('$a/');
+    a == b ||
+    a.startsWith(_workingDirectoryPrefix(b)) ||
+    b.startsWith(_workingDirectoryPrefix(a));
 
 /// Parses `git worktree list --porcelain` output into root paths.
 @visibleForTesting
@@ -1505,28 +1399,6 @@ bool matchesDiscoveredSessionWorkingDirectory(
   return false;
 }
 
-/// Resolves a Gemini project directory label to a concrete worktree path.
-@visibleForTesting
-String? resolveGeminiProjectWorkingDirectory(
-  String? projectDirectoryName,
-  Iterable<String> relatedWorkingDirectories,
-) {
-  final trimmedProjectDirectoryName = projectDirectoryName?.trim();
-  if (trimmedProjectDirectoryName == null ||
-      trimmedProjectDirectoryName.isEmpty) {
-    return null;
-  }
-
-  for (final directory in relatedWorkingDirectories) {
-    final trimmedDirectory = _trimWorkingDirectory(directory);
-    if (trimmedDirectory == null) continue;
-    if (_pathLastSegment(trimmedDirectory) == trimmedProjectDirectoryName) {
-      return trimmedDirectory;
-    }
-  }
-  return null;
-}
-
 /// Reads the Claude history working directory using only string-typed fields.
 @visibleForTesting
 String? readClaudeHistoryWorkingDirectory(Map<String, dynamic> entry) =>
@@ -1552,65 +1424,6 @@ int calculateRecentSessionMetadataReadLimit(int maxPerTool) =>
       minimum: 24,
       maximum: 48,
     );
-
-/// Builds the Gemini chat project directory names associated with the active
-/// worktree family.
-@visibleForTesting
-List<String> buildGeminiProjectDirectoryNames(
-  Iterable<String> relatedWorkingDirectories,
-) {
-  final directories = relatedWorkingDirectories
-      .map(_trimWorkingDirectory)
-      .whereType<String>()
-      .toSet()
-      .toList(growable: false);
-  final rootDirectories = directories
-      .where(
-        (directory) => !directories.any(
-          (other) => other != directory && directory.startsWith('$other/'),
-        ),
-      )
-      .toList(growable: false);
-
-  return rootDirectories
-      .map(_pathLastSegment)
-      .where((name) => name.isNotEmpty && name != '.' && name != '~')
-      .toSet()
-      .toList(growable: false);
-}
-
-/// Builds the narrow Gemini project directory names that should be preferred
-/// for the active scope before falling back to the broader worktree family.
-@visibleForTesting
-List<String> buildScopedGeminiProjectDirectoryNames(
-  String activeWorkingDirectory,
-  Iterable<String> relatedWorkingDirectories,
-) {
-  final trimmedActive = _trimWorkingDirectory(activeWorkingDirectory);
-  if (trimmedActive == null) {
-    return const <String>[];
-  }
-
-  final activeRootCandidates =
-      relatedWorkingDirectories
-          .map(_trimWorkingDirectory)
-          .whereType<String>()
-          .where(
-            (directory) =>
-                directory == trimmedActive ||
-                trimmedActive.startsWith('$directory/'),
-          )
-          .toList(growable: false)
-        ..sort((a, b) => a.length.compareTo(b.length));
-  final activeRoot = activeRootCandidates.firstOrNull ?? trimmedActive;
-
-  return <String>{
-        _pathLastSegment(activeRoot),
-        _pathLastSegment(normalizeWorkingDirectoryForComparison(activeRoot)),
-      }
-      .where((name) => name.isNotEmpty && name != '.' && name != '~')
-      .toList(growable: false);
-}
 
 /// Sorts merged discovery sessions by recency before applying a scan cap.
 @visibleForTesting
@@ -1700,35 +1513,21 @@ class AgentSessionDiscoveryService {
   _inFlightRelatedWorkingDirectories =
       <_AgentSessionDiscoveryScopeKey, Future<List<String>>>{};
 
-  /// Discovers recent sessions across all supported tools for the given
-  /// [workingDirectory] on the remote host.
+  /// Invalidates cached and in-flight discovery state for [session].
   ///
-  /// Each tool's sessions are discovered separately, normalized to drop
-  /// noisy placeholder entries, and then sorted globally by recency.
-  /// Limits to [maxPerTool] sessions per tool to keep results manageable.
-  ///
-  /// Returns both the successfully parsed sessions and any tool histories that
-  /// could not be loaded, so the UI can distinguish parse failures from an
-  /// actually empty history.
-  ///
-  /// When [workingDirectory] is available, sessions are filtered to that
-  /// directory whenever the tool exposes enough path information to do so.
-  Future<DiscoveredSessionsResult> discoverSessions(
-    SshSession session, {
-    String? workingDirectory,
-    int maxPerTool = 12,
-    String? toolName,
-  }) async {
-    DiscoveredSessionsResult? latestResult;
-    await for (final result in discoverSessionsStream(
-      session,
-      workingDirectory: workingDirectory,
-      maxPerTool: maxPerTool,
-      toolName: toolName,
-    )) {
-      latestResult = result;
-    }
-    return latestResult ?? DiscoveredSessionsResult(sessions: const []);
+  /// The next picker load starts fresh without reconnecting the SSH session.
+  void invalidateSession(SshSession session) {
+    bool matches(_AgentSessionDiscoveryScopeKey key) =>
+        key.hostId == session.hostId &&
+        key.hostname == session.config.hostname &&
+        key.port == session.config.port &&
+        key.username == session.config.username;
+
+    _discoveryCache.removeWhere((key, _) => matches(key.scopeKey));
+    _inFlightDiscoveries.removeWhere((key, _) => matches(key.scopeKey));
+    _inFlightDiscoverySnapshots.removeWhere((key, _) => matches(key.scopeKey));
+    _relatedWorkingDirectoriesCache.removeWhere((key, _) => matches(key));
+    _inFlightRelatedWorkingDirectories.removeWhere((key, _) => matches(key));
   }
 
   /// Warms the discovery cache for the given scope without changing UI state.
@@ -1843,7 +1642,8 @@ class AgentSessionDiscoveryService {
     required String? toolName,
   }) {
     final controller = StreamController<DiscoveredSessionsResult>.broadcast();
-    _inFlightDiscoveries[key] = controller.stream;
+    final stream = controller.stream;
+    _inFlightDiscoveries[key] = stream;
 
     unawaited(() async {
       try {
@@ -1888,7 +1688,9 @@ class AgentSessionDiscoveryService {
               previewSnapshot,
               previewResult,
             );
-            _inFlightDiscoverySnapshots[key] = previewSnapshot;
+            if (identical(_inFlightDiscoveries[key], stream)) {
+              _inFlightDiscoverySnapshots[key] = previewSnapshot;
+            }
             controller.add(previewResult);
             await Future<void>.delayed(Duration.zero);
           }
@@ -1900,23 +1702,31 @@ class AgentSessionDiscoveryService {
           relatedWorkingDirectories: relatedWorkingDirectories,
           maxPerTool: maxPerTool,
         );
-        _inFlightDiscoverySnapshots[key] = latestResult;
+        // Invalidated work may finish for its original listeners, but must not
+        // restore a stale snapshot or overwrite a replacement discovery's one.
+        if (identical(_inFlightDiscoveries[key], stream)) {
+          _inFlightDiscoverySnapshots[key] = latestResult;
+        }
         controller.add(latestResult);
 
-        _discoveryCache[key] = _CachedDiscoveryResult(
-          result: latestResult,
-          cachedAt: _now(),
-        );
+        if (identical(_inFlightDiscoveries[key], stream)) {
+          _discoveryCache[key] = _CachedDiscoveryResult(
+            result: latestResult,
+            cachedAt: _now(),
+          );
+        }
       } on Object catch (error, stackTrace) {
         controller.addError(error, stackTrace);
       } finally {
-        _inFlightDiscoveries.remove(key);
-        _inFlightDiscoverySnapshots.remove(key);
+        if (identical(_inFlightDiscoveries[key], stream)) {
+          _inFlightDiscoveries.remove(key);
+          _inFlightDiscoverySnapshots.remove(key);
+        }
         await controller.close();
       }
     }());
 
-    return controller.stream;
+    return stream;
   }
 
   DiscoveredSessionsResult? _lookupCachedDiscoveryResult(
@@ -1995,164 +1805,57 @@ class AgentSessionDiscoveryService {
     required String? toolName,
     required bool previewOnly,
   }) {
-    final effectiveMaxPerTool = previewOnly ? 1 : maxPerTool;
-    return toolName == null
-        ? [
-            _discoverOpenCodeSessions(
+    final handlers =
+        <
+          String,
+          Future<_ToolDiscoveryResult> Function(
+            SshSession,
+            String?,
+            List<String>,
+            int, {
+            bool previewOnly,
+          })
+        >{
+          'OpenCode':
+              (session, cwd, related, max, {bool previewOnly = false}) =>
+                  _discoverOpenCodeSessions(
+                    session,
+                    cwd,
+                    related,
+                    max,
+                    previewOnly: previewOnly,
+                    useAcp: toolName != null,
+                  ),
+          'Codex': _discoverCodexSessions,
+          'Copilot CLI':
+              (session, cwd, related, max, {bool previewOnly = false}) =>
+                  _discoverCopilotSessions(
+                    session,
+                    cwd,
+                    related,
+                    max,
+                    previewOnly: previewOnly,
+                    useAcp: toolName != null,
+                  ),
+          'Claude Code': _discoverClaudeSessions,
+          'Antigravity': _discoverAntigravitySessions,
+          'Cursor Agent': _discoverCursorSessions,
+          'Pi': _discoverPiSessions,
+          'Hermes': _discoverHermesSessions,
+          'Grok Build': _discoverGrokSessions,
+        };
+    return [
+      for (final name in toolName == null ? handlers.keys : [toolName])
+        handlers[name]?.call(
               session,
               workingDirectory,
               relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              useAcp: false,
-              previewOnly: previewOnly,
-            ),
-            _discoverCodexSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverCopilotSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              useAcp: false,
-              previewOnly: previewOnly,
-            ),
-            _discoverGeminiSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverClaudeSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverAntigravitySessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverCursorSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverPiSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverHermesSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-            _discoverGrokSessions(
-              session,
-              workingDirectory,
-              relatedWorkingDirectories,
-              effectiveMaxPerTool,
-              previewOnly: previewOnly,
-            ),
-          ]
-        : [
-            _discoverSessionsForTool(
-              toolName,
-              session,
-              workingDirectory: workingDirectory,
-              relatedWorkingDirectories: relatedWorkingDirectories,
-              maxPerTool: effectiveMaxPerTool,
-            ),
-          ];
+              previewOnly ? 1 : maxPerTool,
+              previewOnly: toolName == null && previewOnly,
+            ) ??
+            Future.value(_ToolDiscoveryResult.success(name, const [])),
+    ];
   }
-
-  Future<_ToolDiscoveryResult> _discoverSessionsForTool(
-    String toolName,
-    SshSession session, {
-    required String? workingDirectory,
-    required List<String> relatedWorkingDirectories,
-    required int maxPerTool,
-  }) => switch (toolName) {
-    'OpenCode' => _discoverOpenCodeSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Codex' => _discoverCodexSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Copilot CLI' => _discoverCopilotSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Gemini CLI' => _discoverGeminiSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Claude Code' => _discoverClaudeSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Antigravity' => _discoverAntigravitySessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Cursor Agent' => _discoverCursorSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Pi' => _discoverPiSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Hermes' => _discoverHermesSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    'Grok Build' => _discoverGrokSessions(
-      session,
-      workingDirectory,
-      relatedWorkingDirectories,
-      maxPerTool,
-    ),
-    _ => Future<_ToolDiscoveryResult>.value(
-      _ToolDiscoveryResult.success(toolName, const <ToolSessionInfo>[]),
-    ),
-  };
 
   DiscoveredSessionsResult _buildToolDiscoveryPreviewResult(
     _ToolDiscoveryResult result, {
@@ -2303,7 +2006,7 @@ class AgentSessionDiscoveryService {
 
     final dir = info.workingDirectory;
     if (dir != null && dir.isNotEmpty && !_looksLikeWindowsPath(dir)) {
-      return 'cd ${_shellQuote(dir)} && $resume';
+      return 'cd ${shellEscapePosix(dir)} && $resume';
     }
     return resume;
   }
@@ -2497,22 +2200,11 @@ class AgentSessionDiscoveryService {
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final scanLimit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
       final output = session.remoteIsWindows
           ? await _execWindowsPowerShell(
               session,
@@ -2524,19 +2216,16 @@ class AgentSessionDiscoveryService {
             )
           : await _exec(
               session,
-              'find ~/.codex/sessions -name "rollout-*.jsonl" -type f '
-              '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit',
+              posixListNewestFilesCommand(
+                'find ~/.codex/sessions -name "rollout-*.jsonl" -type f',
+                scanLimit,
+              ),
             );
       if (output.trim().isEmpty) {
         return const _ToolDiscoveryResult.success('Codex', []);
       }
 
-      final rolloutPaths = output
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false);
+      final rolloutPaths = _nonEmptyLines(output).toList(growable: false);
       final recentRolloutPaths = rolloutPaths
           .take(metadataReadLimit)
           .toList(growable: false);
@@ -2593,22 +2282,12 @@ class AgentSessionDiscoveryService {
           ),
         );
       }
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
       return _ToolDiscoveryResult.success(
         'Codex',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
           max,
         ),
         hadError: hadError,
@@ -2674,19 +2353,13 @@ class AgentSessionDiscoveryService {
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 20,
-              minimum: 120,
-              maximum: 240,
-            );
+      final scanLimit = _sessionScanLimit(
+        max,
+        previewOnly: previewOnly,
+        multiplier: 20,
+        minimum: 120,
+        maximum: 240,
+      );
       if (useAcp) {
         final acpSessions = await _discoverAcpSessions(
           session,
@@ -2705,14 +2378,10 @@ class AgentSessionDiscoveryService {
         }
       }
 
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
       final workspacePaths = await _listCopilotWorkspacePaths(
         session,
         scanLimit,
@@ -2810,190 +2479,12 @@ class AgentSessionDiscoveryService {
 
       return _ToolDiscoveryResult.success(
         'Copilot CLI',
-        sortAndLimitDiscoveredSessions(sessions, max),
+        sessions..sort(compareDiscoveredSessionsByRecency),
         hadError: hadError,
       );
     } on Object {
       return const _ToolDiscoveryResult.failure('Copilot CLI');
     }
-  }
-
-  // ── Gemini CLI ─────────────────────────────────────────────────────────
-  // Sessions: ~/.gemini/tmp/**/chats/session-*.json*
-  // File-based discovery is substantially faster than `gemini --list-sessions`
-  // on large worktree families, so prefer the stored chat files directly.
-
-  Future<_ToolDiscoveryResult> _discoverGeminiSessions(
-    SshSession session,
-    String? workingDirectory,
-    List<String> relatedWorkingDirectories,
-    int max, {
-    bool previewOnly = false,
-  }) async {
-    try {
-      return await _discoverGeminiSessionsFromFiles(
-        session,
-        workingDirectory,
-        relatedWorkingDirectories,
-        max,
-        previewOnly: previewOnly,
-      );
-    } on Object {
-      return const _ToolDiscoveryResult.failure('Gemini CLI');
-    }
-  }
-
-  Future<_ToolDiscoveryResult> _discoverGeminiSessionsFromFiles(
-    SshSession session,
-    String? workingDirectory,
-    List<String> relatedWorkingDirectories,
-    int max, {
-    bool previewOnly = false,
-  }) async {
-    final scanLimit = previewOnly
-        ? _calculateDiscoveryScanLimit(
-            max,
-            multiplier: 8,
-            minimum: 24,
-            maximum: 40,
-          )
-        : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-    final metadataReadLimit = previewOnly
-        ? _calculateDiscoveryScanLimit(
-            max,
-            multiplier: 4,
-            minimum: 6,
-            maximum: 12,
-          )
-        : calculateRecentSessionMetadataReadLimit(max);
-    final globalCommand =
-        r'find ~/.gemini/tmp \( -name "session-*.json" -o -name "session-*.jsonl" \) '
-        '-path "*/chats/*" -type f '
-        '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit';
-    const geminiGlobs = ['session-*.json', 'session-*.jsonl'];
-    var output = '';
-
-    final projectDirectoryNames =
-        workingDirectory != null && workingDirectory.isNotEmpty
-        ? buildScopedGeminiProjectDirectoryNames(
-            workingDirectory,
-            relatedWorkingDirectories,
-          )
-        : buildGeminiProjectDirectoryNames(relatedWorkingDirectories);
-    if (workingDirectory != null &&
-        workingDirectory.isNotEmpty &&
-        projectDirectoryNames.isNotEmpty) {
-      final scopedPathFilters = projectDirectoryNames
-          .map((name) => '-path ${_shellQuote('*/$name/chats/*')}')
-          .join(' -o ');
-      output = session.remoteIsWindows
-          ? await _execWindowsPowerShell(
-              session,
-              windowsListNewestFilesScript(
-                relativeRoot: '.gemini/tmp',
-                includeGlobs: geminiGlobs,
-                limit: scanLimit,
-                pathLikeFilters: projectDirectoryNames
-                    .map((name) => '*/$name/chats/*')
-                    .toList(growable: false),
-              ),
-            )
-          : await _exec(
-              session,
-              r'find ~/.gemini/tmp \( -name "session-*.json" -o -name "session-*.jsonl" \) '
-              '-type f '
-              '\\( $scopedPathFilters \\) '
-              '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit',
-            );
-    }
-    if (output.trim().isEmpty) {
-      output = session.remoteIsWindows
-          ? await _execWindowsPowerShell(
-              session,
-              windowsListNewestFilesScript(
-                relativeRoot: '.gemini/tmp',
-                includeGlobs: geminiGlobs,
-                limit: scanLimit,
-                pathLikeFilters: const ['*/chats/*'],
-              ),
-            )
-          : await _exec(session, globalCommand);
-    }
-    if (output.trim().isEmpty) {
-      return const _ToolDiscoveryResult.success('Gemini CLI', []);
-    }
-
-    final sessionPaths = output
-        .trim()
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .toList(growable: false);
-    final recentSessionPaths = sessionPaths
-        .take(metadataReadLimit)
-        .toList(growable: false);
-    final sessionSnapshots = await _readRemoteFileSnapshots(
-      session,
-      recentSessionPaths,
-      maxBytes: _geminiSessionMetadataMaxBytes,
-    );
-
-    var hadError = false;
-    final sessions = <ToolSessionInfo>[];
-    for (final filePath in recentSessionPaths) {
-      final fileName = filePath
-          .split('/')
-          .last
-          .replaceAll('.jsonl', '')
-          .replaceAll('.json', '');
-
-      final pathParts = filePath.split('/');
-      final chatsIdx = pathParts.indexOf('chats');
-      final projectDir = chatsIdx > 0 ? pathParts[chatsIdx - 1] : null;
-      final fallbackWorkingDirectory = resolveGeminiProjectWorkingDirectory(
-        projectDir,
-        relatedWorkingDirectories,
-      );
-
-      final snapshot = sessionSnapshots[filePath];
-      if (snapshot == null) {
-        hadError = true;
-        continue;
-      }
-
-      try {
-        final metadata = parseGeminiSessionMetadata(
-          snapshot.content,
-          activeWorkingDirectory: workingDirectory,
-          fallbackWorkingDirectory: fallbackWorkingDirectory,
-        );
-        if (snapshot.content.trim().isNotEmpty && !metadata.parsedAny) {
-          hadError = true;
-          continue;
-        }
-        if (metadata.isSubagent) continue;
-
-        sessions.add(
-          ToolSessionInfo(
-            toolName: 'Gemini CLI',
-            sessionId:
-                metadata.sessionId != null && metadata.sessionId!.isNotEmpty
-                ? metadata.sessionId!
-                : fileName,
-            workingDirectory: metadata.workingDirectory,
-            lastActive: metadata.updatedAt ?? snapshot.modifiedAt,
-            summary: metadata.summary ?? projectDir ?? _truncateId(fileName),
-          ),
-        );
-      } on Object {
-        hadError = true;
-      }
-    }
-    return _ToolDiscoveryResult.success(
-      'Gemini CLI',
-      sortAndLimitDiscoveredSessions(sessions, max),
-      hadError: hadError,
-    );
   }
 
   // ── Antigravity CLI ────────────────────────────────────────────────────
@@ -3006,289 +2497,43 @@ class AgentSessionDiscoveryService {
     int max, {
     bool previewOnly = false,
   }) async {
-    if (session.remoteIsWindows) {
-      return _discoverWindowsAntigravitySessions(
-        session,
-        workingDirectory,
-        relatedWorkingDirectories,
+    try {
+      final scanLimit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final metadataReadLimit = _sessionMetadataReadLimit(
         max,
         previewOnly: previewOnly,
       );
-    }
-    try {
-      const pyScript = r'''
-import os
-import sys
-import json
-import re
-import glob
-from datetime import datetime
-
-def extract_partial_json_field(raw, key):
-    pattern = r"\"" + re.escape(key) + r"\"\s*:\s*\"([^\"]*)\""
-    match = re.search(pattern, raw)
-    if match:
-        return match.group(1)
-    return None
-
-home = os.path.expanduser("~")
-legacy_dirs = [
-    os.path.join(home, ".antigravity", "sessions"),
-    os.path.join(home, ".agy", "sessions"),
-    "./.antigravitycli",
-    "./.agycli"
-]
-
-sessions = []
-visited_session_ids = set()
-
-for d in legacy_dirs:
-    if os.path.isdir(d):
-        for fp in glob.glob(os.path.join(d, "*.json")):
-            try:
-                mtime = os.path.getmtime(fp)
-                dt = datetime.utcfromtimestamp(mtime)
-                last_active = dt.isoformat() + "Z"
-                
-                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                
-                metadata = {}
-                try:
-                    metadata = json.loads(content)
-                except Exception:
-                    session_id = extract_partial_json_field(content, "id") or extract_partial_json_field(content, "sessionId")
-                    summary = extract_partial_json_field(content, "summary") or extract_partial_json_field(content, "name")
-                    cwd = extract_partial_json_field(content, "workingDirectory") or extract_partial_json_field(content, "cwd")
-                    if not cwd:
-                        folder_uri = extract_partial_json_field(content, "folderUri")
-                        if folder_uri and folder_uri.startswith("file://"):
-                            cwd = folder_uri[7:]
-                    if not cwd and summary and summary.startswith("/"):
-                        cwd = summary
-                    updated_at = extract_partial_json_field(content, "updatedAt") or extract_partial_json_field(content, "lastActive")
-                    
-                    if session_id or summary or cwd or updated_at:
-                        metadata = {
-                            "id": session_id,
-                            "summary": summary,
-                            "workingDirectory": cwd,
-                            "updatedAt": updated_at
-                        }
-                
-                session_id = metadata.get("id") or metadata.get("sessionId") or os.path.basename(fp).replace(".json", "")
-                if session_id in visited_session_ids:
-                    continue
-                visited_session_ids.add(session_id)
-                
-                summary = metadata.get("display") or metadata.get("summary") or metadata.get("name") or session_id[:8]
-                cwd = metadata.get("workingDirectory") or metadata.get("cwd")
-                
-                if not cwd:
-                    res = metadata.get("projectResources", {}).get("resources", [])
-                    for r in res:
-                        git_folder = r.get("gitFolder", {}) if isinstance(r, dict) else {}
-                        uri_str = git_folder.get("folderUri")
-                        if uri_str and uri_str.startswith("file://"):
-                            cwd = uri_str[7:]
-                            break
-                
-                if not cwd and summary and summary.startswith("/"):
-                    cwd = summary
-                
-                updated_at = metadata.get("updatedAt") or metadata.get("lastActive")
-                if updated_at:
-                    last_active = updated_at
-                
-                sessions.append({
-                    "sessionId": session_id,
-                    "summary": summary,
-                    "workingDirectory": cwd,
-                    "lastActive": last_active
-                })
-            except Exception:
-                pass
-
-history_path = os.path.join(home, ".gemini", "antigravity-cli", "history.jsonl")
-history_by_id = {}
-if os.path.exists(history_path):
-    with open(history_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                conv_id = entry.get("conversationId")
-                if conv_id:
-                    history_by_id[conv_id] = entry
-            except Exception:
-                pass
-
-conv_dirs = [
-    os.path.join(home, ".gemini", "antigravity-cli", "conversations"),
-    os.path.join(home, ".gemini", "antigravity-cli", "implicit")
-]
-
-for d in conv_dirs:
-    if os.path.isdir(d):
-        for fp in glob.glob(os.path.join(d, "*.pb")):
-            try:
-                conv_id = os.path.basename(fp).replace(".pb", "")
-                if conv_id in visited_session_ids:
-                    continue
-                visited_session_ids.add(conv_id)
-                
-                mtime = os.path.getmtime(fp)
-                dt = datetime.utcfromtimestamp(mtime)
-                last_active = dt.isoformat() + "Z"
-                
-                annotation_path = os.path.join(home, ".gemini", "antigravity-cli", "annotations", conv_id + ".pbtxt")
-                title = None
-                if os.path.exists(annotation_path):
-                    with open(annotation_path, "r", encoding="utf-8", errors="ignore") as af:
-                        ann_content = af.read()
-                        m = re.search(r"title\s*:\s*\"([^\"]+)\"", ann_content)
-                        if m:
-                            title = m.group(1)
-                
-                history_entry = history_by_id.get(conv_id, {})
-                summary = history_entry.get("display") or title or conv_id[:8]
-                cwd = history_entry.get("workspace")
-                
-                timestamp = history_entry.get("timestamp")
-                if timestamp:
-                    try:
-                        dt_hist = datetime.utcfromtimestamp(timestamp / 1000.0)
-                        last_active = dt_hist.isoformat() + "Z"
-                    except Exception:
-                        pass
-                
-                sessions.append({
-                    "sessionId": conv_id,
-                    "summary": summary,
-                    "workingDirectory": cwd,
-                    "lastActive": last_active
-                })
-            except Exception:
-                pass
-
-print(json.dumps(sessions))
-''';
-
-      final pyCommand = "python3 -c '${pyScript.replaceAll("'", r"'\''")}'";
-      final output = await _exec(session, pyCommand);
-
-      final sessions = <ToolSessionInfo>[];
-      var hadError = false;
-
-      if (output.trim().isNotEmpty) {
-        try {
-          final List<dynamic> decoded = jsonDecode(output);
-          for (final entry in decoded) {
-            if (entry is Map<String, dynamic>) {
-              final sessionId = entry['sessionId'] as String?;
-              final summary = entry['summary'] as String?;
-              final workingDir = entry['workingDirectory'] as String?;
-              final lastActiveStr = entry['lastActive'] as String?;
-
-              if (sessionId != null) {
-                DateTime? lastActive;
-                if (lastActiveStr != null) {
-                  lastActive = DateTime.tryParse(lastActiveStr);
-                }
-                sessions.add(
-                  ToolSessionInfo(
-                    toolName: 'Antigravity',
-                    sessionId: sessionId,
-                    workingDirectory: workingDir,
-                    lastActive: lastActive,
-                    summary: summary ?? _truncateId(sessionId),
-                  ),
-                );
-              }
-            }
-          }
-        } on Object {
-          hadError = true;
-        }
-      }
-
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
-
-      return _ToolDiscoveryResult.success(
-        'Antigravity',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
-          max,
-        ),
-        hadError: hadError,
-      );
-    } on Object {
-      return const _ToolDiscoveryResult.failure('Antigravity');
-    }
-  }
-
-  Future<_ToolDiscoveryResult> _discoverWindowsAntigravitySessions(
-    SshSession session,
-    String? workingDirectory,
-    List<String> relatedWorkingDirectories,
-    int max, {
-    bool previewOnly = false,
-  }) async {
-    try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
       final sessions = <ToolSessionInfo>[];
       final seenSessionIds = <String>{};
       var hadError = false;
 
-      final jsonPathOutput = await _execWindowsPowerShell(
-        session,
-        windowsListNewestFilesScript(
-          relativeRoot: '.antigravity/sessions',
-          additionalRelativeRoots: const [
-            '.agy/sessions',
-            '.antigravitycli',
-            '.agycli',
-          ],
-          includeGlobs: const ['*.json'],
-          limit: scanLimit,
-          rootEnvironmentVariables: _windowsUserDataRootEnvironmentVariables,
-        ),
-      );
-      final jsonPaths = jsonPathOutput
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .take(metadataReadLimit)
-          .toList(growable: false);
+      final jsonPathOutput = session.remoteIsWindows
+          ? await _execWindowsPowerShell(
+              session,
+              windowsListNewestFilesScript(
+                relativeRoot: '.antigravity/sessions',
+                additionalRelativeRoots: const [
+                  '.agy/sessions',
+                  '.antigravitycli',
+                  '.agycli',
+                ],
+                includeGlobs: const ['*.json'],
+                limit: scanLimit,
+                rootEnvironmentVariables:
+                    _windowsUserDataRootEnvironmentVariables,
+              ),
+            )
+          : await _exec(
+              session,
+              posixListNewestFilesCommand(
+                'find ~/.antigravity/sessions ~/.agy/sessions '
+                "./.antigravitycli ./.agycli -maxdepth 1 -name '*.json' -type f",
+                scanLimit,
+              ),
+            );
+      final jsonPaths = _nonEmptyLines(
+        jsonPathOutput,
+      ).take(metadataReadLimit).toList(growable: false);
       final jsonSnapshots = await _readRemoteFileSnapshots(
         session,
         jsonPaths,
@@ -3324,30 +2569,41 @@ print(json.dumps(sessions))
         }
       }
 
-      final conversationPathOutput = await _execWindowsPowerShell(
-        session,
-        windowsListNewestFilesScript(
-          relativeRoot: '.gemini/antigravity-cli',
-          includeGlobs: const ['*.pb'],
-          limit: scanLimit,
-          pathLikeFilters: const ['*/conversations/*', '*/implicit/*'],
-        ),
-      );
-      final conversationPaths = conversationPathOutput
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .take(metadataReadLimit)
-          .toList(growable: false);
+      final conversationPathOutput = session.remoteIsWindows
+          ? await _execWindowsPowerShell(
+              session,
+              windowsListNewestFilesScript(
+                relativeRoot: '.gemini/antigravity-cli',
+                includeGlobs: const ['*.pb'],
+                limit: scanLimit,
+                pathLikeFilters: const ['*/conversations/*', '*/implicit/*'],
+              ),
+            )
+          : await _exec(
+              session,
+              posixListNewestFilesCommand(
+                'find ~/.gemini/antigravity-cli/conversations '
+                "~/.gemini/antigravity-cli/implicit -maxdepth 1 -name '*.pb' -type f",
+                scanLimit,
+              ),
+            );
+      final conversationPaths = _nonEmptyLines(
+        conversationPathOutput,
+      ).take(metadataReadLimit).toList(growable: false);
       if (conversationPaths.isNotEmpty) {
-        final historyOutput = await _execWindowsPowerShell(
-          session,
-          windowsTailFileScript(
-            relativePath: '.gemini/antigravity-cli/history.jsonl',
-            lines: scanLimit * 5,
-          ),
-        );
+        final historyOutput = session.remoteIsWindows
+            ? await _execWindowsPowerShell(
+                session,
+                windowsTailFileScript(
+                  relativePath: '.gemini/antigravity-cli/history.jsonl',
+                  lines: scanLimit * 5,
+                ),
+              )
+            : await _exec(
+                session,
+                'tail -n ${scanLimit * 5} '
+                '~/.gemini/antigravity-cli/history.jsonl 2>/dev/null',
+              );
         final historyById = _parseAntigravityHistoryJsonl(historyOutput);
         final annotationPaths = conversationPaths
             .map(_antigravityAnnotationPathForConversationFile)
@@ -3390,22 +2646,12 @@ print(json.dumps(sessions))
         }
       }
 
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
       return _ToolDiscoveryResult.success(
         'Antigravity',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
           max,
         ),
         hadError: hadError,
@@ -3429,22 +2675,11 @@ print(json.dumps(sessions))
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final scanLimit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
       final output = session.remoteIsWindows
           ? await _execWindowsPowerShell(
               session,
@@ -3456,19 +2691,16 @@ print(json.dumps(sessions))
             )
           : await _exec(
               session,
-              'find ~/.cursor/chats -name meta.json -type f '
-              '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit',
+              posixListNewestFilesCommand(
+                'find ~/.cursor/chats -name meta.json -type f',
+                scanLimit,
+              ),
             );
       if (output.trim().isEmpty) {
         return const _ToolDiscoveryResult.success('Cursor Agent', []);
       }
 
-      final metaPaths = output
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false);
+      final metaPaths = _nonEmptyLines(output).toList(growable: false);
       final recentMetaPaths = metaPaths
           .take(metadataReadLimit)
           .toList(growable: false);
@@ -3521,22 +2753,12 @@ print(json.dumps(sessions))
           ),
         );
       }
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
       return _ToolDiscoveryResult.success(
         'Cursor Agent',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
           max,
         ),
         hadError: hadError,
@@ -3570,22 +2792,11 @@ print(json.dumps(sessions))
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final scanLimit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
 
       final scopedDirectoryNames = <String>{
         if (workingDirectory != null && workingDirectory.isNotEmpty)
@@ -3610,28 +2821,22 @@ print(json.dumps(sessions))
         );
       } else {
         final roots = scopedDirectoryNames
-            .map((name) => r'"$GROK_SESSIONS_ROOT"/' + _shellQuote(name))
+            .map((name) => r'"$GROK_SESSIONS_ROOT"/' + shellEscapePosix(name))
             .join(' ');
         output = await _exec(
           session,
           r'GROK_SESSIONS_ROOT="${GROK_HOME:-$HOME/.grok}/sessions"; '
-          '${roots.isEmpty ? r'find "$GROK_SESSIONS_ROOT"' : 'find $roots -maxdepth 2'} '
-          '-name summary.json -type f '
-          '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit',
+          '${posixListNewestFilesCommand('${roots.isEmpty ? r'find "$GROK_SESSIONS_ROOT"' : 'find $roots -maxdepth 2'} '
+          '-name summary.json -type f', scanLimit)}',
         );
       }
       if (output.trim().isEmpty) {
         return const _ToolDiscoveryResult.success('Grok Build', []);
       }
 
-      final summaryPaths = output
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toSet()
-          .take(metadataReadLimit)
-          .toList(growable: false);
+      final summaryPaths = _nonEmptyLines(
+        output,
+      ).toSet().take(metadataReadLimit).toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
         summaryPaths,
@@ -3679,22 +2884,12 @@ print(json.dumps(sessions))
         );
       }
 
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
       return _ToolDiscoveryResult.success(
         'Grok Build',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
           max,
         ),
         hadError: hadError,
@@ -3717,22 +2912,11 @@ print(json.dumps(sessions))
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 24,
-              maximum: 40,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final scanLimit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
       final sessionPaths = await _listPiSessionPaths(
         session,
         workingDirectory,
@@ -3851,9 +3035,9 @@ print(json.dumps(sessions))
         r'NODE_BIN=$(command -v node 2>/dev/null); '
         r'[ -n "$NODE_BIN" ] || exit 0; '
         r'"$NODE_BIN" -e '
-        '${_shellQuote('eval(Buffer.from(process.argv[1], "base64").toString("utf8"))')} '
-        '${_shellQuote(encodedScript)} '
-        '${sessionPaths.map(_shellQuote).join(' ')}',
+        '${shellEscapePosix('eval(Buffer.from(process.argv[1], "base64").toString("utf8"))')} '
+        '${shellEscapePosix(encodedScript)} '
+        '${sessionPaths.map(shellEscapePosix).join(' ')}',
       );
       return parsePiSessionLabelOutput(output);
     } on Object {
@@ -3895,18 +3079,13 @@ print(json.dumps(sessions))
           )
         : await _exec(
             session,
-            '{ find ${buckets.map((bucket) => '"\$HOME"/.pi/agent/sessions/${_shellQuote(bucket)}').join(' ')} '
-            '-maxdepth 1 -name "*.jsonl" -type f '
-            '-exec ls -1t {} + 2>/dev/null || true; } | '
-            'head -n $scanLimit',
+            posixListNewestFilesCommand(
+              'find ${buckets.map((bucket) => '"\$HOME"/.pi/agent/sessions/${shellEscapePosix(bucket)}').join(' ')} '
+              '-maxdepth 1 -name "*.jsonl" -type f',
+              scanLimit,
+            ),
           );
-    return output
-        .trim()
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .take(scanLimit)
-        .toList(growable: false);
+    return _nonEmptyLines(output).take(scanLimit).toList(growable: false);
   }
 
   // ── Hermes ─────────────────────────────────────────────────────────────
@@ -3925,14 +3104,13 @@ print(json.dumps(sessions))
       return const _ToolDiscoveryResult.success('Hermes', []);
     }
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 24,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
+      final scanLimit = _sessionScanLimit(
+        max,
+        previewOnly: previewOnly,
+        previewMultiplier: 4,
+        previewMinimum: 6,
+        previewMaximum: 24,
+      );
       final scopedDirectories = <String>[
         if (workingDirectory != null && workingDirectory.isNotEmpty)
           workingDirectory,
@@ -3991,7 +3169,7 @@ print(json.dumps(sessions))
       session,
       r'SEP=$(printf "\037"); sqlite3 -separator "$SEP" '
       r'"${HERMES_HOME:-$HOME/.hermes}/state.db" '
-      '${_shellQuote(sql.toString())} 2>/dev/null',
+      '${shellEscapePosix(sql.toString())} 2>/dev/null',
     );
   }
 
@@ -4018,14 +3196,12 @@ print(json.dumps(sessions))
       );
     }
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 12,
-              maximum: 24,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
+      final scanLimit = _sessionScanLimit(
+        max,
+        previewOnly: previewOnly,
+        previewMinimum: 12,
+        previewMaximum: 24,
+      );
       var hadError = false;
       if (useAcp) {
         final acpSessions = await _discoverAcpSessions(
@@ -4070,22 +3246,12 @@ print(json.dumps(sessions))
       if (cliOutput.trim().startsWith('[')) {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
-          final scopedSessions =
-              workingDirectory != null && workingDirectory.isNotEmpty
-              ? sessions
-                    .where(
-                      (info) => matchesDiscoveredSessionWorkingDirectory(
-                        workingDirectory,
-                        info.workingDirectory,
-                        relatedWorkingDirectories: relatedWorkingDirectories,
-                      ),
-                    )
-                    .toList(growable: false)
-              : sessions;
           return _ToolDiscoveryResult.success(
             'OpenCode',
-            sortAndLimitDiscoveredSessions(
-              scopedSessions.isNotEmpty ? scopedSessions : sessions,
+            _scopeSessions(
+              sessions,
+              workingDirectory,
+              relatedWorkingDirectories,
               max,
             ),
           );
@@ -4101,22 +3267,12 @@ print(json.dumps(sessions))
       final dbOutput = await _queryOpenCodeDb(session, scanLimit);
       if (dbOutput.trim().isNotEmpty) {
         final sessions = _parseOpenCodeDbOutput(dbOutput);
-        final scopedSessions =
-            workingDirectory != null && workingDirectory.isNotEmpty
-            ? sessions
-                  .where(
-                    (info) => matchesDiscoveredSessionWorkingDirectory(
-                      workingDirectory,
-                      info.workingDirectory,
-                      relatedWorkingDirectories: relatedWorkingDirectories,
-                    ),
-                  )
-                  .toList(growable: false)
-            : sessions;
         return _ToolDiscoveryResult.success(
           'OpenCode',
-          sortAndLimitDiscoveredSessions(
-            scopedSessions.isNotEmpty ? scopedSessions : sessions,
+          _scopeSessions(
+            sessions,
+            workingDirectory,
+            relatedWorkingDirectories,
             max,
           ),
           hadError: hadError,
@@ -4137,22 +3293,16 @@ print(json.dumps(sessions))
     bool previewOnly = false,
   }) async {
     try {
-      final scanLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 8,
-              minimum: 12,
-              maximum: 24,
-            )
-          : _calculateDiscoveryScanLimit(max, multiplier: 10, maximum: 120);
-      final metadataReadLimit = previewOnly
-          ? _calculateDiscoveryScanLimit(
-              max,
-              multiplier: 4,
-              minimum: 6,
-              maximum: 12,
-            )
-          : calculateRecentSessionMetadataReadLimit(max);
+      final scanLimit = _sessionScanLimit(
+        max,
+        previewOnly: previewOnly,
+        previewMinimum: 12,
+        previewMaximum: 24,
+      );
+      final metadataReadLimit = _sessionMetadataReadLimit(
+        max,
+        previewOnly: previewOnly,
+      );
       var hadError = false;
 
       final cliOutput = await _execWindowsPowerShell(
@@ -4162,22 +3312,12 @@ print(json.dumps(sessions))
       if (cliOutput.trim().startsWith('[')) {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
-          final scopedSessions =
-              workingDirectory != null && workingDirectory.isNotEmpty
-              ? sessions
-                    .where(
-                      (info) => matchesDiscoveredSessionWorkingDirectory(
-                        workingDirectory,
-                        info.workingDirectory,
-                        relatedWorkingDirectories: relatedWorkingDirectories,
-                      ),
-                    )
-                    .toList(growable: false)
-              : sessions;
           return _ToolDiscoveryResult.success(
             'OpenCode',
-            sortAndLimitDiscoveredSessions(
-              scopedSessions.isNotEmpty ? scopedSessions : sessions,
+            _scopeSessions(
+              sessions,
+              workingDirectory,
+              relatedWorkingDirectories,
               max,
             ),
           );
@@ -4204,13 +3344,9 @@ print(json.dumps(sessions))
         );
       }
 
-      final storagePaths = storagePathOutput
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .take(metadataReadLimit)
-          .toList(growable: false);
+      final storagePaths = _nonEmptyLines(
+        storagePathOutput,
+      ).take(metadataReadLimit).toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
         storagePaths,
@@ -4251,22 +3387,12 @@ print(json.dumps(sessions))
         }
       }
 
-      final scopedSessions =
-          workingDirectory != null && workingDirectory.isNotEmpty
-          ? sessions
-                .where(
-                  (info) => matchesDiscoveredSessionWorkingDirectory(
-                    workingDirectory,
-                    info.workingDirectory,
-                    relatedWorkingDirectories: relatedWorkingDirectories,
-                  ),
-                )
-                .toList(growable: false)
-          : sessions;
       return _ToolDiscoveryResult.success(
         'OpenCode',
-        sortAndLimitDiscoveredSessions(
-          scopedSessions.isNotEmpty ? scopedSessions : sessions,
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
           max,
         ),
         hadError: hadError,
@@ -4274,6 +3400,29 @@ print(json.dumps(sessions))
     } on Object {
       return const _ToolDiscoveryResult.failure('OpenCode');
     }
+  }
+
+  List<ToolSessionInfo> _scopeSessions(
+    List<ToolSessionInfo> sessions,
+    String? workingDirectory,
+    List<String> relatedWorkingDirectories,
+    int max,
+  ) {
+    final scoped = workingDirectory != null && workingDirectory.isNotEmpty
+        ? sessions
+              .where(
+                (info) => matchesDiscoveredSessionWorkingDirectory(
+                  workingDirectory,
+                  info.workingDirectory,
+                  relatedWorkingDirectories: relatedWorkingDirectories,
+                ),
+              )
+              .toList(growable: false)
+        : sessions;
+    return sortAndLimitDiscoveredSessions(
+      scoped.isNotEmpty ? scoped : sessions,
+      max,
+    );
   }
 
   List<ToolSessionInfo> _parseOpenCodeCliJson(String raw) {
@@ -4359,7 +3508,7 @@ print(json.dumps(sessions))
       session,
       r'SEP=$(printf "\037"); sqlite3 -separator "$SEP" '
       '~/.local/share/opencode/opencode.db '
-      '${_shellQuote(sql.toString())} 2>/dev/null',
+      '${shellEscapePosix(sql.toString())} 2>/dev/null',
     );
   }
 
@@ -4371,8 +3520,9 @@ print(json.dumps(sessions))
       return _execThroughControlChannel(controlChannelBackend, command);
     }
     return session.runQueuedExec(() async {
-      final execSession = await session.execute(
-        _markCommandDone('$_profileSourcingPrefix$command'),
+      final execSession = await openSshExec(
+        session.execute(_markCommandDone('$_profileSourcingPrefix$command')),
+        _execOutputTimeout,
       );
       try {
         execSession.stderr.drain<void>().ignore();
@@ -4412,7 +3562,10 @@ print(json.dumps(sessions))
           .then((result) => result.output);
     }
     return session.runQueuedExec(() async {
-      final execSession = await session.execute(command);
+      final execSession = await openSshExec(
+        session.execute(command),
+        _execOutputTimeout,
+      );
       try {
         execSession.stderr.drain<void>().ignore();
         return await _readStdoutUntilDoneMarker(execSession);
@@ -4433,14 +3586,13 @@ print(json.dumps(sessions))
 
   static String _markCommandDone(String command) =>
       '{ $command; __flutty_agent_discovery_exec_status__=\$?; '
-      'printf ${_shellQuote('\n$_execDoneMarker:%s\n')} '
+      'printf ${shellEscapePosix('\n$_execDoneMarker:%s\n')} '
       r'"$__flutty_agent_discovery_exec_status__"; }';
 
   static String _stripDoneMarker(String output) {
-    RegExpMatch? markerMatch;
-    for (final match in _execDoneMarkerLinePattern.allMatches(output)) {
-      markerMatch = match;
-    }
+    final markerMatch = _execDoneMarkerLinePattern
+        .allMatches(output)
+        .lastOrNull;
     return markerMatch == null
         ? output
         : output.substring(0, markerMatch.start);
@@ -4448,31 +3600,14 @@ print(json.dumps(sessions))
 
   static Future<String> _readStdoutUntilDoneMarker(
     SSHSession execSession,
-  ) async {
-    final output = StringBuffer();
-    try {
-      await for (final chunk
-          in execSession.stdout
-              .cast<List<int>>()
-              .transform(utf8.decoder)
-              .timeout(_execOutputTimeout)) {
-        output.write(chunk);
-        final currentOutput = output.toString();
-        RegExpMatch? markerMatch;
-        for (final match in _execDoneMarkerLinePattern.allMatches(
-          currentOutput,
-        )) {
-          markerMatch = match;
-        }
-        if (markerMatch != null) {
-          return currentOutput.substring(0, markerMatch.start);
-        }
-      }
-    } on TimeoutException {
-      return output.toString();
-    }
-    return output.toString();
-  }
+  ) async => (await readCommandOutputUntilMarker(
+    execSession.stdout
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .timeout(_execOutputTimeout),
+    _execDoneMarker,
+    allowPartialOnTimeout: true,
+  )).output;
 
   List<String?> _acpSessionListWorkingDirectories(
     String? workingDirectory,
@@ -4502,7 +3637,7 @@ print(json.dumps(sessions))
       'copilot --acp --no-color --no-auto-update --log-level error',
     _AcpSessionProvider.openCode =>
       'opencode acp --log-level ERROR'
-          '${workingDirectory == null || workingDirectory.isEmpty ? '' : ' --cwd ${_shellQuote(workingDirectory)}'}',
+          '${workingDirectory == null || workingDirectory.isEmpty ? '' : ' --cwd ${shellEscapePosix(workingDirectory)}'}',
   };
 
   Future<_AcpSessionListResult?> _discoverAcpSessions(
@@ -4548,8 +3683,11 @@ print(json.dumps(sessions))
     required List<String?> listWorkingDirectories,
     required int max,
   }) => session.runQueuedExec(() async {
-    final execSession = await session.execute(
-      '$_profileSourcingPrefix${_buildAcpSessionListCommand(provider, workingDirectory)}',
+    final execSession = await openSshExec(
+      session.execute(
+        '$_profileSourcingPrefix${_buildAcpSessionListCommand(provider, workingDirectory)}',
+      ),
+      _acpResponseTimeout,
     );
     var nextRequestId = 0;
     final connection = AcpJsonRpcConnection(
@@ -4574,6 +3712,7 @@ print(json.dumps(sessions))
       var hadError = false;
       for (final listWorkingDirectory in listWorkingDirectories) {
         String? cursor;
+        final seenCursors = <String>{};
         do {
           late final AcpSessionListResult listResult;
           try {
@@ -4604,6 +3743,10 @@ print(json.dumps(sessions))
             sessionsById.putIfAbsent(info.sessionId, () => info);
           }
           cursor = listResult.nextCursor;
+          if (cursor != null && !seenCursors.add(cursor)) {
+            hadError = true;
+            break;
+          }
         } while (cursor != null && sessionsById.length < max);
       }
 
@@ -4634,12 +3777,7 @@ print(json.dumps(sessions))
           limit: scanLimit,
         ),
       );
-      return output
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false);
+      return _nonEmptyLines(output).toList(growable: false);
     }
 
     final scopedDirectories = relatedWorkingDirectories
@@ -4648,18 +3786,14 @@ print(json.dumps(sessions))
         .toSet()
         .toList(growable: false);
 
-    final globalCommand =
-        'find ~/.copilot/session-state -mindepth 2 -maxdepth 2 '
-        '-name workspace.yaml -type f '
-        '-exec ls -1t {} + 2>/dev/null | head -n $scanLimit';
+    final globalCommand = posixListNewestFilesCommand(
+      'find ~/.copilot/session-state -mindepth 2 -maxdepth 2 '
+      '-name workspace.yaml -type f',
+      scanLimit,
+    );
     if (scopedDirectories.isEmpty) {
       final output = await _exec(session, globalCommand);
-      return output
-          .trim()
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false);
+      return _nonEmptyLines(output).toList(growable: false);
     }
 
     final scopedCommand = StringBuffer()
@@ -4667,7 +3801,7 @@ print(json.dumps(sessions))
       ..writeAll(
         scopedDirectories.map(
           (directory) =>
-              'printf "%s\\n" ${_shellQuote('cwd: $directory')} '
+              'printf "%s\\n" ${shellEscapePosix('cwd: $directory')} '
               r'>> "$pattern_file"; ',
         ),
       )
@@ -4679,21 +3813,18 @@ print(json.dumps(sessions))
         r'printf "%s\n" "$matching_paths" '
         '| while IFS= read -r path; do '
         r'[ -n "$path" ] && printf "%s\0" "$path"; '
-        'done | xargs -0 ls -1t 2>/dev/null '
-        '| head -n $scanLimit; '
-        'fi',
+        'done | xargs -0 sh -c ${shellEscapePosix(_posixFileTimestampsScript)} '
+        'sh 2>/dev/null; fi',
       );
 
-    final scopedOutput = await _exec(session, scopedCommand.toString());
+    final scopedOutput = await _exec(
+      session,
+      _newestFilePathsCommand('{ $scopedCommand; }', scanLimit),
+    );
     final output = scopedOutput.trim().isNotEmpty
         ? scopedOutput
         : await _exec(session, globalCommand);
-    return output
-        .trim()
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .toList(growable: false);
+    return _nonEmptyLines(output).toList(growable: false);
   }
 
   Future<Map<String, _RemoteFileSnapshot>> _readRemoteFileSnapshots(
@@ -4753,7 +3884,7 @@ print(json.dumps(sessions))
           r'TAIL_BIN=/usr/bin/tail; [ -x "$TAIL_BIN" ] || TAIL_BIN=tail; ',
         )
         ..write('for path in ')
-        ..write(batchPaths.map(_shellQuote).join(' '))
+        ..write(batchPaths.map(shellEscapePosix).join(' '))
         ..write(r'; do [ -f "$path" ] || continue; ')
         ..write(
           r'mtime=$( ($STAT_BIN -c %Y "$path" 2>/dev/null || '
@@ -4804,7 +3935,7 @@ print(json.dumps(sessions))
     }
 
     final nameFilters = uniqueSessionIds
-        .map((id) => '-name ${_shellQuote('$id.jsonl')}')
+        .map((id) => '-name ${shellEscapePosix('$id.jsonl')}')
         .join(' -o ');
     final output = session.remoteIsWindows
         ? await _execWindowsPowerShell(
@@ -4896,21 +4027,25 @@ print(json.dumps(sessions))
       return inFlight;
     }
 
-    final future =
-        _resolveRelatedWorkingDirectories(session, key.workingDirectory).then((
-          directories,
-        ) {
-          _relatedWorkingDirectoriesCache[key] =
-              _CachedRelatedWorkingDirectories(
-                directories: directories,
-                cachedAt: _now(),
-              );
+    late final Future<List<String>> future;
+    future = _resolveRelatedWorkingDirectories(session, key.workingDirectory)
+        .then((directories) {
+          if (identical(_inFlightRelatedWorkingDirectories[key], future)) {
+            _relatedWorkingDirectoriesCache[key] =
+                _CachedRelatedWorkingDirectories(
+                  directories: directories,
+                  cachedAt: _now(),
+                );
+          }
           return directories;
+        })
+        .whenComplete(() {
+          if (identical(_inFlightRelatedWorkingDirectories[key], future)) {
+            _inFlightRelatedWorkingDirectories.remove(key);
+          }
         });
     _inFlightRelatedWorkingDirectories[key] = future;
-    return future.whenComplete(
-      () => _inFlightRelatedWorkingDirectories.remove(key),
-    );
+    return future;
   }
 
   Future<List<String>> _resolveRelatedWorkingDirectories(
@@ -4931,11 +4066,11 @@ print(json.dumps(sessions))
       final gitOutput = await _exec(
         session,
         r'ROOT=$(git -C '
-        '${_shellQuote(trimmedWorkingDirectory)}'
+        '${shellEscapePosix(trimmedWorkingDirectory)}'
         ' rev-parse --show-toplevel 2>/dev/null) && '
         r'[ -n "$ROOT" ] && printf "root=%s\n" "$ROOT" && '
         'git -C '
-        '${_shellQuote(trimmedWorkingDirectory)}'
+        '${shellEscapePosix(trimmedWorkingDirectory)}'
         ' worktree list --porcelain 2>/dev/null',
       );
       if (gitOutput.trim().isEmpty) {
@@ -4961,9 +4096,6 @@ print(json.dumps(sessions))
       return buildRelatedWorkingDirectories(trimmedWorkingDirectory);
     }
   }
-
-  static String _shellQuote(String value) =>
-      "'${value.replaceAll("'", "'\"'\"'")}'";
 
   List<ToolSessionInfo> _limitDiscoveredSessionsPerTool(
     List<ToolSessionInfo> sessions,
@@ -5302,12 +4434,32 @@ String _windowsNameLikeCondition(List<String> globs) => globs
     )
     .join(' -or ');
 
+const _posixFileTimestampsScript =
+    'if stat -c %Y / >/dev/null 2>&1; then '
+    "stat -c '%Y\t%n' \"\$@\"; "
+    "else stat -f '%m\t%N' \"\$@\"; fi";
+
+String _newestFilePathsCommand(String timestampsCommand, int limit) =>
+    '$timestampsCommand | LC_ALL=C sort -t "\t" -k1,1nr | '
+    'head -n $limit | cut -f2-';
+
+/// Globally sorts timestamp/path records from every batch of [findCommand].
+@visibleForTesting
+String posixListNewestFilesCommand(
+  String findCommand,
+  int limit,
+) => _newestFilePathsCommand(
+  '{ $findCommand -exec sh -c ${shellEscapePosix(_posixFileTimestampsScript)} '
+  'sh {} + 2>/dev/null || true; }',
+  limit,
+);
+
 /// Builds a PowerShell script listing files under [relativeRoot] below one or
 /// more Windows user roots that match any of [includeGlobs], newest first,
 /// limited to [limit].
 ///
 /// Emits one forward-slash path per line, mirroring
-/// `find <root> -name <glob> -type f -exec ls -1t {} + | head -n <limit>`. When
+/// [posixListNewestFilesCommand]. When
 /// [pathLikeFilters] is non-empty only files whose forward-slash path matches at
 /// least one `-like` pattern are emitted (mirroring `find ... -path <pattern>`).
 /// [additionalRelativeRoots] and [rootEnvironmentVariables] let callers include
@@ -5563,30 +4715,16 @@ Map<String, dynamic>? _tryDecodeJsonObject(String raw) {
   return null;
 }
 
-Map<String, dynamic>? _decodeJsonOrJsonlObject(String raw) {
-  final direct = _tryDecodeJsonObject(raw.trim());
-  if (direct != null) return direct;
-
-  Map<String, dynamic>? lastObject;
-  for (final line in const LineSplitter().convert(raw)) {
-    final decoded = _tryDecodeJsonObject(line.trim());
-    if (decoded == null) continue;
-    lastObject = decoded;
-    if (decoded.containsKey('sessionId') || decoded.containsKey('messages')) {
-      return decoded;
-    }
-  }
-  return lastObject;
-}
-
 String _buildSqlWorkingDirectoryPrefixPredicate(
   String directory, {
   required String columnName,
 }) {
   final quotedDirectory = _sqliteQuote(directory);
-  final quotedDirectoryPrefix = _sqliteQuote('$directory/');
+  final quotedDirectoryPrefix = _sqliteQuote(
+    _workingDirectoryPrefix(directory),
+  );
   return '($columnName = $quotedDirectory OR '
-      'substr($columnName, 1, length($quotedDirectory) + 1) = '
+      'substr($columnName, 1, length($quotedDirectoryPrefix)) = '
       '$quotedDirectoryPrefix)';
 }
 
@@ -5651,60 +4789,11 @@ String? _extractCodexThreadId(String fileName) {
   return match?.group(1);
 }
 
-String? _extractGeminiUserSummary(List<dynamic>? messages) {
-  if (messages == null) return null;
-  for (final message in messages.whereType<Map>()) {
-    final messageMap = message.map((key, value) => MapEntry('$key', value));
-    if (_readStringField(messageMap, 'type') != 'user') continue;
-
-    final content = _readListField(messageMap, 'content');
-    if (content != null) {
-      for (final part in content.whereType<Map>()) {
-        final partMap = part.map((key, value) => MapEntry('$key', value));
-        final text = _readStringField(partMap, 'text');
-        if (text != null && text.trim().isNotEmpty) {
-          return _summarizeSessionText(text);
-        }
-      }
-    }
-
-    final displayContent = _readStringField(messageMap, 'displayContent');
-    if (displayContent != null && displayContent.trim().isNotEmpty) {
-      return _summarizeSessionText(displayContent);
-    }
-  }
-  return null;
-}
-
 String? _extractClaudeUserSummary(String? value) {
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) return null;
   if (trimmed.startsWith('/') || trimmed.startsWith('<')) return null;
   return _summarizeSessionText(trimmed);
-}
-
-String? _resolveGeminiWorkingDirectory(
-  List<dynamic>? directories, {
-  String? activeWorkingDirectory,
-}) {
-  final values = directories
-      ?.whereType<String>()
-      .map((value) => value.trim())
-      .where((value) => value.isNotEmpty)
-      .toList(growable: false);
-  if (values == null || values.isEmpty) return null;
-
-  if (activeWorkingDirectory != null && activeWorkingDirectory.isNotEmpty) {
-    for (final value in values) {
-      if (value == activeWorkingDirectory ||
-          _pathLastSegment(value) == _pathLastSegment(activeWorkingDirectory)) {
-        return value;
-      }
-    }
-  }
-
-  if (values.length == 1) return values.first;
-  return null;
 }
 
 /// Provider for [AgentSessionDiscoveryService].

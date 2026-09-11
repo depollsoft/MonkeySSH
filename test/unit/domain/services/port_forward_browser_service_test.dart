@@ -108,18 +108,22 @@ void main() {
     });
   });
 
-  group('buildPortForwardBrowserUri', () {
+  group('buildPortForwardBrowserUriForBind', () {
     test('builds an http URL for loopback forwards', () {
       expect(
-        buildPortForwardBrowserUri(_buildPortForward()).toString(),
+        buildPortForwardBrowserUriForBind(
+          localHost: '127.0.0.1',
+          localPort: 8080,
+        ).toString(),
         'http://127.0.0.1:8080',
       );
     });
 
     test('maps wildcard bind addresses to loopback', () {
       expect(
-        buildPortForwardBrowserUri(
-          _buildPortForward(localHost: '0.0.0.0'),
+        buildPortForwardBrowserUriForBind(
+          localHost: '0.0.0.0',
+          localPort: 8080,
         ).toString(),
         'http://127.0.0.1:8080',
       );
@@ -127,8 +131,9 @@ void main() {
 
     test('maps IPv6 loopback bind addresses to localhost', () {
       expect(
-        buildPortForwardBrowserUri(
-          _buildPortForward(localHost: '::1'),
+        buildPortForwardBrowserUriForBind(
+          localHost: '::1',
+          localPort: 8080,
         ).toString(),
         'http://localhost:8080',
       );
@@ -136,14 +141,16 @@ void main() {
 
     test('preserves distinct IPv4 loopback bind addresses', () {
       expect(
-        buildPortForwardBrowserUri(
-          _buildPortForward(localHost: '127.0.0.5'),
+        buildPortForwardBrowserUriForBind(
+          localHost: '127.0.0.5',
+          localPort: 8080,
         ).toString(),
         'http://127.0.0.5:8080',
       );
       expect(
-        buildPortForwardBrowserUri(
-          _buildPortForward(localHost: '127.0.0.53%lo'),
+        buildPortForwardBrowserUriForBind(
+          localHost: '127.0.0.53%lo',
+          localPort: 8080,
         ).toString(),
         'http://127.0.0.53:8080',
       );
@@ -186,45 +193,31 @@ void main() {
       });
     });
 
-    group('hostPortProxyDomain', () {
+    group('proxy names', () {
       test('generates a stable DNS-safe host-scoped name', () {
+        expect(generatedPortProxyName('Dev Box!', hostId: 42), 'dev-box');
         expect(
-          hostPortProxyDomain(hostLabel: 'Dev Box!', hostId: 42),
-          'dev-box.localhost',
+          generatedPortProxyName('Dev Box!', hostId: 42),
+          generatedPortProxyName('Dev Box!', hostId: 42),
         );
         expect(
-          hostPortProxyDomain(hostLabel: 'Dev Box!', hostId: 42),
-          hostPortProxyDomain(hostLabel: 'Dev Box!', hostId: 42),
-        );
-        expect(
-          hostPortProxyDomain(
-            hostLabel: 'OVH davidpollforlasd com production workspace',
+          generatedPortProxyName(
+            'OVH davidpollforlasd com production workspace',
             hostId: 57,
           ),
-          'ovh-davidpol.localhost',
+          'ovh-davidpol',
         );
       });
 
       test('adds the saved host ID only for duplicate generated labels', () {
         expect(
-          hostPortProxyDomain(
-            hostLabel: 'Dev Box',
-            hostId: 42,
-            generatedName: 'dev-box-42',
-          ),
-          'dev-box-42.localhost',
+          generatedPortProxyName('Dev Box', hostId: 42, includeHostId: true),
+          'dev-box-42',
         );
       });
 
       test('uses and normalizes a custom localhost prefix', () {
-        expect(
-          hostPortProxyDomain(
-            hostLabel: 'Ignored',
-            hostId: 1,
-            customName: 'API.Dev.LocalHost',
-          ),
-          'api.dev.localhost',
-        );
+        expect(normalizeOptionalPortProxyName('API.Dev.LocalHost'), 'api.dev');
       });
 
       group('resolveGeneratedPortProxyNames', () {
@@ -267,36 +260,6 @@ void main() {
             {42: 'dev-box-host-42', 43: 'dev-box-43'},
           );
         });
-      });
-
-      test('isolates automatic services by host and remote port', () {
-        expect(
-          automaticPortForwardBrowserHost(
-            hostDomain: 'api.dev.localhost',
-            hostId: 1,
-            remoteHost: '127.0.0.1',
-            remotePort: 3000,
-          ),
-          'api.dev.localhost',
-        );
-        expect(
-          automaticPortForwardBrowserHost(
-            hostDomain: 'other.localhost',
-            hostId: 2,
-            remoteHost: '127.0.0.1',
-            remotePort: 3000,
-          ),
-          'other.localhost',
-        );
-        expect(
-          automaticPortForwardBrowserHost(
-            hostDomain: 'api.dev.localhost',
-            hostId: 1,
-            remoteHost: '::1',
-            remotePort: 8080,
-          ),
-          'api.dev.localhost',
-        );
       });
 
       test('validates DNS labels and allows an empty generated-name field', () {
@@ -479,80 +442,6 @@ void main() {
     });
   });
 
-  group('shouldOpenUriInPortForwardBrowser', () {
-    test('matches http and https loopback URLs', () {
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('http://127.0.0.1:8080'),
-          activeLocalPorts: const [8080],
-        ),
-        isTrue,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('https://localhost:8443'),
-          activeLocalPorts: const [8443],
-        ),
-        isTrue,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('http://127.0.0.5:8080'),
-          activeLocalPorts: const [8080],
-        ),
-        isTrue,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('http://localhost/'),
-          activeLocalPorts: const [80],
-        ),
-        isTrue,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('https://localhost/'),
-          activeLocalPorts: const [443],
-        ),
-        isTrue,
-      );
-    });
-
-    test('does not match inactive loopback ports', () {
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('http://127.0.0.1:8080'),
-          activeLocalPorts: const [3000],
-        ),
-        isFalse,
-      );
-    });
-
-    test('does not match non-web or non-loopback URLs', () {
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('ssh://localhost:22'),
-          activeLocalPorts: const [22],
-        ),
-        isFalse,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('https://example.com'),
-          activeLocalPorts: const [443],
-        ),
-        isFalse,
-      );
-      expect(
-        shouldOpenUriInPortForwardBrowser(
-          Uri.parse('https://127.example.com'),
-          activeLocalPorts: const [443],
-        ),
-        isFalse,
-      );
-    });
-  });
-
   group('normalizePortForwardBrowserUri', () {
     test('maps wildcard URL hosts to loopback', () {
       expect(
@@ -645,36 +534,6 @@ void main() {
       expect(
         portForwardBrowserDisplayOrigin(Uri.parse('http:relative-path')),
         'http',
-      );
-    });
-  });
-
-  group('isPortForwardBrowserUri', () {
-    test('allows only loopback web URLs on the forwarded port', () {
-      expect(
-        isPortForwardBrowserUri(
-          Uri.parse('http://127.0.0.5:3000/path'),
-          port: 3000,
-        ),
-        isTrue,
-      );
-      expect(
-        isPortForwardBrowserUri(
-          Uri.parse('http://127.0.0.1:4000/path'),
-          port: 3000,
-        ),
-        isFalse,
-      );
-      expect(
-        isPortForwardBrowserUri(
-          Uri.parse('https://example.com:3000/path'),
-          port: 3000,
-        ),
-        isFalse,
-      );
-      expect(
-        isPortForwardBrowserUri(Uri.parse('http://127.0.0.1:0/path'), port: 0),
-        isFalse,
       );
     });
   });

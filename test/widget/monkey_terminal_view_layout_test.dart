@@ -2,7 +2,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
@@ -27,6 +28,66 @@ Color _rawRgbaPixel(ByteData data, int width, int x, int y) {
 }
 
 void main() {
+  for (final index in [11, 226]) {
+    testWidgets('palette-only updates and resets repaint index $index', (
+      tester,
+    ) async {
+      final terminal = Terminal()..write('\x1b[38;5;${index}m██MM\x1b[?25l');
+      final key = GlobalKey();
+      const base = TerminalThemes.defaultDarkTheme;
+      final original = index == 11
+          ? base.brightYellow
+          : const Color(0xFFFFFF00);
+      Color? previous;
+      for (final color in [
+        original,
+        const Color(0xFF00FF00),
+        const Color(0xFF00FFFF),
+        original,
+      ]) {
+        final theme = base.copyWith(
+          paletteOverrides: color == original ? {} : {index: color},
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Center(
+              child: SizedBox(
+                width: 120,
+                height: 60,
+                child: RepaintBoundary(
+                  key: key,
+                  child: MonkeyTerminalView(
+                    terminal,
+                    theme: theme.toXtermTheme(),
+                    hardwareKeyboardOnly: true,
+                    readOnly: true,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        final boundary =
+            key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+        final data = (await tester.runAsync(() async {
+          final image = await boundary.toImage();
+          try {
+            return await image.toByteData();
+          } finally {
+            image.dispose();
+          }
+        }))!;
+        final pixels = <Color>{
+          for (var offset = 0; offset < data.lengthInBytes; offset += 4)
+            _rawRgbaPixel(data, data.lengthInBytes ~/ 4, offset ~/ 4, 0),
+        };
+        expect(pixels, contains(color));
+        if (previous != null) expect(pixels, isNot(contains(previous)));
+        previous = color;
+      }
+    });
+  }
+
   group('resolveTerminalRenderPadding', () {
     test('keeps portrait terminal rendering edge-to-edge', () {
       const mediaQuery = MediaQueryData(

@@ -1,41 +1,9 @@
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/performance_diagnostics_service.dart';
 
-class _RecordingLogger implements DiagnosticsLogger {
-  final events =
-      <({String category, String message, Map<String, Object?> f})>[];
-
-  @override
-  void debug(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((category: category, message: message, f: fields));
-
-  @override
-  void info(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((category: category, message: message, f: fields));
-
-  @override
-  void warning(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((category: category, message: message, f: fields));
-
-  @override
-  void error(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => events.add((category: category, message: message, f: fields));
-}
+import '../../helpers/recording_diagnostics_logger.dart';
 
 FrameTiming _frame({required int buildMicros, required int rasterMicros}) {
   // Build runs first on the UI thread, then raster on the GPU thread.
@@ -56,11 +24,11 @@ FrameTiming _frame({required int buildMicros, required int rasterMicros}) {
 
 void main() {
   group('PerformanceDiagnosticsService frame jank', () {
-    late _RecordingLogger logger;
+    late RecordingDiagnosticsLogger logger;
     late PerformanceDiagnosticsService service;
 
     setUp(() {
-      logger = _RecordingLogger();
+      logger = RecordingDiagnosticsLogger();
       service = PerformanceDiagnosticsService(logger: logger);
     });
 
@@ -79,8 +47,8 @@ void main() {
       final event = logger.events.single;
       expect(event.category, 'perf.frame');
       expect(event.message, 'jank');
-      expect(event.f['bound'], 'ui');
-      expect(event.f['buildMs'], 1200);
+      expect(event.fields['bound'], 'ui');
+      expect(event.fields['buildMs'], 1200);
     });
 
     test('flags a raster-thread bound janky frame', () {
@@ -88,8 +56,8 @@ void main() {
         _frame(buildMicros: 3000, rasterMicros: 900 * 1000),
       ]);
       expect(logger.events, hasLength(1));
-      expect(logger.events.single.f['bound'], 'raster');
-      expect(logger.events.single.f['rasterMs'], 900);
+      expect(logger.events.single.fields['bound'], 'raster');
+      expect(logger.events.single.fields['rasterMs'], 900);
     });
   });
 }

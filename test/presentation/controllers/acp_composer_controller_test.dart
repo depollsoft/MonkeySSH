@@ -249,10 +249,7 @@ void main() {
           mimeType: 'image/png',
         ),
       )
-      ..setAttachmentFallback(
-        controller.attachments.single.id,
-        AcpAttachmentFallback.remoteUpload,
-      );
+      ..enableRemoteUploadFallback();
 
     expect(await controller.send(), isFalse);
     expect(controller.text, 'keep this draft');
@@ -421,10 +418,7 @@ void main() {
           mimeType: 'text/plain',
         ),
       )
-      ..setAttachmentFallback(
-        controller.attachments.single.id,
-        AcpAttachmentFallback.remoteUpload,
-      );
+      ..enableRemoteUploadFallback();
 
     final future = controller.send();
     await Future<void>.delayed(Duration.zero);
@@ -460,10 +454,7 @@ void main() {
             mimeType: 'text/plain',
           ),
         )
-        ..setAttachmentFallback(
-          controller.attachments.single.id,
-          AcpAttachmentFallback.remoteUpload,
-        );
+        ..enableRemoteUploadFallback();
 
       final future = controller.send();
       await Future<void>.delayed(Duration.zero);

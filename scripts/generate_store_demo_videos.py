@@ -13,12 +13,14 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import generate_store_screenshots as store_screenshots
+from store_media import _video_duration
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_HOLD_MS = 1600
@@ -160,15 +162,10 @@ def _run_target(
             store_screenshots._ios_simulator_name(screenshot_target),
         )
         store_screenshots._reset_ios_app_state(device_id)
-        restore_android = None
     else:
         device_id = store_screenshots._android_device_id()
-        restore_android = store_screenshots._configure_android_display(
-            screenshot_target,
-            device_id,
-        )
 
-    try:
+    with store_screenshots._android_display_override(screenshot_target, device_id):
         with tempfile.TemporaryDirectory(prefix='monkeyssh-demo-video-') as tmpdir:
             suffix = '.mov' if screenshot_target.platform == 'ios' else '.mp4'
             raw_path = Path(tmpdir) / f'raw{suffix}'
@@ -186,9 +183,6 @@ def _run_target(
                     raw_path=raw_path,
                     beat_offsets=beat_offsets,
                 )
-    finally:
-        if restore_android is not None:
-            restore_android()
 
 
 def _compose_output(
@@ -232,29 +226,8 @@ def _run_flutter_recording(
     output_path: Path,
     scene_hold_ms: int,
 ) -> list[float]:
-    env = os.environ.copy()
-    java_home = store_screenshots._java_home_17()
-    if java_home:
-        env['JAVA_HOME'] = java_home
-    restore_error_dialogs = None
-    if target.platform == 'android':
-        restore_error_dialogs = _suppress_android_error_dialogs(device_id)
-        _dismiss_android_system_dialogs(device_id, force=True)
-
-    dart_defines = [
-        f'--dart-define=STORE_SCREENSHOT_TARGET={target.name}',
-        f'--dart-define=STORE_SCREENSHOT_SSH_PORT={demo.port}',
-        f'--dart-define=STORE_SCREENSHOT_SSH_USERNAME={demo.username}',
-        f'--dart-define=STORE_SCREENSHOT_SSH_PRIVATE_KEY_B64={demo.private_key_b64}',
-        f'--dart-define=STORE_SCREENSHOT_SSH_HOST_KEY_B64={demo.host_key_b64}',
-        (
-            '--dart-define=STORE_SCREENSHOT_SSH_HOST_KEY_FINGERPRINT='
-            f'{demo.host_key_fingerprint}'
-        ),
-        f'--dart-define=STORE_SCREENSHOT_MUX_SESSION={demo.mux_session}',
-        f'--dart-define=STORE_SCREENSHOT_WORKSPACE_PATH={demo.demo_dir}',
-        '--dart-define=STORE_SCREENSHOT_REDACT_IDENTITIES=true',
-        '--dart-define=STORE_SCREENSHOT_DISABLE_NOTIFICATIONS=true',
+    env = store_screenshots._flutter_environment()
+    dart_defines = store_screenshots._capture_defines(target, demo) + [
         '--dart-define=STORE_SCREENSHOT_VIDEO_DEMO=true',
         f'--dart-define=STORE_SCREENSHOT_COPILOT_PROMPT={COPILOT_PROMPT}',
         f'--dart-define=STORE_SCREENSHOT_CLAUDE_PROMPT={CLAUDE_PROMPT}',
@@ -264,31 +237,36 @@ def _run_flutter_recording(
         dart_defines.append(
             f'--dart-define=STORE_SCREENSHOT_DEMO_IMAGE_B64={demo.demo_image_b64}',
         )
-    command = _flutter_command(target, device_id, env, dart_defines)
-    watchdog = (
-        _AndroidSystemDialogWatchdog(device_id)
-        if target.platform == 'android'
-        else None
-    )
-    if watchdog is not None:
-        watchdog.start()
-    process = subprocess.Popen(
-        command,
-        cwd=ROOT,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    assert process.stdout is not None
+    with ExitStack() as cleanup:
+        if target.platform == 'android':
+            cleanup.callback(_suppress_android_error_dialogs(device_id))
+            _dismiss_android_system_dialogs(device_id, force=True)
+        command = store_screenshots._flutter_command(target, device_id, env, dart_defines)
+        watchdog = (
+            _AndroidSystemDialogWatchdog(device_id)
+            if target.platform == 'android'
+            else None
+        )
+        if watchdog is not None:
+            watchdog.start()
+            cleanup.callback(watchdog.stop)
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        cleanup.callback(store_screenshots._terminate_process, process, timeout=20)
+        assert process.stdout is not None
 
-    recorder: _NativeScreenRecorder | None = None
-    saw_done = False
-    failure: str | None = None
-    beat_times: dict[int, float] = {}
-    try:
+        recorder: _NativeScreenRecorder | None = None
+        saw_done = False
+        failure: str | None = None
+        beat_times: dict[int, float] = {}
         for raw_line in process.stdout:
             print(raw_line, end='')
             line = raw_line.strip()
@@ -299,6 +277,7 @@ def _run_flutter_recording(
                     pending_recorder = _recorder_for_target(
                         target, device_id, output_path,
                     )
+                    cleanup.callback(pending_recorder.stop)
                     pending_recorder.start()
                     recorder = pending_recorder
                 beat = _parse_beat(line)
@@ -310,21 +289,6 @@ def _run_flutter_recording(
             if store_screenshots.DONE_MARKER in line:
                 saw_done = True
                 break
-    finally:
-        if recorder is not None:
-            recorder.stop()
-        if watchdog is not None:
-            watchdog.stop()
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=20)
-        if restore_error_dialogs is not None:
-            restore_error_dialogs()
-
     if failure is not None:
         raise RuntimeError(f'{target.name} run failed in the app: {failure}')
 
@@ -1015,28 +979,6 @@ def _draw_landscape_timeline(
     )
 
 
-def _video_duration(path: Path) -> float:
-    ffprobe = shutil.which('ffprobe')
-    if ffprobe is None:
-        raise RuntimeError('ffprobe is required to read demo video duration.')
-    result = subprocess.run(
-        [
-            ffprobe,
-            '-v',
-            'error',
-            '-show_entries',
-            'format=duration',
-            '-of',
-            'default=noprint_wrappers=1:nokey=1',
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    return float(result.stdout.strip())
-
 
 def _promo_layout(target: store_screenshots.ScreenshotTarget) -> dict[str, int]:
     canvas_width, canvas_height = target.size
@@ -1598,38 +1540,6 @@ def _display_path(path: Path) -> str:
     except ValueError:
         return str(path)
 
-
-def _flutter_command(
-    target: store_screenshots.ScreenshotTarget,
-    device_id: str,
-    env: dict[str, str],
-    dart_defines: list[str],
-) -> list[str]:
-    if target.platform == 'android':
-        apk_path = store_screenshots._build_android_screenshot_apk(env, dart_defines)
-        return [
-            'flutter',
-            'run',
-            '-d',
-            device_id,
-            '--use-application-binary',
-            str(apk_path),
-            '--no-pub',
-        ]
-
-    command = [
-        'flutter',
-        'run',
-        '--debug',
-        '-d',
-        device_id,
-        '-t',
-        'tool/store_screenshot_app.dart',
-        *dart_defines,
-    ]
-    if target.platform == 'ios':
-        command.extend(['--flavor', 'production'])
-    return command
 
 
 def _recorder_for_target(

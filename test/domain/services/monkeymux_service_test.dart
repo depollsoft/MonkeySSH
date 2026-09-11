@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
@@ -17,6 +18,97 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 void main() {
+  group('short-lived exec deadlines', () {
+    setUpAll(() => registerFallbackValue(Uint8List(0)));
+
+    for (final operation in ['one-shot', 'server-status', 'helper-version']) {
+      for (final opens in [false, true]) {
+        testWidgets(
+          '$operation bounds ${opens ? 'busy output' : 'channel opening'}',
+          (tester) async {
+            final client = _MockSshClient();
+            final installer = _MockMonkeyMuxInstaller();
+            final session = _buildSession(client, connectionId: 88001);
+            final service = MonkeyMuxService(installer: installer);
+            final opening = Completer<SSHSession>();
+            final stdout = StreamController<Uint8List>();
+            final channel = _buildSilentControlSession(stdout);
+            final underlying = _MockChannel();
+            when(() => channel.channel).thenReturn(underlying);
+            when(
+              () => installer.ensureInstalled(
+                session,
+                priority: SshExecPriority.normal,
+              ),
+            ).thenAnswer((_) async => _fakeInstallation);
+            when(
+              () => client.execute(any(), pty: any(named: 'pty')),
+            ).thenAnswer((_) => opens ? Future.value(channel) : opening.future);
+            final request = switch (operation) {
+              'one-shot' => service.injectInput(session, 'work', 'x'),
+              'server-status' => service.runningServerStatus(
+                session,
+                _fakeInstallation,
+                'work',
+              ),
+              _ => service.installedHelperVersion(session, _fakeInstallation),
+            };
+            final result = expectLater(
+              request,
+              operation == 'one-shot'
+                  ? throwsA(isA<TimeoutException>())
+                  : completion(isNull),
+            );
+            await tester.pump();
+            final blocker = Completer<void>();
+            final blocked = session.runQueuedExec(() => blocker.future);
+            var nextRan = false;
+            final next = session.runQueuedExec(() async {
+              nextRan = true;
+            });
+            expect(
+              pendingQueuedSshExecCountForTesting(session.connectionId),
+              1,
+            );
+            for (var second = 0; second < (opens ? 11 : 21); second++) {
+              if (opens && stdout.hasListener) {
+                stdout.add(
+                  Uint8List.fromList(
+                    utf8.encode(
+                      '{"type":"window_list","id":"unrelated","windows":[]}\n',
+                    ),
+                  ),
+                );
+              }
+              await tester.pump(const Duration(seconds: 1));
+            }
+            expect(nextRan, isTrue);
+            await result;
+            await next;
+            if (!opens) {
+              opening.complete(channel);
+              await tester.pump();
+            } else {
+              expect(stdout.hasListener, isFalse);
+            }
+            if (opens) {
+              verify(channel.close).called(1);
+            } else {
+              verify(underlying.destroy).called(1);
+            }
+            verify(
+              () => client.execute(any(), pty: any(named: 'pty')),
+            ).called(1);
+            blocker.complete();
+            await blocked;
+            stdout.close().ignore();
+            await service.clearCache(session.connectionId);
+          },
+        );
+      }
+    }
+  });
+
   group('RemoteMuxBackendPresentation', () {
     test('parses stable storage values', () {
       expect(
@@ -53,6 +145,20 @@ void main() {
   });
 
   group('buildMonkeyMuxAttachCommand', () {
+    test('passes the force reload policy to attach', () {
+      final command = buildMonkeyMuxAttachCommand(
+        executablePath: '/home/me/.monkeyssh/bin/monkeymux',
+        sessionName: 'work',
+        serverUpdatePolicy: MonkeyMuxServerUpdatePolicy.force,
+      );
+
+      expect(
+        command,
+        "'/home/me/.monkeyssh/bin/monkeymux' attach --quiet "
+        "--update-policy force 'work'",
+      );
+    });
+
     test('puts flags before the session and shell-quotes values', () {
       final command = buildMonkeyMuxAttachCommand(
         executablePath: '/home/me/.monkeyssh/bin/monkey mux',
@@ -70,8 +176,8 @@ void main() {
         command,
         "'/home/me/.monkeyssh/bin/monkey mux' attach --quiet "
         "--client-id 'app 7' --clip-viewport --update-policy never "
-        "--restore-yolo --cwd '~/src/it'\"'\"'s app' --name 'Codex agent' --command "
-        "'codex --model '\"'\"'gpt-5.4'\"'\"'' 'work'\"'\"'space'",
+        r"--restore-yolo --cwd '~/src/it'\''s app' --name 'Codex agent' --command "
+        r"'codex --model '\''gpt-5.4'\''' 'work'\''space'",
       );
     });
 
@@ -190,7 +296,6 @@ void main() {
       expect(status.supportsShutdown, isTrue);
       expect(status.hasNativeAcpWindows, isFalse);
       expect(status.nativeAcpWindowCount, 0);
-      expect(status.supportsViewportClipping, isTrue);
       expect(status.supportsBracketedPasteControlInput, isTrue);
       expect(status.needsUpdate('0.1.13'), isFalse);
       expect(status.needsUpdate('0.1.14'), isTrue);
@@ -292,19 +397,68 @@ void main() {
   });
 
   group('parseMonkeyMuxWindowSnapshotForTesting', () {
+    test('ignores legacy Gemini agent metadata from older helpers', () {
+      for (final name in ['Gemini CLI', 'Codex']) {
+        final window = parseMonkeyMuxWindowSnapshotForTesting({
+          'id': '@1',
+          'index': 0,
+          'name': name,
+          'active': true,
+          'currentCommand': 'node',
+          'agentTool': 'gemini',
+          'agentSessionId': 'legacy-gemini-session',
+          'agentSessionIdentityExact': true,
+        });
+        expect(window, isNotNull);
+        expect(window!.agentTool, isNull);
+        expect(window.activeAgentSessionId, isNull);
+        expect(window.activeAgentSessionConfidence, isNull);
+        expect(window.foregroundAgentTool, isNull);
+        expect(window.hasUnsupportedAgentTool, isTrue);
+        expect(
+          window.copyWith(currentCommand: 'copilot').foregroundAgentTool,
+          AgentLaunchTool.copilotCli,
+        );
+      }
+    });
+
+    test('confirmed plain shells do not regain identity from their names', () {
+      for (final storedTool in [null, '']) {
+        final window = parseMonkeyMuxWindowSnapshotForTesting({
+          'id': '@1',
+          'index': 0,
+          'name': 'Codex',
+          'paneTitle': 'Claude Code',
+          'currentCommand': 'zsh',
+          'agentTool': storedTool,
+          'agentToolConfirmed': true,
+          'agentSessionId': 'stale-session',
+          'agentSessionIdentityExact': true,
+        })!;
+        expect(window.foregroundAgentTool, isNull);
+        expect(window.activeAgentSessionId, isNull);
+        expect(window.agentSessionId, isNull);
+        expect(window.activeAgentSessionConfidence, isNull);
+        expect(
+          window.copyWith(currentCommand: 'copilot').foregroundAgentTool,
+          AgentLaunchTool.copilotCli,
+        );
+      }
+    });
+
     test('maps helper agentTool metadata onto tmux windows', () {
       final window = parseMonkeyMuxWindowSnapshotForTesting({
         'id': '@1',
         'index': 0,
-        'name': 'Gemini CLI',
+        'name': 'Cursor Agent',
         'active': true,
         'currentCommand': 'node',
         'panePid': 1234,
-        'agentTool': 'gemini',
+        'agentTool': 'cursor-agent',
       });
 
       expect(window, isNotNull);
-      expect(window!.foregroundAgentTool, AgentLaunchTool.geminiCli);
+      expect(window!.foregroundAgentTool, AgentLaunchTool.cursorAgent);
     });
 
     test('maps server-owned native ACP identity onto real windows', () {
@@ -468,6 +622,56 @@ void main() {
   });
 
   group('MonkeyMux agent metadata', () {
+    for (final fullList in [false, true]) {
+      test('Codex title survives repeated helper updates, list=$fullList', () {
+        const sep = tmuxWindowFieldSeparator;
+        const snapshot = {
+          'index': 3,
+          'id': '@7',
+          'panePid': 42,
+          'name': 'codex',
+          'active': true,
+          'currentCommand': 'codex',
+          'currentPath': '/work/MonkeySSH',
+          'paneTitle': 'Show agent usage limits | MonkeySSH',
+          'agentTool': 'codex',
+          'agentSessionId': 'codex-session',
+          'agentSessionIdentityExact': true,
+        };
+        final window = parseMonkeyMuxWindowSnapshotForTesting(snapshot)!;
+        var windows = [window];
+        for (var refresh = 0; refresh < 3; refresh++) {
+          windows = applyMonkeyMuxAgentMetadataForTesting(
+            windows,
+            'codex${sep}codex-session${sep}501${sep}42${sep}high${sep}Show agent usage limits\n',
+          );
+          final title = windows.single.displayTitle;
+          final subtitle = windows.single.secondaryTitle;
+          final handle = windows.single.handleTitle;
+          expect(title, 'Show agent usage limits');
+          expect(subtitle, contains('MonkeySSH'));
+
+          final updated = parseMonkeyMuxWindowSnapshotForTesting({
+            ...snapshot,
+            'flags': '#',
+            'lastActivityEpochSeconds': refresh + 1,
+          })!;
+          windows = applyTmuxWindowChangeEvent(
+            windows,
+            fullList
+                ? TmuxWindowListEvent([updated])
+                : TmuxWindowSnapshotEvent(updated),
+          );
+          expect(windows.single.displayTitle, title);
+          expect(windows.single.secondaryTitle, subtitle);
+          expect(windows.single.handleTitle, handle);
+          expect(windows.single.activeAgentSessionId, 'codex-session');
+          expect(windows.single.hasAlert, isTrue);
+          expect(windows.single.lastActivityEpochSeconds, refresh + 1);
+        }
+      });
+    }
+
     test('refreshes metadata for every supported agent pane', () {
       const windows = [
         TmuxWindow(
@@ -513,9 +717,9 @@ void main() {
         ),
         TmuxWindow(
           index: 1,
-          name: 'Gemini',
+          name: 'Cursor',
           isActive: false,
-          currentCommand: 'gemini',
+          currentCommand: 'cursor-agent',
           panePid: 43,
         ),
       ];
@@ -523,7 +727,7 @@ void main() {
       final enriched = applyMonkeyMuxAgentMetadataForTesting(
         windows,
         'codex${sep}codex-session${sep}501${sep}42${sep}medium$sep\n'
-        'gemini${sep}gemini-session${sep}502${sep}43${sep}medium${sep}Gemini title\n',
+        'cursor-agent${sep}cursor-agent-session${sep}502${sep}43${sep}medium${sep}Cursor title\n',
       );
 
       expect(enriched[0].activeAgentSessionId, 'codex-session');
@@ -531,82 +735,77 @@ void main() {
         enriched[0].activeAgentSessionConfidence,
         AgentSessionConfidence.medium,
       );
-      expect(enriched[1].activeAgentSessionId, 'gemini-session');
-      expect(enriched[1].agentSessionTitle, 'Gemini title');
+      expect(enriched[1].activeAgentSessionId, 'cursor-agent-session');
+      expect(enriched[1].agentSessionTitle, 'Cursor title');
       expect(
         enriched[1].activeAgentSessionConfidence,
         AgentSessionConfidence.medium,
       );
     });
 
-    test('applies live Copilot session titles by pane pid', () {
-      const window = TmuxWindow(
-        index: 1,
-        id: '@7',
-        panePid: 42,
-        name: 'Copilot CLI',
-        isActive: true,
-        currentCommand: 'copilot',
-        paneTitle: 'Copilot CLI',
-      );
-
-      final windows = applyMonkeyMuxAgentSessionMetadataForTesting(
-        const [window],
-        const {
-          42: (sessionId: 'session-1', title: 'Implement MonkeyMux refresh'),
-        },
-        refreshedPanePids: const {42},
-      );
-
-      expect(windows.single.activeAgentSessionId, 'session-1');
-      expect(windows.single.agentSessionTitle, 'Implement MonkeyMux refresh');
-      expect(windows.single.displayTitle, 'Implement MonkeyMux refresh');
-    });
-
-    test('keeps Copilot session titles after a transient refreshed miss', () {
-      const window = TmuxWindow(
-        index: 1,
-        id: '@7',
-        panePid: 42,
-        name: 'Copilot CLI',
-        isActive: true,
-        currentCommand: 'copilot',
-        paneTitle: 'Copilot CLI',
-        activeAgentSessionId: 'stale-session',
-        agentSessionTitle: 'Stale Copilot session',
-      );
-
-      final windows = applyMonkeyMuxAgentSessionMetadataForTesting(
-        const [window],
-        const {},
-        refreshedPanePids: const {42},
-      );
-
-      expect(windows.single.activeAgentSessionId, 'stale-session');
-      expect(windows.single.agentSessionTitle, 'Stale Copilot session');
-      expect(windows.single.displayTitle, 'Stale Copilot session');
-    });
-
-    test('keeps existing Copilot metadata when pane was not refreshed', () {
-      const window = TmuxWindow(
-        index: 1,
-        id: '@7',
-        panePid: 42,
-        name: 'Copilot CLI',
-        isActive: true,
-        currentCommand: 'copilot',
-        paneTitle: 'Copilot CLI',
-        activeAgentSessionId: 'session-1',
-        agentSessionTitle: 'Current Copilot session',
-      );
-
-      final windows = applyMonkeyMuxAgentSessionMetadataForTesting(const [
-        window,
-      ], const {});
-
-      expect(windows.single.activeAgentSessionId, 'session-1');
-      expect(windows.single.agentSessionTitle, 'Current Copilot session');
-    });
+    for (final (name, oldId, oldTitle, output, id, title, displayTitle) in [
+      (
+        'live title',
+        null,
+        null,
+        'copilot\x1fsession-1\x1f501\x1f42\x1fmedium\x1fImplement MonkeyMux refresh\n',
+        'session-1',
+        'Implement MonkeyMux refresh',
+        'Implement MonkeyMux refresh',
+      ),
+      (
+        'absent metadata',
+        'stale-session',
+        'Stale Copilot session',
+        '',
+        'stale-session',
+        'Stale Copilot session',
+        'Stale Copilot session',
+      ),
+      (
+        'untitled replacement',
+        'session-a',
+        'Task A',
+        'copilot\x1fsession-b\x1f501\x1f42\x1fmedium\x1f\n',
+        'session-b',
+        null,
+        'Copilot CLI',
+      ),
+    ]) {
+      test('Copilot metadata: $name', () {
+        final original = [
+          TmuxWindow(
+            index: 1,
+            id: '@7',
+            panePid: 42,
+            name: 'Copilot CLI',
+            isActive: true,
+            currentCommand: 'copilot',
+            paneTitle: 'Copilot CLI',
+            activeAgentSessionId: oldId,
+            agentSessionTitle: oldTitle,
+            activeAgentSessionConfidence: name == 'untitled replacement'
+                ? AgentSessionConfidence.high
+                : null,
+          ),
+        ];
+        final windows = applyMonkeyMuxAgentMetadataForTesting(original, output);
+        expect(windows.single.activeAgentSessionId, id);
+        expect(windows.single.agentSessionTitle, title);
+        expect(windows.single.displayTitle, displayTitle);
+        if (output.isEmpty) expect(windows, same(original));
+        if (name == 'untitled replacement') {
+          expect(
+            windows.single.activeAgentSessionConfidence,
+            AgentSessionConfidence.medium,
+          );
+          expect(
+            applyMonkeyMuxAgentMetadataForTesting(windows, output),
+            same(windows),
+          );
+        }
+      });
+    }
   });
 
   group('MonkeyMux input injection', () {
@@ -677,6 +876,84 @@ void main() {
       verify(() => installer.clearCache(898)).called(1);
     });
 
+    for (final clearConnection in [false, true]) {
+      test(
+        'late window list cannot refill cache after clear=$clearConnection',
+        () async {
+          final client = _MockSshClient();
+          final installer = _MockMonkeyMuxInstaller();
+          final session = _buildSession(client, connectionId: 896);
+          final pending = Completer<SSHSession>();
+          final oldOutput = StreamController<Uint8List>();
+          final newOutput = StreamController<Uint8List>();
+          final finalOutput = StreamController<Uint8List>();
+          final oldControl = _buildRespondingControlSession(
+            oldOutput,
+            window: {
+              ..._fakeWindowJson,
+              'name': 'Old helper',
+              'agentSessionId': 'old-session',
+            },
+          );
+          final newControl = _buildRespondingControlSession(
+            newOutput,
+            window: {
+              ..._fakeWindowJson,
+              'name': 'Replacement helper',
+              'agentSessionId': 'new-session',
+            },
+          );
+          final finalControl = _buildRespondingControlSession(
+            finalOutput,
+            window: {..._fakeWindowJson, 'name': 'Replacement helper'},
+          );
+          when(
+            () => installer.ensureInstalled(
+              session,
+              priority: SshExecPriority.normal,
+            ),
+          ).thenAnswer((_) async => _fakeInstallation);
+          var opens = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+            (_) => switch (opens++) {
+              0 => pending.future,
+              1 => Future.value(newControl),
+              _ => Future.value(finalControl),
+            },
+          );
+          final service = MonkeyMuxService(
+            installer: installer,
+            agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+          );
+          addTearDown(() async {
+            await service.clearCache(896);
+            await oldOutput.close();
+            await newOutput.close();
+            await finalOutput.close();
+          });
+          final old = service.listWindows(session, 'work');
+          await untilCalled(
+            () => client.execute(any(), pty: any(named: 'pty')),
+          );
+          if (clearConnection) {
+            await service.clearCache(896);
+          } else {
+            await service.resetServerRuntime(896, 'work');
+          }
+          expect(
+            (await service.listWindows(session, 'work')).single.name,
+            'Replacement helper',
+          );
+          pending.complete(oldControl);
+          expect((await old).single.name, 'Old helper');
+          final after = (await service.listWindows(session, 'work')).single;
+          expect(after.name, 'Replacement helper');
+          expect(after.activeAgentSessionId, 'new-session');
+          expect(opens, 3);
+        },
+      );
+    }
+
     test('recycles a watcher without closing existing consumers', () async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
@@ -725,6 +1002,58 @@ void main() {
       await oldOutput.close();
       await newOutput.close();
       await service.clearCache(897);
+    });
+
+    test('window actions prefer stable IDs and fall back to indices', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client);
+      final output = StreamController<Uint8List>();
+      final control = _buildRespondingControlSession(
+        output,
+        window: _fakeWindowJson,
+      );
+      when(
+        () => installer.ensureInstalled(session),
+      ).thenAnswer((_) async => _fakeInstallation);
+      when(
+        () => client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((_) async => control);
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+      )..watchWindowChanges(session, 'work');
+      addTearDown(() async {
+        await service.clearCache(session.connectionId);
+        await output.close();
+      });
+
+      await service.selectWindow(session, 'work', 2, windowId: '@7');
+      await service.killWindow(session, 'work', 2, windowId: '@7');
+      await service.killWindow(session, 'work', 2);
+
+      final requests = verify(() => control.write(captureAny())).captured
+          .map(
+            (data) =>
+                jsonDecode(utf8.decode(data as List<int>))
+                    as Map<String, Object?>,
+          )
+          .toList();
+      expect(requests.map((request) => request['type']), [
+        'select_window',
+        'close_window',
+        'close_window',
+      ]);
+      expect(requests.map((request) => request['windowId']), [
+        '@7',
+        '@7',
+        null,
+      ]);
+      expect(requests.map((request) => request['windowIndex']), [
+        null,
+        null,
+        2,
+      ]);
     });
 
     test('preserves an exact bracketed paste in one control request', () async {
@@ -1271,6 +1600,8 @@ class _MockSshClient extends Mock implements SSHClient {}
 
 class _MockExecSession extends Mock implements SSHSession {}
 
+class _MockChannel extends Mock implements SSHChannel {}
+
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 
 class _MockMonkeyMuxInstaller extends Mock
@@ -1336,14 +1667,7 @@ SSHSession _buildRespondingControlSession(
   StreamController<Uint8List> stdoutController, {
   required Map<String, Object?> window,
 }) {
-  final session = _MockExecSession();
-  final stdinSink = _MockByteSink();
-  when(stdinSink.close).thenAnswer((_) async {});
-  when(() => session.stdout).thenAnswer((_) => stdoutController.stream);
-  when(() => session.stderr).thenAnswer((_) => const Stream<Uint8List>.empty());
-  when(() => session.done).thenAnswer((_) => Completer<void>().future);
-  when(() => session.stdin).thenAnswer((_) => stdinSink);
-  when(session.close).thenAnswer((_) {});
+  final session = _buildSilentControlSession(stdoutController);
   when(() => session.write(any())).thenAnswer((invocation) {
     final data = invocation.positionalArguments.single as List<int>;
     final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;

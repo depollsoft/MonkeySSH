@@ -1,6 +1,5 @@
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/monetization.dart';
 
@@ -107,8 +106,3 @@ class AcpConcurrencyPolicy {
     );
   }
 }
-
-/// Provider for [AcpConcurrencyPolicy].
-final acpConcurrencyPolicyProvider = Provider<AcpConcurrencyPolicy>(
-  (ref) => const AcpConcurrencyPolicy(),
-);

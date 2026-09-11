@@ -4,13 +4,16 @@ import 'dart:io' show gzip;
 
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
 import 'remote_file_service.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
+import 'windows_remote_powershell.dart';
 
 /// Asset path for the bundled MonkeyMux binary manifest.
 const monkeyMuxManifestAssetPath = 'assets/monkeymux/manifest.json';
@@ -294,14 +297,6 @@ class MonkeyMuxInstallerService {
         'MonkeyMux is not bundled for $platform.',
       );
     }
-    final assetBytes = await _loadAssetBytes(entry);
-    final localDigest = sha256.convert(assetBytes).toString();
-    if (localDigest != entry.sha256) {
-      throw const MonkeyMuxInstallException(
-        'Bundled MonkeyMux checksum does not match the manifest.',
-      );
-    }
-
     final sftp = await session.openStandaloneSftp();
     try {
       final homeDirectory = await _remoteFileService.resolveInitialDirectory(
@@ -322,168 +317,155 @@ class MonkeyMuxInstallerService {
       final executablePath = isWindows
           ? sftpPathToWindowsShellPath(executableSftpPath)
           : executableSftpPath;
-      if (await _remoteShaMatches(
+      final reused = await _remoteShaMatches(
         session,
         executablePath,
         entry.sha256,
         isWindows: isWindows,
         priority: priority,
-      )) {
+      );
+      if (reused) {
         DiagnosticsLogService.instance.info(
           'monkeymux.install',
           'reuse_existing',
           fields: {'connectionId': session.connectionId, 'platform': platform},
         );
-        await _ensureDirectCommandLauncherBestEffort(
-          session,
-          homeDirectory: homeDirectory,
-          executablePath: executablePath,
-          version: manifest.version,
-          platform: platform,
-          isWindows: isWindows,
-          priority: priority,
-        );
-        return MonkeyMuxInstallation(
-          executablePath: executablePath,
+      } else {
+        final installRequest = MonkeyMuxInstallRequest(
           platform: platform,
           version: manifest.version,
+          size: entry.size,
         );
-      }
-
-      final installRequest = MonkeyMuxInstallRequest(
-        platform: platform,
-        version: manifest.version,
-        size: entry.size,
-      );
-      if (confirmInstall == null) {
-        DiagnosticsLogService.instance.warning(
-          'monkeymux.install',
-          'confirmation_required',
-          fields: {'connectionId': session.connectionId, 'platform': platform},
-        );
-        throw const MonkeyMuxInstallConfirmationRequiredException();
-      }
-      DiagnosticsLogService.instance.info(
-        'monkeymux.install',
-        'confirmation_requested',
-        fields: {
-          'connectionId': session.connectionId,
-          'platform': platform,
-          'size': entry.size,
-        },
-      );
-      final confirmed = await confirmInstall(installRequest);
-      if (!confirmed) {
+        if (confirmInstall == null) {
+          DiagnosticsLogService.instance.warning(
+            'monkeymux.install',
+            'confirmation_required',
+            fields: {
+              'connectionId': session.connectionId,
+              'platform': platform,
+            },
+          );
+          throw const MonkeyMuxInstallConfirmationRequiredException();
+        }
         DiagnosticsLogService.instance.info(
           'monkeymux.install',
-          'confirmation_declined',
+          'confirmation_requested',
+          fields: {
+            'connectionId': session.connectionId,
+            'platform': platform,
+            'size': entry.size,
+          },
+        );
+        final confirmed = await confirmInstall(installRequest);
+        if (!confirmed) {
+          DiagnosticsLogService.instance.info(
+            'monkeymux.install',
+            'confirmation_declined',
+            fields: {
+              'connectionId': session.connectionId,
+              'platform': platform,
+            },
+          );
+          throw const MonkeyMuxInstallDeclinedException();
+        }
+        DiagnosticsLogService.instance.info(
+          'monkeymux.install',
+          'confirmation_accepted',
           fields: {'connectionId': session.connectionId, 'platform': platform},
         );
-        throw const MonkeyMuxInstallDeclinedException();
-      }
-      DiagnosticsLogService.instance.info(
-        'monkeymux.install',
-        'confirmation_accepted',
-        fields: {'connectionId': session.connectionId, 'platform': platform},
-      );
 
-      DiagnosticsLogService.instance.info(
-        'monkeymux.install',
-        'upload_start',
-        fields: {
-          'connectionId': session.connectionId,
-          'platform': platform,
-          'size': entry.size,
-        },
-      );
-      await _remoteFileService.ensureDirectoryExists(sftp, installDirectory);
-      final temporaryExecutablePath = joinRemotePath(
-        installDirectory,
-        '.monkeymux.${session.connectionId}.'
-        '${DateTime.now().microsecondsSinceEpoch}.tmp',
-      );
-      final temporaryCommandPath = isWindows
-          ? sftpPathToWindowsShellPath(temporaryExecutablePath)
-          : temporaryExecutablePath;
-      var movedTemporaryExecutable = false;
-      try {
-        await _remoteFileService.uploadBytes(
-          sftp: sftp,
-          remotePath: temporaryExecutablePath,
-          bytes: assetBytes,
+        final assetBytes = await _loadAssetBytes(entry);
+        DiagnosticsLogService.instance.info(
+          'monkeymux.install',
+          'upload_start',
+          fields: {
+            'connectionId': session.connectionId,
+            'platform': platform,
+            'size': entry.size,
+          },
         );
-        if (!isWindows) {
-          // Windows has no execute bit; a `.exe` runs by extension.
-          await _runRemoteCommand(
-            session,
-            'chmod 700 ${_shellQuote(temporaryExecutablePath)}',
-            priority: priority,
+        await _remoteFileService.ensureDirectoryExists(sftp, installDirectory);
+        final temporaryExecutablePath = joinRemotePath(
+          installDirectory,
+          '.monkeymux.${session.connectionId}.'
+          '${DateTime.now().microsecondsSinceEpoch}.tmp',
+        );
+        final temporaryCommandPath = isWindows
+            ? sftpPathToWindowsShellPath(temporaryExecutablePath)
+            : temporaryExecutablePath;
+        try {
+          await _remoteFileService.uploadBytes(
+            sftp: sftp,
+            remotePath: temporaryExecutablePath,
+            bytes: assetBytes,
           );
-        }
-        if (!await _remoteShaMatches(
-          session,
-          temporaryCommandPath,
-          entry.sha256,
-          isWindows: isWindows,
-          priority: priority,
-        )) {
-          throw const MonkeyMuxInstallException(
-            'Uploaded MonkeyMux checksum verification failed.',
-          );
-        }
-        if (isWindows) {
-          // SFTP rename cannot overwrite an existing file and there is no
-          // atomic force-move over cmd/PowerShell, so clear any stale target
-          // first, then rename the verified upload into place. Only ignore a
-          // missing target (the common fresh-install case); surface real errors
-          // (for example a permission error or a locked, running helper) so we
-          // abort with the existing binary intact instead of renaming onto a
-          // half-removed target.
-          try {
-            await sftp.remove(executableSftpPath);
-          } on SftpStatusError catch (error) {
-            if (error.code != SftpStatusCode.noSuchFile) {
-              rethrow;
+          if (isWindows) {
+            if (!await _remoteShaMatches(
+              session,
+              temporaryCommandPath,
+              entry.sha256,
+              isWindows: true,
+              priority: priority,
+            )) {
+              throw const MonkeyMuxInstallException(
+                'Uploaded MonkeyMux checksum verification failed.',
+              );
             }
+            // SFTP rename cannot overwrite an existing file and there is no
+            // atomic force-move over cmd/PowerShell, so clear any stale target
+            // first, then rename the verified upload into place. Only ignore a
+            // missing target (the common fresh-install case); surface real errors
+            // (for example a permission error or a locked, running helper) so we
+            // abort with the existing binary intact instead of renaming onto a
+            // half-removed target.
+            try {
+              await sftp.remove(executableSftpPath);
+            } on SftpStatusError catch (error) {
+              if (error.code != SftpStatusCode.noSuchFile) {
+                rethrow;
+              }
+            }
+            await sftp.rename(temporaryExecutablePath, executableSftpPath);
+          } else {
+            await _runRemoteCommand(
+              session,
+              r'__monkeymux_sha__=$(sha256sum '
+              '${_shellQuote(temporaryExecutablePath)} 2>/dev/null || '
+              'shasum -a 256 ${_shellQuote(temporaryExecutablePath)} '
+              '2>/dev/null) && '
+              '[ "\${__monkeymux_sha__%% *}" = ${_shellQuote(entry.sha256)} ] && '
+              'chmod 700 ${_shellQuote(temporaryExecutablePath)} && '
+              'mv -f ${_shellQuote(temporaryExecutablePath)} '
+              '${_shellQuote(executableSftpPath)}',
+              priority: priority,
+            );
           }
-          await sftp.rename(temporaryExecutablePath, executableSftpPath);
-        } else {
-          await _runRemoteCommand(
-            session,
-            'mv -f ${_shellQuote(temporaryExecutablePath)} '
-            '${_shellQuote(executableSftpPath)}',
-            priority: priority,
-          );
-        }
-        movedTemporaryExecutable = true;
-      } on Object catch (error, stackTrace) {
-        if (!movedTemporaryExecutable) {
+        } on Object catch (error, stackTrace) {
           await _removeRemoteTemporaryFile(
             session,
             temporaryExecutablePath,
             sftp: sftp,
-            isWindows: isWindows,
-            priority: priority,
+          );
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+        if (isWindows &&
+            !await _remoteShaMatches(
+              session,
+              executablePath,
+              entry.sha256,
+              isWindows: true,
+              priority: priority,
+            )) {
+          throw const MonkeyMuxInstallException(
+            'Installed MonkeyMux checksum verification failed.',
           );
         }
-        Error.throwWithStackTrace(error, stackTrace);
-      }
-      if (!await _remoteShaMatches(
-        session,
-        executablePath,
-        entry.sha256,
-        isWindows: isWindows,
-        priority: priority,
-      )) {
-        throw const MonkeyMuxInstallException(
-          'Installed MonkeyMux checksum verification failed.',
+        DiagnosticsLogService.instance.info(
+          'monkeymux.install',
+          'upload_complete',
+          fields: {'connectionId': session.connectionId, 'platform': platform},
         );
       }
-      DiagnosticsLogService.instance.info(
-        'monkeymux.install',
-        'upload_complete',
-        fields: {'connectionId': session.connectionId, 'platform': platform},
-      );
       await _ensureDirectCommandLauncherBestEffort(
         session,
         homeDirectory: homeDirectory,
@@ -497,7 +479,7 @@ class MonkeyMuxInstallerService {
         executablePath: executablePath,
         platform: platform,
         version: manifest.version,
-        installedDuringCall: true,
+        installedDuringCall: !reused,
       );
     } finally {
       await sftp.close();
@@ -561,10 +543,10 @@ class MonkeyMuxInstallerService {
       const managedMarker = '@REM Managed by MonkeySSH launcher v1';
       final script = <String>[
         r"$ErrorActionPreference = 'Stop'",
-        '\$path = ${_powerShellSingleQuote(launcherPath)}',
-        '\$pointer = ${_powerShellSingleQuote(pointerPath)}',
-        '\$managedMarker = ${_powerShellSingleQuote(managedMarker)}',
-        '\$target = ${_powerShellSingleQuote(relativeTarget)}',
+        '\$path = ${powerShellSingleQuote(launcherPath)}',
+        '\$pointer = ${powerShellSingleQuote(pointerPath)}',
+        '\$managedMarker = ${powerShellSingleQuote(managedMarker)}',
+        '\$target = ${powerShellSingleQuote(relativeTarget)}',
         'function Set-AtomicAsciiFile {',
         r'  param([string]$Destination, [string[]]$Lines)',
         r'  for ($attempt = 0; $attempt -lt 3; $attempt++) {',
@@ -595,7 +577,7 @@ class MonkeyMuxInstallerService {
         r'New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null',
         r'Set-AtomicAsciiFile -Destination $pointer -Lines @($target)',
         r'Set-AtomicAsciiFile -Destination $path -Lines @(',
-        '  ${_powerShellSingleQuote(managedMarker)},',
+        '  ${powerShellSingleQuote(managedMarker)},',
         "  '@echo off',",
         '''  'set /p "MONKEYMUX_TARGET="<"%~dp0.monkeymux-current"',''',
         r'''  '"%~dp0..\..\.monkeyssh\bin\monkeymux\%MONKEYMUX_TARGET%" %*',''',
@@ -606,7 +588,7 @@ class MonkeyMuxInstallerService {
       final output = await _runRawRemoteCommand(
         session,
         'powershell -NoProfile -NonInteractive -EncodedCommand '
-        '${_encodePowerShellCommand(script)}',
+        '${encodePowerShellCommand(script)}',
         priority: priority,
       );
       if (!output.contains('MONKEYMUX_LAUNCHER_MANAGED') &&
@@ -794,18 +776,11 @@ class MonkeyMuxInstallerService {
       bytes.offsetInBytes,
       bytes.lengthInBytes,
     );
-    switch (entry.encoding) {
-      case null:
-      case '':
-      case 'none':
-        return assetBytes;
-      case 'gzip':
-        return Uint8List.fromList(gzip.decode(assetBytes));
-      default:
-        throw MonkeyMuxInstallException(
-          'Unsupported MonkeyMux asset encoding: ${entry.encoding}',
-        );
-    }
+    return compute(_verifyAssetBytes, (
+      assetBytes,
+      entry.encoding,
+      entry.sha256,
+    ));
   }
 
   Future<bool> _remoteShaMatches(
@@ -842,19 +817,9 @@ class MonkeyMuxInstallerService {
     SshSession session,
     String remotePath, {
     required SftpClient sftp,
-    required bool isWindows,
-    required SshExecPriority priority,
   }) async {
     try {
-      if (isWindows) {
-        await sftp.remove(remotePath);
-        return;
-      }
-      await _runRemoteCommand(
-        session,
-        'rm -f ${_shellQuote(remotePath)}',
-        priority: priority,
-      );
+      await sftp.remove(remotePath);
     } on Object catch (error) {
       DiagnosticsLogService.instance.debug(
         'monkeymux.install',
@@ -866,6 +831,23 @@ class MonkeyMuxInstallerService {
       );
     }
   }
+}
+
+Uint8List _verifyAssetBytes((Uint8List, String?, String) input) {
+  final (assetBytes, encoding, expectedSha) = input;
+  final bytes = switch (encoding) {
+    null || '' || 'none' => assetBytes,
+    'gzip' => Uint8List.fromList(gzip.decode(assetBytes)),
+    _ => throw MonkeyMuxInstallException(
+      'Unsupported MonkeyMux asset encoding: $encoding',
+    ),
+  };
+  if (sha256.convert(bytes).toString() != expectedSha) {
+    throw const MonkeyMuxInstallException(
+      'Bundled MonkeyMux checksum does not match the manifest.',
+    );
+  }
+  return bytes;
 }
 
 class _MonkeyMuxInstallInFlight {
@@ -921,7 +903,10 @@ Future<String> _runRemoteCommand(
   String command, {
   SshExecPriority priority = SshExecPriority.normal,
 }) => session.runQueuedExec(() async {
-  final execSession = await session.execute(_markRemoteCommandDone(command));
+  final execSession = await openSshExec(
+    session.execute(_markRemoteCommandDone(command)),
+    _monkeyMuxInstallTimeout,
+  );
   try {
     execSession.stderr.drain<void>().ignore();
     return await _readStdoutUntilMarker(execSession);
@@ -938,19 +923,24 @@ Future<String> _runRawRemoteCommand(
   String command, {
   SshExecPriority priority = SshExecPriority.normal,
 }) => session.runQueuedExec(() async {
-  final execSession = await session.execute(command);
+  final execSession = await openSshExec(
+    session.execute(command),
+    _monkeyMuxInstallTimeout,
+  );
+  final chunks = StreamIterator(
+    execSession.stdout.cast<List<int>>().transform(utf8.decoder),
+  );
   try {
     execSession.stderr.drain<void>().ignore();
-    final output = StringBuffer();
-    await for (final chunk
-        in execSession.stdout
-            .cast<List<int>>()
-            .transform(utf8.decoder)
-            .timeout(_monkeyMuxInstallTimeout)) {
-      output.write(chunk);
-    }
-    return output.toString();
+    return await (() async {
+      final output = StringBuffer();
+      while (await chunks.moveNext()) {
+        output.write(chunks.current);
+      }
+      return output.toString();
+    })().timeout(_monkeyMuxInstallTimeout);
   } finally {
+    chunks.cancel().ignore();
     execSession.close();
   }
 }, priority: priority);
@@ -961,47 +951,33 @@ String _markRemoteCommandDone(String command) =>
     r'"$__monkeymux_status__"; }';
 
 Future<String> _readStdoutUntilMarker(SSHSession execSession) async {
-  final output = StringBuffer();
-  await for (final chunk
-      in execSession.stdout
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .timeout(_monkeyMuxInstallTimeout)) {
-    output.write(chunk);
-    final currentOutput = output.toString();
-    final markerPattern = RegExp(
-      '(?:^|\\n)${RegExp.escape(_monkeyMuxExecMarker)}:([0-9]+)\\n',
-    );
-    final markers = markerPattern.allMatches(currentOutput);
-    final marker = markers.isEmpty ? null : markers.last;
-    if (marker == null) {
-      continue;
+  final chunks = StreamIterator(
+    execSession.stdout.cast<List<int>>().transform(utf8.decoder),
+  );
+  Stream<String> output() async* {
+    while (await chunks.moveNext()) {
+      yield chunks.current;
     }
-    final status = int.parse(marker.group(1)!);
-    if (status != 0) {
+  }
+
+  try {
+    final result = await readCommandOutputUntilMarker(
+      output(),
+      _monkeyMuxExecMarker,
+    ).timeout(_monkeyMuxInstallTimeout);
+    if (result.status != 0) {
       throw MonkeyMuxInstallException(
-        'Remote command failed with exit status $status.',
+        'Remote command failed with exit status ${result.status}.',
       );
     }
-    return currentOutput.substring(0, marker.start).trimRight();
+    return result.output.trimRight();
+  } on CommandOutputMarkerMissingException {
+    throw const MonkeyMuxInstallException(
+      'Remote command closed before completion marker.',
+    );
+  } finally {
+    chunks.cancel().ignore();
   }
-  throw const MonkeyMuxInstallException(
-    'Remote command closed before completion marker.',
-  );
 }
 
 String _shellQuote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
-
-String _powerShellSingleQuote(String value) =>
-    "'${value.replaceAll("'", "''")}'";
-
-String _encodePowerShellCommand(String script) {
-  final codeUnits = script.codeUnits;
-  final bytes = Uint8List(codeUnits.length * 2);
-  for (var index = 0; index < codeUnits.length; index++) {
-    final codeUnit = codeUnits[index];
-    bytes[index * 2] = codeUnit & 0xff;
-    bytes[index * 2 + 1] = codeUnit >> 8;
-  }
-  return base64Encode(bytes);
-}

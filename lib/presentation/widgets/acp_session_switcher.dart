@@ -83,18 +83,14 @@ List<AcpSwitcherEntry> buildAcpMuxWindowEntries(
     });
 
 /// Navigates to the chat for [key], replacing the current chat route.
-void _openChat(BuildContext context, AcpSessionKey key, {bool replace = true}) {
+void _openChat(BuildContext context, AcpSessionKey key) {
   final location = buildAgentChatLocation(
     hostId: key.hostId,
     providerId: key.providerId,
     bridgeId: key.bridgeId,
     acpSessionId: key.acpSessionId,
   );
-  if (replace) {
-    context.replace(location);
-  } else {
-    context.push<void>(location);
-  }
+  context.replace(location);
 }
 
 /// Opens the session switcher bottom sheet.

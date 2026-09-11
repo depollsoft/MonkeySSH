@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_provider.dart';
 import 'settings_service.dart';
 
-/// Persists and lists ACP provider definitions.
+/// Loads persisted ACP provider definitions.
 ///
 /// This service only manages provider *configuration* (built-in presets plus
 /// user-approved custom launch commands). It never reads, logs, or persists
@@ -16,13 +16,6 @@ class AcpProviderService {
   AcpProviderService(this._settings);
 
   final SettingsService _settings;
-
-  // Chains every mutating operation onto a single queue so a save/remove
-  // always reads the settings table only after every previously queued
-  // save/remove has finished writing. Without this, two overlapping
-  // read-modify-write cycles can each read the same starting list and the
-  // later write silently discards the earlier caller's change.
-  Future<void> _mutationQueue = Future<void>.value();
 
   /// All built-in ACP providers bundled with the app.
   List<AcpBuiltinProvider> get builtinProviders => acpBuiltinProviders;
@@ -44,75 +37,16 @@ class AcpProviderService {
     return providers.firstWhereOrNull((provider) => provider.id == id);
   }
 
-  /// Lists built-in providers followed by persisted custom providers.
-  Future<List<AcpProvider>> listAllProviders() async =>
-      _combineProviders(await listCustomProviders());
-
   /// Streams the combined list of built-in providers followed by persisted
   /// custom providers, re-emitting automatically whenever custom provider
   /// storage changes.
   ///
   /// Backed by [SettingsService.watchString], so callers (including
   /// [acpProvidersProvider]) never need to manually invalidate or refetch
-  /// after [saveCustomProvider] or [removeCustomProvider].
+  /// after imported settings change.
   Stream<List<AcpProvider>> watchAllProviders() => _settings
       .watchString(SettingKeys.acpCustomProviders)
       .map((raw) => _combineProviders(_decodeCustomProviders(raw)));
-
-  /// Saves [definition], inserting it or updating an existing entry with the
-  /// same ID in place without disturbing the order of other entries.
-  ///
-  /// Concurrent mutations (saves and/or removes) are serialized so that two
-  /// overlapping calls can never race on the same underlying
-  /// read-modify-write cycle and silently drop one another's changes.
-  Future<void> saveCustomProvider(AcpCustomProviderDefinition definition) =>
-      _withMutationLock(() async {
-        final providers = await listCustomProviders();
-        final index = providers.indexWhere(
-          (provider) => provider.id == definition.id,
-        );
-        final updated = List<AcpCustomProviderDefinition>.from(providers);
-        if (index >= 0) {
-          updated[index] = definition;
-        } else {
-          updated.add(definition);
-        }
-        await _writeCustomProviders(updated);
-      });
-
-  /// Removes the persisted custom provider with [id], if one exists.
-  ///
-  /// See [saveCustomProvider] for the concurrency guarantee shared by all
-  /// mutating operations on this service.
-  Future<void> removeCustomProvider(String id) => _withMutationLock(() async {
-    final providers = await listCustomProviders();
-    final updated = providers
-        .where((provider) => provider.id != id)
-        .toList(growable: false);
-    if (updated.length == providers.length) {
-      return;
-    }
-    await _writeCustomProviders(updated);
-  });
-
-  Future<void> _writeCustomProviders(
-    List<AcpCustomProviderDefinition> providers,
-  ) async {
-    if (providers.isEmpty) {
-      await _settings.delete(SettingKeys.acpCustomProviders);
-      return;
-    }
-    final encoded = jsonEncode([
-      for (final provider in providers) provider.toJson(),
-    ]);
-    await _settings.setString(SettingKeys.acpCustomProviders, encoded);
-  }
-
-  Future<void> _withMutationLock(Future<void> Function() action) {
-    final operation = _mutationQueue.then((_) => action());
-    _mutationQueue = operation.catchError((_) {});
-    return operation;
-  }
 
   // Shared defensive decoding used by both the one-shot future path
   // (listCustomProviders) and the reactive stream path (watchAllProviders),
@@ -145,10 +79,7 @@ class AcpProviderService {
 
   List<AcpProvider> _combineProviders(
     List<AcpCustomProviderDefinition> customProviders,
-  ) => [
-    for (final builtin in builtinProviders) AcpBuiltinProviderView(builtin),
-    for (final definition in customProviders) AcpCustomProviderView(definition),
-  ];
+  ) => [...builtinProviders, ...customProviders];
 }
 
 /// Provider for [AcpProviderService].
@@ -161,8 +92,7 @@ final acpProviderServiceProvider = Provider<AcpProviderService>(
 ///
 /// Backed by [AcpProviderService.watchAllProviders], which streams from
 /// [SettingsService.watchString]. Watchers therefore refresh automatically
-/// after [AcpProviderService.saveCustomProvider] or
-/// [AcpProviderService.removeCustomProvider]; callers never need to manually
+/// after imported settings change; callers never need to manually
 /// invalidate this provider.
 final acpProvidersProvider = StreamProvider<List<AcpProvider>>(
   (ref) => ref.watch(acpProviderServiceProvider).watchAllProviders(),

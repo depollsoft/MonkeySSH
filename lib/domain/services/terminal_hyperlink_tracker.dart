@@ -64,13 +64,14 @@ class TerminalHyperlinkTracker {
 
     final nextUri = _parseHyperlinkUri(args);
     if (nextUri == null) {
-      _closePendingHyperlink(terminal);
+      _closePendingHyperlink();
       return;
     }
 
-    _closePendingHyperlink(terminal);
+    _closePendingHyperlink();
     _pendingHyperlink = _PendingTerminalHyperlink(
       uri: nextUri,
+      buffer: terminal.buffer,
       startAnchor: terminal.buffer.createAnchorFromCursor(),
     );
   }
@@ -86,6 +87,7 @@ class TerminalHyperlinkTracker {
 
     final activeHyperlink = _pendingHyperlink;
     if (activeHyperlink != null &&
+        identical(activeHyperlink.buffer, terminal.buffer) &&
         _containsExclusiveOffset(
           start: activeHyperlink.startAnchor.offset,
           end: _currentCursorOffset(terminal),
@@ -95,7 +97,8 @@ class TerminalHyperlinkTracker {
     }
 
     for (final hyperlink in _trackedHyperlinks.reversed) {
-      if (hyperlink.contains(offset)) {
+      if (identical(hyperlink.buffer, terminal.buffer) &&
+          hyperlink.contains(offset)) {
         return hyperlink.uri.toString();
       }
     }
@@ -120,6 +123,7 @@ class TerminalHyperlinkTracker {
     final queryEndInclusive = CellOffset(endColumn, row);
     final queryEndExclusive = CellOffset(endColumn + 1, row);
     bool intersectsExclusive(CellOffset start, CellOffset end) =>
+        _compareOffsets(start, end) < 0 &&
         _compareOffsets(start, queryEndExclusive) < 0 &&
         _compareOffsets(queryStart, end) < 0;
     bool intersectsInclusive(CellOffset start, CellOffset end) =>
@@ -128,6 +132,7 @@ class TerminalHyperlinkTracker {
 
     final activeHyperlink = _pendingHyperlink;
     if (activeHyperlink != null &&
+        identical(activeHyperlink.buffer, terminal.buffer) &&
         intersectsExclusive(
           activeHyperlink.startAnchor.offset,
           _currentCursorOffset(terminal),
@@ -136,7 +141,7 @@ class TerminalHyperlinkTracker {
     }
 
     for (final hyperlink in _trackedHyperlinks) {
-      if (hyperlink.attached &&
+      if (identical(hyperlink.buffer, terminal.buffer) &&
           intersectsInclusive(
             hyperlink.startAnchor.offset,
             hyperlink.lastCellAnchor.offset,
@@ -163,36 +168,34 @@ class TerminalHyperlinkTracker {
 
     _pruneDetachedHyperlinks();
 
-    final destinations = <String>{};
-    String? lastDestination;
-
-    void consider(CellOffset start, CellOffset end, Uri uri) {
-      if (row >= start.y && row <= end.y) {
-        final destination = uri.toString();
-        destinations.add(destination);
-        lastDestination = destination;
-      }
-    }
-
+    String? destination;
     final activeHyperlink = _pendingHyperlink;
-    if (activeHyperlink != null) {
-      consider(
-        activeHyperlink.startAnchor.offset,
-        _currentCursorOffset(terminal),
-        activeHyperlink.uri,
-      );
+    if (activeHyperlink != null &&
+        identical(activeHyperlink.buffer, terminal.buffer)) {
+      final start = activeHyperlink.startAnchor.offset;
+      final end = _currentCursorOffset(terminal);
+      final lastCell = _previousCellOffset(end, terminal.buffer.viewWidth);
+      if (_compareOffsets(start, end) < 0 &&
+          lastCell != null &&
+          row >= start.y &&
+          row <= lastCell.y) {
+        destination = activeHyperlink.uri.toString();
+      }
     }
     for (final hyperlink in _trackedHyperlinks) {
-      if (hyperlink.attached) {
-        consider(
-          hyperlink.startAnchor.offset,
-          hyperlink.lastCellAnchor.offset,
-          hyperlink.uri,
-        );
+      if (!identical(hyperlink.buffer, terminal.buffer) ||
+          row < hyperlink.startAnchor.y ||
+          row > hyperlink.lastCellAnchor.y) {
+        continue;
       }
+      final nextDestination = hyperlink.uri.toString();
+      if (destination != null && destination != nextDestination) {
+        return null;
+      }
+      destination = nextDestination;
     }
 
-    return destinations.length == 1 ? lastDestination : null;
+    return destination;
   }
 
   /// Number of fully tracked hyperlinks currently retained in memory.
@@ -212,13 +215,16 @@ class TerminalHyperlinkTracker {
     return Uri.tryParse(uriText);
   }
 
-  void _closePendingHyperlink(Terminal terminal) {
+  void _closePendingHyperlink() {
     final pendingHyperlink = _pendingHyperlink;
     if (pendingHyperlink == null) {
       return;
     }
 
-    final endOffset = _currentCursorOffset(terminal);
+    // A close can arrive after a buffer switch. Never combine anchors from
+    // one buffer with the cursor or an end anchor from the other.
+    final buffer = pendingHyperlink.buffer;
+    final endOffset = CellOffset(buffer.cursorX, buffer.absoluteCursorY);
     if (!pendingHyperlink.attached ||
         _compareOffsets(pendingHyperlink.startAnchor.offset, endOffset) >= 0) {
       pendingHyperlink.dispose();
@@ -226,10 +232,7 @@ class TerminalHyperlinkTracker {
       return;
     }
 
-    final lastCellOffset = _previousCellOffset(
-      endOffset,
-      terminal.buffer.viewWidth,
-    );
+    final lastCellOffset = _previousCellOffset(endOffset, buffer.viewWidth);
     if (lastCellOffset == null ||
         _compareOffsets(pendingHyperlink.startAnchor.offset, lastCellOffset) >
             0) {
@@ -238,11 +241,10 @@ class TerminalHyperlinkTracker {
       return;
     }
 
-    final lastCellAnchor = terminal.buffer.createAnchorFromOffset(
-      lastCellOffset,
-    );
+    final lastCellAnchor = buffer.createAnchorFromOffset(lastCellOffset);
     final hyperlink = _TrackedTerminalHyperlink(
       uri: pendingHyperlink.uri,
+      buffer: buffer,
       startAnchor: pendingHyperlink.startAnchor,
       lastCellAnchor: lastCellAnchor,
     );
@@ -289,9 +291,14 @@ class TerminalHyperlinkTracker {
 }
 
 class _PendingTerminalHyperlink {
-  _PendingTerminalHyperlink({required this.uri, required this.startAnchor});
+  _PendingTerminalHyperlink({
+    required this.uri,
+    required this.buffer,
+    required this.startAnchor,
+  });
 
   final Uri uri;
+  final Buffer buffer;
   final CellAnchor startAnchor;
 
   bool get attached => startAnchor.attached;
@@ -304,11 +311,13 @@ class _PendingTerminalHyperlink {
 class _TrackedTerminalHyperlink {
   _TrackedTerminalHyperlink({
     required this.uri,
+    required this.buffer,
     required this.startAnchor,
     required this.lastCellAnchor,
   });
 
   final Uri uri;
+  final Buffer buffer;
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
 

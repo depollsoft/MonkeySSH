@@ -6,9 +6,6 @@ abstract final class Routes {
   /// Hosts list route.
   static const hosts = 'hosts';
 
-  /// Host detail/edit route.
-  static const hostDetail = 'host-detail';
-
   /// Terminal session route.
   static const terminal = 'terminal';
 

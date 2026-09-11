@@ -54,7 +54,7 @@ class ClipboardSharingService {
 
       if (payload == '?') {
         if (!allowLocalClipboardRead) return null;
-        return _handleQuery(target);
+        return await _handleQuery(target);
       }
 
       await _handleSet(payload);

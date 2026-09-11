@@ -13,12 +13,21 @@ jobs:
     name: Handle /deploy command
     if: github.event.issue.pull_request
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       actions: write
       contents: read
       issues: write
       pull-requests: write
     steps:
+      - name: Checkout comment tooling from the workflow commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/preview_deploy_comments.cjs
+          sparse-checkout-cone-mode: false
+
       - name: Dispatch preview deploy request
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -34,10 +43,10 @@ jobs:
              const requestKey = `comment-${requestCommentId}`;
              const requestCommentUrl = context.payload.comment.html_url;
              const requestCreatedAt = context.payload.comment.created_at;
-             const previewMarker = '<!-- Sticky Pull Request Commentpreview-build -->';
-             const statusMarker = '<!-- preview-deploy-status -->';
+            const {statusMarker, noPreviewCommentUrl, readMeta, isTrustedWorkflowComment,
+              findStatusComment, findPreviewComment, upsertStatusComment} =
+              require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/preview_deploy_comments.cjs'));
             const workflowId = 'preview-deploy.yml';
-            const noPreviewCommentUrl = '__NO_PREVIEW_COMMENT__';
             const activeLockTimeoutMs = 4 * 60 * 60 * 1000;
              const allowedRepositoryPermissions = new Set(['admin', 'maintain', 'write']);
              const managedReactionContents = new Set(['eyes', 'rocket', '-1']);
@@ -77,22 +86,6 @@ jobs:
               );
               return;
             }
-
-             const readMeta = (body, key) => {
-               const pattern = new RegExp(`<!-- ${key}:(.*?) -->`);
-               return body.match(pattern)?.[1] ?? '';
-             };
-
-              const isTrustedWorkflowComment = (comment) =>
-                comment.user?.login === 'github-actions[bot]' && comment.user?.type === 'Bot';
-
-              const findStatusComment = (comments, targetRequestKey) =>
-                [...comments].reverse().find(
-                  (comment) =>
-                    isTrustedWorkflowComment(comment) &&
-                    comment.body?.includes(statusMarker) &&
-                    readMeta(comment.body, 'preview-deploy-request-key') === targetRequestKey,
-                );
 
               const listCommentReactions = async (commentId) =>
                 github.paginate('GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions', {
@@ -152,28 +145,6 @@ jobs:
                 },
               );
             };
-
-              const upsertStatusComment = async (comments, body, targetRequestKey) => {
-                const existing = findStatusComment(comments, targetRequestKey);
-
-               if (existing) {
-                 await github.rest.issues.updateComment({
-                   owner,
-                   repo,
-                  comment_id: existing.id,
-                  body,
-                });
-                return existing.id;
-              }
-
-               const {data: created} = await github.rest.issues.createComment({
-                 owner,
-                 repo,
-                 issue_number: issueNumber,
-                 body,
-               });
-               return created.id;
-             };
 
               const formatBuildDisplay = (buildName, buildCodename) => {
                 if (!buildName) {
@@ -330,15 +301,11 @@ jobs:
                  note: '> This PR comes from a fork, so `/deploy` was ignored.',
                  requestKey,
                });
-               await upsertStatusComment(comments, body, requestKey);
+               await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
                return;
              }
 
-             const previewComment = [...comments].reverse().find(
-               (comment) =>
-                 isTrustedWorkflowComment(comment) &&
-                 comment.body?.includes(previewMarker),
-             );
+             const previewComment = findPreviewComment(comments);
             const previewSha = pr.head.sha;
              const previewCommentUrl = previewComment?.html_url ?? '';
              const previewCommentBody = previewComment?.body ?? '';
@@ -417,7 +384,7 @@ jobs:
                    '> The preview version metadata was malformed. Re-run the preview build before deploying.',
                  requestKey,
                });
-               await upsertStatusComment(comments, body, requestKey);
+               await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
                core.setFailed(`Invalid preview build metadata for ${previewSha}.`);
                return;
              }
@@ -579,7 +546,7 @@ jobs:
 
                 const dispatchedWorkflowRun = await waitForDeployWorkflowRun(requestCommentId);
                 const queuedBody = renderQueuedBody(dispatchedWorkflowRun?.html_url ?? '');
-                await upsertStatusComment(comments, queuedBody, requestKey);
+                await upsertStatusComment({github, owner, repo, issueNumber, comments, body: queuedBody, requestKey});
               } catch (error) {
                 if (!dispatched) {
                   try {
@@ -598,7 +565,7 @@ jobs:
                  note: '> Add a new `/deploy` comment if you want to retry.',
                  requestKey,
                });
-               await upsertStatusComment(comments, failureBody, requestKey);
+               await upsertStatusComment({github, owner, repo, issueNumber, comments, body: failureBody, requestKey});
                throw error;
              }
 

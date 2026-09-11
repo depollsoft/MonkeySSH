@@ -2,9 +2,9 @@ name: Security
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main]
   push:
-    branches: [main, develop]
+    branches: [main]
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
@@ -21,19 +21,30 @@ jobs:
     name: Dependency Review
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubicloud-standard-4
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
 
-      - name: Detect changed dependency lockfiles
-        id: changed-deps
+      - name: Resolve dependency comparison commits
+        id: comparison
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+
+          ensure_commit() {
+            if ! git cat-file -e "$1^{commit}" 2>/dev/null; then
+              git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+                fetch --no-tags --depth=1 origin "$1"
+            fi
+            git cat-file -e "$1^{commit}"
+          }
+          ensure_commit "$HEAD_SHA"
 
           if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = '0000000000000000000000000000000000000000' ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
@@ -42,6 +53,20 @@ jobs:
               BASE_SHA=''
             fi
           fi
+
+          if [ -n "$BASE_SHA" ]; then
+            ensure_commit "$BASE_SHA"
+          fi
+          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Detect changed dependency lockfiles
+        id: changed-deps
+        env:
+          BASE_SHA: ${{ steps.comparison.outputs.base }}
+          HEAD_SHA: ${{ steps.comparison.outputs.head }}
+        run: |
+          set -euo pipefail
 
           if [ -z "${BASE_SHA}" ]; then
             echo '- No baseline commit was available for dependency comparison, so the fallback OSV diff scan was skipped.' >> "$GITHUB_STEP_SUMMARY"
@@ -54,6 +79,9 @@ jobs:
               case "${path}" in
                 Gemfile|Gemfile.lock)
                   printf '%s\n' 'scan:Gemfile.lock'
+                  ;;
+                remote/monkeymux/go.mod|remote/monkeymux/go.sum)
+                  printf '%s\n' 'scan:remote/monkeymux/go.mod'
                   ;;
                 pubspec.yaml|pubspec.lock)
                   printf '%s\n' 'scan:pubspec.lock'
@@ -120,15 +148,11 @@ jobs:
       - name: Compare changed dependencies with OSV
         if: steps.changed-deps.outputs.changed == 'true'
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.comparison.outputs.base }}
           CHANGED_FILES: ${{ steps.changed-deps.outputs.files }}
           OSV_SCANNER_IMAGE: ghcr.io/google/osv-scanner:v2.3.3
         run: |
           set -euo pipefail
-
-          if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = '0000000000000000000000000000000000000000' ]; then
-            BASE_SHA=$(git rev-parse "${GITHUB_SHA}^")
-          fi
 
           scan_root="${RUNNER_TEMP}/dependency-review"
           base_root="${scan_root}/base"
@@ -247,13 +271,14 @@ jobs:
   secret-scan:
     name: Secret Scan
     runs-on: ubicloud-standard-4
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
           persist-credentials: false
 
       - name: Select Gitleaks scan scope
@@ -348,9 +373,11 @@ jobs:
         if: always() && hashFiles('gitleaks.sarif') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          compression-level: 0
           name: gitleaks-results-${{ github.run_id }}
           path: gitleaks.sarif
 
+          retention-days: 7
       - name: Summarize Gitleaks findings
         if: always()
         run: |
@@ -368,6 +395,7 @@ jobs:
     name: OSV Dependency Scan
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
@@ -375,7 +403,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Run OSV scanner
@@ -400,9 +428,11 @@ jobs:
         if: always() && hashFiles('results.sarif') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          compression-level: 0
           name: osv-results-${{ github.run_id }}
           path: results.sarif
 
+          retention-days: 7
       - name: Summarize OSV findings
         if: always()
         run: |

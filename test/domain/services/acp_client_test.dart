@@ -130,7 +130,13 @@ void main() {
     );
 
     final initialization = await client.initialize();
-    final sessions = await client.listAllSessions(cwd: '/repo');
+    final firstPage = await client.listSessions(cwd: '/repo');
+    final secondPage = await client.listSessions(
+      cwd: '/repo',
+      cursor: firstPage.nextCursor,
+    );
+    final sessions = [...firstPage.sessions, ...secondPage.sessions];
+    expect(secondPage.nextCursor, isNull);
 
     final initializeRequest = transport.requests.firstWhere(
       (request) => request['method'] == 'initialize',
@@ -195,8 +201,10 @@ void main() {
     final update = await updateFuture;
     expect(update.update, isA<AcpUsageUpdate>());
     final request = await requestFuture;
-    expect(request, isA<AcpPermissionServerRequest>());
-    await (request as AcpPermissionServerRequest).select('allow');
+    expect(request.method, 'session/request_permission');
+    await request.respond({
+      'outcome': const AcpSelectedPermissionOutcome('allow').toJson(),
+    });
     expect(transport.requests.last['id'], 'permission-1');
     expect(transport.requests.last['result'], {
       'outcome': {'outcome': 'selected', 'optionId': 'allow'},
@@ -225,11 +233,8 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       final request = await client.serverRequests.first;
-      expect(request, isA<AcpPermissionServerRequest>());
-      expect(
-        (request as AcpPermissionServerRequest).raw.id,
-        'early-permission',
-      );
+      expect(request.method, 'session/request_permission');
+      expect(request.id, 'early-permission');
       await client.close();
     },
   );

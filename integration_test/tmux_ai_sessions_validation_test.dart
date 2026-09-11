@@ -38,7 +38,6 @@ const _expectedProviders = <String>[
   'Claude Code',
   'Codex',
   'Copilot CLI',
-  'Gemini CLI',
   'OpenCode',
 ];
 

@@ -7,7 +7,8 @@ import 'acp_updates.dart';
 sealed class AcpPendingClientRequest {
   /// Creates a retained client request.
   AcpPendingClientRequest(this.request, {DateTime? requestedAt})
-    : requestedAt = requestedAt ?? DateTime.now();
+    : retainedContentBytes = utf8.encode(jsonEncode(request.params)).length,
+      requestedAt = requestedAt ?? DateTime.now();
 
   /// Current transport-bound request responder.
   AcpJsonRpcServerRequest request;
@@ -25,11 +26,11 @@ sealed class AcpPendingClientRequest {
   /// ACP session that owns this request, if supplied by the agent.
   String get sessionId;
 
-  /// Bytes retained exclusively for this pending request.
+  /// UTF-8 JSON size of all retained provider parameters, including metadata.
   ///
-  /// Used by the shared registry to bound provider-controlled content kept in
-  /// memory while waiting for a user decision.
-  int get retainedContentBytes => 0;
+  /// Counted once for every request kind, so permissions cannot bypass the
+  /// shared content budget and removal releases exactly the reserved amount.
+  final int retainedContentBytes;
 
   /// When this request was first observed locally.
   ///
@@ -89,9 +90,6 @@ final class AcpPendingFileWrite extends AcpPendingClientRequest {
 
   /// UTF-8 text to write. This is intentionally never logged.
   final String content;
-
-  @override
-  int get retainedContentBytes => utf8.encode(content).length;
 
   /// Completes this write after user approval.
   Future<void> approve(Future<void> Function() write) async {

@@ -71,6 +71,7 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   final _descriptionController = TextEditingController();
 
   bool _isLoading = false;
+  String? _loadError;
   Snippet? _existingSnippet;
   int? _selectedFolderId;
   int _folderDropdownRevision = 0;
@@ -108,19 +109,25 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
 
   Future<void> _loadSnippet() async {
     setState(() => _isLoading = true);
-    final snippet = await ref
-        .read(snippetRepositoryProvider)
-        .getById(widget.snippetId!);
-    if (snippet != null && mounted) {
-      setState(() {
-        _existingSnippet = snippet;
-        _nameController.text = snippet.name;
-        _contentController.text = snippet.command;
-        _descriptionController.text = snippet.description ?? '';
-        _selectedFolderId = snippet.folderId;
-        _isLoading = false;
-        _initialDraft = _currentDraft();
-      });
+    try {
+      final snippet = await ref
+          .read(snippetRepositoryProvider)
+          .getById(widget.snippetId!);
+      if (!mounted) return;
+      if (snippet == null) {
+        _loadError = 'Snippet not found.';
+        return;
+      }
+      _existingSnippet = snippet;
+      _nameController.text = snippet.name;
+      _contentController.text = snippet.command;
+      _descriptionController.text = snippet.description ?? '';
+      _selectedFolderId = snippet.folderId;
+      _initialDraft = _currentDraft();
+    } on Object {
+      if (mounted) _loadError = 'Could not load snippet. Try again.';
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -151,6 +158,8 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
         ),
         body: _isLoading
             ? const Center(child: CircularProgressIndicator())
+            : _loadError != null
+            ? Center(child: Text(_loadError!))
             : Form(
                 key: _formKey,
                 onChanged: () => setState(() {}),

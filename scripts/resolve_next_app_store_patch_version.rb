@@ -42,7 +42,7 @@ module AppStorePatchVersion
     unless requested.empty?
       return resolve_requested(
         requested_version: requested,
-        parsed_versions: parsed_versions,
+        parsed_versions: parsed_versions
       )
     end
 
@@ -63,12 +63,12 @@ module AppStorePatchVersion
                .map(&:first)
                .select { |version| same_version_line?(version, base) }
                .max_by(&:patch)
-    return editable.to_s if editable && editable.patch >= base.patch
-
     existing_patches = parsed_versions
                        .map(&:first)
                        .select { |version| same_version_line?(version, base) }
                        .map(&:patch)
+    return editable.to_s if editable && editable.patch >= base.patch && editable.patch == existing_patches.max
+
     next_patch = if existing_patches.empty?
                    base.patch
                  else
@@ -88,7 +88,7 @@ module AppStorePatchVersion
   def parse!(value, label:)
     parse(value) || raise(
       ResolutionError,
-      "#{label.capitalize} must use numeric x.y.z format; received #{value.inspect}",
+      "#{label.capitalize} must use numeric x.y.z format; received #{value.inspect}"
     )
   end
 
@@ -163,7 +163,7 @@ module AppStorePatchVersion
 
     submission = app.get_in_progress_review_submission(
       platform: platform,
-      includes: 'appStoreVersionForReview',
+      includes: 'appStoreVersionForReview'
     )
     if existing && submission.nil?
       raise ResolutionError,
@@ -185,18 +185,18 @@ module AppStorePatchVersion
                              timeout_seconds: review_cancellation_timeout_seconds,
                              clock: clock,
                              sleeper: sleeper,
-                             logger: logger,
+                             logger: logger
                            )
                          else
                            latest_editable_version(
-                             app_store_versions: app_store_versions,
+                             app_store_versions: app_store_versions
                            )
                          end
 
     if version_to_advance
       if version_to_advance.version_string != resolved_version
         version_to_advance.update(
-          attributes: { version_string: resolved_version },
+          attributes: { version_string: resolved_version }
         )
       end
     else
@@ -209,7 +209,7 @@ module AppStorePatchVersion
       platform: platform,
       timeout_seconds: version_preparation_timeout_seconds,
       clock: clock,
-      sleeper: sleeper,
+      sleeper: sleeper
     )
     logger.call("Prepared editable App Store version #{resolved_version}")
     :prepared
@@ -232,14 +232,14 @@ module AppStorePatchVersion
     end
 
     logger.call(
-      'Canceling the current App Store review before advancing the patch version',
+      'Canceling the current App Store review before advancing the patch version'
     )
     submission.cancel_submission
 
     deadline = clock.call + timeout_seconds
     loop do
       active_submission = app.get_in_progress_review_submission(
-        platform: platform,
+        platform: platform
       )
       version = version_loader.call(version.id)
       if version.nil?
@@ -286,7 +286,7 @@ module AppStorePatchVersion
     loop do
       prepared_version = app.get_app_store_versions(
         filter: { platform: platform },
-        includes: nil,
+        includes: nil
       ).find { |version| version.version_string == resolved_version }
       prepared = prepared_version &&
                  store_listing_editable?(prepared_version.app_version_state)
@@ -321,7 +321,7 @@ if $PROGRAM_NAME == __FILE__
   token = Spaceship::ConnectAPI::Token.create(
     key_id: ENV.fetch('APP_STORE_CONNECT_API_KEY_ID'),
     issuer_id: ENV.fetch('APP_STORE_CONNECT_API_ISSUER_ID'),
-    key: ENV.fetch('APP_STORE_CONNECT_API_KEY_CONTENT'),
+    key: ENV.fetch('APP_STORE_CONNECT_API_KEY_CONTENT')
   )
   Spaceship::ConnectAPI.token = token
 
@@ -331,19 +331,19 @@ if $PROGRAM_NAME == __FILE__
   platform = Spaceship::ConnectAPI::Platform::IOS
   app_store_versions = app.get_app_store_versions(
     filter: { platform: platform },
-    includes: nil,
+    includes: nil
   )
   versions = app_store_versions.map do |version|
     {
       version: version.version_string,
-      state: version.app_version_state,
+      state: version.app_version_state
     }
   end
 
   resolved_version = AppStorePatchVersion.resolve(
     base_version: base_version,
     app_store_versions: versions,
-    requested_version: requested_version,
+    requested_version: requested_version
   )
   if mode == 'prepare'
     AppStorePatchVersion.prepare_version!(
@@ -354,7 +354,7 @@ if $PROGRAM_NAME == __FILE__
       version_loader: lambda do |version_id|
         Spaceship::ConnectAPI::AppStoreVersion.get(
           app_store_version_id: version_id,
-          includes: nil,
+          includes: nil
         )
       end,
       version_creator: lambda do |app_id, version_string, version_platform|
@@ -362,10 +362,10 @@ if $PROGRAM_NAME == __FILE__
           app_id: app_id,
           attributes: {
             versionString: version_string,
-            platform: version_platform,
-          },
+            platform: version_platform
+          }
         )
-      end,
+      end
     )
   end
 

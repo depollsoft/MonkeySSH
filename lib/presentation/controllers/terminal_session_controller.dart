@@ -105,6 +105,9 @@ class TerminalSessionController {
     }
 
     observedSession.removeMetadataListener(_handleSessionMetadataChanged);
+    _sessionMetadataDebounceTimer?.cancel();
+    _sessionMetadataDebounceTimer = null;
+    _hasPendingSessionMetadataChange = false;
     _observedSession = null;
   }
 

@@ -20,6 +20,42 @@ void main() {
     await database.close();
   });
 
+  test(
+    'concurrent saves across service instances preserve both hosts',
+    () async {
+      final otherService = HostCliLaunchPreferencesService(
+        SettingsService(database),
+      );
+      const preferences = HostCliLaunchPreferences(startInYoloMode: true);
+
+      await Future.wait([
+        service.setPreferencesForHost(1, preferences),
+        otherService.setPreferencesForHost(2, preferences),
+      ]);
+
+      expect((await service.getPreferencesForHost(1)).startInYoloMode, isTrue);
+      expect((await service.getPreferencesForHost(2)).startInYoloMode, isTrue);
+    },
+  );
+
+  test(
+    'concurrent delete and save do not restore deleted preferences',
+    () async {
+      const preferences = HostCliLaunchPreferences(startInYoloMode: true);
+      await service.setPreferencesForHost(1, preferences);
+      await service.setPreferencesForHost(2, preferences);
+
+      await Future.wait([
+        service.deletePreferencesForHost(1),
+        service.setPreferencesForHost(3, preferences),
+      ]);
+
+      expect((await service.getPreferencesForHost(1)).isEmpty, isTrue);
+      expect((await service.getPreferencesForHost(2)).startInYoloMode, isTrue);
+      expect((await service.getPreferencesForHost(3)).startInYoloMode, isTrue);
+    },
+  );
+
   test('stores and loads host CLI launch preferences', () async {
     const preferences = HostCliLaunchPreferences(startInYoloMode: true);
 

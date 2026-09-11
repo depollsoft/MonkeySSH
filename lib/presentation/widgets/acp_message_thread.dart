@@ -284,7 +284,6 @@ class AcpMessageThread extends StatefulWidget {
     this.onTapLink,
     this.onCopyCode,
     this.onOpenLocation,
-    this.thoughtsInitiallyExpanded = false,
     this.followTail = false,
   });
 
@@ -332,9 +331,6 @@ class AcpMessageThread extends StatefulWidget {
 
   /// Called when a tool-call file location is opened.
   final ValueChanged<AcpToolLocation>? onOpenLocation;
-
-  /// Whether thought sections start expanded.
-  final bool thoughtsInitiallyExpanded;
 
   /// Keeps only a bounded tail mounted while the conversation follows live
   /// output. Older children are revealed in pages when the user scrolls up.
@@ -616,16 +612,13 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           .clamp(_renderStartChildIndex, _threadChildren.length - 1);
 
   void _revealEarlierTranscriptPage({
-    bool all = false,
     int pageChildren = _earlierTranscriptPageChildren,
   }) {
     final currentVisible = _threadChildren.length - _renderStartChildIndex;
-    final desiredVisible = all
-        ? _threadChildren.length + _loadedStartEntryIndex
-        : currentVisible + pageChildren;
+    final desiredVisible = currentVisible + pageChildren;
     final prefix = <_AcpThreadChild>[];
     while (_loadedStartEntryIndex > 0 &&
-        (all || _threadChildren.length + prefix.length < desiredVisible)) {
+        _threadChildren.length + prefix.length < desiredVisible) {
       _loadedStartEntryIndex -= 1;
       prefix.insertAll(
         0,
@@ -640,12 +633,10 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       _threadChildren = <_AcpThreadChild>[...prefix, ..._threadChildren];
       _rebuildThreadChildIndexes();
     }
-    _renderStartChildIndex = all
-        ? 0
-        : (_threadChildren.length - desiredVisible).clamp(
-            0,
-            _threadChildren.length,
-          );
+    _renderStartChildIndex = (_threadChildren.length - desiredVisible).clamp(
+      0,
+      _threadChildren.length,
+    );
   }
 
   void _ensureEarlierTranscriptIsScrollable(ScrollMetrics metrics) {
@@ -948,7 +939,6 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       case AcpThoughtEntry():
         return AcpThoughtView(
           entry: entry,
-          initiallyExpanded: widget.thoughtsInitiallyExpanded,
           onTapLink: widget.onTapLink,
           imageResolver: widget.imageResolver,
         );

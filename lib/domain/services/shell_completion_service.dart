@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'diagnostics_log_service.dart';
+import 'remote_file_service.dart' show shellEscapePosix;
+import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
 
@@ -24,9 +26,6 @@ enum ShellCompletionMode {
 
   /// Complete only directories.
   directory,
-
-  /// Complete files and directories.
-  path,
 }
 
 /// Type of a single shell completion suggestion.
@@ -372,26 +371,22 @@ class ShellCompletionService {
     return cached;
   }
 
-  Future<List<String>> _runHistoryCommand(
-    SshSession session,
-    ShellCompletionInvocation invocation,
-  ) async {
-    final command = session.remoteIsWindows
-        ? buildWindowsPowerShellCommand(
-            buildWindowsShellHistoryScript(invocation),
-          )
-        : buildShellHistoryRemoteCommand(invocation);
-    final exec = await session.execute(command);
+  Future<String> _collectStdout(
+    SSHSession exec, {
+    required int outputLimit,
+    required Duration timeout,
+    Future<void> Function()? writeInput,
+  }) async {
     try {
       final stdout = StringBuffer();
       final stdoutFuture = exec.stdout
           .cast<List<int>>()
           .transform(utf8.decoder)
           .forEach((chunk) {
-            if (stdout.length >= maxHistoryOutputChars) {
+            if (stdout.length >= outputLimit) {
               return;
             }
-            final remaining = maxHistoryOutputChars - stdout.length;
+            final remaining = outputLimit - stdout.length;
             stdout.write(
               chunk.length <= remaining ? chunk : chunk.substring(0, remaining),
             );
@@ -401,8 +396,32 @@ class ShellCompletionService {
         stdoutFuture,
         stderrFuture,
         exec.done,
-      ]).timeout(historyTimeout);
-      return parseShellHistoryOutput(stdout.toString());
+        if (writeInput != null) writeInput(),
+      ]).timeout(timeout);
+      return stdout.toString();
+    } finally {
+      exec.close();
+    }
+  }
+
+  Future<List<String>> _runHistoryCommand(
+    SshSession session,
+    ShellCompletionInvocation invocation,
+  ) async {
+    final command = session.remoteIsWindows
+        ? buildWindowsPowerShellCommand(
+            buildWindowsShellHistoryScript(invocation),
+          )
+        : buildShellHistoryRemoteCommand(invocation);
+    try {
+      final exec = await openSshExec(session.execute(command), historyTimeout);
+      return parseShellHistoryOutput(
+        await _collectStdout(
+          exec,
+          outputLimit: maxHistoryOutputChars,
+          timeout: historyTimeout,
+        ),
+      );
     } on TimeoutException {
       DiagnosticsLogService.instance.debug(
         'shell_completion',
@@ -413,8 +432,6 @@ class ShellCompletionService {
         },
       );
       rethrow;
-    } finally {
-      exec.close();
     }
   }
 
@@ -449,28 +466,13 @@ class ShellCompletionService {
             buildWindowsShellCompletionScript(invocation),
           )
         : buildShellCompletionRemoteCommand(invocation);
-    final exec = await session.execute(command);
     try {
-      final stdout = StringBuffer();
-      final stdoutFuture = exec.stdout
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .forEach((chunk) {
-            if (stdout.length >= maxOutputChars) {
-              return;
-            }
-            final remaining = maxOutputChars - stdout.length;
-            stdout.write(
-              chunk.length <= remaining ? chunk : chunk.substring(0, remaining),
-            );
-          });
-      final stderrFuture = exec.stderr.drain<void>();
-      await Future.wait<void>([
-        stdoutFuture,
-        stderrFuture,
-        exec.done,
-      ]).timeout(timeout);
-      return stdout.toString();
+      final exec = await openSshExec(session.execute(command), timeout);
+      return await _collectStdout(
+        exec,
+        outputLimit: maxOutputChars,
+        timeout: timeout,
+      );
     } on TimeoutException {
       DiagnosticsLogService.instance.warning(
         'shell_completion',
@@ -482,8 +484,6 @@ class ShellCompletionService {
         },
       );
       rethrow;
-    } finally {
-      exec.close();
     }
   }
 
@@ -492,37 +492,23 @@ class ShellCompletionService {
     ShellCompletionInvocation invocation,
   ) async {
     final command = buildInteractiveZshCompletionRemoteCommand(invocation);
-    final exec = await session.execute(command, pty: const SSHPtyConfig());
-    try {
-      final stdout = StringBuffer();
-      final stdoutFuture = exec.stdout
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .forEach((chunk) {
-            if (stdout.length >= maxOutputChars) {
-              return;
-            }
-            final remaining = maxOutputChars - stdout.length;
-            stdout.write(
-              chunk.length <= remaining ? chunk : chunk.substring(0, remaining),
-            );
-          });
-      final stderrFuture = exec.stderr.drain<void>();
-      exec.write(utf8.encode(buildInteractiveZshCompletionInput(invocation)));
-      await exec.stdin.close();
-      await Future.wait<void>([
-        stdoutFuture,
-        stderrFuture,
-        exec.done,
-      ]).timeout(interactiveZshTimeout);
-      final output = stdout.toString();
-      return _InteractiveCompletionResult(
-        output: output,
-        didComplete: _containsInteractiveZshCompletionDoneMarker(output),
-      );
-    } finally {
-      exec.close();
-    }
+    final exec = await openSshExec(
+      session.execute(command, pty: const SSHPtyConfig()),
+      interactiveZshTimeout,
+    );
+    final output = await _collectStdout(
+      exec,
+      outputLimit: maxOutputChars,
+      timeout: interactiveZshTimeout,
+      writeInput: () async {
+        exec.write(utf8.encode(buildInteractiveZshCompletionInput(invocation)));
+        await exec.stdin.close();
+      },
+    );
+    return _InteractiveCompletionResult(
+      output: output,
+      didComplete: _containsInteractiveZshCompletionDoneMarker(output),
+    );
   }
 
   void _trimCompletionCache(DateTime now) {
@@ -1712,7 +1698,7 @@ bool _containsInteractiveZshCompletionDoneMarker(String output) {
 String buildShellHistoryRemoteCommand(ShellCompletionInvocation invocation) {
   final preferredShell = invocation.shellCommand?.trim() ?? '';
   return '''
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; export FLUTTY_PREFERRED_SHELL=${_shellQuote(preferredShell)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; emit_history_file() { flutty_source=\$1; flutty_path=\$2; [ -r "\$flutty_path" ] || return 0; tail -n 1200 "\$flutty_path" 2>/dev/null | while IFS= read -r flutty_line; do printf '%s\\t%s\\n' "\$flutty_source" "\$flutty_line"; done; }; printf '__FLUTTY_HISTORY_START__\\n'; case "\$flutty_shell_name" in zsh) emit_history_file zsh "\${HISTFILE:-\$HOME/.zsh_history}";; bash) emit_history_file bash "\${HISTFILE:-\$HOME/.bash_history}";; fish) emit_history_file fish "\${XDG_DATA_HOME:-\$HOME/.local/share}/fish/fish_history";; *) emit_history_file zsh "\$HOME/.zsh_history"; emit_history_file bash "\$HOME/.bash_history"; emit_history_file fish "\${XDG_DATA_HOME:-\$HOME/.local/share}/fish/fish_history";; esac; printf '$_shellHistoryDoneMarker\\n'
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; export FLUTTY_PREFERRED_SHELL=${shellEscapePosix(preferredShell)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; emit_history_file() { flutty_source=\$1; flutty_path=\$2; [ -r "\$flutty_path" ] || return 0; tail -n 1200 "\$flutty_path" 2>/dev/null | while IFS= read -r flutty_line; do printf '%s\\t%s\\n' "\$flutty_source" "\$flutty_line"; done; }; printf '__FLUTTY_HISTORY_START__\\n'; case "\$flutty_shell_name" in zsh) emit_history_file zsh "\${HISTFILE:-\$HOME/.zsh_history}";; bash) emit_history_file bash "\${HISTFILE:-\$HOME/.bash_history}";; fish) emit_history_file fish "\${XDG_DATA_HOME:-\$HOME/.local/share}/fish/fish_history";; *) emit_history_file zsh "\$HOME/.zsh_history"; emit_history_file bash "\$HOME/.bash_history"; emit_history_file fish "\${XDG_DATA_HOME:-\$HOME/.local/share}/fish/fish_history";; esac; printf '$_shellHistoryDoneMarker\\n'
 ''';
 }
 
@@ -1778,7 +1764,7 @@ String buildInteractiveZshCompletionRemoteCommand(
   final mode = invocation.mode.name;
   final setupScript = _interactiveZshCompletionSetupScript();
   return '''
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; stty -echo 2>/dev/null || :; export FLUTTY_CWD=${_shellQuote(cwd ?? '')} FLUTTY_PREFERRED_SHELL=${_shellQuote(preferredShell)} FLUTTY_MODE=${_shellQuote(mode)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; case "\$flutty_shell_name" in zsh) if [ -x "\$flutty_shell" ]; then flutty_runner=\$flutty_shell; else flutty_runner=\$(command -v zsh 2>/dev/null || :); fi;; *) exit 78;; esac; [ -n "\$flutty_runner" ] || exit 78; if [ -n "\$FLUTTY_CWD" ]; then cd -- "\$FLUTTY_CWD" 2>/dev/null || cd -- "\$HOME" 2>/dev/null || :; fi; flutty_setup=\$(mktemp "\${TMPDIR:-/tmp}/flutty-zsh-completion.XXXXXX") || exit 78; cat >"\$flutty_setup" <<'__FLUTTY_ZSH_COMPLETION_SETUP__'
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; stty -echo 2>/dev/null || :; export FLUTTY_CWD=${shellEscapePosix(cwd ?? '')} FLUTTY_PREFERRED_SHELL=${shellEscapePosix(preferredShell)} FLUTTY_MODE=${shellEscapePosix(mode)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; case "\$flutty_shell_name" in zsh) if [ -x "\$flutty_shell" ]; then flutty_runner=\$flutty_shell; else flutty_runner=\$(command -v zsh 2>/dev/null || :); fi;; *) exit 78;; esac; [ -n "\$flutty_runner" ] || exit 78; if [ -n "\$FLUTTY_CWD" ]; then cd -- "\$FLUTTY_CWD" 2>/dev/null || cd -- "\$HOME" 2>/dev/null || :; fi; flutty_setup=\$(mktemp "\${TMPDIR:-/tmp}/flutty-zsh-completion.XXXXXX") || exit 78; cat >"\$flutty_setup" <<'__FLUTTY_ZSH_COMPLETION_SETUP__'
 $setupScript
 __FLUTTY_ZSH_COMPLETION_SETUP__
 export FLUTTY_ZSH_COMPLETION_SETUP="\$flutty_setup"; exec "\$flutty_runner" -fi
@@ -1891,7 +1877,7 @@ String buildShellCompletionRemoteCommand(ShellCompletionInvocation invocation) {
       'cd'.startsWith(invocation.token);
 
   return '''
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; export FLUTTY_MODE=${_shellQuote(mode)} FLUTTY_TOKEN=${_shellQuote(token)} FLUTTY_COMMAND_NAME=${_shellQuote(commandName)} FLUTTY_COMMAND_LINE=${_shellQuote(invocation.commandLine)} FLUTTY_CURSOR_OFFSET=${invocation.cursorOffset} FLUTTY_WORD_INDEX=${invocation.wordIndex} FLUTTY_COMP_WORDS_ASSIGNMENT=${_shellQuote(compWordsAssignment)} FLUTTY_INCLUDE_CD_SHORTCUTS=${includeCdShortcuts ? '1' : '0'} FLUTTY_CWD=${_shellQuote(cwd ?? '')} FLUTTY_LIMIT=$limit FLUTTY_PREFERRED_SHELL=${_shellQuote(preferredShell)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; case "\$flutty_shell_name" in bash|zsh|ksh|sh) if [ -x "\$flutty_shell" ]; then flutty_runner=\$flutty_shell; else flutty_runner=\$(command -v "\$flutty_shell_name" 2>/dev/null || printf %s "\$flutty_shell_name"); fi; flutty_profile_kind=\$flutty_shell_name;; *) flutty_runner=sh; flutty_profile_kind=sh;; esac; [ -n "\$flutty_runner" ] || flutty_runner=sh; FLUTTY_PROFILE_KIND=\$flutty_profile_kind "\$flutty_runner" -s <<'__FLUTTY_COMPLETION__'
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; export FLUTTY_MODE=${shellEscapePosix(mode)} FLUTTY_TOKEN=${shellEscapePosix(token)} FLUTTY_COMMAND_NAME=${shellEscapePosix(commandName)} FLUTTY_COMMAND_LINE=${shellEscapePosix(invocation.commandLine)} FLUTTY_CURSOR_OFFSET=${invocation.cursorOffset} FLUTTY_WORD_INDEX=${invocation.wordIndex} FLUTTY_COMP_WORDS_ASSIGNMENT=${shellEscapePosix(compWordsAssignment)} FLUTTY_INCLUDE_CD_SHORTCUTS=${includeCdShortcuts ? '1' : '0'} FLUTTY_CWD=${shellEscapePosix(cwd ?? '')} FLUTTY_LIMIT=$limit FLUTTY_PREFERRED_SHELL=${shellEscapePosix(preferredShell)}; flutty_shell=\${FLUTTY_PREFERRED_SHELL:-\${SHELL:-}}; flutty_shell_name=\${flutty_shell##*/}; case "\$flutty_shell_name" in bash|zsh|ksh|sh) if [ -x "\$flutty_shell" ]; then flutty_runner=\$flutty_shell; else flutty_runner=\$(command -v "\$flutty_shell_name" 2>/dev/null || printf %s "\$flutty_shell_name"); fi; flutty_profile_kind=\$flutty_shell_name;; *) flutty_runner=sh; flutty_profile_kind=sh;; esac; [ -n "\$flutty_runner" ] || flutty_runner=sh; FLUTTY_PROFILE_KIND=\$flutty_profile_kind "\$flutty_runner" -s <<'__FLUTTY_COMPLETION__'
 case "\$FLUTTY_MODE:\$FLUTTY_PROFILE_KIND" in
   command:*|argument:bash)
     source_if_readable() {
@@ -2154,9 +2140,6 @@ case "\$FLUTTY_MODE" in
   directory)
     emit_path_matches directory "\$FLUTTY_TOKEN"
     ;;
-  path)
-    emit_path_matches path "\$FLUTTY_TOKEN"
-    ;;
 esac
 __FLUTTY_COMPLETION__
 ''';
@@ -2172,10 +2155,8 @@ String _bashCompWordsAssignment(ShellCompletionInvocation invocation) {
   if (invocation.wordIndex >= 0 && invocation.wordIndex < words.length) {
     words[invocation.wordIndex] = invocation.token;
   }
-  return 'COMP_WORDS=(${words.map(_shellQuote).join(' ')})';
+  return 'COMP_WORDS=(${words.map(shellEscapePosix).join(' ')})';
 }
-
-String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
 
 /// PowerShell logic that normalizes the active Windows shell name into `cmd`,
 /// `powershell`, `pwsh`, or an empty string.
@@ -2249,7 +2230,6 @@ elseif($__flType -eq 'ProviderContainer'){$__flKind='directory'}
 elseif($__flType -eq 'ProviderItem'){$__flKind='file'}
 if($__flMode -eq 'argument' -and $__flKind -eq 'command'){continue}
 if($__flMode -eq 'directory' -and $__flKind -ne 'directory'){continue}
-if($__flMode -eq 'path' -and $__flKind -ne 'directory' -and $__flKind -ne 'file'){continue}
 $__flAny=$true
 if(!(__flEmit $__flKind $__flText)){break}
 }
@@ -2276,7 +2256,7 @@ $__flItems=@(Get-ChildItem -LiteralPath $__flDir -ErrorAction SilentlyContinue|W
 foreach($__it in $__flItems){
 $__nm=$__it.Name;$__val="$__flPrefix$__nm"
 if($__it.PSIsContainer){if(!(__flEmit 'directory' $__val)){break}}
-elseif($__flMode -eq 'path'){if(!(__flEmit 'file' $__val)){break}}
+elseif($__flMode -ne 'directory'){if(!(__flEmit 'file' $__val)){break}}
 }
 }
 }''';
@@ -2287,7 +2267,7 @@ elseif($__flMode -eq 'path'){if(!(__flEmit 'file' $__val)){break}}
 ///
 /// Command mode lists matching commands via `Get-Command` (executable extensions
 /// stripped); argument mode asks PowerShell's native `TabExpansion2` completer;
-/// directory/path modes enumerate the token's directory.
+/// directory mode enumerates the token's directory.
 @visibleForTesting
 String buildWindowsShellCompletionScript(ShellCompletionInvocation invocation) {
   final limit = invocation.maxSuggestions * 4;

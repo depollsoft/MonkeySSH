@@ -4,7 +4,10 @@ import 'dart:async';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -17,12 +20,13 @@ import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
-import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
@@ -81,6 +85,10 @@ class _ConfirmCloseHostState extends ConsumerState<_ConfirmCloseHost> {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  // Widget tests do not run the native plugin registrant.
+  AndroidFlutterLocalNotificationsPlugin.registerWith();
+
   testWidgets('native mux handle shows provider icon without window number', (
     tester,
   ) async {
@@ -277,7 +285,611 @@ void main() {
     expect(find.byIcon(Icons.play_arrow), findsOneWidget);
   });
 
+  group('shared mux presentation', () {
+    test(
+      'synthetic numbers ignore activity order and skip server-owned sessions',
+      () {
+        final first = fakeAcpSession(key: fakeAcpKey(bridgeId: 'a'));
+        final second = fakeAcpSession(key: fakeAcpKey(bridgeId: 'b'));
+        final server = fakeAcpSession(key: fakeAcpKey(bridgeId: 'server'));
+        final windows = [
+          TmuxWindow(
+            index: 7,
+            name: 'native',
+            isActive: false,
+            nativeAcpBridgeId: server.key.bridgeId,
+            nativeAcpProviderId: server.key.providerId,
+          ),
+        ];
+        final initial = MuxWindowProjection(windows, [second, server, first]);
+        final refreshed = MuxWindowProjection(windows, [
+          first.copyWith(lastActivityAt: DateTime(2030)),
+          second,
+          server,
+        ]);
+        expect(initial.orphanSessions.map((session) => session.key), [
+          first.key,
+          second.key,
+        ]);
+        expect(initial.nativeIndices, {
+          server.key: 7,
+          first.key: 8,
+          second.key: 9,
+        });
+        expect(refreshed.nativeIndices, initial.nativeIndices);
+        expect(initial.sessionForWindow(windows.single), same(server));
+      },
+    );
+
+    for (final inBar in [false, true]) {
+      for (final identity in ['terminal', 'server native', 'tracked native']) {
+        for (final isActive in [false, true]) {
+          testWidgets(
+            '$identity row inBar=$inBar active=$isActive retains identity progress and actions',
+            (tester) async {
+              final session = fakeAcpSession(
+                title: 'Native work',
+                promptStatus: AcpPromptStatus.streaming,
+                plan: _halfFinishedPlan(AcpPlanPriority.high),
+              );
+              final window = TmuxWindow(
+                index: 3,
+                name: 'Terminal work',
+                isActive: isActive,
+                flags: '!',
+                agentTool: AgentLaunchTool.codex,
+                nativeAcpBridgeId: identity == 'server native'
+                    ? session.key.bridgeId
+                    : null,
+                nativeAcpProviderId: identity == 'server native'
+                    ? session.key.providerId
+                    : null,
+                terminalProgress: const TerminalProgress(
+                  state: TerminalProgressState.normal,
+                  percentage: 50,
+                ),
+              );
+              final presentation = identity == 'tracked native'
+                  ? MuxWindowPresentation.session(
+                      session,
+                      index: 3,
+                      isActive: isActive,
+                    )
+                  : MuxWindowPresentation.window(
+                      window,
+                      session: identity == 'server native' ? session : null,
+                      isActive: isActive,
+                    );
+              var taps = 0;
+              var closes = 0;
+              await tester.pumpWidget(
+                MaterialApp(
+                  home: Scaffold(
+                    body: MuxWindowRow(
+                      presentation: presentation,
+                      inBar: inBar,
+                      onTap: () => taps++,
+                      onClose: () => closes++,
+                    ),
+                  ),
+                ),
+              );
+              final icon = tester.widget<AgentToolIcon>(
+                find.byType(AgentToolIcon),
+              );
+              final scheme = Theme.of(
+                tester.element(find.byType(MuxWindowRow)),
+              ).colorScheme;
+              expect(
+                icon.tool,
+                identity == 'terminal'
+                    ? AgentLaunchTool.codex
+                    : AgentLaunchTool.copilotCli,
+              );
+              expect(
+                icon.color,
+                isActive ? scheme.primary : scheme.onSurfaceVariant,
+              );
+              expect(
+                find.byType(AcpNativeBadge),
+                identity == 'terminal' ? findsNothing : findsOneWidget,
+              );
+              expect(
+                tester
+                    .widget<LinearProgressIndicator>(
+                      find.byType(LinearProgressIndicator),
+                    )
+                    .value,
+                0.5,
+              );
+              expect(find.text('3'), findsOneWidget);
+              if (identity == 'terminal') {
+                expect(find.byIcon(Icons.notifications_active), findsOneWidget);
+              }
+              await tester.tap(find.text(presentation.title));
+              expect(taps, 1);
+              await tester.tap(find.byTooltip('Close window'));
+              expect(closes, 1);
+              expect(taps, 1);
+            },
+          );
+        }
+      }
+      testWidgets(
+        'unattached native window preserves terminal progress inBar=$inBar',
+        (tester) async {
+          final presentation = MuxWindowPresentation.window(
+            const TmuxWindow(
+              index: 4,
+              name: 'Native',
+              isActive: false,
+              nativeAcpBridgeId: 'bridge',
+              nativeAcpProviderId: AcpBuiltinProviderIds.codex,
+              terminalProgress: TerminalProgress(
+                state: TerminalProgressState.indeterminate,
+              ),
+            ),
+            isActive: false,
+          );
+          await tester.pumpWidget(
+            MaterialApp(
+              home: MediaQuery(
+                data: const MediaQueryData(disableAnimations: true),
+                child: Scaffold(
+                  body: MuxWindowRow(
+                    presentation: presentation,
+                    inBar: inBar,
+                    onTap: () {},
+                    onClose: () {},
+                  ),
+                ),
+              ),
+            ),
+          );
+          expect(
+            tester
+                .widget<LinearProgressIndicator>(
+                  find.byType(LinearProgressIndicator),
+                )
+                .value,
+            0.5,
+          );
+          expect(find.text('native'), findsOneWidget);
+        },
+      );
+    }
+  });
+
+  group('shared recent sessions', () {
+    late _MockAgentSessionDiscoveryService discovery;
+    late SshSession session;
+    setUp(() {
+      discovery = _MockAgentSessionDiscoveryService();
+      session = _navigatorSession();
+    });
+    Widget recentHost({
+      required bool inBar,
+      required List<TmuxWindow> windows,
+      AgentWindowModePreference mode = AgentWindowModePreference.preferTerminal,
+      bool yolo = false,
+      AgentLaunchTool? tool,
+      ValueChanged<TmuxNavigatorAction>? onAction,
+    }) => ProviderScope(
+      overrides: [
+        agentSessionDiscoveryServiceProvider.overrideWithValue(discovery),
+      ],
+      child: MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: MuxRecentSessionsSection(
+              session: session,
+              tmuxSessionName: 'main',
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              scopeWorkingDirectory: '/explicit',
+              liveWindows: windows,
+              isProUser: true,
+              startClisInYoloMode: yolo,
+              preferredTool: tool,
+              inBar: inBar,
+              loadModePreference: () async => mode,
+              onAction: onAction ?? (_) {},
+              headerBuilder: (context, toggle, {required expanded}) =>
+                  TextButton(onPressed: toggle, child: const Text('History')),
+            ),
+          ),
+        ),
+      ),
+    );
+    for (final inBar in [false, true]) {
+      for (final (mode, forcePicker) in [
+        (AgentWindowModePreference.preferNative, false),
+        (AgentWindowModePreference.preferTerminal, false),
+        (AgentWindowModePreference.preferNative, true),
+        (AgentWindowModePreference.preferTerminal, true),
+      ]) {
+        testWidgets(
+          'live-only history resumes with $mode forcePicker=$forcePicker inBar=$inBar',
+          (tester) async {
+            const liveWindow = TmuxWindow(
+              index: 1,
+              name: 'codex',
+              isActive: true,
+              currentPath: '/explicit',
+              agentTool: AgentLaunchTool.codex,
+              activeAgentSessionId: 'live-session',
+              activeAgentSessionConfidence: AgentSessionConfidence.high,
+              agentSessionTitle: 'Live-only work',
+            );
+            const info = ToolSessionInfo(
+              toolName: 'Codex',
+              sessionId: 'live-session',
+              workingDirectory: '/explicit',
+              summary: 'Live-only work',
+            );
+            when(
+              () => discovery.discoverSessionsStream(
+                session,
+                workingDirectory: '/explicit',
+                maxPerTool: any(named: 'maxPerTool'),
+                toolName: any(named: 'toolName'),
+              ),
+            ).thenAnswer(
+              (_) => Stream.value(DiscoveredSessionsResult(sessions: const [])),
+            );
+            when(
+              () => discovery.buildResumeCommand(info, startInYoloMode: true),
+            ).thenReturn('codex --yolo resume live-session');
+            TmuxNavigatorAction? action;
+            await tester.pumpWidget(
+              recentHost(
+                inBar: inBar,
+                windows: const [liveWindow],
+                mode: mode,
+                yolo: true,
+                tool: AgentLaunchTool.codex,
+                onAction: (value) => action = value,
+              ),
+            );
+            await tester.pumpAndSettle();
+            verifyNever(
+              () => discovery.discoverSessionsStream(
+                session,
+                workingDirectory: '/explicit',
+                maxPerTool: any(named: 'maxPerTool'),
+                toolName: any(named: 'toolName'),
+              ),
+            );
+            await tester.tap(find.text('History'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Codex'));
+            await tester.pumpAndSettle();
+            final expectedNative =
+                (mode == AgentWindowModePreference.preferNative) != forcePicker;
+            if (forcePicker) {
+              await tester.longPress(find.text('Live-only work'));
+              await tester.pumpAndSettle();
+              await tester.tap(
+                find.text(expectedNative ? 'Native chat' : 'Terminal'),
+              );
+            } else {
+              await tester.tap(find.text('Live-only work'));
+            }
+            await tester.pumpAndSettle();
+            if (expectedNative) {
+              expect(action, isA<TmuxResumeAcpSessionAction>());
+              final native = action! as TmuxResumeAcpSessionAction;
+              expect(native.providerId, AcpBuiltinProviderIds.codex);
+              expect(native.acpSessionId, 'live-session');
+              expect(native.workingDirectory, '/explicit');
+            } else {
+              expect(action, isA<TmuxResumeSessionAction>());
+              final terminal = action! as TmuxResumeSessionAction;
+              expect(
+                terminal.resumeCommand,
+                'codex --yolo resume live-session',
+              );
+              expect(terminal.workingDirectory, '/explicit');
+            }
+          },
+        );
+      }
+
+      testWidgets(
+        'explicit scope retains discovery across live-window changes inBar=$inBar',
+        (tester) async {
+          var loads = 0;
+          when(
+            () => discovery.discoverSessionsStream(
+              session,
+              workingDirectory: '/explicit',
+              maxPerTool: any(named: 'maxPerTool'),
+            ),
+          ).thenAnswer((_) {
+            loads++;
+            return Stream.value(DiscoveredSessionsResult(sessions: const []));
+          });
+          var path = '/one';
+          late StateSetter rebuild;
+          await tester.pumpWidget(
+            StatefulBuilder(
+              builder: (context, setState) {
+                rebuild = setState;
+                return recentHost(
+                  inBar: inBar,
+                  windows: [
+                    TmuxWindow(
+                      index: 1,
+                      name: 'shell',
+                      isActive: true,
+                      currentPath: path,
+                    ),
+                  ],
+                );
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(loads, 0);
+          await tester.tap(find.text('History'));
+          await tester.pumpAndSettle();
+          expect(loads, 1);
+          rebuild(() => path = '/two');
+          await tester.pumpAndSettle();
+          expect(loads, 1);
+          await tester.tap(find.text('History'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('History'));
+          await tester.pumpAndSettle();
+          expect(loads, 1);
+        },
+      );
+    }
+  });
+
   group('tmux navigator UI', () {
+    late _MockTmuxService tmuxService;
+    late _MockAgentLaunchPresetService presetService;
+    late _MockAgentSessionDiscoveryService discoveryService;
+    late SshSession session;
+
+    Future<void> pumpNavigatorHost(
+      WidgetTester tester, {
+      required String tmuxSessionName,
+      RemoteMuxBackend remoteMuxBackend = RemoteMuxBackend.tmux,
+      bool startClisInYoloMode = false,
+      bool isProUser = true,
+      bool? confirmWindowClose,
+      ValueChanged<TmuxNavigatorAction?>? onActionSelected,
+      FakeAcpSessionManager? acpManager,
+    }) async {
+      final resolvedAcpManager = acpManager ?? FakeAcpSessionManager();
+      addTearDown(resolvedAcpManager.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            if (confirmWindowClose != null)
+              confirmMuxWindowCloseNotifierProvider.overrideWith(
+                _TestConfirmMuxWindowCloseNotifier.new,
+              ),
+            acpSessionManagerProvider.overrideWithValue(resolvedAcpManager),
+            acpProvidersProvider.overrideWith(
+              (ref) => Stream.value(<AcpProvider>[
+                for (final provider in acpBuiltinProviders) provider,
+              ]),
+            ),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+            agentSessionDiscoveryServiceProvider.overrideWithValue(
+              discoveryService,
+            ),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => TextButton(
+                  onPressed: () {
+                    unawaited(
+                      showTmuxNavigator(
+                        context: context,
+                        session: session,
+                        tmuxSessionName: tmuxSessionName,
+                        remoteMuxBackend: remoteMuxBackend,
+                        remoteMultiplexerService: tmuxService,
+                        isProUser: isProUser,
+                        startClisInYoloMode: startClisInYoloMode,
+                      ).then((action) => onActionSelected?.call(action)),
+                    );
+                  },
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump();
+    }
+
+    setUp(() {
+      tmuxService = _MockTmuxService();
+      presetService = _MockAgentLaunchPresetService();
+      discoveryService = _MockAgentSessionDiscoveryService();
+      session = _navigatorSession();
+      when(
+        () => presetService.getPresetForHost(session.hostId),
+      ).thenAnswer((_) async => null);
+      when(
+        () => tmuxService.watchWindowChanges(session, any()),
+      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+    });
+
+    for (final delayedMethod in ['requestPermissions', 'show']) {
+      for (final retirement in [
+        'activation',
+        'removal',
+        'disposal',
+        'stable identity',
+      ]) {
+        testWidgets('bar cancels delayed $delayedMethod after $retirement', (
+          tester,
+        ) async {
+          const channel = MethodChannel(
+            'dexterous.com/flutter/local_notifications',
+          );
+          final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+          FlutterLocalNotificationsPlatform.instance =
+              IOSFlutterLocalNotificationsPlugin();
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          try {
+            final notifications = LocalNotificationService();
+            final pending = Completer<bool>();
+            final delivered = <int>{};
+            final shown = <int>[];
+            final cancelled = <int>[];
+            var started = false;
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              channel,
+              (call) async {
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                if (call.method == delayedMethod && !started) {
+                  started = true;
+                  await pending.future;
+                }
+                if (call.method == 'show') {
+                  final id = (call.arguments as Map)['id'] as int;
+                  shown.add(id);
+                  delivered.add(id);
+                } else if (call.method == 'cancel') {
+                  final id = call.arguments as int;
+                  cancelled.add(id);
+                  delivered.remove(id);
+                }
+                return true;
+              },
+            );
+            final events = StreamController<TmuxWindowChangeEvent>();
+            addTearDown(() async {
+              await events.close();
+              notifications.dispose();
+              tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                channel,
+                null,
+              );
+              FlutterLocalNotificationsPlatform.instance = previousPlatform;
+            });
+            const shell = TmuxWindow(
+              index: 0,
+              id: '@1',
+              name: 'shell',
+              isActive: true,
+            );
+            const alert = TmuxWindow(
+              index: 1,
+              name: 'agent',
+              isActive: false,
+              flags: '!',
+            );
+            when(
+              () => tmuxService.listWindows(session, 'main'),
+            ).thenAnswer((_) async => [shell]);
+            when(
+              () => tmuxService.watchWindowChanges(session, 'main'),
+            ).thenAnswer((_) => events.stream);
+            when(
+              () => tmuxService.prefetchInstalledAgentTools(session),
+            ).thenAnswer((_) async {});
+            final mux = tmuxService;
+            await tester.pumpWidget(
+              ProviderScope(
+                overrides: [
+                  tmuxServiceProvider.overrideWithValue(tmuxService),
+                  agentLaunchPresetServiceProvider.overrideWithValue(
+                    presetService,
+                  ),
+                  localNotificationServiceProvider.overrideWithValue(
+                    notifications,
+                  ),
+                ],
+                child: MaterialApp(
+                  home: Scaffold(
+                    body: Consumer(
+                      builder: (context, ref, _) =>
+                          buildTmuxExpandableBarTestHost(
+                            ref: ref,
+                            session: session,
+                            remoteMultiplexerService: mux,
+                          ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            events.add(const TmuxWindowListEvent([shell, alert]));
+            await tester.pumpAndSettle();
+            expect(started, isTrue);
+            expect(cancelled, isEmpty);
+            final oldId =
+                Object.hash(session.hostId, session.connectionId, 'main', 1) &
+                0x7fffffff;
+            switch (retirement) {
+              case 'activation':
+                events.add(
+                  TmuxWindowListEvent([
+                    shell.copyWith(isActive: false),
+                    alert.copyWith(isActive: true),
+                  ]),
+                );
+              case 'removal':
+                events.add(const TmuxWindowListEvent([shell]));
+              case 'disposal':
+                await tester.pumpWidget(const SizedBox.shrink());
+              case 'stable identity':
+                events.add(
+                  TmuxWindowListEvent([shell, alert.copyWith(id: '@9')]),
+                );
+            }
+            await tester.pump();
+            pending.complete(true);
+            await tester.pumpAndSettle();
+            expect(shown, contains(oldId));
+            expect(cancelled, [oldId]);
+            expect(
+              delivered,
+              retirement == 'stable identity'
+                  ? {
+                      Object.hash(
+                            session.hostId,
+                            session.connectionId,
+                            'main',
+                            '@9',
+                          ) &
+                          0x7fffffff,
+                    }
+                  : isEmpty,
+            );
+            if (retirement == 'activation') {
+              // An unchanged alert remains acknowledged after leaving the window.
+              events.add(const TmuxWindowListEvent([shell, alert]));
+              await tester.pumpAndSettle();
+              expect(shown, [oldId]);
+              expect(cancelled, [oldId]);
+            }
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+            expect(delivered, isEmpty);
+            expect(notifications.pendingNotificationOperationCount, 0);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        });
+      }
+    }
+
     final windows = [
       const TmuxWindow(
         index: 0,
@@ -303,69 +915,54 @@ void main() {
       ),
     ];
 
-    testWidgets('renders window list with correct statuses', (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: _MockWindowList(windows: windows)),
-        ),
-      );
+    for (final windowId in <String?>['@9', null]) {
+      testWidgets('switch and close retain window ID $windowId', (
+        tester,
+      ) async {
+        when(() => tmuxService.listWindows(session, 'main')).thenAnswer(
+          (_) async => [
+            windows.first,
+            TmuxWindow(index: 1, id: windowId, name: 'target', isActive: false),
+          ],
+        );
+        TmuxNavigatorAction? selected;
+        await pumpNavigatorHost(
+          tester,
+          tmuxSessionName: 'main',
+          confirmWindowClose: true,
+          onActionSelected: (action) => selected = action,
+        );
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('target'));
+        await tester.pumpAndSettle();
+        expect(selected, isA<TmuxSwitchWindowAction>());
+        final switchAction = selected! as TmuxSwitchWindowAction;
+        expect(switchAction.windowIndex, 1);
+        expect(switchAction.windowId, windowId);
 
-      expect(find.text('✨ Editing main.dart'), findsOneWidget);
-      expect(find.text('Claude Code'), findsOneWidget);
-      expect(find.text('bash'), findsOneWidget);
-      expect(find.text('htop'), findsOneWidget);
-      expect(find.text('running'), findsNWidgets(3));
-      expect(find.text('waiting'), findsOneWidget);
-    });
-
-    testWidgets('renders tmux badge with window chips', (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData(
-            colorSchemeSeed: const Color(0xFF00796B),
-            useMaterial3: true,
-          ),
-          home: Scaffold(body: _MockTmuxBadge(windows: windows.sublist(0, 3))),
-        ),
-      );
-
-      expect(find.text('tmux:'), findsOneWidget);
-      expect(find.text('✨ Editing main.dart'), findsOneWidget);
-      expect(find.text('Claude Code'), findsOneWidget);
-      expect(find.text('bash'), findsOneWidget);
-    });
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Close window').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Close window'));
+        await tester.pumpAndSettle();
+        expect(selected, isA<TmuxCloseWindowAction>());
+        final closeAction = selected! as TmuxCloseWindowAction;
+        expect(closeAction.windowIndex, 1);
+        expect(closeAction.windowId, windowId);
+      });
+    }
 
     testWidgets('shows MonkeyMux terminal shortcuts', (tester) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const sessionName = 'main';
-      when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.watchWindowChanges(session, sessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, sessionName),
       ).thenAnswer((_) async => windows);
 
-      await _pumpNavigatorHost(
+      await pumpNavigatorHost(
         tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
         tmuxSessionName: sessionName,
         remoteMuxBackend: RemoteMuxBackend.monkeyMux,
         confirmWindowClose: true,
@@ -390,34 +987,6 @@ void main() {
       expect(find.text('windows'), findsOneWidget);
     });
 
-    testWidgets('recent session tile shows time ago', (tester) async {
-      final session = ToolSessionInfo(
-        toolName: 'Claude Code',
-        sessionId: 'abc123',
-        summary: 'Fix auth middleware',
-        lastActive: DateTime.now().subtract(const Duration(hours: 2)),
-      );
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: ListTile(
-              title: Text(session.summary!),
-              subtitle: Text('${session.toolName} · ${session.timeAgoLabel}'),
-              trailing: TextButton(
-                onPressed: () {},
-                child: const Text('Resume'),
-              ),
-            ),
-          ),
-        ),
-      );
-
-      expect(find.text('Fix auth middleware'), findsOneWidget);
-      expect(find.text('Claude Code · 2h ago'), findsOneWidget);
-      expect(find.text('Resume'), findsOneWidget);
-    });
-
     testWidgets('new window picker stays above the visible keyboard', (
       tester,
     ) async {
@@ -432,30 +1001,12 @@ void main() {
           ..resetViewInsets();
       });
 
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => {AgentLaunchTool.claudeCode});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => windows);
@@ -472,14 +1023,7 @@ void main() {
         ),
       );
 
-      await _pumpNavigatorHost(
-        tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
-        tmuxSessionName: tmuxSessionName,
-      );
+      await pumpNavigatorHost(tester, tmuxSessionName: tmuxSessionName);
 
       await tester.tap(find.text('Open'));
       await tester.pumpAndSettle();
@@ -502,30 +1046,12 @@ void main() {
     testWidgets('loads AI session providers only after expanding the section', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => const <AgentLaunchTool>{});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => windows);
@@ -562,9 +1088,7 @@ void main() {
                         session: session,
                         tmuxSessionName: tmuxSessionName,
                         remoteMuxBackend: RemoteMuxBackend.tmux,
-                        remoteMultiplexerService: TmuxRemoteMultiplexerService(
-                          tmuxService,
-                        ),
+                        remoteMultiplexerService: tmuxService,
                         isProUser: true,
                         startClisInYoloMode: false,
                       ),
@@ -623,19 +1147,6 @@ void main() {
     testWidgets(
       'running Pi window remains discoverable when history scan is empty',
       (tester) async {
-        final tmuxService = _MockTmuxService();
-        final presetService = _MockAgentLaunchPresetService();
-        final discoveryService = _MockAgentSessionDiscoveryService();
-        final session = SshSession(
-          connectionId: 1,
-          hostId: 1,
-          client: _MockSshClient(),
-          config: const SshConnectionConfig(
-            hostname: 'example.com',
-            port: 22,
-            username: 'demo',
-          ),
-        );
         const tmuxSessionName = 'main';
         const piWindows = <TmuxWindow>[
           TmuxWindow(
@@ -652,14 +1163,9 @@ void main() {
         ];
 
         when(
-          () => presetService.getPresetForHost(session.hostId),
-        ).thenAnswer((_) async => null);
-        when(
           () => tmuxService.detectInstalledAgentTools(session),
         ).thenAnswer((_) async => const <AgentLaunchTool>{AgentLaunchTool.pi});
-        when(
-          () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
         when(
           () => tmuxService.listWindows(session, tmuxSessionName),
         ).thenAnswer((_) async => piWindows);
@@ -681,12 +1187,8 @@ void main() {
           ),
         );
 
-        await _pumpNavigatorHost(
+        await pumpNavigatorHost(
           tester,
-          tmuxService: tmuxService,
-          presetService: presetService,
-          discoveryService: discoveryService,
-          session: session,
           tmuxSessionName: tmuxSessionName,
           remoteMuxBackend: RemoteMuxBackend.monkeyMux,
         );
@@ -718,19 +1220,6 @@ void main() {
     testWidgets('resumes a supported history session as native ACP', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
       const codexSession = ToolSessionInfo(
         toolName: 'Codex',
@@ -741,14 +1230,9 @@ void main() {
       TmuxNavigatorAction? selectedAction;
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => const <AgentLaunchTool>{});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => windows);
@@ -777,12 +1261,8 @@ void main() {
         ),
       ).thenReturn("codex --yolo resume 'codex-session'");
 
-      await _pumpNavigatorHost(
+      await pumpNavigatorHost(
         tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
         tmuxSessionName: tmuxSessionName,
         remoteMuxBackend: RemoteMuxBackend.monkeyMux,
         startClisInYoloMode: true,
@@ -821,34 +1301,83 @@ void main() {
       );
     });
 
+    for (final (dispose, fail) in [
+      (true, false),
+      (true, true),
+      (false, true),
+    ]) {
+      testWidgets(
+        dispose
+            ? 'does not run queued reload after disposal, failure=$fail'
+            : 'ignores late failure after a newer window snapshot',
+        (tester) async {
+          final events = StreamController<TmuxWindowChangeEvent>();
+          addTearDown(events.close);
+          final pending = Completer<List<TmuxWindow>>();
+
+          when(
+            () => tmuxService.detectInstalledAgentTools(session),
+          ).thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(
+            () => tmuxService.watchWindowChanges(session, 'main'),
+          ).thenAnswer((_) => events.stream);
+          when(
+            () => tmuxService.listWindows(session, 'main'),
+          ).thenAnswer((_) => pending.future);
+          when(
+            () => discoveryService.discoverSessionsStream(
+              session,
+              workingDirectory: any(named: 'workingDirectory'),
+              maxPerTool: any(named: 'maxPerTool'),
+              toolName: any(named: 'toolName'),
+            ),
+          ).thenAnswer(
+            (_) => Stream.value(
+              DiscoveredSessionsResult(sessions: const <ToolSessionInfo>[]),
+            ),
+          );
+          await pumpNavigatorHost(tester, tmuxSessionName: 'main');
+          await tester.tap(find.text('Open'));
+          await tester.pump();
+          events.add(
+            dispose
+                ? const TmuxWindowReloadEvent()
+                : TmuxWindowListEvent(windows),
+          );
+          await tester.pump();
+          if (dispose) {
+            await tester.pumpWidget(const SizedBox.shrink());
+          } else {
+            expect(find.text('✨ Editing main.dart'), findsOneWidget);
+          }
+          if (fail) {
+            pending.completeError(Exception('late window failure'));
+          } else {
+            pending.complete(windows);
+          }
+          await tester.pump();
+          await tester.pump(const Duration(seconds: 2));
+          expect(tester.takeException(), isNull);
+          verify(() => tmuxService.listWindows(session, 'main')).called(1);
+          if (!dispose) {
+            expect(find.text('✨ Editing main.dart'), findsOneWidget);
+            expect(find.byType(CircularProgressIndicator), findsNothing);
+            await tester.pumpWidget(const SizedBox.shrink());
+          }
+        },
+      );
+    }
+
     testWidgets('recovers from a transient empty window reload', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
       var listWindowsCallCount = 0;
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => const <AgentLaunchTool>{});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer((
         _,
       ) {
@@ -870,14 +1399,7 @@ void main() {
         ),
       );
 
-      await _pumpNavigatorHost(
-        tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
-        tmuxSessionName: tmuxSessionName,
-      );
+      await pumpNavigatorHost(tester, tmuxSessionName: tmuxSessionName);
 
       await tester.tap(find.text('Open'));
       await tester.pump();
@@ -893,30 +1415,12 @@ void main() {
     testWidgets('contains SSH channel errors while loading windows', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => const <AgentLaunchTool>{});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer(
         (_) => Future<List<TmuxWindow>>.error(
           SSHChannelOpenError(1, 'administratively prohibited'),
@@ -935,14 +1439,7 @@ void main() {
         ),
       );
 
-      await _pumpNavigatorHost(
-        tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
-        tmuxSessionName: tmuxSessionName,
-      );
+      await pumpNavigatorHost(tester, tmuxSessionName: tmuxSessionName);
       await tester.tap(find.text('Open'));
       await tester.pump();
 
@@ -953,30 +1450,12 @@ void main() {
     testWidgets('stops showing an indefinite spinner after repeated empties', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
         () => tmuxService.detectInstalledAgentTools(session),
       ).thenAnswer((_) async => const <AgentLaunchTool>{});
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => const <TmuxWindow>[]);
@@ -993,14 +1472,7 @@ void main() {
         ),
       );
 
-      await _pumpNavigatorHost(
-        tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
-        tmuxSessionName: tmuxSessionName,
-      );
+      await pumpNavigatorHost(tester, tmuxSessionName: tmuxSessionName);
 
       await tester.tap(find.text('Open'));
       await tester.pump();
@@ -1015,8 +1487,7 @@ void main() {
 
     test('maps every verified ACP adapter to its terminal tool', () {
       final mapping = nativeAcpProvidersByTool([
-        for (final provider in acpBuiltinProviders)
-          AcpBuiltinProviderView(provider),
+        for (final provider in acpBuiltinProviders) provider,
       ]);
 
       expect(
@@ -1045,31 +1516,20 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: true,
-                    startClisInYoloMode: false,
-                    agentWindowModePreference:
-                        AgentWindowModePreference.preferNative,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.copilotCli,
-                    }),
-                    nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                      AgentLaunchTool.copilotCli:
-                          AcpBuiltinProviderIds.copilotCli,
-                    },
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: true,
+            startClisInYoloMode: false,
+            agentWindowModePreference: AgentWindowModePreference.preferNative,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.copilotCli,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.copilotCli: AcpBuiltinProviderIds.copilotCli,
+            },
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1088,30 +1548,20 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: false,
-                    startClisInYoloMode: false,
-                    agentWindowModePreference:
-                        AgentWindowModePreference.preferTerminal,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.openCode,
-                    }),
-                    nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                      AgentLaunchTool.openCode: AcpBuiltinProviderIds.openCode,
-                    },
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: false,
+            startClisInYoloMode: false,
+            agentWindowModePreference: AgentWindowModePreference.preferTerminal,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.openCode,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.openCode: AcpBuiltinProviderIds.openCode,
+            },
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1130,31 +1580,20 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: true,
-                    startClisInYoloMode: false,
-                    agentWindowModePreference:
-                        AgentWindowModePreference.preferNative,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.copilotCli,
-                    }),
-                    nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                      AgentLaunchTool.copilotCli:
-                          AcpBuiltinProviderIds.copilotCli,
-                    },
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: true,
+            startClisInYoloMode: false,
+            agentWindowModePreference: AgentWindowModePreference.preferNative,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.copilotCli,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.copilotCli: AcpBuiltinProviderIds.copilotCli,
+            },
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1180,31 +1619,21 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [databaseProvider.overrideWithValue(database)],
-          child: MaterialApp(
-            home: Scaffold(
-              body: Builder(
-                builder: (context) => TextButton(
-                  onPressed: () async {
-                    result = await showTmuxNewWindowPicker(
-                      context: context,
-                      isProUser: true,
-                      startClisInYoloMode: false,
-                      agentWindowModePreference:
-                          AgentWindowModePreference.preferTerminal,
-                      installedToolsFuture: Future.value(
-                        const <AgentLaunchTool>{AgentLaunchTool.copilotCli},
-                      ),
-                      nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                        AgentLaunchTool.copilotCli:
-                            AcpBuiltinProviderIds.copilotCli,
-                      },
-                    );
-                  },
-                  child: const Text('Open picker'),
-                ),
-              ),
-            ),
-          ),
+          child: _pickerHost((context) async {
+            result = await showTmuxNewWindowPicker(
+              context: context,
+              isProUser: true,
+              startClisInYoloMode: false,
+              agentWindowModePreference:
+                  AgentWindowModePreference.preferTerminal,
+              installedToolsFuture: Future.value(const <AgentLaunchTool>{
+                AgentLaunchTool.copilotCli,
+              }),
+              nativeAcpProviderIds: const <AgentLaunchTool, String>{
+                AgentLaunchTool.copilotCli: AcpBuiltinProviderIds.copilotCli,
+              },
+            );
+          }),
         ),
       );
 
@@ -1236,29 +1665,19 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: false,
-                    startClisInYoloMode: false,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.copilotCli,
-                    }),
-                    nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                      AgentLaunchTool.copilotCli:
-                          AcpBuiltinProviderIds.copilotCli,
-                    },
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: false,
+            startClisInYoloMode: false,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.copilotCli,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.copilotCli: AcpBuiltinProviderIds.copilotCli,
+            },
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1295,25 +1714,17 @@ void main() {
           ..resetViewInsets();
       });
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () => showTmuxNewWindowPicker(
-                  context: context,
-                  isProUser: true,
-                  startClisInYoloMode: false,
-                  installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                    AgentLaunchTool.copilotCli,
-                  }),
-                  nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                    AgentLaunchTool.copilotCli:
-                        AcpBuiltinProviderIds.copilotCli,
-                  },
-                ),
-                child: const Text('Open picker'),
-              ),
-            ),
+        _pickerHost(
+          (context) => showTmuxNewWindowPicker(
+            context: context,
+            isProUser: true,
+            startClisInYoloMode: false,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.copilotCli,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.copilotCli: AcpBuiltinProviderIds.copilotCli,
+            },
           ),
         ),
       );
@@ -1341,28 +1752,19 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: true,
-                    startClisInYoloMode: false,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.openCode,
-                    }),
-                    nativeAcpProviderIds: const <AgentLaunchTool, String>{
-                      AgentLaunchTool.openCode: AcpBuiltinProviderIds.openCode,
-                    },
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: true,
+            startClisInYoloMode: false,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.openCode,
+            }),
+            nativeAcpProviderIds: const <AgentLaunchTool, String>{
+              AgentLaunchTool.openCode: AcpBuiltinProviderIds.openCode,
+            },
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1388,25 +1790,16 @@ void main() {
     ) async {
       TmuxNavigatorAction? result;
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () async {
-                  result = await showTmuxNewWindowPicker(
-                    context: context,
-                    isProUser: false,
-                    startClisInYoloMode: false,
-                    installedToolsFuture: Future.value(const <AgentLaunchTool>{
-                      AgentLaunchTool.claudeCode,
-                    }),
-                  );
-                },
-                child: const Text('Open picker'),
-              ),
-            ),
-          ),
-        ),
+        _pickerHost((context) async {
+          result = await showTmuxNewWindowPicker(
+            context: context,
+            isProUser: false,
+            startClisInYoloMode: false,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{
+              AgentLaunchTool.claudeCode,
+            }),
+          );
+        }),
       );
 
       await tester.tap(find.text('Open picker'));
@@ -1423,28 +1816,9 @@ void main() {
     });
 
     testWidgets('tmux navigator remains terminal-only', (tester) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
       TmuxNavigatorAction? selected;
 
-      when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
       when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => windows);
@@ -1452,12 +1826,8 @@ void main() {
         (_) async => const <AgentLaunchTool>{AgentLaunchTool.copilotCli},
       );
 
-      await _pumpNavigatorHost(
+      await pumpNavigatorHost(
         tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
         tmuxSessionName: tmuxSessionName,
         acpManager: FakeAcpSessionManager(
           sessions: [fakeAcpSession(title: 'Native only')],
@@ -1481,36 +1851,14 @@ void main() {
     testWidgets('free navigator offers recent terminal sessions with Pro', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       TmuxNavigatorAction? selected;
-      when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.watchWindowChanges(session, 'main'),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+
       when(
         () => tmuxService.listWindows(session, 'main'),
       ).thenAnswer((_) async => windows);
 
-      await _pumpNavigatorHost(
+      await pumpNavigatorHost(
         tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
         tmuxSessionName: 'main',
         isProUser: false,
         onActionSelected: (action) => selected = action,
@@ -1542,19 +1890,12 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => TextButton(
-                onPressed: () => showTmuxNewWindowPicker(
-                  context: context,
-                  isProUser: false,
-                  startClisInYoloMode: false,
-                  installedToolsFuture: Future.value(const <AgentLaunchTool>{}),
-                ),
-                child: const Text('Open picker'),
-              ),
-            ),
+        _pickerHost(
+          (context) => showTmuxNewWindowPicker(
+            context: context,
+            isProUser: false,
+            startClisInYoloMode: false,
+            installedToolsFuture: Future.value(const <AgentLaunchTool>{}),
           ),
         ),
       );
@@ -1570,19 +1911,6 @@ void main() {
     testWidgets('MonkeyMux navigator lists and opens native ACP sessions', (
       tester,
     ) async {
-      final tmuxService = _MockTmuxService();
-      final presetService = _MockAgentLaunchPresetService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final session = SshSession(
-        connectionId: 1,
-        hostId: 1,
-        client: _MockSshClient(),
-        config: const SshConnectionConfig(
-          hostname: 'example.com',
-          port: 22,
-          username: 'demo',
-        ),
-      );
       const tmuxSessionName = 'main';
       final key = fakeAcpKey();
       final manager = FakeAcpSessionManager(
@@ -1592,18 +1920,7 @@ void main() {
             title: 'Fix authentication',
             cwd: '/home/dev/monkeyssh',
             promptStatus: AcpPromptStatus.streaming,
-            plan: const [
-              AcpPlanEntry(
-                content: 'done',
-                priority: AcpPlanPriority.high,
-                status: AcpPlanStatus.completed,
-              ),
-              AcpPlanEntry(
-                content: 'next',
-                priority: AcpPlanPriority.medium,
-                status: AcpPlanStatus.inProgress,
-              ),
-            ],
+            plan: _halfFinishedPlan(AcpPlanPriority.medium),
           ),
           fakeAcpSession(
             key: fakeAcpKey(acpSessionId: 'failed-session'),
@@ -1627,21 +1944,11 @@ void main() {
       TmuxNavigatorAction? selected;
 
       when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
-      when(
         () => tmuxService.listWindows(session, tmuxSessionName),
       ).thenAnswer((_) async => windows);
 
-      await _pumpNavigatorHost(
+      await pumpNavigatorHost(
         tester,
-        tmuxService: tmuxService,
-        presetService: presetService,
-        discoveryService: discoveryService,
-        session: session,
         tmuxSessionName: tmuxSessionName,
         remoteMuxBackend: RemoteMuxBackend.monkeyMux,
         acpManager: manager,
@@ -1730,19 +2037,6 @@ void main() {
     testWidgets(
       'durable native window keeps panel title badges and progress live',
       (tester) async {
-        final tmuxService = _MockTmuxService();
-        final presetService = _MockAgentLaunchPresetService();
-        final discoveryService = _MockAgentSessionDiscoveryService();
-        final session = SshSession(
-          connectionId: 1,
-          hostId: 1,
-          client: _MockSshClient(),
-          config: const SshConnectionConfig(
-            hostname: 'example.com',
-            port: 22,
-            username: 'demo',
-          ),
-        );
         const tmuxSessionName = 'main';
         final key = fakeAcpKey();
         final manager = FakeAcpSessionManager(
@@ -1751,18 +2045,7 @@ void main() {
               key: key,
               title: 'Live panel title',
               promptStatus: AcpPromptStatus.streaming,
-              plan: const [
-                AcpPlanEntry(
-                  content: 'done',
-                  priority: AcpPlanPriority.high,
-                  status: AcpPlanStatus.completed,
-                ),
-                AcpPlanEntry(
-                  content: 'next',
-                  priority: AcpPlanPriority.medium,
-                  status: AcpPlanStatus.inProgress,
-                ),
-              ],
+              plan: _halfFinishedPlan(AcpPlanPriority.medium),
             ),
           ],
         );
@@ -1798,21 +2081,14 @@ void main() {
         TmuxNavigatorAction? selected;
 
         when(
-          () => presetService.getPresetForHost(session.hostId),
-        ).thenAnswer((_) async => null);
-        when(
           () => tmuxService.watchWindowChanges(session, tmuxSessionName),
         ).thenAnswer((_) => windowEvents.stream);
         when(
           () => tmuxService.listWindows(session, tmuxSessionName),
         ).thenAnswer((_) async => windows);
 
-        await _pumpNavigatorHost(
+        await pumpNavigatorHost(
           tester,
-          tmuxService: tmuxService,
-          presetService: presetService,
-          discoveryService: discoveryService,
-          session: session,
           tmuxSessionName: tmuxSessionName,
           remoteMuxBackend: RemoteMuxBackend.monkeyMux,
           acpManager: manager,
@@ -1853,16 +2129,8 @@ void main() {
         expect(nativeIcon.color, scheme.onSurfaceVariant);
         expect(terminalIcon.color, nativeIcon.color);
 
-        windows = [
-          TmuxWindow(
-            index: 3,
-            id: '@4',
-            name: 'Copilot CLI',
-            isActive: true,
-            currentPath: '/home/dev/project',
-            nativeAcpBridgeId: key.bridgeId,
-            nativeAcpProviderId: key.providerId,
-          ),
+        List<TmuxWindow> activityWindows({required bool active}) => [
+          windows.first.copyWith(isActive: active),
           const TmuxWindow(
             index: 4,
             id: '@5',
@@ -1870,8 +2138,9 @@ void main() {
             isActive: false,
             agentTool: AgentLaunchTool.copilotCli,
           ),
-          const TmuxWindow(index: 5, id: '@6', name: 'zsh', isActive: false),
+          TmuxWindow(index: 5, id: '@6', name: 'zsh', isActive: !active),
         ];
+        windows = activityWindows(active: true);
         windowEvents.add(TmuxWindowListEvent(windows));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
@@ -1884,25 +2153,7 @@ void main() {
           scheme.primary,
         );
 
-        windows = [
-          TmuxWindow(
-            index: 3,
-            id: '@4',
-            name: 'Copilot CLI',
-            isActive: false,
-            currentPath: '/home/dev/project',
-            nativeAcpBridgeId: key.bridgeId,
-            nativeAcpProviderId: key.providerId,
-          ),
-          const TmuxWindow(
-            index: 4,
-            id: '@5',
-            name: 'Terminal Copilot',
-            isActive: false,
-            agentTool: AgentLaunchTool.copilotCli,
-          ),
-          const TmuxWindow(index: 5, id: '@6', name: 'zsh', isActive: true),
-        ];
+        windows = activityWindows(active: false);
         windowEvents.add(TmuxWindowListEvent(windows));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
@@ -1982,73 +2233,6 @@ void main() {
   });
 }
 
-Future<void> _pumpNavigatorHost(
-  WidgetTester tester, {
-  required TmuxService tmuxService,
-  required AgentLaunchPresetService presetService,
-  required AgentSessionDiscoveryService discoveryService,
-  required SshSession session,
-  required String tmuxSessionName,
-  RemoteMuxBackend remoteMuxBackend = RemoteMuxBackend.tmux,
-  bool startClisInYoloMode = false,
-  bool isProUser = true,
-  bool? confirmWindowClose,
-  ValueChanged<TmuxNavigatorAction?>? onActionSelected,
-  FakeAcpSessionManager? acpManager,
-}) async {
-  final resolvedAcpManager = acpManager ?? FakeAcpSessionManager();
-  addTearDown(resolvedAcpManager.dispose);
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        if (confirmWindowClose != null)
-          confirmMuxWindowCloseNotifierProvider.overrideWith(
-            _TestConfirmMuxWindowCloseNotifier.new,
-          ),
-        acpSessionManagerProvider.overrideWithValue(resolvedAcpManager),
-        acpProvidersProvider.overrideWith(
-          (ref) => Stream.value(<AcpProvider>[
-            for (final provider in acpBuiltinProviders)
-              AcpBuiltinProviderView(provider),
-          ]),
-        ),
-        tmuxServiceProvider.overrideWithValue(tmuxService),
-        agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-        agentSessionDiscoveryServiceProvider.overrideWithValue(
-          discoveryService,
-        ),
-      ],
-      child: MaterialApp(
-        home: Scaffold(
-          body: Consumer(
-            builder: (context, ref, _) => TextButton(
-              onPressed: () {
-                unawaited(
-                  showTmuxNavigator(
-                    context: context,
-                    session: session,
-                    tmuxSessionName: tmuxSessionName,
-                    remoteMuxBackend: remoteMuxBackend,
-                    remoteMultiplexerService: TmuxRemoteMultiplexerService(
-                      tmuxService,
-                    ),
-                    isProUser: isProUser,
-                    startClisInYoloMode: startClisInYoloMode,
-                  ).then((action) => onActionSelected?.call(action)),
-                );
-              },
-              child: const Text('Open'),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-
-  await tester.pump();
-  await tester.pump();
-}
-
 class _MockTmuxService extends Mock implements TmuxService {}
 
 class _MockAgentLaunchPresetService extends Mock
@@ -2059,100 +2243,37 @@ class _MockAgentSessionDiscoveryService extends Mock
 
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockWindowList extends StatelessWidget {
-  const _MockWindowList({required this.windows});
-  final List<TmuxWindow> windows;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ListView(
-      children: windows
-          .map(
-            (w) => ListTile(
-              dense: true,
-              leading: Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  color: w.isActive
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  '${w.index}',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: w.isActive
-                        ? theme.colorScheme.onPrimary
-                        : theme.colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              title: Text(w.displayTitle),
-              trailing: Text(w.statusLabel),
-              selected: w.isActive,
-            ),
-          )
-          .toList(),
-    );
-  }
-}
-
-class _MockTmuxBadge extends StatelessWidget {
-  const _MockTmuxBadge({required this.windows});
-  final List<TmuxWindow> windows;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(56, 0, 16, 8),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            Icon(
-              Icons.window_outlined,
-              size: 14,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              'tmux:',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(width: 6),
-            for (final window in windows) ...[
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: window.isActive
-                      ? theme.colorScheme.primaryContainer
-                      : theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  window.displayTitle,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: window.isActive
-                        ? theme.colorScheme.onPrimaryContainer
-                        : theme.colorScheme.onSurfaceVariant,
-                    fontWeight: window.isActive
-                        ? FontWeight.bold
-                        : FontWeight.normal,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-            ],
-          ],
-        ),
+Widget _pickerHost(Future<void> Function(BuildContext) open) => MaterialApp(
+  home: Scaffold(
+    body: Builder(
+      builder: (context) => TextButton(
+        onPressed: () => unawaited(open(context)),
+        child: const Text('Open picker'),
       ),
-    );
-  }
-}
+    ),
+  ),
+);
+
+SshSession _navigatorSession() => SshSession(
+  connectionId: 1,
+  hostId: 1,
+  client: _MockSshClient(),
+  config: const SshConnectionConfig(
+    hostname: 'example.com',
+    port: 22,
+    username: 'demo',
+  ),
+);
+
+List<AcpPlanEntry> _halfFinishedPlan(AcpPlanPriority nextPriority) => [
+  const AcpPlanEntry(
+    content: 'done',
+    priority: AcpPlanPriority.high,
+    status: AcpPlanStatus.completed,
+  ),
+  AcpPlanEntry(
+    content: 'next',
+    priority: nextPriority,
+    status: AcpPlanStatus.inProgress,
+  ),
+];

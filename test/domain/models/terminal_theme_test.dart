@@ -18,6 +18,32 @@ Color _compositeOver(Color foreground, Color background) =>
 
 void main() {
   group('TerminalThemeData', () {
+    const testTheme = TerminalThemeData(
+      id: 'test-id',
+      name: 'Test Theme',
+      isDark: true,
+      foreground: Color(0xFFFFFFFF),
+      background: Color(0xFF000000),
+      cursor: Color(0xFFFFFFFF),
+      selection: Color(0x60FFFFFF),
+      black: Color(0xFF000000),
+      red: Color(0xFFFF0000),
+      green: Color(0xFF00FF00),
+      yellow: Color(0xFFFFFF00),
+      blue: Color(0xFF0000FF),
+      magenta: Color(0xFFFF00FF),
+      cyan: Color(0xFF00FFFF),
+      white: Color(0xFFFFFFFF),
+      brightBlack: Color(0xFF808080),
+      brightRed: Color(0xFFFF8080),
+      brightGreen: Color(0xFF80FF80),
+      brightYellow: Color(0xFFFFFF80),
+      brightBlue: Color(0xFF8080FF),
+      brightMagenta: Color(0xFFFF80FF),
+      brightCyan: Color(0xFF80FFFF),
+      brightWhite: Color(0xFFFFFFFF),
+    );
+
     test('builds xterm theme mode reports for tmux refreshes', () {
       expect(buildTerminalThemeModeReport(isDark: true), '\x1b[?997;1n');
       expect(buildTerminalThemeModeReport(isDark: false), '\x1b[?997;2n');
@@ -33,66 +59,8 @@ void main() {
       expect(reports, contains('\x1b]4;0;rgb:2424/2929/2f2f\x1b\\'));
     });
 
-    test('creates with required fields', () {
-      const theme = TerminalThemeData(
-        id: 'test-id',
-        name: 'Test Theme',
-        isDark: true,
-        foreground: Color(0xFFFFFFFF),
-        background: Color(0xFF000000),
-        cursor: Color(0xFFFFFFFF),
-        selection: Color(0x60FFFFFF),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
-      );
-
-      expect(theme.id, 'test-id');
-      expect(theme.name, 'Test Theme');
-      expect(theme.isDark, true);
-      expect(theme.foreground, const Color(0xFFFFFFFF));
-      expect(theme.background, const Color(0xFF000000));
-    });
-
     test('toJson returns valid JSON map', () {
-      const theme = TerminalThemeData(
-        id: 'test-id',
-        name: 'Test Theme',
-        isDark: true,
-        foreground: Color(0xFFFFFFFF),
-        background: Color(0xFF000000),
-        cursor: Color(0xFFFFFFFF),
-        selection: Color(0x60FFFFFF),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
-      );
+      const theme = testTheme;
 
       final json = theme.toJson();
 
@@ -100,6 +68,8 @@ void main() {
       expect(json['name'], 'Test Theme');
       expect(json['isDark'], true);
       expect(json['foreground'], 0xFFFFFFFF);
+      expect(theme.foreground, const Color(0xFFFFFFFF));
+      expect(theme.background, const Color(0xFF000000));
     });
 
     test('fromJson creates theme from JSON map', () {
@@ -137,30 +107,11 @@ void main() {
     });
 
     test('toJson and fromJson are symmetric', () {
-      const original = TerminalThemeData(
+      final original = testTheme.copyWith(
         id: 'roundtrip-id',
         name: 'Roundtrip Theme',
-        isDark: true,
-        foreground: Color(0xFFABCDEF),
-        background: Color(0xFF123456),
-        cursor: Color(0xFFFFFFFF),
-        selection: Color(0x60FFFFFF),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
+        foreground: const Color(0xFFABCDEF),
+        background: const Color(0xFF123456),
       );
 
       final json = original.toJson();
@@ -174,30 +125,9 @@ void main() {
     });
 
     test('copyWith creates new theme with modified fields', () {
-      const original = TerminalThemeData(
+      final original = testTheme.copyWith(
         id: 'original-id',
         name: 'Original Theme',
-        isDark: true,
-        foreground: Color(0xFFFFFFFF),
-        background: Color(0xFF000000),
-        cursor: Color(0xFFFFFFFF),
-        selection: Color(0x60FFFFFF),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
       );
 
       final modified = original.copyWith(
@@ -209,38 +139,6 @@ void main() {
       expect(modified.name, 'Modified Theme');
       expect(modified.isDark, original.isDark);
       expect(modified.foreground, original.foreground);
-    });
-
-    test('toXtermTheme converts to xterm TerminalTheme', () {
-      const theme = TerminalThemeData(
-        id: 'xterm-test',
-        name: 'Xterm Test',
-        isDark: true,
-        foreground: Color(0xFFFFFFFF),
-        background: Color(0xFF000000),
-        cursor: Color(0xFFFFFFFF),
-        selection: Color(0x60FFFFFF),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
-      );
-
-      final xtermTheme = theme.toXtermTheme();
-
-      expect(xtermTheme, isNotNull);
     });
 
     test('buildTerminalThemeOscResponse answers special color queries', () {
@@ -342,15 +240,6 @@ void main() {
       expect(reports, isNot(contains('\x1b]19;')));
     });
 
-    test('buildTerminalThemeBackgroundColorReport answers OSC 11', () {
-      const theme = TerminalThemes.githubLightDefault;
-
-      expect(
-        buildTerminalThemeBackgroundColorReport(theme),
-        '\x1b]11;rgb:ffff/ffff/ffff\x1b\\',
-      );
-    });
-
     test('buildTerminalThemeOscResponse ignores unsupported OSC values', () {
       const theme = TerminalThemes.githubLightDefault;
 
@@ -380,43 +269,30 @@ void main() {
       );
     });
 
-    test('toXtermTheme normalizes unreadable selection backgrounds', () {
-      const theme = TerminalThemeData(
+    for (final theme in [
+      testTheme.copyWith(id: 'xterm-test', name: 'Xterm Test'),
+      testTheme.copyWith(
         id: 'selection-test',
         name: 'Selection Test',
         isDark: false,
-        foreground: Color(0xFF1F2328),
-        background: Color(0xFFFFFFFF),
-        cursor: Color(0xFF0969DA),
-        selection: Color(0xFF1F2328),
-        black: Color(0xFF000000),
-        red: Color(0xFFFF0000),
-        green: Color(0xFF00FF00),
-        yellow: Color(0xFFFFFF00),
-        blue: Color(0xFF0000FF),
-        magenta: Color(0xFFFF00FF),
-        cyan: Color(0xFF00FFFF),
-        white: Color(0xFFFFFFFF),
-        brightBlack: Color(0xFF808080),
-        brightRed: Color(0xFFFF8080),
-        brightGreen: Color(0xFF80FF80),
-        brightYellow: Color(0xFFFFFF80),
-        brightBlue: Color(0xFF8080FF),
-        brightMagenta: Color(0xFFFF80FF),
-        brightCyan: Color(0xFF80FFFF),
-        brightWhite: Color(0xFFFFFFFF),
-      );
+        foreground: const Color(0xFF1F2328),
+        background: const Color(0xFFFFFFFF),
+        cursor: const Color(0xFF0969DA),
+        selection: const Color(0xFF1F2328),
+      ),
+    ]) {
+      test('toXtermTheme keeps selection readable for ${theme.id}', () {
+        final xtermTheme = theme.toXtermTheme();
 
-      final xtermTheme = theme.toXtermTheme();
-
-      expect(
-        _contrastRatio(
-          theme.foreground,
-          _compositeOver(xtermTheme.selection, theme.background),
-        ),
-        greaterThanOrEqualTo(3.5),
-      );
-    });
+        expect(
+          _contrastRatio(
+            theme.foreground,
+            _compositeOver(xtermTheme.selection, theme.background),
+          ),
+          greaterThanOrEqualTo(3.5),
+        );
+      });
+    }
   });
 
   group('TerminalThemes', () {

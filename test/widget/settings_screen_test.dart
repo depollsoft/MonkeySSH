@@ -9,12 +9,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/app_metadata.dart';
 import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/background_ssh_service.dart';
+import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/settings_screen.dart';
@@ -96,14 +99,42 @@ class _ThrowingChangePinAuthService extends FakeAuthService {
   }
 }
 
+class _MockMonetizationService extends Mock implements MonetizationService {}
+
+class _MockSecureTransferService extends Mock
+    implements SecureTransferService {}
+
 Future<void> _pumpSettingsScreen(
   WidgetTester tester, {
   required AppDatabase db,
+  bool? pro,
+  SecureTransferService? transferService,
+  bool settle = true,
 }) async {
+  final access = MonetizationState.initial(debugUnlockAvailable: false)
+      .copyWith(
+        entitlements: pro ?? false
+            ? const MonetizationEntitlements.pro()
+            : const MonetizationEntitlements.free(),
+      );
+  final billing = _MockMonetizationService();
+  when(() => billing.currentState).thenReturn(access);
+  when(
+    () => billing.canUseFeature(MonetizationFeature.agentManagement),
+  ).thenAnswer((_) async => pro ?? false);
+  when(
+    () => billing.canUseFeature(MonetizationFeature.migrationImportExport),
+  ).thenAnswer((_) async => pro ?? false);
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
+        if (transferService != null)
+          secureTransferServiceProvider.overrideWithValue(transferService),
+        if (pro != null) ...[
+          monetizationServiceProvider.overrideWithValue(billing),
+          monetizationStateProvider.overrideWith((ref) => Stream.value(access)),
+        ],
         authServiceProvider.overrideWithValue(FakeAuthService()),
         authStateProvider.overrideWith(MockAuthStateNotifier.new),
       ],
@@ -111,7 +142,12 @@ Future<void> _pumpSettingsScreen(
     ),
   );
 
-  await tester.pumpAndSettle();
+  if (settle) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
 }
 
 void main() {
@@ -141,6 +177,38 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_backgroundSshChannel, null);
     });
+
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      testWidgets(
+        'explains platform-specific local clipboard reads',
+        (tester) async {
+          final db = AppDatabase.forTesting(NativeDatabase.memory());
+          addTearDown(db.close);
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          await _pumpSettingsScreen(tester, db: db);
+          await tester.scrollUntilVisible(
+            find.text('Remote can read clipboard'),
+            300,
+            scrollable: find.byType(Scrollable).first,
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.text(
+              platform == TargetPlatform.iOS
+                  ? 'Allow remote OSC 52 queries to read local clipboard text. '
+                        'The clipboard is not polled automatically on iOS.'
+                  : 'Allow remote OSC 52 queries and clipboard sync to send local clipboard text to the connected host',
+            ),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        },
+        variant: TargetPlatformVariant.only(platform),
+      );
+    }
 
     testWidgets('displays all sections', (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -200,6 +268,65 @@ void main() {
       expect(
         find.text('Unlock transfers, automation, and agent launch presets'),
         findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'free users must upgrade before enabling agent update indicators',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        await _pumpSettingsScreen(tester, db: db, pro: false);
+        final tile = find.byKey(
+          const ValueKey('settings-agent-update-notifications'),
+        );
+        await tester.scrollUntilVisible(
+          tile,
+          300,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+        await tester.tap(tile);
+        await tester.pumpAndSettle();
+        expect(find.text('Manage remote coding agents'), findsOneWidget);
+        expect(
+          await SettingsService(
+            db,
+          ).getBool(SettingKeys.agentUpdateNotifications, defaultValue: true),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets('shows and persists the agent update indicator toggle', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+
+      await _pumpSettingsScreen(tester, db: db, pro: true);
+      final tile = find.byKey(
+        const ValueKey('settings-agent-update-notifications'),
+      );
+      await tester.scrollUntilVisible(
+        tile,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Agent update indicators'), findsOneWidget);
+      expect(tester.widget<SwitchListTile>(tile).value, isTrue);
+      await tester.tap(tile);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<SwitchListTile>(tile).value, isFalse);
+      expect(
+        await SettingsService(
+          db,
+        ).getBool(SettingKeys.agentUpdateNotifications, defaultValue: true),
+        isFalse,
       );
     });
 
@@ -379,6 +506,52 @@ void main() {
       expect(find.text('Lifetime'), findsOneWidget);
     });
 
+    for (final (title, labels, setting, saved) in [
+      (
+        'Theme',
+        ['System default', 'Light', 'Dark'],
+        SettingKeys.themeMode,
+        'dark',
+      ),
+      (
+        'Cursor style',
+        ['Block', 'Underline', 'Bar'],
+        SettingKeys.cursorStyle,
+        'bar',
+      ),
+    ]) {
+      testWidgets('$title choices stay ordered and persist selection', (
+        tester,
+      ) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        await _pumpSettingsScreen(tester, db: db);
+        await tester.scrollUntilVisible(
+          find.text(title),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(title));
+        await tester.pumpAndSettle();
+        final dialog = find.byType(AlertDialog);
+        expect(
+          tester
+              .widgetList<Text>(
+                find.descendant(of: dialog, matching: find.byType(Text)),
+              )
+              .map((text) => text.data),
+          [title, ...labels],
+        );
+        await tester.tap(
+          find.descendant(of: dialog, matching: find.text(labels.last)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(await SettingsService(db).getString(setting), saved);
+      });
+    }
+
     testWidgets('displays theme option', (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -407,7 +580,34 @@ void main() {
       expect(find.text('14 pt'), findsOneWidget);
     });
 
+    for (final family in ['monospace', 'JetBrains Mono', 'Custom Mono']) {
+      testWidgets('font size preview uses $family', (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        await _pumpSettingsScreen(tester, db: db);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SettingsScreen)),
+        );
+        await container
+            .read(fontFamilyNotifierProvider.notifier)
+            .setFontFamily(family);
+        await tester.scrollUntilVisible(
+          find.text('Font size'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Font size'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsOneWidget);
+        final preview = tester.widget<Text>(find.text('AaBbCc 0123 {}[]'));
+        expect(preview.style!.fontFamily, family);
+        expect(preview.style!.fontSize, 14);
+      });
+    }
+
     testWidgets('displays font family option', (tester) async {
+      final semantics = tester.ensureSemantics();
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
 
@@ -422,6 +622,29 @@ void main() {
 
       expect(find.text('Font family'), findsOneWidget);
       expect(find.text('System Monospace'), findsOneWidget);
+      await tester.tap(find.text('Font family'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSemantics(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(ListTile, 'System Monospace'),
+          ),
+        ),
+        isSemantics(isSelected: true),
+      );
+      expect(
+        tester.getSemantics(find.widgetWithText(ListTile, 'JetBrains Mono')),
+        isSemantics(isSelected: false),
+      );
+      semantics.dispose();
+      await tester.tap(find.text('JetBrains Mono'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SettingsScreen)),
+      );
+      expect(container.read(fontFamilyNotifierProvider), 'JetBrains Mono');
     });
 
     testWidgets('displays cursor style option', (tester) async {
@@ -1078,6 +1301,93 @@ void main() {
       expect(find.text('Import app data'), findsOneWidget);
     });
 
+    testWidgets(
+      'app data export shows unreadable secrets without reporting an error',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        const message =
+            'Cannot export: re-enter the password for host "Alpha" '
+            'and the private key for SSH key "Alpha key".';
+        final transferService = _MockSecureTransferService();
+        when(
+          () => transferService.createFullMigrationPayload(
+            transferPassphrase: 'transfer-passphrase',
+          ),
+        ).thenAnswer((_) async => throw const FormatException(message));
+        try {
+          await _pumpSettingsScreen(
+            tester,
+            db: db,
+            pro: true,
+            transferService: transferService,
+            settle: false,
+          );
+          await tester.scrollUntilVisible(
+            find.text('Export app data'),
+            300,
+            scrollable: find.byType(Scrollable).first,
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.tap(find.text('Export app data'));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.text('Export passphrase'), findsOneWidget);
+          await tester.enterText(
+            find.widgetWithText(TextField, 'Transfer passphrase'),
+            'transfer-passphrase',
+          );
+          final reportedErrors = <FlutterErrorDetails>[];
+          final originalOnError = FlutterError.onError;
+          addTearDown(() => FlutterError.onError = originalOnError);
+          FlutterError.onError = reportedErrors.add;
+          try {
+            await tester.tap(find.widgetWithText(FilledButton, 'Continue'));
+            await tester.pump();
+            // Exercise a frame during dismissal, when the TextField still needs
+            // its controller, then finish the dialog and SnackBar animations.
+            await tester.pump(const Duration(milliseconds: 100));
+            await tester.pump(const Duration(milliseconds: 200));
+            await tester.pump();
+          } finally {
+            FlutterError.onError = originalOnError;
+          }
+
+          expect(
+            reportedErrors,
+            isEmpty,
+            reason: reportedErrors.map((error) => error.toString()).join('\n'),
+          );
+
+          verify(
+            () => transferService.createFullMigrationPayload(
+              transferPassphrase: 'transfer-passphrase',
+            ),
+          ).called(1);
+          expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+          expect(find.text('Export failed. Try again.'), findsNothing);
+          expect(find.byType(AlertDialog), findsNothing);
+          expect(find.byType(SettingsScreen), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        } finally {
+          // Pump cleanup inside the test's fake async zone, before database
+          // teardown, and resolve any dialog left open by a failed assertion.
+          final navigators = find.byType(Navigator);
+          if (navigators.evaluate().isNotEmpty) {
+            tester
+                .state<NavigatorState>(navigators)
+                .popUntil((route) => route.isFirst);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 30)),
+    );
+
     testWidgets('has scrollable ListView', (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -1087,7 +1397,7 @@ void main() {
       expect(find.byType(ListView), findsOneWidget);
     });
 
-    testWidgets('import app data invalidates shared entity providers', (
+    testWidgets('import refreshes settings and shared entity providers', (
       tester,
     ) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -1145,7 +1455,47 @@ void main() {
         tester.element(find.byType(EntityProviderProbe)),
       );
 
-      invalidateImportedEntityProviders(container.invalidate);
+      expect(
+        await container
+            .read(terminalNotificationsNotifierProvider.notifier)
+            .initializedValue(),
+        isTrue,
+      );
+      expect(
+        await container
+            .read(shellCompletionsNotifierProvider.notifier)
+            .initializedValue(),
+        isTrue,
+      );
+      await container
+          .read(secureTransferServiceProvider)
+          .importFullMigrationPayload(
+            payload: TransferPayload(
+              type: TransferPayloadType.fullMigration,
+              schemaVersion: 1,
+              createdAt: DateTime.utc(2026),
+              data: const {
+                'settings': {
+                  SettingKeys.terminalNotifications: 'false',
+                  SettingKeys.shellCompletions: 'false',
+                },
+              },
+            ),
+            mode: MigrationImportMode.replace,
+          );
+      invalidateSyncedDataProviders(container.invalidate);
+      expect(
+        await container
+            .read(terminalNotificationsNotifierProvider.notifier)
+            .initializedValue(),
+        isFalse,
+      );
+      expect(
+        await container
+            .read(shellCompletionsNotifierProvider.notifier)
+            .initializedValue(),
+        isFalse,
+      );
       container
         ..read(allHostsProvider)
         ..read(allKeysProvider)

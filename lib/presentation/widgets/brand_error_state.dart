@@ -16,7 +16,6 @@ class BrandErrorState extends StatelessWidget {
     required this.title,
     this.message,
     this.onRetry,
-    this.retryLabel = 'Retry',
     this.icon = Icons.error_outline_rounded,
     super.key,
   });
@@ -29,9 +28,6 @@ class BrandErrorState extends StatelessWidget {
 
   /// Retry handler. When null, no retry button is shown.
   final VoidCallback? onRetry;
-
-  /// Retry button label.
-  final String retryLabel;
 
   /// Leading status icon.
   final IconData icon;
@@ -72,7 +68,7 @@ class BrandErrorState extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: onRetry,
                 icon: const Icon(Icons.refresh, size: 18),
-                label: Text(retryLabel),
+                label: const Text('Retry'),
               ),
             ],
           ],

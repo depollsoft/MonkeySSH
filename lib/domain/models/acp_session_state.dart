@@ -102,9 +102,6 @@ enum AcpSessionErrorKind {
   /// A request exceeded its deadline.
   timeout,
 
-  /// The free concurrency limit blocked the requested transition.
-  concurrencyBlocked,
-
   /// An otherwise uncategorized failure.
   unknown,
 }
@@ -441,7 +438,6 @@ final class AcpSessionState {
   /// fields the way a hand-written field-by-field reconstruction could.
   AcpSessionState copyWith({
     AcpSessionKey? key,
-    String? providerLabel,
     String? cwd,
     String? title,
     bool clearTitle = false,
@@ -452,22 +448,18 @@ final class AcpSessionState {
     List<AcpAuthMethod>? authMethods,
     bool? pendingAuthentication,
     AcpSessionModeState? modeState,
-    bool clearModeState = false,
     AcpModelState? modelState,
-    bool clearModelState = false,
     List<AcpSessionConfigOption>? configOptions,
     bool? autoApprovePermissions,
     List<AcpAvailableCommand>? availableCommands,
     List<AcpPlanEntry>? plan,
     AcpUsageUpdate? usage,
-    bool clearUsage = false,
     AcpStopReason? lastStopReason,
     bool clearLastStopReason = false,
     AcpPromptStatus? promptStatus,
     List<AcpPendingPermission>? pendingPermissions,
     List<AcpPendingWrite>? pendingWrites,
     MonkeyMuxAcpTransportState? transportState,
-    bool clearTransportState = false,
     AcpSessionError? error,
     bool clearError = false,
     AcpSessionError? warning,
@@ -475,7 +467,7 @@ final class AcpSessionState {
     AcpTimeline? timeline,
   }) => AcpSessionState(
     key: key ?? this.key,
-    providerLabel: providerLabel ?? this.providerLabel,
+    providerLabel: providerLabel,
     isCustomProvider: isCustomProvider,
     cwd: cwd ?? this.cwd,
     title: clearTitle ? null : (title ?? this.title),
@@ -486,23 +478,21 @@ final class AcpSessionState {
     initialization: initialization ?? this.initialization,
     authMethods: authMethods ?? this.authMethods,
     pendingAuthentication: pendingAuthentication ?? this.pendingAuthentication,
-    modeState: clearModeState ? null : (modeState ?? this.modeState),
-    modelState: clearModelState ? null : (modelState ?? this.modelState),
+    modeState: modeState ?? this.modeState,
+    modelState: modelState ?? this.modelState,
     configOptions: configOptions ?? this.configOptions,
     autoApprovePermissions:
         autoApprovePermissions ?? this.autoApprovePermissions,
     availableCommands: availableCommands ?? this.availableCommands,
     plan: plan ?? this.plan,
-    usage: clearUsage ? null : (usage ?? this.usage),
+    usage: usage ?? this.usage,
     lastStopReason: clearLastStopReason
         ? null
         : (lastStopReason ?? this.lastStopReason),
     promptStatus: promptStatus ?? this.promptStatus,
     pendingPermissions: pendingPermissions ?? this.pendingPermissions,
     pendingWrites: pendingWrites ?? this.pendingWrites,
-    transportState: clearTransportState
-        ? null
-        : (transportState ?? this.transportState),
+    transportState: transportState ?? this.transportState,
     error: clearError ? null : (error ?? this.error),
     warning: clearWarning ? null : (warning ?? this.warning),
     timeline: timeline ?? this.timeline,

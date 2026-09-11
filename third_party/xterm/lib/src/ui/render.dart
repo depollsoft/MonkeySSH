@@ -196,6 +196,12 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   @override
+  void dispose() {
+    _painter.dispose();
+    super.dispose();
+  }
+
+  @override
   bool hitTestSelf(Offset position) {
     return true;
   }
@@ -483,6 +489,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     paragraph.layout(ParagraphConstraints(width: size.width));
 
     canvas.drawParagraph(paragraph, Offset(0, offset.dy));
+    paragraph.dispose();
   }
 
   void _paintSelection(

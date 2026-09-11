@@ -105,22 +105,17 @@ final class AcpRecentSessionRef {
   };
 
   /// Returns a copy with selected fields replaced.
-  AcpRecentSessionRef copyWith({
-    String? title,
-    bool clearTitle = false,
-    String? cwd,
-    bool clearCwd = false,
-    DateTime? lastActivityAt,
-  }) => AcpRecentSessionRef(
-    hostId: hostId,
-    providerId: providerId,
-    bridgeId: bridgeId,
-    acpSessionId: acpSessionId,
-    title: clearTitle ? null : (title ?? this.title),
-    cwd: clearCwd ? null : (cwd ?? this.cwd),
-    createdAt: createdAt,
-    lastActivityAt: lastActivityAt ?? this.lastActivityAt,
-  );
+  AcpRecentSessionRef copyWith({String? title, String? cwd}) =>
+      AcpRecentSessionRef(
+        hostId: hostId,
+        providerId: providerId,
+        bridgeId: bridgeId,
+        acpSessionId: acpSessionId,
+        title: title ?? this.title,
+        cwd: cwd ?? this.cwd,
+        createdAt: createdAt,
+        lastActivityAt: lastActivityAt,
+      );
 
   @override
   bool operator ==(Object other) =>

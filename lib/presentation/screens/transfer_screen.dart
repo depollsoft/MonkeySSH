@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -164,34 +165,28 @@ Future<void> _savePayloadToFileDialog({
   required String fileName,
 }) async {
   final appName = await loadAppName();
-  final targetPath = await FilePicker.saveFile(
-    dialogTitle: 'Export encrypted $appName transfer file',
-    fileName: fileName,
-    type: FileType.custom,
-    allowedExtensions: const [monkeySshTransferFileExtension],
-    bytes: bytes,
-  );
-
-  if (!context.mounted) {
-    return;
-  }
-
-  if (targetPath == null) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Export cancelled')));
-    return;
-  }
-
-  final shouldWriteFileDirectly =
-      !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
-  if (shouldWriteFileDirectly) {
-    try {
-      await File(targetPath.toFilePath()).writeAsBytes(bytes, flush: true);
-    } on FileSystemException {
-      if (!context.mounted) {
-        return;
-      }
+  try {
+    final targetPath = await FilePicker.saveFile(
+      dialogTitle: 'Export encrypted $appName transfer file',
+      fileName: fileName,
+      type: FileType.custom,
+      allowedExtensions: const [monkeySshTransferFileExtension],
+      bytes: bytes,
+    );
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          targetPath == null
+              ? 'Export cancelled'
+              : 'Encrypted file saved: $targetPath',
+        ),
+      ),
+    );
+  } on Exception {
+    if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -199,22 +194,14 @@ Future<void> _savePayloadToFileDialog({
           ),
         ),
       );
-      return;
     }
   }
-  if (!context.mounted) {
-    return;
-  }
-
-  ScaffoldMessenger.of(
-    context,
-  ).showSnackBar(SnackBar(content: Text('Encrypted file saved: $targetPath')));
 }
 
 /// Imports payload content from an encrypted transfer file.
 Future<String?> pickTransferPayloadFromFile(BuildContext context) async {
   final appName = await loadAppName();
-  final result = await FilePicker.pickFiles(
+  final selectedFile = await FilePicker.pickFile(
     dialogTitle: 'Select encrypted $appName transfer file',
     type: pickerFileTypeForCustomExtension(defaultTargetPlatform),
     allowedExtensions: pickerAllowedExtensionsForCustomExtension(
@@ -223,11 +210,10 @@ Future<String?> pickTransferPayloadFromFile(BuildContext context) async {
     ),
   );
 
-  if (result.isEmpty) {
+  if (selectedFile == null) {
     return null;
   }
 
-  final selectedFile = result.single;
   if (!platformFileMatchesExpectedExtension(
     selectedFile,
     monkeySshTransferFileExtension,
@@ -240,107 +226,37 @@ Future<String?> pickTransferPayloadFromFile(BuildContext context) async {
     return null;
   }
 
-  if (kIsWeb) {
-    final Uint8List bytes;
-    try {
-      bytes = await selectedFile.readAsBytes();
-    } on Exception {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
-            ),
-          ),
-        );
+  String message;
+  try {
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in selectedFile.readAsByteStream()) {
+      if (bytes.length + chunk.length > _maxTransferPayloadBytes) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Transfer file is too large')),
+          );
+        }
+        return null;
       }
-      return null;
+      bytes.add(chunk);
     }
     if (bytes.isEmpty) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
-            ),
-          ),
-        );
-      }
-      return null;
+      throw const FileSystemException('Empty transfer file');
     }
-    if (bytes.length > _maxTransferPayloadBytes) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Transfer file is too large')),
-        );
-      }
-      return null;
-    }
-    try {
-      return utf8.decode(bytes);
-    } on FormatException {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.',
-            ),
-          ),
-        );
-      }
-      return null;
-    }
-  }
-
-  final path = selectedFile.path;
-  if (path == null || path.isEmpty) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
-          ),
-        ),
-      );
-    }
-    return null;
-  }
-
-  final file = File(path);
-  try {
-    final length = await file.length();
-    if (length > _maxTransferPayloadBytes) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Transfer file is too large')),
-        );
-      }
-      return null;
-    }
-    return await file.readAsString();
-  } on FileSystemException {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
-          ),
-        ),
-      );
-    }
-    return null;
+    return utf8.decode(bytes.takeBytes());
   } on FormatException {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.',
-          ),
-        ),
-      );
-    }
-    return null;
+    message =
+        'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.';
+  } on Exception {
+    message =
+        'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.';
   }
+  if (context.mounted) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+  return null;
 }
 
 /// Dialog that asks for transfer passphrase.
@@ -348,55 +264,68 @@ Future<String?> showTransferPassphraseDialog({
   required BuildContext context,
   required String title,
 }) async {
-  final controller = TextEditingController();
-  var obscureText = true;
+  final value = await showDialog<String>(
+    context: context,
+    builder: (context) => _TransferPassphraseDialog(title: title),
+  );
 
-  try {
-    final value = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: Text(title),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            obscureText: obscureText,
-            decoration: InputDecoration(
-              labelText: 'Transfer passphrase',
-              helperText: 'Required to encrypt/decrypt transfer data',
-              suffixIcon: IconButton(
-                onPressed: () => setState(() => obscureText = !obscureText),
-                icon: Icon(
-                  obscureText ? Icons.visibility : Icons.visibility_off,
-                ),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () =>
-                  Navigator.pop(dialogContext, controller.text.trim()),
-              child: const Text('Continue'),
-            ),
-          ],
-        ),
-      ),
-    );
+  final trimmed = value?.trim();
+  if (trimmed == null || trimmed.isEmpty) {
+    return null;
+  }
+  return trimmed;
+}
 
-    final trimmed = value?.trim();
-    if (trimmed == null || trimmed.isEmpty) {
-      return null;
-    }
-    return trimmed;
-  } finally {
-    controller
+class _TransferPassphraseDialog extends StatefulWidget {
+  const _TransferPassphraseDialog({required this.title});
+
+  final String title;
+
+  @override
+  State<_TransferPassphraseDialog> createState() =>
+      _TransferPassphraseDialogState();
+}
+
+class _TransferPassphraseDialogState extends State<_TransferPassphraseDialog> {
+  final _controller = TextEditingController();
+  var _obscureText = true;
+
+  @override
+  void dispose() {
+    // The TextField still needs its controller during the route's exit animation.
+    _controller
       ..clear()
       ..dispose();
+    super.dispose();
   }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      obscureText: _obscureText,
+      decoration: InputDecoration(
+        labelText: 'Transfer passphrase',
+        helperText: 'Required to encrypt/decrypt transfer data',
+        suffixIcon: IconButton(
+          onPressed: () => setState(() => _obscureText = !_obscureText),
+          icon: Icon(_obscureText ? Icons.visibility : Icons.visibility_off),
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text.trim()),
+        child: const Text('Continue'),
+      ),
+    ],
+  );
 }
 
 /// Requests local authentication for sensitive transfer exports.

@@ -1,6 +1,5 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../domain/models/terminal_theme.dart';
 
@@ -49,16 +48,13 @@ abstract final class FluttyTheme {
   /// Large border radius.
   static const double radiusLg = 16;
 
-  /// Standard icon size for empty states.
-  static const double emptyStateIconSize = 48;
-
   /// Light theme.
   static ThemeData get light => _buildTheme(Brightness.light);
 
   /// Dark theme.
   static ThemeData get dark => _buildTheme(Brightness.dark);
 
-  /// Uses system text styles instead of Google Fonts when true.
+  /// Uses system text styles instead of bundled fonts when true.
   ///
   /// This is intended for tests that instantiate theme data without a bundled
   /// font asset bundle.
@@ -513,7 +509,7 @@ abstract final class FluttyTheme {
       );
 
   static TextTheme _interTextTheme(TextTheme textTheme) =>
-      debugUseSystemFonts ? textTheme : GoogleFonts.interTextTheme(textTheme);
+      debugUseSystemFonts ? textTheme : textTheme.apply(fontFamily: 'Inter');
 
   static TextStyle _inter({
     double? fontSize,
@@ -530,7 +526,9 @@ abstract final class FluttyTheme {
       );
     }
 
-    return GoogleFonts.inter(
+    // Flutter 3.41+ maps fontWeight to the variable font's wght axis.
+    return TextStyle(
+      fontFamily: 'Inter',
       fontSize: fontSize,
       fontWeight: fontWeight,
       color: color,
@@ -554,7 +552,8 @@ abstract final class FluttyTheme {
       );
     }
 
-    return GoogleFonts.jetBrainsMono(
+    return TextStyle(
+      fontFamily: 'JetBrains Mono',
       fontSize: fontSize,
       fontWeight: fontWeight,
       color: color,
@@ -621,13 +620,8 @@ abstract final class FluttyTheme {
   }
 
   /// Monospace text style for terminal/code content.
-  static TextStyle get monoStyle => debugUseSystemFonts
-      ? const TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 13,
-          fontWeight: FontWeight.w400,
-        )
-      : GoogleFonts.jetBrainsMono(fontSize: 13, fontWeight: FontWeight.w400);
+  static TextStyle get monoStyle =>
+      _mono(fontSize: 13, fontWeight: FontWeight.w400);
 
   /// Monospace **display** text style: the brand/identity voice for screen
   /// titles, host names, numerals, and status badges.
@@ -646,16 +640,4 @@ abstract final class FluttyTheme {
     color: color,
     letterSpacing: letterSpacing,
   );
-
-  /// Accent gradient for special elements.
-  static LinearGradient get accentGradient => const LinearGradient(
-    colors: [_accentTeal, _accentTealSoft],
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-  );
-
-  /// Glow box shadow for cards/buttons.
-  static List<BoxShadow> glowShadow([Color? color]) => [
-    BoxShadow(color: (color ?? _accentTeal).withAlpha(40), blurRadius: 20),
-  ];
 }

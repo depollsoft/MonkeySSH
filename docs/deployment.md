@@ -1,12 +1,12 @@
 # Deployment Guide
 
 This guide covers automated deployment to TestFlight, Play Store internal
-testing, and public store releases.
+testing, Firebase App Distribution, and public store releases.
 
 ## App Variants
 
 | Variant | Android Package | iOS Bundle ID | Display Name | Purpose |
-|---------|----------------|---------------|--------------|---------|
+| --------- | ---------------- | --------------- | -------------- | --------- |
 | **private** | `xyz.depollsoft.monkeyssh.private` | `xyz.depollsoft.monkeyssh.private` | MonkeySSH β | PR previews, internal testing |
 | **production** | `xyz.depollsoft.monkeyssh` | `xyz.depollsoft.monkeyssh` | MonkeySSH | App Store / Play Store releases |
 
@@ -39,15 +39,53 @@ Both variants install side-by-side on the same device.
    - Create and download a JSON key
    - Back in Play Console, grant the service account access with "Release manager" permissions
 
+### Firebase App Distribution
+
+Every push to a same-repository pull request, plus app changes pushed to
+`main`, distributes the **private** flavor to Firebase App Distribution testers
+(see the Firebase Distribution workflow below). Pull requests build unsigned
+artifacts without deployment credentials; a trusted `workflow_run` validates
+and distributes the immutable artifacts. Fork pull requests are skipped. One-time
+setup in the [Firebase console](https://console.firebase.google.com/) for
+project `monkeyssh`:
+
+1. Open **App Distribution** and press **Get started** for both private apps
+   (`xyz.depollsoft.monkeyssh.private` on Android and iOS)
+2. Create a tester **group** with alias `testers` (or set the
+   `FIREBASE_TESTER_GROUPS` repository *variable* to a comma-separated list of
+   your group aliases) and add tester emails to it
+3. Create a **service account** in the Google Cloud console for the Firebase
+   project, grant it the **Firebase App Distribution Admin** role, and download
+   a JSON key — this becomes the `FIREBASE_SERVICE_ACCOUNT_JSON` secret
+4. **iOS only:** App Distribution installs ad hoc builds, so every tester
+   device UDID must be registered in the Apple Developer portal. Have testers
+   register through the invite link (Firebase collects the UDID), then add the
+   device in the developer portal.
+
+   Apple requires **at least one registered device** before it will issue an
+   ad hoc profile, so register a device before the first firebase deploy. The
+   first deploy then creates the `AdHoc_*` match profiles automatically,
+   reusing the existing distribution certificate. Later device registrations
+   are picked up automatically too (`force_for_new_devices`), so no manual
+   step is normally needed. To force a refresh anyway:
+
+   ```bash
+   cd ios
+   bundle exec fastlane regenerate_profiles type:adhoc
+   ```
+
 ### Fastlane Match (iOS Certificates)
 
 1. Create a **private Git repository** for storing certificates (e.g., `github.com/yourorg/certificates`)
 2. Initialize match locally:
+
    ```bash
    cd ios
    bundle exec fastlane match init
    ```
+
 3. Generate certificates for every shipped iOS bundle ID, including the Live Activity extension:
+
     ```bash
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.private
@@ -58,6 +96,7 @@ Both variants install side-by-side on the same device.
 ### Android Upload Keystore
 
 Generate a release keystore:
+
 ```bash
 keytool -genkey -v \
   -keystore upload-keystore.jks \
@@ -76,7 +115,7 @@ Configure these secrets in your repository settings (Settings → Secrets and va
 ### iOS / Apple
 
 | Secret | Description | How to get it |
-|--------|-------------|---------------|
+| -------- | ------------- | --------------- |
 | `MATCH_GIT_URL` | Private Git repo URL for certificates | `https://github.com/yourorg/certificates.git` |
 | `MATCH_PASSWORD` | Encryption password for match | Set during `fastlane match init` |
 | `MATCH_GIT_BASIC_AUTHORIZATION` | Base64-encoded `username:PAT` | `echo -n "username:ghp_token" \| base64` |
@@ -87,18 +126,28 @@ Configure these secrets in your repository settings (Settings → Secrets and va
 ### Android / Google Play
 
 | Secret | Description | How to get it |
-|--------|-------------|---------------|
+| -------- | ------------- | --------------- |
 | `ANDROID_KEYSTORE_BASE64` | Base64-encoded keystore | `base64 -i upload-keystore.jks` |
 | `ANDROID_KEY_ALIAS` | Keystore key alias | Set during `keytool -genkey` |
 | `ANDROID_KEY_PASSWORD` | Key password | Set during `keytool -genkey` |
 | `ANDROID_STORE_PASSWORD` | Keystore password | Set during `keytool -genkey` |
 | `PLAY_STORE_SERVICE_ACCOUNT_JSON` | Service account JSON key content | Downloaded from Google Cloud Console |
 
+### Firebase App Distribution
+
+| Secret | Description | How to get it |
+|--------|-------------|---------------|
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Service account JSON key with the Firebase App Distribution Admin role | Google Cloud Console for the `monkeyssh` Firebase project |
+
+Optionally set the `FIREBASE_TESTER_GROUPS` repository **variable** (not a
+secret) to override the default `testers` group alias.
+
 ## Workflows
 
 ### PR Preview (`preview.yml`)
 
 Triggered automatically on PRs to `main` and `develop`. Builds the **private** flavor and:
+
 - **iOS**: Builds an unsigned release IPA for `/deploy` promotion to TestFlight
 - **Android**: Builds an unsigned release AAB plus a debug-signed APK for direct download in the PR comment
 
@@ -107,14 +156,37 @@ When `/deploy` promotes a PR preview, it reuses the existing unsigned preview ar
 ### Deploy Private (`deploy-private.yml`)
 
 Triggered on push to `main`. Builds the **private** flavor and deploys to:
+
 - **iOS**: TestFlight (MonkeySSH β)
 - **Android**: Play Store internal testing track
 
 This ensures TestFlight and Play Store internal testing always reflect the latest `main`.
 
+### Firebase Distribution (`firebase-distribution.yml`)
+
+Triggered after each successful **PR Preview** and **PR Preview iOS** run, and
+whenever a push to `main` touches app code. PR code runs only in the
+unprivileged preview workflows. The trusted default-branch workflow verifies
+that the artifact SHA is still the PR head, checks out trusted deployment code,
+then signs and uploads the immutable artifact using the **private** flavor:
+
+- **iOS**: ad hoc signed IPA (match `adhoc` profiles; tester devices must be
+  registered in the Apple Developer portal)
+- **Android**: release-signed universal APK (no Play account link required)
+
+Release notes carry the associated PR number and title, source branch, version,
+and latest commit SHA and subject. Direct pushes without an associated PR retain
+the branch and commit details. Main distributions serialize because they may
+refresh the shared match repository. PR artifacts use existing ad hoc profiles
+in read-only mode, so each trusted artifact consumer can run independently.
+Stale PR artifacts are rejected before signing. TestFlight and Play
+uploads are unaffected: `/deploy` on a PR still promotes to TestFlight + Play
+internal, and pushes to `main` still run Deploy Private.
+
 ### Release (`release.yml`)
 
 Triggered by:
+
 - Creating a GitHub Release (tag format: `vX.Y.Z`)
 - Manual workflow dispatch
 
@@ -156,6 +228,7 @@ Assets workflow) before validation and Fastlane upload, and re-hosts that media
 as workflow artifacts.
 
 Supports selecting:
+
 - **Platform**: iOS, Android, or both
 - **App**: private, production, or both
 
@@ -176,9 +249,11 @@ Store uploads create GitHub Deployments so PRs and the repository deployment
 view show the latest status for each supported channel:
 
 | Environment | Updated by |
-|-------------|------------|
+| ------------- | ------------ |
 | `iOS Private / TestFlight` | PR `/deploy`, Deploy Private |
 | `Android Private / Play Internal` | PR `/deploy`, Deploy Private |
+| `iOS Private / Firebase App Distribution` | Firebase Distribution (PR revision or push to `main`) |
+| `Android Private / Firebase App Distribution` | Firebase Distribution (PR revision or push to `main`) |
 | `Android Private / Internal App Sharing` | PR Preview Internal App Sharing |
 | `iOS Production / TestFlight` | Release (`internal` channel) |
 | `Android Production / Play Internal` | Release (`internal` channel) |
@@ -270,6 +345,10 @@ Android `icon.png` files are auto-regenerated from `assets/icons/monkeyssh_icon*
 Google Play text limits still apply to the repository files: `title.txt` must stay within 30 characters, `short_description.txt` within 80 characters, and `full_description.txt` within 4000 characters. You can validate them locally with `python3 scripts/validate_play_store_metadata.py`.
 App Store text limits can be validated locally with `python3 scripts/validate_app_store_metadata.py`.
 Store screenshots can be regenerated locally with `python3 scripts/generate_store_screenshots.py` after installing Pillow (`python3 -m pip install Pillow`). The generator starts a temporary local `sshd` and uniquely named MonkeyMux workspace, boots the normal MonkeySSH app on iOS simulators and an Android emulator with release-demo data, drives real app navigation through a real Copilot ACP conversation in the embedded native agent window, a real Copilot CLI terminal, hosts, snippets, the MonkeyMux window selector with the current supported agent family, SFTP, and a real Claude Code terminal, then captures native device screenshots into the Fastlane folders. The generator fails instead of substituting mock screenshots if the real SSH/MonkeyMux workspace cannot be created.
+Each device gets eight screenshots. The final two show a real native chat and Agent Management with live remote version checks. Only entirely Pro-only features get screenshot badges. Agent Management has a Pro caption below the complete app image, without covering controls. Native chat is available free, so it uses the full unbadged capture. The screenshot entrypoint grants demo Pro access only, with purchases disabled. Agent Management waits for real SSH probes and never installs or updates the developer's CLIs. The existing `STORE_SCREENSHOT_REDACT_IDENTITIES` flag hides private executable directories in the manager while preserving real version numbers and install sources. Uncaptioned originals for badged scenes stay under `build/store-screenshots/raw/` for inspection.
+
+Run the caption and scene-contract regression checks with `python3 -m unittest discover -s test/scripts -p 'store_screenshots_test.py'` on macOS with Pillow installed. For a screenshot-only refresh, download the current archive before generation to preserve existing videos, then publish without `--generate` so the archive restore does not overwrite the new captures. Omit `--sync` when preparing a PR rather than updating live listings. The publisher also regenerates and uploads `monkeyssh-agent-workspace.png`, the release-hosted README gallery, from the current iPhone native-chat and Agent Management captures. To preview that composition without launching the app, run `python3 scripts/generate_store_screenshots.py --gallery-only`. To replace only a failed scene while preserving validated captures, use `python3 scripts/generate_store_screenshots.py both --scene terminal_claude` or another registered scene name. This still captures the real app and live SSH workspace; it is not a mock or image-only fallback. Set `ANDROID_SERIAL` to a dedicated emulator when other projects are running locally. Android capture checks the foreground activity and fails rather than saving another app's screen.
+
 Generated screenshot counts, dimensions, and OCR content can be validated locally on macOS with `python3 scripts/validate_store_screenshots.py` after installing Pillow.
 Short product demo videos can be recorded with `python3 scripts/generate_store_demo_videos.py [ios|android|both]` and validated with `python3 scripts/validate_store_demo_videos.py [ios|android|all]`. The video generator reuses the real screenshot capture environment, records native simulator/emulator screen video while the app opens a real Copilot ACP conversation in the embedded native agent window, then walks Claude Code, the MonkeyMux window switcher, OpenCode, a real image paste into Copilot CLI, and a Copilot prompt against that screenshot, then composes that single recording into store-compliant deliverables. Copilot screenshot/video scenes must show the CLI displaying the image inline; the harness must not enable streamer mode or rename sessions to placeholders. App Store **app previews** are full-screen native captures at the exact device slot resolution — `ios/fastlane/app-previews/en-US/iphone_67_1.mov` (886x1920) and `ipad_13_1.mov` (1200x1600) — with fading caption overlays and a silent audio track, because App Store Connect validates resolution at upload. The **Google Play preview** is a 16:9 landscape branded promo at `store/demo-videos/google-play/monkeyssh-google-play-promo.mp4` (1920x1080); Google Play videos are externally hosted, so this MP4 is uploaded to YouTube and referenced by URL in Play Console rather than synced by Fastlane. The portrait branded canvas is kept for ads under `store/demo-videos/ads/`. The validator enforces per-slot resolution, 15-30s duration, H.264, an audio track on the Apple previews, and that the live app region advances through scenes.
 
@@ -391,3 +470,6 @@ disabled for that build.
 - [ ] App Store Connect API key created with .p8 file
 - [ ] All GitHub Secrets configured
 - [ ] First manual upload to Play Store done (required before API uploads work)
+- [ ] Firebase App Distribution enabled for both private apps, tester group created
+- [ ] Firebase service account created with App Distribution Admin role (`FIREBASE_SERVICE_ACCOUNT_JSON`)
+- [ ] At least one iOS tester device UDID registered (required for ad hoc profiles)

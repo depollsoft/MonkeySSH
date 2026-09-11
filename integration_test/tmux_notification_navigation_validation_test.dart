@@ -24,6 +24,8 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
+import '../test/helpers/terminal_session_fixture.dart';
+
 class _MockHostRepository extends Mock implements HostRepository {}
 
 class _MockSshClient extends Mock implements SSHClient {}
@@ -33,34 +35,6 @@ class _MockShellChannel extends Mock implements SSHSession {}
 class _MockMonetizationService extends Mock implements MonetizationService {}
 
 class _MockTmuxService extends Mock implements TmuxService {}
-
-class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
-  _TestActiveSessionsNotifier(this.session);
-
-  final SshSession session;
-
-  @override
-  Map<int, SshConnectionState> build() => <int, SshConnectionState>{
-    session.connectionId: SshConnectionState.connected,
-  };
-
-  @override
-  ConnectionAttemptStatus? getConnectionAttempt(int hostId) => null;
-
-  @override
-  List<int> getConnectionsForHost(int hostId) =>
-      hostId == session.hostId ? <int>[session.connectionId] : const <int>[];
-
-  @override
-  ActiveConnection? getActiveConnection(int connectionId) => null;
-
-  @override
-  SshSession? getSession(int connectionId) =>
-      connectionId == session.connectionId ? session : null;
-
-  @override
-  Future<void> syncBackgroundStatus() async {}
-}
 
 Host _buildHost({required int id, required String tmuxSessionName}) => Host(
   id: id,
@@ -200,7 +174,7 @@ void main() {
             ),
             sharedClipboardProvider.overrideWith((ref) async => false),
             activeSessionsProvider.overrideWith(
-              () => _TestActiveSessionsNotifier(session),
+              () => TestActiveSessionsNotifier(session),
             ),
             tmuxServiceProvider.overrideWithValue(tmuxService),
           ],

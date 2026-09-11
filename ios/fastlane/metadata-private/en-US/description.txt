@@ -2,10 +2,11 @@ Test the latest MonkeySSH agent workflows on iPhone or iPad. MonkeySSH beta puts
 
 Choose the right view for each task:
 
-- Open supported agents in a native window with readable chat, streamed tool progress, permission controls, images, attachments, session history, and a mobile composer.
+- Chat with supported agents in native windows with streaming replies, tool progress, plans, diffs, permission prompts, images, attachments, slash commands, and session history. Model and mode controls depend on the agent. Get notified when an agent finishes or needs permission.
 - Switch to the full terminal whenever you need direct CLI control, xterm-256color, inline images, gestures, modifier keys, function keys, macros, or IME-friendly typing.
 - Keep agent and shell work running in persistent MonkeyMux windows. Reconnect, switch windows, and share the same session with your desktop.
-- Find recent project-scoped sessions and save launch presets for Claude Code, Copilot CLI, Codex, Gemini CLI, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, and Grok Build.
+- Launch Claude Code, Copilot CLI, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, and Grok Build, find recent project-scoped sessions, and save launch presets per host.
+- Manage agent CLIs and ACP adapters on a host with Agent Management. Check versions, install or repair supported packages, and update supported installations together. A dot on the terminal menu flags available updates.
 - Browse, upload, download, create, and edit remote files over SFTP.
 - Generate or import Ed25519 and RSA keys, verify host keys, use jump hosts, and cancel slow connection attempts.
 - Forward remote ports, manage live tunnels, and open forwarded services in the in-app browser.
@@ -13,7 +14,7 @@ Choose the right view for each task:
 
 Your hosts, keys, snippets, and settings stay on your device. PIN and biometric lock are available, and MonkeySSH does not require cloud sync. Optional analytics and crash reports are off by default and exclude commands, terminal output, paths, hostnames, usernames, clipboard contents, and credentials.
 
-One connected native chat, SSH, terminal, SFTP, and the choice between native and terminal agent windows are available without Pro.
+SSH, terminal, SFTP, one connected native chat, and the choice between native and terminal agent windows are free. MonkeySSH Pro adds parallel native chats with instant switching and session forks, agent launch presets and recent-session discovery, Agent Management, auto-connect automation, encrypted transfers and migration packages, and host-specific themes.
 
 This beta listing receives preview and internal testing builds before the public MonkeySSH app.
 

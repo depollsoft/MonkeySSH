@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/acp_attachment.dart';
 import '../models/acp_timeline.dart';
 
 /// Maximum number of decoded bytes [AcpInlineImage] will accept for inline
@@ -13,7 +14,7 @@ import '../models/acp_timeline.dart';
 ///
 /// Exposed so attachment/composer controllers can enforce the same ceiling
 /// when deciding whether to inline an image or fall back to a resource link.
-const int kAcpMaxInlineImageBytes = 10 * 1024 * 1024; // 10 MiB
+const int kAcpMaxInlineImageBytes = kAcpAttachmentImageDisplayMaxBytes;
 
 /// Default decode dimension (in pixels) applied to the longer image edge when
 /// no explicit decode hint is present, to bound decode memory.
@@ -46,7 +47,7 @@ void clearAcpInlineImageCache() {
   _acpInlineDataImageDecodeCount = 0;
 }
 
-/// Number of URI images currently retained by the bounded cache.
+/// Number of immutable data images currently retained by the bounded cache.
 @visibleForTesting
 int get acpInlineImageCacheEntryCount => _acpInlineImageCache.length;
 
@@ -62,12 +63,10 @@ Uint8List? _decodeInlineDataImage(String uri) {
   }
 }
 
-String? _imageCacheKey(AcpImageContent image) => switch (image.sourceKind) {
-  AcpImageSourceKind.bytes => null,
-  AcpImageSourceKind.dataUri ||
-  AcpImageSourceKind.fileUri ||
-  AcpImageSourceKind.networkUri => '${image.sourceKind.name}:${image.uri}',
-};
+String? _imageCacheKey(AcpImageContent image) =>
+    image.sourceKind == AcpImageSourceKind.dataUri
+    ? image.dataUri ?? image.uri
+    : null;
 
 final class _CachedInlineImage {
   const _CachedInlineImage({
@@ -273,7 +272,7 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
       return;
     }
 
-    final cacheKey = _imageCacheKey(image);
+    var cacheKey = _imageCacheKey(image);
     if (cacheKey != null) {
       final cached = _acpInlineImageCache.read(cacheKey);
       if (cached != null) {
@@ -296,12 +295,33 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
       }
     }
 
-    final Uint8List? bytes;
+    Uint8List? bytes;
     switch (image.sourceKind) {
       case AcpImageSourceKind.bytes:
         bytes = image.bytes;
       case AcpImageSourceKind.dataUri:
-        bytes = await _decodeDataUriBytes(image.uri!, generation);
+        bytes = await _decodeDataUriBytes(
+          image.dataUri ?? image.uri!,
+          generation,
+        );
+        if (_isCurrent(generation) &&
+            bytes == null &&
+            image.dataUri != null &&
+            image.uri != null &&
+            image.uri!.isNotEmpty) {
+          // Remote fallback bytes must never be cached under the encoded data.
+          cacheKey = null;
+          final fallback = AcpImageContent(
+            uri: image.uri,
+            mimeType: image.mimeType,
+            label: image.label,
+            decodeWidth: image.decodeWidth,
+            decodeHeight: image.decodeHeight,
+          );
+          bytes = fallback.sourceKind == AcpImageSourceKind.dataUri
+              ? await _decodeDataUriBytes(fallback.uri!, generation)
+              : await _resolveBytes(fallback, generation);
+        }
       case AcpImageSourceKind.fileUri:
       case AcpImageSourceKind.networkUri:
         bytes = await _resolveBytes(image, generation);
@@ -313,16 +333,24 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
       _set(_ImageState.tooLarge);
       return;
     }
-    await _decodeAndReady(bytes, image, generation);
+    await _decodeAndReady(bytes, image, generation, cacheKey);
   }
 
   Future<Uint8List?> _decodeDataUriBytes(String uri, int generation) async {
     _acpInlineDataImageDecodeCount++;
     try {
-      // Cheap pre-decode guard: a base64 data URI decodes to roughly 3/4 of
-      // its encoded length, so reject clearly oversized input before paying
-      // for the base64 decode.
-      if ((uri.length * 3) ~/ 4 > widget.maxBytes) {
+      // Count only the payload, including base64 padding, so an image at
+      // exactly the byte limit is accepted regardless of its URI header.
+      final separator = uri.indexOf(',');
+      final encodedLength = uri.length - separator - 1;
+      final isBase64 =
+          separator >= 0 &&
+          uri.substring(0, separator).toLowerCase().endsWith(';base64');
+      final padding = uri.endsWith('==') ? 2 : (uri.endsWith('=') ? 1 : 0);
+      final estimatedBytes = isBase64
+          ? (encodedLength * 3) ~/ 4 - padding
+          : encodedLength;
+      if (estimatedBytes > widget.maxBytes) {
         _set(_ImageState.tooLarge);
         return null;
       }
@@ -377,6 +405,7 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
     Uint8List bytes,
     AcpImageContent image,
     int generation,
+    String? cacheKey,
   ) async {
     final target = await _computeDecodeTarget(bytes, image);
     if (!_isCurrent(generation)) {
@@ -388,7 +417,6 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
       case _DecodeOutcome.invalid:
         _set(_ImageState.error);
       case _DecodeOutcome.ok:
-        final cacheKey = _imageCacheKey(image);
         if (cacheKey != null) {
           _acpInlineImageCache.write(
             cacheKey,

@@ -58,6 +58,52 @@ const _redactStoreScreenshotIdentities = bool.fromEnvironment(
   'STORE_SCREENSHOT_REDACT_IDENTITIES',
 );
 
+enum _LocalFileExport { cancelled, saved, shared }
+
+Future<_LocalFileExport> _exportLocalFile(
+  BuildContext context, {
+  required File file,
+  required String fileName,
+  String? mimeType,
+  bool share = false,
+}) async {
+  final largeFile = await file.length() > _maxPreviewBytes;
+  if (!context.mounted) {
+    return _LocalFileExport.cancelled;
+  }
+  final mobile = switch (Theme.of(context).platform) {
+    TargetPlatform.android || TargetPlatform.iOS => true,
+    _ => false,
+  };
+  if (share || (largeFile && mobile)) {
+    final box = context.findRenderObject() as RenderBox?;
+    final result = await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(file.path, mimeType: mimeType, name: fileName)],
+        sharePositionOrigin: box != null && box.hasSize
+            ? box.localToGlobal(Offset.zero) & box.size
+            : null,
+      ),
+    );
+    return result.status == ShareResultStatus.dismissed
+        ? _LocalFileExport.cancelled
+        : _LocalFileExport.shared;
+  }
+  final destination = await FilePicker.saveFile(
+    dialogTitle: 'Save $fileName',
+    fileName: fileName,
+    mimeType: mimeType ?? 'application/octet-stream',
+    bytes: largeFile ? Uint8List(0) : await file.readAsBytes(),
+  );
+  if (destination == null) {
+    return _LocalFileExport.cancelled;
+  }
+  if (largeFile) {
+    await file.copy(destination.toFilePath());
+  }
+  return _LocalFileExport.saved;
+}
+
 /// Identifies a remembered SFTP browser location.
 typedef SftpBrowserLocationKey = ({int hostId, int? connectionId});
 
@@ -298,14 +344,6 @@ bool isRemoteVideoPreviewSizeAllowed(
   int maxBytes = maxRemoteVideoPreviewBytes,
 }) => sizeBytes == null || sizeBytes <= maxBytes;
 
-/// Whether adding a streamed video chunk would exceed the preview byte cap.
-@visibleForTesting
-bool wouldRemoteVideoPreviewExceedByteCap({
-  required int downloadedBytes,
-  required int chunkBytes,
-  int maxBytes = maxRemoteVideoPreviewBytes,
-}) => downloadedBytes + chunkBytes > maxBytes;
-
 /// Describes why a remote video is too large for inline preview.
 @visibleForTesting
 String remoteVideoPreviewTooLargeMessage({
@@ -415,32 +453,6 @@ String? formatRemoteModifiedTime(int? modifyTime) {
   return DateTime.fromMillisecondsSinceEpoch(
     modifyTime * 1000,
   ).toString().split('.').first;
-}
-
-/// Resolves the picker request used for local SFTP uploads.
-@visibleForTesting
-({bool allowMultiple}) resolveSftpUploadPickerRequest() =>
-    (allowMultiple: true);
-
-/// Resolves a readable stream for a picked SFTP upload file when available.
-@visibleForTesting
-Stream<List<int>>? resolvePickedSftpUploadReadStream(PlatformFile file) {
-  if (file.path == null) {
-    return null;
-  }
-  return file.readAsByteStream().cast<List<int>>();
-}
-
-/// Resolves the error message shown when selected SFTP upload files are unreadable.
-@visibleForTesting
-String resolveUnreadableSftpUploadMessage(List<PlatformFile> files) {
-  if (files.length == 1) {
-    final name = files.single.name.trim();
-    return name.isEmpty
-        ? 'Unable to read the selected file'
-        : 'Unable to read "$name"';
-  }
-  return 'Unable to read ${files.length} selected files';
 }
 
 /// Returns an error when a picker-provided upload name is not a single file.
@@ -824,6 +836,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   final ScrollController _breadcrumbScrollController = ScrollController();
   final ScrollController _fileListScrollController = ScrollController();
   String _currentPath = '/';
+  int _directoryRequest = 0;
   List<SftpName> _files = [];
   bool _isLoading = true;
   bool _isConnectingSession = false;
@@ -840,9 +853,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   List<RemoteFileSelection> _selectedFiles = const [];
 
   bool get _isSelectionMode => widget.selectionConstraints != null;
-
-  RemoteFilePickerConstraints? get _selectionConstraints =>
-      widget.selectionConstraints;
 
   @override
   void initState() {
@@ -998,12 +1008,17 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         await _openRequestedPath(requestedPath);
         return;
       }
+      final request = ++_directoryRequest;
       if (await _loadDirectory(
         _fallbackDirectoryPath!,
+        requestGeneration: request,
         nextHistory: [_fallbackDirectoryPath!],
         rethrowTimeout: true,
         showError: false,
       )) {
+        return;
+      }
+      if (!mounted || request != _directoryRequest) {
         return;
       }
       await _openFallbackDirectory(preferredPath: _fallbackDirectoryPath);
@@ -1022,7 +1037,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     try {
       return await withSftpOperationTimeout(sftpOpenFuture);
     } on TimeoutException {
-      sftpOpenFuture.then(session.discardSftpClient).ignore();
+      session.discardSftpOpen(sftpOpenFuture);
       rethrow;
     }
   }
@@ -1075,6 +1090,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   Future<void> _openFallbackDirectory({String? preferredPath}) async {
+    final request = ++_directoryRequest;
     final candidatePaths = <String>[];
 
     void addCandidate(String? path) {
@@ -1093,9 +1109,13 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     addCandidate('/');
 
     for (final candidatePath in candidatePaths) {
+      if (!mounted || request != _directoryRequest) {
+        return;
+      }
       try {
         if (await _loadDirectory(
           candidatePath,
+          requestGeneration: request,
           nextHistory: [candidatePath],
           rethrowTimeout: true,
           showError: false,
@@ -1104,7 +1124,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           return;
         }
       } on TimeoutException {
-        if (mounted) {
+        if (mounted && request == _directoryRequest) {
           setState(() {
             _isLoading = false;
             _error = sftpTimeoutMessage('opening the SFTP browser');
@@ -1114,7 +1134,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
     }
 
-    if (!mounted) {
+    if (!mounted || request != _directoryRequest) {
       return;
     }
     setState(() {
@@ -1129,16 +1149,23 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     bool rethrowTimeout = false,
     bool showError = true,
     bool allowReconnect = true,
+    int? requestGeneration,
   }) async {
+    final request = requestGeneration ?? ++_directoryRequest;
     if (_sftp == null) {
-      return false;
+      return _reconnectSftpAndLoadDirectory(
+        path,
+        request: request,
+        nextHistory: nextHistory,
+        showError: showError,
+      );
     }
 
     setState(() => _isLoading = true);
 
     try {
       final items = await withSftpOperationTimeout(_sftp!.listdir(path));
-      if (!mounted) {
+      if (!mounted || request != _directoryRequest) {
         return false;
       }
       setState(() {
@@ -1167,60 +1194,46 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       _rememberCurrentPath(path);
       _queueScrollBreadcrumbTailIntoView();
       return true;
-    } on TimeoutException catch (e) {
-      if (rethrowTimeout) {
-        rethrow;
-      }
-      return _handleLoadDirectoryFailure(
-        e,
-        path,
-        nextHistory: nextHistory,
-        showError: showError,
-        allowReconnect: allowReconnect,
-      );
-    } on SSHError catch (e) {
-      return _handleLoadDirectoryFailure(
-        e,
-        path,
-        nextHistory: nextHistory,
-        showError: showError,
-        allowReconnect: allowReconnect,
-      );
-    } on SftpStatusError catch (e) {
-      return _handleLoadDirectoryFailure(e, path, showError: showError);
-    } on SftpError catch (e) {
-      return _handleLoadDirectoryFailure(
-        e,
-        path,
-        nextHistory: nextHistory,
-        showError: showError,
-        allowReconnect: allowReconnect,
-      );
     } on Object catch (e) {
       if (e is! Exception && !isExpectedSshOperationError(e)) {
         rethrow;
       }
-      return _handleLoadDirectoryFailure(e, path, showError: showError);
+      if (!mounted || request != _directoryRequest) {
+        return false;
+      }
+      if (rethrowTimeout && e is TimeoutException) {
+        rethrow;
+      }
+      return _handleLoadDirectoryFailure(
+        e,
+        path,
+        request: request,
+        nextHistory: nextHistory,
+        showError: showError,
+        allowReconnect: allowReconnect,
+      );
     }
   }
 
   Future<bool> _handleLoadDirectoryFailure(
     Object error,
     String path, {
+    required int request,
     List<String>? nextHistory,
     bool showError = true,
     bool allowReconnect = true,
   }) async {
-    if (!mounted) {
+    if (!mounted || request != _directoryRequest) {
       return false;
     }
     if (allowReconnect && _shouldReconnectSftpAfterDirectoryError(error)) {
       final reconnected = await _reconnectSftpAndLoadDirectory(
         path,
+        request: request,
         nextHistory: nextHistory,
         showError: showError,
       );
-      if (reconnected || !mounted) {
+      if (reconnected || !mounted || request != _directoryRequest) {
         return reconnected;
       }
     }
@@ -1229,7 +1242,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       'list_failed',
       fields: {'errorType': error.runtimeType},
     );
-    if (!mounted) {
+    if (!mounted || request != _directoryRequest) {
       return false;
     }
     setState(() {
@@ -1250,10 +1263,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   Future<bool> _reconnectSftpAndLoadDirectory(
     String path, {
+    required int request,
     List<String>? nextHistory,
     bool showError = true,
   }) async {
-    if (!mounted) {
+    if (!mounted || request != _directoryRequest) {
       return false;
     }
     final connectionId = _connectionId ?? widget.connectionId;
@@ -1272,12 +1286,14 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       'reconnect_start',
       fields: {'connectionId': connectionId},
     );
-    session.discardSftpClient(_sftp);
+    if (_sftp != null) {
+      session.discardSftpClient(_sftp);
+    }
     _sftp = null;
 
     try {
       final sftp = await _openSftpClient(session);
-      if (!mounted) {
+      if (!mounted || request != _directoryRequest) {
         return false;
       }
       _sftp = sftp;
@@ -1288,27 +1304,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       );
       return _loadDirectory(
         path,
+        requestGeneration: request,
         nextHistory: nextHistory,
         showError: showError,
         allowReconnect: false,
-      );
-    } on TimeoutException catch (error) {
-      return _handleSftpReconnectFailure(
-        connectionId,
-        error,
-        showError: showError,
-      );
-    } on SSHError catch (error) {
-      return _handleSftpReconnectFailure(
-        connectionId,
-        error,
-        showError: showError,
-      );
-    } on SftpError catch (error) {
-      return _handleSftpReconnectFailure(
-        connectionId,
-        error,
-        showError: showError,
       );
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
@@ -1317,6 +1316,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return _handleSftpReconnectFailure(
         connectionId,
         error,
+        request: request,
         showError: showError,
       );
     }
@@ -1325,6 +1325,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   bool _handleSftpReconnectFailure(
     int connectionId,
     Object error, {
+    required int request,
     required bool showError,
   }) {
     DiagnosticsLogService.instance.warning(
@@ -1332,7 +1333,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       'reconnect_failed',
       fields: {'connectionId': connectionId, 'errorType': error.runtimeType},
     );
-    if (!mounted || !showError) {
+    if (!mounted || request != _directoryRequest || !showError) {
       return false;
     }
     setState(() {
@@ -1394,8 +1395,9 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   Future<bool> _openRequestedPath(String requestedPath) async {
+    final request = ++_directoryRequest;
     final homeDirectory = await _resolveHomeDirectoryPath();
-    if (!mounted) {
+    if (!mounted || request != _directoryRequest) {
       return false;
     }
     final normalizedPath = resolveRequestedSftpPath(
@@ -1413,10 +1415,14 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (normalizedPath == '/') {
       if (await _loadDirectory(
         normalizedPath,
+        requestGeneration: request,
         nextHistory: [normalizedPath],
         showError: false,
       )) {
         return true;
+      }
+      if (!mounted || request != _directoryRequest) {
+        return false;
       }
       _closeRequestedPathWithError(
         'Could not open "$normalizedPath" in SFTP: failed to list directory',
@@ -1436,11 +1442,17 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           .stat(normalizedPath)
           .timeout(_requestedPathLookupTimeout);
     } on TimeoutException {
+      if (!mounted || request != _directoryRequest) {
+        return false;
+      }
       _closeRequestedPathWithError(
         'Timed out opening "$normalizedPath" in SFTP',
       );
       return false;
     } on SftpStatusError catch (error) {
+      if (!mounted || request != _directoryRequest) {
+        return false;
+      }
       if (error.code == SftpStatusCode.noSuchFile) {
         _closeRequestedPathWithError(
           'Could not open "$normalizedPath" in SFTP: path does not exist',
@@ -1451,12 +1463,16 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return false;
     }
 
+    if (!mounted || request != _directoryRequest) {
+      return false;
+    }
     final navigationTarget = resolveRequestedSftpNavigationTarget(
       normalizedPath,
       isDirectory: requestedPathStat.isDirectory,
     );
     if (await _loadDirectory(
       navigationTarget.directoryPath,
+      requestGeneration: request,
       nextHistory: [navigationTarget.directoryPath],
       showError: false,
     )) {
@@ -1479,7 +1495,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         return false;
       }
 
-      if (!mounted) {
+      if (!mounted || request != _directoryRequest) {
         return true;
       }
       _highlightFile(navigationTarget.directoryPath, fileName);
@@ -1487,6 +1503,9 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return true;
     }
 
+    if (!mounted || request != _directoryRequest) {
+      return false;
+    }
     _closeRequestedPathWithError('Could not open "$normalizedPath" in SFTP');
     return false;
   }
@@ -1500,7 +1519,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       _highlightFile(_currentPath, file.filename);
       final disabledReason = _selectionDisabledReasonForFile(file);
       if (disabledReason != null) {
-        _showSelectionUnavailableSnackBar(disabledReason);
+        _showMessage(disabledReason);
       }
       return;
     }
@@ -1548,7 +1567,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     final navigator = Navigator.of(context);
-    if (navigator.canPop()) {
+    if (!_isSelectionMode && navigator.canPop()) {
       navigator.pop(message);
       return;
     }
@@ -1630,19 +1649,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   RemoteFileSelection _remoteFileSelectionFor(SftpName file) =>
       RemoteFileSelection(
-        remotePath: _joinRemotePath(_currentPath, file.filename),
+        remotePath: joinRemotePath(_currentPath, file.filename),
         displayName: file.filename,
         sizeBytes: file.attr.size,
         mimeType: inferRemoteFileMimeType(file.filename),
       );
 
   bool _isRemoteFileSelected(SftpName file) {
-    final remotePath = _joinRemotePath(_currentPath, file.filename);
+    final remotePath = joinRemotePath(_currentPath, file.filename);
     return _selectedFiles.any((entry) => entry.remotePath == remotePath);
   }
 
   String? _selectionDisabledReasonForFile(SftpName file) {
-    final constraints = _selectionConstraints;
+    final constraints = widget.selectionConstraints;
     if (constraints == null || file.attr.isDirectory) {
       return null;
     }
@@ -1653,44 +1672,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     );
   }
 
-  String _selectionSemanticsLabelForFile(SftpName file) =>
-      remoteFileSelectionSemanticsLabel(
-        isDirectory: file.attr.isDirectory,
-        fileName: file.filename,
-        isSelected: _isRemoteFileSelected(file),
-        disabledReason: _selectionDisabledReasonForFile(file),
-      );
-
-  String _selectionSemanticsHintForFile(SftpName file) =>
-      remoteFileSelectionSemanticsHint(
-        isDirectory: file.attr.isDirectory,
-        isSelected: _isRemoteFileSelected(file),
-        disabledReason: _selectionDisabledReasonForFile(file),
-      );
-
-  IconData? _selectionTrailingIconForFile(SftpName file) {
-    if (file.attr.isDirectory) {
-      return null;
-    }
-    final disabledReason = _selectionDisabledReasonForFile(file);
-    if (disabledReason != null) {
-      return Icons.block_outlined;
-    }
-    return _isRemoteFileSelected(file)
-        ? Icons.check_circle
-        : Icons.radio_button_unchecked;
-  }
-
-  String? _selectionTrailingTooltipForFile(SftpName file) =>
-      remoteFileSelectionTooltip(
-        isDirectory: file.attr.isDirectory,
-        fileName: file.filename,
-        isSelected: _isRemoteFileSelected(file),
-        disabledReason: _selectionDisabledReasonForFile(file),
-      );
-
   String _selectionSummaryText() {
-    final constraints = _selectionConstraints;
+    final constraints = widget.selectionConstraints;
     if (constraints == null) {
       return '';
     }
@@ -1718,20 +1701,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     return '$selectedCount of $maxSelectionCount $totalNoun selected';
   }
 
-  void _showSelectionUnavailableSnackBar(String message) {
-    if (!mounted) {
-      return;
+  void _showMessage(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _toggleRemoteFileSelection(
     SftpName file, {
     bool announceDisabled = true,
   }) {
-    final constraints = _selectionConstraints;
+    final constraints = widget.selectionConstraints;
     if (constraints == null || file.attr.isDirectory) {
       return;
     }
@@ -1739,7 +1721,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     final disabledReason = _selectionDisabledReasonForFile(file);
     if (disabledReason != null) {
       if (announceDisabled) {
-        _showSelectionUnavailableSnackBar(disabledReason);
+        _showMessage(disabledReason);
       }
       return;
     }
@@ -1760,19 +1742,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
     navigator.pop(List<RemoteFileSelection>.unmodifiable(_selectedFiles));
-  }
-
-  Widget? _buildSelectionActionBar() {
-    final constraints = _selectionConstraints;
-    if (constraints == null) {
-      return null;
-    }
-    return _RemoteFileSelectionBar(
-      selectedCount: _selectedFiles.length,
-      summaryText: _selectionSummaryText(),
-      onCancel: _closeBrowser,
-      onConfirm: _selectedFiles.isEmpty ? null : _confirmRemoteFileSelection,
-    );
   }
 
   @override
@@ -1824,7 +1793,16 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           Expanded(child: _buildFileList()),
         ],
       ),
-      bottomNavigationBar: _buildSelectionActionBar(),
+      bottomNavigationBar: _isSelectionMode
+          ? _RemoteFileSelectionBar(
+              selectedCount: _selectedFiles.length,
+              summaryText: _selectionSummaryText(),
+              onCancel: _closeBrowser,
+              onConfirm: _selectedFiles.isEmpty
+                  ? null
+                  : _confirmRemoteFileSelection,
+            )
+          : null,
       floatingActionButton: _isSelectionMode
           ? null
           : FloatingActionButton(
@@ -2102,17 +2080,35 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                 ? null
                 : () => _showFileOptions(file),
             disabledReason: selectionDisabledReason,
-            trailingIcon: _isSelectionMode
-                ? _selectionTrailingIconForFile(file)
-                : null,
+            trailingIcon: !_isSelectionMode || file.attr.isDirectory
+                ? null
+                : selectionDisabledReason != null
+                ? Icons.block_outlined
+                : isSelected
+                ? Icons.check_circle
+                : Icons.radio_button_unchecked,
             trailingTooltip: _isSelectionMode
-                ? _selectionTrailingTooltipForFile(file)
+                ? remoteFileSelectionTooltip(
+                    isDirectory: file.attr.isDirectory,
+                    fileName: file.filename,
+                    isSelected: isSelected,
+                    disabledReason: selectionDisabledReason,
+                  )
                 : null,
             semanticsLabel: _isSelectionMode
-                ? _selectionSemanticsLabelForFile(file)
+                ? remoteFileSelectionSemanticsLabel(
+                    isDirectory: file.attr.isDirectory,
+                    fileName: file.filename,
+                    isSelected: isSelected,
+                    disabledReason: selectionDisabledReason,
+                  )
                 : null,
             semanticsHint: _isSelectionMode
-                ? _selectionSemanticsHintForFile(file)
+                ? remoteFileSelectionSemanticsHint(
+                    isDirectory: file.attr.isDirectory,
+                    isSelected: isSelected,
+                    disabledReason: selectionDisabledReason,
+                  )
                 : null,
           );
         },
@@ -2132,7 +2128,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       filename: file.filename,
     )) {
       case SftpFileTapIntent.navigate:
-        unawaited(_navigateTo(_joinRemotePath(_currentPath, file.filename)));
+        unawaited(_navigateTo(joinRemotePath(_currentPath, file.filename)));
       case SftpFileTapIntent.preview:
         unawaited(_previewImageFile(file));
       case SftpFileTapIntent.previewVideo:
@@ -2215,7 +2211,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               title: const Text('Rename'),
               onTap: () {
                 Navigator.pop(context);
-                _showRenameDialog(file);
+                unawaited(_showRenameDialog(file));
               },
             ),
             ListTile(
@@ -2229,7 +2225,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               ),
               onTap: () {
                 Navigator.pop(context);
-                _deleteFile(file);
+                unawaited(_deleteFile(file));
               },
             ),
           ],
@@ -2278,15 +2274,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
     final validationMessage = validateSftpDirectoryName(name);
     if (validationMessage != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(validationMessage)));
-      }
+      _showMessage(validationMessage);
       return;
     }
 
-    final remotePath = _joinRemotePath(_currentPath, name.trim());
+    final remotePath = joinRemotePath(_currentPath, name.trim());
     try {
       await _sftp!.mkdir(remotePath);
       await _loadDirectory(_currentPath);
@@ -2318,15 +2310,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (newName != null && newName.isNotEmpty && _sftp != null) {
       try {
         await _sftp!.rename(
-          _joinRemotePath(_currentPath, file.filename),
-          _joinRemotePath(_currentPath, newName),
+          joinRemotePath(_currentPath, file.filename),
+          joinRemotePath(_currentPath, newName),
         );
         await _loadDirectory(_currentPath);
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Renamed to "$newName"')));
-        }
+        _showMessage('Renamed to "$newName"');
       } on Object catch (e) {
         if (e is! Exception && !isExpectedSshOperationError(e)) {
           rethrow;
@@ -2364,24 +2352,24 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
     if ((confirmed ?? false) && _sftp != null) {
       try {
-        final path = _joinRemotePath(_currentPath, file.filename);
+        final path = joinRemotePath(_currentPath, file.filename);
         if (file.attr.isDirectory) {
           await _sftp!.rmdir(path);
         } else {
           await _sftp!.remove(path);
         }
         await _loadDirectory(_currentPath);
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Deleted "${file.filename}"')));
-        }
+        _showMessage('Deleted "${file.filename}"');
       } on Object catch (e) {
         if (e is! Exception && !isExpectedSshOperationError(e)) {
           rethrow;
         }
         _showSftpFailureSnackBar(
-          message: 'Could not delete item. Check permissions and try again.',
+          message: e is SftpStatusError && e.code == SftpStatusCode.noSuchFile
+              ? 'Item no longer exists. Refresh the folder and try again.'
+              : file.attr.isDirectory
+              ? 'Could not delete folder. Make sure it is empty and you have permission.'
+              : 'Could not delete item. Check permissions and try again.',
           eventName: 'delete_failed',
           error: e,
         );
@@ -2396,33 +2384,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
     final telemetryService = ref.read(telemetryServiceProvider);
     final remoteFileService = ref.read(remoteFileServiceProvider);
-    late final Uri? savePath;
-    try {
-      savePath = await FilePicker.saveFile(
-        dialogTitle: 'Save ${file.filename}',
-        fileName: file.filename,
-        bytes: Uint8List(0),
-      );
-    } on Exception catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'sftp.download',
-        'picker_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not open the save dialog. Try again.'),
-          ),
-        );
-      }
-      return;
-    }
-    if (savePath == null || !mounted || _sftp == null) {
-      return;
-    }
-
     final sftp = _sftp!;
+    final remotePath = joinRemotePath(_currentPath, file.filename);
+    Directory? stagingDirectory;
+    var keepStagedFile = false;
     final startedAt = DateTime.now();
     final sizeBytes = file.attr.size;
     unawaited(
@@ -2433,18 +2398,31 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       ),
     );
     try {
-      final remotePath = _joinRemotePath(_currentPath, file.filename);
+      stagingDirectory = await (await getTemporaryDirectory()).createTemp(
+        'sftp-export-',
+      );
+      final localFile = File(
+        path.join(stagingDirectory.path, path.basename(file.filename)),
+      );
       await remoteFileService.downloadFile(
         sftp: sftp,
         remotePath: remotePath,
-        localPath: savePath.toFilePath(),
+        localPath: localFile.path,
       );
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Downloaded "${file.filename}"')),
-        );
+      if (!mounted) {
+        return;
       }
+      final result = await _exportLocalFile(
+        context,
+        file: localFile,
+        fileName: file.filename,
+      );
+      keepStagedFile = result == _LocalFileExport.shared;
+      if (result == _LocalFileExport.cancelled) {
+        return;
+      }
+
+      _showMessage('Downloaded "${file.filename}"');
       unawaited(
         telemetryService.logSftpTransferCompleted(
           direction: 'download',
@@ -2471,6 +2449,14 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         eventName: 'download_failed',
         error: e,
       );
+    } finally {
+      if (!keepStagedFile && stagingDirectory != null) {
+        try {
+          await stagingDirectory.delete(recursive: true);
+        } on FileSystemException {
+          // Temporary storage may already have removed the staging directory.
+        }
+      }
     }
   }
 
@@ -2479,6 +2465,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
 
+    final destinationDirectory = _currentPath;
     final telemetryService = ref.read(telemetryServiceProvider);
     final remoteFileService = ref.read(remoteFileServiceProvider);
     late final List<PlatformFile> result;
@@ -2527,37 +2514,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
 
-    final uploads = <({PlatformFile file, Stream<List<int>>? readStream})>[
-      for (final file in selectedFiles)
-        (file: file, readStream: resolvePickedSftpUploadReadStream(file)),
-    ];
-    final unreadableUploads = uploads
-        .where((upload) => upload.readStream == null)
-        .toList();
-    if (unreadableUploads.isNotEmpty) {
-      unawaited(
-        telemetryService.logSftpTransferFailed(
-          direction: 'upload',
-          fileCount: selectedFiles.length,
-          sizeBytes: await _selectedUploadSizeBytes(selectedFiles),
-          duration: Duration.zero,
-          failureCategory: 'unreadable',
-        ),
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              resolveUnreadableSftpUploadMessage([
-                for (final upload in unreadableUploads) upload.file,
-              ]),
-            ),
-          ),
-        );
-      }
-      return;
-    }
-
     final startedAt = DateTime.now();
     final sizeBytes = await _selectedUploadSizeBytes(selectedFiles);
     if (!mounted || _sftp == null) {
@@ -2571,37 +2527,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         sizeBytes: sizeBytes,
       ),
     );
+    var uploadedFileCount = 0;
     try {
-      for (final upload in uploads) {
+      for (final file in selectedFiles) {
         await remoteFileService.uploadStream(
           sftp: sftp,
-          remotePath: _joinRemotePath(_currentPath, upload.file.name),
-          stream: upload.readStream!,
+          remotePath: joinRemotePath(destinationDirectory, file.name),
+          stream: file.readAsByteStream(),
         );
+        uploadedFileCount++;
       }
-      if (mounted) {
-        await _loadDirectory(_currentPath);
-        if (mounted) {
-          final message = selectedFiles.length == 1
-              ? 'Uploaded "${selectedFiles.single.name}"'
-              : 'Uploaded ${selectedFiles.length} files';
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(message)));
-        }
-      }
-      unawaited(
-        telemetryService.logSftpTransferCompleted(
-          direction: 'upload',
-          fileCount: selectedFiles.length,
-          sizeBytes: sizeBytes,
-          duration: DateTime.now().difference(startedAt),
-        ),
-      );
     } on Object catch (e) {
-      if (e is! Exception && !isExpectedSshOperationError(e)) {
-        rethrow;
-      }
+      // Remote file implementations can throw Error subtypes as well as
+      // SSH/SFTP errors. Stop the batch and report the failed transfer.
       unawaited(
         telemetryService.logSftpTransferFailed(
           direction: 'upload',
@@ -2611,30 +2549,74 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           failureCategory: _sftpTelemetryFailureCategory(e),
         ),
       );
+      if (uploadedFileCount > 0 && mounted) {
+        await _loadDirectory(_currentPath);
+      }
       _showSftpFailureSnackBar(
-        message: 'Upload failed. Check the connection and try again.',
+        message: uploadedFileCount == 0
+            ? 'Upload failed. Check the connection and try again.'
+            : 'Uploaded $uploadedFileCount of ${selectedFiles.length} files. '
+                  'Upload failed. Check the connection and try again.',
         eventName: 'upload_failed',
         error: e,
       );
+      return;
     }
+    if (mounted) {
+      await _loadDirectory(_currentPath);
+      if (mounted) {
+        final message = selectedFiles.length == 1
+            ? 'Uploaded "${selectedFiles.single.name}"'
+            : 'Uploaded ${selectedFiles.length} files';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(message)));
+      }
+    }
+    unawaited(
+      telemetryService.logSftpTransferCompleted(
+        direction: 'upload',
+        fileCount: selectedFiles.length,
+        sizeBytes: sizeBytes,
+        duration: DateTime.now().difference(startedAt),
+      ),
+    );
   }
 
   Future<void> _copyRemotePath(SftpName file) async {
     final remotePath = joinRemotePath(_currentPath, file.filename);
-    await Clipboard.setData(
-      ClipboardData(
-        text: buildSftpCopyPathClipboardText(
-          directory: _currentPath,
-          filename: file.filename,
+    try {
+      await Clipboard.setData(
+        ClipboardData(
+          text: buildSftpCopyPathClipboardText(
+            directory: _currentPath,
+            filename: file.filename,
+          ),
         ),
-      ),
-    );
+      );
+    } on Exception catch (error) {
+      _showSftpFailureSnackBar(
+        message: 'Could not copy the path. Try again.',
+        eventName: 'copy_path_failed',
+        error: error,
+      );
+      return;
+    }
     if (!mounted) {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(sftpCopyPathSnackBarMessage(remotePath))),
     );
+  }
+
+  Future<Uint8List> _readFileBytes(String remotePath, int length) async {
+    final file = await _sftp!.open(remotePath);
+    try {
+      return await file.readBytes(length: length);
+    } finally {
+      await file.close();
+    }
   }
 
   Future<void> _previewImageFile(SftpName file) async {
@@ -2646,33 +2628,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       byteCount: file.attr.size ?? 0,
     );
     if (preflightMessage != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(preflightMessage)));
-      }
+      _showMessage(preflightMessage);
       return;
     }
 
-    final remotePath = _joinRemotePath(_currentPath, file.filename);
+    final remotePath = joinRemotePath(_currentPath, file.filename);
     try {
-      final remoteFile = await _sftp!.open(remotePath);
-      late final Uint8List bytes;
-      try {
-        bytes = await remoteFile.readBytes(length: _maxPreviewBytes + 1);
-      } finally {
-        await remoteFile.close();
-      }
+      final bytes = await _readFileBytes(remotePath, _maxPreviewBytes + 1);
 
       final loadedMessage = resolveSftpImagePreviewBlockMessage(
         byteCount: bytes.length,
       );
       if (loadedMessage != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(loadedMessage)));
-        }
+        _showMessage(loadedMessage);
         return;
       }
 
@@ -2711,7 +2679,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
 
-    final remotePath = _joinRemotePath(_currentPath, file.filename);
+    final remotePath = joinRemotePath(_currentPath, file.filename);
     final knownSize = file.attr.size;
     if (!isRemoteVideoPreviewSizeAllowed(knownSize)) {
       _showVideoPreviewFallbackSnackBar(
@@ -2728,7 +2696,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         totalBytes: knownSize ?? 0,
       ),
     );
-    final cancelToken = _SftpTransferCancelToken();
+    final cancelToken = RemoteFileDownloadCancelToken();
     final downloadFuture = _cacheRemoteVideoFile(
       sftp: sftp,
       file: file,
@@ -2739,11 +2707,15 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
     _RemoteVideoCacheDialogResult? dialogResult;
     try {
-      dialogResult = await _showRemoteVideoCacheDialog(
-        file: file,
-        progress: progress,
-        downloadFuture: downloadFuture,
-        cancelToken: cancelToken,
+      dialogResult = await showDialog<_RemoteVideoCacheDialogResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _RemoteVideoCachingDialog(
+          fileName: file.filename,
+          progressListenable: progress,
+          downloadFuture: downloadFuture,
+          onCancel: cancelToken.cancel,
+        ),
       );
     } on Object {
       cancelToken.cancel();
@@ -2806,27 +2778,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     );
   }
 
-  Future<_RemoteVideoCacheDialogResult?> _showRemoteVideoCacheDialog({
-    required SftpName file,
-    required ValueNotifier<_RemoteVideoDownloadProgress> progress,
-    required Future<_CachedRemoteVideo> downloadFuture,
-    required _SftpTransferCancelToken cancelToken,
-  }) async => showDialog<_RemoteVideoCacheDialogResult>(
-    context: context,
-    barrierDismissible: false,
-    builder: (context) => _RemoteVideoCachingDialog(
-      fileName: file.filename,
-      progressListenable: progress,
-      downloadFuture: downloadFuture,
-      onCancel: () {
-        cancelToken.cancel();
-        Navigator.of(
-          context,
-        ).pop(const _RemoteVideoCacheDialogResult.cancelled());
-      },
-    ),
-  );
-
   Future<void> _discardRemoteVideoDownload(
     Future<_CachedRemoteVideo> downloadFuture,
   ) async {
@@ -2858,7 +2809,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     required SftpName file,
     required String remotePath,
     required ValueNotifier<_RemoteVideoDownloadProgress> progress,
-    required _SftpTransferCancelToken cancelToken,
+    required RemoteFileDownloadCancelToken cancelToken,
   }) async {
     final tempDirectory = await getTemporaryDirectory();
     final cacheDirectory = Directory(
@@ -2875,21 +2826,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       ),
     );
 
-    SftpFile? remoteFile;
-    IOSink? sink;
     var downloadedBytes = 0;
-    var completed = false;
-
     try {
-      remoteFile = await sftp.open(remotePath);
-      cancelToken.onCancel(() {
-        final openFile = remoteFile;
-        if (openFile != null) {
-          unawaited(openFile.close());
-        }
-      });
-      sink = cacheFile.openWrite();
-
       final progressStopwatch = Stopwatch()..start();
       var reportedBytes = 0;
       void publishProgress() {
@@ -2900,47 +2838,34 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         );
       }
 
-      await for (final chunk in remoteFile.read()) {
-        cancelToken.throwIfCancelled();
-        final nextDownloadedBytes = downloadedBytes + chunk.length;
-        if (wouldRemoteVideoPreviewExceedByteCap(
-          downloadedBytes: downloadedBytes,
-          chunkBytes: chunk.length,
-        )) {
-          throw Exception(
-            remoteVideoPreviewTooLargeMessage(sizeBytes: nextDownloadedBytes),
+      await ref
+          .read(remoteFileServiceProvider)
+          .downloadFile(
+            sftp: sftp,
+            remotePath: remotePath,
+            localPath: cacheFile.path,
+            maxBytes: maxRemoteVideoPreviewBytes,
+            cancelToken: cancelToken,
+            onProgress: (bytes) async {
+              downloadedBytes = bytes;
+              if (downloadedBytes - reportedBytes >=
+                      _videoPreviewProgressByteInterval ||
+                  progressStopwatch.elapsed >= _videoPreviewProgressInterval) {
+                publishProgress();
+                await Future<void>.delayed(Duration.zero);
+              }
+            },
           );
-        }
-        sink.add(chunk);
-        downloadedBytes = nextDownloadedBytes;
-        // Throttle UI updates and yield so the SFTP read + dialog rebuilds can't
-        // monopolize the main isolate and freeze the app during the download.
-        if (downloadedBytes - reportedBytes >=
-                _videoPreviewProgressByteInterval ||
-            progressStopwatch.elapsed >= _videoPreviewProgressInterval) {
-          publishProgress();
-          await Future<void>.delayed(Duration.zero);
-        }
-      }
       if (downloadedBytes != reportedBytes) {
         publishProgress();
       }
-
-      completed = true;
       return _CachedRemoteVideo(
         localFile: cacheFile,
         downloadedBytes: downloadedBytes,
       );
-    } finally {
-      await sink?.close();
-      await remoteFile?.close();
-      if (!completed) {
-        try {
-          await cacheFile.delete();
-        } on FileSystemException {
-          // Best-effort cleanup; failed preview caches live in temp storage.
-        }
-      }
+    } on Object {
+      await _deleteCachedRemoteVideoFile(cacheFile);
+      rethrow;
     }
   }
 
@@ -2957,7 +2882,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (error == null) {
       return 'Unknown error';
     }
-    if (error is _SftpTransferCancelledException) {
+    if (error is RemoteFileDownloadLimitException) {
+      return remoteVideoPreviewTooLargeMessage(sizeBytes: error.byteCount);
+    }
+    if (error is RemoteFileDownloadCancelledException) {
       return 'Cancelled';
     }
     return error.toString().replaceFirst(RegExp('^Exception: '), '');
@@ -2972,34 +2900,20 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       byteCount: file.attr.size ?? 0,
     );
     if (preflightMessage != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(preflightMessage)));
-      }
+      _showMessage(preflightMessage);
       return;
     }
 
-    final remotePath = _joinRemotePath(_currentPath, file.filename);
+    final remotePath = joinRemotePath(_currentPath, file.filename);
     try {
-      final remoteFile = await _sftp!.open(remotePath);
-      late final Uint8List bytes;
-      try {
-        bytes = await remoteFile.readBytes(length: _maxEditableBytes + 1);
-      } finally {
-        await remoteFile.close();
-      }
+      final bytes = await _readFileBytes(remotePath, _maxEditableBytes + 1);
 
       final loadedMessage = resolveSftpTextEditBlockMessage(
         byteCount: bytes.length,
         loadedBytes: bytes,
       );
       if (loadedMessage != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(loadedMessage)));
-        }
+        _showMessage(loadedMessage);
         return;
       }
 
@@ -3067,13 +2981,21 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         controller.dispose();
         return;
       }
-      final updated = await navigator.push<String>(
+      final saved = await navigator.push<bool>(
         MaterialPageRoute(
           fullscreenDialog: true,
           builder: (context) => RemoteTextEditorScreen(
             fileName: file.filename,
             filePath: remotePath,
             controller: controller,
+            onSave: (text) => ref
+                .read(remoteFileServiceProvider)
+                .uploadBytes(
+                  sftp: _sftp!,
+                  remotePath: remotePath,
+                  bytes: Uint8List.fromList(utf8.encode(text)),
+                  applyPrivateMode: false,
+                ),
             terminalTheme: editorTheme,
             fontFamily: fontFamily,
             initialFontSize: initialFontSize,
@@ -3081,28 +3003,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         ),
       );
       controller.dispose();
-      if (updated == null) {
+      if (saved != true) {
         return;
       }
 
-      final saveFile = await _sftp!.open(
-        remotePath,
-        mode:
-            SftpFileOpenMode.write |
-            SftpFileOpenMode.create |
-            SftpFileOpenMode.truncate,
-      );
-      try {
-        await saveFile.writeBytes(Uint8List.fromList(utf8.encode(updated)));
-      } finally {
-        await saveFile.close();
-      }
       await _loadDirectory(_currentPath);
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Saved "${file.filename}"')));
-      }
+      _showMessage('Saved "${file.filename}"');
     } on Object catch (e) {
       if (e is! Exception && !isExpectedSshOperationError(e)) {
         rethrow;
@@ -3125,16 +3031,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       eventName,
       fields: {'errorType': error.runtimeType},
     );
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    _showMessage(message);
   }
-
-  String _joinRemotePath(String directory, String name) =>
-      joinRemotePath(directory, name);
 }
 
 class _CreateDirectoryDialog extends StatefulWidget {
@@ -3289,63 +3187,38 @@ class _FileListTile extends StatelessWidget {
         : theme.colorScheme.onSurfaceVariant;
     final trailingIconColor = isHighlighted
         ? theme.colorScheme.onPrimaryContainer
-        : isDisabled
-        ? theme.colorScheme.onSurfaceVariant
         : theme.colorScheme.onSurfaceVariant;
-    final sizeText = formatRemoteFileSize(file.attr.size ?? 0);
-    final knownSizeText = file.attr.size == null ? null : sizeText;
-
-    Widget? subtitle;
-    if (!isDirectory) {
-      if (isDisabled) {
-        final subtitleChildren = <Widget>[];
-        if (knownSizeText != null) {
-          subtitleChildren.add(
-            Text(
-              knownSizeText,
-              style: FluttyTheme.monoStyle.copyWith(
-                fontSize: 12,
-                color: isHighlighted
-                    ? theme.colorScheme.onPrimaryContainer
-                    : theme.colorScheme.onSurfaceVariant,
+    final sizeLabel = Text(
+      formatRemoteFileSize(file.attr.size ?? 0),
+      style: FluttyTheme.monoStyle.copyWith(
+        fontSize: 12,
+        color: trailingIconColor,
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+    final subtitle = isDirectory
+        ? null
+        : !isDisabled
+        ? sizeLabel
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (file.attr.size != null) sizeLabel,
+              Text(
+                disabledReason!,
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 12,
+                  color: isHighlighted
+                      ? theme.colorScheme.onPrimaryContainer
+                      : theme.colorScheme.error,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+            ],
           );
-        }
-        subtitleChildren.add(
-          Text(
-            disabledReason!,
-            style: FluttyTheme.monoStyle.copyWith(
-              fontSize: 12,
-              color: isHighlighted
-                  ? theme.colorScheme.onPrimaryContainer
-                  : theme.colorScheme.error,
-            ),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-        );
-        subtitle = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: subtitleChildren,
-        );
-      } else {
-        subtitle = Text(
-          sizeText,
-          style: FluttyTheme.monoStyle.copyWith(
-            fontSize: 12,
-            color: isHighlighted
-                ? theme.colorScheme.onPrimaryContainer
-                : theme.colorScheme.onSurfaceVariant,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        );
-      }
-    }
 
     Widget? trailingIconWidget;
     if (trailingIcon != null) {
@@ -3361,10 +3234,6 @@ class _FileListTile extends StatelessWidget {
         );
       }
     }
-    final trailingWidgets = trailingIconWidget == null
-        ? const <Widget>[]
-        : <Widget>[trailingIconWidget];
-
     final tile = ListTile(
       visualDensity: VisualDensity.compact,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12),
@@ -3399,7 +3268,7 @@ class _FileListTile extends StatelessWidget {
         children: [
           if (isDirectory)
             Icon(Icons.chevron_right, size: 20, color: trailingIconColor),
-          ...trailingWidgets,
+          ?trailingIconWidget,
           if (onShowOptions != null)
             IconButton(
               onPressed: onShowOptions,
@@ -3451,68 +3320,48 @@ class _RemoteFileSelectionBar extends StatelessWidget {
         ? 'Select 1 file'
         : 'Select $selectedCount files';
 
-    final buttons = isWide
-        ? Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              OutlinedButton.icon(
-                onPressed: onCancel,
-                icon: const Icon(Icons.close),
-                label: const Text('Cancel'),
-              ),
-              const SizedBox(width: 12),
-              FilledButton.icon(
-                onPressed: onConfirm,
-                icon: const Icon(Icons.check),
-                label: Text(confirmLabel),
-              ),
-            ],
-          )
-        : Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onCancel,
-                  icon: const Icon(Icons.close),
-                  label: const Text('Cancel'),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: onConfirm,
-                  icon: const Icon(Icons.check),
-                  label: Text(confirmLabel),
-                ),
-              ),
-            ],
-          );
-
+    final cancelButton = OutlinedButton.icon(
+      onPressed: onCancel,
+      icon: const Icon(Icons.close),
+      label: const Text('Cancel'),
+    );
+    final confirmButton = FilledButton.icon(
+      onPressed: onConfirm,
+      icon: const Icon(Icons.check),
+      label: Text(confirmLabel),
+    );
+    final buttons = Row(
+      mainAxisSize: isWide ? MainAxisSize.min : MainAxisSize.max,
+      children: [
+        if (isWide) cancelButton else Expanded(child: cancelButton),
+        const SizedBox(width: 12),
+        if (isWide) confirmButton else Expanded(child: confirmButton),
+      ],
+    );
+    final summary = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'remote file selection',
+          style: FluttyTheme.displayMono(
+            fontSize: 16,
+            color: theme.colorScheme.onSurface,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          summaryText,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
     final content = isWide
         ? Row(
             children: [
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'remote file selection',
-                      style: FluttyTheme.displayMono(
-                        fontSize: 16,
-                        color: theme.colorScheme.onSurface,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      summaryText,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              Expanded(child: summary),
               const SizedBox(width: 16),
               buttons,
             ],
@@ -3520,24 +3369,7 @@ class _RemoteFileSelectionBar extends StatelessWidget {
         : Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'remote file selection',
-                style: FluttyTheme.displayMono(
-                  fontSize: 16,
-                  color: theme.colorScheme.onSurface,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                summaryText,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 12),
-              buttons,
-            ],
+            children: [summary, const SizedBox(height: 12), buttons],
           );
 
     return Material(
@@ -3619,42 +3451,6 @@ class _RemoteVideoDownloadProgress {
       );
 }
 
-class _SftpTransferCancelToken {
-  final List<VoidCallback> _cancelCallbacks = [];
-  var _isCancelled = false;
-
-  void cancel() {
-    if (_isCancelled) {
-      return;
-    }
-    _isCancelled = true;
-    for (final callback in _cancelCallbacks) {
-      callback();
-    }
-  }
-
-  void onCancel(VoidCallback callback) {
-    if (_isCancelled) {
-      callback();
-      return;
-    }
-    _cancelCallbacks.add(callback);
-  }
-
-  void throwIfCancelled() {
-    if (_isCancelled) {
-      throw const _SftpTransferCancelledException();
-    }
-  }
-}
-
-class _SftpTransferCancelledException implements Exception {
-  const _SftpTransferCancelledException();
-
-  @override
-  String toString() => 'Video preview cancelled';
-}
-
 class _CachedRemoteVideo {
   const _CachedRemoteVideo({
     required this.localFile,
@@ -3719,24 +3515,22 @@ class _RemoteVideoCachingDialog extends StatefulWidget {
 }
 
 class _RemoteVideoCachingDialogState extends State<_RemoteVideoCachingDialog> {
+  var _completed = false;
+
+  void _complete(_RemoteVideoCacheDialogResult result) {
+    if (_completed || !mounted) return;
+    _completed = true;
+    Navigator.of(context).pop(result);
+  }
+
   @override
   void initState() {
     super.initState();
     widget.downloadFuture.then<void>(
-      (cacheResult) {
-        if (!mounted) {
-          return;
-        }
-        Navigator.of(
-          context,
-        ).pop(_RemoteVideoCacheDialogResult.success(cacheResult));
-      },
-      onError: (Object error, StackTrace _) {
-        if (!mounted) {
-          return;
-        }
-        Navigator.of(context).pop(_RemoteVideoCacheDialogResult.failure(error));
-      },
+      (cacheResult) =>
+          _complete(_RemoteVideoCacheDialogResult.success(cacheResult)),
+      onError: (Object error, StackTrace _) =>
+          _complete(_RemoteVideoCacheDialogResult.failure(error)),
     );
   }
 
@@ -3770,7 +3564,14 @@ class _RemoteVideoCachingDialogState extends State<_RemoteVideoCachingDialog> {
       ),
     ),
     actions: [
-      TextButton(onPressed: widget.onCancel, child: const Text('Cancel')),
+      TextButton(
+        onPressed: () {
+          if (_completed) return;
+          _complete(const _RemoteVideoCacheDialogResult.cancelled());
+          widget.onCancel();
+        },
+        child: const Text('Cancel'),
+      ),
     ],
   );
 }
@@ -3977,12 +3778,12 @@ class _RemoteVideoViewerScreenState extends State<_RemoteVideoViewerScreen> {
         runSpacing: 8,
         children: [
           OutlinedButton.icon(
-            onPressed: _saveCachedCopy,
+            onPressed: _exportCachedCopy,
             icon: const Icon(Icons.download),
             label: const Text('Save copy'),
           ),
           FilledButton.icon(
-            onPressed: _shareCachedCopy,
+            onPressed: () => _exportCachedCopy(share: true),
             icon: const Icon(Icons.ios_share),
             label: const Text('Open/Share'),
           ),
@@ -4063,97 +3864,39 @@ class _RemoteVideoViewerScreenState extends State<_RemoteVideoViewerScreen> {
     ),
   );
 
-  Future<void> _saveCachedCopy() async {
-    late final Uri? savePath;
+  Future<void> _exportCachedCopy({bool share = false}) async {
     try {
-      savePath = await FilePicker.saveFile(
-        dialogTitle: 'Save ${widget.fileName}',
+      final result = await _exportLocalFile(
+        context,
+        file: widget.localFile,
         fileName: widget.fileName,
-        bytes: Uint8List(0),
+        mimeType: widget.mimeType,
+        share: share,
       );
+      _keepCachedFile |= result == _LocalFileExport.shared;
+      if (mounted && result == _LocalFileExport.saved) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Saved "${widget.fileName}"')));
+      } else if (mounted && share && result == _LocalFileExport.cancelled) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Open/share cancelled')));
+      }
     } on Exception catch (error) {
       DiagnosticsLogService.instance.warning(
         'sftp.preview',
-        'save_picker_failed',
+        'export_failed',
         fields: {'errorType': error.runtimeType},
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Could not open the save dialog. Try again.'),
+            content: Text('Could not export the file. Try again.'),
           ),
         );
       }
-      return;
     }
-    if (savePath == null) {
-      return;
-    }
-
-    try {
-      await widget.localFile.copy(savePath.toFilePath());
-      _keepCachedFile = true;
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Saved "${widget.fileName}"')));
-      }
-    } on FileSystemException catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: ${error.message}')),
-        );
-      }
-    }
-  }
-
-  Future<void> _shareCachedCopy() async {
-    try {
-      final result = await SharePlus.instance.share(
-        ShareParams(
-          files: [
-            XFile(
-              widget.localFile.path,
-              mimeType: widget.mimeType,
-              name: widget.fileName,
-            ),
-          ],
-          sharePositionOrigin: _shareOriginFromContext(context),
-        ),
-      );
-      if (!mounted) {
-        return;
-      }
-      if (result.status == ShareResultStatus.dismissed) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Open/share cancelled')));
-      } else {
-        _keepCachedFile = true;
-      }
-    } on Object catch (error, stackTrace) {
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          stack: stackTrace,
-          library: 'sftp',
-          context: ErrorDescription('while sharing remote video preview'),
-        ),
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to open share sheet')),
-        );
-      }
-    }
-  }
-
-  Rect? _shareOriginFromContext(BuildContext context) {
-    final box = context.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) {
-      return null;
-    }
-    return box.localToGlobal(Offset.zero) & box.size;
   }
 
   String _playbackErrorMessage(Object _) =>

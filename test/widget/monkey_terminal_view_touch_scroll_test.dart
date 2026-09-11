@@ -1587,7 +1587,9 @@ void main() {
   testWidgets('paste intent can be rerouted through reviewed callback', (
     tester,
   ) async {
-    final terminal = Terminal();
+    final terminal = Terminal()..write('selected text');
+    final controller = TerminalController();
+    final pendingReview = Completer<void>();
     final output = <String>[];
     terminal.onOutput = output.add;
     var pasteCalls = 0;
@@ -1599,26 +1601,53 @@ void main() {
           height: 200,
           child: MonkeyTerminalView(
             terminal,
+            controller: controller,
             hardwareKeyboardOnly: true,
             onPasteText: () async {
               pasteCalls += 1;
+              if (pasteCalls == 2) {
+                await pendingReview.future;
+              }
             },
           ),
         ),
       ),
     );
 
+    controller.setSelection(
+      terminal.buffer.createAnchor(0, 0),
+      terminal.buffer.createAnchor(8, 0),
+    );
+    expect(terminal.buffer.getText(controller.selection), 'selected');
+
     final actionsWidget = tester
         .widgetList<Actions>(find.byType(Actions))
         .firstWhere((widget) => widget.actions.containsKey(PasteTextIntent));
     final pasteAction = actionsWidget.actions[PasteTextIntent];
     expect(pasteAction, isA<CallbackAction<PasteTextIntent>>());
-    (pasteAction! as CallbackAction<PasteTextIntent>).invoke(
+    final context = tester.element(find.byWidget(actionsWidget.child));
+    Actions.invoke(
+      context,
       const PasteTextIntent(SelectionChangedCause.keyboard),
     );
     await tester.pump();
 
     expect(pasteCalls, 1);
+    expect(output, isEmpty);
+    expect(terminal.buffer.getText(controller.selection), 'selected');
+
+    final pendingPaste =
+        Actions.invoke(
+              context,
+              const PasteTextIntent(SelectionChangedCause.keyboard),
+            )
+            as Future<Object?>?;
+    expect(pasteCalls, 2);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    pendingReview.complete();
+    await pendingPaste;
+    expect(tester.takeException(), isNull);
     expect(output, isEmpty);
   });
 }

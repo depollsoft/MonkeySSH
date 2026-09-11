@@ -23,7 +23,11 @@ import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:xterm/src/ui/palette_builder.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
+
+import '../test/helpers/live_ssh_terminal_helpers.dart';
+import '../test/helpers/terminal_theme_assertion_helpers.dart';
 
 const _sshPort = int.fromEnvironment('CODEX_THEME_SSH_PORT');
 const _sshUser = String.fromEnvironment('CODEX_THEME_SSH_USER');
@@ -158,20 +162,23 @@ void main() {
       ),
     );
 
-    await _pumpUntilConnected(tester);
-    await _pumpUntilFound(tester, find.byType(MonkeyTerminalView));
-
-    var terminal = _terminalFromView(tester);
-    await _waitForTerminalText(
+    await pumpUntilConnected(
       tester,
-      () => _terminalFromView(tester),
+      description: 'SSH connection to validation host',
+    );
+    await pumpUntilFound(tester, find.byType(MonkeyTerminalView));
+
+    var terminal = terminalFromView(tester);
+    await waitForTerminalText(
+      tester,
+      () => terminalFromView(tester),
       'Codex',
       description: 'Timed out waiting for Codex to render in tmux',
       timeout: const Duration(seconds: 90),
     );
-    await _pumpUntil(
+    await pumpUntil(
       tester,
-      () => _terminalFromView(tester).reportFocusMode,
+      () => terminalFromView(tester).reportFocusMode,
       description: 'Codex/tmux did not request terminal focus reports',
     );
     await binding.takeScreenshot('codex-clean-white-before-theme-change');
@@ -181,22 +188,22 @@ void main() {
         .toRadixString(36);
 
     await _switchThemeMode(tester, themeMode, ThemeMode.dark);
-    terminal = _terminalFromView(tester);
+    terminal = terminalFromView(tester);
     final darkToken = 'd$tokenSuffix';
     terminal.textInput(darkToken);
-    await _waitForTerminalText(
+    await waitForTerminalText(
       tester,
-      () => _terminalFromView(tester),
+      () => terminalFromView(tester),
       darkToken,
       description: 'Timed out waiting for dark-theme Codex input token',
     );
-    terminal = _terminalFromView(tester);
+    terminal = terminalFromView(tester);
     final darkContrast = _minimumTokenContrast(
       terminal,
       monkey_themes.TerminalThemes.defaultDarkTheme,
       darkToken,
     );
-    final darkSurface = _composerSurfaceForToken(
+    final darkSurface = composerSurfaceForToken(
       terminal,
       monkey_themes.TerminalThemes.defaultDarkTheme,
       darkToken,
@@ -207,22 +214,22 @@ void main() {
     await binding.takeScreenshot('codex-default-dark-readable');
 
     await _switchThemeMode(tester, themeMode, ThemeMode.light);
-    terminal = _terminalFromView(tester);
+    terminal = terminalFromView(tester);
     final lightToken = '-l$tokenSuffix';
     terminal.textInput(lightToken);
-    await _waitForTerminalText(
+    await waitForTerminalText(
       tester,
-      () => _terminalFromView(tester),
+      () => terminalFromView(tester),
       lightToken,
       description: 'Timed out waiting for light-theme Codex input token',
     );
-    terminal = _terminalFromView(tester);
+    terminal = terminalFromView(tester);
     final lightContrast = _minimumTokenContrast(
       terminal,
       monkey_themes.TerminalThemes.defaultLightTheme,
       lightToken,
     );
-    final lightSurface = _composerSurfaceForToken(
+    final lightSurface = composerSurfaceForToken(
       terminal,
       monkey_themes.TerminalThemes.defaultLightTheme,
       lightToken,
@@ -234,17 +241,6 @@ void main() {
   });
 }
 
-Future<void> _pumpUntilConnected(WidgetTester tester) async {
-  await _pumpUntil(
-    tester,
-    () => find.text('Connecting...').evaluate().isEmpty,
-    description: 'SSH connection to validation host',
-    timeout: const Duration(seconds: 60),
-  );
-  expect(find.textContaining('Failed to start shell'), findsNothing);
-  expect(find.textContaining('Connection failed'), findsNothing);
-}
-
 Future<void> _switchThemeMode(
   WidgetTester tester,
   ValueNotifier<ThemeMode> themeMode,
@@ -254,73 +250,13 @@ Future<void> _switchThemeMode(
   await tester.pumpAndSettle(const Duration(seconds: 1));
 }
 
-Terminal _terminalFromView(WidgetTester tester) =>
-    tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView)).terminal;
-
-Future<void> _pumpUntilFound(
-  WidgetTester tester,
-  Finder finder, {
-  Duration timeout = const Duration(seconds: 30),
-}) async {
-  await _pumpUntil(
-    tester,
-    () => finder.evaluate().isNotEmpty,
-    description: 'finder $finder',
-    timeout: timeout,
-  );
-}
-
-Future<void> _pumpUntil(
-  WidgetTester tester,
-  bool Function() predicate, {
-  required String description,
-  Duration timeout = const Duration(seconds: 30),
-  Duration step = const Duration(milliseconds: 100),
-}) async {
-  final end = DateTime.now().add(timeout);
-  while (DateTime.now().isBefore(end)) {
-    await tester.pump(step);
-    if (predicate()) {
-      return;
-    }
-  }
-  fail('Timed out waiting for $description');
-}
-
-Future<void> _waitForTerminalText(
-  WidgetTester tester,
-  Terminal Function() terminal,
-  String expected, {
-  required String description,
-  Duration timeout = const Duration(seconds: 20),
-}) async {
-  await _pumpUntil(
-    tester,
-    () => _terminalBufferText(terminal()).contains(expected),
-    description: '$description\n${_terminalBufferText(terminal())}',
-    timeout: timeout,
-  );
-}
-
-String _terminalBufferText(Terminal terminal) {
-  final lines = <String>[];
-  for (var index = 0; index < terminal.buffer.lines.length; index += 1) {
-    lines.add(
-      terminal.buffer.lines[index]
-          .getText(0, terminal.buffer.viewWidth)
-          .trimRight(),
-    );
-  }
-  return lines.join('\n');
-}
-
 double _minimumTokenContrast(
   Terminal terminal,
   TerminalThemeData theme,
   String token,
 ) {
   final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
+  final palette = PaletteBuilder(xtermTheme).build();
   final cell = CellData.empty();
 
   for (var row = 0; row < terminal.buffer.lines.length; row += 1) {
@@ -334,130 +270,14 @@ double _minimumTokenContrast(
     var minimum = double.infinity;
     for (var offset = 0; offset < token.length; offset += 1) {
       line.getCellData(startColumn + offset, cell);
-      final colors = _effectiveCellColors(cell, xtermTheme, palette);
+      final colors = effectiveCellColors(cell, xtermTheme, palette);
       minimum = math.min(
         minimum,
-        _contrastRatio(colors.foreground, colors.background),
+        contrastRatio(colors.foreground, colors.background),
       );
     }
     return minimum;
   }
 
   fail('Could not find token "$token" in terminal buffer.');
-}
-
-({Color background, int sampledCells}) _composerSurfaceForToken(
-  Terminal terminal,
-  TerminalThemeData theme,
-  String token,
-) {
-  final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
-  final cell = CellData.empty();
-
-  for (var row = 0; row < terminal.buffer.lines.length; row += 1) {
-    final line = terminal.buffer.lines[row];
-    final text = line.getText(0, terminal.buffer.viewWidth);
-    final startColumn = text.indexOf(token);
-    if (startColumn == -1) {
-      continue;
-    }
-
-    line.getCellData(startColumn, cell);
-    final tokenSurfaceColor = _effectiveBackgroundCellColor(cell);
-    final background = _effectiveCellColors(
-      cell,
-      xtermTheme,
-      palette,
-    ).background;
-    var sampledCells = 0;
-
-    for (var column = 0; column < terminal.buffer.viewWidth; column += 1) {
-      line.getCellData(column, cell);
-      if (_effectiveBackgroundCellColor(cell) == tokenSurfaceColor) {
-        sampledCells += 1;
-      }
-    }
-
-    return (background: background, sampledCells: sampledCells);
-  }
-
-  fail('Could not find token "$token" in terminal buffer.');
-}
-
-int _effectiveBackgroundCellColor(CellData cell) =>
-    (cell.flags & CellFlags.inverse) == 0 ? cell.background : cell.foreground;
-
-({Color foreground, Color background}) _effectiveCellColors(
-  CellData cell,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  var foreground = (cell.flags & CellFlags.inverse) == 0
-      ? _resolveForegroundColor(cell.foreground, xtermTheme, palette)
-      : _resolveBackgroundColor(cell.background, xtermTheme, palette);
-  final background = (cell.flags & CellFlags.inverse) == 0
-      ? _resolveBackgroundColor(cell.background, xtermTheme, palette)
-      : _resolveForegroundColor(cell.foreground, xtermTheme, palette);
-
-  if ((cell.flags & CellFlags.faint) != 0) {
-    foreground = resolveMonkeyTerminalFaintForegroundColor(
-      foreground: foreground,
-      background: background,
-    );
-  }
-  return (foreground: foreground, background: background);
-}
-
-Color _resolveForegroundColor(
-  int cellColor,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  final colorType = cellColor & CellColor.typeMask;
-  final colorValue = cellColor & CellColor.valueMask;
-  return switch (colorType) {
-    CellColor.normal => xtermTheme.foreground,
-    CellColor.named || CellColor.palette => palette[colorValue],
-    _ => Color.fromARGB(
-      0xFF,
-      (colorValue >> 16) & 0xFF,
-      (colorValue >> 8) & 0xFF,
-      colorValue & 0xFF,
-    ),
-  };
-}
-
-Color _resolveBackgroundColor(
-  int cellColor,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  final colorType = cellColor & CellColor.typeMask;
-  final colorValue = cellColor & CellColor.valueMask;
-  return switch (colorType) {
-    CellColor.normal => xtermTheme.background,
-    CellColor.named || CellColor.palette => palette[colorValue],
-    _ => Color.fromARGB(
-      0xFF,
-      (colorValue >> 16) & 0xFF,
-      (colorValue >> 8) & 0xFF,
-      colorValue & 0xFF,
-    ),
-  };
-}
-
-List<Color> _buildTerminalPalette(TerminalTheme xtermTheme) =>
-    List<Color>.generate(
-      256,
-      (index) => resolveMonkeyTerminalPaletteColor(xtermTheme, index),
-      growable: false,
-    );
-
-double _contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
 }

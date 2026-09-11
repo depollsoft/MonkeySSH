@@ -307,6 +307,7 @@ class HostEditViewModel extends Notifier<HostEditState> {
 
     state = state.copyWith(isLoading: true);
     final host = await ref.read(hostRepositoryProvider).getById(editingHostId);
+    if (!ref.mounted) return null;
     if (host == null) {
       state = state.copyWith(isLoading: false, existingHost: null);
       return null;
@@ -315,12 +316,15 @@ class HostEditViewModel extends Notifier<HostEditState> {
     final portForwards = await ref
         .read(portForwardRepositoryProvider)
         .getByHostId(host.id);
+    if (!ref.mounted) return null;
     final preset = await ref
         .read(agentLaunchPresetServiceProvider)
         .getPresetForHost(host.id);
+    if (!ref.mounted) return null;
     final cliLaunchPreferences = await ref
         .read(hostCliLaunchPreferencesServiceProvider)
         .getPreferencesForHost(host.id);
+    if (!ref.mounted) return null;
 
     state = state.copyWith(
       isLoading: false,
@@ -505,111 +509,68 @@ class HostEditViewModel extends Notifier<HostEditState> {
     final tmuxWorkingDirectory = draft.tmuxWorkingDirectory.trim();
     final tmuxExtraFlags = draft.tmuxExtraFlags.trim();
 
-    final normalizedTmuxSessionName =
-        switch (draft.selectedStartupMode.usesRemoteMultiplexer) {
-          true => tmuxSessionName.isEmpty ? null : tmuxSessionName,
-          false => switch (draft.selectedStartupMode) {
-            HostStartupMode.none => null,
-            _ => hasAutomationAccess ? null : existingHost?.tmuxSessionName,
-          },
-        };
-    final normalizedRemoteMuxBackend =
-        switch (draft.selectedStartupMode.usesRemoteMultiplexer) {
-          true => draft.selectedStartupMode.remoteMuxBackend,
-          false => switch (draft.selectedStartupMode) {
-            HostStartupMode.none => null,
-            _ =>
-              hasAutomationAccess
-                  ? null
-                  : RemoteMuxBackendPresentation.fromStorageValue(
-                      existingHost?.remoteMuxBackend,
-                    ),
-          },
-        };
-    final normalizedTmuxWorkingDirectory = switch (draft
-        .selectedStartupMode
-        .usesRemoteMultiplexer) {
-      true => tmuxWorkingDirectory.isEmpty ? null : tmuxWorkingDirectory,
-      false => switch (draft.selectedStartupMode) {
-        HostStartupMode.none => null,
-        _ => hasAutomationAccess ? null : existingHost?.tmuxWorkingDirectory,
-      },
-    };
-    final normalizedTmuxExtraFlags = switch (draft.selectedStartupMode) {
-      HostStartupMode.tmux => resolveTmuxExtraFlags(
-        extraFlags: tmuxExtraFlags,
-        disableStatusBar: draft.disableTmuxStatusBar,
-      ),
-      HostStartupMode.muxAuto || HostStartupMode.monkeyMux => null,
-      HostStartupMode.none => null,
-      _ => hasAutomationAccess ? null : existingHost?.tmuxExtraFlags,
-    };
+    final startupMode = draft.selectedStartupMode;
+    final usesRemoteMultiplexer = startupMode.usesRemoteMultiplexer;
+    // Without automation access, an automation startup mode (agent, custom
+    // command, or snippet) cannot be edited, so the stored automation and
+    // legacy remote-window fields are carried over unchanged rather than
+    // cleared or rebuilt from the read-only form.
+    final preservesExistingAutomation =
+        !hasAutomationAccess &&
+        !usesRemoteMultiplexer &&
+        startupMode != HostStartupMode.none;
+    final preservedHost = preservesExistingAutomation ? existingHost : null;
 
-    String? normalizedAutoConnectCommand;
-    int? normalizedAutoConnectSnippetId;
-    late final bool autoConnectRequiresConfirmation;
-    switch (draft.selectedStartupMode) {
-      case HostStartupMode.none:
-      case HostStartupMode.muxAuto:
-      case HostStartupMode.monkeyMux:
-      case HostStartupMode.tmux:
-        normalizedAutoConnectCommand = null;
-        normalizedAutoConnectSnippetId = null;
-        autoConnectRequiresConfirmation = false;
-      case HostStartupMode.agent:
-        if (hasAutomationAccess) {
-          normalizedAutoConnectCommand =
-              presetCommand == null || presetCommand.trim().isEmpty
+    final normalizedTmuxSessionName = usesRemoteMultiplexer
+        ? (tmuxSessionName.isEmpty ? null : tmuxSessionName)
+        : preservedHost?.tmuxSessionName;
+    final normalizedRemoteMuxBackend = usesRemoteMultiplexer
+        ? startupMode.remoteMuxBackend
+        : RemoteMuxBackendPresentation.fromStorageValue(
+            preservedHost?.remoteMuxBackend,
+          );
+    final normalizedTmuxWorkingDirectory = usesRemoteMultiplexer
+        ? (tmuxWorkingDirectory.isEmpty ? null : tmuxWorkingDirectory)
+        : preservedHost?.tmuxWorkingDirectory;
+    final normalizedTmuxExtraFlags = startupMode == HostStartupMode.tmux
+        ? resolveTmuxExtraFlags(
+            extraFlags: tmuxExtraFlags,
+            disableStatusBar: draft.disableTmuxStatusBar,
+          )
+        : preservedHost?.tmuxExtraFlags;
+
+    final String? normalizedAutoConnectCommand;
+    final int? normalizedAutoConnectSnippetId;
+    if (preservesExistingAutomation) {
+      normalizedAutoConnectCommand = existingHost?.autoConnectCommand;
+      normalizedAutoConnectSnippetId = existingHost?.autoConnectSnippetId;
+    } else {
+      final customCommand = draft.autoConnectCommand.trim();
+      (
+        normalizedAutoConnectCommand,
+        normalizedAutoConnectSnippetId,
+      ) = switch (startupMode) {
+        HostStartupMode.agent => (
+          presetCommand == null || presetCommand.trim().isEmpty
               ? null
-              : presetCommand;
-          normalizedAutoConnectSnippetId = null;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: normalizedAutoConnectCommand,
-            snippetId: null,
-          );
-        } else {
-          normalizedAutoConnectCommand = existingHost?.autoConnectCommand;
-          normalizedAutoConnectSnippetId = existingHost?.autoConnectSnippetId;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: existingHost?.autoConnectCommand,
-            snippetId: existingHost?.autoConnectSnippetId,
-          );
-        }
-      case HostStartupMode.customCommand:
-        if (hasAutomationAccess) {
-          final cmd = draft.autoConnectCommand.trim();
-          normalizedAutoConnectCommand = cmd.isEmpty ? null : cmd;
-          normalizedAutoConnectSnippetId = null;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: normalizedAutoConnectCommand,
-            snippetId: null,
-          );
-        } else {
-          normalizedAutoConnectCommand = existingHost?.autoConnectCommand;
-          normalizedAutoConnectSnippetId = existingHost?.autoConnectSnippetId;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: existingHost?.autoConnectCommand,
-            snippetId: existingHost?.autoConnectSnippetId,
-          );
-        }
-      case HostStartupMode.snippet:
-        if (hasAutomationAccess) {
-          normalizedAutoConnectCommand =
-              selectedSnippet?.command ?? draft.autoConnectCommand;
-          normalizedAutoConnectSnippetId = selectedSnippet?.id;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: normalizedAutoConnectCommand,
-            snippetId: normalizedAutoConnectSnippetId,
-          );
-        } else {
-          normalizedAutoConnectCommand = existingHost?.autoConnectCommand;
-          normalizedAutoConnectSnippetId = existingHost?.autoConnectSnippetId;
-          autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
-            command: existingHost?.autoConnectCommand,
-            snippetId: existingHost?.autoConnectSnippetId,
-          );
-        }
+              : presetCommand,
+          null,
+        ),
+        HostStartupMode.customCommand => (
+          customCommand.isEmpty ? null : customCommand,
+          null,
+        ),
+        HostStartupMode.snippet => (
+          selectedSnippet?.command ?? draft.autoConnectCommand,
+          selectedSnippet?.id,
+        ),
+        _ => (null, null),
+      };
     }
+    final autoConnectRequiresConfirmation = _resolveAutoConnectConfirmation(
+      command: normalizedAutoConnectCommand,
+      snippetId: normalizedAutoConnectSnippetId,
+    );
 
     return SaveHostInput(
       label: draft.label,
@@ -645,21 +606,45 @@ class HostEditViewModel extends Notifier<HostEditState> {
     required bool hasAutomationAccess,
     required bool hasAgentPresetAccess,
   }) {
-    final preset = buildCurrentAgentLaunchPreset(draft);
-    if (draft.selectedStartupMode == HostStartupMode.agent &&
-        hasAutomationAccess &&
-        hasAgentPresetAccess &&
-        preset != null) {
-      return SaveAgentPreset(preset);
+    // A non-agent startup form may hide an unsupported saved preset. Do not
+    // delete persisted data when the user only edits host metadata.
+    final initial = state.initialDraft;
+    if (initial != null &&
+        initial.selectedStartupMode != HostStartupMode.agent &&
+        (
+              initial.selectedStartupMode,
+              initial.selectedAutoConnectMode,
+              initial.autoConnectCommand,
+              initial.selectedAutoConnectSnippetId,
+              initial.tmuxSession,
+              initial.tmuxWorkingDirectory,
+              initial.tmuxExtraFlags,
+              initial.disableTmuxStatusBar,
+            ) ==
+            (
+              draft.selectedStartupMode,
+              draft.selectedAutoConnectMode,
+              draft.autoConnectCommand,
+              draft.selectedAutoConnectSnippetId,
+              draft.tmuxSession,
+              draft.tmuxWorkingDirectory,
+              draft.tmuxExtraFlags,
+              draft.disableTmuxStatusBar,
+            )) {
+      return const LeaveAgentPresetUnchanged();
     }
-    if (draft.selectedStartupMode == HostStartupMode.none ||
-        draft.selectedStartupMode == HostStartupMode.muxAuto ||
-        draft.selectedStartupMode == HostStartupMode.monkeyMux ||
-        draft.selectedStartupMode == HostStartupMode.tmux ||
-        ((draft.selectedStartupMode == HostStartupMode.customCommand ||
-                draft.selectedStartupMode == HostStartupMode.snippet) &&
-            hasAutomationAccess &&
-            hasAgentPresetAccess)) {
+    final canEditPreset = hasAutomationAccess && hasAgentPresetAccess;
+    // Non-null only in agent mode.
+    final preset = buildCurrentAgentLaunchPreset(draft);
+    if (preset != null) {
+      return canEditPreset
+          ? SaveAgentPreset(preset)
+          : const LeaveAgentPresetUnchanged();
+    }
+    final startupMode = draft.selectedStartupMode;
+    if (startupMode == HostStartupMode.none ||
+        startupMode.usesRemoteMultiplexer ||
+        canEditPreset) {
       return const DeleteAgentPreset();
     }
     return const LeaveAgentPresetUnchanged();

@@ -5,12 +5,14 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
-	"io"
+	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -30,33 +32,8 @@ func TestBundledConPtyPreservesKittyGraphics(t *testing.T) {
 		os.Exit(0)
 	}
 
-	previousCacheRoot := conPtyCacheRoot
-	conPtyCacheRoot = t.TempDir()
-	t.Cleanup(func() {
-		conPtyCacheRoot = previousCacheRoot
-	})
-
-	backend, err := loadBundledConPtyBackend()
-	if err != nil {
-		t.Fatalf("load bundled ConPTY: %v", err)
-	}
-	if backend.name != "bundled" {
-		t.Fatalf("backend name = %q, want bundled", backend.name)
-	}
-	t.Cleanup(func() {
-		if backend.dll != nil {
-			_ = windows.FreeLibrary(windows.Handle(backend.dll.Handle()))
-		}
-	})
-
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test executable: %v", err)
-	}
-	commandLine := windows.ComposeCommandLine([]string{
-		executable,
-		"-test.run=^TestBundledConPtyPreservesKittyGraphics$",
-	})
+	backend := loadTestConPtyBackend(t)
+	commandLine := conPtyTestCommand(t)
 	env := append(os.Environ(), conPtyHelperEnvironment)
 	writeHandle, readHandle, hpcon, processHandle, _, err :=
 		startConPtyWithBackend(
@@ -70,39 +47,8 @@ func TestBundledConPtyPreservesKittyGraphics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start helper under bundled ConPTY: %v", err)
 	}
-	input := os.NewFile(uintptr(writeHandle), "conpty-test-input")
-	output := os.NewFile(uintptr(readHandle), "conpty-test-output")
-	defer input.Close()
-	defer output.Close()
-
-	outputDone := make(chan []byte, 1)
-	go func() {
-		data, _ := io.ReadAll(output)
-		outputDone <- data
-	}()
-
-	waitResult, waitErr := windows.WaitForSingleObject(processHandle, 10_000)
-	var exitCode uint32
-	_ = windows.GetExitCodeProcess(processHandle, &exitCode)
-	_ = input.Close()
-	backend.close(hpcon)
-	windows.CloseHandle(processHandle)
-	if waitErr != nil {
-		t.Fatalf("wait for helper: %v", waitErr)
-	}
-	if waitResult != windows.WAIT_OBJECT_0 {
-		t.Fatalf("wait result = %d, exit code = 0x%x", waitResult, exitCode)
-	}
-	if exitCode != 0 {
-		t.Fatalf("helper exit code = 0x%x", exitCode)
-	}
-
-	var data []byte
-	select {
-	case data = <-outputDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out draining bundled ConPTY output")
-	}
+	consoleFixture := ownTestConPty(t, backend, writeHandle, readHandle, hpcon, processHandle)
+	data := consoleFixture.finish(true)
 	got := string(data)
 	for _, expected := range []string{
 		conPtyTestRawAPC,
@@ -121,32 +67,10 @@ func TestBundledConPtyPreservesBracketedPasteInWin32InputMode(t *testing.T) {
 		os.Exit(0)
 	}
 
-	previousCacheRoot := conPtyCacheRoot
-	conPtyCacheRoot = t.TempDir()
-	t.Cleanup(func() {
-		conPtyCacheRoot = previousCacheRoot
-	})
-
-	backend, err := loadBundledConPtyBackend()
-	if err != nil {
-		t.Fatalf("load bundled ConPTY: %v", err)
-	}
-	t.Cleanup(func() {
-		if backend.dll != nil {
-			_ = windows.FreeLibrary(windows.Handle(backend.dll.Handle()))
-		}
-	})
-
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test executable: %v", err)
-	}
-	commandLine := windows.ComposeCommandLine([]string{
-		executable,
-		"-test.run=^TestBundledConPtyPreservesBracketedPasteInWin32InputMode$",
-	})
-	env := append(os.Environ(), conPtyBracketedPasteHelperEnvironment)
-	writeHandle, readHandle, hpcon, processHandle, _, err :=
+	backend := loadTestConPtyBackend(t)
+	commandLine := conPtyTestCommand(t)
+	env := append(os.Environ(), conPtyBracketedPasteHelperEnvironment, "MONKEYMUX_CONPTY_VT_INPUT=1")
+	writeHandle, readHandle, hpcon, processHandle, pid, err :=
 		startConPtyWithBackend(
 			backend,
 			commandLine,
@@ -158,177 +82,98 @@ func TestBundledConPtyPreservesBracketedPasteInWin32InputMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start helper under bundled ConPTY: %v", err)
 	}
-	input := os.NewFile(uintptr(writeHandle), "conpty-bracketed-paste-input")
-	output := os.NewFile(uintptr(readHandle), "conpty-bracketed-paste-output")
-	defer input.Close()
-	defer output.Close()
-
-	outputDone := make(chan []byte, 1)
-	ready := make(chan struct{})
-	go func() {
-		var data []byte
-		buffer := make([]byte, 4096)
-		readySent := false
-		for {
-			count, readErr := output.Read(buffer)
-			if count > 0 {
-				data = append(data, buffer[:count]...)
-				if !readySent && bytes.Contains(data, []byte("READY")) {
-					close(ready)
-					readySent = true
-				}
-			}
-			if readErr != nil {
-				outputDone <- data
-				return
-			}
-		}
-	}()
-
+	consoleFixture := ownTestConPty(t, backend, writeHandle, readHandle, hpcon, processHandle)
 	select {
-	case <-ready:
+	case <-consoleFixture.ready:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for bundled ConPTY helper readiness")
 	}
 	const paste = "\x1b[200~hello\x1b[201~!"
-	encodedPaste := encodeBracketedPasteInputForWin32InputMode([]byte(paste))
-	if _, err := input.Write(encodedPaste); err != nil {
+	window := &muxWindow{id: "@1", win32InputMode: true, pty: &winPty{pid: pid, writeFile: consoleFixture.input}}
+	t.Cleanup(window.pty.(*winPty).closeConsoleInputModeReader)
+	if vt, err := window.pty.(*winPty).virtualTerminalInputEnabled(); err != nil || !vt {
+		t.Fatalf("console input mode: VT=%v, error=%v; want VT enabled", vt, err)
+	}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	const reply = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
+	if err := server.writeWindow(window.id, []byte(reply)); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.writeWindowInput(window.id, []byte(paste), true); err != nil {
 		t.Fatalf("write bracketed paste: %v", err)
 	}
-
-	waitResult, waitErr := windows.WaitForSingleObject(processHandle, 10_000)
-	var exitCode uint32
-	_ = windows.GetExitCodeProcess(processHandle, &exitCode)
-	_ = input.Close()
-	backend.close(hpcon)
-	windows.CloseHandle(processHandle)
-	if waitErr != nil {
-		t.Fatalf("wait for helper: %v", waitErr)
-	}
-	if waitResult != windows.WAIT_OBJECT_0 {
-		t.Fatalf("wait result = %d, exit code = 0x%x", waitResult, exitCode)
-	}
-	if exitCode != 0 {
-		t.Fatalf("helper exit code = 0x%x", exitCode)
-	}
-
-	var data []byte
-	select {
-	case data = <-outputDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out draining bundled ConPTY output")
-	}
-	want := "INPUT_HEX:" + hex.EncodeToString([]byte(paste))
+	data := consoleFixture.finish(true)
+	want := "INPUT_HEX:" + hex.EncodeToString([]byte(reply+paste))
 	if got := string(data); !strings.Contains(got, want) {
 		t.Fatalf("bundled ConPTY input does not contain %q; output=%q", want, got)
 	}
 }
 
-func TestSplitBracketedPasteActionsStayClassified(t *testing.T) {
-	client := &attachClient{}
-
-	first := client.routeInput([]byte("abc\x1b[20"))
-	if !bytes.Equal(first.passthrough, []byte("abc")) ||
-		len(first.actions) != 1 ||
-		first.actions[0].bracketedPaste {
-		t.Fatalf("partial paste start routing = %#v", first)
+func TestBundledConPtyNativeInputDoesNotLeakProtocolText(t *testing.T) {
+	if os.Getenv("MONKEYMUX_CONPTY_BRACKETED_PASTE_TEST_HELPER") == "1" {
+		runConPtyBracketedPasteTestHelper()
+		os.Exit(0)
 	}
-
-	second := client.routeInput([]byte("0~hello\x1b[201~"))
-	want := []byte("\x1b[200~hello\x1b[201~")
-	if !bytes.Equal(second.passthrough, want) ||
-		len(second.actions) != 1 ||
-		!second.actions[0].bracketedPaste ||
-		!bytes.Equal(second.actions[0].data, want) {
-		t.Fatalf("completed paste routing = %#v, want %q", second, want)
+	backend := loadTestConPtyBackend(t)
+	write, read, console, process, pid, err := startConPtyWithBackend(
+		backend, conPtyTestCommand(t), append(os.Environ(), conPtyBracketedPasteHelperEnvironment, "MONKEYMUX_CONPTY_NATIVE_INPUT=1"), "", 120, 40,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := ownTestConPty(t, backend, write, read, console, process)
+	select {
+	case <-fixture.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for helper")
+	}
+	window := &muxWindow{id: "@1", win32InputMode: true,
+		pty: &winPty{pid: pid, writeFile: fixture.input}}
+	t.Cleanup(window.pty.(*winPty).closeConsoleInputModeReader)
+	if vt, err := window.pty.(*winPty).virtualTerminalInputEnabled(); err != nil || vt {
+		t.Fatalf("console input mode: VT=%v, error=%v; want native input", vt, err)
+	}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	if err := server.writeWindow(window.id, []byte("\x1b]11;rgb:0d0d/1a1a/2020\x1b\\")); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise framing split across writes, like mobile keyboard batches.
+	for _, input := range []string{"\x1b[200~hello\r", "\nworld\t\xf0", "\x9f\x90\x92", "\x1b", "[20", "1~", "!"} {
+		if err := server.writeWindowInput(window.id, []byte(input), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := string(fixture.finish(true))
+	want := "INPUT_HEX:" + hex.EncodeToString([]byte("hello\rworld\t🐒!"))
+	if !strings.Contains(got, want) {
+		t.Fatalf("console input missing %q; output=%q", want, got)
 	}
 }
-
-func TestEscapeImmediatelyBeforePastePreservesActionOrder(t *testing.T) {
-	client := &attachClient{}
-	input := []byte("\x1b\x1b[200~hello\x1b[201~x")
-
-	routing := client.routeInput(input)
-	if !bytes.Equal(routing.passthrough, input) ||
-		len(routing.actions) != 3 ||
-		routing.actions[0].bracketedPaste ||
-		!bytes.Equal(routing.actions[0].data, []byte{0x1b}) ||
-		!routing.actions[1].bracketedPaste ||
-		!bytes.Equal(
-			routing.actions[1].data,
-			[]byte("\x1b[200~hello\x1b[201~"),
-		) ||
-		routing.actions[2].bracketedPaste ||
-		!bytes.Equal(routing.actions[2].data, []byte("x")) {
-		t.Fatalf("escape + paste routing = %#v", routing)
-	}
-}
-
-func TestAmbiguousPasteStartFlushesAsOrdinaryInput(t *testing.T) {
-	passthrough := make(chan []byte, 1)
-	claims := make(chan uint64, 1)
-	client := &attachClient{
-		inputPassthrough: func(data []byte) {
-			passthrough <- append([]byte(nil), data...)
-		},
-		focusSequenceSnapshot: func() uint64 {
-			return 42
-		},
-		focusClaim: func(sequence uint64) {
-			claims <- sequence
-		},
-	}
-
-	routing := client.routeInput([]byte{0x1b})
-	if len(routing.passthrough) != 0 {
-		t.Fatalf("ambiguous escape routing = %#v", routing)
-	}
-	select {
-	case data := <-passthrough:
-		if !bytes.Equal(data, []byte{0x1b}) {
-			t.Fatalf("flushed input = %q, want ESC", data)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for ambiguous ESC flush")
-	}
-	select {
-	case sequence := <-claims:
-		if sequence != 42 {
-			t.Fatalf("focus sequence = %d, want 42", sequence)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for focus claim")
-	}
-}
-
-func TestLateSplitPasteStartAfterTimeoutStaysOrdinary(t *testing.T) {
-	flushed := make(chan []byte, 1)
-	client := &attachClient{
-		inputPassthrough: func(data []byte) {
-			flushed <- append([]byte(nil), data...)
-		},
-	}
-
-	if routing := client.routeInput([]byte{0x1b}); len(routing.passthrough) != 0 {
-		t.Fatalf("ambiguous escape routing = %#v", routing)
-	}
-	select {
-	case data := <-flushed:
-		if !bytes.Equal(data, []byte{0x1b}) {
-			t.Fatalf("flushed prefix = %q, want ESC", data)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for paste prefix flush")
-	}
-
-	routing := client.routeInput([]byte("[200~hello\x1b[201~"))
-	if len(routing.actions) != 1 ||
-		routing.actions[0].bracketedPaste ||
-		!bytes.Equal(
-			routing.actions[0].data,
-			[]byte("[200~hello\x1b[201~"),
-		) {
-		t.Fatalf("late split ordinary routing = %#v", routing)
+func TestConPtyRejectsInvalidInputBeforeCreate(t *testing.T) {
+	backend := &conPtyBackend{create: func(windows.Coord, windows.Handle, windows.Handle, uint32, *windows.Handle) error {
+		t.Error("invalid input reached pseudoconsole creation")
+		return windows.ERROR_INVALID_PARAMETER
+	}}
+	for _, test := range []struct {
+		command, dir string
+		env          []string
+		want         string
+	}{
+		{"cmd\x00", "", nil, "encode command line:"},
+		{"cmd", "dir\x00", nil, "encode working directory:"},
+		{"cmd", "", []string{"KEY=value\x00"}, "encode environment:"},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			write, read, console, process, pid, err := startConPtyWithBackend(backend, test.command, test.env, test.dir, 80, 24)
+			if err == nil || !strings.HasPrefix(err.Error(), test.want) {
+				t.Fatalf("start error = %v, want %s", err, test.want)
+			}
+			if write != 0 || read != 0 || console != 0 || process != 0 || pid != 0 {
+				t.Fatalf("failure returned resources: %v %v %v %v %v", write, read, console, process, pid)
+			}
+		})
 	}
 }
 
@@ -338,20 +183,20 @@ func TestConPtyStartFallsBackAndReturnsActualBackend(t *testing.T) {
 		os.Exit(0)
 	}
 
-	previousCacheRoot := conPtyCacheRoot
-	conPtyCacheRoot = t.TempDir()
-	t.Cleanup(func() {
-		conPtyCacheRoot = previousCacheRoot
-	})
-	fallback, err := loadBundledConPtyBackend()
-	if err != nil {
-		t.Fatalf("load fallback ConPTY: %v", err)
+	fallback := loadTestConPtyBackend(t)
+	closed := 0
+	closeConsole := fallback.close
+	fallback.close = func(handle windows.Handle) {
+		closed++
+		closeConsole(handle)
 	}
-	t.Cleanup(func() {
-		if fallback.dll != nil {
-			_ = windows.FreeLibrary(windows.Handle(fallback.dll.Handle()))
-		}
-	})
+	write, read, console, process, pid, startErr := startConPtyWithBackend(fallback, `"`+t.TempDir()+`\missing.exe"`, nil, "", 80, 24)
+	if startErr == nil || !strings.HasPrefix(startErr.Error(), "create process:") {
+		t.Fatalf("missing executable error = %v", startErr)
+	}
+	if write != 0 || read != 0 || console != 0 || process != 0 || pid != 0 || closed != 1 {
+		t.Fatalf("failed launch resources = %v %v %v %v %v, console closes = %d", write, read, console, process, pid, closed)
+	}
 	preferred := &conPtyBackend{
 		name: "injected-failure",
 		create: func(
@@ -364,14 +209,7 @@ func TestConPtyStartFallsBackAndReturnsActualBackend(t *testing.T) {
 			return windows.ERROR_INVALID_PARAMETER
 		},
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test executable: %v", err)
-	}
-	commandLine := windows.ComposeCommandLine([]string{
-		executable,
-		"-test.run=^TestConPtyStartFallsBackAndReturnsActualBackend$",
-	})
+	commandLine := conPtyTestCommand(t)
 	env := append(os.Environ(), conPtyHelperEnvironment)
 
 	writeHandle, readHandle, hpcon, usedBackend, processHandle, _, err :=
@@ -387,21 +225,11 @@ func TestConPtyStartFallsBackAndReturnsActualBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start with fallback: %v", err)
 	}
-	input := os.NewFile(uintptr(writeHandle), "conpty-fallback-input")
-	output := os.NewFile(uintptr(readHandle), "conpty-fallback-output")
-	defer input.Close()
-	defer output.Close()
+	consoleFixture := ownTestConPty(t, usedBackend, writeHandle, readHandle, hpcon, processHandle)
 	if usedBackend != fallback {
 		t.Fatalf("used backend = %q, want fallback %q", usedBackend.name, fallback.name)
 	}
-
-	waitResult, waitErr := windows.WaitForSingleObject(processHandle, 10_000)
-	_ = input.Close()
-	usedBackend.close(hpcon)
-	windows.CloseHandle(processHandle)
-	if waitErr != nil || waitResult != windows.WAIT_OBJECT_0 {
-		t.Fatalf("wait result=%d error=%v", waitResult, waitErr)
-	}
+	consoleFixture.finish(true)
 }
 
 func runConPtyTestHelper() {
@@ -443,16 +271,39 @@ func runConPtyBracketedPasteTestHelper() {
 	if windows.GetConsoleMode(stdin, &inputMode) == nil {
 		inputMode &^= windows.ENABLE_LINE_INPUT |
 			windows.ENABLE_ECHO_INPUT |
-			windows.ENABLE_PROCESSED_INPUT
+			windows.ENABLE_PROCESSED_INPUT |
+			windows.ENABLE_VIRTUAL_TERMINAL_INPUT
+		if os.Getenv("MONKEYMUX_CONPTY_VT_INPUT") == "1" {
+			inputMode |= windows.ENABLE_VIRTUAL_TERMINAL_INPUT
+		}
 		_ = windows.SetConsoleMode(stdin, inputMode)
 	}
-	_, _ = os.Stdout.WriteString("\x1b[?9001h\x1b[?2004hREADY\r\n")
+	_, _ = os.Stdout.WriteString("\x1b[?2004hREADY\r\n")
 
 	var received []uint16
 	buffer := make([]uint16, 64)
 	for {
 		var count uint32
-		if err := windows.ReadConsole(
+		if os.Getenv("MONKEYMUX_CONPTY_NATIVE_INPUT") == "1" {
+			// Match Codex/crossterm's native ReadConsoleInputW reader rather
+			// than only proving that ReadConsoleW can reconstruct a VT stream.
+			var record struct {
+				eventType, padding     uint16
+				keyDown                int32
+				repeat, vk, scan, char uint16
+				control                uint32
+			}
+			readInput := windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
+			ok, _, _ := readInput.Call(uintptr(stdin), uintptr(unsafe.Pointer(&record)), 1, uintptr(unsafe.Pointer(&count)))
+			if ok == 0 {
+				os.Exit(3)
+			}
+			if count == 0 || record.eventType != 1 || record.keyDown == 0 || record.char == 0 {
+				continue
+			}
+			count = 1
+			buffer[0] = record.char
+		} else if err := windows.ReadConsole(
 			stdin,
 			&buffer[0],
 			uint32(len(buffer)),
@@ -460,6 +311,14 @@ func runConPtyBracketedPasteTestHelper() {
 			nil,
 		); err != nil {
 			os.Exit(3)
+		}
+		if os.Getenv("MONKEYMUX_CONPTY_MODE_TOGGLE") == "1" && count == 1 && buffer[0] == '^' {
+			var mode uint32
+			if windows.GetConsoleMode(stdin, &mode) != nil ||
+				windows.SetConsoleMode(stdin, mode^windows.ENABLE_VIRTUAL_TERMINAL_INPUT) != nil {
+				os.Exit(4)
+			}
+			continue
 		}
 		received = append(received, buffer[:count]...)
 		if count > 0 && buffer[count-1] == '!' {
@@ -471,4 +330,229 @@ func runConPtyBracketedPasteTestHelper() {
 			hex.EncodeToString([]byte(string(utf16.Decode(received)))) +
 			"\r\n",
 	)
+}
+
+func loadTestConPtyBackend(t *testing.T) *conPtyBackend {
+	t.Helper()
+	previous := conPtyCacheRoot
+	conPtyCacheRoot = t.TempDir()
+	t.Cleanup(func() { conPtyCacheRoot = previous })
+	backend, err := loadBundledConPtyBackend()
+	if err != nil {
+		t.Fatalf("load bundled ConPTY: %v", err)
+	}
+	t.Cleanup(func() {
+		if backend.dll != nil {
+			_ = windows.FreeLibrary(windows.Handle(backend.dll.Handle()))
+		}
+	})
+	if backend.name != "bundled" {
+		t.Fatalf("backend name = %q, want bundled", backend.name)
+	}
+	return backend
+}
+
+func conPtyTestCommand(t *testing.T) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return windows.ComposeCommandLine([]string{executable, "-test.run=^" + t.Name() + "$"})
+}
+
+type testConPty struct {
+	input  *os.File
+	ready  <-chan struct{}
+	finish func(bool) []byte
+}
+
+func ownTestConPty(t *testing.T, backend *conPtyBackend, write, read, console, process windows.Handle) *testConPty {
+	t.Helper()
+	input := os.NewFile(uintptr(write), "conpty-test-input")
+	output := os.NewFile(uintptr(read), "conpty-test-output")
+	ready := make(chan struct{})
+	drained := make(chan []byte, 1)
+	var once sync.Once
+	var data []byte
+	fixture := &testConPty{input: input, ready: ready}
+	fixture.finish = func(wait bool) []byte {
+		t.Helper()
+		once.Do(func() {
+			var timeout uint32
+			if wait {
+				timeout = 10_000
+			}
+			result, err := windows.WaitForSingleObject(process, timeout)
+			if wait && (err != nil || result != windows.WAIT_OBJECT_0) {
+				t.Errorf("wait for ConPTY helper: result=%d, error=%v", result, err)
+			}
+			if err != nil || result != windows.WAIT_OBJECT_0 {
+				if err := windows.TerminateProcess(process, 1); err != nil {
+					t.Errorf("terminate helper: %v", err)
+				}
+				if result, err := windows.WaitForSingleObject(process, 5_000); err != nil || result != windows.WAIT_OBJECT_0 {
+					t.Errorf("reap helper: result=%d, error=%v", result, err)
+				}
+			} else if wait {
+				var exitCode uint32
+				if err := windows.GetExitCodeProcess(process, &exitCode); err != nil || exitCode != 0 {
+					t.Errorf("helper exit code = %d, error=%v", exitCode, err)
+				}
+			}
+			// ClosePseudoConsole can block while flushing output. Keep draining
+			// until the console is closed, then release the process and pipes.
+			backend.close(console)
+			_ = windows.CloseHandle(process)
+			_ = input.Close()
+			select {
+			case data = <-drained:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out draining ConPTY output")
+				_ = output.Close()
+				data = <-drained
+			}
+			_ = output.Close()
+		})
+		return data
+	}
+	t.Cleanup(func() { fixture.finish(false) })
+	go func() {
+		var data []byte
+		buffer := make([]byte, 4096)
+		readySent := false
+		for {
+			n, err := output.Read(buffer)
+			data = append(data, buffer[:n]...)
+			if !readySent && bytes.Contains(data, []byte("READY")) {
+				close(ready)
+				readySent = true
+			}
+			if err != nil {
+				drained <- data
+				return
+			}
+		}
+	}()
+	return fixture
+}
+
+func TestConPtyFixtureCleanupTerminatesUnfinishedChild(t *testing.T) {
+	if os.Getenv("MONKEYMUX_CONPTY_BRACKETED_PASTE_TEST_HELPER") == "1" {
+		runConPtyBracketedPasteTestHelper()
+		os.Exit(0)
+	}
+	backend := loadTestConPtyBackend(t)
+	command := conPtyTestCommand(t)
+	closed := 0
+	closeConsole := backend.close
+	backend.close = func(handle windows.Handle) { closed++; closeConsole(handle) }
+	var fixture *testConPty
+	var process, observer windows.Handle
+	t.Cleanup(func() { _ = windows.CloseHandle(observer) })
+	t.Run("return before finish", func(t *testing.T) {
+		write, read, console, child, _, err := startConPtyWithBackend(
+			backend, command, append(os.Environ(), conPtyBracketedPasteHelperEnvironment), "", 120, 40,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture = ownTestConPty(t, backend, write, read, console, child)
+		process = child
+		if err := windows.DuplicateHandle(windows.CurrentProcess(), process, windows.CurrentProcess(), &observer, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-fixture.ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("helper did not become ready")
+		}
+		if result, err := windows.WaitForSingleObject(observer, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
+			t.Fatalf("helper must still be waiting for input: result=%d, error=%v", result, err)
+		}
+		// Returning without finish exercises the same registered cleanup as Fatal.
+	})
+	if fixture == nil || observer == 0 {
+		t.Fatal("helper fixture was not created")
+	}
+	fixture.finish(false)
+	if closed != 1 {
+		t.Errorf("console closed %d times, want once", closed)
+	}
+	if result, err := windows.WaitForSingleObject(observer, 0); err != nil || result != windows.WAIT_OBJECT_0 {
+		t.Errorf("cleanup did not reap helper: result=%d, error=%v", result, err)
+	}
+	if _, err := windows.WaitForSingleObject(process, 0); err != windows.ERROR_INVALID_HANDLE {
+		t.Errorf("process handle survived cleanup: %v", err)
+	}
+	if _, err := fixture.input.Write([]byte("late input")); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("input survived cleanup: %v", err)
+	}
+}
+
+func TestConsoleInputModeReaderIsPersistentAndTracksChanges(t *testing.T) {
+	if os.Getenv("MONKEYMUX_CONPTY_BRACKETED_PASTE_TEST_HELPER") == "1" {
+		runConPtyBracketedPasteTestHelper()
+		os.Exit(0)
+	}
+	backend := loadTestConPtyBackend(t)
+	env := append(os.Environ(), conPtyBracketedPasteHelperEnvironment,
+		"MONKEYMUX_CONPTY_NATIVE_INPUT=1", "MONKEYMUX_CONPTY_MODE_TOGGLE=1")
+	write, read, console, process, pid, err := startConPtyWithBackend(
+		backend, conPtyTestCommand(t), env, "", 120, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := ownTestConPty(t, backend, write, read, console, process)
+	select {
+	case <-fixture.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper not ready")
+	}
+	pty := &winPty{pid: pid, writeFile: fixture.input}
+	t.Cleanup(pty.closeConsoleInputModeReader)
+	if vt, err := pty.virtualTerminalInputEnabled(); err != nil || vt {
+		t.Fatalf("initial VT mode = %v, %v", vt, err)
+	}
+	reader := pty.inputModeReader
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		if _, err := pty.virtualTerminalInputEnabled(); err != nil {
+			t.Fatal(err)
+		}
+		if pty.inputModeReader != reader {
+			t.Fatal("query restarted the mode reader")
+		}
+	}
+	t.Logf("50 warm mode queries: %s", time.Since(start))
+	for _, want := range []bool{true, false} {
+		if _, err := fixture.input.Write([]byte{'^'}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			vt, err := pty.virtualTerminalInputEnabled()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pty.inputModeReader != reader {
+				t.Fatal("mode change restarted reader")
+			}
+			if vt == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("VT mode did not change to %v", want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	pty.closeConsoleInputModeReader()
+	if reader.cmd.ProcessState == nil || !reader.cmd.ProcessState.Exited() {
+		t.Fatal("mode reader was not reaped on close")
+	}
+	if _, err := fixture.input.Write([]byte{'!'}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.finish(true)
 }

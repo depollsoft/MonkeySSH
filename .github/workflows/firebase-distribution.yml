@@ -1,0 +1,274 @@
+name: Firebase Distribution
+
+# Main builds are shared by Deploy Private's store and Firebase consumers.
+# This workflow distributes immutable PR artifacts using trusted main code.
+on:
+  workflow_run:
+    workflows: [PR Preview, PR Preview iOS]
+    types: [completed]
+
+# Concurrency is applied by the reusable deployment call after PR identity and
+# platform are known. Only an older run for the same PR platform is cancelled.
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  resolve-preview:
+    name: Resolve Trusted Preview Artifact
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      should-distribute: ${{ steps.preview.outputs.should-distribute }}
+      platform: ${{ steps.preview.outputs.platform }}
+      pr-number: ${{ steps.preview.outputs.pr-number }}
+      pr-title: ${{ steps.preview.outputs.pr-title }}
+      source-sha: ${{ steps.preview.outputs.source-sha }}
+      source-branch: ${{ steps.preview.outputs.source-branch }}
+      build-name: ${{ steps.preview.outputs.build-name }}
+      build-number: ${{ steps.preview.outputs.build-number }}
+      android-aab-artifact: ${{ steps.preview.outputs.android-aab-artifact }}
+      ios-ipa-artifact: ${{ steps.preview.outputs.ios-ipa-artifact }}
+      preview-run-id: ${{ steps.preview.outputs.preview-run-id }}
+    steps:
+      - name: Validate PR and resolve immutable artifacts
+        id: preview
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflowRun = context.payload.workflow_run;
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {owner, repo, run_id: workflowRun.id, per_page: 100},
+            );
+            const activeArtifacts = artifacts.filter((artifact) => !artifact.expired);
+            // run-name can replace workflow_run.name with a per-build title.
+            // Resolve the stable workflow name by ID before selecting a platform.
+            const {data: producerWorkflow} = await github.rest.actions.getWorkflow({
+              owner, repo, workflow_id: workflowRun.workflow_id,
+              request: {timeout: 10_000},
+            });
+            const sourceWorkflow = producerWorkflow.name;
+            let platform;
+            let sourceSha;
+            let buildName;
+            let buildNumber;
+            let androidAabArtifact = '';
+            let iosIpaArtifact = '';
+            let pullRequest;
+
+            if (sourceWorkflow === 'PR Preview') {
+              platform = 'android';
+              sourceSha = workflowRun.head_sha;
+              const pullRequestSummary = workflowRun.pull_requests?.[0];
+              if (!pullRequestSummary) {
+                core.notice(`Workflow run ${workflowRun.id} has no associated pull request.`);
+                core.setOutput('should-distribute', 'false');
+                return;
+              }
+              ({data: pullRequest} = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pullRequestSummary.number,
+              }));
+              if (pullRequest.head.repo?.full_name !== `${owner}/${repo}`) {
+                core.notice(`Skipping fork PR #${pullRequest.number}.`);
+                core.setOutput('should-distribute', 'false');
+                return;
+              }
+              if (pullRequest.head.sha !== sourceSha) {
+                core.notice(
+                  `Skipping stale PR Preview run ${workflowRun.id}; ` +
+                  `PR #${pullRequest.number} now points at ${pullRequest.head.sha}.`,
+                );
+                core.setOutput('should-distribute', 'false');
+                return;
+              }
+              const aabArtifacts = activeArtifacts.filter((artifact) =>
+                artifact.name.startsWith('android-unsigned-private-'),
+              );
+              const aab =
+                aabArtifacts.find((artifact) =>
+                  !/-android-(?:arm|arm64|x64|ia32)$/.test(artifact.name),
+                ) ?? aabArtifacts[0];
+              if (!aab) {
+                core.setFailed(`Preview run ${workflowRun.id} is missing Android artifacts.`);
+                return;
+              }
+              const match = aab.name.match(
+                /^android-unsigned-private-(.+)-([0-9]+)(?:-android-(?:arm|arm64|x64|ia32))?$/,
+              );
+              if (!match) {
+                core.setFailed(`Could not parse Android artifact name ${aab.name}.`);
+                return;
+              }
+              [, buildName, buildNumber] = match;
+              androidAabArtifact = aab.name;
+            } else if (sourceWorkflow === 'PR Preview iOS') {
+              platform = 'ios';
+              const ipa = activeArtifacts.find((artifact) =>
+                artifact.name.startsWith('ios-unsigned-private-'),
+              );
+              if (!ipa) {
+                core.notice(
+                  `Skipping PR Preview iOS run ${workflowRun.id}; no unsigned IPA was produced.`,
+                );
+                core.setOutput('should-distribute', 'false');
+                return;
+              }
+              const match = ipa.name.match(
+                /^ios-unsigned-private-(.+)-([0-9]+)-([0-9a-f]{40})\.ipa$/,
+              );
+              if (!match) {
+                core.setFailed(`Could not parse iOS artifact name ${ipa.name}.`);
+                return;
+              }
+              [, buildName, buildNumber, sourceSha] = match;
+              if (workflowRun.event === 'pull_request' && workflowRun.head_sha !== sourceSha) {
+                core.setFailed('iOS artifact source does not match its producer commit.');
+                return;
+              }
+              iosIpaArtifact = ipa.name;
+              const associated = await github.paginate(
+                github.rest.repos.listPullRequestsAssociatedWithCommit,
+                {owner, repo, commit_sha: sourceSha, per_page: 100},
+              );
+              const candidate = associated.find((pull) =>
+                pull.state === 'open' && pull.head?.sha === sourceSha,
+              );
+              if (!candidate) {
+                core.notice(`No open pull request currently points at ${sourceSha}.`);
+                core.setOutput('should-distribute', 'false');
+                return;
+              }
+              ({data: pullRequest} = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: candidate.number,
+              }));
+            } else {
+              core.notice(`Ignoring unsupported workflow ${sourceWorkflow}.`);
+              core.setOutput('should-distribute', 'false');
+              return;
+            }
+
+            if (pullRequest.head.repo?.full_name !== `${owner}/${repo}`) {
+              core.notice(`Skipping fork PR #${pullRequest.number}.`);
+              core.setOutput('should-distribute', 'false');
+              return;
+            }
+            if (pullRequest.head.sha !== sourceSha) {
+              core.notice(
+                `Skipping stale ${sourceWorkflow} run ${workflowRun.id}; ` +
+                `PR #${pullRequest.number} now points at ${pullRequest.head.sha}.`,
+              );
+              core.setOutput('should-distribute', 'false');
+              return;
+            }
+
+            if (pullRequest.state !== 'open') {
+              core.setOutput('should-distribute', 'false');
+              return;
+            }
+            core.setOutput('should-distribute', 'true');
+            core.setOutput('platform', platform);
+            core.setOutput('pr-number', String(pullRequest.number));
+            core.setOutput('pr-title', pullRequest.title ?? '');
+            core.setOutput('source-sha', sourceSha);
+            core.setOutput('source-branch', pullRequest.head.ref);
+            core.setOutput('build-name', buildName);
+            core.setOutput('build-number', buildNumber);
+            core.setOutput('android-aab-artifact', androidAabArtifact);
+            core.setOutput('ios-ipa-artifact', iosIpaArtifact);
+            core.setOutput('preview-run-id', String(workflowRun.id));
+
+  distribute-preview-android:
+    name: Distribute Android Preview
+    needs: resolve-preview
+    if: >-
+      needs.resolve-preview.outputs.should-distribute == 'true' &&
+      needs.resolve-preview.outputs.platform == 'android'
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.resolve-preview.outputs.build-name }}
+      build-number: ${{ needs.resolve-preview.outputs.build-number }}
+      pr-number: ${{ needs.resolve-preview.outputs.pr-number }}
+      pr-title: ${{ needs.resolve-preview.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ needs.resolve-preview.outputs.source-sha }}
+      source-branch: ${{ needs.resolve-preview.outputs.source-branch }}
+      deploy-ios-to: none
+      deploy-android-to: firebase
+      build-ios: false
+      build-android: true
+      android-reuse-run-id: ${{ needs.resolve-preview.outputs.preview-run-id }}
+      android-reuse-aab-artifact-name: ${{ needs.resolve-preview.outputs.android-aab-artifact }}
+      android-reuse-aab-is-unsigned: true
+      android-reuse-source-sha: ${{ needs.resolve-preview.outputs.source-sha }}
+      firebase-tester-groups: ${{ vars.FIREBASE_TESTER_GROUPS || 'testers' }}
+      deployment-concurrency-group: firebase-preview-${{ needs.resolve-preview.outputs.pr-number }}-android
+      deployment-cancel-in-progress: true
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+      FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON }}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+
+  distribute-preview-ios:
+    name: Distribute iOS Preview
+    needs: resolve-preview
+    if: >-
+      needs.resolve-preview.outputs.should-distribute == 'true' &&
+      needs.resolve-preview.outputs.platform == 'ios'
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.resolve-preview.outputs.build-name }}
+      build-number: ${{ needs.resolve-preview.outputs.build-number }}
+      pr-number: ${{ needs.resolve-preview.outputs.pr-number }}
+      pr-title: ${{ needs.resolve-preview.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ needs.resolve-preview.outputs.source-sha }}
+      source-branch: ${{ needs.resolve-preview.outputs.source-branch }}
+      deploy-ios-to: firebase
+      deploy-android-to: none
+      build-ios: true
+      build-android: false
+      ios-reuse-run-id: ${{ needs.resolve-preview.outputs.preview-run-id }}
+      ios-reuse-ipa-artifact-name: ${{ needs.resolve-preview.outputs.ios-ipa-artifact }}
+      ios-reuse-ipa-is-unsigned: true
+      ios-resign-match-readonly: true
+      ios-reuse-source-sha: ${{ needs.resolve-preview.outputs.source-sha }}
+      firebase-tester-groups: ${{ vars.FIREBASE_TESTER_GROUPS || 'testers' }}
+      deployment-concurrency-group: firebase-preview-${{ needs.resolve-preview.outputs.pr-number }}-ios
+      deployment-cancel-in-progress: true
+    secrets:
+      MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+      FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST }}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}

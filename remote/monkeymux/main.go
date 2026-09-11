@@ -56,13 +56,17 @@ type muxProcess interface {
 	// Hangup asks the process (group) to terminate, as if the controlling
 	// terminal went away (SIGHUP on POSIX).
 	Hangup()
+	// Kill terminates the process group immediately. The caller must own the
+	// process exclusively and must not call Wait until Kill returns.
+	Kill()
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.180"
+	monkeyMuxVersion                  = "0.1.195"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
+	controlMaxFrameBytes              = 1024 * 1024
 	piSessionMetadataRecordLimitBytes = 1024 * 1024
 	piSessionHeaderScanLimitBytes     = 1024 * 1024
 	piSessionActivityMatchTolerance   = 15 * time.Second
@@ -74,6 +78,8 @@ const (
 	runCommandTimeout                 = 20 * time.Second
 	socketTimeout                     = 2 * time.Second
 	attachWriteTimeout                = time.Second
+	attachTransitionTimeout           = 3 * time.Second
+	terminalResponseMaxOutstanding    = 64
 	attachWriteChunkBytes             = 32 * 1024
 	terminalResponseFocusGrace        = 2 * time.Second
 	focusInputCarryDelay              = 75 * time.Millisecond
@@ -365,9 +371,10 @@ func (w *muxWindow) resizePty(width int, height int) {
 	}
 	w.resizeGeneration.Add(1)
 	w.ptyResizeMu.Lock()
-	_ = w.pty.Resize(width, height)
-	w.ptyWidth = width
-	w.ptyHeight = height
+	if err := w.pty.Resize(width, height); err == nil {
+		w.ptyWidth = width
+		w.ptyHeight = height
+	}
 	w.ptyResizeMu.Unlock()
 }
 
@@ -396,9 +403,10 @@ func (w *muxWindow) resizePtyIfCurrent(
 	if w.resizeGeneration.Load() != generation {
 		return
 	}
-	_ = w.pty.Resize(width, height)
-	w.ptyWidth = width
-	w.ptyHeight = height
+	if err := w.pty.Resize(width, height); err == nil {
+		w.ptyWidth = width
+		w.ptyHeight = height
+	}
 }
 
 func (w *muxWindow) closePty(ptyFile muxPty) error {
@@ -435,6 +443,7 @@ const (
 	serverUpdatePolicyPrompt = "prompt"
 	serverUpdatePolicyNever  = "never"
 	serverUpdatePolicyAlways = "always"
+	serverUpdatePolicyForce  = "force"
 )
 
 var (
@@ -453,9 +462,6 @@ var (
 		},
 		"codex": {
 			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"gemini": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
 		},
 		"opencode": {
 			regexp.MustCompile(`(?:^|\s)--session(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
@@ -587,6 +593,7 @@ type restoreWindowState struct {
 	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
 	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
 	AgentSessionIdentityExact bool                      `json:"agentSessionIdentityExact,omitempty"`
+	AgentSessionAssigned      bool                      `json:"agentSessionAssigned,omitempty"`
 	NativeAcpBridgeID         string                    `json:"nativeAcpBridgeId,omitempty"`
 	NativeAcpProviderID       string                    `json:"nativeAcpProviderId,omitempty"`
 	LastActivityEpochSeconds  int64                     `json:"lastActivityEpochSeconds,omitempty"`
@@ -604,6 +611,8 @@ type restoreWindowState struct {
 }
 
 type muxServer struct {
+	agentSessionBindings agentSessionBindingState
+
 	session         string
 	width           int
 	height          int
@@ -668,6 +677,9 @@ type muxServer struct {
 	// server and keep mutating its state (markWindowClosed) after shutdown,
 	// which races whatever runs next in the same process.
 	windowWatchers sync.WaitGroup
+	// pendingWindowStarts owns admitted launches until watcher registration or
+	// rejected-process cleanup finishes. Add is guarded by s.mu and !s.closed.
+	pendingWindowStarts sync.WaitGroup
 	// socketRepublishers tracks the path-healing goroutine so close cannot
 	// return while it still owns a replacement listener with unlink disabled.
 	socketRepublishers sync.WaitGroup
@@ -677,6 +689,10 @@ type muxServer struct {
 }
 
 type muxWindow struct {
+	agentSessionWatch           *agentSessionWatch
+	inputMu                     sync.Mutex
+	nativePaste                 nativeConsolePasteFilter
+	nativeResponse              nativeConsoleResponseFilter
 	id                          string
 	index                       int
 	name                        string
@@ -687,6 +703,8 @@ type muxWindow struct {
 	agentSessionID              string
 	agentSessionDir             string
 	agentSessionPath            string
+	agentSessionAssigned        bool
+	agentIdentityServer         *muxServer
 	agentSessionIdentityExact   bool
 	nativeAcpBridgeID           string
 	nativeAcpProviderID         string
@@ -703,8 +721,6 @@ type muxWindow struct {
 	oscBuffer                   []byte
 	attachOscBuffer             []byte
 	csiBuffer                   []byte
-	terminalBellState           terminalBellParserState
-	terminalBellBytes           int
 	terminalOutputState         terminalOutputParserState
 	terminalOutputBytes         int
 	terminalOutputUtf8Remaining int
@@ -797,17 +813,6 @@ type muxWindow struct {
 	kittyGraphicsPendingTerm int
 }
 
-type terminalBellParserState int
-
-const (
-	terminalBellParserGround terminalBellParserState = iota
-	terminalBellParserEscape
-	terminalBellParserOsc
-	terminalBellParserOscEscape
-	terminalBellParserString
-	terminalBellParserStringEscape
-)
-
 type terminalOutputParserState int
 
 const (
@@ -870,11 +875,6 @@ type attachWriteGate struct {
 	deliver atomic.Bool
 }
 
-type routedTerminalResponse struct {
-	windowID string
-	data     []byte
-}
-
 type attachInputAction struct {
 	userInput      bool
 	bracketedPaste bool
@@ -884,8 +884,6 @@ type attachInputAction struct {
 
 type attachInputRouting struct {
 	claimsFocus bool
-	passthrough []byte
-	responses   []routedTerminalResponse
 	actions     []attachInputAction
 }
 
@@ -894,10 +892,6 @@ func (r *attachInputRouting) addResponse(windowID string, data []byte) {
 		return
 	}
 	copied := append([]byte(nil), data...)
-	r.responses = append(
-		r.responses,
-		routedTerminalResponse{windowID: windowID, data: copied},
-	)
 	r.actions = append(
 		r.actions,
 		attachInputAction{windowID: windowID, data: copied},
@@ -909,7 +903,6 @@ func (r *attachInputRouting) addUserInput(data []byte, bracketedPaste bool) {
 		return
 	}
 	copied := append([]byte(nil), data...)
-	r.passthrough = append(r.passthrough, copied...)
 	r.actions = append(
 		r.actions,
 		attachInputAction{
@@ -921,13 +914,11 @@ func (r *attachInputRouting) addUserInput(data []byte, bracketedPaste bool) {
 }
 
 type attachClient struct {
-	conn           net.Conn
-	id             string
-	width          int
-	height         int
-	terminalWidth  int
-	terminalHeight int
-	clipViewport   bool
+	conn         net.Conn
+	id           string
+	width        int
+	height       int
+	clipViewport bool
 	// capabilityHint holds this client's replies to static terminal capability
 	// queries. It is per client because the answer describes *this* terminal:
 	// a client that sends no hint (an older helper, or a plain terminal running
@@ -1007,6 +998,10 @@ func main() {
 		acpCommand(os.Args[2:])
 	case "pi-agent":
 		piAgentCommand(os.Args[2:])
+	case "agent-launch":
+		runAgentLaunchWrapper(os.Args[2:])
+	case "agent-identity-hook":
+		agentIdentityHookCommand(os.Args[2:])
 	case "cursor-agent-auth":
 		cursorAgentAuthCommand(os.Args[2:])
 	case "version", "--version", "-v":
@@ -1028,6 +1023,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  monkeymux list-sessions")
 	fmt.Fprintln(writer, "  monkeymux kill-session -t NAME")
 	fmt.Fprintln(writer, "  monkeymux acp start|attach|list|status|stop|gc")
+	fmt.Fprintln(writer, "  monkeymux agent-identity-hook --tool TOOL")
 	fmt.Fprintln(writer, "  monkeymux version")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Inside a session (prefix Ctrl-B):")
@@ -1121,7 +1117,7 @@ func attachCommand(args []string) {
 	restoreYolo := fs.Bool("restore-yolo", false, "restore agent windows in YOLO mode")
 	themeHintBase64 := fs.String("theme-hint-base64", "", "base64-encoded terminal theme reports")
 	capabilityHintBase64 := fs.String("capability-hint-base64", "", "base64-encoded terminal capability reports")
-	updatePolicy := fs.String("update-policy", serverUpdatePolicyPrompt, "running server update policy: prompt, never, or always")
+	updatePolicy := fs.String("update-policy", serverUpdatePolicyPrompt, "running server update policy: prompt, never, always, or force")
 	clientID := fs.String("client-id", "", "stable foreground client identifier")
 	clipViewport := fs.Bool("clip-viewport", false, "clip a shared terminal grid to this client's viewport")
 	existingOnly := fs.Bool("existing", false, "fail instead of creating a missing session")
@@ -1260,10 +1256,10 @@ func attachCommand(args []string) {
 	if flusher, ok := attachOut.(interface{ Flush() error }); ok {
 		_ = flusher.Flush()
 	}
+	restoreTerminal()
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
 		fatal(copyErr)
 	}
-	restoreTerminal()
 	if !*quiet {
 		if _, err := queryRunningServerStatus(session); err == nil {
 			fmt.Fprintf(os.Stderr, "\r\nmonkeymux: detached from %s\r\n", session)
@@ -1729,12 +1725,15 @@ func gcCommand() {
 		default:
 			continue
 		}
+		identity, _ := socketFileIdentity(path)
 		conn, err := net.DialTimeout("unix", path, 150*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
 			continue
 		}
-		_ = os.Remove(path)
+		if isStaleUnixSocketError(err) {
+			removeSocketPathIfUnchanged(path, identity)
+		}
 	}
 	gcAcpArtifacts(runDir)
 }
@@ -1834,7 +1833,15 @@ func ensureServer(
 	// AF_UNIX, removing a live socket steals the name while the old process and
 	// all of its ConPTY windows keep running unreachable.
 	if current, err := queryRunningServerStatus(session); err == nil {
-		if replacement == nil || current.version == monkeyMuxVersion {
+		var currentPID pidRecord
+		if updatePolicy == serverUpdatePolicyForce && replacement != nil {
+			currentPID, _ = sessionServerOwner(session)
+		}
+		keep, err := keepRespondingServerBeforeReplacement(current, currentPID, replacement, updatePolicy)
+		if err != nil {
+			return err
+		}
+		if keep {
 			return nil
 		}
 	}
@@ -1982,7 +1989,7 @@ func prepareRunningServerReplacement(
 	updatePolicy string,
 	startInYoloMode bool,
 ) (*ensureServerReplacement, error) {
-	if status.version == monkeyMuxVersion {
+	if status.version == monkeyMuxVersion && updatePolicy != serverUpdatePolicyForce {
 		return nil, nil
 	}
 	if !shouldUpdateRunningServer(
@@ -2061,6 +2068,33 @@ func prepareRunningServerReplacement(
 		oldPID:        oldPID,
 		legacyHandoff: !status.supportsCapability("shutdown"),
 	}, nil
+}
+
+// keepRespondingServerBeforeReplacement guards the last socket ownership check.
+// After a forced shutdown, a different known pid means another attach replaced
+// the server; keep it regardless of version. The same (or unknown) pid must fail
+// closed with the still-alive error, never unlink a responding Windows socket.
+// Legacy and native ACP handoffs intentionally retain the outgoing process, so
+// they may take over its socket even when both helpers have the same version.
+func keepRespondingServerBeforeReplacement(
+	current runningServerStatus,
+	currentPID pidRecord,
+	replacement *ensureServerReplacement,
+	updatePolicy string,
+) (bool, error) {
+	if replacement == nil {
+		return true, nil
+	}
+	if updatePolicy != serverUpdatePolicyForce {
+		return current.version == monkeyMuxVersion, nil
+	}
+	if currentPID.pid > 0 && replacement.oldPID.pid > 0 && currentPID.pid != replacement.oldPID.pid {
+		return true, nil
+	}
+	if replacement.legacyHandoff || replacement.keepOldProcess {
+		return false, nil
+	}
+	return false, errServerUpdateStillAlive
 }
 
 func queryRunningServerStatusWithRetry(
@@ -2253,14 +2287,6 @@ func removeSessionPIDFile(session string) {
 		return
 	}
 	_ = os.Remove(path)
-}
-
-func readSessionPID(session string) int {
-	path, err := sessionPIDPath(session)
-	if err != nil {
-		return 0
-	}
-	return readPIDFileOrZero(path)
 }
 
 // A record is only
@@ -2574,14 +2600,6 @@ func clearAbandonedPIDFile(path string) bool {
 		return false
 	}
 	return os.Remove(path) == nil
-}
-
-func readPIDFileOrZero(path string) int {
-	pid, err := readPIDFile(path)
-	if err != nil {
-		return 0
-	}
-	return pid
 }
 
 func readPIDFile(path string) (int, error) {
@@ -3026,6 +3044,9 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 	if restore == nil {
 		return
 	}
+	defer protectLiveAgentSessionInference(restore)()
+	defer protectProvisionalAgentSessionBindings(restore)()
+	defer protectExactAgentSessionBindings(restore)()
 	panePids := map[int]struct{}{}
 	paneWorkingDirectories := map[int]string{}
 	hasAntigravityWindows := false
@@ -3071,10 +3092,9 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 	if len(processes) > 0 {
 		processDiscoveredSessions = map[string]map[int]string{
 			"copilot":  discoverCopilotSessionIDs(processes, panePids),
-			"codex":    discoverCodexSessionIDs(processes, panePids, paneWorkingDirectories),
-			"opencode": discoverOpenCodeSessionIDs(processes, panePids, paneWorkingDirectories),
-			"claude":   discoverClaudeSessionIDs(processes, panePids, paneWorkingDirectories),
-			"gemini":   discoverGeminiSessionIDs(processes, panePids, paneWorkingDirectories),
+			"codex":    discoverAgentSessionIDs("codex", processes, panePids, paneWorkingDirectories),
+			"opencode": discoverAgentSessionIDs("opencode", processes, panePids, paneWorkingDirectories),
+			"claude":   discoverAgentSessionIDs("claude", processes, panePids, paneWorkingDirectories),
 		}
 	}
 	for i := range restore.Windows {
@@ -3139,45 +3159,59 @@ type antigravityHistoryEntry struct {
 	updatedAt      time.Time
 }
 
-func discoverAntigravitySessionIDs(
+func assignAgentSessionsByWorkspace(
 	restore *serverRestore,
 	processes map[int]processInfo,
 	panePids map[int]struct{},
+	provider string,
+	sessionIDForWorkspace func(string, time.Time, ...map[int]struct{}) string,
 ) map[int]string {
-	entries := readAntigravityHistoryEntries()
-	if len(entries) == 0 {
-		return nil
-	}
 	workspaceCounts := map[string]int{}
 	for _, window := range restore.Windows {
-		if agentToolForRestore(window) == "antigravity" {
-			workspaceCounts[normalizedAntigravityWorkspacePath(window.Cwd)]++
+		if agentToolForRestore(window) == provider {
+			workspaceCounts[normalizedAgentWorkspacePath(window.Cwd)]++
 		}
 	}
 	sessions := map[int]string{}
-	liveProcesses := agentProcessesByPane(processes, panePids, "antigravity")
+	liveProcesses := agentProcessesByPane(processes, panePids, provider)
 	for i, window := range restore.Windows {
-		if agentToolForRestore(window) != "antigravity" {
-			continue
-		}
-		workspace := normalizedAntigravityWorkspacePath(window.Cwd)
-		if workspace == "" || workspaceCounts[workspace] != 1 {
+		if agentToolForRestore(window) != provider {
 			continue
 		}
 		process, ok := liveProcesses[window.PanePid]
 		if !ok {
 			continue
 		}
+		workspace := normalizedAgentWorkspacePath(window.Cwd)
+		if exact := exactAgentSessionForProcess(provider, workspace, process, processes); exact.agentSessionID != "" {
+			sessions[i] = exact.agentSessionID
+			continue
+		}
+		if workspace == "" || workspaceCounts[workspace] != 1 {
+			continue
+		}
 		processStarted := processStartedAtForMetadata(process.pid)
-		if sessionID := antigravitySessionIDForWorkspace(
-			entries,
+		if sessionID := sessionIDForWorkspace(
 			workspace,
 			processStarted,
+			agentProcessTree(processes, process.pid),
 		); sessionID != "" {
 			sessions[i] = sessionID
 		}
 	}
 	return sessions
+}
+
+func discoverAntigravitySessionIDs(
+	restore *serverRestore,
+	processes map[int]processInfo,
+	panePids map[int]struct{},
+) map[int]string {
+	entries := readAntigravityHistoryEntries()
+	return assignAgentSessionsByWorkspace(restore, processes, panePids, "antigravity",
+		func(workspace string, started time.Time, pids ...map[int]struct{}) string {
+			return antigravitySessionIDForWorkspace(entries, workspace, started, pids...)
+		})
 }
 
 func readAntigravityHistoryEntries() []antigravityHistoryEntry {
@@ -3209,7 +3243,7 @@ func readAntigravityHistoryEntries() []antigravityHistoryEntry {
 		}
 		entries = append(entries, antigravityHistoryEntry{
 			conversationID: sessionID,
-			workspace:      normalizedAntigravityWorkspacePath(raw.Workspace),
+			workspace:      normalizedAgentWorkspacePath(raw.Workspace),
 			updatedAt:      unixDatabaseTime(strconv.FormatInt(raw.Timestamp, 10)),
 		})
 	}
@@ -3220,21 +3254,23 @@ func antigravitySessionIDForWorkspace(
 	entries []antigravityHistoryEntry,
 	workspace string,
 	processStarted time.Time,
+	windowPids ...map[int]struct{},
 ) string {
-	normalizedWorkspace := normalizedAntigravityWorkspacePath(workspace)
+	normalizedWorkspace := normalizedAgentWorkspacePath(workspace)
 	if normalizedWorkspace == "" {
 		return ""
 	}
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].workspace == normalizedWorkspace &&
-			sessionUpdatedDuringProcess(entries[i].updatedAt, processStarted) {
+			sessionUpdatedDuringProcess(entries[i].updatedAt, processStarted) &&
+			!agentSessionOwnedElsewhere("antigravity", entries[i].conversationID, agentSessionWindowPIDs(windowPids)) {
 			return entries[i].conversationID
 		}
 	}
 	return ""
 }
 
-func normalizedAntigravityWorkspacePath(value string) string {
+func normalizedAgentWorkspacePath(value string) string {
 	workspace := strings.TrimSpace(value)
 	if workspace == "" {
 		return ""
@@ -3271,36 +3307,10 @@ func discoverCursorSessionIDs(
 	if len(entries) == 0 {
 		return nil
 	}
-	workspaceCounts := map[string]int{}
-	for _, window := range restore.Windows {
-		if agentToolForRestore(window) == "cursor-agent" {
-			workspaceCounts[normalizedCursorWorkspacePath(window.Cwd)]++
-		}
-	}
-	sessions := map[int]string{}
-	liveProcesses := agentProcessesByPane(processes, panePids, "cursor-agent")
-	for i, window := range restore.Windows {
-		if agentToolForRestore(window) != "cursor-agent" {
-			continue
-		}
-		workspace := normalizedCursorWorkspacePath(window.Cwd)
-		if workspace == "" || workspaceCounts[workspace] != 1 {
-			continue
-		}
-		process, ok := liveProcesses[window.PanePid]
-		if !ok {
-			continue
-		}
-		processStarted := processStartedAtForMetadata(process.pid)
-		if sessionID := cursorSessionIDForWorkspace(
-			entries,
-			workspace,
-			processStarted,
-		); sessionID != "" {
-			sessions[i] = sessionID
-		}
-	}
-	return sessions
+	return assignAgentSessionsByWorkspace(restore, processes, panePids, "cursor-agent",
+		func(workspace string, started time.Time, pids ...map[int]struct{}) string {
+			return cursorSessionIDForWorkspace(entries, workspace, started, pids...)
+		})
 }
 
 // readCursorChatEntries reads recent Cursor chat metadata, ordered oldest to
@@ -3371,7 +3381,7 @@ func readCursorChatMeta(path string, chatID string) (cursorChatEntry, bool) {
 	}
 	return cursorChatEntry{
 		chatID:    sessionID,
-		cwd:       normalizedCursorWorkspacePath(raw.Cwd),
+		cwd:       normalizedAgentWorkspacePath(raw.Cwd),
 		updatedAt: updatedAt,
 	}, true
 }
@@ -3380,35 +3390,21 @@ func cursorSessionIDForWorkspace(
 	entries []cursorChatEntry,
 	workspace string,
 	processStarted time.Time,
+	windowPids ...map[int]struct{},
 ) string {
-	normalizedWorkspace := normalizedCursorWorkspacePath(workspace)
+	normalizedWorkspace := normalizedAgentWorkspacePath(workspace)
 	if normalizedWorkspace == "" {
 		return ""
 	}
 	for i := len(entries) - 1; i >= 0; i-- {
 		updatedAt := time.UnixMilli(entries[i].updatedAt)
 		if entries[i].cwd == normalizedWorkspace &&
-			sessionUpdatedDuringProcess(updatedAt, processStarted) {
+			sessionUpdatedDuringProcess(updatedAt, processStarted) &&
+			!agentSessionOwnedElsewhere("cursor-agent", entries[i].chatID, agentSessionWindowPIDs(windowPids)) {
 			return entries[i].chatID
 		}
 	}
 	return ""
-}
-
-func normalizedCursorWorkspacePath(value string) string {
-	workspace := strings.TrimSpace(value)
-	if workspace == "" {
-		return ""
-	}
-	if strings.HasPrefix(strings.ToLower(workspace), "file://") {
-		if path := pathFromOsc7(workspace); path != "" {
-			workspace = path
-		}
-	}
-	if expanded, err := expandHomePath(workspace); err == nil {
-		workspace = expanded
-	}
-	return filepath.Clean(workspace)
 }
 
 // piSessionEntry is the resumable metadata stored in a primary Pi JSONL file.
@@ -3543,7 +3539,7 @@ func discoverPiSessions(
 			}
 			processStarts[i] = processStartedAtForMetadata(process.pid)
 		}
-		cwd := normalizedPiWorkingDirectory(window.Cwd)
+		cwd := normalizedWorkingDirectory(window.Cwd)
 		if cwd == "" {
 			continue
 		}
@@ -4132,41 +4128,11 @@ func piProcessesByPane(
 	panePids map[int]struct{},
 	knownPiPanePids map[int]struct{},
 ) map[int]processInfo {
-	selected := map[int]processInfo{}
-	depths := map[int]int{}
-	minimumDepthCount := map[int]int{}
-	for _, process := range processes {
-		panePid := ancestorPanePID(processes, process.pid, panePids)
-		if panePid <= 0 {
-			continue
-		}
-		command := commandNameFromProcessFields(process.comm, process.args)
+	return uniqueShallowestProcessesByPane(processes, panePids, func(panePid int, command string) bool {
 		_, knownPiPane := knownPiPanePids[panePid]
-		if agentToolFromCommandName(command) != "pi" &&
-			!(knownPiPane && isGenericRuntimeCommandName(command)) {
-			continue
-		}
-		depth := processDepthFromAncestor(processes, process.pid, panePid)
-		if depth < 0 {
-			continue
-		}
-		prior, exists := depths[panePid]
-		if !exists || depth < prior {
-			selected[panePid] = process
-			depths[panePid] = depth
-			minimumDepthCount[panePid] = 1
-			continue
-		}
-		if depth == prior {
-			minimumDepthCount[panePid]++
-		}
-	}
-	for panePid, count := range minimumDepthCount {
-		if count != 1 {
-			delete(selected, panePid)
-		}
-	}
-	return selected
+		return agentToolFromCommandName(command) == "pi" ||
+			(knownPiPane && isGenericRuntimeCommandName(command))
+	})
 }
 
 func processDepthFromAncestor(processes map[int]processInfo, pid int, ancestor int) int {
@@ -4284,7 +4250,7 @@ func piSessionRootForWorkingDirectory(cwd string) string {
 		agentDirectory = normalizedPiSessionDirectory(agentDirectory, cwd)
 	}
 	setting := readPiSessionDirectorySetting(filepath.Join(agentDirectory, "settings.json"))
-	projectDirectory := normalizedPiWorkingDirectory(cwd)
+	projectDirectory := normalizedWorkingDirectory(cwd)
 	if projectDirectory != "" {
 		if projectSetting := readPiSessionDirectorySetting(filepath.Join(projectDirectory, ".pi", "settings.json")); projectSetting != "" {
 			setting = projectSetting
@@ -4332,7 +4298,7 @@ func normalizedPiSessionDirectory(path string, cwd string) string {
 		trimmed = expanded
 	}
 	if !filepath.IsAbs(trimmed) {
-		base := normalizedPiWorkingDirectory(cwd)
+		base := normalizedWorkingDirectory(cwd)
 		if base == "" {
 			if absolute, err := filepath.Abs(trimmed); err == nil {
 				return filepath.Clean(absolute)
@@ -4381,7 +4347,7 @@ func readPiSessionEntry(path string) (piSessionEntry, bool) {
 		entry := piSessionEntry{
 			sessionID: strings.TrimSpace(metadata.ID),
 			rawCwd:    filepath.Clean(strings.TrimSpace(metadata.Cwd)),
-			cwd:       normalizedPiWorkingDirectory(metadata.Cwd),
+			cwd:       normalizedWorkingDirectory(metadata.Cwd),
 			path:      filepath.Clean(path),
 			modTime:   info.ModTime(),
 		}
@@ -4477,7 +4443,7 @@ func piLatestSessionName(path string) (string, bool) {
 // colon replaced by "-", wrapped in "--". A deleted origin file's bucket name
 // therefore still identifies the working directory it was created in.
 func piEncodedSessionDirName(cwd string) string {
-	resolved := normalizedPiWorkingDirectory(cwd)
+	resolved := normalizedWorkingDirectory(cwd)
 	if resolved == "" {
 		return ""
 	}
@@ -4556,24 +4522,13 @@ func annotatePiSessionOrigins(entries []piSessionEntry) {
 	}
 }
 
-func normalizedPiWorkingDirectory(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return ""
-	}
-	if expanded, err := expandHomePath(trimmed); err == nil {
-		trimmed = expanded
-	}
-	cleaned := filepath.Clean(trimmed)
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		return resolved
-	}
-	return cleaned
-}
-
 func agentToolCandidateForRestore(window restoreWindowState) string {
+	// Explicit metadata is authoritative, including confirmed plain shells.
+	// Do not replace a retired tool with one guessed from a window's label.
+	if tool := strings.TrimSpace(window.AgentTool); tool != "" || window.AgentToolConfirmed {
+		return agentToolFromCommandName(tool)
+	}
 	return firstNonEmptyString(
-		window.AgentTool,
 		agentToolFromCommandName(window.CurrentCommand),
 		agentToolFromTerminalTitle(window.PaneTitle),
 		agentToolFromCommandName(window.Name),
@@ -4614,14 +4569,17 @@ var processWorkingDirectoryForMetadata = defaultProcessWorkingDirectoryForMetada
 func cachedProcessTable(now time.Time) map[int]processInfo {
 	commandProcessTableCache.mu.Lock()
 	defer commandProcessTableCache.mu.Unlock()
-	if commandProcessTableCache.processes != nil &&
-		!commandProcessTableCache.loadedAt.IsZero() &&
+	if !commandProcessTableCache.loadedAt.IsZero() &&
 		now.Sub(commandProcessTableCache.loadedAt) < processMetadataInterval {
 		return commandProcessTableCache.processes
 	}
+	started := time.Now()
 	processes := readProcessTable()
 	commandProcessTableCache.processes = processes
 	commandProcessTableCache.loadedAt = now
+	if processes == nil {
+		commandProcessTableCache.loadedAt = now.Add(time.Since(started))
+	}
 	return processes
 }
 
@@ -4629,53 +4587,10 @@ func discoverCopilotSessionIDs(
 	processes map[int]processInfo,
 	panePids map[int]struct{},
 ) map[int]string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	stateDir := filepath.Join(home, ".copilot", "session-state")
-	entries, err := os.ReadDir(stateDir)
-	if err != nil {
-		return nil
-	}
 	sessions := map[int]string{}
-	chosenModTime := map[int]time.Time{}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		dir := filepath.Join(stateDir, entry.Name())
-		locks, err := filepath.Glob(filepath.Join(dir, "inuse.*.lock"))
-		if err != nil {
-			continue
-		}
-		for _, lock := range locks {
-			pid := pidFromCopilotLockPath(lock)
-			if pid <= 0 {
-				continue
-			}
-			process, ok := processes[pid]
-			if !ok || !strings.Contains(strings.ToLower(process.comm+" "+process.args), "copilot") {
-				continue
-			}
-			panePid := ancestorPanePID(processes, pid, panePids)
-			if panePid <= 0 {
-				continue
-			}
-			// When more than one session dir maps to the same pane — a stale
-			// inuse lock whose PID was reused by a live copilot, or a session
-			// left behind by an earlier resume — keep the most recently locked
-			// one so a restored window resumes the live session rather than an
-			// abandoned one.
-			modTime := copilotLockModTime(lock)
-			if !sessionUpdatedDuringProcess(modTime, processStartedAtForMetadata(pid)) {
-				continue
-			}
-			if previous, exists := chosenModTime[panePid]; exists && !modTime.After(previous) {
-				continue
-			}
-			sessions[panePid] = entry.Name()
-			chosenModTime[panePid] = modTime
+	for panePid, process := range agentProcessesByPane(processes, panePids, "copilot") {
+		if exact := exactAgentSessionForProcess("copilot", "", process, processes); exact.agentSessionID != "" {
+			sessions[panePid] = exact.agentSessionID
 		}
 	}
 	return sessions
@@ -4759,7 +4674,7 @@ func copilotSessionWorkingDirectory(eventsPath string) string {
 				} `json:"data"`
 			}
 			if json.Unmarshal([]byte(line), &raw) == nil {
-				if cwd := normalizedCopilotWorkingDirectory(raw.Data.Context.Cwd); cwd != "" {
+				if cwd := normalizedWorkingDirectory(raw.Data.Context.Cwd); cwd != "" {
 					return cwd
 				}
 			}
@@ -4771,10 +4686,10 @@ func copilotSessionWorkingDirectory(eventsPath string) string {
 	return ""
 }
 
-// normalizedCopilotWorkingDirectory canonicalizes a working directory so a
+// normalizedWorkingDirectory canonicalizes a working directory so a
 // window's cwd and a session's recorded cwd compare equal despite ~ expansion
 // or symlinks (for example /tmp vs /private/tmp on macOS).
-func normalizedCopilotWorkingDirectory(path string) string {
+func normalizedWorkingDirectory(path string) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return ""
@@ -4823,14 +4738,15 @@ func assignCopilotSessionsByWorkingDirectory(
 		if !ok {
 			continue
 		}
-		workingDirectory := normalizedCopilotWorkingDirectory(restore.Windows[i].Cwd)
+		workingDirectory := normalizedWorkingDirectory(restore.Windows[i].Cwd)
 		if workingDirectory == "" {
 			continue
 		}
 		processStarted := processStartedAtForMetadata(process.pid)
+		windowPids := agentProcessTree(processes, process.pid)
 		candidates := []copilotSessionEntry{}
 		for _, session := range sessionsByDirectory[workingDirectory] {
-			if used[session.id] ||
+			if used[session.id] || agentSessionOwnedElsewhere("copilot", session.id, windowPids) ||
 				!sessionUpdatedDuringProcess(session.updatedAt, processStarted) {
 				continue
 			}
@@ -4881,6 +4797,16 @@ func agentProcessesByPane(
 	panePids map[int]struct{},
 	tool string,
 ) map[int]processInfo {
+	return uniqueShallowestProcessesByPane(processes, panePids, func(_ int, command string) bool {
+		return agentToolFromCommandName(command) == tool
+	})
+}
+
+func uniqueShallowestProcessesByPane(
+	processes map[int]processInfo,
+	panePids map[int]struct{},
+	match func(panePid int, command string) bool,
+) map[int]processInfo {
 	selected := map[int]processInfo{}
 	minimumDepth := map[int]int{}
 	minimumDepthCount := map[int]int{}
@@ -4890,7 +4816,7 @@ func agentProcessesByPane(
 			continue
 		}
 		command := commandNameFromProcessFields(process.comm, process.args)
-		if agentToolFromCommandName(command) != tool {
+		if !match(panePid, command) {
 			continue
 		}
 		depth := processDepthFromAncestor(processes, process.pid, panePid)
@@ -4932,80 +4858,72 @@ func agentWorkingDirectoryForMetadata(
 	return normalizedMetadataPath(fallbackWorkingDirectories[0][panePID])
 }
 
-func discoverCodexSessionIDs(
+func discoverAgentSessionIDs(
+	tool string,
 	processes map[int]processInfo,
 	panePids map[int]struct{},
 	fallbackWorkingDirectories ...map[int]string,
 ) map[int]string {
-	type unresolvedCodexProcess struct {
+	var recentSession func(string, time.Time, ...map[int]struct{}) string
+	switch tool {
+	case "codex":
+		recentSession = codexRecentSessionIDForWorkingDirectory
+	case "claude":
+		recentSession = claudeRecentSessionIDForWorkingDirectory
+	case "opencode":
+		var entries []openCodeSessionEntry
+		loaded := false
+		recentSession = func(directory string, started time.Time, pids ...map[int]struct{}) string {
+			if !loaded {
+				entries = readOpenCodeSessionEntries()
+				loaded = true
+			}
+			return openCodeSessionIDForWorkingDirectory(entries, directory, started, pids...)
+		}
+	default:
+		return nil
+	}
+	type unresolvedProcess struct {
 		panePid          int
 		workingDirectory string
 		processStarted   time.Time
+		windowPids       map[int]struct{}
 	}
 	sessions := map[int]string{}
-	unresolved := []unresolvedCodexProcess{}
-	unresolvedPanes := map[int]struct{}{}
+	unresolved := []unresolvedProcess{}
 	workingDirectoryCounts := map[string]int{}
-	countedWorkingDirectoryPanes := map[int]bool{}
-	for panePid, process := range agentProcessesByPane(processes, panePids, "codex") {
+	for panePid, process := range agentProcessesByPane(processes, panePids, tool) {
 		workingDirectory := agentWorkingDirectoryForMetadata(
-			process.pid,
-			panePid,
-			fallbackWorkingDirectories,
+			process.pid, panePid, fallbackWorkingDirectories,
 		)
-		if workingDirectory != "" && !countedWorkingDirectoryPanes[panePid] {
+		if workingDirectory != "" {
 			workingDirectoryCounts[workingDirectory]++
-			countedWorkingDirectoryPanes[panePid] = true
 		}
-		if sessionID := agentSessionIDFromArgs("codex", process.args); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		if sessionID := codexSessionIDFromOpenFiles(process.pid); sessionID != "" {
+		sessionID := exactAgentSessionForProcess(tool, workingDirectory, process, processes).agentSessionID
+		if sessionID != "" {
 			sessions[panePid] = sessionID
 			continue
 		}
 		processStarted := processStartedAtForMetadata(process.pid)
-		if workingDirectory == "" || processStarted.IsZero() {
-			continue
+		if workingDirectory != "" && !processStarted.IsZero() {
+			unresolved = append(unresolved, unresolvedProcess{panePid, workingDirectory, processStarted, agentProcessTree(processes, process.pid)})
 		}
-		if _, ok := unresolvedPanes[panePid]; ok {
-			continue
-		}
-		unresolvedPanes[panePid] = struct{}{}
-		unresolved = append(unresolved, unresolvedCodexProcess{
-			panePid:          panePid,
-			workingDirectory: workingDirectory,
-			processStarted:   processStarted,
-		})
 	}
 	for _, candidate := range unresolved {
-		if sessions[candidate.panePid] != "" ||
-			workingDirectoryCounts[candidate.workingDirectory] != 1 {
+		if workingDirectoryCounts[candidate.workingDirectory] != 1 {
 			continue
 		}
-		if sessionID := codexRecentSessionIDForWorkingDirectory(
-			candidate.workingDirectory,
-			candidate.processStarted,
-		); sessionID != "" {
+		if sessionID := recentSession(candidate.workingDirectory, candidate.processStarted, candidate.windowPids); sessionID != "" {
 			sessions[candidate.panePid] = sessionID
 		}
 	}
 	return sessions
 }
 
-func codexSessionIDFromOpenFiles(pid int) string {
-	for _, path := range processOpenFilePathsForMetadata(pid) {
-		if sessionID := codexSessionIDFromRolloutFile(path); sessionID != "" {
-			return sessionID
-		}
-	}
-	return ""
-}
-
 func codexRecentSessionIDForWorkingDirectory(
 	workingDirectory string,
 	processStarted time.Time,
+	windowPids ...map[int]struct{},
 ) string {
 	workingDirectory = normalizedMetadataPath(workingDirectory)
 	if workingDirectory == "" || processStarted.IsZero() {
@@ -5016,7 +4934,7 @@ func codexRecentSessionIDForWorkingDirectory(
 		return ""
 	}
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
-	for _, path := range recentCodexRolloutFiles(sessionsDir, 30) {
+	for _, path := range recentAgentSessionFiles(sessionsDir, 30, isCodexRolloutPath) {
 		info, err := os.Stat(path)
 		if err != nil || !sessionUpdatedDuringProcess(info.ModTime(), processStarted) {
 			continue
@@ -5024,47 +4942,11 @@ func codexRecentSessionIDForWorkingDirectory(
 		if normalizedMetadataPath(codexRolloutWorkingDirectory(path)) != workingDirectory {
 			continue
 		}
-		if sessionID := codexSessionIDFromRolloutFile(path); sessionID != "" {
+		if sessionID := codexSessionIDFromRolloutFile(path); sessionID != "" && !agentSessionOwnedElsewhere("codex", sessionID, agentSessionWindowPIDs(windowPids)) {
 			return sessionID
 		}
 	}
 	return ""
-}
-
-func recentCodexRolloutFiles(root string, limit int) []string {
-	type recentFile struct {
-		path    string
-		modTime time.Time
-	}
-	files := []recentFile{}
-	if limit <= 0 {
-		return nil
-	}
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry == nil || entry.IsDir() {
-			return nil
-		}
-		if !isCodexRolloutPath(path) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		files = append(files, recentFile{path: path, modTime: info.ModTime()})
-		return nil
-	})
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
-	if len(files) > limit {
-		files = files[:limit]
-	}
-	paths := make([]string, 0, len(files))
-	for _, file := range files {
-		paths = append(paths, file.path)
-	}
-	return paths
 }
 
 func codexRolloutWorkingDirectory(path string) string {
@@ -5120,75 +5002,6 @@ type openCodeSessionEntry struct {
 // lookup can be stubbed without a live OpenCode database.
 var openCodeSessionEntriesReader = defaultOpenCodeSessionEntries
 
-func discoverOpenCodeSessionIDs(
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-	fallbackWorkingDirectories ...map[int]string,
-) map[int]string {
-	type unresolvedOpenCodeProcess struct {
-		panePid          int
-		workingDirectory string
-		processStarted   time.Time
-	}
-	sessions := map[int]string{}
-	unresolved := []unresolvedOpenCodeProcess{}
-	unresolvedPanes := map[int]struct{}{}
-	workingDirectoryCounts := map[string]int{}
-	countedWorkingDirectoryPanes := map[int]bool{}
-	for panePid, process := range agentProcessesByPane(processes, panePids, "opencode") {
-		workingDirectory := agentWorkingDirectoryForMetadata(
-			process.pid,
-			panePid,
-			fallbackWorkingDirectories,
-		)
-		if workingDirectory != "" && !countedWorkingDirectoryPanes[panePid] {
-			workingDirectoryCounts[workingDirectory]++
-			countedWorkingDirectoryPanes[panePid] = true
-		}
-		if sessionID := agentSessionIDFromArgs("opencode", process.args); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		if workingDirectory == "" {
-			continue
-		}
-		if _, ok := unresolvedPanes[panePid]; ok {
-			continue
-		}
-		unresolvedPanes[panePid] = struct{}{}
-		processStarted := processStartedAtForMetadata(process.pid)
-		if processStarted.IsZero() {
-			continue
-		}
-		unresolved = append(unresolved, unresolvedOpenCodeProcess{
-			panePid:          panePid,
-			workingDirectory: workingDirectory,
-			processStarted:   processStarted,
-		})
-	}
-	if len(unresolved) == 0 {
-		return sessions
-	}
-	entries := readOpenCodeSessionEntries()
-	if len(entries) == 0 {
-		return sessions
-	}
-	for _, candidate := range unresolved {
-		if sessions[candidate.panePid] != "" ||
-			workingDirectoryCounts[candidate.workingDirectory] != 1 {
-			continue
-		}
-		if sessionID := openCodeSessionIDForWorkingDirectory(
-			entries,
-			candidate.workingDirectory,
-			candidate.processStarted,
-		); sessionID != "" {
-			sessions[candidate.panePid] = sessionID
-		}
-	}
-	return sessions
-}
-
 func readOpenCodeSessionEntries() []openCodeSessionEntry {
 	return openCodeSessionEntriesReader()
 }
@@ -5197,6 +5010,7 @@ func openCodeSessionIDForWorkingDirectory(
 	entries []openCodeSessionEntry,
 	workingDirectory string,
 	processStarted time.Time,
+	windowPids ...map[int]struct{},
 ) string {
 	workingDirectory = normalizedMetadataPath(workingDirectory)
 	if workingDirectory == "" || processStarted.IsZero() {
@@ -5205,7 +5019,8 @@ func openCodeSessionIDForWorkingDirectory(
 	// entries are ordered most-recently-updated first.
 	for _, entry := range entries {
 		if entry.directory == workingDirectory &&
-			sessionUpdatedDuringProcess(entry.updatedAt, processStarted) {
+			sessionUpdatedDuringProcess(entry.updatedAt, processStarted) &&
+			!agentSessionOwnedElsewhere("opencode", entry.sessionID, agentSessionWindowPIDs(windowPids)) {
 			return entry.sessionID
 		}
 	}
@@ -5284,80 +5099,10 @@ var claudeSessionIDPattern = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
 )
 
-func discoverClaudeSessionIDs(
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-	fallbackWorkingDirectories ...map[int]string,
-) map[int]string {
-	type unresolvedClaudeProcess struct {
-		panePid          int
-		workingDirectory string
-		processStarted   time.Time
-	}
-	sessions := map[int]string{}
-	unresolved := []unresolvedClaudeProcess{}
-	unresolvedPanes := map[int]struct{}{}
-	workingDirectoryCounts := map[string]int{}
-	countedWorkingDirectoryPanes := map[int]bool{}
-	for panePid, process := range agentProcessesByPane(processes, panePids, "claude") {
-		workingDirectory := agentWorkingDirectoryForMetadata(
-			process.pid,
-			panePid,
-			fallbackWorkingDirectories,
-		)
-		if workingDirectory != "" && !countedWorkingDirectoryPanes[panePid] {
-			workingDirectoryCounts[workingDirectory]++
-			countedWorkingDirectoryPanes[panePid] = true
-		}
-		if sessionID := agentSessionIDFromArgs("claude", process.args); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		if sessionID := claudeSessionIDFromOpenFiles(process.pid); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		processStarted := processStartedAtForMetadata(process.pid)
-		if workingDirectory == "" || processStarted.IsZero() {
-			continue
-		}
-		if _, ok := unresolvedPanes[panePid]; ok {
-			continue
-		}
-		unresolvedPanes[panePid] = struct{}{}
-		unresolved = append(unresolved, unresolvedClaudeProcess{
-			panePid:          panePid,
-			workingDirectory: workingDirectory,
-			processStarted:   processStarted,
-		})
-	}
-	for _, candidate := range unresolved {
-		if sessions[candidate.panePid] != "" ||
-			workingDirectoryCounts[candidate.workingDirectory] != 1 {
-			continue
-		}
-		if sessionID := claudeRecentSessionIDForWorkingDirectory(
-			candidate.workingDirectory,
-			candidate.processStarted,
-		); sessionID != "" {
-			sessions[candidate.panePid] = sessionID
-		}
-	}
-	return sessions
-}
-
-func claudeSessionIDFromOpenFiles(pid int) string {
-	for _, path := range processOpenFilePathsForMetadata(pid) {
-		if sessionID := claudeSessionIDFromProjectFile(path); sessionID != "" {
-			return sessionID
-		}
-	}
-	return ""
-}
-
 func claudeRecentSessionIDForWorkingDirectory(
 	workingDirectory string,
 	processStarted time.Time,
+	windowPids ...map[int]struct{},
 ) string {
 	workingDirectory = normalizedMetadataPath(workingDirectory)
 	if workingDirectory == "" || processStarted.IsZero() {
@@ -5376,7 +5121,7 @@ func claudeRecentSessionIDForWorkingDirectory(
 		if !claudeSessionMatchesWorkingDirectory(path, workingDirectory) {
 			continue
 		}
-		if sessionID := claudeSessionIDFromProjectFile(path); sessionID != "" {
+		if sessionID := claudeSessionIDFromProjectFile(path); sessionID != "" && !agentSessionOwnedElsewhere("claude", sessionID, agentSessionWindowPIDs(windowPids)) {
 			return sessionID
 		}
 	}
@@ -5474,191 +5219,6 @@ func isClaudeProjectSessionPath(path string) bool {
 	return strings.HasSuffix(normalized, ".jsonl")
 }
 
-// ── Gemini CLI ───────────────────────────────────────────────────────────────
-// Gemini stores chats at `~/.gemini/tmp/<project>/chats/session-*.json`, with
-// the resumable `sessionId` and the project `directories` recorded inside the
-// file. Recover the session from the chat file the process holds open, or a
-// non-subagent chat for the pane's directory updated during this process.
-
-var (
-	geminiSessionIDFieldPattern   = regexp.MustCompile(`"sessionId"\s*:\s*"((?:\\.|[^"\\])*)"`)
-	geminiKindFieldPattern        = regexp.MustCompile(`"kind"\s*:\s*"((?:\\.|[^"\\])*)"`)
-	geminiDirectoriesStartPattern = regexp.MustCompile(`"directories"\s*:\s*\[`)
-	geminiQuotedStringPattern     = regexp.MustCompile(`"((?:\\.|[^"\\])*)"`)
-)
-
-type geminiSessionMetadata struct {
-	sessionID   string
-	isSubagent  bool
-	directories []string
-}
-
-func discoverGeminiSessionIDs(
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-	fallbackWorkingDirectories ...map[int]string,
-) map[int]string {
-	type unresolvedGeminiProcess struct {
-		panePid          int
-		workingDirectory string
-		processStarted   time.Time
-	}
-	sessions := map[int]string{}
-	unresolved := []unresolvedGeminiProcess{}
-	unresolvedPanes := map[int]struct{}{}
-	workingDirectoryCounts := map[string]int{}
-	countedWorkingDirectoryPanes := map[int]bool{}
-	for panePid, process := range agentProcessesByPane(processes, panePids, "gemini") {
-		workingDirectory := agentWorkingDirectoryForMetadata(
-			process.pid,
-			panePid,
-			fallbackWorkingDirectories,
-		)
-		if workingDirectory != "" && !countedWorkingDirectoryPanes[panePid] {
-			workingDirectoryCounts[workingDirectory]++
-			countedWorkingDirectoryPanes[panePid] = true
-		}
-		if sessionID := agentSessionIDFromArgs("gemini", process.args); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		if sessionID := geminiSessionIDFromOpenFiles(process.pid); sessionID != "" {
-			sessions[panePid] = sessionID
-			continue
-		}
-		if workingDirectory == "" {
-			continue
-		}
-		if _, ok := unresolvedPanes[panePid]; ok {
-			continue
-		}
-		unresolvedPanes[panePid] = struct{}{}
-		processStarted := processStartedAtForMetadata(process.pid)
-		if processStarted.IsZero() {
-			continue
-		}
-		unresolved = append(unresolved, unresolvedGeminiProcess{
-			panePid:          panePid,
-			workingDirectory: workingDirectory,
-			processStarted:   processStarted,
-		})
-	}
-	for _, candidate := range unresolved {
-		if sessions[candidate.panePid] != "" ||
-			workingDirectoryCounts[candidate.workingDirectory] != 1 {
-			continue
-		}
-		if sessionID := geminiRecentSessionIDForWorkingDirectory(
-			candidate.workingDirectory,
-			candidate.processStarted,
-		); sessionID != "" {
-			sessions[candidate.panePid] = sessionID
-		}
-	}
-	return sessions
-}
-
-func geminiSessionIDFromOpenFiles(pid int) string {
-	for _, path := range processOpenFilePathsForMetadata(pid) {
-		if !isGeminiChatSessionPath(path) {
-			continue
-		}
-		metadata := readGeminiSessionMetadata(path)
-		if metadata.sessionID != "" && !metadata.isSubagent {
-			return metadata.sessionID
-		}
-	}
-	return ""
-}
-
-func geminiRecentSessionIDForWorkingDirectory(
-	workingDirectory string,
-	processStarted time.Time,
-) string {
-	workingDirectory = normalizedMetadataPath(workingDirectory)
-	if workingDirectory == "" || processStarted.IsZero() {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	tmpDir := filepath.Join(home, ".gemini", "tmp")
-	for _, path := range recentAgentSessionFiles(tmpDir, 60, isGeminiChatSessionPath) {
-		info, err := os.Stat(path)
-		if err != nil || !sessionUpdatedDuringProcess(info.ModTime(), processStarted) {
-			continue
-		}
-		metadata := readGeminiSessionMetadata(path)
-		if metadata.sessionID == "" || metadata.isSubagent {
-			continue
-		}
-		for _, dir := range metadata.directories {
-			if normalizedMetadataPath(dir) == workingDirectory {
-				return metadata.sessionID
-			}
-		}
-	}
-	return ""
-}
-
-func isGeminiChatSessionPath(path string) bool {
-	normalized := filepath.ToSlash(path)
-	if !strings.Contains(normalized, "/.gemini/tmp/") ||
-		!strings.Contains(normalized, "/chats/") {
-		return false
-	}
-	name := filepath.Base(path)
-	return strings.HasPrefix(name, "session-") &&
-		(strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonl"))
-}
-
-func readGeminiSessionMetadata(path string) geminiSessionMetadata {
-	file, err := os.Open(path)
-	if err != nil {
-		return geminiSessionMetadata{}
-	}
-	defer file.Close()
-	const maxBytes = 64 * 1024
-	raw, err := io.ReadAll(io.LimitReader(file, maxBytes))
-	if err != nil {
-		return geminiSessionMetadata{}
-	}
-	return parseGeminiSessionMetadata(string(raw))
-}
-
-func parseGeminiSessionMetadata(text string) geminiSessionMetadata {
-	metadata := geminiSessionMetadata{}
-	if match := geminiSessionIDFieldPattern.FindStringSubmatch(text); match != nil {
-		metadata.sessionID = decodeJSONStringLiteral(match[1])
-	}
-	if match := geminiKindFieldPattern.FindStringSubmatch(text); match != nil {
-		metadata.isSubagent = decodeJSONStringLiteral(match[1]) == "subagent"
-	}
-	metadata.directories = geminiDirectoriesFromText(text)
-	return metadata
-}
-
-func geminiDirectoriesFromText(text string) []string {
-	loc := geminiDirectoriesStartPattern.FindStringIndex(text)
-	if loc == nil {
-		return nil
-	}
-	segment := text[loc[1]:]
-	// Paths never contain ']', so the array ends at the first closing bracket.
-	// When the prefix is truncated mid-array, fall back to the prefix end.
-	if end := strings.IndexByte(segment, ']'); end >= 0 {
-		segment = segment[:end]
-	}
-	directories := []string{}
-	for _, match := range geminiQuotedStringPattern.FindAllStringSubmatch(segment, -1) {
-		if value := decodeJSONStringLiteral(match[1]); value != "" {
-			directories = append(directories, value)
-		}
-	}
-	return directories
-}
-
 // ── Shared agent session-file helpers ────────────────────────────────────────
 
 // sessionUpdatedDuringProcess is the common safety boundary for cwd/history
@@ -5729,14 +5289,6 @@ func recentAgentSessionFiles(
 	return paths
 }
 
-func decodeJSONStringLiteral(value string) string {
-	var decoded string
-	if err := json.Unmarshal([]byte(`"`+value+`"`), &decoded); err == nil {
-		return strings.TrimSpace(decoded)
-	}
-	return strings.TrimSpace(value)
-}
-
 func jsonStringFieldFromFile(path string, field string) string {
 	file, err := os.Open(path)
 	if err != nil {
@@ -5791,9 +5343,8 @@ func jsonStringFieldValuesFromFileEnds(path string, field string) []string {
 		}
 	}
 	collect(io.LimitReader(file, sessionFileScanChunkBytes), false)
-	// Below two chunks the head scan already covered the whole file, and a tail
-	// scan would only re-read records it has seen.
-	if info.Size() > 2*sessionFileScanChunkBytes {
+	// Scan the tail whenever the head did not cover the whole file.
+	if info.Size() > sessionFileScanChunkBytes {
 		if _, err := file.Seek(info.Size()-sessionFileScanChunkBytes, io.SeekStart); err == nil {
 			collect(file, true)
 		}
@@ -6042,10 +5593,6 @@ func serveSession(
 	}
 }
 
-func newMuxServer(session string) *muxServer {
-	return newMuxServerWithSize(session, defaultColumns, defaultRows)
-}
-
 func newMuxServerWithSize(session string, width int, height int) *muxServer {
 	if width <= 0 {
 		width = defaultColumns
@@ -6260,7 +5807,7 @@ func (s *muxServer) redrawRestoredWindow(windowID string) {
 		return
 	}
 	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -6291,7 +5838,7 @@ func (s *muxServer) forceForegroundThemeRedraw(windowID string) {
 		return
 	}
 	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -6325,6 +5872,12 @@ func createWindowOptionsForRestore(
 		}
 	}
 	agentTool := agentToolForRestore(state)
+	if agentTool == "" {
+		state.AgentSessionID = ""
+		state.AgentSessionDir = ""
+		state.AgentSessionPath = ""
+		state.AgentSessionIdentityExact = false
+	}
 	command := ""
 	if agentTool != "" {
 		launch := agentLaunchCommand(agentTool, startInYoloMode)
@@ -6342,7 +5895,10 @@ func createWindowOptionsForRestore(
 				)
 				command = piResumeCommandWithFreshFallback(resume, launch)
 			} else {
-				command = agentResumeCommandWithFreshFallback(resume, launch)
+				command = agentResumeCommandWithFreshFallback(
+					monkeyMuxAgentLaunchCommand(resume),
+					monkeyMuxAgentLaunchCommand(launch),
+				)
 			}
 		}
 	}
@@ -6356,7 +5912,11 @@ func createWindowOptionsForRestore(
 			history,
 			terminalOutputParserSnapshot{},
 		)
+		history = stripTerminalProgressFromRestoreHistory(history)
 	}
+	// CLI and shell restoration starts a new process. Its old task progress is
+	// stale until the new process reports its own OSC 9;4 state. The native ACP
+	// branch above preserves progress because its agent process keeps running.
 	return createWindowOptions{
 		name:                      firstNonEmptyString(state.Name, state.PaneTitle, state.CurrentCommand, "shell"),
 		cwd:                       state.Cwd,
@@ -6364,6 +5924,7 @@ func createWindowOptionsForRestore(
 		history:                   history,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
+		agentToolConfirmed:        state.AgentToolConfirmed || strings.TrimSpace(state.AgentTool) != "",
 		agentSessionID:            state.AgentSessionID,
 		agentSessionDir:           state.AgentSessionDir,
 		agentSessionPath:          state.AgentSessionPath,
@@ -6371,7 +5932,6 @@ func createWindowOptionsForRestore(
 		cursorVisible:             state.CursorVisible,
 		cursorVisibilityKnown:     state.CursorVisibilityKnown,
 		privateModes:              privateModesForRestore(state.PrivateModes),
-		terminalProgress:          copyTerminalProgressSnapshot(state.TerminalProgress),
 	}
 }
 
@@ -6406,6 +5966,7 @@ type createWindowOptions struct {
 	history                   []byte
 	paneTitle                 string
 	agentTool                 string
+	agentToolConfirmed        bool
 	agentSessionID            string
 	agentSessionDir           string
 	agentSessionPath          string
@@ -6428,6 +5989,9 @@ func newWindowAgentTool(
 	options createWindowOptions,
 	name string,
 ) (tool string, confirmed bool) {
+	if options.agentToolConfirmed {
+		return options.agentTool, true
+	}
 	commandTool := agentToolFromCommandText(options.command)
 	tool = firstNonEmptyString(
 		options.agentTool,
@@ -6439,6 +6003,14 @@ func newWindowAgentTool(
 }
 
 func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error) {
+	return s.createWindowWithStarter(options, startWindow)
+}
+
+// createWindowWithStarter lets lifecycle tests gate startup without global hooks.
+func (s *muxServer) createWindowWithStarter(
+	options createWindowOptions,
+	start func(*exec.Cmd, int, int) (muxPty, muxProcess, error),
+) (*muxWindow, error) {
 	options.command = monkeyMuxAgentLaunchCommand(options.command)
 	var replay []byte
 	var snapshots []windowSnapshot
@@ -6486,11 +6058,19 @@ func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error
 	cmd.Env = terminalEnvironment(os.Environ())
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errServerClosed
+	}
+	s.pendingWindowStarts.Add(1)
 	cols, rows := s.publishedWidth, s.publishedHeight
 	s.mu.Unlock()
 
-	windowPty, proc, err := startWindow(cmd, cols, rows)
+	sessionWatch, finishSessionWatch := s.prepareAgentSessionWatch(agentTool, cwd, options)
+	defer finishSessionWatch()
+	windowPty, proc, err := start(cmd, cols, rows)
 	if err != nil {
+		s.pendingWindowStarts.Done()
 		return nil, err
 	}
 
@@ -6501,8 +6081,10 @@ func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error
 		// watchers would join the group after close already waited. Tear the
 		// freshly started process down instead of publishing it.
 		s.mu.Unlock()
-		proc.Hangup()
-		_ = windowPty.Close()
+		go func() {
+			defer s.pendingWindowStarts.Done()
+			cleanupRejectedWindow(windowPty, proc)
+		}()
 		return nil, errServerClosed
 	}
 	// Registering the watchers here, rather than beside the `go` statements
@@ -6510,8 +6092,10 @@ func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error
 	// observes s.closed it knows no further watchers can be added, so its Wait
 	// cannot race an Add.
 	s.windowWatchers.Add(2)
+	s.pendingWindowStarts.Done() // Transfer ownership to the watchers under s.mu.
 	s.nextID++
 	window := &muxWindow{
+		agentSessionWatch:         sessionWatch,
 		id:                        fmt.Sprintf("@%d", s.nextID),
 		index:                     len(s.windows),
 		name:                      name,
@@ -6603,6 +6187,17 @@ func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error
 	return window, nil
 }
 
+// cleanupRejectedWindow exclusively owns a started but unpublished window.
+// There is no useful work to preserve, so force termination immediately rather
+// than leaving a hangup-ignoring child alive. No Wait may run before Kill: on
+// Unix the unreaped leader reserves its PID/PGID throughout group signaling.
+// Keep terminal close and Wait off the rejection path, too.
+func cleanupRejectedWindow(windowPty muxPty, proc muxProcess) {
+	proc.Kill()
+	_ = windowPty.Close()
+	_ = proc.Wait()
+}
+
 func (s *muxServer) readWindow(window *muxWindow) {
 	buf := make([]byte, 32*1024)
 	for {
@@ -6654,24 +6249,26 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.mu.Unlock()
 		return
 	}
+	before := window.broadcastIdentityLocked()
+	s.mu.Unlock()
+	s.refreshProcessMetadata(windowID)
+	s.mu.Lock()
+	if s.windowByIDLocked(windowID) != window || window.closed {
+		s.mu.Unlock()
+		return
+	}
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
-	before := window.broadcastIdentityLocked()
 	wasAlert := window.alert
-	if !window.redrawForwardingPaused {
-		// A switch/restore redraw is output produced only because MonkeyMux
-		// resized the foreground TUI. Keep its previous activity timestamp so
-		// selecting an idle window does not make it look busy.
-		window.lastActivity = now
-	}
-	window.refreshProcessMetadataLocked(now)
+	// PTY output may contain real work even during a resize redraw pause.
+	// Replaying retained bytes bypasses this path and must not count as activity.
+	window.lastActivity = now
 	// Modes are observed before metadata so a `CSI ? 9001 h` arriving in the
 	// same chunk as a colour query is already reflected when the query is
 	// answered below (and when the answer is encoded in writeWindow).
 	window.observeTerminalModesLocked(chunk)
-	queryKeys := window.observeTerminalMetadataLocked(chunk)
-	terminalBell := window.observeTerminalBellLocked(chunk)
-	window.observeTerminalOutputStateLocked(chunk)
+	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
+	terminalBell := window.observeTerminalOutputStateLocked(chunk)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
@@ -6876,6 +6473,32 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 	return output
 }
 
+func (s *muxServer) retireWindowLocked(window *muxWindow) {
+	window.closed = true
+	window.alert = false
+	window.releaseRedrawForwardingStateLocked()
+	window.clearKittyGraphicsPendingLocked()
+	window.clearKittyImagesLocked()
+	window.history = nil
+	window.oscBuffer = nil
+	window.attachOscBuffer = nil
+	window.csiBuffer = nil
+	window.pendingTerminalQueries = nil
+	window.pendingTerminalQueriesInFlight = nil
+	window.pendingTerminalQueryCarry = nil
+	window.secondaryQueryCarry = nil
+	window.secondaryQueryPrimary = nil
+	window.lastForwardedTerminalQueries = nil
+	for i, candidate := range s.windows {
+		if candidate == window {
+			copy(s.windows[i:], s.windows[i+1:])
+			s.windows[len(s.windows)-1] = nil
+			s.windows = s.windows[:len(s.windows)-1]
+			break
+		}
+	}
+}
+
 func (s *muxServer) markWindowClosed(windowID string) {
 	var replay []byte
 	var activeChanged bool
@@ -6895,12 +6518,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 		s.attachMu.Unlock()
 		return
 	}
-	window.closed = true
-	window.alert = false
-	// See closeWindow: a pause in flight would otherwise retain its buffers on
-	// a window that is never removed from s.windows.
-	window.releaseRedrawForwardingStateLocked()
-	window.clearKittyGraphicsPendingLocked()
+	s.retireWindowLocked(window)
 	if s.lastActiveID == windowID {
 		s.lastActiveID = ""
 	}
@@ -6989,12 +6607,14 @@ func (s *muxServer) markWindowClosed(windowID string) {
 }
 
 func (s *muxServer) handleConnection(conn net.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(socketTimeout))
 	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
+	line, err := readBoundedProtocolLine(reader, controlMaxFrameBytes)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	var hello controlMessage
 	if err := json.Unmarshal(line, &hello); err != nil {
 		_ = conn.Close()
@@ -7015,21 +6635,11 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 	if clientID == "" {
 		clientID = fmt.Sprintf("client-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
-	terminalWidth := hello.Width
-	terminalHeight := hello.Height
-	if hello.ClipViewport {
-		// A clipping-aware client starts unconfirmed so the server always sends
-		// the initial canonical grid, even when it matches the client's viewport.
-		terminalWidth = 0
-		terminalHeight = 0
-	}
 	client := &attachClient{
 		conn:            conn,
 		id:              clientID,
 		width:           hello.Width,
 		height:          hello.Height,
-		terminalWidth:   terminalWidth,
-		terminalHeight:  terminalHeight,
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
 		capabilityHint:  capabilityHintDataFromString(hello.CapabilityHint),
@@ -7065,6 +6675,12 @@ func (c *attachClient) writeLoop() {
 				write.responseWindowID,
 				write.responseCount,
 			)
+			select {
+			case <-c.done:
+				c.finishQueuedWrite(write, io.ErrClosedPipe)
+				return
+			default:
+			}
 		}
 		err := writeAttachConnection(c.conn, write.data)
 		_ = c.conn.SetWriteDeadline(time.Time{})
@@ -7352,10 +6968,6 @@ func (c *attachClient) suppressesReplayedOutput(
 	return false
 }
 
-func (c *attachClient) expectTerminalResponse(windowID string) {
-	c.expectTerminalResponses(windowID, 1)
-}
-
 func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	if c == nil || windowID == "" {
 		return
@@ -7405,6 +7017,18 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 		}
 		c.resetTerminalResponseStateLocked()
 	}
+	outstanding := len(c.terminalResponseWindows)
+	if c.terminalResponseActiveWindow != "" {
+		outstanding++
+	}
+	if count > terminalResponseMaxOutstanding-outstanding {
+		c.activityMu.Unlock()
+		if inputLocked {
+			c.inputMu.Unlock()
+		}
+		c.close()
+		return
+	}
 	c.terminalResponseUntil = now.Add(terminalResponseFocusGrace)
 	for range count {
 		c.terminalResponseWindows = append(
@@ -7432,10 +7056,6 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	if passthrough != nil {
 		passthrough(expiredInput)
 	}
-}
-
-func (c *attachClient) inputClaimsFocus(data []byte) bool {
-	return c.routeInput(data).claimsFocus
 }
 
 func (c *attachClient) routeInput(data []byte) attachInputRouting {
@@ -8257,9 +7877,6 @@ func (s *muxServer) isAttachConnectionLocked(conn net.Conn) bool {
 	if conn == nil {
 		return false
 	}
-	if len(s.attachClients) == 0 {
-		return s.attachConn == conn
-	}
 	_, ok := s.attachClients[conn]
 	return ok
 }
@@ -8279,13 +7896,7 @@ func (s *muxServer) capabilityHintLocked() []byte {
 }
 
 func (s *muxServer) attachCountLocked() int {
-	if len(s.attachClients) > 0 {
-		return len(s.attachClients)
-	}
-	if s.attachConn != nil {
-		return 1
-	}
-	return 0
+	return len(s.attachClients)
 }
 
 func (s *muxServer) promoteAttachClient(client *attachClient) {
@@ -8558,6 +8169,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		}})
 	}
 	go s.runAttachInputActions(client)
+	transitionDeadline := time.Now().Add(attachTransitionTimeout)
 	s.attachTransitionMu.Lock()
 	attachTransitionLocked := true
 	defer func() {
@@ -8568,7 +8180,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	transitionWindowID := ""
 	for {
 		s.mu.Lock()
-		if s.closed {
+		if s.closed || !time.Now().Before(transitionDeadline) {
 			s.attachViewportTransitionWindowID = ""
 			s.mu.Unlock()
 			client.close()
@@ -8588,7 +8200,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		s.attachMu.Lock()
 		s.mu.Lock()
 		window = s.windowByIDLocked(s.activeID)
-		if !s.closed &&
+		if !s.closed && time.Now().Before(transitionDeadline) &&
 			s.activeID == transitionWindowID &&
 			terminalViewportTransitionSafe(window) {
 			break
@@ -8597,14 +8209,6 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		s.attachMu.Unlock()
 		s.resizeMu.Unlock()
 		time.Sleep(time.Millisecond)
-	}
-	if s.closed {
-		s.attachViewportTransitionWindowID = ""
-		s.mu.Unlock()
-		s.attachMu.Unlock()
-		s.resizeMu.Unlock()
-		client.close()
-		return
 	}
 	if s.attachClients == nil {
 		s.attachClients = map[net.Conn]*attachClient{}
@@ -8728,8 +8332,9 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			continue
 		}
 		if action.windowID == "" {
-			s.writeActiveFromAttach(action.data)
-			continue
+			s.mu.Lock()
+			action.windowID = s.activeID
+			s.mu.Unlock()
 		}
 		_ = s.writeWindow(action.windowID, action.data)
 	}
@@ -8737,7 +8342,14 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 
 func (s *muxServer) handleControl(conn net.Conn, reader *bufio.Reader) {
 	client := newControlClient(conn)
-	s.addControl(client)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	s.controls[client] = struct{}{}
+	s.mu.Unlock()
 	defer func() {
 		client.close()
 		s.removeControl(client)
@@ -8760,7 +8372,7 @@ func (s *muxServer) handleControl(conn net.Conn, reader *bufio.Reader) {
 	})
 
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), controlMaxFrameBytes)
 	for scanner.Scan() {
 		var request controlMessage
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
@@ -8905,6 +8517,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			FocusChanged: result.primaryChanged,
 		})
 	case "query_active_context":
+		s.refreshProcessMetadata("")
 		s.mu.Lock()
 		window := s.windowByIDLocked(s.activeID)
 		if window == nil || window.closed {
@@ -8912,7 +8525,6 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			client.sendError(request, errors.New("no active window"))
 			return
 		}
-		window.refreshProcessMetadataLocked(time.Now())
 		currentPath := window.cwd
 		currentCommand := window.currentCommandLocked()
 		s.mu.Unlock()
@@ -8984,12 +8596,6 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 	}
 }
 
-func (s *muxServer) addControl(client *controlClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.controls[client] = struct{}{}
-}
-
 func (s *muxServer) removeControl(client *controlClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -9018,9 +8624,6 @@ func (s *muxServer) canUseClientImageSignatures(clientID string) bool {
 	if s.attachCountLocked() != 1 {
 		return false
 	}
-	if len(s.attachClients) == 0 {
-		return true
-	}
 	normalizedID := strings.TrimSpace(clientID)
 	if normalizedID == "" {
 		return true
@@ -9048,7 +8651,10 @@ func (c *controlClient) send(response controlResponse) {
 	if c.enc == nil {
 		return
 	}
-	_ = c.enc.Encode(response)
+	_ = c.conn.SetWriteDeadline(time.Now().Add(socketTimeout))
+	if err := c.enc.Encode(response); err != nil {
+		_ = c.conn.Close()
+	}
 }
 
 func (c *controlClient) sendError(request controlMessage, err error) {
@@ -9260,6 +8866,7 @@ func (s *muxServer) broadcastWindowList(eventType string) {
 }
 
 func (s *muxServer) snapshots() []windowSnapshot {
+	s.refreshAllProcessMetadata()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotsLocked()
@@ -9277,6 +8884,7 @@ func (s *muxServer) snapshotsLocked() []windowSnapshot {
 }
 
 func (s *muxServer) restoreSnapshot() *serverRestore {
+	s.refreshAllProcessMetadata()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -9288,7 +8896,6 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 		if window.closed {
 			continue
 		}
-		window.refreshProcessMetadataLocked(time.Now())
 		state := restoreWindowState{
 			ID:                        window.id,
 			Index:                     window.index,
@@ -9316,6 +8923,7 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 			ApplicationKeypadKnown:    window.applicationKeypadKnown,
 			Active:                    s.activeID == window.id,
 		}
+		s.snapshotAgentIdentityLocked(window, &state)
 		if isShellRestoreWindow(state) && len(window.history) > 0 {
 			history, historyStart := window.historyTailWithParserLocked()
 			history = terminalHistoryAtGroundBoundaries(history, historyStart)
@@ -9330,13 +8938,13 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 }
 
 func (s *muxServer) snapshot(window *muxWindow) windowSnapshot {
+	s.refreshProcessMetadata(window.id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotLocked(window)
 }
 
 func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
-	window.refreshProcessMetadataLocked(time.Now())
 	flags := ""
 	if window.alert {
 		flags = "#"
@@ -9389,6 +8997,7 @@ func (s *muxServer) runShellCommandContext(
 	defer cancel()
 	output := newBoundedCommandOutput(runCommandOutputMaxBytes, cancel)
 	cmd := newRunCommand(command)
+	cmd.WaitDelay = 250 * time.Millisecond
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -9534,7 +9143,6 @@ func (s *muxServer) replayRequestedImages(
 	if len(ids) == 0 {
 		return nil
 	}
-	var attach net.Conn
 	var client *attachClient
 	var payload []byte
 	s.attachMu.Lock()
@@ -9545,17 +9153,12 @@ func (s *muxServer) replayRequestedImages(
 		s.attachMu.Unlock()
 		return nil
 	}
-	attach = s.attachConn
 	if normalizedID := strings.TrimSpace(clientID); normalizedID != "" {
 		client = s.attachClientByIDLocked(normalizedID)
-		attach = nil
-		if client != nil {
-			attach = client.conn
-		}
 	} else {
-		client = s.attachClients[attach]
+		client = s.attachClients[s.attachConn]
 	}
-	if attach == nil {
+	if client == nil {
 		s.mu.Unlock()
 		s.attachMu.Unlock()
 		return nil
@@ -9566,17 +9169,9 @@ func (s *muxServer) replayRequestedImages(
 		s.attachMu.Unlock()
 		return nil
 	}
-	if client != nil {
-		completion, queued := client.enqueue(payload, true)
-		s.attachMu.Unlock()
-		if !queued || !client.waitForWrite(completion) {
-			return nil
-		}
-		return ids
-	}
-	queued := s.writeAttachLocked(attach, payload)
+	completion, queued := client.enqueue(payload, true)
 	s.attachMu.Unlock()
-	if !queued {
+	if !queued || !client.waitForWrite(completion) {
 		return nil
 	}
 	return ids
@@ -9752,15 +9347,7 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 			s.pendingFocusRefreshConn = nil
 		}
 	}
-	window.closed = true
-	window.alert = false
-	// A window can be closed while a redraw pause is in flight, and
-	// resumePausedAttachForwarding bails out on closed windows before it
-	// reaches its own cleanup. Closed windows stay in s.windows for the life of
-	// the server, so release the retained frame and output buffers here or they
-	// leak for as long as the server runs.
-	window.releaseRedrawForwardingStateLocked()
-	window.clearKittyGraphicsPendingLocked()
+	s.retireWindowLocked(window)
 	if s.lastActiveID == windowID {
 		s.lastActiveID = ""
 	}
@@ -9939,7 +9526,8 @@ func (s *muxServer) resizeWithRedraw(
 	s.resizeWindowLocked(window, width, height)
 	if window != nil &&
 		!window.closed &&
-		window.usesForegroundRedrawReplayLocked() &&
+		(window.usesForegroundRedrawReplayLocked() ||
+			(syntheticRedraw && window.supportsForegroundRedrawLocked())) &&
 		(forceRedraw || sizeChanged) {
 		// Genuine viewport changes rely on the real PTY resize and forward their
 		// reflow immediately. Restore/theme redraws always need the synthetic
@@ -9999,6 +9587,9 @@ func (s *muxServer) resizeActiveLocked(width int, height int) {
 
 func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int) {
 	if window == nil || window.closed || window.pty == nil {
+		return
+	}
+	if window.retainsConPtyNormalScreenLocked() && window.ptySizeIs(width, height) {
 		return
 	}
 	window.resizePty(width, height)
@@ -10064,7 +9655,8 @@ func (s *muxServer) simulateForegroundResizeIfAttached(
 ) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.isAttachConnectionLocked(conn) || window == nil || window.closed {
+	if !s.isAttachConnectionLocked(conn) || window == nil || window.closed ||
+		window.retainsConPtyNormalScreenLocked() {
 		return false
 	}
 	s.pauseAttachForwardingForRedrawLocked(
@@ -10079,7 +9671,8 @@ func (s *muxServer) simulateForegroundResizeIfAttached(
 func (s *muxServer) simulateForegroundResizeIfAnyAttached(window *muxWindow) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.attachCountLocked() == 0 || window == nil || window.closed {
+	if s.attachCountLocked() == 0 || window == nil || window.closed ||
+		window.retainsConPtyNormalScreenLocked() {
 		return false
 	}
 	s.pauseAttachForwardingForRedrawLocked(
@@ -10099,7 +9692,7 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	if window == nil ||
 		window.closed ||
 		s.attachCountLocked() == 0 ||
-		!window.usesForegroundRedrawReplayLocked() {
+		!window.supportsForegroundRedrawLocked() {
 		return
 	}
 	if _, _, ok := foregroundRedrawTemporarySize(width, height); !ok {
@@ -10220,7 +9813,6 @@ func (s *muxServer) resumePausedAttachForwarding(
 	var primary net.Conn
 	var primaryNeedsFailover bool
 	var clients []*attachClient
-	var legacy net.Conn
 	var refreshPendingFocus bool
 	var refreshPendingResize bool
 	s.attachMu.Lock()
@@ -10234,17 +9826,11 @@ func (s *muxServer) resumePausedAttachForwarding(
 		s.attachMu.Unlock()
 		return
 	}
-	replay = append([]byte(nil), window.redrawForwardingReplay...)
-	buffered = append([]byte(nil), window.redrawForwardingBuffer...)
-	failoverBuffered = append(
-		[]byte(nil),
-		window.redrawForwardingFailoverBuffer...,
-	)
-	secondaryBuffered = append(
-		[]byte(nil),
-		window.redrawForwardingSecondaryBuffer...,
-	)
-	queryData = append([]byte(nil), window.redrawForwardingQueryBuffer...)
+	replay = window.redrawForwardingReplay
+	buffered = window.redrawForwardingBuffer
+	failoverBuffered = window.redrawForwardingFailoverBuffer
+	secondaryBuffered = window.redrawForwardingSecondaryBuffer
+	queryData = window.redrawForwardingQueryBuffer
 	primary = window.redrawForwardingPrimaryConn
 	if !s.isAttachConnectionLocked(primary) {
 		primary = s.attachConn
@@ -10311,9 +9897,6 @@ func (s *muxServer) resumePausedAttachForwarding(
 		for _, client := range s.attachClients {
 			clients = append(clients, client)
 		}
-		if len(clients) == 0 {
-			legacy = s.attachConn
-		}
 	}
 	s.mu.Unlock()
 	primaryOutput := wrapSynchronizedTerminalOutput(
@@ -10328,11 +9911,6 @@ func (s *muxServer) resumePausedAttachForwarding(
 		replay,
 		secondaryBuffered,
 	)
-	if legacy != nil {
-		s.writeAttachLocked(legacy, primaryOutput)
-		s.attachMu.Unlock()
-		return
-	}
 	var primaryClient *attachClient
 	for _, client := range clients {
 		if client.conn == primary {
@@ -10517,6 +10095,16 @@ func (s *muxServer) replayBytesLockedWithSkip(
 	clientHas map[string]uint32,
 ) []byte {
 	history, historyStart := window.historyTailWithParserLocked()
+	if window.retainsConPtyNormalScreenLocked() {
+		// Keep the full bounded screen history: differential updates may leave
+		// the composer untouched beyond the short shell scrollback limit.
+		start := advanceReplayStartToTerminalGround(history, 0, historyStart)
+		history = stripTerminalQueriesFromReplay(history[start:])
+		history = window.withheldAttachOscSuffixTrimmedLocked(history)
+		images := window.kittyImageReplayLocked(clientHas)
+		replayHistory := append(images, history...)
+		return wrapSynchronizedTerminalOutput(nil, buildWindowReplay(window, replayHistory))
+	}
 	if window.usesForegroundRedrawReplayLocked() {
 		// The foreground app redraws its own cells on reattach (driven by a
 		// resize), so we must not replay the visible history or it would draw
@@ -10562,11 +10150,19 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
 	window *muxWindow,
 ) []byte {
-	if window == nil || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || !window.supportsForegroundRedrawLocked() {
 		return nil
 	}
 	history, historyStart := window.historyTailWithParserLocked()
-	history = trimReplayHistoryForAttachWithParser(history, historyStart)
+	// This is a TUI frame recovery, not the short shell scrollback replay.
+	// Differential updates can leave the composer untouched for more than
+	// windowReplayLimitBytes of output. Cutting to that tail discards the
+	// cells (and cursor position) those updates depend on, so a switch paints
+	// the transcript over a blank/misaligned composer until a real resize.
+	// Keep the full, already bounded foreground history and only skip an
+	// incomplete leading control sequence left by history eviction.
+	start := advanceReplayStartToTerminalGround(history, 0, historyStart)
+	history = history[start:]
 	history = stripTerminalQueriesFromReplay(history)
 	if len(history) == 0 {
 		return nil
@@ -10622,11 +10218,26 @@ func buildWindowReplay(window *muxWindow, history []byte) []byte {
 	return replay
 }
 
+// Explicit theme/restore redraws still repaint normal-screen console agents.
+// Switching back to their retained screen does not require that repaint.
+func (w *muxWindow) supportsForegroundRedrawLocked() bool {
+	return w != nil && (w.alternateScreenModeActiveLocked() || w.agentToolLocked() != "")
+}
+
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
 	if w == nil {
 		return false
 	}
-	return w.alternateScreenModeActiveLocked() || w.agentToolLocked() != ""
+	// ConPTY already maintains the normal screen and its retained VT output
+	// can restore that screen without asking the application to repaint its
+	// transcript. A temporary resize on every return makes normal-buffer TUIs
+	// reflow/reinsert history, visibly scrolling the restored window again.
+	return w.alternateScreenModeActiveLocked() ||
+		(!w.retainsConPtyNormalScreenLocked() && w.agentToolLocked() != "")
+}
+
+func (w *muxWindow) retainsConPtyNormalScreenLocked() bool {
+	return w != nil && w.win32InputMode && !w.alternateScreenModeActiveLocked()
 }
 
 func (w *muxWindow) alternateScreenModeActiveLocked() bool {
@@ -10862,25 +10473,12 @@ func (s *muxServer) writeAttachLocked(conn net.Conn, data []byte) bool {
 	}
 	s.mu.Lock()
 	client := s.attachClients[conn]
-	legacy := len(s.attachClients) == 0 && s.attachConn == conn
 	s.mu.Unlock()
-	if client != nil {
-		_, queued := client.enqueue(data, false)
-		return queued
-	}
-	if !legacy {
+	if client == nil {
 		return false
 	}
-	err := writeConnection(conn, data)
-	if err != nil {
-		s.mu.Lock()
-		if s.attachConn == conn {
-			s.attachConn = nil
-		}
-		s.mu.Unlock()
-		return false
-	}
-	return true
+	_, queued := client.enqueue(data, false)
+	return queued
 }
 
 func (s *muxServer) writeAllAttachesLocked(data []byte) {
@@ -10892,16 +10490,9 @@ func (s *muxServer) writeAllAttachesLocked(data []byte) {
 	for _, client := range s.attachClients {
 		clients = append(clients, client)
 	}
-	legacy := net.Conn(nil)
-	if len(clients) == 0 {
-		legacy = s.attachConn
-	}
 	s.mu.Unlock()
 	for _, client := range clients {
 		_, _ = client.enqueue(data, false)
-	}
-	if legacy != nil {
-		s.writeAttachLocked(legacy, data)
 	}
 }
 
@@ -10948,12 +10539,6 @@ func (s *muxServer) enqueueAttachViewportTransitionLocked(
 		if !client.clipViewport {
 			continue
 		}
-		// Deliberately not suppressed when the tracked size already matches:
-		// that value records what was queued, never what the client actually
-		// applied, so trusting it can silence the only message able to repair a
-		// client whose grid drifted.
-		client.terminalWidth = width
-		client.terminalHeight = height
 		_, _ = client.enqueue(sequence, false)
 	}
 }
@@ -10987,15 +10572,9 @@ func (s *muxServer) writeAttachOutputIfActive(
 			clients = append(clients, client)
 		}
 	}
-	legacy := len(s.attachClients) == 0 && s.attachConn == primary
 	currentPrimary := s.attachConn
 	s.mu.Unlock()
 
-	if legacy {
-		s.writeAttachLocked(primary, primaryData)
-		s.attachMu.Unlock()
-		return
-	}
 	var primaryClient *attachClient
 	for _, client := range clients {
 		if client.conn == primary {
@@ -11159,19 +10738,6 @@ func (s *muxServer) writeAttachOutputIfActive(
 	s.attachMu.Unlock()
 }
 
-func (s *muxServer) writeAttachIfActive(windowID string, conn net.Conn, data []byte) {
-	s.writeAttachOutputIfActive(
-		windowID,
-		conn,
-		data,
-		data,
-		data,
-		nil,
-		^uint64(0),
-		0,
-	)
-}
-
 func (s *muxServer) enqueuePrimaryAttachLocked(
 	preferred net.Conn,
 	data []byte,
@@ -11187,11 +10753,7 @@ func (s *muxServer) enqueuePrimaryAttachLocked(
 	for _, client := range s.attachClients {
 		clients = append(clients, client)
 	}
-	legacy := len(clients) == 0 && currentPrimary == preferred
 	s.mu.Unlock()
-	if legacy {
-		return nil, nil, s.writeAttachLocked(preferred, data)
-	}
 	sort.Slice(clients, func(i int, j int) bool {
 		iPreferred := clients[i].conn == preferred
 		jPreferred := clients[j].conn == preferred
@@ -11477,10 +11039,6 @@ func (s *muxServer) restorePendingTerminalQueries(
 	window.pendingTerminalQueries = restored
 }
 
-func (s *muxServer) writeActive(data []byte) {
-	_ = s.writeWindow(s.activeWindowID(), data)
-}
-
 func (s *muxServer) handleAttachInputSerialized(
 	client *attachClient,
 	data []byte,
@@ -11587,7 +11145,6 @@ func (s *muxServer) createWindowFromActiveDirectory() error {
 	window := s.windowByIDLocked(s.activeID)
 	cwd := ""
 	if window != nil && !window.closed {
-		window.refreshProcessMetadataLocked(time.Now())
 		cwd = window.cwd
 	}
 	s.mu.Unlock()
@@ -11799,6 +11356,7 @@ func (s *muxServer) sendThemeHint(data string) bool {
 // id is returned even when nothing was pushed so the caller can still repaint
 // the intended window.
 func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
+	s.refreshProcessMetadata("")
 	themeHint := themeHintDataFromString(data)
 	var themeHintData []byte
 	s.mu.Lock()
@@ -11811,7 +11369,6 @@ func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
 		return "", false
 	}
 	windowID := window.id
-	window.refreshProcessMetadataLocked(time.Now())
 	sendFocusTransition := window.themeHintFocusTransitionLocked()
 	if len(themeHint) > 0 {
 		themeHintData = window.themeHintRefreshDataLocked(themeHint)
@@ -11851,14 +11408,16 @@ func capabilityHintDataFromString(data string) []byte {
 
 func (s *muxServer) sendFocusTransition(windowID string) {
 	go func() {
-		_ = s.writeWindow(windowID, []byte("\x1b[O"))
+		_ = s.writeWindowInput(windowID, []byte("\x1b[O"), false)
 		time.Sleep(50 * time.Millisecond)
-		_ = s.writeWindow(windowID, []byte("\x1b[I"))
+		_ = s.writeWindowInput(windowID, []byte("\x1b[I"), false)
 	}()
 }
 
+// Terminal replies have their own stream state, independent of user input and
+// focus events, which can arrive while a large reply is still being streamed.
 func (s *muxServer) writeWindow(windowID string, data []byte) error {
-	return s.writeWindowInput(windowID, data, false)
+	return s.writeWindowData(windowID, data, false, true)
 }
 
 func (s *muxServer) writeWindowInput(
@@ -11866,14 +11425,54 @@ func (s *muxServer) writeWindowInput(
 	data []byte,
 	bracketedPaste bool,
 ) error {
+	return s.writeWindowData(windowID, data, bracketedPaste, false)
+}
+
+func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste, response bool) error {
 	s.mu.Lock()
 	window := s.windowByIDLocked(windowID)
-	win32InputMode := window != nil && window.win32InputMode
-	s.mu.Unlock()
 	if window == nil || window.closed {
+		s.mu.Unlock()
 		return fmt.Errorf("window %q not found", windowID)
 	}
-	if win32InputMode {
+	win32InputMode := window.win32InputMode
+	s.mu.Unlock()
+	window.inputMu.Lock()
+	defer window.inputMu.Unlock()
+	// Native console readers receive encoded protocol bytes as typed keys.
+	// Query the console mode rather than inferring the reader from an app name.
+	// Ordinary keys need no probe: both reader types use the same encoding.
+	// Keep an already-started native paste on the same path until its closing
+	// marker arrives. A split paste needs one mode query, not one per packet.
+	responseFilter := window.nativeResponse
+	var filteredResponse []byte
+	var hasResponse bool
+	if win32InputMode && response {
+		filteredResponse, hasResponse = responseFilter.filter(data)
+	}
+	nativeConsoleInput := win32InputMode && ((bracketedPaste &&
+		(window.nativePaste.inPaste || len(window.nativePaste.carry) > 0)) ||
+		(response && window.nativeResponse.kind != 0))
+	if win32InputMode && !nativeConsoleInput && (bracketedPaste || hasResponse) {
+		if console, ok := window.pty.(interface{ virtualTerminalInputEnabled() (bool, error) }); ok {
+			vtInput, err := console.virtualTerminalInputEnabled()
+			nativeConsoleInput = err == nil && !vtInput
+		}
+	}
+	if win32InputMode && response {
+		if !nativeConsoleInput {
+			responseFilter.kind, responseFilter.escape = 0, false
+		}
+		window.nativeResponse = responseFilter
+	}
+	if nativeConsoleInput {
+		if bracketedPaste {
+			data = window.nativePaste.encode(data)
+		} else {
+			data = filteredResponse
+			data = encodeTerminalInputForWin32InputMode(data)
+		}
+	} else if win32InputMode {
 		// ConPTY's input parser cannot disambiguate a bare ESC and drops raw
 		// OSC/DCS sequences, so a standalone Escape keystroke and synthetic
 		// replies (theme hints, clipboard responses, relayed query answers)
@@ -12087,12 +11686,6 @@ func isWin32InputModeRequestPrefix(rest []byte) bool {
 	return false
 }
 
-func (s *muxServer) activeWindow() *muxWindow {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.windowByIDLocked(s.activeID)
-}
-
 func (s *muxServer) activeWindowID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -12152,11 +11745,6 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 	}
 }
 
-func (w *muxWindow) historyTailLocked() []byte {
-	history, _ := w.historyTailWithParserLocked()
-	return history
-}
-
 func (w *muxWindow) historyTailWithParserLocked() (
 	[]byte,
 	terminalOutputParserSnapshot,
@@ -12173,17 +11761,10 @@ func (w *muxWindow) historyTailWithParserLocked() (
 }
 
 func (w *muxWindow) historyLimitLocked() int {
-	if w.usesForegroundRedrawReplayLocked() {
+	if w.usesForegroundRedrawReplayLocked() || w.retainsConPtyNormalScreenLocked() {
 		return windowFullReplayHistoryLimitBytes
 	}
 	return windowHistoryLimitBytes
-}
-
-func trimReplayHistoryForAttach(history []byte) []byte {
-	return trimReplayHistoryForAttachWithParser(
-		history,
-		terminalOutputParserSnapshot{},
-	)
 }
 
 func trimReplayHistoryForAttachWithParser(
@@ -12351,104 +11932,20 @@ func stripFocusReportsFromAttachInput(data []byte) []byte {
 	return output
 }
 
-func (w *muxWindow) observeTerminalBellLocked(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	observedBell := false
-	for _, b := range data {
-		if b == 0x18 || b == 0x1a {
-			w.resetTerminalBellParserLocked()
-			continue
-		}
-		switch w.terminalBellState {
-		case terminalBellParserGround:
-			switch b {
-			case '\a':
-				observedBell = true
-			case '\x1b':
-				w.terminalBellState = terminalBellParserEscape
-				w.terminalBellBytes = 1
-			}
-		case terminalBellParserEscape:
-			w.terminalBellBytes++
-			switch b {
-			case ']':
-				w.terminalBellState = terminalBellParserOsc
-			case 'P', 'X', '^', '_':
-				w.terminalBellState = terminalBellParserString
-			case '\x1b':
-				w.terminalBellState = terminalBellParserEscape
-				w.terminalBellBytes = 1
-			case '\a':
-				observedBell = true
-				w.resetTerminalBellParserLocked()
-			default:
-				w.resetTerminalBellParserLocked()
-			}
-		case terminalBellParserOsc:
-			w.terminalBellBytes++
-			switch b {
-			case '\a':
-				w.resetTerminalBellParserLocked()
-			case '\x1b':
-				w.terminalBellState = terminalBellParserOscEscape
-			}
-		case terminalBellParserOscEscape:
-			w.terminalBellBytes++
-			switch b {
-			case '\\':
-				w.resetTerminalBellParserLocked()
-			case '\x1b':
-				w.terminalBellState = terminalBellParserOscEscape
-			default:
-				w.terminalBellState = terminalBellParserOsc
-			}
-		case terminalBellParserString:
-			w.terminalBellBytes++
-			switch b {
-			case '\a':
-				w.resetTerminalBellParserLocked()
-			case '\x1b':
-				w.terminalBellState = terminalBellParserStringEscape
-			}
-		case terminalBellParserStringEscape:
-			w.terminalBellBytes++
-			switch b {
-			case '\\', '\a':
-				w.resetTerminalBellParserLocked()
-			case '\x1b':
-				w.terminalBellState = terminalBellParserStringEscape
-			default:
-				w.terminalBellState = terminalBellParserString
-			}
-		}
-		if w.terminalBellState != terminalBellParserGround &&
-			w.terminalBellBytes > oscBufferLimitBytes {
-			w.resetTerminalBellParserLocked()
-		}
-	}
-	return observedBell
-}
-
-func (w *muxWindow) resetTerminalBellParserLocked() {
-	w.terminalBellState = terminalBellParserGround
-	w.terminalBellBytes = 0
-}
-
-func (w *muxWindow) observeTerminalOutputStateLocked(data []byte) {
+func (w *muxWindow) observeTerminalOutputStateLocked(data []byte) bool {
 	parser := terminalOutputParserSnapshot{
 		state:         w.terminalOutputState,
 		bytes:         w.terminalOutputBytes,
 		utf8Remaining: w.terminalOutputUtf8Remaining,
 	}
-	parser.observe(data)
+	bell := parser.observe(data)
 	w.terminalOutputState = parser.state
 	w.terminalOutputBytes = parser.bytes
 	w.terminalOutputUtf8Remaining = parser.utf8Remaining
+	return bell
 }
 
-func (p *terminalOutputParserSnapshot) observe(data []byte) {
+func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 	for _, value := range data {
 		if p.utf8Remaining > 0 {
 			if value&0xc0 == 0x80 {
@@ -12464,6 +11961,9 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) {
 		if value == 0x18 || value == 0x1a {
 			p.reset()
 			continue
+		}
+		if value == '\a' && p.state <= terminalOutputParserCsi {
+			bell = true
 		}
 		switch p.state {
 		case terminalOutputParserGround:
@@ -12549,6 +12049,7 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) {
 			}
 		}
 	}
+	return bell
 }
 
 func terminalOutputHasVisibleContent(data []byte) bool {
@@ -12793,11 +12294,6 @@ func (p terminalOutputParserSnapshot) isGround() bool {
 	return p.state == terminalOutputParserGround && p.utf8Remaining == 0
 }
 
-func (w *muxWindow) resetTerminalOutputParserLocked() {
-	w.terminalOutputState = terminalOutputParserGround
-	w.terminalOutputBytes = 0
-}
-
 func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 	return terminalOutputParserSnapshot{
 		state:         w.terminalOutputState,
@@ -12891,7 +12387,8 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		}
 		sequenceEnd := payloadStart + payloadEnd + terminatorLength
 		payload := data[payloadStart : payloadStart+payloadEnd]
-		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi="))
+		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi=")) ||
+			bytes.HasPrefix(payload, []byte("1337;"+monkeyMuxAgentIdentityOSCPrefix))
 		queryKeys := themeQueryKeysFromOscPayload(string(payload))
 		if !privatePiIdentity && !answerable(queryKeys) {
 			i = sequenceEnd
@@ -12986,27 +12483,6 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 	}
 	output = append(output, data[copyStart:]...)
 	return output
-}
-
-func terminalQueriesFromData(data []byte) []byte {
-	var queries []byte
-	for index := 0; index < len(data); {
-		sequenceEnd, isQuery, incomplete, recognized :=
-			terminalQuerySequenceAt(data, index)
-		if incomplete {
-			break
-		}
-		if !recognized {
-			index++
-			continue
-		}
-		if isQuery &&
-			len(queries)+(sequenceEnd-index) <= pendingTerminalQueryLimitBytes {
-			queries = append(queries, data[index:sequenceEnd]...)
-		}
-		index = sequenceEnd
-	}
-	return queries
 }
 
 func terminalQueryResponseCount(data []byte) int {
@@ -14530,19 +14006,19 @@ type bracketedPasteStartMatch struct {
 	length int
 }
 
-func bracketedPasteStart(
-	data []byte,
+func matchBracketedPasteMarker(
+	data, sevenBit, eightBit []byte,
 	leadingUtf8Prefix int,
 ) bracketedPasteStartMatch {
 	match := bracketedPasteStartMatch{index: -1}
-	if index := bytes.Index(data, bracketedPasteStart7Bit); index >= 0 {
+	if index := bytes.Index(data, sevenBit); index >= 0 {
 		match = bracketedPasteStartMatch{
 			index:  index,
-			length: len(bracketedPasteStart7Bit),
+			length: len(sevenBit),
 		}
 	}
 	for offset := 0; offset < len(data); {
-		index := bytes.Index(data[offset:], bracketedPasteStart8Bit)
+		index := bytes.Index(data[offset:], eightBit)
 		if index < 0 {
 			break
 		}
@@ -14553,7 +14029,7 @@ func bracketedPasteStart(
 			if match.index < 0 || index < match.index {
 				match = bracketedPasteStartMatch{
 					index:  index,
-					length: len(bracketedPasteStart8Bit),
+					length: len(eightBit),
 				}
 			}
 			break
@@ -14563,14 +14039,14 @@ func bracketedPasteStart(
 	return match
 }
 
-func bracketedPasteStartSuffixLength(
-	data []byte,
+func bracketedPasteMarkerSuffixLength(
+	data, sevenBit, eightBit []byte,
 	leadingUtf8Prefix int,
 ) int {
 	longest := 0
 	for _, marker := range [][]byte{
-		bracketedPasteStart7Bit,
-		bracketedPasteStart8Bit,
+		sevenBit,
+		eightBit,
 	} {
 		maximum := min(len(data), len(marker)-1)
 		for length := maximum; length > longest; length-- {
@@ -14591,64 +14067,20 @@ func bracketedPasteStartSuffixLength(
 	return longest
 }
 
-func bracketedPasteEnd(
-	data []byte,
-	leadingUtf8Prefix int,
-) bracketedPasteStartMatch {
-	match := bracketedPasteStartMatch{index: -1}
-	if index := bytes.Index(data, bracketedPasteEnd7Bit); index >= 0 {
-		match = bracketedPasteStartMatch{
-			index:  index,
-			length: len(bracketedPasteEnd7Bit),
-		}
-	}
-	for offset := 0; offset < len(data); {
-		eightBit := bytes.Index(data[offset:], bracketedPasteEnd8Bit)
-		if eightBit < 0 {
-			break
-		}
-		eightBit += offset
-		if (eightBit >= leadingUtf8Prefix ||
-			data[eightBit]&0xc0 != 0x80) &&
-			!isUtf8ContinuationAt(data, eightBit) {
-			if match.index < 0 || eightBit < match.index {
-				match = bracketedPasteStartMatch{
-					index:  eightBit,
-					length: len(bracketedPasteEnd8Bit),
-				}
-			}
-			break
-		}
-		offset = eightBit + 1
-	}
-	return match
+func bracketedPasteStart(data []byte, leadingUtf8Prefix int) bracketedPasteStartMatch {
+	return matchBracketedPasteMarker(data, bracketedPasteStart7Bit, bracketedPasteStart8Bit, leadingUtf8Prefix)
 }
 
-func bracketedPasteEndSuffix(
-	data []byte,
-	leadingUtf8Prefix int,
-) []byte {
-	longest := 0
-	for _, marker := range [][]byte{
-		bracketedPasteEnd7Bit,
-		bracketedPasteEnd8Bit,
-	} {
-		maximum := min(len(data), len(marker)-1)
-		for length := maximum; length > longest; length-- {
-			start := len(data) - length
-			if !bytes.Equal(data[start:], marker[:length]) {
-				continue
-			}
-			if marker[0] == 0x9b &&
-				((start < leadingUtf8Prefix &&
-					data[start]&0xc0 == 0x80) ||
-					isUtf8ContinuationAt(data, start)) {
-				continue
-			}
-			longest = length
-			break
-		}
-	}
+func bracketedPasteEnd(data []byte, leadingUtf8Prefix int) bracketedPasteStartMatch {
+	return matchBracketedPasteMarker(data, bracketedPasteEnd7Bit, bracketedPasteEnd8Bit, leadingUtf8Prefix)
+}
+
+func bracketedPasteStartSuffixLength(data []byte, leadingUtf8Prefix int) int {
+	return bracketedPasteMarkerSuffixLength(data, bracketedPasteStart7Bit, bracketedPasteStart8Bit, leadingUtf8Prefix)
+}
+
+func bracketedPasteEndSuffix(data []byte, leadingUtf8Prefix int) []byte {
+	longest := bracketedPasteMarkerSuffixLength(data, bracketedPasteEnd7Bit, bracketedPasteEnd8Bit, leadingUtf8Prefix)
 	if longest == 0 {
 		return nil
 	}
@@ -15065,7 +14497,7 @@ func isReplayUnsafeOscNotification(payload []byte) bool {
 	case "99", "777":
 		return true
 	case "1337":
-		return strings.HasPrefix(rest, "MonkeyMuxPi=")
+		return strings.HasPrefix(rest, "MonkeyMuxPi=") || strings.HasPrefix(rest, monkeyMuxAgentIdentityOSCPrefix)
 	case "9":
 		// iTerm2 notifications are `OSC 9 ; <text>`. ConEmu reuses OSC 9 with a
 		// numeric sub-command (9;4 progress, 9;9 working dir, ...); leave those
@@ -15116,6 +14548,11 @@ func (w *muxWindow) agentToolLocked() string {
 	if tool := strings.TrimSpace(w.agentTool); tool != "" {
 		return tool
 	}
+	// A restored retired agent is now a known shell, even if its retained
+	// title/name resembles another tool. Live commands still win above.
+	if w.agentToolConfirmed {
+		return ""
+	}
 	if tool := agentToolFromTerminalTitle(w.paneTitle); tool != "" {
 		return tool
 	}
@@ -15143,49 +14580,65 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 	return identity
 }
 
-func (w *muxWindow) refreshProcessMetadataLocked(now time.Time) {
-	if w == nil || w.pty == nil {
-		return
+func (s *muxServer) refreshAllProcessMetadata() {
+	s.mu.Lock()
+	windows := append([]*muxWindow(nil), s.windows...)
+	s.mu.Unlock()
+	for _, window := range windows {
+		s.refreshProcessMetadata(window.id)
 	}
-	if !w.lastProcessMetadataRefresh.IsZero() &&
-		now.Sub(w.lastProcessMetadataRefresh) < processMetadataInterval {
-		return
-	}
-	w.lastProcessMetadataRefresh = now
+}
 
+func (s *muxServer) refreshProcessMetadata(windowID string) {
+	s.mu.Lock()
+	if windowID == "" {
+		windowID = s.activeID
+	}
+	w := s.windowByIDLocked(windowID)
+	now := time.Now()
+	if w == nil || w.closed || w.pty == nil ||
+		(!w.lastProcessMetadataRefresh.IsZero() &&
+			now.Sub(w.lastProcessMetadataRefresh) < processMetadataInterval) {
+		s.mu.Unlock()
+		return
+	}
+	defer s.refreshAgentSessionBinding(windowID)
+	w.lastProcessMetadataRefresh = now
 	pgrp := w.foregroundProcessGroupLocked()
-	if command := commandNameForProcessGroup(pgrp); command != "" {
+	pty, process := w.pty, w.proc
+	identity := w.broadcastIdentityLocked()
+	fallbackTool := (&muxWindow{
+		agentTool: w.agentTool, agentToolConfirmed: w.agentToolConfirmed,
+		paneTitle: w.paneTitle, name: w.name,
+	}).agentToolLocked()
+	sessionID := w.agentSessionID
+	s.mu.Unlock()
+
+	command := commandNameForProcessGroup(pgrp)
+	tool := identity.agentTool
+	if command != "" {
+		tool = firstNonEmptyString(agentToolFromCommandName(command), fallbackTool)
+	}
+	if sessionID == "" && tool == "cursor-agent" && pgrp > 0 {
+		if started := processStartedAtForMetadata(pgrp); !started.IsZero() {
+			sessionID = cursorSessionIDForWorkspace(readCursorChatEntries(), identity.cwd, started)
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.windowByIDLocked(windowID) != w || w.closed || w.pty != pty || w.proc != process ||
+		w.lastProcessMetadataRefresh != now || w.foregroundProcessGroupLocked() != pgrp ||
+		w.broadcastIdentityLocked() != identity {
+		return
+	}
+	if command != "" {
 		w.foregroundCommand = command
 	}
-	w.refreshCursorSessionMetadataLocked(pgrp)
-}
-
-func (w *muxWindow) refreshCursorSessionMetadataLocked(processID int) {
-	if w == nil || w.agentSessionID != "" ||
-		w.agentToolLocked() != "cursor-agent" || processID <= 0 {
-		return
+	if w.agentSessionID == "" && sessionID != "" && s.allowAgentSessionFallbackLocked(w, tool, sessionID) {
+		w.agentSessionID = sessionID
+		w.agentSessionIdentityExact = true
 	}
-	processStarted := processStartedAtForMetadata(processID)
-	if processStarted.IsZero() {
-		return
-	}
-	sessionID := cursorSessionIDForWorkspace(
-		readCursorChatEntries(),
-		w.cwd,
-		processStarted,
-	)
-	if sessionID == "" {
-		return
-	}
-	w.agentSessionID = sessionID
-	w.agentSessionIdentityExact = true
-}
-
-func (w *muxWindow) supportsThemeHintLocked() bool {
-	return w.themeHintFocusTransitionLocked() ||
-		w.themeHintModeReportLocked() ||
-		len(w.themeHintRefreshKeysLocked()) > 0 ||
-		len(w.agentThemeHintRefreshKeysLocked()) > 0
 }
 
 // themeHintRefreshKeysLocked returns the OSC theme-query keys the daemon
@@ -15327,7 +14780,9 @@ func commandNameForProcessGroup(pgrp int) string {
 	if pgrp <= 0 {
 		return ""
 	}
-	directCommand := commandNameForPID(pgrp)
+	processes := cachedProcessTable(time.Now())
+	info := processes[pgrp]
+	directCommand := commandNameFromProcessFields(info.comm, info.args)
 	if directCommand != "" &&
 		!isGenericRuntimeCommandName(directCommand) &&
 		!isShellCommandName(directCommand) {
@@ -15339,7 +14794,6 @@ func commandNameForProcessGroup(pgrp int) string {
 		return fallback
 	}
 
-	processes := cachedProcessTable(time.Now())
 	if len(processes) == 0 {
 		return fallback
 	}
@@ -15393,6 +14847,9 @@ func cleanProcessCommandName(value string) string {
 }
 
 func agentCommandNameFromProcessArgs(args string) string {
+	if tool := agentLaunchToolFromCommand(args); tool != "" {
+		return tool
+	}
 	trimmed := strings.TrimSpace(args)
 	if trimmed == "" {
 		return ""
@@ -15406,10 +14863,6 @@ func agentCommandNameFromProcessArgs(args string) string {
 
 	lowered := strings.ToLower(trimmed)
 	switch {
-	case strings.Contains(lowered, "@google/gemini-cli") ||
-		strings.Contains(lowered, "/gemini-cli/") ||
-		strings.Contains(lowered, "/gemini.js"):
-		return "gemini"
 	case strings.Contains(lowered, "@openai/codex") ||
 		strings.Contains(lowered, "/codex/bin/codex") ||
 		strings.Contains(lowered, "/codex.js"):
@@ -15433,6 +14886,9 @@ func agentCommandNameFromProcessArgs(args string) string {
 }
 
 func agentToolFromCommandText(command string) string {
+	if tool := agentLaunchToolFromCommand(command); tool != "" {
+		return tool
+	}
 	return firstNonEmptyString(
 		agentToolFromCommandName(commandNameFromShellCommand(command)),
 		agentToolFromCommandName(agentCommandNameFromProcessArgs(command)),
@@ -15440,6 +14896,9 @@ func agentToolFromCommandText(command string) string {
 }
 
 func agentToolFromCommandName(command string) string {
+	if tool := agentLaunchToolFromCommand(command); tool != "" {
+		return tool
+	}
 	normalized := strings.ToLower(cleanProcessCommandName(command))
 	switch normalized {
 	case "claude", "claude-code":
@@ -15450,8 +14909,6 @@ func agentToolFromCommandName(command string) string {
 		return "codex"
 	case "opencode", "open-code":
 		return "opencode"
-	case "gemini", "gemini-cli":
-		return "gemini"
 	case "agy", "antigravity", "antigravity-cli":
 		return "antigravity"
 	case "cursor-agent":
@@ -15471,7 +14928,7 @@ func monkeyMuxAgentLaunchCommand(command string) string {
 	if strings.HasPrefix(trimmed, "pi ") {
 		return monkeyMuxPiAgentLaunchCommand() + trimmed[len("pi"):]
 	}
-	return command
+	return rewriteAgentLaunchCommand(command)
 }
 
 func monkeyMuxPiAgentLaunchCommand() string {
@@ -15484,48 +14941,35 @@ func monkeyMuxPiAgentLaunchCommand() string {
 	return "monkeymux pi-agent"
 }
 
+var agentCommands = map[string]struct {
+	executable       string
+	permissionFlags  string
+	resumeArgument   string
+	supportsContinue bool
+}{
+	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
+	"copilot":      {"copilot", "--yolo", "--resume", false},
+	"codex":        {"codex", "--yolo", "resume", false},
+	"opencode":     {"opencode", "", "--session", true},
+	"antigravity":  {"agy", "--dangerously-skip-permissions", "--conversation", true},
+	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
+}
+
 func agentLaunchCommand(tool string, startInYoloMode bool) string {
-	switch tool {
-	case "claude":
-		if startInYoloMode {
-			return "claude --dangerously-skip-permissions"
-		}
-		return "claude"
-	case "copilot":
-		if startInYoloMode {
-			return "copilot --yolo"
-		}
-		return "copilot"
-	case "codex":
-		if startInYoloMode {
-			return "codex --yolo"
-		}
-		return "codex"
-	case "opencode":
-		if startInYoloMode {
-			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " opencode"
-		}
-		return "opencode"
-	case "gemini":
-		if startInYoloMode {
-			return "gemini --yolo"
-		}
-		return "gemini"
-	case "antigravity":
-		if startInYoloMode {
-			return "agy --dangerously-skip-permissions"
-		}
-		return "agy"
-	case "cursor-agent":
-		if startInYoloMode {
-			return "cursor-agent --force"
-		}
-		return "cursor-agent"
-	case "pi":
+	if tool == "pi" {
 		return monkeyMuxPiAgentLaunchCommand()
-	default:
-		return ""
 	}
+	descriptor := agentCommands[tool]
+	command := descriptor.executable
+	if startInYoloMode {
+		if tool == "opencode" {
+			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command
+		}
+		if descriptor.permissionFlags != "" {
+			command += " " + descriptor.permissionFlags
+		}
+	}
+	return command
 }
 
 func piLaunchCommand(sessionDir string) string {
@@ -15535,7 +14979,7 @@ func piLaunchCommand(sessionDir string) string {
 	}
 	argument, ok := shellArgument(sessionDir)
 	if !ok {
-		return monkeyMuxPiAgentLaunchCommand()
+		return ""
 	}
 	return monkeyMuxPiAgentLaunchCommand() + " --session-dir " + argument
 }
@@ -15552,7 +14996,7 @@ func piResumeCommand(sessionID string, sessionDir string, sessionPath string) st
 		return monkeyMuxPiAgentLaunchCommand() + " --session " + argument
 	}
 	launch := piLaunchCommand(sessionDir)
-	if strings.TrimSpace(sessionDir) != "" && launch == "pi" {
+	if launch == "" {
 		return ""
 	}
 	return launch + " --session " + sessionID
@@ -15563,64 +15007,21 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 	if !ok {
 		return ""
 	}
-	switch tool {
-	case "claude":
-		if startInYoloMode {
-			return "claude --dangerously-skip-permissions --resume " + quotedSessionID
-		}
-		return "claude --resume " + quotedSessionID
-	case "copilot":
-		if startInYoloMode {
-			return "copilot --yolo --resume " + quotedSessionID
-		}
-		return "copilot --resume " + quotedSessionID
-	case "codex":
-		if startInYoloMode {
-			return "codex --yolo resume " + quotedSessionID
-		}
-		return "codex resume " + quotedSessionID
-	case "opencode":
-		commandPrefix := ""
-		if startInYoloMode {
-			commandPrefix = "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " "
-		}
-		if sessionID == "_continue" {
-			return commandPrefix + "opencode --continue"
-		}
-		return commandPrefix + "opencode --session " + quotedSessionID
-	case "gemini":
-		if startInYoloMode {
-			return "gemini --yolo --resume " + quotedSessionID
-		}
-		return "gemini --resume " + quotedSessionID
-	case "antigravity":
-		commandPrefix := ""
-		if startInYoloMode {
-			commandPrefix = "agy --dangerously-skip-permissions "
-		} else {
-			commandPrefix = "agy "
-		}
-		if sessionID == "_continue" {
-			return commandPrefix + "--continue"
-		}
-		return commandPrefix + "--conversation " + quotedSessionID
-	case "cursor-agent":
-		commandPrefix := "cursor-agent"
-		if startInYoloMode {
-			commandPrefix = "cursor-agent --force"
-		}
-		if sessionID == "_continue" {
-			return commandPrefix + " --continue"
-		}
-		return commandPrefix + " --resume " + quotedSessionID
-	case "pi":
+	if tool == "pi" {
 		if !safePiSessionIDPattern.MatchString(sessionID) {
 			return ""
 		}
-		return monkeyMuxPiAgentLaunchCommand() + " --session " + sessionID
-	default:
+		return piResumeCommand(sessionID, "", "")
+	}
+	launch := agentLaunchCommand(tool, startInYoloMode)
+	if launch == "" {
 		return ""
 	}
+	descriptor := agentCommands[tool]
+	if sessionID == "_continue" && descriptor.supportsContinue {
+		return launch + " --continue"
+	}
+	return launch + " " + descriptor.resumeArgument + " " + quotedSessionID
 }
 
 func canonicalAgentCommandName(command string) string {
@@ -15663,9 +15064,6 @@ func agentToolFromTerminalTitle(title string) string {
 	case normalized == "opencode" || normalized == "open code" ||
 		strings.HasPrefix(normalized, "opencode "):
 		return "opencode"
-	case normalized == "gemini" || normalized == "gemini cli" ||
-		strings.HasPrefix(normalized, "gemini cli "):
-		return "gemini"
 	case normalized == "agy" || normalized == "antigravity" ||
 		strings.HasPrefix(normalized, "agy ") || strings.HasPrefix(normalized, "antigravity "):
 		return "antigravity"
@@ -16250,6 +15648,7 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 		w.applyTerminalProgressPayloadLocked(value)
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
+		w.applyAgentIdentityPayloadLocked(value)
 	}
 	queryKeys := themeQueryKeysFromOscPayload(payload)
 	if len(queryKeys) == 0 {
@@ -16483,11 +15882,10 @@ func pathFromOsc7(value string) string {
 	if err != nil || parsed.Scheme != "file" {
 		return ""
 	}
-	path, err := url.PathUnescape(parsed.Path)
-	if err != nil || !strings.HasPrefix(path, "/") {
+	if !strings.HasPrefix(parsed.Path, "/") {
 		return ""
 	}
-	return path
+	return parsed.Path
 }
 
 func (s *muxServer) clearAlertsLocked(activeID string) {
@@ -16530,13 +15928,9 @@ func (s *muxServer) close() {
 	socket := s.socketPath
 	identity := s.socketIdentity
 	s.listener = nil
-	attach := net.Conn(nil)
 	attachClients := make([]*attachClient, 0, len(s.attachClients))
 	for _, client := range s.attachClients {
 		attachClients = append(attachClients, client)
-	}
-	if len(attachClients) == 0 {
-		attach = s.attachConn
 	}
 	s.attachConn = nil
 	s.attachClients = map[net.Conn]*attachClient{}
@@ -16545,6 +15939,11 @@ func (s *muxServer) close() {
 		controls = append(controls, control)
 	}
 	windows := append([]*muxWindow(nil), s.windows...)
+	// Read each pane's foreground process group while its pty is still open:
+	// an interactive pane shell keeps its jobs in their own groups, so a
+	// hangup-ignoring agent is only reachable through the terminal's
+	// foreground group, never through the shell's.
+	foregroundGroups := shutdownForegroundGroups(windows)
 	// Mark the windows closed while still holding s.mu. A watcher that outruns
 	// the bounded wait below then finds its window already closed and returns
 	// from markWindowClosed before touching any server state.
@@ -16562,9 +15961,6 @@ func (s *muxServer) close() {
 	if socket != "" {
 		removeSocketPathIfUnchanged(socket, identity)
 	}
-	if attach != nil {
-		_ = attach.Close()
-	}
 	for _, client := range attachClients {
 		client.close()
 	}
@@ -16576,8 +15972,20 @@ func (s *muxServer) close() {
 			window.proc.Hangup()
 		}
 		if window.pty != nil {
+			// Closing the master also hangs up the terminal's foreground
+			// group, which is how a cooperative agent under the pane shell's
+			// job control learns to exit.
 			_ = window.closePty(window.pty)
 		}
+	}
+	// A child that ignores SIGHUP (cursor-agent does) never lets its watcher
+	// finish, so close runs out the whole watcher bound below and the
+	// replacement helper's exit wait times out: the update is abandoned and the
+	// old server kept, every time. Give the hangups a moment to work, then
+	// force the survivors out; the restore snapshot already carries what they
+	// need to resume.
+	killSurvivingWindowProcesses(windows, foregroundGroups, windowHangupGrace)
+	for _, window := range windows {
 		if window.nativeAcpBridgeID != "" {
 			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
 		}
@@ -16593,6 +16001,10 @@ func (s *muxServer) close() {
 	// reacquire s.mu. Join it before close returns so it can observe closed and
 	// remove that listener's path rather than leaving stale socket residue.
 	s.socketRepublishers.Wait()
+	// Admission closed under s.mu before any Wait, so no start can join late.
+	// Unlike normal watchers, unpublished children have no useful work to
+	// preserve: join their forced cleanup through Wait before closing closeDone.
+	s.pendingWindowStarts.Wait()
 }
 
 // windowWatcherShutdownTimeout bounds how long close waits for the per-window
@@ -16600,6 +16012,50 @@ func (s *muxServer) close() {
 // finish immediately; the bound only exists so a child that ignores SIGHUP
 // cannot hang shutdown.
 const windowWatcherShutdownTimeout = 2 * time.Second
+
+// windowHangupGrace bounds how long close waits for hung-up children to exit
+// before killing their process groups. Cooperative children exit within a few
+// milliseconds, so the bound only matters for those that ignore SIGHUP.
+const windowHangupGrace = time.Second
+
+// shutdownForegroundGroups records each window's current foreground process
+// group. It must run while the ptys are still open.
+func shutdownForegroundGroups(windows []*muxWindow) map[*muxWindow]int {
+	groups := make(map[*muxWindow]int, len(windows))
+	for _, window := range windows {
+		if group := foregroundProcessGroupForWindow(window); group > 0 {
+			groups[window] = group
+		}
+	}
+	return groups
+}
+
+// killSurvivingWindowProcesses kills, for every window whose children are
+// still alive once the grace period has elapsed, the child's own process group
+// and the pane's foreground process group (an interactive pane shell keeps
+// its jobs in their own groups). Each liveness check runs right before its
+// kill so a group that already exited (and was reaped) is never signalled
+// through a recycled id.
+func killSurvivingWindowProcesses(windows []*muxWindow, foregroundGroups map[*muxWindow]int, grace time.Duration) {
+	deadline := time.Now().Add(grace)
+	for _, window := range windows {
+		leader, group := 0, foregroundGroups[window]
+		if window.proc != nil {
+			leader = window.proc.Pid()
+		}
+		leaderAlive := func() bool { return leader > 0 && processIDAlive(leader) }
+		groupAlive := func() bool { return processGroupAlive(group) }
+		for (leaderAlive() || groupAlive()) && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if leaderAlive() {
+			window.proc.Kill()
+		}
+		if groupAlive() {
+			killProcessGroup(group)
+		}
+	}
+}
 
 func (s *muxServer) waitForWindowWatchers(timeout time.Duration) {
 	done := make(chan struct{})
@@ -16788,6 +16244,9 @@ func shouldUpdateRunningServer(
 		return false
 	case serverUpdatePolicyAlways:
 		return true
+	case serverUpdatePolicyForce:
+		fmt.Fprintf(writer, "monkeymux: forcing reload of session %q on helper %s\r\n", session, status.displayVersion())
+		return true
 	default:
 		return promptForServerUpdate(reader, writer, session, status)
 	}
@@ -16801,6 +16260,8 @@ func normalizeServerUpdatePolicy(value string) (string, error) {
 		return serverUpdatePolicyNever, nil
 	case serverUpdatePolicyAlways:
 		return serverUpdatePolicyAlways, nil
+	case serverUpdatePolicyForce:
+		return serverUpdatePolicyForce, nil
 	default:
 		return "", fmt.Errorf("invalid update policy %q", value)
 	}
@@ -16921,6 +16382,10 @@ func requestServerShutdown(session string) {
 	if err != nil {
 		return
 	}
+	requestServerShutdownOnConnection(conn, session)
+}
+
+func requestServerShutdownOnConnection(conn net.Conn, session string) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
 
@@ -16933,11 +16398,25 @@ func requestServerShutdown(session string) {
 	if err := dec.Decode(&ignored); err != nil {
 		return
 	}
-	_ = enc.Encode(controlMessage{
-		ID:      strconv.FormatInt(time.Now().UnixNano(), 10),
+	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := enc.Encode(controlMessage{
+		ID:      requestID,
 		Type:    "shutdown",
 		Session: session,
-	})
+	}); err != nil {
+		return
+	}
+	// Wait for the acknowledgement. The server may still be building the hello
+	// reply (a window's metadata refresh can take a few hundred milliseconds);
+	// closing this end before it has read the request makes that hello write
+	// fail, the handler give up, and the queued shutdown vanish, so a busy
+	// session then never stops and no helper update can replace it.
+	for {
+		var ack controlResponse
+		if err := dec.Decode(&ack); err != nil || (ack.Type == "shutdown" && ack.ID == requestID) {
+			return
+		}
+	}
 }
 
 func waitForServerExit(session string, timeout time.Duration) bool {

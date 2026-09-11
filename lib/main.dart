@@ -30,7 +30,7 @@ Future<void> main() async {
   final telemetryService = await createTelemetryService(
     settingsService: settingsService,
   );
-  _installTelemetryErrorHandlers(telemetryService);
+  installTelemetryErrorHandlers(telemetryService);
   runApp(
     ProviderScope(
       overrides: [
@@ -49,6 +49,10 @@ Future<void> main() async {
   );
 }
 
+/// Registers bundled licenses without starting the app in tests.
+@visibleForTesting
+void installBundledLicensesForTesting() => _installBundledLicenses();
+
 void _installBundledLicenses() {
   LicenseRegistry.addLicense(() async* {
     final license = await rootBundle.loadString(
@@ -57,6 +61,16 @@ void _installBundledLicenses() {
     yield LicenseEntryWithLineBreaks(const [
       'Microsoft Windows Terminal ConPTY',
     ], license);
+    final interLicense = await rootBundle.loadString(
+      'assets/fonts/OFL-Inter.txt',
+    );
+    yield LicenseEntryWithLineBreaks(const ['Inter'], interLicense);
+    final jetBrainsMonoLicense = await rootBundle.loadString(
+      'assets/fonts/OFL-JetBrainsMono.txt',
+    );
+    yield LicenseEntryWithLineBreaks(const [
+      'JetBrains Mono',
+    ], jetBrainsMonoLicense);
   });
 }
 
@@ -91,7 +105,9 @@ void _installPerformanceDiagnostics() {
       );
 }
 
-void _installTelemetryErrorHandlers(TelemetryService telemetryService) {
+/// Installs the last-resort reporters while preserving existing error handlers.
+@visibleForTesting
+void installTelemetryErrorHandlers(TelemetryService telemetryService) {
   final previousFlutterErrorHandler = FlutterError.onError;
   FlutterError.onError = (details) {
     if (previousFlutterErrorHandler != null) {
@@ -106,39 +122,37 @@ void _installTelemetryErrorHandlers(TelemetryService telemetryService) {
 
   final previousPlatformErrorHandler = PlatformDispatcher.instance.onError;
   PlatformDispatcher.instance.onError = (error, stackTrace) {
+    var absorbed = false;
     if (isExpectedSshChannelTeardownError(error, stackTrace)) {
+      absorbed = true;
       DiagnosticsLogService.instance.info(
         'ssh.channel',
         'late_write_ignored',
         fields: {'errorType': error.runtimeType},
       );
-      previousPlatformErrorHandler?.call(error, stackTrace);
-      return true;
-    }
-    if (isExpectedSshOperationError(error)) {
+    } else if (isExpectedSshOperationError(error, stackTrace)) {
+      absorbed = true;
       DiagnosticsLogService.instance.warning(
         'ssh.operation',
         'unhandled_failure_absorbed',
         fields: {'errorType': error.runtimeType},
       );
-      previousPlatformErrorHandler?.call(error, stackTrace);
-      return true;
-    }
-    if (_isGoogleFontsLoadFailure(error, stackTrace)) {
+    } else if (_isGoogleFontsLoadFailure(error, stackTrace)) {
+      absorbed = true;
       DiagnosticsLogService.instance.warning(
         'fonts',
         'runtime_load_failed',
         fields: {'errorType': error.runtimeType},
       );
-      previousPlatformErrorHandler?.call(error, stackTrace);
-      return true;
     }
     unawaited(
       telemetryService
-          .recordError(error, stackTrace, fatal: true)
+          .recordError(error, stackTrace, fatal: !absorbed, absorbed: absorbed)
           .catchError((Object _) {}),
     );
-    return previousPlatformErrorHandler?.call(error, stackTrace) ?? false;
+    final previouslyHandled =
+        previousPlatformErrorHandler?.call(error, stackTrace) ?? false;
+    return absorbed || previouslyHandled;
   };
 }
 

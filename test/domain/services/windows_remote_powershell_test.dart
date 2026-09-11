@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
@@ -35,6 +36,132 @@ void main() {
       },
     );
   });
+
+  group('buildCompactWindowsPowerShellCommand', () {
+    test('leaves small scripts unchanged', () {
+      const script = "Write-Output 'hello'";
+      expect(
+        buildCompactWindowsPowerShellCommand(script),
+        buildWindowsPowerShellCommand(script),
+      );
+    });
+
+    test(
+      'transport boundary matches encoded size including UTF-16 surrogates',
+      () {
+        for (final value in ['x', 'é', '🐒']) {
+          for (var count = 1380; count <= 2820; count++) {
+            final script = value * count;
+            final encoded = buildWindowsPowerShellCommand(script);
+            final compact = buildCompactWindowsPowerShellCommand(script);
+            if (encoded.length < 7500) {
+              expect(compact, encoded);
+            } else {
+              expect(compact, contains('GZipStream'));
+            }
+          }
+        }
+      },
+    );
+
+    test('round-trips large Unicode scripts without shell interpolation', () {
+      final script = "Write-Output 'café 🐒';\n" * 2000;
+      final command = buildCompactWindowsPowerShellCommand(script);
+      expect(command.length, lessThan(7500));
+      expect(command, isNot(contains(r'$')));
+      expect(command, isNot(contains('`')));
+      final payload = RegExp(
+        r"FromBase64String\('([^']+)'\)",
+      ).firstMatch(command)![1]!;
+      expect(utf8.decode(gzip.decode(base64.decode(payload))), script);
+    });
+  });
+
+  test('profile probes suppress progress before loading modules', () {
+    expect(
+      powerShellProfilePathPreamble,
+      startsWith(r"$ProgressPreference = 'SilentlyContinue';"),
+    );
+  });
+
+  test(
+    'Windows PATH refresh discovers new user entries without duplicates',
+    () async {
+      // Exercise the exact refresh fragment without loading real user profiles or
+      // changing the registry. The literal represents a freshly read User PATH.
+      final refresh = powerShellProfilePathPreamble
+          .split(r'$__flProfilePaths')
+          .first
+          .replaceFirst(
+            "[Environment]::GetEnvironmentVariable('Path','User')",
+            r"'C:\existing;%LOCALAPPDATA%\agy\bin;;C:\new tools'",
+          );
+      final script =
+          r"$env:Path='C:\existing';$env:LOCALAPPDATA='C:\Local';" +
+          refresh +
+          refresh +
+          r'[Console]::WriteLine($env:Path);';
+      final command = buildWindowsPowerShellCommand(script);
+      final result = await Process.run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        command,
+      ]).timeout(const Duration(seconds: 20));
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      expect(
+        (result.stdout as String).trim(),
+        r'C:\existing;C:\Local\agy\bin;C:\new tools',
+      );
+    },
+    skip: !Platform.isWindows,
+  );
+
+  for (final large in [false, true]) {
+    test(
+      'Windows output is plain text and retains errors, large=$large',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'powershell-output-',
+        );
+        addTearDown(() => root.delete(recursive: true));
+        // No user profiles or real installers: exercise small and large scripts
+        // with the same progress, success, PowerShell error and native error streams.
+        final script =
+            r'''
+$ProgressPreference = 'SilentlyContinue';
+Write-Progress -Activity 'Preparing modules for first use' -Status 'fixture';
+Write-Output 'installer stdout';
+Write-Error 'installer PowerShell error' -ErrorAction Continue;
+[Console]::Error.WriteLine('installer native stderr');
+exit 7;
+''' +
+            (large ? '# padding\n' * 1500 : '');
+        final command = buildCompactWindowsPowerShellCommand(
+          script,
+          plainTextOutput: true,
+        );
+        expect(command, contains('-OutputFormat Text'));
+        expect(command, contains('GZipStream'));
+        final batch = File('${root.path}/probe.cmd');
+        await batch.writeAsString('@echo off\r\n$command\r\n');
+        final result = await Process.run('cmd.exe', [
+          '/d',
+          '/c',
+          batch.path,
+        ]).timeout(const Duration(seconds: 20));
+        expect(result.exitCode, 7);
+        expect(result.stdout, contains('installer stdout'));
+        expect(result.stderr, contains('installer PowerShell error'));
+        expect(result.stderr, contains('installer native stderr'));
+        final output = '${result.stdout}\n${result.stderr}';
+        expect(output, isNot(contains('#< CLIXML')));
+        expect(output, isNot(contains('<Objs')));
+        expect(output, isNot(contains('<PR ')));
+      },
+      skip: !Platform.isWindows,
+    );
+  }
 
   group('powerShellSingleQuote', () {
     test('wraps in single quotes and doubles embedded quotes', () {
@@ -284,21 +411,30 @@ void main() {
       expect(script, contains(r"if($__flShell -eq 'cmd'){return $false}"));
     });
 
-    test('path mode enumerates directories and files', () {
-      const invocation = ShellCompletionInvocation(
-        commandLine: 'type .cop',
-        cursorOffset: 9,
-        token: '.cop',
-        tokenStart: 5,
-        mode: ShellCompletionMode.path,
-        workingDirectory: r'C:\Users\x',
-      );
-      final script = buildWindowsShellCompletionScript(invocation);
-      expect(script, contains(r"$__flMode='path'"));
-      expect(script, contains('Get-ChildItem -LiteralPath'));
-      expect(script, contains(r"__flEmit 'directory' $__val"));
-      expect(script, contains(r"__flEmit 'file' $__val"));
-    });
+    for (final shell in ['cmd.exe', 'pwsh.exe']) {
+      test('$shell argument fallback emits directories and regular files', () {
+        final invocation = buildShellCompletionInvocation(
+          terminalText: r'C:\Users\x>type rea',
+          terminalCursorOffset: r'C:\Users\x>type rea'.length,
+          promptPrefix: r'C:\Users\x>',
+          shellCommand: shell,
+          workingDirectory: r'C:\Users\x',
+        )!;
+        expect(invocation.mode, ShellCompletionMode.argument);
+        final script = buildWindowsShellCompletionScript(invocation);
+        expect(script, contains(r"$__flMode='argument'"));
+        expect(script, contains(r"$__flToken='rea'"));
+        expect(script, contains(r"if($__flShell -eq 'cmd'){return $false}"));
+        expect(script, contains('Get-ChildItem -LiteralPath'));
+        expect(script, contains(r"__flEmit 'directory' $__val"));
+        expect(
+          script,
+          contains(
+            r"elseif($__flMode -ne 'directory'){if(!(__flEmit 'file' $__val)){break}}",
+          ),
+        );
+      });
+    }
 
     test('escapes wildcard tokens and handles drive roots', () {
       const invocation = ShellCompletionInvocation(
@@ -306,7 +442,7 @@ void main() {
         cursorOffset: 10,
         token: 'C:/Us',
         tokenStart: 5,
-        mode: ShellCompletionMode.path,
+        mode: ShellCompletionMode.argument,
         workingDirectory: r'C:\Users\x',
       );
       final script = buildWindowsShellCompletionScript(invocation);

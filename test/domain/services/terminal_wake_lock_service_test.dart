@@ -5,28 +5,16 @@ import 'package:monkeyssh/domain/services/terminal_wake_lock_service.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:wakelock_plus_platform_interface/wakelock_plus_platform_interface.dart';
 
-class _FakeWakelockPlusPlatform extends WakelockPlusPlatformInterface {
-  final toggleCalls = <bool>[];
-  bool _enabled = false;
-
-  @override
-  Future<void> toggle({required bool enable}) async {
-    _enabled = enable;
-    toggleCalls.add(enable);
-  }
-
-  @override
-  Future<bool> get enabled async => _enabled;
-}
+import '../../helpers/fake_wakelock_plus_platform.dart';
 
 void main() {
   late WakelockPlusPlatformInterface originalWakelockPlatform;
-  late _FakeWakelockPlusPlatform wakelockPlatform;
+  late FakeWakelockPlusPlatform wakelockPlatform;
   late TerminalWakeLockService service;
 
   setUp(() {
     originalWakelockPlatform = wakelockPlusPlatformInstance;
-    wakelockPlatform = _FakeWakelockPlusPlatform();
+    wakelockPlatform = FakeWakelockPlusPlatform();
     wakelockPlusPlatformInstance = wakelockPlatform;
     service = TerminalWakeLockService();
   });

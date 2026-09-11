@@ -138,57 +138,6 @@ void main() {
       expect(span.toPlainText(), largeText);
     });
 
-    test('invalidateHighlightCache forces re-highlight', () {
-      controller = SyntaxHighlightController(
-        theme: const {'keyword': TextStyle(color: Color(0xFFFF00FF))},
-        text: 'var x = 1;',
-        language: 'dart',
-      );
-
-      final span1 = controller.buildTextSpan(
-        context: _FakeBuildContext(),
-        withComposing: false,
-      );
-
-      controller.invalidateHighlightCache();
-
-      final span2 = controller.buildTextSpan(
-        context: _FakeBuildContext(),
-        withComposing: false,
-      );
-
-      // After cache invalidation, the cached children should differ.
-      expect(identical(span1.children, span2.children), isFalse);
-    });
-
-    test('handles language change at runtime', () {
-      controller = SyntaxHighlightController(
-        theme: const {
-          'keyword': TextStyle(color: Color(0xFFFF00FF)),
-          'string': TextStyle(color: Color(0xFF00FF00)),
-        },
-        text: '{"key": "value"}',
-        language: 'json',
-      );
-
-      // First build triggers highlighting; then change language and invalidate.
-      // ignore: cascade_invocations
-      controller.buildTextSpan(
-        context: _FakeBuildContext(),
-        withComposing: false,
-      );
-      // ignore: cascade_invocations
-      controller
-        ..language = 'javascript'
-        ..invalidateHighlightCache();
-
-      final span = controller.buildTextSpan(
-        context: _FakeBuildContext(),
-        withComposing: false,
-      );
-      expect(span.toPlainText(), '{"key": "value"}');
-    });
-
     test('falls back to plain text on highlight failure', () {
       controller = SyntaxHighlightController(
         theme: const {'keyword': TextStyle(color: Color(0xFFFF00FF))},

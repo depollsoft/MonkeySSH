@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
 import 'diagnostics_log_service.dart';
@@ -35,6 +36,30 @@ Future<T> runQueuedSshExec<T>(
   );
   return queue.run(operation, priority: priority);
 }
+
+/// Bounds channel creation and closes channels that arrive after the deadline.
+/// Late opening failures are consumed without changing the timeout result.
+Future<SSHSession> openSshExec(
+  Future<SSHSession> opening,
+  Duration timeout, {
+  void Function(Object error, StackTrace stackTrace)? onLateError,
+}) => opening.timeout(
+  timeout,
+  onTimeout: () {
+    opening
+        // SSHSession.close only sends EOF until the peer finishes. A command
+        // that ignores EOF must not keep an abandoned session slot occupied.
+        .then((session) => session.channel.destroy())
+        .then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stackTrace) {
+            onLateError?.call(error, stackTrace);
+          },
+        )
+        .ignore();
+    throw TimeoutException('Timed out opening SSH exec channel', timeout);
+  },
+);
 
 /// Clears queued exec state for tests.
 @visibleForTesting
@@ -137,30 +162,39 @@ class _SshExecQueue {
       },
     );
     unawaited(
-      Future.sync(
-        job.operation,
-      ).then<void>(job.complete, onError: job.completeError).whenComplete(() {
-        _activeCount -= 1;
-        if (job.priority == SshExecPriority.low) {
-          _activeLowPriorityCount -= 1;
-        }
-        DiagnosticsLogService.instance.debug(
-          'ssh.exec_queue',
-          'complete',
-          fields: {
-            'connectionId': connectionId,
-            'jobId': job.id,
-            'priority': job.priority.name,
-            'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
-            'activeCount': _activeCount,
-            'pendingCount': pendingCount,
-          },
-        );
-        _drain();
-        if (_activeCount == 0 && pendingCount == 0) {
-          _execQueues.remove(connectionId);
-        }
-      }),
+      Future.sync(job.operation)
+          .then<void>(
+            job.completer.complete,
+            onError: job.completer.completeError,
+          )
+          .whenComplete(() {
+            _activeCount -= 1;
+            if (job.priority == SshExecPriority.low) {
+              _activeLowPriorityCount -= 1;
+            }
+            DiagnosticsLogService.instance.debug(
+              'ssh.exec_queue',
+              'complete',
+              fields: {
+                'connectionId': connectionId,
+                'jobId': job.id,
+                'priority': job.priority.name,
+                'durationMs': DateTime.now()
+                    .difference(startedAt)
+                    .inMilliseconds,
+                'activeCount': _activeCount,
+                'pendingCount': pendingCount,
+              },
+            );
+            _drain();
+            // Only evict this queue; a replacement registered for the same
+            // connection must keep its own pending jobs.
+            if (_activeCount == 0 &&
+                pendingCount == 0 &&
+                identical(_execQueues[connectionId], this)) {
+              _execQueues.remove(connectionId);
+            }
+          }),
     );
   }
 }
@@ -177,19 +211,7 @@ class _QueuedSshExecJob<T> {
   final SshExecPriority priority;
   final DateTime enqueuedAt;
   final Future<T> Function() operation;
-  final _completer = Completer<T>();
+  final completer = Completer<T>();
 
-  Future<T> get future => _completer.future;
-
-  void complete(T value) {
-    if (!_completer.isCompleted) {
-      _completer.complete(value);
-    }
-  }
-
-  void completeError(Object error, StackTrace stackTrace) {
-    if (!_completer.isCompleted) {
-      _completer.completeError(error, stackTrace);
-    }
-  }
+  Future<T> get future => completer.future;
 }

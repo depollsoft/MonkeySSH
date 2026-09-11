@@ -33,10 +33,12 @@ import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/presentation/screens/agent_management_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart'
     show storeDemoImagePasteCompleter;
 
 const _targetName = String.fromEnvironment('STORE_SCREENSHOT_TARGET');
+const _selectedScene = String.fromEnvironment('STORE_SCREENSHOT_SCENE');
 const _sshPort = int.fromEnvironment('STORE_SCREENSHOT_SSH_PORT');
 const _sshUsername = String.fromEnvironment('STORE_SCREENSHOT_SSH_USERNAME');
 const _sshPrivateKeyB64 = String.fromEnvironment(
@@ -54,10 +56,10 @@ const _workspacePath = String.fromEnvironment(
   defaultValue: '/Users/Shared/monkeyssh-release-workspace',
 );
 const _nativeCopilotPrompt =
-    'Write three short bullets for a mobile developer. State that this native '
-    'agent window keeps Copilot readable, MonkeyMux sessions stay running after '
-    'disconnect, and the full terminal is one tap away. Do not run tools or '
-    'read files.';
+    'Review this reconnect plan: keep the remote agent running, retry SSH with '
+    'backoff, then resume the same conversation. Give four short test cases '
+    'and a four-line retry example. Keep the reply under 90 words. '
+    'Do not run tools, read files, or load skills.';
 const _themeMode = String.fromEnvironment(
   'STORE_SCREENSHOT_THEME_MODE',
   defaultValue: 'dark',
@@ -139,6 +141,7 @@ const _sceneNames = <String>[
   'sftp',
   'terminal_claude',
   'native_copilot',
+  'agent_management',
 ];
 
 final _targets = <String, _ScreenshotTarget>{
@@ -269,7 +272,7 @@ Future<void> main() async {
 MonetizationService _createMonetizationService() {
   const state = MonetizationState(
     billingAvailability: MonetizationBillingAvailability.unavailable,
-    entitlements: MonetizationEntitlements.free(),
+    entitlements: MonetizationEntitlements.pro(),
     offers: [],
     debugUnlockAvailable: false,
     debugUnlocked: false,
@@ -279,7 +282,7 @@ MonetizationService _createMonetizationService() {
   when(() => service.states).thenAnswer((_) => Stream.value(state));
   // ignore: unnecessary_lambdas
   when(() => service.initialize()).thenAnswer((_) => Future<void>.value());
-  when(() => service.canUseFeature(any())).thenAnswer((_) async => false);
+  when(() => service.canUseFeature(any())).thenAnswer((_) async => true);
   when(() => service.purchaseOffer(any())).thenAnswer(
     (_) async => const MonetizationActionResult.cancelled(
       'Purchases are disabled for screenshots.',
@@ -495,7 +498,7 @@ Future<int> _seedDatabase(
       name: 'List agent windows',
       command: 'monkeymux control --json $muxSessionName',
       description:
-          'Inspect active Copilot, Gemini, Claude, Codex, OpenCode, and Antigravity windows.',
+          'Inspect active Copilot, Claude, Codex, OpenCode, and Antigravity windows.',
       autoExecute: false,
       usageCount: 7,
     ),
@@ -548,6 +551,9 @@ Future<int> _seedDatabase(
     _terminalThemeDarkId,
   );
   await settings.setBool(SettingKeys.terminalPathLinks, value: false);
+  // The manager scene probes explicitly; background update timers add noise
+  // while this capture flow navigates rapidly between routes.
+  await settings.setBool(SettingKeys.agentUpdateNotifications, value: false);
   return terminalHostId;
 }
 
@@ -674,9 +680,18 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     // the full window list and Claude selection lands, even on slower devices.
     await _ensureMuxReady();
 
+    // A targeted Claude retry needs no native session or unrelated navigation.
+    if (_selectedScene == 'terminal_claude') {
+      await _selectClaudeWindow();
+      _go('/terminal/$terminalHostId?connectionId=$_connectionId');
+      await Future<void>.delayed(const Duration(seconds: 4));
+      await _announceScene(_sceneNames.indexOf(_selectedScene));
+      return;
+    }
+
     final nativeKey = await _ensureNativeCopilotSession();
     _clearNativeFocus();
-    await _selectMonkeyMuxWindow(0);
+    await _selectMonkeyMuxWindow('copilot');
     _go('/terminal/$terminalHostId?connectionId=$_connectionId');
     await Future<void>.delayed(const Duration(seconds: 3));
     await _announceScene(0);
@@ -714,6 +729,41 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     _go('/terminal/$terminalHostId?connectionId=$_connectionId');
     await Future<void>.delayed(const Duration(seconds: 4));
     await _announceScene(6);
+
+    final session = ref
+        .read(activeSessionsProvider.notifier)
+        .getSession(_connectionId!);
+    if (session == null) {
+      throw StateError('SSH session not available for Agent Management.');
+    }
+    final refreshed = Completer<void>();
+    // Use the production screen and live SSH probes, never preview runtimes.
+    // Only inspect versions here; capture must not install or update local CLIs.
+    unawaited(
+      Navigator.of(appNavigatorKey.currentContext!).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => AgentManagementScreen(
+            session: session,
+            onRuntimesRefreshed: (runtimes) {
+              if (refreshed.isCompleted) return;
+              final installed = runtimes.where(
+                (runtime) => runtime.installedVersion?.isNotEmpty ?? false,
+              );
+              if (installed.length < 2) {
+                refreshed.completeError(
+                  StateError('Agent Management did not detect live versions.'),
+                );
+              } else {
+                refreshed.complete();
+              }
+            },
+          ),
+        ),
+      ),
+    );
+    await refreshed.future.timeout(const Duration(seconds: 120));
+    await Future<void>.delayed(const Duration(seconds: 2));
+    await _announceScene(7);
   }
 
   Future<void> _runVideoDemoFlow() async {
@@ -738,7 +788,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     _clearNativeFocus();
     _go('/');
     await Future<void>.delayed(const Duration(milliseconds: 350));
-    await _selectMonkeyMuxWindow(2);
+    await _selectMonkeyMuxWindow('claude');
     _emitBeat(2);
     _go('$base&showKeyboard=1');
     await Future<void>.delayed(const Duration(milliseconds: 650));
@@ -751,14 +801,14 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     _emitBeat(3);
     _go('$base&expandTmux=1');
     await Future<void>.delayed(const Duration(milliseconds: 1800));
-    await _selectMonkeyMuxWindow(4);
+    await _selectMonkeyMuxWindow('opencode');
     _go(base);
     await _hideKeyboard();
     await Future<void>.delayed(const Duration(milliseconds: 1600));
 
     // Beat 4: paste a real screenshot into Copilot CLI and wait until the
     // inline image has finished uploading and rendering.
-    await _selectMonkeyMuxWindow(0);
+    await _selectMonkeyMuxWindow('copilot');
     _emitBeat(4);
     _armDemoImagePasteWait();
     _go('$base&pasteDemoImage=1');
@@ -859,6 +909,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
+    throw TimeoutException('MonkeyMux windows did not become ready.');
   }
 
   Future<void> _hideKeyboard() async {
@@ -881,20 +932,26 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
   }
 
   Future<void> _selectClaudeWindow() async {
-    await _selectMonkeyMuxWindow(2);
+    await _selectMonkeyMuxWindow('claude');
   }
 
-  Future<void> _selectMonkeyMuxWindow(int windowIndex) async {
+  Future<void> _selectMonkeyMuxWindow(String windowName) async {
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(_connectionId!);
     if (session == null) {
       throw StateError('SSH session not available for store demo.');
     }
-    await ref
-        .read(monkeyMuxServiceProvider)
-        .selectWindow(session, _muxSessionName, windowIndex)
-        .timeout(const Duration(seconds: 8), onTimeout: () {});
+    final mux = ref.read(monkeyMuxServiceProvider);
+    final windows = await mux
+        .listWindows(session, _muxSessionName)
+        .timeout(const Duration(seconds: 8));
+    // Agent additions/removals change indices. Resolve the live named window
+    // so screenshots and video beats cannot silently land on another agent.
+    final window = windows.singleWhere((window) => window.name == windowName);
+    await mux
+        .selectWindow(session, _muxSessionName, window.index)
+        .timeout(const Duration(seconds: 8));
   }
 
   Future<void> _waitForApp() async {
@@ -905,6 +962,9 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
   }
 
   Future<void> _announceScene(int index) async {
+    if (_selectedScene.isNotEmpty && _sceneNames[index] != _selectedScene) {
+      return;
+    }
     FocusManager.instance.primaryFocus?.unfocus();
     final payload = {
       'scene': _sceneNames[index],

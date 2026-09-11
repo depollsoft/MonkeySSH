@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path;
+
+import 'diagnostics_log_service.dart';
 
 final _sftpWindowsDriveRootPattern = RegExp(r'^/?[A-Za-z]:(?:/|$)');
 final _terminalControlCharacterPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
@@ -417,6 +420,47 @@ int countTerminalAttachmentPastePaths(Iterable<String> remotePaths) =>
         )
         .length;
 
+/// Signals cancellation to active remote file downloads.
+class RemoteFileDownloadCancelToken {
+  final _callbacks = <void Function()>[];
+  var _isCancelled = false;
+
+  /// Cancels current and future downloads using this token.
+  void cancel() {
+    if (_isCancelled) return;
+    _isCancelled = true;
+    for (final callback in _callbacks) {
+      callback();
+    }
+  }
+
+  /// Throws if cancellation has been requested.
+  void throwIfCancelled() {
+    if (_isCancelled) throw const RemoteFileDownloadCancelledException();
+  }
+}
+
+/// A remote file download was cancelled.
+class RemoteFileDownloadCancelledException implements Exception {
+  /// Creates a cancellation exception.
+  const RemoteFileDownloadCancelledException();
+
+  @override
+  String toString() => 'Download cancelled';
+}
+
+/// A download exceeded its configured byte limit.
+class RemoteFileDownloadLimitException implements Exception {
+  /// Creates an exception with the observed byte count.
+  const RemoteFileDownloadLimitException(this.byteCount);
+
+  /// Number of bytes received, including the chunk exceeding the limit.
+  final int byteCount;
+
+  @override
+  String toString() => 'Download exceeds byte limit';
+}
+
 /// Shared helpers for remote file transfers over SFTP.
 final remoteFileServiceProvider = Provider<RemoteFileService>(
   (ref) => const RemoteFileService(),
@@ -483,21 +527,59 @@ class RemoteFileService {
   }
 
   /// Downloads a remote file to a local path.
+  ///
+  /// Progress reports bytes written to disk. The caller owns partial-file
+  /// cleanup on failure. Completion includes closing both file handles.
   Future<void> downloadFile({
     required SftpClient sftp,
     required String remotePath,
     required String localPath,
+    FutureOr<void> Function(int downloadedBytes)? onProgress,
+    int? maxBytes,
+    RemoteFileDownloadCancelToken? cancelToken,
   }) async {
+    cancelToken?.throwIfCancelled();
     final remoteFile = await sftp.open(remotePath);
-    final sink = File(localPath).openWrite();
+    Future<void>? closing;
+    Future<void> closeRemote() => closing ??= Future.sync(remoteFile.close);
+    void cancel() => unawaited(
+      closeRemote().then<void>(
+        (_) {},
+        onError: (Object error, StackTrace _) {
+          DiagnosticsLogService.instance.warning(
+            'sftp.transfer',
+            'cancel_close_failed',
+            fields: {'errorType': error.runtimeType},
+          );
+        },
+      ),
+    );
+    cancelToken?._callbacks.add(cancel);
     try {
-      await for (final chunk in remoteFile.read()) {
-        sink.add(chunk);
+      cancelToken?.throwIfCancelled();
+      final localFile = await File(localPath).open(mode: FileMode.write);
+      try {
+        cancelToken?.throwIfCancelled();
+        var downloadedBytes = 0;
+        await for (final chunk in remoteFile.read()) {
+          cancelToken?.throwIfCancelled();
+          final nextBytes = downloadedBytes + chunk.length;
+          if (maxBytes != null && nextBytes > maxBytes) {
+            throw RemoteFileDownloadLimitException(nextBytes);
+          }
+          await localFile.writeFrom(chunk);
+          downloadedBytes = nextBytes;
+          await onProgress?.call(downloadedBytes);
+        }
+        cancelToken?.throwIfCancelled();
+      } finally {
+        await localFile.close();
       }
     } finally {
-      await sink.close();
-      await remoteFile.close();
+      cancelToken?._callbacks.remove(cancel);
+      await closeRemote();
     }
+    cancelToken?.throwIfCancelled();
   }
 
   /// Uploads a stream into a remote file path.
@@ -515,10 +597,27 @@ class RemoteFileService {
           SftpFileOpenMode.truncate,
     );
     try {
-      await remoteFile.write(_normalizeByteStream(stream)).done;
-    } finally {
-      await remoteFile.close();
+      // dartssh2's stream writer does not forward source-stream or async
+      // chunk-write failures to .done. Own both futures here instead.
+      var offset = 0;
+      await for (final chunk in _normalizeByteStream(stream)) {
+        await remoteFile.writeBytes(chunk, offset: offset);
+        offset += chunk.length;
+      }
+    } on Object catch (error, stackTrace) {
+      try {
+        await remoteFile.close();
+      } on Object catch (closeError) {
+        // Preserve the transfer failure for the caller if cleanup also fails.
+        DiagnosticsLogService.instance.warning(
+          'sftp.upload',
+          'close_failed',
+          fields: {'errorType': closeError.runtimeType},
+        );
+      }
+      Error.throwWithStackTrace(error, stackTrace);
     }
+    await remoteFile.close();
     if (applyPrivateMode) {
       await sftp.setStat(remotePath, SftpFileAttrs(mode: remoteUploadFileMode));
     }

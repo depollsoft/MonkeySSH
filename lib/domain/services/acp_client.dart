@@ -19,47 +19,11 @@ final class AcpUnsupportedCapabilityException implements Exception {
   String toString() => 'ACP capability is not available: $capability';
 }
 
-/// Base class for typed server-to-client ACP requests.
-sealed class AcpServerRequest {
-  const AcpServerRequest(this.raw);
-
-  /// Underlying JSON-RPC request.
-  final AcpJsonRpcServerRequest raw;
-
-  /// ACP method name.
-  String get method => raw.method;
-}
-
-/// A typed `session/request_permission` server request.
-final class AcpPermissionServerRequest extends AcpServerRequest {
-  /// Creates a permission server request.
-  const AcpPermissionServerRequest(super.raw, this.permission);
-
-  /// Parsed permission parameters.
-  final AcpPermissionRequest permission;
-
-  /// Responds with the selected option.
-  Future<void> select(String optionId) => raw.respond(<String, Object?>{
-    'outcome': AcpSelectedPermissionOutcome(optionId).toJson(),
-  });
-
-  /// Responds that the request was cancelled.
-  Future<void> cancel() => raw.respond(<String, Object?>{
-    'outcome': const AcpCancelledPermissionOutcome().toJson(),
-  });
-}
-
-/// An unrecognized server request retained for future ACP versions.
-final class AcpUnknownServerRequest extends AcpServerRequest {
-  /// Creates an unknown server request.
-  const AcpUnknownServerRequest(super.raw);
-}
-
 /// High-level typed ACP v1 client.
 final class AcpClient {
   /// Creates a client over an active JSON-RPC connection.
   AcpClient(this.connection) {
-    _serverRequests = StreamController<AcpServerRequest>.broadcast(
+    _serverRequests = StreamController<AcpJsonRpcServerRequest>.broadcast(
       sync: true,
       onListen: _schedulePendingServerRequestFlush,
     );
@@ -67,7 +31,7 @@ final class AcpClient {
       _handleNotification,
     );
     _serverRequestSubscription = connection.serverRequests.listen(
-      _handleServerRequest,
+      _emitServerRequest,
     );
   }
 
@@ -80,12 +44,10 @@ final class AcpClient {
   // Exactly one capability router answers provider-to-client requests. Keep a
   // small, bridge-bounded pre-listener queue because pending replay can arrive
   // as soon as the transport attaches, before that router has rebound.
-  late final StreamController<AcpServerRequest> _serverRequests;
-  final Queue<AcpServerRequest> _pendingServerRequests =
-      Queue<AcpServerRequest>();
+  late final StreamController<AcpJsonRpcServerRequest> _serverRequests;
+  final Queue<AcpJsonRpcServerRequest> _pendingServerRequests =
+      Queue<AcpJsonRpcServerRequest>();
   var _pendingServerRequestFlushScheduled = false;
-  final _otherNotifications =
-      StreamController<AcpJsonRpcNotification>.broadcast(sync: true);
   late final StreamSubscription<AcpJsonRpcNotification>
   _notificationSubscription;
   late final StreamSubscription<AcpJsonRpcServerRequest>
@@ -99,12 +61,8 @@ final class AcpClient {
   /// Typed `session/update` notifications.
   Stream<AcpSessionNotification> get updates => _updates.stream;
 
-  /// Typed incoming server requests.
-  Stream<AcpServerRequest> get serverRequests => _serverRequests.stream;
-
-  /// Notifications not handled by the typed ACP layer.
-  Stream<AcpJsonRpcNotification> get otherNotifications =>
-      _otherNotifications.stream;
+  /// Incoming server requests.
+  Stream<AcpJsonRpcServerRequest> get serverRequests => _serverRequests.stream;
 
   /// Initializes the ACP connection.
   Future<AcpInitializeResult> initialize({
@@ -192,40 +150,6 @@ final class AcpClient {
       timeout: timeout,
     );
     return AcpSessionListResult.fromJson(_requireObject(result));
-  }
-
-  /// Lists pages until the cursor ends or [maxSessions] is reached.
-  Future<List<AcpSessionInfo>> listAllSessions({
-    String? cwd,
-    int? maxSessions,
-    Duration? timeout,
-  }) async {
-    if (maxSessions != null && maxSessions <= 0) {
-      return const <AcpSessionInfo>[];
-    }
-    final sessions = <AcpSessionInfo>[];
-    final seenCursors = <String>{};
-    String? cursor;
-    do {
-      final page = await listSessions(
-        cwd: cwd,
-        cursor: cursor,
-        timeout: timeout,
-      );
-      for (final session in page.sessions) {
-        sessions.add(session);
-        if (maxSessions != null && sessions.length >= maxSessions) {
-          return List<AcpSessionInfo>.unmodifiable(sessions);
-        }
-      }
-      cursor = page.nextCursor;
-      if (cursor != null && !seenCursors.add(cursor)) {
-        throw const AcpProtocolException(
-          'session/list returned a repeated cursor',
-        );
-      }
-    } while (cursor != null);
-    return List<AcpSessionInfo>.unmodifiable(sessions);
   }
 
   /// Loads a stored ACP session and requests history replay.
@@ -421,7 +345,6 @@ final class AcpClient {
     _pendingServerRequests.clear();
     await _updates.close();
     await _serverRequests.close();
-    await _otherNotifications.close();
   }
 
   Future<AcpSessionSetupResult> _sessionSetupRequest(
@@ -441,34 +364,16 @@ final class AcpClient {
 
   void _handleNotification(AcpJsonRpcNotification notification) {
     if (notification.method != 'session/update') {
-      _otherNotifications.add(notification);
       return;
     }
     final params = AcpJson.object(notification.params);
     if (params == null) {
-      _otherNotifications.add(notification);
       return;
     }
     _updates.add(AcpSessionNotification.fromJson(params));
   }
 
-  void _handleServerRequest(AcpJsonRpcServerRequest request) {
-    if (request.method == 'session/request_permission') {
-      final params = AcpJson.object(request.params);
-      if (params != null) {
-        _emitServerRequest(
-          AcpPermissionServerRequest(
-            request,
-            AcpPermissionRequest.fromJson(params),
-          ),
-        );
-        return;
-      }
-    }
-    _emitServerRequest(AcpUnknownServerRequest(request));
-  }
-
-  void _emitServerRequest(AcpServerRequest request) {
+  void _emitServerRequest(AcpJsonRpcServerRequest request) {
     if (!_serverRequests.hasListener ||
         _pendingServerRequestFlushScheduled ||
         _pendingServerRequests.isNotEmpty) {

@@ -160,19 +160,15 @@ final class AcpPlanUpdate extends AcpSessionUpdate {
   });
 
   /// Parses a plan update.
-  factory AcpPlanUpdate.fromJson(AcpJsonMap json) {
-    final entries = <AcpPlanEntry>[];
-    for (final item in AcpJson.listField(json, 'entries') ?? const []) {
-      final entry = AcpJson.object(item);
-      if (entry != null) entries.add(AcpPlanEntry.fromJson(entry));
-      if (entries.length >= acpMaxPlanEntries) break;
-    }
-    return AcpPlanUpdate(
-      entries: List<AcpPlanEntry>.unmodifiable(entries),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const ['sessionUpdate', 'entries']),
-    );
-  }
+  factory AcpPlanUpdate.fromJson(AcpJsonMap json) => AcpPlanUpdate(
+    entries: AcpJson.objectList(
+      json['entries'],
+      AcpPlanEntry.fromJson,
+      limit: acpMaxPlanEntries,
+    ),
+    meta: AcpJson.meta(json),
+    extensions: AcpJson.extensions(json, const ['sessionUpdate', 'entries']),
+  );
 
   @override
   String get kind => 'plan';
@@ -212,9 +208,6 @@ extension type const AcpToolKind(String value) {
 
   /// External data fetch.
   static const fetch = AcpToolKind('fetch');
-
-  /// Session mode switch.
-  static const switchMode = AcpToolKind('switch_mode');
 
   /// Other tool category.
   static const other = AcpToolKind('other');
@@ -454,26 +447,6 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
     AcpJsonMap json, {
     bool isInitial = false,
   }) {
-    List<AcpToolContent>? content;
-    final rawContent = AcpJson.listField(json, 'content');
-    if (rawContent != null) {
-      final parsed = <AcpToolContent>[];
-      for (final item in rawContent) {
-        final object = AcpJson.object(item);
-        if (object != null) parsed.add(AcpToolContent.fromJson(object));
-      }
-      content = List<AcpToolContent>.unmodifiable(parsed);
-    }
-    List<AcpToolLocation>? locations;
-    final rawLocations = AcpJson.listField(json, 'locations');
-    if (rawLocations != null) {
-      final parsed = <AcpToolLocation>[];
-      for (final item in rawLocations) {
-        final object = AcpJson.object(item);
-        if (object != null) parsed.add(AcpToolLocation.fromJson(object));
-      }
-      locations = List<AcpToolLocation>.unmodifiable(parsed);
-    }
     final toolKind = AcpJson.string(json, 'kind');
     final status = AcpJson.string(json, 'status');
     return AcpToolCallUpdate(
@@ -482,8 +455,12 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
       title: AcpJson.string(json, 'title'),
       toolKind: toolKind == null ? null : AcpToolKind(toolKind),
       status: status == null ? null : AcpToolStatus(status),
-      content: content,
-      locations: locations,
+      content: json['content'] is List
+          ? AcpJson.objectList(json['content'], AcpToolContent.fromJson)
+          : null,
+      locations: json['locations'] is List
+          ? AcpJson.objectList(json['locations'], AcpToolLocation.fromJson)
+          : null,
       rawInput: json['rawInput'],
       rawOutput: json['rawOutput'],
       meta: AcpJson.meta(json),
@@ -622,24 +599,18 @@ final class AcpAvailableCommandsUpdate extends AcpSessionUpdate {
   });
 
   /// Parses an available-commands update.
-  factory AcpAvailableCommandsUpdate.fromJson(AcpJsonMap json) {
-    final commands = <AcpAvailableCommand>[];
-    for (final item
-        in AcpJson.listField(json, 'availableCommands') ?? const []) {
-      final command = AcpJson.object(item);
-      if (command != null) {
-        commands.add(AcpAvailableCommand.fromJson(command));
-      }
-    }
-    return AcpAvailableCommandsUpdate(
-      commands: List<AcpAvailableCommand>.unmodifiable(commands),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const [
-        'sessionUpdate',
-        'availableCommands',
-      ]),
-    );
-  }
+  factory AcpAvailableCommandsUpdate.fromJson(AcpJsonMap json) =>
+      AcpAvailableCommandsUpdate(
+        commands: AcpJson.objectList(
+          json['availableCommands'],
+          AcpAvailableCommand.fromJson,
+        ),
+        meta: AcpJson.meta(json),
+        extensions: AcpJson.extensions(json, const [
+          'sessionUpdate',
+          'availableCommands',
+        ]),
+      );
 
   @override
   String get kind => 'available_commands_update';
@@ -738,23 +709,18 @@ final class AcpConfigOptionsUpdate extends AcpSessionUpdate {
   });
 
   /// Parses a configuration update.
-  factory AcpConfigOptionsUpdate.fromJson(AcpJsonMap json) {
-    final options = <AcpSessionConfigOption>[];
-    for (final item in AcpJson.listField(json, 'configOptions') ?? const []) {
-      final option = AcpJson.object(item);
-      if (option != null) {
-        options.add(AcpSessionConfigOption.fromJson(option));
-      }
-    }
-    return AcpConfigOptionsUpdate(
-      options: List<AcpSessionConfigOption>.unmodifiable(options),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const [
-        'sessionUpdate',
-        'configOptions',
-      ]),
-    );
-  }
+  factory AcpConfigOptionsUpdate.fromJson(AcpJsonMap json) =>
+      AcpConfigOptionsUpdate(
+        options: AcpJson.objectList(
+          json['configOptions'],
+          AcpSessionConfigOption.fromJson,
+        ),
+        meta: AcpJson.meta(json),
+        extensions: AcpJson.extensions(json, const [
+          'sessionUpdate',
+          'configOptions',
+        ]),
+      );
 
   @override
   String get kind => 'config_option_update';
@@ -1033,15 +999,13 @@ final class AcpPermissionRequest implements AcpExtensible {
     final toolCall =
         AcpJson.objectField(json, 'toolCall') ??
         const <String, Object?>{'toolCallId': ''};
-    final options = <AcpPermissionOption>[];
-    for (final item in AcpJson.listField(json, 'options') ?? const []) {
-      final option = AcpJson.object(item);
-      if (option != null) options.add(AcpPermissionOption.fromJson(option));
-    }
     return AcpPermissionRequest(
       sessionId: AcpJson.identifier(json, 'sessionId') ?? '',
       toolCall: AcpToolCallUpdate.fromJson(toolCall),
-      options: List<AcpPermissionOption>.unmodifiable(options),
+      options: AcpJson.objectList(
+        json['options'],
+        AcpPermissionOption.fromJson,
+      ),
       meta: AcpJson.meta(json),
       extensions: AcpJson.extensions(json, const [
         'sessionId',

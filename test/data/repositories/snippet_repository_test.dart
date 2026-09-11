@@ -148,152 +148,26 @@ void main() {
       expect(snippet!.usageCount, 2);
     });
 
+    test('concurrent usage increments each take effect', () async {
+      final id = await repository.insert(
+        SnippetsCompanion.insert(name: 'List Files', command: 'ls'),
+      );
+      expect(
+        await Future.wait(
+          List.generate(10, (_) => repository.incrementUsage(id)),
+        ),
+        everyElement(isTrue),
+      );
+      final snippet = (await repository.getById(id))!;
+      expect(snippet.usageCount, 10);
+      expect(snippet.lastUsedAt, isNotNull);
+      expect(snippet.name, 'List Files');
+      expect(snippet.command, 'ls');
+    });
+
     test('incrementUsage returns false when snippet not exists', () async {
       final result = await repository.incrementUsage(999);
       expect(result, isFalse);
-    });
-
-    test('search finds snippets by name', () async {
-      await repository.insert(
-        SnippetsCompanion.insert(
-          name: 'Docker Logs',
-          command: 'docker logs -f',
-        ),
-      );
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Git Status', command: 'git status'),
-      );
-
-      final results = await repository.search('Docker');
-      expect(results, hasLength(1));
-      expect(results.first.name, 'Docker Logs');
-    });
-
-    test('search finds snippets by command', () async {
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Logs', command: 'docker logs -f'),
-      );
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Status', command: 'git status'),
-      );
-
-      final results = await repository.search('git');
-      expect(results, hasLength(1));
-      expect(results.first.name, 'Status');
-    });
-
-    test('search finds snippets by description', () async {
-      await repository.insert(
-        SnippetsCompanion.insert(
-          name: 'Cleanup',
-          command: 'rm -rf /tmp/*',
-          description: const Value('Remove temporary files'),
-        ),
-      );
-
-      final results = await repository.search('temporary');
-      expect(results, hasLength(1));
-      expect(results.first.name, 'Cleanup');
-    });
-
-    test(
-      'search treats percent as a literal character, not a wildcard',
-      () async {
-        await repository.insert(
-          SnippetsCompanion.insert(name: 'Disk 100%', command: 'df -h'),
-        );
-        await repository.insert(
-          SnippetsCompanion.insert(name: 'List files', command: 'ls -la'),
-        );
-
-        final results = await repository.search('%');
-        expect(results, hasLength(1));
-        expect(results.first.name, 'Disk 100%');
-      },
-    );
-
-    test(
-      'search treats underscore as a literal character, not a wildcard',
-      () async {
-        await repository.insert(
-          SnippetsCompanion.insert(name: 'deploy_app', command: 'deploy app'),
-        );
-        await repository.insert(
-          SnippetsCompanion.insert(name: 'deploy app', command: 'deploy app'),
-        );
-
-        final results = await repository.search('deploy_');
-        expect(results, hasLength(1));
-        expect(results.first.name, 'deploy_app');
-      },
-    );
-
-    test('getFrequent returns snippets ordered by usage count', () async {
-      final id1 = await repository.insert(
-        SnippetsCompanion.insert(name: 'Snippet 1', command: 'cmd1'),
-      );
-      final id2 = await repository.insert(
-        SnippetsCompanion.insert(name: 'Snippet 2', command: 'cmd2'),
-      );
-      final id3 = await repository.insert(
-        SnippetsCompanion.insert(name: 'Snippet 3', command: 'cmd3'),
-      );
-
-      // Use snippets different amounts
-      await repository.incrementUsage(id1);
-      await repository.incrementUsage(id2);
-      await repository.incrementUsage(id2);
-      await repository.incrementUsage(id3);
-      await repository.incrementUsage(id3);
-      await repository.incrementUsage(id3);
-
-      final frequent = await repository.getFrequent(limit: 3);
-      expect(frequent, hasLength(3));
-      expect(frequent[0].name, 'Snippet 3'); // 3 uses
-      expect(frequent[1].name, 'Snippet 2'); // 2 uses
-      expect(frequent[2].name, 'Snippet 1'); // 1 use
-    });
-
-    test('getFrequent respects limit', () async {
-      for (var i = 0; i < 5; i++) {
-        await repository.insert(
-          SnippetsCompanion.insert(name: 'Snippet $i', command: 'cmd$i'),
-        );
-      }
-
-      final frequent = await repository.getFrequent(limit: 2);
-      expect(frequent, hasLength(2));
-    });
-
-    test('getByFolder returns snippets with null folderId', () async {
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Root Snippet', command: 'ls'),
-      );
-
-      final snippets = await repository.getByFolder(null);
-      expect(snippets, hasLength(1));
-      expect(snippets.first.name, 'Root Snippet');
-    });
-
-    test('getByFolder returns snippets with specific folderId', () async {
-      final folderId = await repository.insertFolder(
-        SnippetFoldersCompanion.insert(name: 'Test Folder'),
-      );
-
-      await repository.insert(
-        SnippetsCompanion.insert(
-          name: 'Folder Snippet',
-          command: 'ls',
-          folderId: Value(folderId),
-        ),
-      );
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Root Snippet', command: 'pwd'),
-      );
-
-      final snippets = await repository.getByFolder(folderId);
-      expect(snippets, hasLength(1));
-      expect(snippets.first.name, 'Folder Snippet');
     });
 
     test('watchAll emits updates', () async {
@@ -302,34 +176,6 @@ void main() {
       );
 
       final stream = repository.watchAll();
-      final firstValue = await stream.first;
-      expect(firstValue, hasLength(1));
-    });
-
-    test('watchByFolder emits for null folder', () async {
-      await repository.insert(
-        SnippetsCompanion.insert(name: 'Root Snippet', command: 'ls'),
-      );
-
-      final stream = repository.watchByFolder(null);
-      final firstValue = await stream.first;
-      expect(firstValue, hasLength(1));
-    });
-
-    test('watchByFolder emits for specific folder', () async {
-      final folderId = await repository.insertFolder(
-        SnippetFoldersCompanion.insert(name: 'Test Folder'),
-      );
-
-      await repository.insert(
-        SnippetsCompanion.insert(
-          name: 'Folder Snippet',
-          command: 'ls',
-          folderId: Value(folderId),
-        ),
-      );
-
-      final stream = repository.watchByFolder(folderId);
       final firstValue = await stream.first;
       expect(firstValue, hasLength(1));
     });
@@ -370,23 +216,6 @@ void main() {
       ]);
     });
 
-    test('updateFolder modifies existing folder', () async {
-      await repository.insertFolder(
-        SnippetFoldersCompanion.insert(name: 'Original Folder'),
-      );
-
-      final folders = await repository.getAllFolders();
-      final folder = folders.first;
-      final success = await repository.updateFolder(
-        folder.copyWith(name: 'Updated Folder'),
-      );
-
-      expect(success, isTrue);
-
-      final updated = await repository.getAllFolders();
-      expect(updated.first.name, 'Updated Folder');
-    });
-
     test('deleteFolder removes folder', () async {
       final id = await repository.insertFolder(
         SnippetFoldersCompanion.insert(name: 'To Delete'),
@@ -416,7 +245,12 @@ void main() {
 
       final snippets = await repository.getAll();
       expect(snippets.single.folderId, isNull);
-      expect(await repository.getByFolder(null), hasLength(1));
+      expect(
+        (await repository.getAll())
+            .where((snippet) => snippet.folderId == null)
+            .toList(),
+        hasLength(1),
+      );
     });
 
     test('deleteFolder clears child folder parents', () async {

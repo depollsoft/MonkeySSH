@@ -16,6 +16,12 @@ bundle exec fastlane regenerate_profiles            # both Private + Production
 bundle exec fastlane regenerate_profiles scheme:Private
 ```
 
+For Firebase App Distribution, select `profile-type: adhoc` in that workflow,
+or run `bundle exec fastlane regenerate_profiles scheme:Private type:adhoc`.
+The default `appstore` profile type is for TestFlight and App Store builds.
+Preview distribution intentionally uses readonly match profiles; refresh them
+through this maintenance workflow when required.
+
 Local Xcode builds with automatic signing pick up the new entitlement on next build without any extra step (Xcode regenerates dev profiles via the developer portal automatically).
 
 ## MonkeyMux Go tests on a Windows dev machine
@@ -107,6 +113,8 @@ python3 scripts/validate_play_store_metadata.py
 
 Regenerated store **media** (screenshots, App Previews, demo videos) is not committed. Publish it with `scripts/store_assets.sh publish` to the rolling `store-assets` GitHub Release; CI re-hosts the archive as Actions artifacts and Sync Store Metadata / production releases download it before Fastlane upload. Restore locally with `scripts/store_assets.sh download`.
 
+The screenshot set has eight scenes per device. Only entirely Pro-only features get screenshot badges. Native chat is available free, so its screenshots stay unbadged. Agent Management has a Pro caption outside the real app capture. Agent Management captures live version checks only, without installing or updating the developer's tools.
+
 Regenerate screenshots with `python3 scripts/generate_store_screenshots.py [ios|android|both]` and short demo videos with `python3 scripts/generate_store_demo_videos.py [ios|android|both]`, then publish:
 
 ```bash
@@ -116,7 +124,7 @@ Regenerate screenshots with `python3 scripts/generate_store_screenshots.py [ios|
 For a guided end-to-end release (copy + media publish + optional ship), use the repo skill `/prepare-release` (`.agents/skills/prepare-release/SKILL.md`).
 
 
-Both generators use the normal app, a temporary local SSH server, a live MonkeyMux workspace, real Copilot CLI and Claude Code panes, and seeded release-demo data. They must fail rather than substituting mocked captures when that live workspace cannot be created. Each device is recorded once and composed into store-compliant deliverables: App Store **app previews** are full-screen native app captures at the exact device slot resolution (iPhone 886x1920 at `ios/fastlane/app-previews/en-US/iphone_67_1.mov`, iPad 1200x1600 at `ipad_13_1.mov`) with fading caption overlays and a silent audio track, because App Store Connect validates resolution at upload; the **Google Play preview** is a 16:9 landscape branded promo at `store/demo-videos/google-play/monkeyssh-google-play-promo.mp4` (uploaded to YouTube and referenced by URL); and the portrait **branded canvas** is kept for ads under `store/demo-videos/ads/`. The demo flow walks Claude Code, the MonkeyMux window switcher, OpenCode, a real image paste into Copilot CLI, and a Copilot prompt against that screenshot. Copilot scenes must show the CLI displaying the image inline. Do not enable Copilot streamer mode or rename sessions to placeholders; the harness temporarily forces streamer mode off and restores the prior setting. The MonkeyMux window scene should show the current supported agent family: Copilot CLI, Gemini CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw, Pi, Hermes, and OpenClaw. Validate everything with `python3 scripts/validate_store_demo_videos.py all` (per-slot resolution, 15-30s duration, audio track on Apple previews, and live-region scene progression).
+Both generators use the normal app, a temporary local SSH server, a live MonkeyMux workspace, real Copilot CLI and Claude Code panes, and seeded release-demo data. They must fail rather than substituting mocked captures when that live workspace cannot be created. Each device is recorded once and composed into store-compliant deliverables: App Store **app previews** are full-screen native app captures at the exact device slot resolution (iPhone 886x1920 at `ios/fastlane/app-previews/en-US/iphone_67_1.mov`, iPad 1200x1600 at `ipad_13_1.mov`) with fading caption overlays and a silent audio track, because App Store Connect validates resolution at upload; the **Google Play preview** is a 16:9 landscape branded promo at `store/demo-videos/google-play/monkeyssh-google-play-promo.mp4` (uploaded to YouTube and referenced by URL); and the portrait **branded canvas** is kept for ads under `store/demo-videos/ads/`. The demo flow walks Claude Code, the MonkeyMux window switcher, OpenCode, a real image paste into Copilot CLI, and a Copilot prompt against that screenshot. Copilot scenes must show the CLI displaying the image inline. Do not enable Copilot streamer mode or rename sessions to placeholders; the harness temporarily forces streamer mode off and restores the prior setting. The MonkeyMux window scene should show the current supported agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw. Validate everything with `python3 scripts/validate_store_demo_videos.py all` (per-slot resolution, 15-30s duration, audio track on Apple previews, and live-region scene progression).
 
 ## Diagnostics logging
 

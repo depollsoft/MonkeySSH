@@ -1,20 +1,11 @@
 // ignore_for_file: public_member_api_docs
 
-import 'dart:async';
-
-import 'package:drift/native.dart';
+import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
-import 'package:monkeyssh/data/repositories/host_repository.dart';
-import 'package:monkeyssh/data/repositories/key_repository.dart';
-import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
-import 'package:monkeyssh/data/repositories/snippet_repository.dart';
-import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -25,6 +16,8 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
 import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
+
+import '../helpers/host_edit_fixture.dart';
 
 Host _testHost({
   required int id,
@@ -38,6 +31,7 @@ Host _testHost({
   String? remoteMuxBackend,
   String? terminalThemeLightId,
   String? terminalThemeDarkId,
+  String? terminalFontFamily,
 }) => Host(
   id: id,
   label: label,
@@ -57,6 +51,7 @@ Host _testHost({
   remoteMuxBackend: remoteMuxBackend,
   terminalThemeLightId: terminalThemeLightId,
   terminalThemeDarkId: terminalThemeDarkId,
+  terminalFontFamily: terminalFontFamily,
   sortOrder: 0,
 );
 
@@ -73,78 +68,6 @@ Snippet _testSnippet({
   usageCount: 0,
   sortOrder: 0,
 );
-
-class _FakeHostRepository extends HostRepository {
-  _FakeHostRepository({
-    required Host host,
-    required AppDatabase database,
-    required SecretEncryptionService encryptionService,
-  }) : _host = host,
-       super(database, encryptionService);
-
-  Host _host;
-  Host? updatedHost;
-  HostsCompanion? insertedHost;
-
-  @override
-  Future<Host?> getById(int id) async => id == _host.id ? _host : null;
-
-  @override
-  Stream<List<Host>> watchAll() => Stream.value([_host]);
-
-  @override
-  Future<bool> update(Host host) async {
-    _host = host;
-    updatedHost = host;
-    return true;
-  }
-
-  @override
-  Future<int> insert(HostsCompanion host) async {
-    insertedHost = host;
-    return 2;
-  }
-}
-
-class _FakeKeyRepository extends KeyRepository {
-  _FakeKeyRepository({
-    required AppDatabase database,
-    required SecretEncryptionService encryptionService,
-  }) : super(database, encryptionService);
-
-  @override
-  Stream<List<SshKey>> watchAll() => const Stream<List<SshKey>>.empty();
-}
-
-class _FakeSnippetRepository extends SnippetRepository {
-  _FakeSnippetRepository({
-    required List<Snippet> snippets,
-    required AppDatabase database,
-  }) : _snippets = snippets,
-       super(database);
-
-  final List<Snippet> _snippets;
-
-  @override
-  Future<Snippet?> getById(int id) async {
-    for (final snippet in _snippets) {
-      if (snippet.id == id) {
-        return snippet;
-      }
-    }
-    return null;
-  }
-
-  @override
-  Stream<List<Snippet>> watchAll() => Stream.value(_snippets);
-}
-
-class _FakePortForwardRepository extends PortForwardRepository {
-  _FakePortForwardRepository({required AppDatabase database}) : super(database);
-
-  @override
-  Future<List<PortForward>> getByHostId(int hostId) async => const [];
-}
 
 class _MockMonetizationService extends Mock implements MonetizationService {}
 
@@ -176,31 +99,48 @@ MonetizationService _buildProMonetizationService() {
   return service;
 }
 
-class _HostEditTestHarness {
-  const _HostEditTestHarness({required this.hostRepository});
+class _RejectingHostRepository extends FakeHostRepository {
+  _RejectingHostRepository({
+    required super.host,
+    required super.database,
+    required super.encryptionService,
+    required this.saveError,
+    required this.unreadablePassword,
+  });
 
-  final _FakeHostRepository hostRepository;
+  final Exception? saveError;
+  final bool unreadablePassword;
+
+  @override
+  bool hasUnreadablePassword(int hostId) => unreadablePassword;
+
+  @override
+  Future<int> insert(HostsCompanion host) async {
+    if (saveError case final error?) throw error;
+    return super.insert(host);
+  }
 }
 
-Future<_HostEditTestHarness> _pumpHostCreateScreen(
+Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
   WidgetTester tester, {
   bool hasPro = false,
+  Exception? saveError,
+  bool unreadablePassword = false,
   List<Snippet> snippets = const [],
 }) async {
-  final database = AppDatabase.forTesting(NativeDatabase.memory());
-  final encryptionService = SecretEncryptionService.forTesting();
-  addTearDown(database.close);
-  addTearDown(() => tester.binding.setSurfaceSize(null));
-  await tester.binding.setSurfaceSize(const Size(420, 900));
-
-  final hostRepository = _FakeHostRepository(
+  final fixture = HostEditFixture(
     host: _testHost(
       id: 1,
       label: 'Unused Host',
       autoConnectRequiresConfirmation: false,
     ),
-    database: database,
-    encryptionService: encryptionService,
+  );
+  final hostRepository = _RejectingHostRepository(
+    host: fixture.host,
+    database: fixture.database,
+    encryptionService: fixture.encryptionService,
+    saveError: saveError,
+    unreadablePassword: unreadablePassword,
   );
   final presetService = _MockAgentLaunchPresetService();
   when(
@@ -211,56 +151,25 @@ Future<_HostEditTestHarness> _pumpHostCreateScreen(
   ).thenAnswer((_) async {});
   when(() => presetService.deletePresetForHost(any())).thenAnswer((_) async {});
 
-  final router = GoRouter(
-    routes: [
-      GoRoute(
-        path: '/',
-        builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
-      ),
-      GoRoute(
-        path: '/add',
-        builder: (context, state) => const HostEditScreen(),
-      ),
-    ],
-  );
-  addTearDown(router.dispose);
-
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        if (hasPro) ...[
-          monetizationServiceProvider.overrideWithValue(
-            _buildProMonetizationService(),
-          ),
-          monetizationStateProvider.overrideWith(
-            (ref) => Stream.value(_proMonetizationState),
-          ),
-        ],
-        databaseProvider.overrideWithValue(database),
-        hostRepositoryProvider.overrideWithValue(hostRepository),
-        agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-        keyRepositoryProvider.overrideWithValue(
-          _FakeKeyRepository(
-            database: database,
-            encryptionService: encryptionService,
-          ),
+  await fixture.setSurfaceSize(tester);
+  await fixture.pump(
+    tester,
+    createHost: !unreadablePassword,
+    snippets: snippets,
+    hostRepository: hostRepository,
+    overrides: [
+      if (hasPro) ...[
+        monetizationServiceProvider.overrideWithValue(
+          _buildProMonetizationService(),
         ),
-        snippetRepositoryProvider.overrideWithValue(
-          _FakeSnippetRepository(snippets: snippets, database: database),
-        ),
-        portForwardRepositoryProvider.overrideWithValue(
-          _FakePortForwardRepository(database: database),
+        monetizationStateProvider.overrideWith(
+          (ref) => Stream.value(_proMonetizationState),
         ),
       ],
-      child: MaterialApp.router(routerConfig: router),
-    ),
+      agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+    ],
   );
-
-  unawaited(router.push('/add'));
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 300));
-
-  return _HostEditTestHarness(hostRepository: hostRepository);
+  return (hostRepository: hostRepository);
 }
 
 Future<void> _fillRequiredHostFields(WidgetTester tester) async {
@@ -289,7 +198,10 @@ Future<void> _selectStartupMode(WidgetTester tester, String label) async {
   await tester.pump(const Duration(milliseconds: 300));
 }
 
-Future<void> _tapBottomSave(WidgetTester tester) async {
+Future<void> _tapBottomSave(
+  WidgetTester tester, {
+  Duration duration = const Duration(milliseconds: 600),
+}) async {
   final saveButton = find.byKey(
     const Key('host-save-button'),
     skipOffstage: false,
@@ -302,7 +214,7 @@ Future<void> _tapBottomSave(WidgetTester tester) async {
   await tester.ensureVisible(saveButton);
   tester.widget<FilledButton>(saveButton).onPressed!();
   await tester.pump();
-  await tester.pump(const Duration(milliseconds: 600));
+  await tester.pump(duration);
   await tester.pump();
 }
 
@@ -324,23 +236,6 @@ String _fieldText(WidgetTester tester, Key fieldKey) {
     ),
   );
   return editableText.controller.text;
-}
-
-/// Opens the startup-mode dropdown from any current selection and taps [label].
-Future<void> _switchStartupMode(WidgetTester tester, String label) async {
-  final startupModeField = find.byKey(const Key('host-startup-mode-field'));
-  await tester.scrollUntilVisible(
-    startupModeField,
-    200,
-    scrollable: find.byType(Scrollable).first,
-  );
-  await tester.ensureVisible(startupModeField);
-  await tester.tap(startupModeField);
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 300));
-  await tester.tap(find.text(label).last, warnIfMissed: false);
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 300));
 }
 
 void main() {
@@ -365,6 +260,82 @@ void main() {
         expect(harness.hostRepository.insertedHost, isNull);
       },
     );
+
+    testWidgets('prompts to re-enter an unreadable saved password', (
+      tester,
+    ) async {
+      await _pumpHostCreateScreen(tester, unreadablePassword: true);
+      expect(
+        find.text('Saved password could not be read. Re-enter it to connect.'),
+        findsOneWidget,
+      );
+      final passwordField = tester.widget<TextFormField>(
+        find.ancestor(
+          of: find.text('Password (optional)'),
+          matching: find.byType(TextFormField),
+        ),
+      );
+      expect(passwordField.controller!.text, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+
+    for (final field in ['label', 'hostname', 'username']) {
+      testWidgets('rejects an oversized $field before persistence', (
+        tester,
+      ) async {
+        final harness = await _pumpHostCreateScreen(tester);
+        await _fillRequiredHostFields(tester);
+        final fieldKey = Key('host-$field-field');
+        await tester.enterText(find.byKey(fieldKey), 'a' * 255 + ' ');
+
+        await _tapBottomSave(tester);
+
+        final label = '${field[0].toUpperCase()}${field.substring(1)}';
+        expect(
+          find.text('$label must be 255 characters or fewer'),
+          findsWidgets,
+        );
+        expect(_textFieldHasFocus(tester, fieldKey), isTrue);
+        expect(harness.hostRepository.insertedHost, isNull);
+        expect(tester.takeException(), isNull);
+
+        // The database boundary is inclusive, and correcting the input works.
+        await tester.enterText(find.byKey(fieldKey), 'a' * 255);
+        await _tapBottomSave(tester);
+        expect(harness.hostRepository.insertedHost, isNotNull);
+      });
+    }
+
+    for (final error in <Exception>[
+      InvalidDataException('invalid stored data'),
+      const FormatException('invalid saved credential'),
+    ]) {
+      testWidgets(
+        'shows save validation for ${error.runtimeType} without reporting a framework error',
+        (tester) async {
+          final harness = await _pumpHostCreateScreen(tester, saveError: error);
+          await _fillRequiredHostFields(tester);
+
+          await _tapBottomSave(tester);
+
+          expect(tester.takeException(), isNull);
+          expect(find.byType(HostEditScreen), findsOneWidget);
+          expect(harness.hostRepository.insertedHost, isNull);
+          expect(
+            find.text(
+              error is InvalidDataException
+                  ? 'Couldn’t save this host. Check the field values and try again.'
+                  : 'Couldn’t read the saved credentials. Re-enter the password or import the SSH key again.',
+            ),
+            findsOneWidget,
+          );
+          final saveButton = tester.widget<FilledButton>(
+            find.byKey(const Key('host-save-button')),
+          );
+          expect(saveButton.onPressed, isNotNull);
+        },
+      );
+    }
 
     testWidgets('saves automatic forwarding and a custom proxy domain', (
       tester,
@@ -561,7 +532,7 @@ void main() {
     ) async {
       await _pumpHostCreateScreen(tester, hasPro: true);
       await _fillRequiredHostFields(tester);
-      await _switchStartupMode(tester, 'tmux');
+      await _selectStartupMode(tester, 'tmux');
 
       await tester.enterText(
         find.byKey(const Key('host-tmux-session-field')),
@@ -577,7 +548,7 @@ void main() {
       );
       await tester.pump();
 
-      await _switchStartupMode(tester, 'Launch coding agent');
+      await _selectStartupMode(tester, 'Launch coding agent');
 
       expect(
         _fieldText(tester, const Key('host-agent-tmux-session-field')),
@@ -604,7 +575,7 @@ void main() {
       (tester) async {
         await _pumpHostCreateScreen(tester, hasPro: true);
         await _fillRequiredHostFields(tester);
-        await _switchStartupMode(tester, 'Launch coding agent');
+        await _selectStartupMode(tester, 'Launch coding agent');
 
         await tester.enterText(
           find.byKey(const Key('host-agent-tmux-session-field')),
@@ -616,7 +587,7 @@ void main() {
         );
         await tester.pump();
 
-        await _switchStartupMode(tester, 'tmux');
+        await _selectStartupMode(tester, 'tmux');
 
         expect(
           _fieldText(tester, const Key('host-tmux-session-field')),
@@ -635,21 +606,21 @@ void main() {
       await _pumpHostCreateScreen(tester, hasPro: true);
       await _fillRequiredHostFields(tester);
 
-      await _switchStartupMode(tester, 'Launch coding agent');
+      await _selectStartupMode(tester, 'Launch coding agent');
       await tester.enterText(
         find.byKey(const Key('host-agent-tmux-session-field')),
         'agent-session',
       );
       await tester.pump();
 
-      await _switchStartupMode(tester, 'tmux');
+      await _selectStartupMode(tester, 'tmux');
       await tester.enterText(
         find.byKey(const Key('host-tmux-session-field')),
         'tmux-session',
       );
       await tester.pump();
 
-      await _switchStartupMode(tester, 'Launch coding agent');
+      await _selectStartupMode(tester, 'Launch coding agent');
 
       expect(
         _fieldText(tester, const Key('host-agent-tmux-session-field')),
@@ -756,13 +727,7 @@ void main() {
     testWidgets(
       'preserves imported auto-connect review when saving unrelated edits',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await tester.binding.setSurfaceSize(const Size(420, 900));
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Imported Host',
@@ -770,85 +735,40 @@ void main() {
             autoConnectSnippetId: 7,
             autoConnectRequiresConfirmation: true,
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
-        final snippetRepository = _FakeSnippetRepository(
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
+
+        await fixture.pump(
+          tester,
           snippets: [
             _testSnippet(id: 7, name: 'Attach tmux', command: 'tmux attach'),
           ],
-          database: database,
-        );
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
-            ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(
+                const MonetizationState(
+                  billingAvailability:
+                      MonetizationBillingAvailability.available,
+                  entitlements: MonetizationEntitlements.pro(),
+                  offers: [],
+                  debugUnlockAvailable: false,
+                  debugUnlocked: false,
+                ),
+              ),
             ),
           ],
         );
-        addTearDown(router.dispose);
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              monetizationStateProvider.overrideWith(
-                (ref) => Stream.value(
-                  const MonetizationState(
-                    billingAvailability:
-                        MonetizationBillingAvailability.available,
-                    entitlements: MonetizationEntitlements.pro(),
-                    offers: [],
-                    debugUnlockAvailable: false,
-                    debugUnlocked: false,
-                  ),
-                ),
-              ),
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(snippetRepository),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         await tester.enterText(
           find.byKey(const Key('host-label-field')),
           'Reviewed Host',
         );
 
-        final formScroll = find.byType(Scrollable).first;
-        await tester.scrollUntilVisible(
-          find.byKey(const Key('host-save-button')),
-          200,
-          scrollable: formScroll,
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 300),
         );
-        final saveButton = find.byKey(
-          const Key('host-save-button'),
-          skipOffstage: false,
-        );
-        await tester.ensureVisible(saveButton);
-        tester.widget<FilledButton>(saveButton).onPressed!();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(hostRepository.updatedHost, isNotNull);
         expect(hostRepository.updatedHost!.label, 'Reviewed Host');
@@ -862,13 +782,7 @@ void main() {
     );
 
     testWidgets('saves tmux startup without a custom command', (tester) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      final hostRepository = _FakeHostRepository(
+      final fixture = HostEditFixture(
         host: _testHost(
           id: 1,
           label: 'Imported Host',
@@ -876,49 +790,11 @@ void main() {
           tmuxSessionName: 'old-workspace',
           remoteMuxBackend: RemoteMuxBackend.tmux.storageValue,
         ),
-        database: database,
-        encryptionService: encryptionService,
       );
-      final router = GoRouter(
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (context, state) =>
-                const Scaffold(body: SizedBox.shrink()),
-          ),
-          GoRoute(
-            path: '/edit',
-            builder: (context, state) => const HostEditScreen(hostId: 1),
-          ),
-        ],
-      );
-      addTearDown(router.dispose);
+      await fixture.setSurfaceSize(tester);
+      final hostRepository = fixture.hostRepository;
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: MaterialApp.router(routerConfig: router),
-        ),
-      );
-
-      unawaited(router.push('/edit'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await fixture.pump(tester);
 
       await tester.enterText(
         find.byKey(const Key('host-tmux-session-field')),
@@ -933,19 +809,7 @@ void main() {
         '-f ~/.tmux.conf',
       );
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('host-save-button')),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      final saveButton = find.byKey(
-        const Key('host-save-button'),
-        skipOffstage: false,
-      );
-      await tester.ensureVisible(saveButton);
-      tester.widget<FilledButton>(saveButton).onPressed!();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 300));
 
       expect(hostRepository.updatedHost, isNotNull);
       expect(hostRepository.updatedHost!.autoConnectCommand, isNull);
@@ -962,13 +826,7 @@ void main() {
     testWidgets(
       'adds the tmux status bar command when the checkbox is enabled',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await tester.binding.setSurfaceSize(const Size(420, 900));
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Imported Host',
@@ -976,49 +834,11 @@ void main() {
             tmuxSessionName: 'old-workspace',
             remoteMuxBackend: RemoteMuxBackend.tmux.storageValue,
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
-            ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
-            ),
-          ],
-        );
-        addTearDown(router.dispose);
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
 
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(
-                _FakeSnippetRepository(snippets: const [], database: database),
-              ),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
+        await fixture.pump(tester);
 
         await tester.enterText(
           find.byKey(const Key('host-tmux-session-field')),
@@ -1034,19 +854,10 @@ void main() {
         statusBarCheckbox.onChanged!(true);
         await tester.pump();
 
-        final saveButton = find.byKey(
-          const Key('host-save-button'),
-          skipOffstage: false,
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 300),
         );
-        await tester.scrollUntilVisible(
-          saveButton,
-          200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.ensureVisible(saveButton);
-        tester.widget<FilledButton>(saveButton).onPressed!();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(hostRepository.updatedHost, isNotNull);
         expect(
@@ -1059,13 +870,7 @@ void main() {
     testWidgets('loads an existing tmux status bar command into the checkbox', (
       tester,
     ) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      final hostRepository = _FakeHostRepository(
+      final fixture = HostEditFixture(
         host: _testHost(
           id: 1,
           label: 'Imported Host',
@@ -1074,49 +879,11 @@ void main() {
           tmuxExtraFlags: r'-f ~/.tmux.conf \; set status off',
           remoteMuxBackend: RemoteMuxBackend.tmux.storageValue,
         ),
-        database: database,
-        encryptionService: encryptionService,
       );
-      final router = GoRouter(
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (context, state) =>
-                const Scaffold(body: SizedBox.shrink()),
-          ),
-          GoRoute(
-            path: '/edit',
-            builder: (context, state) => const HostEditScreen(hostId: 1),
-          ),
-        ],
-      );
-      addTearDown(router.dispose);
+      await fixture.setSurfaceSize(tester);
+      final hostRepository = fixture.hostRepository;
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: MaterialApp.router(routerConfig: router),
-        ),
-      );
-
-      unawaited(router.push('/edit'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await fixture.pump(tester);
 
       final extraFlagsField = tester.widget<TextFormField>(
         find.byKey(const Key('host-tmux-extra-flags-field')),
@@ -1128,19 +895,7 @@ void main() {
       expect(extraFlagsField.controller!.text, '-f ~/.tmux.conf');
       expect(statusBarCheckbox.value, isTrue);
 
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('host-save-button')),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      final saveButton = find.byKey(
-        const Key('host-save-button'),
-        skipOffstage: false,
-      );
-      await tester.ensureVisible(saveButton);
-      tester.widget<FilledButton>(saveButton).onPressed!();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 300));
 
       expect(hostRepository.updatedHost, isNotNull);
       expect(
@@ -1152,21 +907,16 @@ void main() {
     testWidgets(
       'shows and saves the tmux status bar checkbox for agent startup',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await tester.binding.setSurfaceSize(const Size(420, 900));
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Agent Host',
             autoConnectRequiresConfirmation: false,
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
+
         final presetService = _MockAgentLaunchPresetService();
         const preset = AgentLaunchPreset(
           tool: AgentLaunchTool.codex,
@@ -1183,50 +933,16 @@ void main() {
           () => presetService.deletePresetForHost(1),
         ).thenAnswer((_) async {});
 
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(_proMonetizationState),
             ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
-            ),
+
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
           ],
         );
-        addTearDown(router.dispose);
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              monetizationStateProvider.overrideWith(
-                (ref) => Stream.value(_proMonetizationState),
-              ),
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(
-                _FakeSnippetRepository(snippets: const [], database: database),
-              ),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(find.byKey(const Key('host-agent-tool-field')), findsOneWidget);
         expect(find.byKey(const Key('host-tmux-session-field')), findsNothing);
@@ -1266,19 +982,10 @@ void main() {
         checkbox.onChanged!(true);
         await tester.pump();
 
-        final saveButton = find.byKey(
-          const Key('host-save-button'),
-          skipOffstage: false,
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 300),
         );
-        await tester.scrollUntilVisible(
-          saveButton,
-          200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.ensureVisible(saveButton);
-        tester.widget<FilledButton>(saveButton).onPressed!();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(hostRepository.updatedHost, isNotNull);
         expect(
@@ -1346,21 +1053,17 @@ void main() {
     testWidgets(
       'uses the host CLI yolo mode setting in generated agent commands',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await tester.binding.setSurfaceSize(const Size(420, 900));
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Agent Host',
             autoConnectRequiresConfirmation: false,
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
+        final database = fixture.database;
+
         final presetService = _MockAgentLaunchPresetService();
         const preset = AgentLaunchPreset(tool: AgentLaunchTool.codex);
         when(
@@ -1373,50 +1076,16 @@ void main() {
           () => presetService.deletePresetForHost(1),
         ).thenAnswer((_) async {});
 
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(_proMonetizationState),
             ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
-            ),
+
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
           ],
         );
-        addTearDown(router.dispose);
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              monetizationStateProvider.overrideWith(
-                (ref) => Stream.value(_proMonetizationState),
-              ),
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(
-                _FakeSnippetRepository(snippets: const [], database: database),
-              ),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(
           find.byKey(const Key('host-agent-window-mode-field')),
@@ -1441,19 +1110,10 @@ void main() {
           findsOneWidget,
         );
 
-        final saveButton = find.byKey(
-          const Key('host-save-button'),
-          skipOffstage: false,
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 300),
         );
-        await tester.scrollUntilVisible(
-          saveButton,
-          200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.ensureVisible(saveButton);
-        tester.widget<FilledButton>(saveButton).onPressed!();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(hostRepository.updatedHost, isNotNull);
         expect(
@@ -1468,21 +1128,15 @@ void main() {
     );
 
     testWidgets('validates agent tmux flags before saving', (tester) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      final hostRepository = _FakeHostRepository(
+      final fixture = HostEditFixture(
         host: _testHost(
           id: 1,
           label: 'Agent Host',
           autoConnectRequiresConfirmation: false,
         ),
-        database: database,
-        encryptionService: encryptionService,
       );
+      await fixture.setSurfaceSize(tester);
+
       final presetService = _MockAgentLaunchPresetService();
       const preset = AgentLaunchPreset(
         tool: AgentLaunchTool.codex,
@@ -1496,50 +1150,16 @@ void main() {
       ).thenAnswer((_) async {});
       when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
 
-      final router = GoRouter(
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (context, state) =>
-                const Scaffold(body: SizedBox.shrink()),
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
           ),
-          GoRoute(
-            path: '/edit',
-            builder: (context, state) => const HostEditScreen(hostId: 1),
-          ),
+
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
         ],
       );
-      addTearDown(router.dispose);
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            monetizationStateProvider.overrideWith(
-              (ref) => Stream.value(_proMonetizationState),
-            ),
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: MaterialApp.router(routerConfig: router),
-        ),
-      );
-
-      unawaited(router.push('/edit'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
 
       await tester.enterText(
         find.byKey(const Key('host-agent-tmux-extra-flags-field')),
@@ -1554,19 +1174,7 @@ void main() {
         findsWidgets,
       );
 
-      final saveButton = find.byKey(
-        const Key('host-save-button'),
-        skipOffstage: false,
-      );
-      await tester.scrollUntilVisible(
-        saveButton,
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.ensureVisible(saveButton);
-      tester.widget<FilledButton>(saveButton).onPressed!();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 350));
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
 
       expect(
         find.text('Fix agent tmux flags to save this host'),
@@ -1585,22 +1193,17 @@ void main() {
     testWidgets(
       'prefers an existing agent preset over legacy tmux startup fields',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await tester.binding.setSurfaceSize(const Size(420, 900));
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Legacy Mixed Host',
             autoConnectRequiresConfirmation: false,
             tmuxSessionName: 'workspace',
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
+
         final presetService = _MockAgentLaunchPresetService();
         const preset = AgentLaunchPreset(
           tool: AgentLaunchTool.codex,
@@ -1617,50 +1220,16 @@ void main() {
           () => presetService.deletePresetForHost(1),
         ).thenAnswer((_) async {});
 
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(_proMonetizationState),
             ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
-            ),
+
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
           ],
         );
-        addTearDown(router.dispose);
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              monetizationStateProvider.overrideWith(
-                (ref) => Stream.value(_proMonetizationState),
-              ),
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              agentLaunchPresetServiceProvider.overrideWithValue(presetService),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(
-                _FakeSnippetRepository(snippets: const [], database: database),
-              ),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(find.byKey(const Key('host-agent-tool-field')), findsOneWidget);
         final checkboxFinder = find.byKey(
@@ -1670,19 +1239,10 @@ void main() {
         expect(tester.widget<CheckboxListTile>(checkboxFinder).value, isTrue);
         expect(find.byKey(const Key('host-tmux-session-field')), findsNothing);
 
-        final saveButton = find.byKey(
-          const Key('host-save-button'),
-          skipOffstage: false,
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 300),
         );
-        await tester.scrollUntilVisible(
-          saveButton,
-          200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.ensureVisible(saveButton);
-        tester.widget<FilledButton>(saveButton).onPressed!();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         expect(hostRepository.updatedHost, isNotNull);
         expect(
@@ -1702,64 +1262,24 @@ void main() {
     testWidgets(
       'clears imported auto-connect review after replacing the command',
       (tester) async {
-        final database = AppDatabase.forTesting(NativeDatabase.memory());
-        final encryptionService = SecretEncryptionService.forTesting();
-        addTearDown(database.close);
-
-        final hostRepository = _FakeHostRepository(
+        final fixture = HostEditFixture(
           host: _testHost(
             id: 1,
             label: 'Imported Host',
             autoConnectCommand: 'tmux attach',
             autoConnectRequiresConfirmation: true,
           ),
-          database: database,
-          encryptionService: encryptionService,
         );
+        final hostRepository = fixture.hostRepository;
+
         final monetizationService = _buildProMonetizationService();
-        final router = GoRouter(
-          routes: [
-            GoRoute(
-              path: '/',
-              builder: (context, state) =>
-                  const Scaffold(body: SizedBox.shrink()),
-            ),
-            GoRoute(
-              path: '/edit',
-              builder: (context, state) => const HostEditScreen(hostId: 1),
-            ),
+
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationServiceProvider.overrideWithValue(monetizationService),
           ],
         );
-        addTearDown(router.dispose);
-
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              monetizationServiceProvider.overrideWithValue(
-                monetizationService,
-              ),
-              databaseProvider.overrideWithValue(database),
-              hostRepositoryProvider.overrideWithValue(hostRepository),
-              keyRepositoryProvider.overrideWithValue(
-                _FakeKeyRepository(
-                  database: database,
-                  encryptionService: encryptionService,
-                ),
-              ),
-              snippetRepositoryProvider.overrideWithValue(
-                _FakeSnippetRepository(snippets: const [], database: database),
-              ),
-              portForwardRepositoryProvider.overrideWithValue(
-                _FakePortForwardRepository(database: database),
-              ),
-            ],
-            child: MaterialApp.router(routerConfig: router),
-          ),
-        );
-
-        unawaited(router.push('/edit'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
 
         final formScroll = find.byType(Scrollable).first;
         await tester.scrollUntilVisible(
@@ -1803,46 +1323,7 @@ void main() {
     testWidgets('explains launch behavior without plan-gating copy', (
       tester,
     ) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(
-              _FakeHostRepository(
-                host: _testHost(
-                  id: 1,
-                  label: 'Imported Host',
-                  autoConnectRequiresConfirmation: false,
-                ),
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: const MaterialApp(home: HostEditScreen()),
-        ),
-      );
-
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await _pumpHostCreateScreen(tester);
 
       expect(
         find.text(
@@ -1852,34 +1333,6 @@ void main() {
       );
       expect(find.textContaining('Terminal windows stay free'), findsNothing);
     });
-
-    testWidgets(
-      'dirty-state notifier: typing marks form dirty without extra setState pumps',
-      (tester) async {
-        // Verify that the ValueNotifier path correctly drives UnsavedChangesGuard
-        // without the removed Form.onChanged whole-screen-rebuild.
-        await _pumpHostCreateScreen(tester);
-
-        // Type a single character – dirty state should update via controller
-        // listener, not Form.onChanged.
-        await tester.enterText(find.byKey(const Key('host-label-field')), 'X');
-        await tester.pump();
-
-        // Navigating back should trigger the discard dialog.
-        await tester.pageBack();
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
-        expect(find.text('Discard changes?'), findsOneWidget);
-
-        await tester.tap(find.text('Discard'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pump(const Duration(seconds: 2));
-        expect(find.byType(HostEditScreen), findsNothing);
-      },
-    );
 
     testWidgets(
       'dirty-state notifier: non-text state change (dropdown) marks form dirty',
@@ -1928,47 +1381,16 @@ void main() {
     testWidgets('keeps auto-run command read-only without Pro access', (
       tester,
     ) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(
-              _FakeHostRepository(
-                host: _testHost(
-                  id: 1,
-                  label: 'Imported Host',
-                  autoConnectCommand: 'tmux attach',
-                  autoConnectRequiresConfirmation: false,
-                ),
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: const MaterialApp(home: HostEditScreen(hostId: 1)),
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Imported Host',
+          autoConnectCommand: 'tmux attach',
+          autoConnectRequiresConfirmation: false,
         ),
       );
-
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await fixture.setSurfaceSize(tester);
+      await fixture.pump(tester);
       await tester.scrollUntilVisible(
         find.byKey(const Key('host-auto-connect-command-field')),
         200,
@@ -1984,67 +1406,22 @@ void main() {
       expect(commandField.readOnly, isTrue);
     });
 
-    testWidgets('clears selected light and dark themes using the clear buttons', (
+    testWidgets('selects a host font and saves reset font and theme overrides', (
       tester,
     ) async {
-      final database = AppDatabase.forTesting(NativeDatabase.memory());
-      final encryptionService = SecretEncryptionService.forTesting();
-      addTearDown(database.close);
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.binding.setSurfaceSize(const Size(420, 900));
-
-      final hostRepository = _FakeHostRepository(
+      final fixture = HostEditFixture(
         host: _testHost(
           id: 1,
           label: 'Themed Host',
           autoConnectRequiresConfirmation: false,
           terminalThemeLightId: 'iterm2-monokai-pro',
           terminalThemeDarkId: 'iterm2-dracula',
-        ),
-        database: database,
-        encryptionService: encryptionService,
-      );
-
-      final router = GoRouter(
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (context, state) =>
-                const Scaffold(body: SizedBox.shrink()),
-          ),
-          GoRoute(
-            path: '/edit',
-            builder: (context, state) => const HostEditScreen(hostId: 1),
-          ),
-        ],
-      );
-      addTearDown(router.dispose);
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            databaseProvider.overrideWithValue(database),
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            keyRepositoryProvider.overrideWithValue(
-              _FakeKeyRepository(
-                database: database,
-                encryptionService: encryptionService,
-              ),
-            ),
-            snippetRepositoryProvider.overrideWithValue(
-              _FakeSnippetRepository(snippets: const [], database: database),
-            ),
-            portForwardRepositoryProvider.overrideWithValue(
-              _FakePortForwardRepository(database: database),
-            ),
-          ],
-          child: MaterialApp.router(routerConfig: router),
+          terminalFontFamily: 'monospace',
         ),
       );
-
-      unawaited(router.push('/edit'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      await fixture.setSurfaceSize(tester);
+      final hostRepository = fixture.hostRepository;
+      await fixture.pump(tester);
 
       // Expand Advanced tile
       final advancedTile = find.byKey(const Key('host-advanced-tile'));
@@ -2071,7 +1448,7 @@ void main() {
       // Find the clear buttons and tap them. Since both tiles show a clear button,
       // we can find by Icon(Icons.clear). Let's verify we have 2 clear icons.
       final clearButtons = find.byIcon(Icons.clear);
-      expect(clearButtons, findsNWidgets(2));
+      expect(clearButtons, findsNWidgets(3));
 
       // Tap the first one (Light theme clear button)
       await tester.tap(clearButtons.first);
@@ -2082,32 +1459,37 @@ void main() {
       expect(find.text('Dracula'), findsOneWidget);
 
       // Tap the remaining clear button
-      await tester.tap(find.byIcon(Icons.clear));
+      await tester.tap(find.byIcon(Icons.clear).first);
       await tester.pump();
 
       // Verify both are cleared
       expect(find.text('Dracula'), findsNothing);
       expect(find.text('Monokai Pro'), findsNothing);
 
-      // Tap save
-      final saveButton = find.byKey(
-        const Key('host-save-button'),
-        skipOffstage: false,
-      );
       await tester.scrollUntilVisible(
-        saveButton,
+        find.text('Terminal Font'),
         200,
         scrollable: find.byType(Scrollable).first,
       );
-      await tester.ensureVisible(saveButton);
-      tester.widget<FilledButton>(saveButton).onPressed!();
+      await tester.tap(find.text('Terminal Font'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('JetBrains Mono'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('JetBrains Mono'), findsOneWidget);
+      await tester.tap(find.byTooltip('Reset to default'));
+      await tester.pump();
+      expect(find.text('JetBrains Mono'), findsNothing);
+
+      // Tap save
+      await _tapBottomSave(tester);
 
       // Verify database repositories received updated host with null themes
       expect(hostRepository.updatedHost, isNotNull);
       expect(hostRepository.updatedHost!.terminalThemeLightId, isNull);
       expect(hostRepository.updatedHost!.terminalThemeDarkId, isNull);
+      expect(hostRepository.updatedHost!.terminalFontFamily, isNull);
     });
   });
 }

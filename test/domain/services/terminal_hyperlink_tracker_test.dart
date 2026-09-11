@@ -243,6 +243,61 @@ void main() {
       expect(resolvedLink, 'https://example.com/two');
     });
 
+    test('keeps closed links scoped to their terminal buffer', () {
+      terminal
+        ..write('\x1b]8;;https://example.com/main\x07main\x1b]8;;\x07')
+        ..write('\x1b[?1049halternate');
+
+      expect(tracker.resolveLinkAt(const CellOffset(1, 0)), isNull);
+      expect(tracker.resolveLinkOnRow(0), isNull);
+      expect(tracker.hasLinkInRowRange(0, 0, 10), isFalse);
+
+      terminal.write('\r\x1b]8;;https://example.com/alt\x07alt\x1b]8;;\x07');
+      expect(
+        tracker.resolveLinkAt(const CellOffset(1, 0)),
+        'https://example.com/alt',
+      );
+      terminal.write('\x1b[?1049l');
+      expect(
+        tracker.resolveLinkAt(const CellOffset(1, 0)),
+        'https://example.com/main',
+      );
+      expect(tracker.resolveLinkOnRow(0), 'https://example.com/main');
+    });
+
+    test('does not resolve pending links in a different buffer', () {
+      terminal
+        ..write('\x1b]8;;https://example.com/main\x07main')
+        ..write('\x1b[?1049halternate');
+
+      expect(tracker.resolveLinkAt(const CellOffset(1, 0)), isNull);
+      expect(tracker.resolveLinkOnRow(0), isNull);
+      expect(tracker.hasLinkInRowRange(0, 0, 10), isFalse);
+
+      terminal.write('\x1b]8;;\x07\x1b[?1049l');
+      expect(
+        tracker.resolveLinkAt(const CellOffset(1, 0)),
+        'https://example.com/main',
+      );
+      expect(tracker.resolveLinkAt(const CellOffset(5, 0)), isNull);
+    });
+
+    test('does not resolve an open link before any label is written', () {
+      terminal.write('prefix\x1b]8;;https://example.com/empty\x07');
+
+      expect(tracker.resolveLinkAt(const CellOffset(6, 0)), isNull);
+      expect(tracker.resolveLinkOnRow(0), isNull);
+      expect(tracker.hasLinkInRowRange(0, 0, 20), isFalse);
+    });
+
+    test('pending row fallback excludes the cursor-only next row', () {
+      terminal.write('\x1b]8;;https://example.com/main\x07main\r\n');
+
+      expect(tracker.resolveLinkOnRow(0), 'https://example.com/main');
+      expect(tracker.resolveLinkOnRow(1), isNull);
+      expect(tracker.hasLinkInRowRange(1, 0, 10), isFalse);
+    });
+
     group('resolveLinkOnRow', () {
       test('resolves a row carrying a single hyperlink from any column', () {
         terminal.write(
@@ -259,6 +314,15 @@ void main() {
         expect(tracker.resolveLinkAt(const CellOffset(20, 0)), isNull);
         // ...but the row-level fallback opens the row's only hyperlink.
         expect(tracker.resolveLinkOnRow(0), 'https://github.com/o/r/pull/587');
+      });
+
+      test('resolves repeated links with the same destination', () {
+        terminal.write(
+          '\x1b]8;;https://example.com/a\x07A\x1b]8;;\x07 '
+          '\x1b]8;;https://example.com/a\x07A again\x1b]8;;\x07',
+        );
+
+        expect(tracker.resolveLinkOnRow(0), 'https://example.com/a');
       });
 
       test('stays ambiguous when a row carries multiple destinations', () {

@@ -18,6 +18,18 @@ on:
           - both
           - Private
           - Production
+      profile-type:
+        description: 'Profile type to regenerate (ad hoc is used by Firebase)'
+        required: true
+        type: choice
+        default: appstore
+        options:
+          - appstore
+          - adhoc
+
+concurrency:
+  group: ios-profile-maintenance
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -26,6 +38,7 @@ jobs:
   regenerate:
     name: Regenerate provisioning profiles
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,16 +52,19 @@ jobs:
       - name: Regenerate provisioning profiles
         env:
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_WRITE_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_WRITE_BASIC_AUTHORIZATION }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
+          PROFILE_TYPE: ${{ inputs.profile-type }}
+          PROFILE_SCHEME: ${{ inputs.scheme }}
         run: |
           cd ios
-          if [ "${{ inputs.scheme }}" = "both" ]; then
-            bundle exec fastlane regenerate_profiles
+          if [ "$PROFILE_SCHEME" = "both" ]; then
+            bundle exec fastlane regenerate_profiles type:"$PROFILE_TYPE"
           else
-            bundle exec fastlane regenerate_profiles scheme:${{ inputs.scheme }}
+            bundle exec fastlane regenerate_profiles type:"$PROFILE_TYPE" scheme:"$PROFILE_SCHEME"
           fi

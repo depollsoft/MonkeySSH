@@ -247,6 +247,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       _cwdEdited = true;
     }
     _recents = ref.read(acpSessionManagerProvider).loadRecentSessions();
+    _recents.ignore();
   }
 
   @override
@@ -271,80 +272,65 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     List<Host> hosts,
     List<AcpProvider> providers,
   ) async {
+    var recents = const <AcpRecentSessionRef>[];
+    AcpSessionKey? lastSelected;
+    var presets = const <int, AgentLaunchPreset>{};
+    var activeHostIds = const <int>{};
     try {
       final manager = ref.read(acpSessionManagerProvider);
       final presetService = ref.read(agentLaunchPresetServiceProvider);
-      final recents = await _recents;
-      final lastSelected = await manager.loadLastSelected();
+      recents = await _recents;
+      lastSelected = await manager.loadLastSelected();
       final presetEntries = await Future.wait(
         hosts.map(
           (host) async =>
               MapEntry(host.id, await presetService.getPresetForHost(host.id)),
         ),
       );
-      final presets = <int, AgentLaunchPreset>{
+      presets = <int, AgentLaunchPreset>{
         for (final entry in presetEntries)
           if (entry.value != null) entry.key: entry.value!,
       };
-      final activeHostIds = ref
+      activeHostIds = ref
           .read(sshServiceProvider)
           .allSessions
           .map((session) => session.hostId)
           .toSet();
-      final defaults = resolveAcpSessionLaunchDefaults(
-        hosts: hosts,
-        providers: providers,
-        recents: recents,
-        activeHostIds: activeHostIds,
-        presets: presets,
-        lastSelected: lastSelected,
-        initialHostId: widget.initialHostId,
-        initialProviderId: widget.initialProviderId,
-        initialWorkingDirectory: widget.initialWorkingDirectory,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _hostId = widget.lockHost ? widget.initialHostId : defaults.hostId;
-        _providerId = widget.lockProvider
-            ? widget.initialProviderId
-            : defaults.providerId;
-        if (!_cwdEdited) {
-          _cwd.text = defaults.cwd;
-        }
-        _loadingDefaults = false;
-      });
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
         'acp.launch',
         'defaults_failed',
         fields: {'errorType': error.runtimeType},
       );
-      if (!mounted) {
-        return;
-      }
-      final defaults = resolveAcpSessionLaunchDefaults(
-        hosts: hosts,
-        providers: providers,
-        recents: const [],
-        activeHostIds: const {},
-        presets: const {},
-        initialHostId: widget.initialHostId,
-        initialProviderId: widget.initialProviderId,
-        initialWorkingDirectory: widget.initialWorkingDirectory,
-      );
-      setState(() {
-        _hostId = widget.lockHost ? widget.initialHostId : defaults.hostId;
-        _providerId = widget.lockProvider
-            ? widget.initialProviderId
-            : defaults.providerId;
-        if (!_cwdEdited) {
-          _cwd.text = defaults.cwd;
-        }
-        _loadingDefaults = false;
-      });
+      recents = const [];
+      lastSelected = null;
+      presets = const {};
+      activeHostIds = const {};
     }
+    final defaults = resolveAcpSessionLaunchDefaults(
+      hosts: hosts,
+      providers: providers,
+      recents: recents,
+      activeHostIds: activeHostIds,
+      presets: presets,
+      lastSelected: lastSelected,
+      initialHostId: widget.initialHostId,
+      initialProviderId: widget.initialProviderId,
+      initialWorkingDirectory: widget.initialWorkingDirectory,
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _hostId = widget.lockHost ? widget.initialHostId : defaults.hostId;
+      _providerId = widget.lockProvider
+          ? widget.initialProviderId
+          : defaults.providerId;
+      if (!_cwdEdited) {
+        _cwd.text = defaults.cwd;
+      }
+      _loadingDefaults = false;
+    });
   }
 
   Future<void> _selectHost(
@@ -539,6 +525,11 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       // Resolve a free-tier concurrency block, then retry once.
       if (result is AcpSessionLaunchBlocked && mounted) {
         final resolved = await _resolveConcurrency(result.decision);
+        // Null also covers the sheet being dismissed while the choice dialog
+        // or upgrade route was open, so re-check mounted before touching state.
+        if (!mounted) {
+          return;
+        }
         if (resolved == null) {
           setState(() => _busy = false);
           return;

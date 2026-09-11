@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs, directives_ordering
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,6 +24,13 @@ class _MockLocalAuthentication extends Mock implements LocalAuthentication {}
 class _LockedAuthStateNotifier extends AuthStateNotifier {
   @override
   AuthState build() => AuthState.locked;
+}
+
+class _BlockingUnlockAuthStateNotifier extends _LockedAuthStateNotifier {
+  final unlockCompleter = Completer<bool>();
+
+  @override
+  Future<bool> unlockWithPin(String pin) => unlockCompleter.future;
 }
 
 void main() {
@@ -324,6 +333,39 @@ void main() {
         expect(find.text('Use biometrics'), findsNothing);
       },
     );
+
+    testWidgets('ignores an unlock result after the screen is removed', (
+      tester,
+    ) async {
+      final authService = _MockAuthService();
+      final notifier = _BlockingUnlockAuthStateNotifier();
+
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(() => notifier),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      await tester.enterText(find.byType(TextField), '1234');
+      await tester.tap(find.text('Unlock'));
+      await tester.pump();
+
+      // The router swaps the lock screen out while the unlock is in flight.
+      await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+
+      notifier.unlockCompleter.complete(false);
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('balances PIN field icon spacing to keep entry centered', (
       tester,

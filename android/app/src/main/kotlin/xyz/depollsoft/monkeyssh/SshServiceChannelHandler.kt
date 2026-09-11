@@ -4,10 +4,10 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import androidx.lifecycle.Lifecycle
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -56,6 +56,10 @@ object SshServiceChannelHandler {
             "updateStatus" -> {
                 val connectionCount = call.argument<Int>("connectionCount") ?: 0
                 val connectedCount = call.argument<Int>("connectedCount") ?: 0
+                if (connectionCount > 0) {
+                    // Ask while visible, before the service needs to start in onPause.
+                    resumedActivity()?.ensureNotificationPermission()
+                }
                 SshConnectionService.updateStatus(
                     context = applicationContext,
                     status = SshConnectionService.ConnectionStatus(
@@ -66,11 +70,10 @@ object SshServiceChannelHandler {
                 result.success(null)
             }
             "setForegroundState" -> {
-                val isForeground = call.argument<Boolean>("isForeground") ?: true
-                if (!isForeground && SshConnectionService.hasActiveConnections()) {
-                    currentActivityRef.get()?.ensureNotificationPermission()
-                }
-                SshConnectionService.setForegroundState(applicationContext, isForeground)
+                // Native lifecycle owns visibility. Flutter reports inactive as
+                // foreground and can deliver it after onPause started the service.
+                // A delayed Dart message must not undo that native transition.
+                SshConnectionService.refresh(applicationContext)
                 result.success(null)
             }
             "stopService" -> {
@@ -87,19 +90,17 @@ object SshServiceChannelHandler {
         }
     }
 
+    private fun resumedActivity(): MainActivity? = currentActivityRef.get()?.takeIf {
+        it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+    }
+
     private fun isBatteryOptimizationIgnored(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true
-        }
         val powerManager =
             context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return powerManager.isIgnoringBatteryOptimizations(context.packageName)
     }
 
     private fun requestDisableBatteryOptimization(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return false
-        }
         if (isBatteryOptimizationIgnored(context)) {
             return true
         }

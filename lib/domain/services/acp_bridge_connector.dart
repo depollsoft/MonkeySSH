@@ -18,9 +18,8 @@ final class AcpWorkingDirectoryException implements Exception {
 /// Bundles the same-host filesystem and terminal implementations used to
 /// answer ACP client-capability requests (`fs/*`, `terminal/*`).
 ///
-/// Resolved once per bridge attachment against the SSH session active at
-/// attach/reconnect time, so a later SSH reconnect on the same host is picked
-/// up the next time the attachment (re)initializes.
+/// New operations resolve the active SSH session for the same host, so these
+/// bindings remain usable when a capability service survives an SSH reconnect.
 final class AcpHostCapabilityBinding {
   /// Creates a capability binding.
   const AcpHostCapabilityBinding({
@@ -144,6 +143,7 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
     required MonkeyMuxAcpBridgeService bridgeService,
     required Future<SshSession> Function(int hostId) sessionResolver,
     this.defaultRequestTimeout = const Duration(seconds: 60),
+    this.capabilityLimits = const AcpClientCapabilityLimits(),
   }) : _bridgeService = bridgeService,
        _sessionResolver = sessionResolver;
 
@@ -152,6 +152,9 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
 
   /// Default per-request timeout applied to the ACP JSON-RPC connection.
   final Duration defaultRequestTimeout;
+
+  /// Limits used when constructing same-host capability implementations.
+  final AcpClientCapabilityLimits capabilityLimits;
 
   @override
   Future<MonkeyMuxAcpBridgeStartResult> startBridge({
@@ -271,8 +274,14 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
       return null;
     }
     return AcpHostCapabilityBinding(
-      fileSystem: AcpSftpRemoteFileSystem.fromSshSession(session),
-      terminalExecutor: AcpSshTerminalExecutor(session),
+      fileSystem: AcpSftpRemoteFileSystem(
+        () async => (await _sessionResolver(hostId)).sftp(),
+      ),
+      terminalExecutor: AcpSshTerminalExecutor(
+        () => _sessionResolver(hostId),
+        remoteIsWindows: session.remoteIsWindows,
+        openTimeout: capabilityLimits.terminalOpenTimeout,
+      ),
     );
   }
 }

@@ -148,17 +148,14 @@ class BufferLine with IndexedItem {
     CursorStyle style, {
     Set<CellAnchor> preservedAnchors = const <CellAnchor>{},
   }) {
-    // reset cell one to the left if start is second cell of a wide char
-    if (start > 0 && getWidth(start - 1) == 2) {
-      eraseCell(start - 1, style);
-    }
+    start = start.clamp(0, _length);
+    end = end.clamp(0, _length);
+    if (start >= end) return;
 
-    // reset cell one to the right if end is second cell of a wide char
-    if (end < _length && getWidth(end - 1) == 2) {
-      eraseCell(end - 1, style);
-    }
+    // Include both halves of a wide cell, including their anchors.
+    if (start > 0 && getWidth(start - 1) == 2) start--;
+    if (end < _length && getWidth(end - 1) == 2) end++;
 
-    end = min(end, _length);
     for (var i = start; i < end; i++) {
       eraseCell(i, style);
     }

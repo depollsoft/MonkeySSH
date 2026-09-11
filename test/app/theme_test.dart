@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:monkeyssh/app/app.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
@@ -19,6 +23,122 @@ void main() {
   });
 
   group('FluttyTheme', () {
+    for (final allowRuntimeFetching in [false, true]) {
+      testWidgets(
+        'uses bundled fonts with runtime fetching $allowRuntimeFetching',
+        (tester) async {
+          final previousFetching = GoogleFonts.config.allowRuntimeFetching;
+          final previousSystemFonts = FluttyTheme.debugUseSystemFonts;
+          addTearDown(() {
+            GoogleFonts.config.allowRuntimeFetching = previousFetching;
+            FluttyTheme.debugUseSystemFonts = previousSystemFonts;
+          });
+          GoogleFonts.config.allowRuntimeFetching = allowRuntimeFetching;
+          FluttyTheme.debugUseSystemFonts = false;
+
+          for (final theme in [FluttyTheme.light, FluttyTheme.dark]) {
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: theme,
+                home: Scaffold(
+                  body: Column(
+                    children: [
+                      const Text('Body'),
+                      Text('Code', style: FluttyTheme.monoStyle),
+                      Text('Title', style: FluttyTheme.displayMono()),
+                    ],
+                  ),
+                ),
+              ),
+            );
+            for (final (label, family) in [
+              ('Body', 'Inter'),
+              ('Code', 'JetBrains Mono'),
+              ('Title', 'JetBrains Mono'),
+            ]) {
+              final richText = tester.widget<RichText>(
+                find.descendant(
+                  of: find.text(label),
+                  matching: find.byType(RichText),
+                ),
+              );
+              expect(richText.text.style?.fontFamily, family);
+            }
+            expect(
+              theme.appBarTheme.titleTextStyle?.fontFamily,
+              'JetBrains Mono',
+            );
+            expect(tester.takeException(), isNull);
+          }
+          // Any accidental GoogleFonts call must finish without a hidden load
+          // failure, even when downloads are disabled and no cache is present.
+          await GoogleFonts.pendingFonts();
+        },
+      );
+    }
+
+    test('preserves text metrics and the system-font test override', () {
+      final previousSystemFonts = FluttyTheme.debugUseSystemFonts;
+      addTearDown(() => FluttyTheme.debugUseSystemFonts = previousSystemFonts);
+      for (final brightness in Brightness.values) {
+        ThemeData buildTheme() => brightness == Brightness.dark
+            ? FluttyTheme.dark
+            : FluttyTheme.light;
+        FluttyTheme.debugUseSystemFonts = true;
+        final system = buildTheme();
+        expect(system.textTheme.bodyMedium?.fontFamily, isNot('Inter'));
+        expect(FluttyTheme.monoStyle.fontFamily, 'monospace');
+        expect(FluttyTheme.displayMono().fontFamily, 'monospace');
+        FluttyTheme.debugUseSystemFonts = false;
+        final bundled = buildTheme();
+        final systemStyles = _textStyles(system.textTheme);
+        final bundledStyles = _textStyles(bundled.textTheme);
+        for (var index = 0; index < systemStyles.length; index++) {
+          final before = systemStyles[index]!;
+          final after = bundledStyles[index]!;
+          expect(after.fontFamily, 'Inter');
+          expect(after.fontSize, before.fontSize);
+          expect(after.fontWeight, before.fontWeight);
+          expect(after.height, before.height);
+          expect(after.letterSpacing, before.letterSpacing);
+          expect(after.wordSpacing, before.wordSpacing);
+          expect(after.textBaseline, before.textBaseline);
+          expect(after.color, before.color);
+        }
+        expect(bundled.textTheme.headlineLarge?.fontWeight, FontWeight.w700);
+        expect(bundled.textTheme.headlineMedium?.fontWeight, FontWeight.w600);
+        expect(bundled.appBarTheme.titleTextStyle?.fontWeight, FontWeight.w600);
+      }
+    });
+
+    test('bundles regular and italic fonts and their OFL notices', () async {
+      final manifest =
+          jsonDecode(await rootBundle.loadString('FontManifest.json'))
+              as List<dynamic>;
+      for (final (family, filename, license) in [
+        ('Inter', 'Inter', 'OFL-Inter.txt'),
+        ('JetBrains Mono', 'JetBrainsMono', 'OFL-JetBrainsMono.txt'),
+      ]) {
+        final entry = manifest.cast<Map<String, dynamic>>().singleWhere(
+          (entry) => entry['family'] == family,
+        );
+        expect(entry['fonts'], [
+          {'asset': 'assets/fonts/$filename.ttf'},
+          {'asset': 'assets/fonts/$filename-Italic.ttf', 'style': 'italic'},
+        ]);
+        for (final suffix in ['', '-Italic']) {
+          final data = await rootBundle.load(
+            'assets/fonts/$filename$suffix.ttf',
+          );
+          expect(data.lengthInBytes, greaterThan(0));
+        }
+        expect(
+          await rootBundle.loadString('assets/fonts/$license'),
+          contains('SIL OPEN FONT LICENSE Version 1.1'),
+        );
+      }
+    });
+
     test('builds app colors from a terminal palette', () {
       const terminalTheme = TerminalThemes.tokyoNightNight;
 
@@ -157,6 +277,24 @@ void main() {
     });
   });
 }
+
+List<TextStyle?> _textStyles(TextTheme theme) => [
+  theme.displayLarge,
+  theme.displayMedium,
+  theme.displaySmall,
+  theme.headlineLarge,
+  theme.headlineMedium,
+  theme.headlineSmall,
+  theme.titleLarge,
+  theme.titleMedium,
+  theme.titleSmall,
+  theme.bodyLarge,
+  theme.bodyMedium,
+  theme.bodySmall,
+  theme.labelLarge,
+  theme.labelMedium,
+  theme.labelSmall,
+];
 
 Set<Color> _terminalAccentCandidates(TerminalThemeData theme) => {
   theme.blue,

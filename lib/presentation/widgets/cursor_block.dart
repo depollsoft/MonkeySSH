@@ -14,7 +14,7 @@ import 'package:flutter/material.dart';
 /// `WidgetTester.pumpAndSettle` in tests.
 class CursorBlock extends StatefulWidget {
   /// Creates a [CursorBlock].
-  const CursorBlock({super.key, this.color, this.size, this.blinking = true});
+  const CursorBlock({super.key, this.color, this.size});
 
   /// Block color. Defaults to the theme's primary (Signal Teal).
   final Color? color;
@@ -22,12 +22,6 @@ class CursorBlock extends StatefulWidget {
   /// Block size (drives its width and height) in logical pixels. Defaults to
   /// the ambient text size.
   final double? size;
-
-  /// Whether the block blinks.
-  ///
-  /// Ignored when the platform requests reduced motion, in which case the block
-  /// is always rendered static (fully visible).
-  final bool blinking;
 
   @override
   State<CursorBlock> createState() => _CursorBlockState();
@@ -44,14 +38,6 @@ class _CursorBlockState extends State<CursorBlock> {
   }
 
   @override
-  void didUpdateWidget(CursorBlock oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.blinking != widget.blinking) {
-      _syncTimer();
-    }
-  }
-
-  @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
@@ -60,8 +46,7 @@ class _CursorBlockState extends State<CursorBlock> {
   void _syncTimer() {
     final reduceMotion =
         MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    final animate = widget.blinking && !reduceMotion;
-    if (animate) {
+    if (!reduceMotion) {
       _timer ??= Timer.periodic(const Duration(milliseconds: 530), (_) {
         if (mounted) {
           setState(() => _on = !_on);

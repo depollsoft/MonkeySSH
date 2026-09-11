@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../../app/app_metadata.dart';
 import '../../app/routes.dart';
@@ -22,9 +21,11 @@ import '../../domain/services/ssh_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import '../providers/entity_list_providers.dart';
+import '../widgets/font_family_picker.dart';
 import '../widgets/message_of_the_day.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
+import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
 import 'transfer_screen.dart';
 
@@ -168,15 +169,80 @@ class _SubscriptionSection extends ConsumerWidget {
   }
 }
 
+void _showChoiceDialog<T>({
+  required BuildContext context,
+  required String title,
+  required T current,
+  required List<T> options,
+  required String Function(T) label,
+  required ValueChanged<T> onSelected,
+  String Function(T)? subtitle,
+  Widget? explanation,
+}) {
+  showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: RadioGroup<T>(
+        groupValue: current,
+        onChanged: (value) {
+          if (value == null) return;
+          onSelected(value);
+          Navigator.pop(context);
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (explanation != null) ...[
+              explanation,
+              const SizedBox(height: FluttyTheme.spacingMd),
+            ],
+            for (final option in options)
+              RadioListTile<T>(
+                value: option,
+                title: Text(label(option)),
+                subtitle: subtitle == null ? null : Text(subtitle(option)),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _SettingSwitch<N extends Notifier<bool>> extends ConsumerWidget {
+  const _SettingSwitch({
+    required this.provider,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.setEnabled,
+  });
+
+  final NotifierProvider<N, bool> provider;
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Future<void> Function(N, {required bool enabled}) setEnabled;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => SwitchListTile(
+    secondary: Icon(icon),
+    title: Text(title),
+    subtitle: Text(subtitle),
+    value: ref.watch(provider),
+    onChanged: (value) =>
+        unawaited(setEnabled(ref.read(provider.notifier), enabled: value)),
+  );
+}
+
 class _AppearanceSection extends ConsumerWidget {
   const _AppearanceSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeNotifierProvider);
-    final terminalThemesApplyToApp = ref.watch(
-      terminalThemesApplyToAppNotifierProvider,
-    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -191,20 +257,14 @@ class _AppearanceSection extends ConsumerWidget {
           subtitle: Text(_themeModeLabel(themeMode)),
           onTap: () => _showThemeDialog(context, ref, themeMode),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.color_lens_outlined),
-          title: const Text('Use terminal themes for app'),
-          subtitle: const Text(
-            'Apply the selected terminal light and dark themes to app colors',
-          ),
-          value: terminalThemesApplyToApp,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(terminalThemesApplyToAppNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: terminalThemesApplyToAppNotifierProvider,
+          icon: Icons.color_lens_outlined,
+          title: 'Use terminal themes for app',
+          subtitle:
+              'Apply the selected terminal light and dark themes to app colors',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
       ],
     );
@@ -220,40 +280,14 @@ class _AppearanceSection extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     ThemeMode current,
-  ) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Theme'),
-        content: RadioGroup<ThemeMode>(
-          groupValue: current,
-          onChanged: (value) {
-            if (value != null) {
-              ref.read(themeModeNotifierProvider.notifier).setThemeMode(value);
-              Navigator.pop(context);
-            }
-          },
-          child: const Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              RadioListTile<ThemeMode>(
-                title: Text('System default'),
-                value: ThemeMode.system,
-              ),
-              RadioListTile<ThemeMode>(
-                title: Text('Light'),
-                value: ThemeMode.light,
-              ),
-              RadioListTile<ThemeMode>(
-                title: Text('Dark'),
-                value: ThemeMode.dark,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  ) => _showChoiceDialog(
+    context: context,
+    title: 'Theme',
+    current: current,
+    options: const [ThemeMode.system, ThemeMode.light, ThemeMode.dark],
+    label: _themeModeLabel,
+    onSelected: ref.read(themeModeNotifierProvider.notifier).setThemeMode,
+  );
 }
 
 class _SecuritySection extends ConsumerWidget {
@@ -574,41 +608,19 @@ class _SecuritySection extends ConsumerWidget {
     ref.invalidate(_biometricSettingsStateProvider);
   }
 
-  void _showAutoLockDialog(BuildContext context, WidgetRef ref, int current) {
-    final options = [0, 1, 2, 5, 10, 15, 30];
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Auto-lock timeout'),
-        content: RadioGroup<int>(
-          groupValue: current,
-          onChanged: (value) {
-            if (value != null) {
-              ref
-                  .read(autoLockTimeoutNotifierProvider.notifier)
-                  .setTimeout(value);
-              Navigator.pop(context);
-            }
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: options
-                .map(
-                  (minutes) => RadioListTile<int>(
-                    title: Text(
-                      minutes == 0
-                          ? 'Disabled'
-                          : '$minutes minute${minutes == 1 ? '' : 's'}',
-                    ),
-                    value: minutes,
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-      ),
-    );
-  }
+  void _showAutoLockDialog(
+    BuildContext context,
+    WidgetRef ref,
+    int current,
+  ) => _showChoiceDialog(
+    context: context,
+    title: 'Auto-lock timeout',
+    current: current,
+    options: const [0, 1, 2, 5, 10, 15, 30],
+    label: (minutes) =>
+        minutes == 0 ? 'Disabled' : '$minutes minute${minutes == 1 ? '' : 's'}',
+    onSelected: ref.read(autoLockTimeoutNotifierProvider.notifier).setTimeout,
+  );
 }
 
 class _PrivacySection extends ConsumerWidget {
@@ -685,27 +697,23 @@ class _TerminalSection extends ConsumerWidget {
     final fontSize = ref.watch(fontSizeNotifierProvider);
     final fontFamily = ref.watch(fontFamilyNotifierProvider);
     final cursorStyle = ref.watch(cursorStyleNotifierProvider);
-    final bellSound = ref.watch(bellSoundNotifierProvider);
-    final terminalNotifications = ref.watch(
-      terminalNotificationsNotifierProvider,
+    final agentAccess =
+        ref.watch(monetizationStateProvider).asData?.value ??
+        ref.read(monetizationServiceProvider).currentState;
+    final canManageAgents = agentAccess.allowsFeature(
+      MonetizationFeature.agentManagement,
     );
-    final terminalWakeLock = ref.watch(terminalWakeLockNotifierProvider);
+    final agentUpdateNotifications = ref.watch(
+      agentUpdateNotificationsNotifierProvider,
+    );
     final terminalPathLinks = ref.watch(terminalPathLinksNotifierProvider);
     final terminalPathLinkUnderlines = ref.watch(
       terminalPathLinkUnderlinesNotifierProvider,
-    );
-    final portForwardBrowserLinks = ref.watch(
-      portForwardBrowserLinksNotifierProvider,
-    );
-    final shellCompletions = ref.watch(shellCompletionsNotifierProvider);
-    final confirmMuxWindowClose = ref.watch(
-      confirmMuxWindowCloseNotifierProvider,
     );
     final sharedClipboard = ref.watch(sharedClipboardNotifierProvider);
     final sharedClipboardLocalRead = ref.watch(
       sharedClipboardLocalReadNotifierProvider,
     );
-    final tapToShowKeyboard = ref.watch(tapToShowKeyboardNotifierProvider);
     final themeSettings = ref.watch(terminalThemeSettingsProvider);
     final availableThemes =
         ref.watch(allTerminalThemesProvider).asData?.value ??
@@ -751,7 +759,7 @@ class _TerminalSection extends ConsumerWidget {
         ListTile(
           leading: const Icon(Icons.font_download_outlined),
           title: const Text('Font family'),
-          subtitle: Text(_fontFamilyLabel(fontFamily)),
+          subtitle: Text(fontFamilyLabel(fontFamily)),
           onTap: () => _showFontFamilyDialog(context, ref, fontFamily),
         ),
         ListTile(
@@ -765,48 +773,62 @@ class _TerminalSection extends ConsumerWidget {
           onTap: () =>
               _showAgentWindowModeDialog(context, ref, agentWindowMode),
         ),
+        SwitchListTile(
+          key: const ValueKey('settings-agent-update-notifications'),
+          secondary: const Icon(Icons.system_update_alt_rounded),
+          title: Row(
+            children: [
+              const Expanded(child: Text('Agent update indicators')),
+              if (!canManageAgents) const PremiumBadge(),
+            ],
+          ),
+          subtitle: const Text(
+            'Show a dot on the terminal menu when agent updates are available',
+          ),
+          value: canManageAgents && agentUpdateNotifications,
+          onChanged: (value) async {
+            if (!await requireMonetizationFeatureAccess(
+                  context: context,
+                  ref: ref,
+                  feature: MonetizationFeature.agentManagement,
+                ) ||
+                !context.mounted) {
+              return;
+            }
+            await ref
+                .read(agentUpdateNotificationsNotifierProvider.notifier)
+                .setEnabled(enabled: value);
+          },
+        ),
         ListTile(
           leading: const Icon(Icons.text_fields),
           title: const Text('Cursor style'),
           subtitle: Text(_cursorStyleLabel(cursorStyle)),
           onTap: () => _showCursorStyleDialog(context, ref, cursorStyle),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.notifications_outlined),
-          title: const Text('Bell sound'),
-          subtitle: const Text('Play sound on terminal bell'),
-          value: bellSound,
-          onChanged: (value) {
-            ref
-                .read(bellSoundNotifierProvider.notifier)
-                .setEnabled(enabled: value);
-          },
+        _SettingSwitch(
+          provider: bellSoundNotifierProvider,
+          icon: Icons.notifications_outlined,
+          title: 'Bell sound',
+          subtitle: 'Play sound on terminal bell',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.notifications_active_outlined),
-          title: const Text('Desktop notifications'),
-          subtitle: const Text(
-            'Let the remote shell post notifications (OSC 9/777/99)',
-          ),
-          value: terminalNotifications,
-          onChanged: (value) {
-            ref
-                .read(terminalNotificationsNotifierProvider.notifier)
-                .setEnabled(enabled: value);
-          },
+        _SettingSwitch(
+          provider: terminalNotificationsNotifierProvider,
+          icon: Icons.notifications_active_outlined,
+          title: 'Desktop notifications',
+          subtitle: 'Let the remote shell post notifications (OSC 9/777/99)',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.screen_lock_portrait_outlined),
-          title: const Text('Keep screen awake'),
-          subtitle: const Text('Hold a wake lock while a terminal is active'),
-          value: terminalWakeLock,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(terminalWakeLockNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: terminalWakeLockNotifierProvider,
+          icon: Icons.screen_lock_portrait_outlined,
+          title: 'Keep screen awake',
+          subtitle: 'Hold a wake lock while a terminal is active',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
         SwitchListTile(
           secondary: const Icon(Icons.folder_open_outlined),
@@ -832,50 +854,31 @@ class _TerminalSection extends ConsumerWidget {
                 }
               : null,
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.open_in_browser_outlined),
-          title: const Text('Open forwarded links in app'),
-          subtitle: const Text(
-            'Keeps the SSH connection open while you browse forwarded pages; turn off to use the system browser',
-          ),
-          value: portForwardBrowserLinks,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(portForwardBrowserLinksNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: portForwardBrowserLinksNotifierProvider,
+          icon: Icons.open_in_browser_outlined,
+          title: 'Open forwarded links in app',
+          subtitle:
+              'Keeps the SSH connection open while you browse forwarded pages; turn off to use the system browser',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.auto_awesome_motion_outlined),
-          title: const Text('Shell completion popups'),
-          subtitle: const Text(
-            'Show command and path suggestions while typing at a shell prompt',
-          ),
-          value: shellCompletions,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(shellCompletionsNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: shellCompletionsNotifierProvider,
+          icon: Icons.auto_awesome_motion_outlined,
+          title: 'Shell completion popups',
+          subtitle:
+              'Show command and path suggestions while typing at a shell prompt',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.warning_amber_rounded),
-          title: const Text('Confirm before closing mux windows'),
-          subtitle: const Text(
-            'Ask before closing a tmux or MonkeyMux terminal window',
-          ),
-          value: confirmMuxWindowClose,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(confirmMuxWindowCloseNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: confirmMuxWindowCloseNotifierProvider,
+          icon: Icons.warning_amber_rounded,
+          title: 'Confirm before closing mux windows',
+          subtitle: 'Ask before closing a tmux or MonkeyMux terminal window',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
         SwitchListTile(
           secondary: const Icon(Icons.content_paste_go_outlined),
@@ -901,8 +904,11 @@ class _TerminalSection extends ConsumerWidget {
         SwitchListTile(
           secondary: const Icon(Icons.content_paste_search_outlined),
           title: const Text('Remote can read clipboard'),
-          subtitle: const Text(
-            'Allow remote OSC 52 queries and clipboard sync to send local clipboard text to the connected host',
+          subtitle: Text(
+            Theme.of(context).platform == TargetPlatform.iOS
+                ? 'Allow remote OSC 52 queries to read local clipboard text. '
+                      'The clipboard is not polled automatically on iOS.'
+                : 'Allow remote OSC 52 queries and clipboard sync to send local clipboard text to the connected host',
           ),
           value: sharedClipboard && sharedClipboardLocalRead,
           onChanged: sharedClipboard
@@ -921,21 +927,15 @@ class _TerminalSection extends ConsumerWidget {
                 }
               : null,
         ),
-        SwitchListTile(
-          secondary: const Icon(Icons.keyboard_outlined),
-          title: const Text('Tap to show keyboard'),
-          subtitle: const Text(
-            'Show the keyboard when tapping the terminal. '
-            'When off, use the toolbar button instead.',
-          ),
-          value: tapToShowKeyboard,
-          onChanged: (value) {
-            unawaited(
-              ref
-                  .read(tapToShowKeyboardNotifierProvider.notifier)
-                  .setEnabled(enabled: value),
-            );
-          },
+        _SettingSwitch(
+          provider: tapToShowKeyboardNotifierProvider,
+          icon: Icons.keyboard_outlined,
+          title: 'Tap to show keyboard',
+          subtitle:
+              'Show the keyboard when tapping the terminal. '
+              'When off, use the toolbar button instead.',
+          setEnabled: (notifier, {required enabled}) =>
+              notifier.setEnabled(enabled: enabled),
         ),
       ],
     );
@@ -945,48 +945,21 @@ class _TerminalSection extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     AgentWindowModePreference current,
-  ) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Agent window mode'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Choose the default for agents that support both experiences. '
-              'You can still pick a different mode from the window menu.',
-            ),
-            const SizedBox(height: FluttyTheme.spacingMd),
-            RadioGroup<AgentWindowModePreference>(
-              groupValue: current,
-              onChanged: (value) {
-                if (value == null) return;
-                unawaited(
-                  ref
-                      .read(agentWindowModePreferenceNotifierProvider.notifier)
-                      .setPreference(value),
-                );
-                Navigator.pop(context);
-              },
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final preference in AgentWindowModePreference.values)
-                    RadioListTile<AgentWindowModePreference>(
-                      title: Text(preference.label),
-                      subtitle: Text(preference.explanation),
-                      value: preference,
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  ) => _showChoiceDialog(
+    context: context,
+    title: 'Agent window mode',
+    current: current,
+    options: AgentWindowModePreference.values,
+    label: (preference) => preference.label,
+    subtitle: (preference) => preference.explanation,
+    explanation: const Text(
+      'Choose the default for agents that support both experiences. '
+      'You can still pick a different mode from the window menu.',
+    ),
+    onSelected: ref
+        .read(agentWindowModePreferenceNotifierProvider.notifier)
+        .setPreference,
+  );
 
   Future<void> _showThemePicker(
     BuildContext context,
@@ -1010,48 +983,6 @@ class _TerminalSection extends ConsumerWidget {
       }
     }
   }
-
-  String _fontFamilyLabel(String family) => switch (family) {
-    'monospace' => 'System Monospace',
-    'JetBrains Mono' => 'JetBrains Mono',
-    'Fira Code' => 'Fira Code',
-    'Source Code Pro' => 'Source Code Pro',
-    'Ubuntu Mono' => 'Ubuntu Mono',
-    'Roboto Mono' => 'Roboto Mono',
-    'IBM Plex Mono' => 'IBM Plex Mono',
-    'Inconsolata' => 'Inconsolata',
-    'Anonymous Pro' => 'Anonymous Pro',
-    'Cousine' => 'Cousine',
-    'PT Mono' => 'PT Mono',
-    'Space Mono' => 'Space Mono',
-    'VT323' => 'VT323 (Retro)',
-    'Share Tech Mono' => 'Share Tech Mono',
-    'Overpass Mono' => 'Overpass Mono',
-    'Oxygen Mono' => 'Oxygen Mono',
-    _ => family,
-  };
-
-  /// Gets a TextStyle for the given font family using Google Fonts.
-  TextStyle _getFontStyle(String family, {double fontSize = 16}) =>
-      switch (family) {
-        'monospace' => TextStyle(fontFamily: 'monospace', fontSize: fontSize),
-        'JetBrains Mono' => GoogleFonts.jetBrainsMono(fontSize: fontSize),
-        'Fira Code' => GoogleFonts.firaCode(fontSize: fontSize),
-        'Source Code Pro' => GoogleFonts.sourceCodePro(fontSize: fontSize),
-        'Ubuntu Mono' => GoogleFonts.ubuntuMono(fontSize: fontSize),
-        'Roboto Mono' => GoogleFonts.robotoMono(fontSize: fontSize),
-        'IBM Plex Mono' => GoogleFonts.ibmPlexMono(fontSize: fontSize),
-        'Inconsolata' => GoogleFonts.inconsolata(fontSize: fontSize),
-        'Anonymous Pro' => GoogleFonts.anonymousPro(fontSize: fontSize),
-        'Cousine' => GoogleFonts.cousine(fontSize: fontSize),
-        'PT Mono' => GoogleFonts.ptMono(fontSize: fontSize),
-        'Space Mono' => GoogleFonts.spaceMono(fontSize: fontSize),
-        'VT323' => GoogleFonts.vt323(fontSize: fontSize),
-        'Share Tech Mono' => GoogleFonts.shareTechMono(fontSize: fontSize),
-        'Overpass Mono' => GoogleFonts.overpassMono(fontSize: fontSize),
-        'Oxygen Mono' => GoogleFonts.oxygenMono(fontSize: fontSize),
-        _ => TextStyle(fontFamily: family, fontSize: fontSize),
-      };
 
   String _cursorStyleLabel(String style) => switch (style) {
     'block' => 'Block',
@@ -1089,9 +1020,10 @@ class _TerminalSection extends ConsumerWidget {
                   children: [
                     Text(
                       previewText,
-                      style: _getFontStyle(
+                      style: resolveMonospaceTextStyle(
                         currentFont,
-                      ).copyWith(fontSize: tempValue),
+                        fontSize: tempValue,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text(
@@ -1132,154 +1064,36 @@ class _TerminalSection extends ConsumerWidget {
     );
   }
 
-  void _showFontFamilyDialog(
+  Future<void> _showFontFamilyDialog(
     BuildContext context,
     WidgetRef ref,
     String current,
-  ) {
-    final options = [
-      'monospace',
-      'JetBrains Mono',
-      'Fira Code',
-      'Source Code Pro',
-      'Ubuntu Mono',
-      'Roboto Mono',
-      'IBM Plex Mono',
-      'Inconsolata',
-      'Anonymous Pro',
-      'Cousine',
-      'PT Mono',
-      'Space Mono',
-      'VT323',
-      'Share Tech Mono',
-      'Overpass Mono',
-      'Oxygen Mono',
-    ];
-    const previewText = 'AaBbCc 0123 {}[]';
-
-    showDialog<void>(
+  ) async {
+    final selected = await showFontPickerDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Font family'),
-        content: SizedBox(
-          width: double.maxFinite,
-          height: MediaQuery.of(context).size.height * 0.6,
-          child: Column(
-            children: [
-              // Current selection preview
-              Container(
-                padding: const EdgeInsets.all(12),
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer.withAlpha(50),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: Theme.of(context).colorScheme.primary.withAlpha(100),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.check_circle,
-                      color: Theme.of(context).colorScheme.primary,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Currently Selected',
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.primary,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                          ),
-                          Text(
-                            _fontFamilyLabel(current),
-                            style: Theme.of(context).textTheme.titleSmall,
-                          ),
-                          Text(previewText, style: _getFontStyle(current)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              // Font list
-              Expanded(
-                child: RadioGroup<String>(
-                  groupValue: current,
-                  onChanged: (value) {
-                    if (value != null) {
-                      ref
-                          .read(fontFamilyNotifierProvider.notifier)
-                          .setFontFamily(value);
-                      Navigator.pop(context);
-                    }
-                  },
-                  child: ListView.builder(
-                    itemCount: options.length,
-                    itemBuilder: (context, index) {
-                      final family = options[index];
-                      return RadioListTile<String>(
-                        title: Text(_fontFamilyLabel(family)),
-                        subtitle: Text(
-                          previewText,
-                          style: _getFontStyle(family),
-                        ),
-                        value: family,
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+      currentFontFamily: current,
+      title: 'Font family',
+      previewFontSize: 16,
     );
+    if (selected != null && context.mounted) {
+      await ref
+          .read(fontFamilyNotifierProvider.notifier)
+          .setFontFamily(selected);
+    }
   }
 
   void _showCursorStyleDialog(
     BuildContext context,
     WidgetRef ref,
     String current,
-  ) {
-    final options = ['block', 'underline', 'bar'];
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Cursor style'),
-        content: RadioGroup<String>(
-          groupValue: current,
-          onChanged: (value) {
-            if (value != null) {
-              ref
-                  .read(cursorStyleNotifierProvider.notifier)
-                  .setCursorStyle(value);
-              Navigator.pop(context);
-            }
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: options
-                .map(
-                  (style) => RadioListTile<String>(
-                    title: Text(_cursorStyleLabel(style)),
-                    value: style,
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-      ),
-    );
-  }
+  ) => _showChoiceDialog(
+    context: context,
+    title: 'Cursor style',
+    current: current,
+    options: const ['block', 'underline', 'bar'],
+    label: _cursorStyleLabel,
+    onSelected: ref.read(cursorStyleNotifierProvider.notifier).setCursorStyle,
+  );
 }
 
 class _DiagnosticsSection extends ConsumerStatefulWidget {
@@ -1644,6 +1458,13 @@ class _ImportExportSection extends ConsumerWidget {
         defaultFileName: 'monkeyssh-migration',
         sharePositionOrigin: shareOriginFromContext(context),
       );
+    } on FormatException catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
     } on Exception catch (error) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -1735,22 +1556,7 @@ class _ImportExportSection extends ConsumerWidget {
       if (mode == MigrationImportMode.replace) {
         await sessionsNotifier.disconnectAll();
       }
-      ref
-        ..invalidate(themeModeNotifierProvider)
-        ..invalidate(terminalThemesApplyToAppNotifierProvider)
-        ..invalidate(terminalThemesApplyToAppProvider)
-        ..invalidate(fontSizeNotifierProvider)
-        ..invalidate(fontFamilyNotifierProvider)
-        ..invalidate(cursorStyleNotifierProvider)
-        ..invalidate(bellSoundNotifierProvider)
-        ..invalidate(portForwardBrowserLinksNotifierProvider)
-        ..invalidate(shellCompletionsNotifierProvider)
-        ..invalidate(sharedClipboardNotifierProvider)
-        ..invalidate(sharedClipboardProvider)
-        ..invalidate(terminalThemeSettingsProvider)
-        ..invalidate(allTerminalThemesProvider)
-        ..invalidate(customTerminalThemesProvider);
-      invalidateImportedEntityProviders(ref.invalidate);
+      invalidateSyncedDataProviders(ref.invalidate);
 
       if (!context.mounted) {
         return;

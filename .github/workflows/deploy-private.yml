@@ -4,11 +4,39 @@ on:
   push:
     branches: [main]
     paths:
-      - '**.dart'
+      - 'lib/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
+      - 'assets/**'
+      - 'remote/monkeymux/**'
+      - '!remote/monkeymux/**/*_test.go'
+      - 'remote/monkeymux/conpty/**'
+      - '!remote/monkeymux/README.md'
+      - 'third_party/**'
       - 'android/**'
+      - '!android/fastlane/metadata-*/**'
       - 'ios/**'
+      - '!ios/fastlane/metadata-*/**'
+      - 'scripts/build_monkeymux_assets.sh'
+      - 'scripts/deterministic_gzip.go'
+      - 'scripts/ensure_monkeymux_assets.sh'
+      - 'scripts/verify_monkeymux_assets.py'
+      - 'scripts/cache_sqlite3_native_assets.sh'
+      - 'scripts/version_codename.py'
+      - 'scripts/preview_release_notes.rb'
+      - 'scripts/preview_build_number.py'
+      - 'scripts/store_metadata.rb'
+      - 'scripts/match_git_persistence.rb'
+      - 'scripts/testflight_delivery.rb'
+      - 'Gemfile'
+      - 'Gemfile.lock'
+      - '.github/workflows/build-deploy.yml'
+      - '.github/workflows/deploy-private.yml'
+      - '.github/workflows/firebase-distribution.yml'
+      - '.github/workflows/preview.yml'
+      - '.github/workflows/preview-ios.yml'
+      - '.github/actions/apple-cache-restore/**'
+      - '.github/actions/apple-cache-save/**'
 
 concurrency:
   group: deploy-private
@@ -22,10 +50,16 @@ jobs:
   compute-version:
     name: Compute Version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       build-name: ${{ steps.version.outputs.build-name }}
       build-number: ${{ steps.version.outputs.build-number }}
       build-codename: ${{ steps.version.outputs.build-codename }}
+      pr-number: ${{ steps.pr-metadata.outputs.pr-number }}
+      pr-title: ${{ steps.pr-metadata.outputs.pr-title }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,9 +76,55 @@ jobs:
           echo "build-number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "build-codename=${BUILD_CODENAME}" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    name: Build & Deploy Private
+      - name: Resolve associated PR metadata
+        id: pr-metadata
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const pulls = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.sha,
+                per_page: 100,
+              },
+            );
+            const pull =
+              pulls.find((candidate) => candidate.merge_commit_sha === context.sha) ??
+              pulls.find((candidate) => candidate.merged_at) ??
+              pulls[0];
+            core.setOutput('pr-number', pull ? String(pull.number) : '');
+            core.setOutput('pr-title', pull?.title ?? '');
+
+  build-android:
+    name: Build Private Android
     needs: compute-version
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.compute-version.outputs.build-name }}
+      build-number: ${{ needs.compute-version.outputs.build-number }}
+      build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: true
+      build-ios: false
+      build-android-apk: false
+      build-android-unsigned-aab: true
+      build-ios-unsigned-ipa: false
+      monkeymux-assets-artifact-name: monkeymux-assets-main-android
+      deployment-concurrency-group: private-build-android-${{ github.run_id }}
+    secrets:
+      FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON }}
+      FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST }}
+
+  distribute-android-store:
+    name: Distribute Android to Store
+    needs: [compute-version, build-android]
     permissions:
       actions: read
       contents: read
@@ -54,23 +134,133 @@ jobs:
       build-name: ${{ needs.compute-version.outputs.build-name }}
       build-number: ${{ needs.compute-version.outputs.build-number }}
       build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
       enable-diagnostics: true
       flavor: private
-      deploy-ios-to: testflight
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: true
+      build-ios: false
       deploy-android-to: internal
+      deploy-ios-to: none
+      deployment-concurrency-group: private-android-store-${{ github.run_id }}
+      android-reuse-run-id: ${{ github.run_id }}
+      android-reuse-aab-artifact-name: android-unsigned-private-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}
+      android-reuse-aab-is-unsigned: true
+      android-reuse-source-sha: ${{ github.sha }}
+    secrets: inherit
+
+  distribute-android-firebase:
+    name: Distribute Android to Firebase
+    needs: [compute-version, build-android]
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.compute-version.outputs.build-name }}
+      build-number: ${{ needs.compute-version.outputs.build-number }}
+      build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: true
+      build-ios: false
+      deploy-android-to: firebase
+      deploy-ios-to: none
+      deployment-concurrency-group: private-android-firebase-${{ github.run_id }}
+      firebase-tester-groups: ${{ vars.FIREBASE_TESTER_GROUPS || 'testers' }}
+      android-reuse-run-id: ${{ github.run_id }}
+      android-reuse-aab-artifact-name: android-unsigned-private-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}
+      android-reuse-aab-is-unsigned: true
+      android-reuse-source-sha: ${{ github.sha }}
+    secrets: inherit
+
+  build-ios:
+    name: Build Private iOS
+    needs: compute-version
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.compute-version.outputs.build-name }}
+      build-number: ${{ needs.compute-version.outputs.build-number }}
+      build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: false
+      build-ios: true
+      build-android-apk: false
+      build-android-unsigned-aab: false
+      build-ios-unsigned-ipa: true
+      monkeymux-assets-artifact-name: monkeymux-assets-main-ios
+      deployment-concurrency-group: private-build-ios-${{ github.run_id }}
     secrets:
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-      PLAY_STORE_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_STORE_SERVICE_ACCOUNT_JSON }}
-      MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
-      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-      MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
-      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-      APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
-      FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON }}
       FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON }}
-      FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST }}
       FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST }}
+
+  distribute-ios-store:
+    name: Distribute iOS to Store
+    needs: [compute-version, build-ios]
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.compute-version.outputs.build-name }}
+      build-number: ${{ needs.compute-version.outputs.build-number }}
+      build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: false
+      build-ios: true
+      deploy-android-to: none
+      deploy-ios-to: testflight
+      deployment-concurrency-group: private-ios-store-${{ github.run_id }}
+      ios-reuse-run-id: ${{ github.run_id }}
+      ios-reuse-ipa-artifact-name: ios-unsigned-private-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}-${{ github.sha }}.ipa
+      ios-reuse-ipa-is-unsigned: true
+      ios-reuse-source-sha: ${{ github.sha }}
+    secrets: inherit
+
+  distribute-ios-firebase:
+    name: Distribute iOS to Firebase
+    needs: [compute-version, build-ios]
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      build-name: ${{ needs.compute-version.outputs.build-name }}
+      build-number: ${{ needs.compute-version.outputs.build-number }}
+      build-codename: ${{ needs.compute-version.outputs.build-codename }}
+      pr-number: ${{ needs.compute-version.outputs.pr-number }}
+      pr-title: ${{ needs.compute-version.outputs.pr-title }}
+      enable-diagnostics: true
+      flavor: private
+      source-ref: ${{ github.sha }}
+      source-branch: ${{ github.ref_name }}
+      build-android: false
+      build-ios: true
+      deploy-android-to: none
+      deploy-ios-to: firebase
+      deployment-concurrency-group: private-ios-firebase-${{ github.run_id }}
+      firebase-tester-groups: ${{ vars.FIREBASE_TESTER_GROUPS || 'testers' }}
+      ios-reuse-run-id: ${{ github.run_id }}
+      ios-reuse-ipa-artifact-name: ios-unsigned-private-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}-${{ github.sha }}.ipa
+      ios-reuse-ipa-is-unsigned: true
+      ios-reuse-source-sha: ${{ github.sha }}
+    secrets: inherit

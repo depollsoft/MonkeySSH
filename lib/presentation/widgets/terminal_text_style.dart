@@ -26,7 +26,7 @@ TextStyle? resolveConfiguredMonospaceTextStyle(
   double? fontSize,
 }) {
   final textStyle = switch (fontFamily) {
-    'JetBrains Mono' => GoogleFonts.jetBrainsMono(),
+    'JetBrains Mono' => const TextStyle(fontFamily: 'JetBrains Mono'),
     'Fira Code' => GoogleFonts.firaCode(),
     'Source Code Pro' => GoogleFonts.sourceCodePro(),
     'Ubuntu Mono' => GoogleFonts.ubuntuMono(),

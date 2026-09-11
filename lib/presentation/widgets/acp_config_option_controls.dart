@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../domain/models/acp_protocol.dart';
+import '../../domain/models/acp_session_keys.dart';
+import '../../domain/models/acp_session_state.dart';
+import '../../domain/services/acp_session_manager.dart';
 
 /// Sets a generic session configuration option by id.
 typedef AcpConfigOptionSetter =
@@ -28,22 +32,30 @@ const _categoryOrder = <String>[
 /// desktop form factors.
 Future<void> showAcpConfigOptions(
   BuildContext context, {
-  required List<AcpSessionConfigOption> options,
-  required AcpConfigOptionSetter onSetConfigOption,
-  AcpSessionModeState? modeState,
-  AcpModelState? modelState,
-  AcpLegacyModeSetter? onSetMode,
-  AcpLegacyModelSetter? onSetModel,
-  bool enabled = true,
+  required AcpSessionKey sessionKey,
 }) {
-  final content = AcpConfigOptionControls(
-    options: options,
-    onSetConfigOption: onSetConfigOption,
-    modeState: modeState,
-    modelState: modelState,
-    onSetMode: onSetMode,
-    onSetModel: onSetModel,
-    enabled: enabled,
+  final content = Consumer(
+    builder: (context, ref, child) {
+      final session = ref.watch(
+        acpSessionManagerStateProvider.select(
+          (state) => state.asData?.value.byKeyValue(sessionKey.value),
+        ),
+      );
+      final manager = ref.watch(acpSessionManagerProvider);
+      return AcpConfigOptionControls(
+        options: session?.configOptions ?? const [],
+        onSetConfigOption: (configId, value) => manager.setConfigOption(
+          sessionKey,
+          configId: configId,
+          value: value,
+        ),
+        modeState: session?.modeState,
+        modelState: session?.modelState,
+        onSetMode: (modeId) => manager.setMode(sessionKey, modeId),
+        onSetModel: (modelId) => manager.setModel(sessionKey, modelId),
+        enabled: session?.status == AcpConnectionStatus.ready,
+      );
+    },
   );
   final wide = MediaQuery.sizeOf(context).width >= 600;
   if (wide) {

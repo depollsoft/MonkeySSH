@@ -10,14 +10,17 @@ import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 class _MockSshSession extends Mock implements SshSession {}
 
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockExecChannel extends Mock implements SSHSession {}
+class _MockExecChannel extends MockSessionWithChannel {}
 
 class _FakeAndroidDeviceDebugPlatform implements AndroidDeviceDebugPlatform {
   final endpoints = <AndroidAdbServiceKind, AndroidAdbEndpoint?>{};
+  Completer<AndroidAdbEndpoint?>? pendingConnectEndpoint;
   bool wirelessDebuggingSupported = true;
   bool pairingPromptAllowed = true;
   bool returnToAppSucceeds = true;
@@ -71,7 +74,13 @@ class _FakeAndroidDeviceDebugPlatform implements AndroidDeviceDebugPlatform {
   Future<AndroidAdbEndpoint?> discoverEndpoint(
     AndroidAdbServiceKind kind, {
     Duration timeout = const Duration(seconds: 6),
-  }) async => endpoints[kind];
+  }) async {
+    if (pendingConnectEndpoint case final pending?
+        when kind == AndroidAdbServiceKind.connect) {
+      return pending.future;
+    }
+    return endpoints[kind];
+  }
 
   @override
   Future<bool> openDeveloperOptions() async => true;
@@ -86,6 +95,7 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
   Exception? disconnectError;
   Completer<RemoteAdbCommandResult>? pendingConnect;
   Completer<RemoteAdbCommandResult>? pendingPair;
+  Completer<RemoteAdbCommandResult>? pendingDisconnect;
   final connectResults = <RemoteAdbCommandResult>[];
   RemoteAdbCommandResult pairResult = const RemoteAdbCommandResult(
     exitCode: 0,
@@ -118,6 +128,9 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
     disconnectAddresses.add(address);
     if (disconnectError case final error?) {
       throw error;
+    }
+    if (pendingDisconnect case final pending?) {
+      return pending.future;
     }
     return const RemoteAdbCommandResult(exitCode: 0, output: 'disconnected');
   }
@@ -153,15 +166,72 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
   }
 }
 
+const _connected = RemoteAdbCommandResult(
+  exitCode: 0,
+  output: 'connected to 127.0.0.1:41002',
+);
+
+const _notPaired = RemoteAdbCommandResult(
+  exitCode: 1,
+  output: "failed to connect to '127.0.0.1:41002'",
+);
+
 void main() {
+  testWidgets(
+    'ADB channel opening times out, releases queue and closes late channel',
+    (tester) async {
+      final client = _MockSshClient();
+      when(
+        () => client.remoteVersion,
+      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      final session = _adbSession(
+        client,
+        connectionId: 88002,
+        hostId: 1,
+        hostname: 'example.com',
+        username: 'tester',
+      );
+      final opening = Completer<SSHSession>();
+      when(
+        () => client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((_) => opening.future);
+      const runner = SshRemoteAdbCommandRunner();
+      final result = expectLater(
+        runner.connect(session, address: '127.0.0.1:41002'),
+        throwsA(
+          isA<DeviceDebugException>().having(
+            (error) => error.kind,
+            'kind',
+            DeviceDebugErrorKind.remoteCommandFailed,
+          ),
+        ),
+      );
+      await tester.pump();
+      final blocker = Completer<void>();
+      final blocked = session.runQueuedExec(() => blocker.future);
+      var nextRan = false;
+      final next = session.runQueuedExec(() async {
+        nextRan = true;
+      });
+      expect(pendingQueuedSshExecCountForTesting(session.connectionId), 1);
+      await tester.pump(const Duration(seconds: 21));
+      expect(nextRan, isTrue);
+      await result;
+      await next;
+      final lateChannel = _MockExecChannel();
+      opening.complete(lateChannel);
+      await tester.pump();
+      verify(lateChannel.channel.destroy).called(1);
+      verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
+      blocker.complete();
+      await blocked;
+    },
+  );
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('remote ADB resolution', () {
-    setUp(resetRemoteAdbPathCacheForTesting);
-    tearDown(() {
-      resetRemoteAdbPathCacheForTesting();
-      resetQueuedSshExecsForTesting();
-    });
+    tearDown(resetQueuedSshExecsForTesting);
 
     test('never sources profiles inline, which would exit a POSIX shell', () {
       final command = buildRemoteAdbResolutionCommand();
@@ -210,32 +280,13 @@ void main() {
       ) async {
         final command = invocation.positionalArguments.single as String;
         executedCommands.add(command);
-        final channel = _MockExecChannel();
-        final output = command.contains('command -v adb')
-            ? 'MOTD greeting noise\n/opt/homebrew/bin/adb\n'
-            : 'Android Debug Bridge version 1.0.41';
-        when(() => channel.stdout).thenAnswer(
-          (_) =>
-              Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(output))),
+        return _adbExec(
+          command.contains('command -v adb')
+              ? 'MOTD greeting noise\n/opt/homebrew/bin/adb\n'
+              : 'Android Debug Bridge version 1.0.41',
         );
-        when(
-          () => channel.stderr,
-        ).thenAnswer((_) => const Stream<Uint8List>.empty());
-        when(() => channel.done).thenAnswer((_) async {});
-        when(() => channel.exitCode).thenReturn(0);
-        when(channel.close).thenReturn(null);
-        return channel;
       });
-      final session = SshSession(
-        connectionId: 91,
-        hostId: 3,
-        client: client,
-        config: const SshConnectionConfig(
-          hostname: 'mac-mini.example',
-          port: 22,
-          username: 'dev',
-        ),
-      );
+      final session = _adbSession(client, connectionId: 91);
       const runner = SshRemoteAdbCommandRunner();
 
       expect(await runner.isAvailable(session), isTrue);
@@ -250,6 +301,64 @@ void main() {
       );
     });
 
+    test(
+      'isolates cached paths by session and clears failed validation',
+      () async {
+        final client = _MockSshClient();
+        final executedCommands = <String>[];
+        var resolvedPath = '/opt/homebrew/bin/adb';
+        var valid = true;
+        when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          invocation,
+        ) async {
+          final command = invocation.positionalArguments.single as String;
+          executedCommands.add(command);
+          return _adbExec(
+            command.contains('command -v adb')
+                ? '$resolvedPath\n'
+                : valid
+                ? 'Android Debug Bridge version 1.0.41'
+                : 'missing',
+          );
+        });
+        final session = _adbSession(client, connectionId: 91);
+        const runner = SshRemoteAdbCommandRunner();
+
+        expect(await runner.isAvailable(session), isTrue);
+        executedCommands.clear();
+        resolvedPath = '/usr/local/bin/adb';
+        final replacement = SshSession(
+          connectionId: session.connectionId,
+          hostId: session.hostId,
+          client: client,
+          config: session.config,
+        );
+        expect(await runner.isAvailable(replacement), isTrue);
+        expect(executedCommands.first, contains('command -v adb'));
+        expect(executedCommands.last, "'/usr/local/bin/adb' version");
+        await runner.connect(session, address: '127.0.0.1:41002');
+        expect(
+          executedCommands.last,
+          "'/opt/homebrew/bin/adb' connect 127.0.0.1:41002",
+        );
+
+        valid = false;
+        expect(await runner.isAvailable(session), isFalse);
+        valid = true;
+        resolvedPath = '/opt/android/adb';
+        executedCommands.clear();
+        expect(await runner.isAvailable(session), isTrue);
+        expect(executedCommands.first, contains('command -v adb'));
+        expect(executedCommands.last, "'/opt/android/adb' version");
+        await runner.connect(replacement, address: '127.0.0.1:41002');
+        expect(
+          executedCommands.last,
+          "'/usr/local/bin/adb' connect 127.0.0.1:41002",
+        );
+      },
+    );
+
     test('reports ADB as unavailable when resolution finds nothing', () async {
       final client = _MockSshClient();
       final executedCommands = <String>[];
@@ -258,28 +367,9 @@ void main() {
         invocation,
       ) async {
         executedCommands.add(invocation.positionalArguments.single as String);
-        final channel = _MockExecChannel();
-        when(
-          () => channel.stdout,
-        ).thenAnswer((_) => const Stream<Uint8List>.empty());
-        when(
-          () => channel.stderr,
-        ).thenAnswer((_) => const Stream<Uint8List>.empty());
-        when(() => channel.done).thenAnswer((_) async {});
-        when(() => channel.exitCode).thenReturn(0);
-        when(channel.close).thenReturn(null);
-        return channel;
+        return _adbExec('');
       });
-      final session = SshSession(
-        connectionId: 92,
-        hostId: 3,
-        client: client,
-        config: const SshConnectionConfig(
-          hostname: 'mac-mini.example',
-          port: 22,
-          username: 'dev',
-        ),
-      );
+      final session = _adbSession(client, connectionId: 92);
       const runner = SshRemoteAdbCommandRunner();
 
       expect(await runner.isAvailable(session), isFalse);
@@ -484,20 +574,20 @@ void main() {
       });
     });
 
-    test('connects an already-paired SSH host and tears it down', () async {
-      platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      );
+    DeviceDebugSessionController buildController() {
       final controller = DeviceDebugSessionController(
         session: session,
         platform: platform,
         remoteRunner: remoteRunner,
       );
       addTearDown(controller.dispose);
+      return controller;
+    }
+
+    test('connects an already-paired SSH host and tears it down', () async {
+      platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
+      remoteRunner.connectResults.add(_connected);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -529,17 +619,9 @@ void main() {
           exitCode: 1,
           output: 'failed to authenticate to 127.0.0.1:41002',
         ),
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
+        _connected,
       ]);
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -560,12 +642,7 @@ void main() {
       'waits for Wireless debugging when no endpoint is advertised',
       () async {
         platform.endpoints[AndroidAdbServiceKind.connect] = null;
-        final controller = DeviceDebugSessionController(
-          session: session,
-          platform: platform,
-          remoteRunner: remoteRunner,
-        );
-        addTearDown(controller.dispose);
+        final controller = buildController();
 
         await controller.enable();
 
@@ -578,12 +655,7 @@ void main() {
 
     test('shows an actionable error when remote adb is unavailable', () async {
       remoteRunner.available = false;
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -593,12 +665,7 @@ void main() {
 
     test('requires a pairing-capable remote adb version', () async {
       remoteRunner.pairingSupported = false;
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -615,12 +682,7 @@ void main() {
         kind: DeviceDebugErrorKind.remoteCommandFailed,
         message: 'ADB failed.',
       );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -635,12 +697,7 @@ void main() {
     test('fails closed when the SSH server widens the listener', () async {
       platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
       remoteRunner.listenerScopeResult = RemoteListenerScope.exposed;
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -658,12 +715,7 @@ void main() {
         kind: DeviceDebugErrorKind.remoteCommandFailed,
         message: 'Could not inspect listeners.',
       );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -675,59 +727,60 @@ void main() {
       );
     });
 
-    test(
-      'does not reactivate after being stopped during adb connect',
-      () async {
-        platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-        final pendingConnect = Completer<RemoteAdbCommandResult>();
-        remoteRunner.pendingConnect = pendingConnect;
-        final controller = DeviceDebugSessionController(
-          session: session,
-          platform: platform,
-          remoteRunner: remoteRunner,
-        );
-        addTearDown(controller.dispose);
+    test('waits for connect cleanup before allowing a restart', () async {
+      platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
+      final pendingConnect = Completer<RemoteAdbCommandResult>();
+      remoteRunner.pendingConnect = pendingConnect;
+      final controller = buildController();
 
-        final enableFuture = controller.enable();
-        await Future<void>.delayed(Duration.zero);
-        expect(controller.state.phase, DeviceDebugPhase.connecting);
+      final enableFuture = controller.enable();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.phase, DeviceDebugPhase.connecting);
 
-        await controller.stop();
-        pendingConnect.complete(
-          const RemoteAdbCommandResult(
-            exitCode: 0,
-            output: 'connected to 127.0.0.1:41002',
-          ),
-        );
-        await enableFuture;
+      var stopCompleted = false;
+      final stopFuture = controller.stop();
+      unawaited(stopFuture.then((_) => stopCompleted = true));
+      expect(identical(controller.stop(), stopFuture), isTrue);
+      await controller.enable();
+      await controller.pair('123456');
+      expect(controller.state.phase, DeviceDebugPhase.stopping);
+      expect(stopCompleted, isFalse);
+      expect(activeTunnels, isEmpty);
+      expect(remoteRunner.connectAddresses, hasLength(1));
+      expect(remoteRunner.pairedCodes, isEmpty);
 
-        expect(controller.state.phase, DeviceDebugPhase.off);
-        expect(
-          activeTunnels.where((tunnel) => tunnel.portForwardId == -2147483002),
-          isEmpty,
-        );
-        // The connect landed after stop() snapshotted the serial, so the
-        // superseded serial must still be dropped from the remote ADB server.
-        expect(remoteRunner.disconnectAddresses, contains('127.0.0.1:41002'));
-      },
-    );
+      final pendingDisconnect = Completer<RemoteAdbCommandResult>();
+      remoteRunner.pendingDisconnect = pendingDisconnect;
+      pendingConnect.complete(_connected);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.phase, DeviceDebugPhase.stopping);
+      expect(stopCompleted, isFalse);
+      expect(remoteRunner.disconnectAddresses, ['127.0.0.1:41002']);
+      pendingDisconnect.complete(
+        const RemoteAdbCommandResult(exitCode: 0, output: 'disconnected'),
+      );
+      await enableFuture;
+      await stopFuture;
+
+      expect(controller.state.phase, DeviceDebugPhase.off);
+      expect(
+        activeTunnels.where((tunnel) => tunnel.portForwardId == -2147483002),
+        isEmpty,
+      );
+
+      remoteRunner.pendingConnect = null;
+      remoteRunner.connectResults.add(_connected);
+      await controller.enable();
+      expect(controller.state.phase, DeviceDebugPhase.active);
+      expect(activeTunnels.single.portForwardId, -2147483002);
+    });
 
     test(
       'offers pairing when adb reports a plain connection failure',
       () async {
         platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-        remoteRunner.connectResults.add(
-          const RemoteAdbCommandResult(
-            exitCode: 1,
-            output: "failed to connect to '127.0.0.1:41002'",
-          ),
-        );
-        final controller = DeviceDebugSessionController(
-          session: session,
-          platform: platform,
-          remoteRunner: remoteRunner,
-        );
-        addTearDown(controller.dispose);
+        remoteRunner.connectResults.add(_notPaired);
+        final controller = buildController();
 
         await controller.enable();
 
@@ -739,12 +792,7 @@ void main() {
 
     test('reports Android versions without Wireless debugging', () async {
       platform.wirelessDebuggingSupported = false;
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -756,18 +804,8 @@ void main() {
 
     test('stops cleanly when the remote disconnect throws', () async {
       platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.add(_connected);
+      final controller = buildController();
       await controller.enable();
       expect(controller.state.phase, DeviceDebugPhase.active);
 
@@ -779,7 +817,7 @@ void main() {
       expect(activeTunnels, isEmpty);
     });
 
-    test('does not reactivate when stopped during pairing', () async {
+    test('waits for pairing cleanup before allowing a restart', () async {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
@@ -789,12 +827,7 @@ void main() {
           output: 'failed to authenticate to 127.0.0.1:41002',
         ),
       );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
       await controller.enable();
       expect(controller.state.phase, DeviceDebugPhase.waitingForPairingCode);
 
@@ -803,15 +836,62 @@ void main() {
       final pairFuture = controller.pair('123456');
       await Future<void>.delayed(Duration.zero);
 
-      await controller.stop();
+      final stopFuture = controller.stop();
+      expect(identical(controller.stop(), stopFuture), isTrue);
+      await controller.pair('654321');
+      await controller.enable();
+      expect(controller.state.phase, DeviceDebugPhase.stopping);
+      expect(remoteRunner.pairedCodes, ['123456']);
+      expect(activeTunnels, isEmpty);
       pendingPair.complete(
         const RemoteAdbCommandResult(exitCode: 1, output: 'rejected'),
       );
       await pairFuture;
+      await stopFuture;
 
       expect(controller.state.phase, DeviceDebugPhase.off);
       expect(stoppedTunnelIds, contains(-2147483001));
+      final replacementPair = Completer<RemoteAdbCommandResult>();
+      remoteRunner.pendingPair = replacementPair;
+      remoteRunner.connectResults.add(_connected);
+      final restartFuture = controller.pair('654321');
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.phase, DeviceDebugPhase.pairing);
+      expect(activeTunnels.single.portForwardId, -2147483001);
+      replacementPair.complete(remoteRunner.pairResult);
+      await restartFuture;
+      expect(controller.state.phase, DeviceDebugPhase.active);
+      expect(activeTunnels.single.portForwardId, -2147483002);
     });
+
+    for (final discoveredEndpoint in [null, connectEndpoint]) {
+      test(
+        'ignores discovery after pairing is stopped: $discoveredEndpoint',
+        () async {
+          platform.endpoints[AndroidAdbServiceKind.pairing] = pairingEndpoint;
+          final pendingEndpoint = Completer<AndroidAdbEndpoint?>();
+          platform.pendingConnectEndpoint = pendingEndpoint;
+          final controller = buildController();
+          final pairFuture = controller.pair('123456');
+          await Future<void>.delayed(Duration.zero);
+          expect(remoteRunner.pairedCodes, ['123456']);
+          expect(activeTunnels, isEmpty);
+
+          final phases = <DeviceDebugPhase>[];
+          controller.addListener(() => phases.add(controller.state.phase));
+          final stopFuture = controller.stop();
+          await Future<void>.delayed(Duration.zero);
+          expect(controller.state.phase, DeviceDebugPhase.stopping);
+          pendingEndpoint.complete(discoveredEndpoint);
+          await pairFuture;
+          await stopFuture;
+
+          expect(phases, [DeviceDebugPhase.stopping, DeviceDebugPhase.off]);
+          expect(remoteRunner.connectAddresses, isEmpty);
+          expect(activeTunnels, isEmpty);
+        },
+      );
+    }
 
     test('publishes the off state when the SSH session closes', () async {
       final controller = DeviceDebugSessionController(
@@ -832,22 +912,8 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.addAll([
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      ]);
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.addAll([_notPaired, _connected]);
+      final controller = buildController();
 
       await controller.enable();
       expect(controller.state.phase, DeviceDebugPhase.waitingForPairingCode);
@@ -872,18 +938,8 @@ void main() {
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
       platform.pairingPromptAllowed = false;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-      );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.add(_notPaired);
+      final controller = buildController();
 
       await controller.enable();
       await Future<void>.delayed(Duration.zero);
@@ -895,18 +951,8 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-      );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.add(_notPaired);
+      final controller = buildController();
       await controller.enable();
       await Future<void>.delayed(Duration.zero);
       expect(platform.pairingPromptStatuses, isNotEmpty);
@@ -921,20 +967,7 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.addAll([
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      ]);
+      remoteRunner.connectResults.addAll([_notPaired, _notPaired, _connected]);
       final first = DeviceDebugSessionController(
         session: session,
         platform: platform,
@@ -968,22 +1001,8 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.addAll([
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      ]);
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.addAll([_notPaired, _connected]);
+      final controller = buildController();
       await controller.enable();
       await Future<void>.delayed(Duration.zero);
 
@@ -1000,18 +1019,8 @@ void main() {
 
     test('does not force the foreground when pairing was not needed', () async {
       platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.add(_connected);
+      final controller = buildController();
 
       await controller.enable();
 
@@ -1023,22 +1032,8 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.addAll([
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-      ]);
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.addAll([_notPaired, _notPaired]);
+      final controller = buildController();
       await controller.enable();
       await Future<void>.delayed(Duration.zero);
 
@@ -1057,22 +1052,8 @@ void main() {
       platform.endpoints
         ..[AndroidAdbServiceKind.connect] = connectEndpoint
         ..[AndroidAdbServiceKind.pairing] = pairingEndpoint;
-      remoteRunner.connectResults.addAll([
-        const RemoteAdbCommandResult(
-          exitCode: 1,
-          output: "failed to connect to '127.0.0.1:41002'",
-        ),
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      ]);
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.addAll([_notPaired, _connected]);
+      final controller = buildController();
       await controller.enable();
       await Future<void>.delayed(Duration.zero);
       platform.pairingCodes.add('123456');
@@ -1087,18 +1068,8 @@ void main() {
 
     test('ignores a stale reply once debugging is active', () async {
       platform.endpoints[AndroidAdbServiceKind.connect] = connectEndpoint;
-      remoteRunner.connectResults.add(
-        const RemoteAdbCommandResult(
-          exitCode: 0,
-          output: 'connected to 127.0.0.1:41002',
-        ),
-      );
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      remoteRunner.connectResults.add(_connected);
+      final controller = buildController();
       await controller.enable();
       expect(controller.state.phase, DeviceDebugPhase.active);
 
@@ -1111,12 +1082,7 @@ void main() {
     });
 
     test('rejects pairing codes that are not six digits', () async {
-      final controller = DeviceDebugSessionController(
-        session: session,
-        platform: platform,
-        remoteRunner: remoteRunner,
-      );
-      addTearDown(controller.dispose);
+      final controller = buildController();
 
       await controller.pair('123');
 
@@ -1129,3 +1095,28 @@ void main() {
     });
   });
 }
+
+SSHSession _adbExec(String output) {
+  final channel = _MockExecChannel();
+  when(
+    () => channel.stdout,
+  ).thenAnswer((_) => Stream.value(Uint8List.fromList(utf8.encode(output))));
+  when(() => channel.stderr).thenAnswer((_) => const Stream<Uint8List>.empty());
+  when(() => channel.done).thenAnswer((_) async {});
+  when(() => channel.exitCode).thenReturn(0);
+  when(channel.close).thenReturn(null);
+  return channel;
+}
+
+SshSession _adbSession(
+  SSHClient client, {
+  required int connectionId,
+  int hostId = 3,
+  String hostname = 'mac-mini.example',
+  String username = 'dev',
+}) => SshSession(
+  connectionId: connectionId,
+  hostId: hostId,
+  client: client,
+  config: SshConnectionConfig(hostname: hostname, port: 22, username: username),
+);

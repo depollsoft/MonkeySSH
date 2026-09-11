@@ -115,6 +115,10 @@ GEM
       xcodeproj (>= 1.13.0, < 2.0.0)
       xcpretty (~> 0.4.1)
       xcpretty-travis-formatter (>= 0.0.3, < 2.0.0)
+    fastlane-plugin-firebase_app_distribution (1.0.0)
+      fastlane (>= 2.232.0)
+      google-apis-firebaseappdistribution_v1 (>= 0.9.0)
+      google-apis-firebaseappdistribution_v1alpha (>= 0.12.0)
     fastlane-sirp (1.1.0)
     gh_inspector (1.1.3)
     google-apis-androidpublisher_v3 (0.107.0)
@@ -128,6 +132,10 @@ GEM
       multi_json (~> 1.11)
       representable (~> 3.0)
       retriable (>= 3.1, < 5.0)
+    google-apis-firebaseappdistribution_v1 (0.22.0)
+      google-apis-core (>= 0.15.0, < 2.a)
+    google-apis-firebaseappdistribution_v1alpha (0.30.0)
+      google-apis-core (>= 0.15.0, < 2.a)
     google-apis-iamcredentials_v1 (0.28.0)
       google-apis-core (>= 0.15.0, < 2.a)
     google-apis-playcustomapp_v1 (0.18.0)
@@ -175,6 +183,7 @@ GEM
     logger (1.7.0)
     mini_magick (4.13.2)
     mini_mime (1.1.5)
+    minitest (5.27.0)
     multi_json (1.21.1)
     multipart-post (2.4.1)
     mutex_m (0.3.0)
@@ -265,6 +274,8 @@ PLATFORMS
 
 DEPENDENCIES
   fastlane
+  fastlane-plugin-firebase_app_distribution
+  minitest (~> 5.27)
 
 CHECKSUMS
   CFPropertyList (3.0.8) sha256=2c99d0d980536d3d7ab252f7bd59ac8be50fbdd1ff487c98c949bb66bb114261
@@ -302,10 +313,13 @@ CHECKSUMS
   faraday-retry (2.4.0) sha256=7b79c48fb7e56526faf247b12d94a680071ff40c9fda7cf1ec1549439ad11ebe
   fastimage (2.4.1) sha256=c64bebd46b6fd8943ab70c1e6e85ff728f970f2e48f92ecd249b6bc3a540ad20
   fastlane (2.238.0) sha256=78e9252df2224c7e427012638e41051edfa29b133a40fda883fd2f1c13a77b98
+  fastlane-plugin-firebase_app_distribution (1.0.0) sha256=321f554d16194ea465c71202274c75609cf986f147fc7203901d44a1a6df736f
   fastlane-sirp (1.1.0) sha256=10bc94f9682efd8e1badfb31452a76dd8981f1f3a33717c765fde6d75b54d847
   gh_inspector (1.1.3) sha256=04cca7171b87164e053aa43147971d3b7f500fcb58177698886b48a9fc4a1939
   google-apis-androidpublisher_v3 (0.107.0) sha256=b8207eecc89e6a9f7ea11aa88a07bccdcae5ca90121330079db4ef4696a2f3ff
   google-apis-core (1.2.5) sha256=e21562b5627a0fc6a0c3165e429c3afed0f6a628eaa514e83f7204dda1adff69
+  google-apis-firebaseappdistribution_v1 (0.22.0) sha256=1296d201247cc80ac2f170faa3ab47f85b495853d69f9dcee1b2c8af201e20c0
+  google-apis-firebaseappdistribution_v1alpha (0.30.0) sha256=a6f84a9080ca17c7168af1d0b8da9a016e9059760ccd0e62e8f086680a91e1f9
   google-apis-iamcredentials_v1 (0.28.0) sha256=0a92ffe6cc39c569554af2a77a25dfc61519ed8bbb64ab04cffdd352dc5ef106
   google-apis-playcustomapp_v1 (0.18.0) sha256=44b277b9dee4a59ac5e9d98be1485edc5e382d2f9d73c79ae8908a455786a254
   google-apis-storage_v1 (0.66.0) sha256=fdf6d65d3fc77e7046b3494333a818ece9e2afd763bb161e1a7a9e70cf198351
@@ -325,6 +339,7 @@ CHECKSUMS
   logger (1.7.0) sha256=196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203
   mini_magick (4.13.2) sha256=71d6258e0e8a3d04a9a0a09784d5d857b403a198a51dd4f882510435eb95ddd9
   mini_mime (1.1.5) sha256=8681b7e2e4215f2a159f9400b5816d85e9d8c6c6b491e96a12797e798f8bccef
+  minitest (5.27.0) sha256=2d3b17f8a36fe7801c1adcffdbc38233b938eb0b4966e97a6739055a45fa77d5
   multi_json (1.21.1) sha256=e6126a31808e3b4d19f483c775ceac34df190dffa62adfb63a165ee14ba68080
   multipart-post (2.4.1) sha256=9872d03a8e552020ca096adadbf5e3cb1cd1cdd6acd3c161136b8a5737cdb4a8
   mutex_m (0.3.0) sha256=cfcb04ac16b69c4813777022fdceda24e9f798e48092a2b817eb4c0a782b0751

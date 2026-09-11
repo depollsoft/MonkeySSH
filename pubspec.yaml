@@ -5,7 +5,7 @@ description: >
   MonkeyMux/tmux remote windows, key management, snippets, and port forwarding.
 publish_to: 'none'
 
-version: 0.4.1+1
+version: 0.6.0+1
 
 environment:
   sdk: ^3.10.7
@@ -55,7 +55,6 @@ dependencies:
   pointycastle: ^4.0.0
 
   # UI
-  cupertino_icons: ^1.0.9
   flutter_svg: ^2.3.0
   google_fonts: ^8.2.1
   # Markdown rendering for ACP assistant messages. flutter_markdown_plus is the
@@ -71,7 +70,6 @@ dependencies:
 
   # Utilities
   uuid: ^4.6.0
-  intl: ^0.20.3
   collection: ^1.19.1
   cross_file: ^0.3.5+5
   equatable: ^2.1.0
@@ -140,7 +138,9 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/icons/
+    - assets/scripts/agent_usage_probe.cjs
+    - assets/icons/monkeyssh_icon.png
+    - assets/icons/monkeyssh_icon_monochrome.png
     - assets/monkeymux/manifest.json
     - assets/monkeymux/bin/darwin-amd64/
     - assets/monkeymux/bin/darwin-arm64/
@@ -150,5 +150,18 @@ flutter:
     - assets/monkeymux/bin/windows-arm64/
     - remote/monkeymux/conpty/LICENSE.microsoft-terminal
     - assets/version_codenames.json
+    - assets/fonts/OFL-Inter.txt
+    - assets/fonts/OFL-JetBrainsMono.txt
     # - assets/icons/
-    # - assets/fonts/
+
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter.ttf
+        - asset: assets/fonts/Inter-Italic.ttf
+          style: italic
+    - family: JetBrains Mono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono.ttf
+        - asset: assets/fonts/JetBrainsMono-Italic.ttf
+          style: italic

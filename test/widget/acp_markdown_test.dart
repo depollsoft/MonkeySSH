@@ -1,10 +1,13 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/models/acp_attachment.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
@@ -19,6 +22,28 @@ Widget wrap(Widget child) => MaterialApp(
     child: Scaffold(body: SingleChildScrollView(child: child)),
   ),
 );
+
+const _pngData =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+    'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+const _pngUri = 'data:image/png;base64,$_pngData';
+
+Uint8List _displayedImageBytes(WidgetTester tester) {
+  final image = tester.widget<Image>(find.byType(Image));
+  return ((image.image as ResizeImage).imageProvider as MemoryImage).bytes;
+}
+
+Future<void> _pumpImage(
+  WidgetTester tester,
+  AcpImageContent image, {
+  AcpImageResolver? resolver,
+}) async {
+  await tester.pumpWidget(
+    wrap(AcpInlineImage(image: image, resolver: resolver)),
+  );
+  await tester.pumpAndSettle();
+}
 
 void main() {
   setUp(() {
@@ -163,12 +188,8 @@ void main() {
   });
 
   testWidgets('renders inline image embedded in markdown', (tester) async {
-    // A valid tiny transparent PNG as a data URI.
-    const dataUri =
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
-        'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
     await tester.pumpWidget(
-      wrap(const AcpMarkdown(data: '![diagram]($dataUri)')),
+      wrap(const AcpMarkdown(data: '![diagram]($_pngUri)')),
     );
     await tester.pumpAndSettle();
     final image = find.byType(AcpInlineImage);
@@ -188,16 +209,13 @@ void main() {
   testWidgets('keeps parsed Markdown stable across parent rebuilds', (
     tester,
   ) async {
-    const dataUri =
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
-        'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
     late StateSetter rebuildParent;
     await tester.pumpWidget(
       wrap(
         StatefulBuilder(
           builder: (context, setState) {
             rebuildParent = setState;
-            return const AcpMarkdown(data: '![diagram]($dataUri)');
+            return const AcpMarkdown(data: '![diagram]($_pngUri)');
           },
         ),
       ),
@@ -214,10 +232,7 @@ void main() {
   });
 
   testWidgets('reuses data-image decode across remounts', (tester) async {
-    const dataUri =
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
-        'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-    final image = AcpImageContent(uri: dataUri, label: 'diagram');
+    final image = AcpImageContent(uri: _pngUri, label: 'diagram');
 
     await tester.pumpWidget(wrap(AcpInlineImage(image: image)));
     await tester.pumpAndSettle();
@@ -235,104 +250,146 @@ void main() {
     expect(acpInlineImageCacheEntryCount, 1);
   });
 
-  testWidgets('reuses resolved file image across reverse-scroll remounts', (
+  for (final changeResolver in [false, true]) {
+    testWidgets(
+      'resolves file images again on remount, new resolver: $changeResolver',
+      (tester) async {
+        var firstCalls = 0;
+        var secondCalls = 0;
+        final firstBytes = base64Decode(_pngData);
+        final secondBytes = Uint8List.fromList([...firstBytes, 0]);
+        var currentBytes = firstBytes;
+        final image = AcpImageContent(uri: 'file:///tmp/result.png');
+        Future<Uint8List?> firstResolver(AcpImageContent _) async {
+          firstCalls++;
+          return currentBytes;
+        }
+
+        Future<Uint8List?> secondResolver(AcpImageContent _) async {
+          secondCalls++;
+          return secondBytes;
+        }
+
+        // Rebuilding a mounted image must not trigger another remote read.
+        for (var frame = 0; frame < 2; frame++) {
+          await _pumpImage(tester, image, resolver: firstResolver);
+          expect(_displayedImageBytes(tester), firstBytes);
+          expect(firstCalls, 1);
+          expect(acpInlineImageCacheEntryCount, 0);
+        }
+        await tester.pumpWidget(wrap(const SizedBox.shrink()));
+        currentBytes = secondBytes;
+        await _pumpImage(
+          tester,
+          image,
+          resolver: changeResolver ? secondResolver : firstResolver,
+        );
+
+        expect(firstCalls, changeResolver ? 1 : 2);
+        expect(secondCalls, changeResolver ? 1 : 0);
+        expect(_displayedImageBytes(tester), secondBytes);
+        expect(acpInlineImageCacheEntryCount, 0);
+      },
+    );
+  }
+
+  testWidgets(
+    'malformed inline data resolves its original URI without caching remote bytes',
+    (tester) async {
+      final bytes = base64Decode(_pngData);
+      final image = AcpImageContent(
+        dataUri: 'data:image/png;base64,not-base64!!!',
+        uri: 'file:///tmp/fallback.png',
+      );
+      var calls = 0;
+      Future<Uint8List?> resolve(AcpImageContent fallback) async {
+        calls++;
+        expect(fallback.uri, image.uri);
+        expect(fallback.sourceKind, AcpImageSourceKind.fileUri);
+        return bytes;
+      }
+
+      await _pumpImage(tester, image, resolver: resolve);
+      expect(_displayedImageBytes(tester), bytes);
+      expect(calls, 1);
+      expect(acpInlineImageCacheEntryCount, 0);
+    },
+  );
+
+  testWidgets(
+    'encoded image cache follows data even when the original URI is unchanged',
+    (tester) async {
+      final bytes = base64Decode(_pngData);
+      for (final payload in [
+        bytes,
+        Uint8List.fromList([...bytes, 0]),
+      ]) {
+        await _pumpImage(
+          tester,
+          AcpImageContent(
+            dataUri: 'data:image/png;base64,${base64Encode(payload)}',
+            uri: 'file:///tmp/result.png',
+          ),
+        );
+        expect(_displayedImageBytes(tester), payload);
+      }
+      expect(acpInlineDataImageDecodeCount, 2);
+      expect(acpInlineImageCacheEntryCount, 2);
+    },
+  );
+
+  for (final size in [6 * 1024 * 1024, kAcpAttachmentImageDisplayMaxBytes]) {
+    testWidgets('decodes a $size byte data image through the worker', (
+      tester,
+    ) async {
+      final png = base64Decode(_pngData);
+      // Trailing PNG bytes exercise the worker limit without a huge bitmap.
+      final bytes = Uint8List(size)..setRange(0, png.length, png);
+      final image = AcpImageContent(
+        dataUri: 'data:image/png;base64,${base64Encode(bytes)}',
+        uri: 'attachment://local/large.png',
+      );
+      var resolveCalls = 0;
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          wrap(
+            AcpInlineImage(
+              image: image,
+              resolver: (_) async {
+                resolveCalls++;
+                return null;
+              },
+            ),
+          ),
+        );
+        for (
+          var attempt = 0;
+          attempt < 200 && find.byType(Image).evaluate().isEmpty;
+          attempt++
+        ) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          await tester.pump();
+        }
+      });
+      expect(find.text('Image too large to display'), findsNothing);
+      expect(_displayedImageBytes(tester).length, size);
+      expect(acpInlineDataImageDecodeCount, 1);
+      expect(resolveCalls, 0);
+    });
+  }
+
+  testWidgets('rejects assistant Markdown image data above the display limit', (
     tester,
   ) async {
-    var resolveCount = 0;
-    final image = AcpImageContent(
-      uri: 'file:///repo/screenshots/layout.png',
-      label: 'layout',
+    final data = base64Encode(
+      Uint8List(kAcpAttachmentImageDisplayMaxBytes + 1),
     );
-    Future<Uint8List?> resolve(AcpImageContent _) async {
-      resolveCount++;
-      return Uint8List.fromList(const [
-        0x89,
-        0x50,
-        0x4E,
-        0x47,
-        0x0D,
-        0x0A,
-        0x1A,
-        0x0A,
-        0x00,
-        0x00,
-        0x00,
-        0x0D,
-        0x49,
-        0x48,
-        0x44,
-        0x52,
-        0x00,
-        0x00,
-        0x00,
-        0x01,
-        0x00,
-        0x00,
-        0x00,
-        0x01,
-        0x08,
-        0x06,
-        0x00,
-        0x00,
-        0x00,
-        0x1F,
-        0x15,
-        0xC4,
-        0x89,
-        0x00,
-        0x00,
-        0x00,
-        0x0A,
-        0x49,
-        0x44,
-        0x41,
-        0x54,
-        0x78,
-        0x9C,
-        0x63,
-        0x00,
-        0x01,
-        0x00,
-        0x00,
-        0x05,
-        0x00,
-        0x01,
-        0x0D,
-        0x0A,
-        0x2D,
-        0xB4,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x49,
-        0x45,
-        0x4E,
-        0x44,
-        0xAE,
-        0x42,
-        0x60,
-        0x82,
-      ]);
-    }
-
     await tester.pumpWidget(
-      wrap(AcpInlineImage(image: image, resolver: resolve)),
+      wrap(AcpMarkdown(data: '![image](data:image/png;base64,$data)')),
     );
     await tester.pumpAndSettle();
-    expect(resolveCount, 1);
-    expect(acpInlineImageCacheEntryCount, 1);
-
-    await tester.pumpWidget(wrap(const SizedBox.shrink()));
-    await tester.pump();
-    await tester.pumpWidget(
-      wrap(AcpInlineImage(image: image, resolver: resolve)),
-    );
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    await tester.pumpAndSettle();
-
-    expect(resolveCount, 1);
-    expect(acpInlineImageCacheEntryCount, 1);
+    expect(find.text('Image too large to display'), findsOneWidget);
+    expect(find.byType(Image), findsNothing);
   });
 
   testWidgets('renders a provider-wrapped inline data image', (tester) async {

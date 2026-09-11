@@ -141,7 +141,7 @@ file path. A later unowned write in the same working directory marks that match
 ambiguous (including `/new` and `/resume` rotation), so it launches fresh rather
 than risking the wrong conversation. Plain working-directory fallback is used
 only for one live window and one unused session updated during that foreground
-process. Across Copilot, Codex, OpenCode, Claude Code, Gemini, Antigravity, and
+process. Across Copilot, Codex, OpenCode, Claude Code, Antigravity, and
 Cursor Agent, argv, open-file, or live-lock identity wins; cwd/history fallback
 only accepts state updated during that foreground process. Claude Code's cwd
 fallback follows a session that moved: entering a git worktree relocates the
@@ -187,7 +187,11 @@ MonkeyMux observes 7-bit and C1 OSC title and working-directory reports for
 metadata only, without stripping or rewriting those bytes from the foreground
 stream. It also retains each window's OSC 9;4 progress state on the control
 backchannel so the MonkeySSH window bar can show active and background work
-independently. It also tracks the PTY foreground process group for snapshots,
+independently. Normal reconnects and live native ACP handoffs retain progress.
+Upgrade restores that relaunch CLI or shell processes start without the old
+process's progress, so an idle resumed agent does not inherit a stuck busy bar.
+Restored shell history also drops old OSC 9;4 markers; normal reconnect history
+is unchanged. It also tracks the PTY foreground process group for snapshots,
 so shell-launched tools
 such as Codex can be surfaced as agent windows even when the terminal title is
 only the current directory. Window replay resets stale local mouse/focus modes

@@ -134,19 +134,6 @@ class FakeSecureTransferService extends SecureTransferService {
   }) async => payload;
 
   @override
-  MigrationPreview previewMigrationPayload(TransferPayload payload) =>
-      MigrationPreview(
-        settingsCount: 0,
-        hostCount: (payload.data['hosts'] as List).length,
-        keyCount: (payload.data['keys'] as List).length,
-        groupCount: (payload.data['groups'] as List).length,
-        snippetCount: (payload.data['snippets'] as List).length,
-        snippetFolderCount: (payload.data['snippetFolders'] as List).length,
-        portForwardCount: (payload.data['portForwards'] as List).length,
-        knownHostCount: (payload.data['knownHosts'] as List).length,
-      );
-
-  @override
   Future<void> importFullMigrationPayload({
     required TransferPayload payload,
     required MigrationImportMode mode,

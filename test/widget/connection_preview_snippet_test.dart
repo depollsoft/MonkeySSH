@@ -393,67 +393,79 @@ void main() {
     );
   });
 
-  testWidgets('styled preview fills its container vertically without slack', (
-    tester,
-  ) async {
-    final terminal = Terminal(maxLines: 100)
-      ..resize(80, 24)
-      ..write(
-        [
-          'cd ~/Code/flutty',
-          'git status --short',
-          ' M lib/foo.dart',
-          ' M lib/bar.dart',
-          'echo done',
-          r'$',
-        ].join('\r\n'),
-      );
-    final preview = SshSession.buildTerminalPreviewSnapshot(terminal)!;
+  for (final textScale in [1.0, 1.5, 2.0]) {
+    testWidgets(
+      'styled preview fills its container vertically at scale $textScale',
+      (tester) async {
+        var fittingSearches = 0;
+        debugOnStyledPreviewFontFit = () => fittingSearches++;
+        addTearDown(() => debugOnStyledPreviewFontFit = null);
+        final terminal = Terminal(maxLines: 100)
+          ..resize(80, 24)
+          ..write(
+            [
+              'cd ~/Code/flutty',
+              'git status --short',
+              ' M lib/foo.dart',
+              ' M lib/bar.dart',
+              'echo done',
+              r'$',
+            ].join('\r\n'),
+          );
+        final preview = SshSession.buildTerminalPreviewSnapshot(terminal)!;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 360,
-            child: ConnectionPreviewStack(
-              entries: [
-                ConnectionPreviewStackEntry(
-                  title: 'Connection #1',
-                  body: preview.plainText,
-                  previewSnapshot: preview,
-                  terminalTheme: TerminalThemes.defaultDarkTheme,
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(textScale)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: SizedBox(
+                width: 360,
+                child: ConnectionPreviewStack(
+                  entries: [
+                    ConnectionPreviewStackEntry(
+                      title: 'Connection #1',
+                      body: preview.plainText,
+                      previewSnapshot: preview,
+                      terminalTheme: TerminalThemes.defaultDarkTheme,
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+
+        final styledPainter = find
+            .descendant(
+              of: find.byType(ConnectionPreviewStack),
+              matching: find.byType(CustomPaint),
+            )
+            .last;
+        final painterSize = tester.getSize(styledPainter);
+        final cardSize = tester.getSize(
+          find
+              .descendant(
+                of: find.byType(ConnectionPreviewStack),
+                matching: find.byType(ClipRect),
+              )
+              .last,
+        );
+        // The styled preview painter must take up the full vertical area it was
+        // given; no slack at the bottom of the rendered card.
+        expect(painterSize.height, greaterThan(0));
+        expect(painterSize.height, cardSize.height);
+        expect(fittingSearches, 1);
+      },
     );
 
-    final styledPainter = find
-        .descendant(
-          of: find.byType(ConnectionPreviewStack),
-          matching: find.byType(CustomPaint),
-        )
-        .last;
-    final painterSize = tester.getSize(styledPainter);
-    final cardSize = tester.getSize(
-      find
-          .descendant(
-            of: find.byType(ConnectionPreviewStack),
-            matching: find.byType(ClipRect),
-          )
-          .last,
-    );
-    // The styled preview painter must take up the full vertical area it was
-    // given; no slack at the bottom of the rendered card.
-    expect(painterSize.height, greaterThan(0));
-    expect(painterSize.height, cardSize.height);
-  });
-
-  testWidgets(
-    'styled preview content fills card width without horizontal slack',
-    (tester) async {
+    testWidgets('styled preview content fills card width at scale $textScale', (
+      tester,
+    ) async {
       // Wide content that should width-fill at a small-to-medium font.
       final lines = [
         '-rw-r--r--    1 root  wheel    1316 Nov 22  2025 syslog.conf',
@@ -472,6 +484,12 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(textScale)),
+            child: child!,
+          ),
           home: Scaffold(
             body: SizedBox(
               width: 360,
@@ -504,8 +522,8 @@ void main() {
       // contentColumns * cellWidth should match painterSize.width within one
       // cell.
       expect(painterSize.height, greaterThan(0));
-    },
-  );
+    });
+  }
 
   testWidgets('sizes long non-wrapping previews to terminal rows', (
     tester,

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
 import '../domain/services/local_notification_service.dart';
@@ -80,4 +81,42 @@ void openTerminalNotificationStack({
       ),
     ),
   );
+}
+
+/// Retains the latest tap until navigation is allowed after a frame.
+class NotificationNavigationScheduler<T extends Object> {
+  /// Creates a queue for one notification policy.
+  NotificationNavigationScheduler({
+    required this.canNavigate,
+    required this.open,
+  });
+
+  /// Whether the owner is mounted and authentication permits navigation.
+  final bool Function() canNavigate;
+
+  /// Opens this notification type's destination.
+  final void Function(T payload) open;
+  T? _pending;
+  bool _queued = false;
+
+  /// Replaces a pending tap and requests navigation.
+  void add(T payload) {
+    _pending = payload;
+    flush();
+  }
+
+  /// Retries pending navigation, for example after unlocking.
+  void flush() {
+    if (_queued || _pending == null || !canNavigate()) return;
+    _queued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _queued = false;
+      if (!canNavigate()) return;
+      final payload = _pending;
+      if (payload == null) return;
+      _pending = null;
+      open(payload);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
 }

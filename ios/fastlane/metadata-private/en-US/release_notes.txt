@@ -1,9 +1,11 @@
 What's new in this beta
 
-- Open supported coding agents in a native, touch-friendly conversation without leaving your MonkeyMux workspace.
-- Switch the same persistent agent workflow between native chat and the full terminal.
-- Follow streamed responses, tool progress, images, attachments, permissions, and session history in the native window.
-- Choose whether agent launches prefer native windows, terminal windows, or ask each time.
-- Large conversations now open, scroll, and resume more smoothly.
+- Agent Management (Pro): install, repair, and update coding agents and their ACP adapters on a host from your phone. See installed and latest versions, or update supported installations together.
+- A dot on the terminal menu now shows when agent updates are available. Turn it off under Settings > Agent update indicators.
+- Native agent windows reconnect more reliably after the phone sleeps or a MonkeyMux bridge goes stale.
+- Retrying a prompt after an error no longer shows the old error.
+- On Windows hosts, agents launch through PowerShell and stray color codes no longer spill into the terminal.
+- Gemini CLI support has been removed. Saved presets for it are ignored instead of failing.
+- Layout fixes for the home screen and for MonkeyMux sheets under the keyboard.
 
 Please report rough edges through the support link.

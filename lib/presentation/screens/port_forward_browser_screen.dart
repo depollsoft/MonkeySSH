@@ -1018,6 +1018,7 @@ class _PortForwardBrowserScreenState
       }
       _addressController?.text = _selectedTab.currentUri.toString();
     });
+    _scheduleSelectedTabLoad();
   }
 
   void _handleProgress(_PortForwardBrowserTabState tab, int progress) {

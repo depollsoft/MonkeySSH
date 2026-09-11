@@ -12,6 +12,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from store_media import _ocr_texts
+
 ROOT = Path(__file__).resolve().parents[1]
 BAD_VIDEO_OCR_PATTERNS = {
     'Android system error dialog': re.compile(
@@ -93,16 +95,21 @@ class VideoInfo:
     width: int
     height: int
     duration: float
+    has_audio: bool
 
 
 def main() -> None:
     args = _parse_args()
+    ffmpeg = shutil.which('ffmpeg')
+    ffprobe = shutil.which('ffprobe')
+    if ffmpeg is None or ffprobe is None:
+        raise RuntimeError('Video validation requires ffmpeg and ffprobe.')
     targets = _filter_targets(args.platform)
     paths = [ROOT / target.rel_path for target in targets]
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(f'Missing demo video: {path}')
-    infos = _probe_videos(paths)
+    infos = _probe_videos(ffprobe, paths)
     for index, target in enumerate(targets):
         path = paths[index]
         _validate_video(
@@ -112,12 +119,13 @@ def main() -> None:
             max_duration=args.max_duration,
             info=infos[path],
         )
-        if target.requires_audio:
-            _validate_audio_track(path, target.slot)
-        _validate_dynamics(path, check_freeze=target.animated_bg)
-        _validate_live_region_motion(path, crop=target.live_crop)
-        _validate_live_region_progression(path, crop=target.live_crop)
-    _validate_sampled_ocr_content(paths)
+        if target.requires_audio and not infos[path].has_audio:
+            raise ValueError(
+                f'{_display_path(path)} ({target.slot}) has no audio track; '
+                'App Store app previews require an audio track',
+            )
+        _validate_dynamics(ffmpeg, path, target=target, info=infos[path])
+    _validate_sampled_ocr_content(ffmpeg, infos)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -181,179 +189,66 @@ def _validate_video(
     )
 
 
-def _probe_videos(paths: list[Path]) -> dict[Path, VideoInfo]:
-    if ffprobe := shutil.which('ffprobe'):
-        return _probe_videos_with_ffprobe(ffprobe, paths)
-    if platform.system() == 'Darwin' and shutil.which('swift') is not None:
-        return _probe_videos_with_avfoundation(paths)
-    raise RuntimeError(
-        'Video validation requires ffprobe or macOS with Swift/AVFoundation.',
-    )
-
-
-def _validate_audio_track(path: Path, slot: str) -> None:
-    ffprobe = shutil.which('ffprobe')
-    if ffprobe is None:
-        print('Skipping audio-track validation; requires ffprobe.')
-        return
+def _validate_dynamics(
+    ffmpeg: str, path: Path, *, target: VideoTarget, info: VideoInfo,
+) -> None:
     result = subprocess.run(
         [
-            ffprobe,
-            '-v',
-            'error',
-            '-select_streams',
-            'a',
-            '-show_entries',
-            'stream=codec_name',
-            '-of',
-            'default=noprint_wrappers=1:nokey=1',
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    if not result.stdout.strip():
-        raise ValueError(
-            f'{_display_path(path)} ({slot}) has no audio track; App Store app '
-            'previews require an audio track — regenerate the preview',
-        )
-    print(f'Validated audio track for {_display_path(path)} ({result.stdout.strip()})')
-
-
-def _validate_dynamics(path: Path, *, check_freeze: bool) -> None:
-    ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg is None:
-        print('Skipping motion/black validation; requires ffmpeg.')
-        return
-    result = subprocess.run(
-        [
-            ffmpeg,
-            '-hide_banner',
-            '-nostats',
-            '-i',
-            str(path),
-            '-vf',
-            'blackdetect=d=0.4:pic_th=0.98,freezedetect=n=0.003:d=2.0',
-            '-an',
-            '-f',
-            'null',
-            '-',
+            ffmpeg, '-hide_banner', '-nostats', '-i', str(path),
+            '-filter_complex',
+            '[0:v:0]split[full][live];'
+            '[full]blackdetect@full=d=0.4:pic_th=0.98,'
+            'freezedetect@full=n=0.003:d=2.0[full_out];'
+            f'[live]{target.live_crop},freezedetect@live=n=0.003:d=1.0,'
+            "select='gt(scene,0.10)',"
+            'metadata@scenes=print:key=lavfi.scene_score,nullsink',
+            '-map', '[full_out]', '-an', '-f', 'null', '-',
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
         check=True,
     )
-    stderr = result.stderr
+    full = '\n'.join(line for line in result.stderr.splitlines() if '@full ' in line)
+    live = '\n'.join(line for line in result.stderr.splitlines() if 'freezedetect@live ' in line)
     black_total = sum(
         float(value)
-        for value in re.findall(r'black_duration:(\d+(?:\.\d+)?)', stderr)
+        for value in re.findall(r'black_duration:(\d+(?:\.\d+)?)', full)
     )
     if black_total > 1.0:
         raise ValueError(
             f'{_display_path(path)} contains {black_total:.1f}s of near-black '
             'frames; the screen capture likely failed — regenerate the demo video',
         )
-    # The branded outputs always animate their backdrop, so a whole-frame freeze
-    # means the promo animation is missing. Native app previews are intentionally
-    # just the app (no animated backdrop) and hold still during scene reads, so
-    # the freeze gate is skipped for them; their motion is covered by the
-    # live-region progression check instead.
-    if check_freeze and 'freeze_start' in stderr:
+    # Native previews hold still during scene reads; branded backdrops animate.
+    if target.animated_bg and 'freeze_start' in full:
         raise ValueError(
             f'{_display_path(path)} contains a frozen/static segment of 2s or '
             'more; the promotional animation is missing — regenerate the demo video',
         )
-    print(f'Validated motion for {_display_path(path)} (no black or frozen segments)')
-
-
-def _validate_live_region_motion(path: Path, *, crop: str) -> None:
-    """Ensure the embedded live app capture actually moves over time."""
-    ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg is None:
-        print('Skipping live-region motion validation; requires ffmpeg.')
-        return
-    max_frozen_fraction = 0.97
-    duration = _video_duration(path)
-    if duration <= 0:
-        return
-    result = subprocess.run(
-        [
-            ffmpeg,
-            '-hide_banner',
-            '-nostats',
-            '-i',
-            str(path),
-            '-vf',
-            f'{crop},freezedetect=n=0.003:d=1.0',
-            '-an',
-            '-f',
-            'null',
-            '-',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
     frozen = sum(
         float(value)
         for value in re.findall(
             r'freeze_duration:\s*(\d+(?:\.\d+)?)',
-            result.stderr,
+            live,
         )
     )
-    fraction = frozen / duration
-    if fraction > max_frozen_fraction:
+    starts = re.findall(r'freeze_start:\s*(\d+(?:\.\d+)?)', live)
+    ends = re.findall(r'freeze_end:\s*(\d+(?:\.\d+)?)', live)
+    if len(starts) > len(ends):
+        frozen += info.duration - float(starts[-1])
+    fraction = frozen / info.duration
+    if fraction > 0.97:
         raise ValueError(
             f'{_display_path(path)} live app region is frozen '
             f'{fraction * 100:.0f}% of the time; the device capture likely '
             'failed or stalled — regenerate the demo video',
         )
-    print(
-        f'Validated live app motion for {_display_path(path)} '
-        f'(live region frozen {fraction * 100:.0f}% of the time)',
+    scene_changes = sum(
+        'metadata@scenes ' in line and 'lavfi.scene_score=' in line
+        for line in result.stderr.splitlines()
     )
-
-
-def _validate_live_region_progression(path: Path, *, crop: str) -> None:
-    """Ensure the live app capture advances through several distinct screens.
-
-    The frozen-fraction check above is defeated by a blinking cursor or spinner
-    that registers as motion while the screen is structurally stalled on one
-    scene (exactly how an earlier broken iOS capture slipped through). This
-    counts substantial scene changes inside the cropped device region: a real
-    walkthrough visits five screens and trips many scene changes, while a
-    stalled or blank capture barely changes at all.
-    """
-    ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg is None:
-        print('Skipping live-region progression validation; requires ffmpeg.')
-        return
-    min_scene_changes = 4
-    result = subprocess.run(
-        [
-            ffmpeg,
-            '-hide_banner',
-            '-nostats',
-            '-i',
-            str(path),
-            '-vf',
-            f"{crop},select='gt(scene,0.10)',metadata=print",
-            '-an',
-            '-f',
-            'null',
-            '-',
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    scene_changes = len(re.findall(r'scene_score', result.stderr))
-    if scene_changes < min_scene_changes:
+    if scene_changes < 4:
         raise ValueError(
             f'{_display_path(path)} live app region only changes '
             f'{scene_changes} time(s); the device capture likely stalled on '
@@ -365,18 +260,16 @@ def _validate_live_region_progression(path: Path, *, crop: str) -> None:
     )
 
 
-def _validate_sampled_ocr_content(paths: list[Path]) -> None:
-    ffmpeg = shutil.which('ffmpeg')
-    if platform.system() != 'Darwin' or shutil.which('swift') is None or ffmpeg is None:
+def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> None:
+    if platform.system() != 'Darwin' or shutil.which('swift') is None:
         print('Skipping video OCR validation; requires macOS, Swift, and ffmpeg.')
         return
 
     with tempfile.TemporaryDirectory(prefix='monkeyssh-demo-video-ocr-') as tmpdir:
         frame_paths: list[Path] = []
         tmpdir_path = Path(tmpdir)
-        for video_path in paths:
-            duration = _video_duration(video_path)
-            for index, timestamp in enumerate(_sample_times(duration)):
+        for video_path, info in infos.items():
+            for index, timestamp in enumerate(_sample_times(info.duration)):
                 frame_path = tmpdir_path / f'{video_path.stem}-{index}.png'
                 subprocess.run(
                     [
@@ -408,29 +301,6 @@ def _validate_sampled_ocr_content(paths: list[Path]) -> None:
                     )
 
 
-def _video_duration(path: Path) -> float:
-    ffprobe = shutil.which('ffprobe')
-    if ffprobe is None:
-        raise RuntimeError('ffprobe is required to read demo video duration.')
-    result = subprocess.run(
-        [
-            ffprobe,
-            '-v',
-            'error',
-            '-show_entries',
-            'format=duration',
-            '-of',
-            'default=noprint_wrappers=1:nokey=1',
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    return float(result.stdout.strip())
-
-
 def _sample_times(duration: float) -> list[float]:
     if duration <= 4:
         return [max(duration / 2, 0)]
@@ -440,64 +310,7 @@ def _sample_times(duration: float) -> list[float]:
     ]
 
 
-def _ocr_texts(paths: list[Path]) -> dict[Path, str]:
-    swift_source = r'''
-import Foundation
-import Vision
-import AppKit
-
-let listPath = CommandLine.arguments[1]
-let contents = try String(contentsOfFile: listPath, encoding: .utf8)
-let urls = contents.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = false
-request.recognitionLanguages = ["en-US"]
-
-for url in urls {
-    guard let image = NSImage(contentsOf: url),
-          let tiff = image.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiff),
-          let cgImage = bitmap.cgImage else {
-        print("FILE\t\(url.path)\tERROR\tCould not load image")
-        continue
-    }
-    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-    try handler.perform([request])
-    let text = (request.results ?? [])
-        .compactMap { $0.topCandidates(1).first?.string }
-        .joined(separator: " ")
-        .replacingOccurrences(of: "\n", with: " ")
-    print("FILE\t\(url.path)")
-    print(text)
-    print("END_FILE")
-}
-'''
-    with tempfile.NamedTemporaryFile('w', suffix='.swift') as script:
-        with tempfile.NamedTemporaryFile('w') as file_list:
-            script.write(swift_source)
-            script.flush()
-            file_list.write('\n'.join(str(path) for path in paths))
-            file_list.flush()
-            result = subprocess.run(
-                ['swift', script.name, file_list.name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-
-    texts: dict[Path, str] = {}
-    for block in result.stdout.split('END_FILE'):
-        lines = [line for line in block.strip().splitlines() if line]
-        if not lines or not lines[0].startswith('FILE\t'):
-            continue
-        path = Path(lines[0].split('\t', 1)[1])
-        texts[path] = ' '.join(lines[1:])
-    return texts
-
-
-def _probe_videos_with_ffprobe(
+def _probe_videos(
     ffprobe: str,
     paths: list[Path],
 ) -> dict[Path, VideoInfo]:
@@ -508,10 +321,8 @@ def _probe_videos_with_ffprobe(
                 ffprobe,
                 '-v',
                 'error',
-                '-select_streams',
-                'v:0',
                 '-show_entries',
-                'stream=width,height,duration:format=duration',
+                'stream=codec_type,width,height,duration:format=duration',
                 '-of',
                 'json',
                 str(path),
@@ -522,10 +333,10 @@ def _probe_videos_with_ffprobe(
             check=True,
         )
         payload = json.loads(result.stdout)
-        streams = payload.get('streams')
-        if not streams:
+        streams = payload.get('streams', [])
+        stream = next((s for s in streams if s.get('codec_type') == 'video'), None)
+        if stream is None:
             raise ValueError(f'{_display_path(path)} does not contain a video stream')
-        stream = streams[0]
         duration = _float_or_none(stream.get('duration'))
         if duration is None:
             duration = _float_or_none(payload.get('format', {}).get('duration'))
@@ -535,67 +346,8 @@ def _probe_videos_with_ffprobe(
             width=int(stream['width']),
             height=int(stream['height']),
             duration=duration,
+            has_audio=any(s.get('codec_type') == 'audio' for s in streams),
         )
-    return infos
-
-
-def _probe_videos_with_avfoundation(paths: list[Path]) -> dict[Path, VideoInfo]:
-    swift_source = r'''
-import AVFoundation
-import Foundation
-
-let listPath = CommandLine.arguments[1]
-let contents = try String(contentsOfFile: listPath, encoding: .utf8)
-let paths = contents.split(separator: "\n").map { String($0) }
-
-for path in paths {
-    let url = URL(fileURLWithPath: path)
-    let asset = AVURLAsset(url: url)
-    guard let track = asset.tracks(withMediaType: .video).first else {
-        print("FILE\t\(path)\tERROR\tmissing video track")
-        continue
-    }
-    let transformedSize = track.naturalSize.applying(track.preferredTransform)
-    let width = Int(abs(transformedSize.width).rounded())
-    let height = Int(abs(transformedSize.height).rounded())
-    let duration = CMTimeGetSeconds(asset.duration)
-    print("FILE\t\(path)\t\(width)\t\(height)\t\(duration)")
-}
-'''
-    with tempfile.NamedTemporaryFile('w', suffix='.swift') as script:
-        with tempfile.NamedTemporaryFile('w') as file_list:
-            script.write(swift_source)
-            script.flush()
-            file_list.write('\n'.join(str(path) for path in paths))
-            file_list.flush()
-            result = subprocess.run(
-                ['swift', script.name, file_list.name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-
-    infos: dict[Path, VideoInfo] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split('\t')
-        if len(parts) < 3 or parts[0] != 'FILE':
-            continue
-        path = Path(parts[1])
-        if len(parts) >= 4 and parts[2] == 'ERROR':
-            raise ValueError(f'{_display_path(path)}: {parts[3]}')
-        if len(parts) != 5:
-            raise ValueError(f'Unexpected AVFoundation probe output: {line}')
-        infos[path] = VideoInfo(
-            width=int(parts[2]),
-            height=int(parts[3]),
-            duration=float(parts[4]),
-        )
-
-    missing_paths = [path for path in paths if path not in infos]
-    if missing_paths:
-        formatted_paths = ', '.join(_display_path(path) for path in missing_paths)
-        raise ValueError(f'Video probe did not return metadata for {formatted_paths}')
     return infos
 
 

@@ -161,7 +161,7 @@ class Buffer {
     for (var i = absoluteCursorY + 1; i < height; i++) {
       final line = lines[i];
       line.isWrapped = false;
-      _eraseRange(line, i, 0, viewWidth);
+      _eraseRange(line, 0, viewWidth);
     }
   }
 
@@ -173,7 +173,7 @@ class Buffer {
     for (var i = 0; i < _cursorY; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
-      _eraseRange(line, i + scrollBack, 0, viewWidth);
+      _eraseRange(line, 0, viewWidth);
     }
   }
 
@@ -182,7 +182,7 @@ class Buffer {
     for (var i = 0; i < viewHeight; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
-      _eraseRange(line, i + scrollBack, 0, viewWidth);
+      _eraseRange(line, 0, viewWidth);
     }
   }
 
@@ -190,34 +190,29 @@ class Buffer {
   /// cursor position.
   void eraseLineFromCursor() {
     currentLine.isWrapped = false;
-    _eraseRange(currentLine, absoluteCursorY, _cursorX, viewWidth);
+    _eraseRange(currentLine, cursorX, viewWidth);
   }
 
   /// Erases the line from the start of the line to the cursor, including the
   /// cursor.
   void eraseLineToCursor() {
     currentLine.isWrapped = false;
-    _eraseRange(currentLine, absoluteCursorY, 0, _cursorX);
+    _eraseRange(currentLine, 0, cursorX + 1);
   }
 
   /// Erases the line at the current cursor position.
   void eraseLine() {
     currentLine.isWrapped = false;
-    _eraseRange(currentLine, absoluteCursorY, 0, viewWidth);
+    _eraseRange(currentLine, 0, viewWidth);
   }
 
   /// Erases [count] cells starting at the cursor position.
   void eraseChars(int count) {
-    final start = _cursorX;
-    _eraseRange(currentLine, absoluteCursorY, start, start + count);
+    final start = cursorX;
+    _eraseRange(currentLine, start, start + count);
   }
 
-  void _eraseRange(
-    BufferLine line,
-    int _,
-    int start,
-    int end,
-  ) {
+  void _eraseRange(BufferLine line, int start, int end) {
     graphics.removePlaceholdersInLineRange(line, start, end);
     line.eraseRange(
       start,
@@ -367,6 +362,7 @@ class Buffer {
     _savedCursorStyle.foreground = terminal.cursor.foreground;
     _savedCursorStyle.background = terminal.cursor.background;
     _savedCursorStyle.attrs = terminal.cursor.attrs;
+    _savedCursorStyle.underlineColor = terminal.cursor.underlineColor;
     charset.save();
   }
 
@@ -377,6 +373,7 @@ class Buffer {
     terminal.cursor.foreground = _savedCursorStyle.foreground;
     terminal.cursor.background = _savedCursorStyle.background;
     terminal.cursor.attrs = _savedCursorStyle.attrs;
+    terminal.cursor.underlineColor = _savedCursorStyle.underlineColor;
     charset.restore();
   }
 
@@ -399,7 +396,7 @@ class Buffer {
   }
 
   void deleteChars(int count) {
-    final start = _cursorX.clamp(0, viewWidth);
+    final start = cursorX;
     count = min(count, viewWidth - start);
     currentLine.removeCells(start, count, terminal.cursor);
   }
@@ -427,7 +424,7 @@ class Buffer {
   }
 
   void insertBlankChars(int count) {
-    currentLine.insertCells(_cursorX, count, terminal.cursor);
+    currentLine.insertCells(cursorX, count, terminal.cursor);
   }
 
   void insertLines(int count) {
@@ -577,6 +574,8 @@ class Buffer {
     // Ensure cursor is within the screen.
     _cursorX = _cursorX.clamp(0, newWidth - 1);
     _cursorY = _cursorY.clamp(0, newHeight - 1);
+    _savedCursorX = _savedCursorX.clamp(0, newWidth - 1);
+    _savedCursorY = _savedCursorY.clamp(0, newHeight - 1);
 
     // 2. Adjust the width.
     if (newWidth != oldWidth) {

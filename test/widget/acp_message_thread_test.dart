@@ -447,6 +447,7 @@ void main() {
         ),
     ];
 
+    final tailLayout = Stopwatch()..start();
     await tester.pumpWidget(
       wrap(
         SizedBox(
@@ -459,7 +460,6 @@ void main() {
         ),
       ),
     );
-    final tailLayout = Stopwatch()..start();
     await tester.pump();
 
     expect(
@@ -1079,7 +1079,9 @@ void main() {
   });
 
   testWidgets('renders in narrow and wide constraints', (tester) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     for (final size in [const Size(280, 640), const Size(1100, 800)]) {
+      await tester.binding.setSurfaceSize(size);
       await tester.pumpWidget(
         wrap(
           size: size,
@@ -1108,6 +1110,7 @@ void main() {
         ),
       );
       await tester.pump();
+      expect(tester.getSize(find.byType(AcpMessageThread)).width, size.width);
       expect(tester.takeException(), isNull);
     }
   });

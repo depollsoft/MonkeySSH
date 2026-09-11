@@ -143,7 +143,8 @@ class KeyboardToolbarController extends ChangeNotifier {
         output = String.fromCharCode(ctrlCode);
       }
       shouldConsume = true;
-    } else if (_altState != null) {
+    }
+    if (_altState != null) {
       output = '\x1b$output';
       shouldConsume = true;
     }
@@ -377,19 +378,13 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
 
   Widget _buildModifierRow() => _KeyRow(children: _buildModifierButtons());
 
-  Widget _buildNavigationRow() => _KeyRow(
-    children: [
-      ..._buildArrowButtons(),
-      ..._buildSeriesNavigationButtons(),
-      _buildEnterButton(),
-    ],
-  );
+  Widget _buildNavigationRow() =>
+      _KeyRow(children: [..._buildNavigationButtons(), _buildEnterButton()]);
 
   Widget _buildLandscapeRow() => _KeyRow(
     children: [
       ..._buildModifierButtons(),
-      ..._buildArrowButtons(),
-      ..._buildSeriesNavigationButtons(),
+      ..._buildNavigationButtons(),
       _buildEnterButton(),
     ],
   );
@@ -459,99 +454,54 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     ),
   ];
 
-  List<Widget> _buildSeriesNavigationButtons() => [
-    _ToolbarButton(
-      icon: Icons.expand_less_rounded,
-      label: 'PgUp',
-      onTap: () => _sendNavigationKey(TerminalKey.pageUp, '\x1b[5~'),
-      onLongPressStart: () => _sendNavigationKey(TerminalKey.pageUp, '\x1b[5~'),
-      onLongPressRepeat: () => _sendNavigationKey(
+  List<Widget> _buildNavigationButtons() => [
+    for (final (key, icon, label, tooltip, sequence) in const [
+      (TerminalKey.arrowLeft, Icons.arrow_back_rounded, '', 'Left', '\x1b[D'),
+      (
+        TerminalKey.arrowRight,
+        Icons.arrow_forward_rounded,
+        '',
+        'Right',
+        '\x1b[C',
+      ),
+      (TerminalKey.arrowUp, Icons.arrow_upward_rounded, '', 'Up', '\x1b[A'),
+      (
+        TerminalKey.arrowDown,
+        Icons.arrow_downward_rounded,
+        '',
+        'Down',
+        '\x1b[B',
+      ),
+      (
         TerminalKey.pageUp,
+        Icons.expand_less_rounded,
+        'PgUp',
+        'Page Up',
         '\x1b[5~',
-        withHaptic: false,
-        consumeOneShot: false,
       ),
-      tooltip: 'Page Up',
-    ),
-    _ToolbarButton(
-      icon: Icons.expand_more_rounded,
-      label: 'PgDn',
-      onTap: () => _sendNavigationKey(TerminalKey.pageDown, '\x1b[6~'),
-      onLongPressStart: () =>
-          _sendNavigationKey(TerminalKey.pageDown, '\x1b[6~'),
-      onLongPressRepeat: () => _sendNavigationKey(
+      (
         TerminalKey.pageDown,
+        Icons.expand_more_rounded,
+        'PgDn',
+        'Page Down',
         '\x1b[6~',
-        withHaptic: false,
-        consumeOneShot: false,
       ),
-      tooltip: 'Page Down',
-    ),
-    _ToolbarButton(
-      icon: Icons.first_page_rounded,
-      label: 'Home',
-      onTap: () => _sendNavigationKey(TerminalKey.home, '\x1b[H'),
-      onLongPressStart: () => _sendNavigationKey(TerminalKey.home, '\x1b[H'),
-      onLongPressRepeat: () => _sendNavigationKey(
-        TerminalKey.home,
-        '\x1b[H',
-        withHaptic: false,
-        consumeOneShot: false,
+      (TerminalKey.home, Icons.first_page_rounded, 'Home', 'Home', '\x1b[H'),
+      (TerminalKey.end, Icons.last_page_rounded, 'End', 'End', '\x1b[F'),
+    ])
+      _ToolbarButton(
+        icon: icon,
+        label: label,
+        tooltip: tooltip,
+        onTap: () => _sendNavigationKey(key, sequence),
+        onLongPressStart: () => _sendNavigationKey(key, sequence),
+        onLongPressRepeat: () => _sendNavigationKey(
+          key,
+          sequence,
+          withHaptic: false,
+          consumeOneShot: false,
+        ),
       ),
-      tooltip: 'Home',
-    ),
-    _ToolbarButton(
-      icon: Icons.last_page_rounded,
-      label: 'End',
-      onTap: () => _sendNavigationKey(TerminalKey.end, '\x1b[F'),
-      onLongPressStart: () => _sendNavigationKey(TerminalKey.end, '\x1b[F'),
-      onLongPressRepeat: () => _sendNavigationKey(
-        TerminalKey.end,
-        '\x1b[F',
-        withHaptic: false,
-        consumeOneShot: false,
-      ),
-      tooltip: 'End',
-    ),
-  ];
-
-  List<Widget> _buildArrowButtons() => [
-    _ToolbarButton(
-      icon: Icons.arrow_back_rounded,
-      label: '',
-      onTap: () => _sendArrow(_Arrow.left),
-      onLongPressStart: () => _sendArrow(_Arrow.left),
-      onLongPressRepeat: () =>
-          _sendArrow(_Arrow.left, withHaptic: false, consumeOneShot: false),
-      tooltip: 'Left',
-    ),
-    _ToolbarButton(
-      icon: Icons.arrow_forward_rounded,
-      label: '',
-      onTap: () => _sendArrow(_Arrow.right),
-      onLongPressStart: () => _sendArrow(_Arrow.right),
-      onLongPressRepeat: () =>
-          _sendArrow(_Arrow.right, withHaptic: false, consumeOneShot: false),
-      tooltip: 'Right',
-    ),
-    _ToolbarButton(
-      icon: Icons.arrow_upward_rounded,
-      label: '',
-      onTap: () => _sendArrow(_Arrow.up),
-      onLongPressStart: () => _sendArrow(_Arrow.up),
-      onLongPressRepeat: () =>
-          _sendArrow(_Arrow.up, withHaptic: false, consumeOneShot: false),
-      tooltip: 'Up',
-    ),
-    _ToolbarButton(
-      icon: Icons.arrow_downward_rounded,
-      label: '',
-      onTap: () => _sendArrow(_Arrow.down),
-      onLongPressStart: () => _sendArrow(_Arrow.down),
-      onLongPressRepeat: () =>
-          _sendArrow(_Arrow.down, withHaptic: false, consumeOneShot: false),
-      tooltip: 'Down',
-    ),
   ];
 
   void _toggleCtrl() {
@@ -1002,7 +952,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       _refocusTerminal();
       return;
     }
-    if (_shouldUseKittyKeyboardEncoding(TerminalKeyEventType.press)) {
+    if (_shouldUseKittyKeyboardEncoding()) {
       widget.terminal.keyInput(TerminalKey.escape);
     } else {
       widget.terminal.textInput('\x1b');
@@ -1025,7 +975,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       _consumeOneShot();
       return;
     }
-    if (_shouldUseKittyKeyboardEncoding(TerminalKeyEventType.press)) {
+    if (_shouldUseKittyKeyboardEncoding()) {
       widget.terminal.keyInput(
         TerminalKey.tab,
         shift: _controller.isShiftActive,
@@ -1094,7 +1044,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     String legacySequence, {
     bool withHaptic = true,
     bool consumeOneShot = true,
-    TerminalKeyEventType type = TerminalKeyEventType.press,
   }) {
     if (withHaptic) {
       HapticFeedback.lightImpact();
@@ -1107,19 +1056,30 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       }
       return;
     }
-    if (_shouldUseKittyKeyboardEncoding(type)) {
+    if (_shouldUseKittyKeyboardEncoding()) {
       final handled = widget.terminal.keyInput(
         key,
         shift: _controller.isShiftActive,
         alt: _controller.isAltActive,
         ctrl: _controller.isCtrlActive,
-        type: type,
       );
       if (!handled) {
         return;
       }
     } else {
-      widget.terminal.textInput(legacySequence);
+      final modifier = _getModifierPrefix();
+      final isArrow = switch (key) {
+        TerminalKey.arrowUp ||
+        TerminalKey.arrowDown ||
+        TerminalKey.arrowLeft ||
+        TerminalKey.arrowRight => true,
+        _ => false,
+      };
+      widget.terminal.textInput(
+        isArrow && modifier.isNotEmpty
+            ? '\x1b[1;$modifier${legacySequence[2]}'
+            : legacySequence,
+      );
     }
     widget.onKeyPressed?.call();
     if (consumeOneShot) {
@@ -1127,83 +1087,12 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     }
   }
 
-  void _sendArrow(
-    _Arrow arrow, {
-    bool withHaptic = true,
-    bool consumeOneShot = true,
-    TerminalKeyEventType type = TerminalKeyEventType.press,
-  }) {
-    if (withHaptic) {
-      HapticFeedback.lightImpact();
-    }
-    final key = _terminalKeyForArrow(arrow);
-    if (widget.onSpecialKey case final sink?) {
-      sink(key);
-      widget.onKeyPressed?.call();
-      if (consumeOneShot) {
-        _consumeOneShot();
-      }
-      return;
-    }
-    if (_shouldUseKittyKeyboardEncoding(type)) {
-      final handled = widget.terminal.keyInput(
-        key,
-        shift: _controller.isShiftActive,
-        alt: _controller.isAltActive,
-        ctrl: _controller.isCtrlActive,
-        type: type,
-      );
-      if (!handled) {
-        return;
-      }
-      widget.onKeyPressed?.call();
-      if (consumeOneShot) {
-        _consumeOneShot();
-      }
-      return;
-    }
-
-    final modifier = _getModifierPrefix();
-    final suffix = switch (arrow) {
-      _Arrow.up => 'A',
-      _Arrow.down => 'B',
-      _Arrow.right => 'C',
-      _Arrow.left => 'D',
-    };
-
-    if (modifier.isNotEmpty) {
-      widget.terminal.textInput('\x1b[1;$modifier$suffix');
-    } else {
-      widget.terminal.textInput('\x1b[$suffix');
-    }
-
-    widget.onKeyPressed?.call();
-    if (consumeOneShot) {
-      _consumeOneShot();
-    }
-  }
-
-  bool _shouldUseKittyKeyboardEncoding(TerminalKeyEventType type) {
-    if (!widget.terminal.kittyKeyboardMode) {
-      return false;
-    }
-    final flags = widget.terminal.kittyKeyboardFlags;
-    const canonicalKeyFlags =
-        KittyKeyboardFlags.disambiguateEscapeCodes |
-        KittyKeyboardFlags.reportAllKeysAsEscapeCodes;
-    if ((flags & canonicalKeyFlags) != 0) {
-      return true;
-    }
-    return type != TerminalKeyEventType.press &&
-        (flags & KittyKeyboardFlags.reportEventTypes) != 0;
-  }
-
-  TerminalKey _terminalKeyForArrow(_Arrow arrow) => switch (arrow) {
-    _Arrow.up => TerminalKey.arrowUp,
-    _Arrow.down => TerminalKey.arrowDown,
-    _Arrow.right => TerminalKey.arrowRight,
-    _Arrow.left => TerminalKey.arrowLeft,
-  };
+  bool _shouldUseKittyKeyboardEncoding() =>
+      widget.terminal.kittyKeyboardMode &&
+      (widget.terminal.kittyKeyboardFlags &
+              (KittyKeyboardFlags.disambiguateEscapeCodes |
+                  KittyKeyboardFlags.reportAllKeysAsEscapeCodes)) !=
+          0;
 
   String _getModifierPrefix() {
     var mod = 1;
@@ -1215,8 +1104,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
 }
 
 enum _Modifier { ctrl, alt, shift }
-
-enum _Arrow { up, down, left, right }
 
 enum _PasteToolbarAction { snippets, media, files }
 

@@ -1,7 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/monetization.dart';
+import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/services/home_screen_shortcut_service.dart';
 import '../../domain/services/monetization_service.dart';
@@ -90,22 +94,80 @@ final class HostRowData {
   );
 }
 
-/// Per-host auto-disposing provider for all reactive data needed to render a
-/// host row on the home screen.
-///
-/// This provider watches [activeSessionsProvider] (the full connection-state
-/// map) but only notifies consumers when the projected [HostRowData] for THIS
-/// host actually changes. As a result, changing connection state for host B
-/// does not rebuild the row widget for host A.
-///
-/// Hosts with no active connections return an empty [HostRowData] that is
-/// stable across the 150 ms live-preview refresh ticks, so their rows are
-/// never rebuilt by preview updates that don't belong to them.
+/// Active connections in display order, independent of preview refreshes.
+final connectionIdsProvider = NotifierProvider.autoDispose(
+  _ConnectionIdsNotifier.new,
+);
+
+class _ConnectionIdsNotifier extends Notifier<List<int>> {
+  @override
+  List<int> build() {
+    ref.watch(activeSessionsProvider);
+    return List.unmodifiable(
+      ref
+          .read(activeSessionsProvider.notifier)
+          .getActiveConnections()
+          .map((connection) => connection.connectionId),
+    );
+  }
+
+  @override
+  bool updateShouldNotify(List<int> previous, List<int> next) =>
+      !listEquals(previous, next);
+}
+
+/// Theme context for a single connection preview.
+typedef ConnectionPreviewProviderArgs = ({
+  int connectionId,
+  String? lightThemeId,
+  String? darkThemeId,
+  bool isDark,
+});
+
+/// Value-equal preview shared by host and connection rows.
+final connectionPreviewProvider = Provider.autoDispose
+    .family<ConnectionPreviewStackEntry, ConnectionPreviewProviderArgs>((
+      ref,
+      args,
+    ) {
+      final states = ref.watch(activeSessionsProvider);
+      final connection = ref
+          .read(activeSessionsProvider.notifier)
+          .getActiveConnection(args.connectionId);
+      final monetizationState =
+          ref.watch(monetizationStateProvider).asData?.value ??
+          ref.read(monetizationServiceProvider).currentState;
+      final hasHostThemeAccess = monetizationState.allowsFeature(
+        MonetizationFeature.hostSpecificThemes,
+      );
+      return buildConnectionPreviewStackEntry(
+        connectionId: args.connectionId,
+        state: states[args.connectionId] ?? SshConnectionState.connected,
+        brightness: args.isDark ? Brightness.dark : Brightness.light,
+        themeSettings: ref.watch(terminalThemeSettingsProvider),
+        availableThemes:
+            ref.watch(allTerminalThemesProvider).asData?.value ??
+            TerminalThemes.all,
+        preview: connection?.preview,
+        previewSnapshot: connection?.previewSnapshot,
+        nativeAcpPreviewSnapshot: connection?.nativeAcpPreviewSnapshot,
+        activeTerminalTheme: connection?.terminalTheme,
+        sessionTitle: connection?.sessionTitle,
+        windowTitle: connection?.windowTitle,
+        iconName: connection?.iconName,
+        workingDirectory: connection?.workingDirectory,
+        shellStatus: connection?.shellStatus,
+        lastExitCode: connection?.lastExitCode,
+        hostLightThemeId: hasHostThemeAccess ? args.lightThemeId : null,
+        hostDarkThemeId: hasHostThemeAccess ? args.darkThemeId : null,
+        connectionLightThemeId: connection?.terminalThemeLightId,
+        connectionDarkThemeId: connection?.terminalThemeDarkId,
+      );
+    });
+
+/// Value-equal reactive data for one host row.
 final hostRowDataProvider = Provider.autoDispose
     .family<HostRowData, HostRowProviderArgs>((ref, args) {
-      // Watch the full connection-state map. The provider re-evaluates on each
-      // map change, but Riverpod only notifies downstream widgets when the
-      // returned HostRowData differs by value (== check).
       final allStates = ref.watch(activeSessionsProvider);
       final notifier = ref.read(activeSessionsProvider.notifier);
 
@@ -131,12 +193,6 @@ final hostRowDataProvider = Provider.autoDispose
           ? attempt!.latestMessage
           : null;
 
-      // Terminal theme data for preview card rendering.
-      final themeSettings = ref.watch(terminalThemeSettingsProvider);
-      final themes =
-          ref.watch(allTerminalThemesProvider).asData?.value ??
-          TerminalThemes.all;
-
       // Monetization: whether per-host theme overrides are unlocked.
       final monetizationState =
           ref.watch(monetizationStateProvider).asData?.value ??
@@ -152,37 +208,17 @@ final hostRowDataProvider = Provider.autoDispose
       final isPinnedToHomeScreen =
           supportsHomeScreenShortcutActions && pinnedIds.contains(args.hostId);
 
-      // Build per-connection preview entries. Entries are value-equal
-      // (ConnectionPreviewStackEntry implements ==), so identical previews
-      // don't trigger a rebuild even when allStates emits a new map reference.
-      final brightness = args.isDark ? Brightness.dark : Brightness.light;
       final previewEntries = connectionIds
-          .map((connectionId) {
-            final connection = notifier.getActiveConnection(connectionId);
-            final state =
-                allStates[connectionId] ?? SshConnectionState.connected;
-            return buildConnectionPreviewStackEntry(
-              connectionId: connectionId,
-              state: state,
-              brightness: brightness,
-              themeSettings: themeSettings,
-              availableThemes: themes,
-              preview: connection?.preview,
-              previewSnapshot: connection?.previewSnapshot,
-              nativeAcpPreviewSnapshot: connection?.nativeAcpPreviewSnapshot,
-              activeTerminalTheme: connection?.terminalTheme,
-              sessionTitle: connection?.sessionTitle,
-              windowTitle: connection?.windowTitle,
-              iconName: connection?.iconName,
-              workingDirectory: connection?.workingDirectory,
-              shellStatus: connection?.shellStatus,
-              lastExitCode: connection?.lastExitCode,
-              hostLightThemeId: hasHostThemeAccess ? args.lightThemeId : null,
-              hostDarkThemeId: hasHostThemeAccess ? args.darkThemeId : null,
-              connectionLightThemeId: connection?.terminalThemeLightId,
-              connectionDarkThemeId: connection?.terminalThemeDarkId,
-            );
-          })
+          .map(
+            (connectionId) => ref.watch(
+              connectionPreviewProvider((
+                connectionId: connectionId,
+                lightThemeId: args.lightThemeId,
+                darkThemeId: args.darkThemeId,
+                isDark: args.isDark,
+              )),
+            ),
+          )
           .toList(growable: false);
 
       return HostRowData(
@@ -195,3 +231,59 @@ final hostRowDataProvider = Provider.autoDispose
         hasHostThemeAccess: hasHostThemeAccess,
       );
     });
+
+/// Saved launch presets, decoded once for all visible host badges.
+final agentLaunchPresetMapProvider =
+    StreamProvider.autoDispose<Map<String, AgentLaunchPreset>>(
+      (ref) => ref
+          .watch(settingsServiceProvider)
+          .watchString(SettingKeys.agentLaunchPresets)
+          .distinct()
+          .map(_decodeAgentLaunchPresets),
+    );
+
+Map<String, AgentLaunchPreset> _decodeAgentLaunchPresets(String? value) {
+  if (value == null) return const {};
+  try {
+    final decoded = jsonDecode(value);
+    if (decoded is! Map<String, dynamic>) return const {};
+    final presets = <String, AgentLaunchPreset>{};
+    for (final entry in decoded.entries) {
+      final value = entry.value;
+      if (value is! Map<String, dynamic>) continue;
+      final preset = AgentLaunchPreset.tryFromJson(value);
+      if (preset != null) presets[entry.key] = preset;
+    }
+    return presets;
+  } on FormatException {
+    return const {};
+  }
+}
+
+/// Value-equal preset fields that affect a host's mux badge.
+typedef HostAgentBadgePreferences = ({
+  String? toolName,
+  RemoteMuxBackend? muxBackend,
+  String? sessionName,
+});
+
+/// Selects only the preset fields used by one host's mux badge.
+final hostAgentBadgePreferencesProvider = Provider.autoDispose
+    .family<AsyncValue<HostAgentBadgePreferences>, int>(
+      (ref, hostId) => ref.watch(
+        agentLaunchPresetMapProvider.select(
+          (presets) => presets.whenData((presets) {
+            final preset = presets[hostId.toString()];
+            final sessionName = preset?.tmuxSessionName?.trim();
+            final hasSessionName = sessionName?.isNotEmpty ?? false;
+            return (
+              toolName: preset?.tool.discoveredSessionToolName,
+              muxBackend: hasSessionName
+                  ? preset?.effectiveRemoteMuxBackend
+                  : null,
+              sessionName: hasSessionName ? sessionName : null,
+            );
+          }),
+        ),
+      ),
+    );

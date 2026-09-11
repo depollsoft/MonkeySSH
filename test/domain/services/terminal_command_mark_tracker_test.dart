@@ -20,6 +20,65 @@ void main() {
     expect(tracker.previousMarkRow(1), 4, reason: 'navigation wraps');
   });
 
+  test('keeps command navigation and deduplication in the active buffer', () {
+    final terminal = Terminal()..resize(20, 4);
+    final tracker = TerminalCommandMarkTracker()..attach(terminal);
+    addTearDown(tracker.reset);
+
+    terminal.write('prompt\r\n');
+    tracker.handlePrivateOsc('133', const ['C']);
+    terminal.useAltBuffer();
+
+    expect(tracker.markCount, 0);
+    expect(tracker.previousMarkRow(4), isNull);
+    terminal.write('alternate\r\n');
+    expect(tracker.handlePrivateOsc('1337', const ['SetMark']), isTrue);
+    terminal.write('next\r\n');
+    tracker.handlePrivateOsc('633', const ['C']);
+    expect(tracker.debugMarkRows, [1, 2]);
+    expect(tracker.previousMarkRow(1), 2);
+
+    terminal.useMainBuffer();
+    expect(tracker.markCount, 1);
+    expect(tracker.debugMarkRows, [1]);
+    expect(tracker.previousMarkRow(4), 1);
+    expect(tracker.handlePrivateOsc('133', const ['C']), isFalse);
+  });
+
+  test('prunes alternate-buffer anchors without losing main marks', () {
+    final terminal = Terminal()..resize(20, 4);
+    final tracker = TerminalCommandMarkTracker()..attach(terminal);
+    addTearDown(tracker.reset);
+
+    tracker.handlePrivateOsc('133', const ['C']);
+    terminal
+      ..useAltBuffer()
+      ..write('\r\n');
+    tracker.handlePrivateOsc('1337', const ['SetMark']);
+    terminal.clearAltBuffer();
+    expect(tracker.markCount, 0);
+    terminal.useMainBuffer();
+    expect(tracker.debugMarkRows, [0]);
+  });
+
+  test('enforces one retention cap across both buffers', () {
+    final terminal = Terminal()..resize(20, 4);
+    final tracker = TerminalCommandMarkTracker(maxRetainedMarks: 2)
+      ..attach(terminal);
+    addTearDown(tracker.reset);
+
+    tracker.handlePrivateOsc('133', const ['C']);
+    terminal.useAltBuffer();
+    tracker.handlePrivateOsc('133', const ['C']);
+    terminal
+      ..useMainBuffer()
+      ..write('\r\n');
+    tracker.handlePrivateOsc('133', const ['C']);
+    expect(tracker.debugMarkRows, [1]);
+    terminal.useAltBuffer();
+    expect(tracker.debugMarkRows, [0]);
+  });
+
   test('deduplicates rows and evicts oldest marks over the cap', () {
     final terminal = Terminal()..resize(20, 2);
     final tracker = TerminalCommandMarkTracker(maxRetainedMarks: 2)

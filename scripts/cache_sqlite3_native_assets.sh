@@ -117,7 +117,7 @@ raise SystemExit(0 if actual_hash == expected_hash else 1)
 PY
 }
 
-prefetch() {
+prefetch() (
   local source_filename="$1"
   local dest_filename="$2"
   local sha256
@@ -141,10 +141,11 @@ prefetch() {
       echo "Reusing cached ${source_filename} as ${dest_filename}"
       return
     fi
-    rm -f "$dest_path"
   fi
 
-  tmp_path="${dest_path}.tmp"
+  # Each invocation owns its download; only verified bytes replace the cache.
+  tmp_path="$(mktemp "${dest_path}.tmp.XXXXXX")"
+  trap 'rm -f "$tmp_path"' EXIT
   for attempt in 1 2 3 4 5; do
     if curl --fail --location \
       --retry 5 \
@@ -165,45 +166,45 @@ prefetch() {
 
   echo "Failed to download ${source_filename}" >&2
   exit 1
-}
+)
 
 for target in "$@"; do
   case "$target" in
-    linux-x64)
-      prefetch libsqlite3.x64.linux.so libsqlite3.so
-      ;;
-    ios-arm64)
-      prefetch libsqlite3.arm64.ios.dylib libsqlite3.dylib
-      ;;
-    macos-x64)
-      prefetch libsqlite3.x64.macos.dylib libsqlite3.dylib
-      ;;
-    macos-arm64)
-      prefetch libsqlite3.arm64.macos.dylib libsqlite3.dylib
-      ;;
-    windows-x64)
-      prefetch sqlite3.x64.windows.dll sqlite3.dll
-      ;;
-    android-arm64)
-      prefetch libsqlite3.arm64.android.so libsqlite3.so
-      ;;
-    android-x64)
-      prefetch libsqlite3.x64.android.so libsqlite3.so
-      ;;
-    android-arm)
-      prefetch libsqlite3.arm.android.so libsqlite3.so
-      ;;
-    android-ia32)
-      prefetch libsqlite3.ia32.android.so libsqlite3.so
-      ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown target: ${target}" >&2
-      usage >&2
-      exit 2
-      ;;
+  linux-x64)
+    prefetch libsqlite3.x64.linux.so libsqlite3.so
+    ;;
+  ios-arm64)
+    prefetch libsqlite3.arm64.ios.dylib libsqlite3.dylib
+    ;;
+  macos-x64)
+    prefetch libsqlite3.x64.macos.dylib libsqlite3.dylib
+    ;;
+  macos-arm64)
+    prefetch libsqlite3.arm64.macos.dylib libsqlite3.dylib
+    ;;
+  windows-x64)
+    prefetch sqlite3.x64.windows.dll sqlite3.dll
+    ;;
+  android-arm64)
+    prefetch libsqlite3.arm64.android.so libsqlite3.so
+    ;;
+  android-x64)
+    prefetch libsqlite3.x64.android.so libsqlite3.so
+    ;;
+  android-arm)
+    prefetch libsqlite3.arm.android.so libsqlite3.so
+    ;;
+  android-ia32)
+    prefetch libsqlite3.ia32.android.so libsqlite3.so
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "Unknown target: ${target}" >&2
+    usage >&2
+    exit 2
+    ;;
   esac
 done

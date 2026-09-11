@@ -36,13 +36,11 @@ class ItermColorSchemeService {
   final _pendingThemes = <String, Future<TerminalThemeData>>{};
 
   /// Lists all live `.itermcolors` schemes from the upstream repository.
-  Future<List<ItermColorSchemeMetadata>> listSchemes({
-    bool refresh = false,
-  }) async {
-    if (!refresh && _cachedSchemes != null) {
+  Future<List<ItermColorSchemeMetadata>> listSchemes() async {
+    if (_cachedSchemes != null) {
       return _cachedSchemes!;
     }
-    if (!refresh && _pendingSchemes != null) {
+    if (_pendingSchemes != null) {
       return _pendingSchemes!;
     }
 

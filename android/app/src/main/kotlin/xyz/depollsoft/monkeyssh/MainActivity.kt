@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.util.Log
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
@@ -15,11 +16,14 @@ import androidx.core.view.WindowInsetsCompat
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMethodCodec
 import java.io.ByteArrayOutputStream
 import java.util.Locale
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterFragmentActivity() {
     companion object {
+        private val transferExecutor = Executors.newSingleThreadExecutor()
         private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
         private const val MAX_CLIPBOARD_CONTENT_URI_BYTES = 512 * 1024
         private const val MONKEYSSH_TRANSFER_MIME_TYPE = "application/x-monkeyssh-transfer"
@@ -39,6 +43,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var keyboardVisibilityMethodChannel: MethodChannel? = null
     private var terminalImeKeyInterceptionEnabled = false
     private var pendingTransferPayload: String? = null
+    private var transferGeneration = 0
     private var hasRequestedNotificationPermission = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,6 +80,9 @@ class MainActivity : FlutterFragmentActivity() {
             MethodChannel(
                 flutterEngine.dartExecutor.binaryMessenger,
                 clipboardChannel,
+                StandardMethodCodec.INSTANCE,
+                // Content providers can block on disk, another process, or the network.
+                flutterEngine.dartExecutor.binaryMessenger.makeBackgroundTaskQueue(),
             )
         clipboardMethodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -228,10 +236,27 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        SshConnectionService.setActivityVisible(true)
+    }
+
     override fun onResume() {
         super.onResume()
+        SshConnectionService.setForegroundState(applicationContext, true)
         // The "tap to return" prompt has done its job once the app is visible.
         DeviceDebugChannelHandler.hideReturnPrompt(applicationContext)
+    }
+
+    override fun onPause() {
+        // Request foreground service while Android still considers us visible.
+        SshConnectionService.setForegroundState(applicationContext, false)
+        super.onPause()
+    }
+
+    override fun onStop() {
+        SshConnectionService.setActivityVisible(false)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -241,6 +266,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        transferGeneration++
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView, null)
         SshServiceChannelHandler.detachActivity(this)
         clipboardMethodChannel?.setMethodCallHandler(null)
@@ -310,27 +336,55 @@ class MainActivity : FlutterFragmentActivity() {
 
         val transferIntent = intent ?: return
         val sourceUri = transferIntent.data ?: return
-        try {
-            pendingTransferPayload =
-                contentResolver.openInputStream(sourceUri)?.use { stream ->
-                    val buffer = ByteArray(8192)
-                    val output = ByteArrayOutputStream()
-                    var bytesRead: Int
-                    var totalBytes = 0
-                    while (stream.read(buffer).also { bytesRead = it } != -1) {
-                        totalBytes += bytesRead
-                        if (totalBytes > maxTransferPayloadBytes) {
-                            return@use null
-                        }
-                        output.write(buffer, 0, bytesRead)
-                    }
-                    output.toString(Charsets.UTF_8.name())
+        val generation = ++transferGeneration
+        pendingTransferPayload = null
+        transferExecutor.execute {
+            val payload = try {
+                if (hasTransferExtension(sourceUri)) {
+                    readBoundedContent(
+                        sourceUri,
+                        maxTransferPayloadBytes,
+                        "Transfer payload exceeds ${maxTransferPayloadBytes / 1024} KB limit",
+                    )?.toString(Charsets.UTF_8)
+                } else {
+                    null
                 }
-            notifyIncomingTransferPayload()
-        } catch (_: Exception) {
-            pendingTransferPayload = null
+            } catch (error: Exception) {
+                Log.w("MainActivity", "Transfer read failed: ${error.javaClass.simpleName}")
+                null
+            }
+            runOnUiThread {
+                if (generation == transferGeneration && !isDestroyed) {
+                    pendingTransferPayload = payload
+                    notifyIncomingTransferPayload()
+                }
+            }
         }
     }
+
+    /**
+     * Reads a content URI fully, or null when it cannot be opened. Throws
+     * [IllegalStateException] with [limitMessage] once [maxBytes] is exceeded.
+     */
+    private fun readBoundedContent(
+        uri: Uri,
+        maxBytes: Int,
+        limitMessage: String,
+    ): ByteArray? =
+        contentResolver.openInputStream(uri)?.use { stream ->
+            val buffer = ByteArray(8192)
+            val output = ByteArrayOutputStream()
+            var bytesRead: Int
+            var totalBytes = 0
+            while (stream.read(buffer).also { bytesRead = it } != -1) {
+                totalBytes += bytesRead
+                if (totalBytes > maxBytes) {
+                    throw IllegalStateException(limitMessage)
+                }
+                output.write(buffer, 0, bytesRead)
+            }
+            output.toByteArray()
+        }
 
     private var keyboardVisible = false
 
@@ -367,90 +421,59 @@ class MainActivity : FlutterFragmentActivity() {
         if (mimeType != MONKEYSSH_TRANSFER_MIME_TYPE) {
             return false
         }
+        // Routing runs during activity startup; provider metadata is read on the worker.
+        return true
+    }
+
+    private fun hasTransferExtension(sourceUri: Uri): Boolean {
         val lastPathSegment = sourceUri.lastPathSegment?.lowercase(Locale.ROOT)
         if (lastPathSegment?.endsWith(MONKEYSSH_TRANSFER_EXTENSION) == true) {
             return true
         }
         val displayName =
-            runCatching { resolveContentDisplayName(sourceUri) }
+            runCatching { resolveContentMetadata(sourceUri)?.displayName }
                 .getOrNull()
                 ?.lowercase(Locale.ROOT)
         return displayName == null || displayName.endsWith(MONKEYSSH_TRANSFER_EXTENSION)
     }
 
     private fun readClipboardContentUri(uri: Uri): Map<String, Any> {
-        val displayName = resolveDisplayName(uri) ?: "clipboard-file"
-        val contentLength = resolveContentLength(uri)
+        val metadata = resolveContentMetadata(uri)
+        val displayName =
+            metadata?.displayName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "clipboard-file"
+        val limitMessage =
+            "Clipboard content exceeds ${MAX_CLIPBOARD_CONTENT_URI_BYTES / 1024} KB limit"
+        val contentLength = metadata?.size
         if (contentLength != null && contentLength > MAX_CLIPBOARD_CONTENT_URI_BYTES) {
-            throw IllegalStateException(
-                "Clipboard content exceeds ${MAX_CLIPBOARD_CONTENT_URI_BYTES / 1024} KB limit",
-            )
+            throw IllegalStateException(limitMessage)
         }
         val bytes =
-            contentResolver.openInputStream(uri)?.use { stream ->
-                val buffer = ByteArray(8192)
-                val output = ByteArrayOutputStream()
-                var bytesRead: Int
-                var totalBytes = 0
-                while (stream.read(buffer).also { bytesRead = it } != -1) {
-                    totalBytes += bytesRead
-                    if (totalBytes > MAX_CLIPBOARD_CONTENT_URI_BYTES) {
-                        throw IllegalStateException(
-                            "Clipboard content exceeds ${MAX_CLIPBOARD_CONTENT_URI_BYTES / 1024} KB limit",
-                        )
-                    }
-                    output.write(buffer, 0, bytesRead)
-                }
-                output.toByteArray()
-            } ?: throw IllegalStateException("Could not open clipboard URI")
+            readBoundedContent(uri, MAX_CLIPBOARD_CONTENT_URI_BYTES, limitMessage)
+                ?: throw IllegalStateException("Could not open clipboard URI")
         return mapOf(
             "name" to displayName,
             "bytes" to bytes,
         )
     }
 
-    private fun resolveContentLength(uri: Uri): Long? {
-        if (uri.scheme == "content") {
-            contentResolver
-                .query(
-                    uri,
-                    arrayOf(OpenableColumns.SIZE),
-                    null,
-                    null,
-                    null,
-                )?.use { cursor ->
-                    val columnIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (columnIndex >= 0 && cursor.moveToFirst() && !cursor.isNull(columnIndex)) {
-                        return cursor.getLong(columnIndex)
-                    }
-                }
-        }
-        return null
-    }
+    private data class ContentMetadata(val displayName: String?, val size: Long?)
 
-    private fun resolveDisplayName(uri: Uri): String? {
-        val displayName = resolveContentDisplayName(uri)
-        if (displayName != null) {
-            return displayName
+    private fun resolveContentMetadata(uri: Uri): ContentMetadata? {
+        if (uri.scheme != "content") {
+            return null
         }
-        return uri.lastPathSegment?.substringAfterLast('/')
-    }
-
-    private fun resolveContentDisplayName(uri: Uri): String? {
-        if (uri.scheme == "content") {
-            contentResolver
-                .query(
-                    uri,
-                    arrayOf(OpenableColumns.DISPLAY_NAME),
-                    null,
-                    null,
-                    null,
-                )?.use { cursor ->
-                    val columnIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (columnIndex >= 0 && cursor.moveToFirst()) {
-                        return cursor.getString(columnIndex)
-                    }
-                }
+        val columns = arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
+        contentResolver.query(uri, columns, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                return ContentMetadata(
+                    displayName = if (nameIndex >= 0) cursor.getString(nameIndex) else null,
+                    size =
+                        if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) cursor.getLong(sizeIndex)
+                        else null,
+                )
+            }
         }
         return null
     }

@@ -6,48 +6,34 @@ import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 
 void main() {
   group('buildAgentToolCommand', () {
-    test('adds yolo flags for supported tools', () {
-      expect(
-        buildAgentToolCommand(
-          AgentLaunchTool.claudeCode,
-          startInYoloMode: true,
-        ),
+    for (final (tool, yolo, expected) in const [
+      (
+        AgentLaunchTool.claudeCode,
+        true,
         'claude --dangerously-skip-permissions',
-      );
-      expect(
-        buildAgentToolCommand(
-          AgentLaunchTool.copilotCli,
-          startInYoloMode: true,
-        ),
-        'copilot --yolo',
-      );
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.codex, startInYoloMode: true),
-        'codex --yolo',
-      );
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.openCode, startInYoloMode: true),
+      ),
+      (AgentLaunchTool.copilotCli, true, 'copilot --yolo'),
+      (AgentLaunchTool.codex, true, 'codex --yolo'),
+      (
+        AgentLaunchTool.openCode,
+        true,
         r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode',
-      );
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.geminiCli, startInYoloMode: true),
-        'gemini --yolo',
-      );
-      expect(
-        buildAgentToolCommand(
-          AgentLaunchTool.antigravity,
-          startInYoloMode: true,
-        ),
-        'agy --dangerously-skip-permissions',
-      );
-      expect(
-        buildAgentToolCommand(
-          AgentLaunchTool.cursorAgent,
-          startInYoloMode: true,
-        ),
-        'cursor-agent --force',
-      );
-    });
+      ),
+      (AgentLaunchTool.antigravity, true, 'agy --dangerously-skip-permissions'),
+      (AgentLaunchTool.cursorAgent, true, 'cursor-agent --force'),
+      (AgentLaunchTool.pi, false, 'pi'),
+      (AgentLaunchTool.hermes, false, 'hermes'),
+      (AgentLaunchTool.openclaw, false, 'openclaw tui'),
+      (AgentLaunchTool.hermes, true, 'hermes --yolo'),
+      (AgentLaunchTool.pi, true, 'pi'),
+      (AgentLaunchTool.openclaw, true, 'openclaw tui'),
+      (AgentLaunchTool.grokBuild, false, 'grok'),
+      (AgentLaunchTool.grokBuild, true, 'grok --yolo'),
+    ]) {
+      test('${tool.name} launch with YOLO $yolo', () {
+        expect(buildAgentToolCommand(tool, startInYoloMode: yolo), expected);
+      });
+    }
 
     test(
       'places profiles before terminal modes and preserves YOLO settings',
@@ -80,133 +66,119 @@ void main() {
   });
 
   group('buildAgentResumeCommand', () {
-    test('adds yolo flags for supported resume commands', () {
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.claudeCode,
-          'claude-session',
-          startInYoloMode: true,
-        ),
+    for (final (tool, session, yolo, expected) in const [
+      (
+        AgentLaunchTool.claudeCode,
+        'claude-session',
+        true,
         "claude --dangerously-skip-permissions --resume 'claude-session'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.copilotCli,
-          'copilot-session',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.copilotCli,
+        'copilot-session',
+        true,
         "copilot --yolo --resume 'copilot-session'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.codex,
-          'codex-session',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.codex,
+        'codex-session',
+        true,
         "codex --yolo resume 'codex-session'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.geminiCli,
-          'gemini-session',
-          startInYoloMode: true,
-        ),
-        "gemini --yolo --resume 'gemini-session'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.openCode,
-          'opencode-session',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.openCode,
+        'opencode-session',
+        true,
         r"""OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --session 'opencode-session'""",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.antigravity,
-          'agy-session',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.antigravity,
+        'agy-session',
+        true,
         "agy --dangerously-skip-permissions --conversation 'agy-session'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.cursorAgent,
-          'cursor-session',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.cursorAgent,
+        'cursor-session',
+        true,
         "cursor-agent --force --resume 'cursor-session'",
-      );
-    });
-
-    test('preserves OpenCode continue resume command in yolo mode', () {
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.openCode,
-          '_continue',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.openCode,
+        '_continue',
+        true,
         r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --continue',
-      );
-    });
-
-    test('preserves Antigravity continue resume command in yolo mode', () {
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.antigravity,
-          '_continue',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.antigravity,
+        '_continue',
+        true,
         'agy --dangerously-skip-permissions --continue',
-      );
-    });
-
-    test('preserves Cursor Agent continue resume command in yolo mode', () {
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.cursorAgent,
-          '_continue',
-          startInYoloMode: true,
-        ),
+      ),
+      (
+        AgentLaunchTool.cursorAgent,
+        '_continue',
+        true,
         'cursor-agent --force --continue',
-      );
-    });
-
-    test('builds Cursor Agent resume by chat id', () {
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.cursorAgent, 'chat-42'),
+      ),
+      (
+        AgentLaunchTool.cursorAgent,
+        'chat-42',
+        false,
         "cursor-agent --resume 'chat-42'",
-      );
-    });
+      ),
+      (AgentLaunchTool.pi, 'abc123', false, "pi --session 'abc123'"),
+      (AgentLaunchTool.pi, '_continue', false, 'pi --continue'),
+      (
+        AgentLaunchTool.hermes,
+        '20250305_091523_a1b2',
+        false,
+        "hermes --resume '20250305_091523_a1b2'",
+      ),
+      (AgentLaunchTool.hermes, '_continue', true, 'hermes --yolo --continue'),
+      (
+        AgentLaunchTool.openclaw,
+        'main',
+        false,
+        "openclaw tui --session 'main'",
+      ),
+      (AgentLaunchTool.openclaw, '_continue', false, 'openclaw tui'),
+      (
+        AgentLaunchTool.grokBuild,
+        '019f6cb5-f7e4',
+        false,
+        "grok --resume '019f6cb5-f7e4'",
+      ),
+      (AgentLaunchTool.grokBuild, '_continue', true, 'grok --yolo --resume'),
+    ]) {
+      test('${tool.name} resumes $session with YOLO $yolo', () {
+        expect(
+          buildAgentResumeCommand(tool, session, startInYoloMode: yolo),
+          expected,
+        );
+      });
+    }
   });
 
   group('agentLaunchToolForCommandText', () {
-    test('detects tools in wrapped shell commands', () {
-      expect(
-        agentLaunchToolForCommandText(
-          r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" /opt/bin/opencode -s abc',
-        ),
+    for (final (input, expected) in const [
+      (
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" /opt/bin/opencode -s abc',
         AgentLaunchTool.openCode,
-      );
-      expect(
-        agentLaunchToolForCommandText('cd ~/repo && codex resume abc'),
-        AgentLaunchTool.codex,
-      );
-      expect(
-        agentLaunchToolForCommandText('cursor-agent --resume abc'),
-        AgentLaunchTool.cursorAgent,
-      );
-      expect(
-        agentLaunchToolForCommandText('cd ~/repo && cursor-agent --force'),
-        AgentLaunchTool.cursorAgent,
-      );
-    });
-
-    test('returns null for commands without supported tools', () {
-      expect(agentLaunchToolForCommandText('node ./script.js'), isNull);
-      expect(agentLaunchToolForCommandText("cd '/tmp/codex' && node"), isNull);
-      expect(agentLaunchToolForCommandText(''), isNull);
-    });
+      ),
+      ('cd ~/repo && codex resume abc', AgentLaunchTool.codex),
+      ('cursor-agent --resume abc', AgentLaunchTool.cursorAgent),
+      ('cd ~/repo && cursor-agent --force', AgentLaunchTool.cursorAgent),
+      ('node ./script.js', null),
+      ("cd '/tmp/codex' && node", null),
+      ('', null),
+      ('openclaw tui', AgentLaunchTool.openclaw),
+      ('cd ~/repo && grok --resume abc', AgentLaunchTool.grokBuild),
+    ]) {
+      test('$input resolves to $expected', () {
+        expect(agentLaunchToolForCommandText(input), expected);
+      });
+    }
   });
 
   group('buildAgentLaunchCommand', () {
@@ -273,7 +245,7 @@ void main() {
       'builds command for tmux with extra flags and no working directory',
       () {
         const preset = AgentLaunchPreset(
-          tool: AgentLaunchTool.geminiCli,
+          tool: AgentLaunchTool.codex,
           tmuxSessionName: 'nightly review',
           tmuxExtraFlags: '-x 160 -y 48',
         );
@@ -281,7 +253,7 @@ void main() {
         expect(
           buildAgentLaunchCommand(preset),
           'tmux new-session -A -s \'nightly review\' '
-          '-x 160 -y 48 \'gemini\' '
+          '-x 160 -y 48 \'codex\' '
           r'\; set-option -g focus-events on',
         );
       },
@@ -357,11 +329,18 @@ void main() {
       );
     });
 
-    test('builds command for geminiCli tool', () {
-      const preset = AgentLaunchPreset(tool: AgentLaunchTool.geminiCli);
-
-      expect(buildAgentLaunchCommand(preset), 'gemini');
-    });
+    test(
+      'rejects removed Gemini presets without substituting another agent',
+      () {
+        const stored = {'tool': 'geminiCli', 'workingDirectory': '~/project'};
+        expect(AgentLaunchPreset.tryFromJson(stored), isNull);
+        expect(agentLaunchToolFromStorageName('geminiCli'), isNull);
+        expect(
+          AgentLaunchTool.uiDisplayOrder.map((tool) => tool.name),
+          isNot(contains('geminiCli')),
+        );
+      },
+    );
 
     test('adds yolo mode to supported presets', () {
       const preset = AgentLaunchPreset(
@@ -429,7 +408,7 @@ void main() {
       additionalArguments: '--resume',
     );
 
-    final decoded = AgentLaunchPreset.fromJson(preset.toJson());
+    final decoded = AgentLaunchPreset.tryFromJson(preset.toJson())!;
 
     expect(decoded.tool, preset.tool);
     expect(decoded.workingDirectory, preset.workingDirectory);
@@ -441,10 +420,10 @@ void main() {
   });
 
   test('decodes legacy session presets as tmux', () {
-    final preset = AgentLaunchPreset.fromJson({
+    final preset = AgentLaunchPreset.tryFromJson({
       'tool': 'codex',
       'tmuxSessionName': 'legacy-agent',
-    });
+    })!;
 
     expect(preset.remoteMuxBackend, isNull);
     expect(preset.effectiveRemoteMuxBackend, RemoteMuxBackend.tmux);
@@ -455,12 +434,11 @@ void main() {
     for (final tool in [
       AgentLaunchTool.codex,
       AgentLaunchTool.openCode,
-      AgentLaunchTool.geminiCli,
       AgentLaunchTool.antigravity,
       AgentLaunchTool.cursorAgent,
     ]) {
       final preset = AgentLaunchPreset(tool: tool);
-      final decoded = AgentLaunchPreset.fromJson(preset.toJson());
+      final decoded = AgentLaunchPreset.tryFromJson(preset.toJson())!;
       expect(decoded.tool, tool, reason: '${tool.name} round-trip failed');
     }
   });
@@ -485,7 +463,6 @@ void main() {
     test('new tool labels are correct', () {
       expect(AgentLaunchTool.codex.label, 'Codex');
       expect(AgentLaunchTool.openCode.label, 'OpenCode');
-      expect(AgentLaunchTool.geminiCli.label, 'Gemini CLI');
       expect(AgentLaunchTool.antigravity.label, 'Antigravity');
       expect(AgentLaunchTool.cursorAgent.label, 'Cursor Agent');
     });
@@ -493,131 +470,48 @@ void main() {
     test('new tool command names are correct', () {
       expect(AgentLaunchTool.codex.commandName, 'codex');
       expect(AgentLaunchTool.openCode.commandName, 'opencode');
-      expect(AgentLaunchTool.geminiCli.commandName, 'gemini');
       expect(AgentLaunchTool.antigravity.commandName, 'agy');
       expect(AgentLaunchTool.cursorAgent.commandName, 'cursor-agent');
     });
 
-    test('command lookup resolves bare names, paths, and argv tokens', () {
-      expect(
-        agentLaunchToolForCommandName('claude'),
-        AgentLaunchTool.claudeCode,
-      );
-      expect(
-        agentLaunchToolForCommandName('/opt/homebrew/bin/codex'),
-        AgentLaunchTool.codex,
-      );
-      expect(
-        agentLaunchToolForCommandName(
+    group('command name lookup', () {
+      for (final (input, expected) in const [
+        ('claude', AgentLaunchTool.claudeCode),
+        ('/opt/homebrew/bin/codex', AgentLaunchTool.codex),
+        (
           r'C:\Users\demo\AppData\Local\Programs\opencode.exe',
+          AgentLaunchTool.openCode,
         ),
-        AgentLaunchTool.openCode,
-      );
-      expect(
-        agentLaunchToolForCommandName(
+        (
           r'C:\Users\demo\AppData\Roaming\npm\copilot.cmd',
+          AgentLaunchTool.copilotCli,
         ),
-        AgentLaunchTool.copilotCli,
-      );
-      expect(
-        agentLaunchToolForCommandName('gemini --yolo'),
-        AgentLaunchTool.geminiCli,
-      );
-      expect(
-        agentLaunchToolForCommandName('gemini-cli'),
-        AgentLaunchTool.geminiCli,
-      );
-      expect(agentLaunchToolForCommandName('codex-cli'), AgentLaunchTool.codex);
-      expect(
-        agentLaunchToolForCommandName('agy --dangerously-skip-permissions'),
-        AgentLaunchTool.antigravity,
-      );
-      expect(
-        agentLaunchToolForCommandName('antigravity'),
-        AgentLaunchTool.antigravity,
-      );
-      expect(
-        agentLaunchToolForCommandName('antigravity-cli'),
-        AgentLaunchTool.antigravity,
-      );
-      expect(
-        agentLaunchToolForCommandName('cursor-agent'),
-        AgentLaunchTool.cursorAgent,
-      );
-      expect(
-        agentLaunchToolForCommandName('/Users/demo/.local/bin/cursor-agent'),
-        AgentLaunchTool.cursorAgent,
-      );
-      expect(agentLaunchToolForCommandName('vim'), isNull);
-      expect(agentLaunchToolForCommandName(''), isNull);
-    });
-
-    test('resolves the newly supported CLIs from command names', () {
-      expect(
-        agentLaunchToolForCommandName('claude-agent-acp'),
-        AgentLaunchTool.claudeCode,
-      );
-      expect(agentLaunchToolForCommandName('codex-acp'), AgentLaunchTool.codex);
-      expect(
-        agentLaunchToolForCommandName('cursor-agent-acp'),
-        AgentLaunchTool.cursorAgent,
-      );
-      expect(
-        agentLaunchToolForCommandName('antigravity-acp'),
-        AgentLaunchTool.antigravity,
-      );
-      expect(
-        agentLaunchToolForCommandName('agy-acp'),
-        AgentLaunchTool.antigravity,
-      );
-      expect(agentLaunchToolForCommandName('pi'), AgentLaunchTool.pi);
-      expect(agentLaunchToolForCommandName('hermes'), AgentLaunchTool.hermes);
-      expect(
-        agentLaunchToolForCommandName('hermes-agent'),
-        AgentLaunchTool.hermes,
-      );
-      expect(
-        agentLaunchToolForCommandName('openclaw'),
-        AgentLaunchTool.openclaw,
-      );
-      expect(
-        agentLaunchToolForCommandText('openclaw tui'),
-        AgentLaunchTool.openclaw,
-      );
-      expect(
-        agentLaunchToolForCommandName('/opt/homebrew/bin/pi'),
-        AgentLaunchTool.pi,
-      );
-      expect(agentLaunchToolForCommandName('grok'), AgentLaunchTool.grokBuild);
-      expect(
-        agentLaunchToolForCommandText('cd ~/repo && grok --resume abc'),
-        AgentLaunchTool.grokBuild,
-      );
-    });
-
-    test('builds launch commands for the newly supported CLIs', () {
-      expect(buildAgentToolCommand(AgentLaunchTool.pi), 'pi');
-      expect(buildAgentToolCommand(AgentLaunchTool.hermes), 'hermes');
-      // OpenClaw's interactive UI lives behind the `tui` subcommand.
-      expect(buildAgentToolCommand(AgentLaunchTool.openclaw), 'openclaw tui');
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.hermes, startInYoloMode: true),
-        'hermes --yolo',
-      );
-      // Pi exposes no YOLO flag, so the host setting must not invent one.
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.pi, startInYoloMode: true),
-        'pi',
-      );
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.openclaw, startInYoloMode: true),
-        'openclaw tui',
-      );
-      expect(buildAgentToolCommand(AgentLaunchTool.grokBuild), 'grok');
-      expect(
-        buildAgentToolCommand(AgentLaunchTool.grokBuild, startInYoloMode: true),
-        'grok --yolo',
-      );
+        ('gemini --yolo', null),
+        ('gemini-cli', null),
+        ('codex-cli', AgentLaunchTool.codex),
+        ('agy --dangerously-skip-permissions', AgentLaunchTool.antigravity),
+        ('antigravity', AgentLaunchTool.antigravity),
+        ('antigravity-cli', AgentLaunchTool.antigravity),
+        ('cursor-agent', AgentLaunchTool.cursorAgent),
+        ('/Users/demo/.local/bin/cursor-agent', AgentLaunchTool.cursorAgent),
+        ('vim', null),
+        ('', null),
+        ('claude-agent-acp', AgentLaunchTool.claudeCode),
+        ('codex-acp', AgentLaunchTool.codex),
+        ('cursor-agent-acp', AgentLaunchTool.cursorAgent),
+        ('antigravity-acp', AgentLaunchTool.antigravity),
+        ('agy-acp', AgentLaunchTool.antigravity),
+        ('pi', AgentLaunchTool.pi),
+        ('hermes', AgentLaunchTool.hermes),
+        ('hermes-agent', AgentLaunchTool.hermes),
+        ('openclaw', AgentLaunchTool.openclaw),
+        ('/opt/homebrew/bin/pi', AgentLaunchTool.pi),
+        ('grok', AgentLaunchTool.grokBuild),
+      ]) {
+        test('$input resolves to $expected', () {
+          expect(agentLaunchToolForCommandName(input), expected);
+        });
+      }
     });
 
     test('does not duplicate an explicit Hermes yolo argument', () {
@@ -670,60 +564,6 @@ void main() {
       }
     });
 
-    test('builds resume commands for the newly supported CLIs', () {
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.pi, 'abc123'),
-        "pi --session 'abc123'",
-      );
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.pi, '_continue'),
-        'pi --continue',
-      );
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.hermes, '20250305_091523_a1b2'),
-        "hermes --resume '20250305_091523_a1b2'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.hermes,
-          '_continue',
-          startInYoloMode: true,
-        ),
-        'hermes --yolo --continue',
-      );
-      // The `tui` subcommand must stay ahead of the resume arguments.
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.openclaw, 'main'),
-        "openclaw tui --session 'main'",
-      );
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.openclaw, '_continue'),
-        'openclaw tui',
-      );
-      expect(
-        buildAgentResumeCommand(AgentLaunchTool.grokBuild, '019f6cb5-f7e4'),
-        "grok --resume '019f6cb5-f7e4'",
-      );
-      expect(
-        buildAgentResumeCommand(
-          AgentLaunchTool.grokBuild,
-          '_continue',
-          startInYoloMode: true,
-        ),
-        'grok --yolo --resume',
-      );
-    });
-
-    test('supportsResume returns true for all tools', () {
-      for (final tool in AgentLaunchTool.values) {
-        expect(
-          tool.supportsResume,
-          isTrue,
-          reason: '${tool.name} should support resume',
-        );
-      }
-    });
-
     test('supportsYoloMode reflects each CLI startup capability', () {
       // Pi has no approval layer, and OpenClaw's YOLO preset is a persisted
       // exec-policy mutation rather than a per-launch flag.
@@ -738,11 +578,7 @@ void main() {
     });
   });
 
-  test('fromJson rejects unknown tool names instead of rewriting them', () {
-    expect(
-      () => AgentLaunchPreset.fromJson({'tool': 'unknownTool'}),
-      throwsA(isA<FormatException>()),
-    );
+  test('tryFromJson rejects unknown tool names instead of rewriting them', () {
     expect(AgentLaunchPreset.tryFromJson({'tool': 'unknownTool'}), isNull);
     expect(agentLaunchToolFromStorageName('codex'), AgentLaunchTool.codex);
     expect(agentLaunchToolFromStorageName('unknownTool'), isNull);

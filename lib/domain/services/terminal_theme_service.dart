@@ -144,18 +144,6 @@ class TerminalThemeService {
     return [...TerminalThemes.all, ...custom];
   }
 
-  /// Gets all dark themes.
-  Future<List<TerminalThemeData>> getDarkThemes() async {
-    final all = await getAllThemes();
-    return all.where((theme) => theme.isDark).toList();
-  }
-
-  /// Gets all light themes.
-  Future<List<TerminalThemeData>> getLightThemes() async {
-    final all = await getAllThemes();
-    return all.where((theme) => !theme.isDark).toList();
-  }
-
   /// Gets all custom themes.
   Future<List<TerminalThemeData>> getCustomThemes() async {
     final json = await _settings.getString(SettingKeys.customTerminalThemes);

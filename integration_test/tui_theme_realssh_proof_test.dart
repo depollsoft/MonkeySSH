@@ -23,7 +23,11 @@ import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:xterm/src/ui/palette_builder.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
+
+import '../test/helpers/live_ssh_terminal_helpers.dart';
+import '../test/helpers/terminal_theme_assertion_helpers.dart';
 
 const _sshPort = int.fromEnvironment('TUI_THEME_PROOF_SSH_PORT');
 const _sshUser = String.fromEnvironment('TUI_THEME_PROOF_SSH_USER');
@@ -124,11 +128,11 @@ void main() {
       final terminal = await _pumpProofTerminal(tester, proofCase);
       if (proofCase.startupCommand != null) {
         await tester.pump(const Duration(seconds: 1));
-        _terminalFromView(tester).textInput('${proofCase.startupCommand}\r');
+        terminalFromView(tester).textInput('${proofCase.startupCommand}\r');
       }
-      await _waitForTerminalText(
+      await waitForTerminalText(
         tester,
-        () => _terminalFromView(tester),
+        () => terminalFromView(tester),
         proofCase.expectedText,
         description: 'Timed out waiting for ${proofCase.label}',
         timeout: const Duration(seconds: 90),
@@ -259,16 +263,16 @@ Future<void> _assertThemeSwitchReadable(
 }) async {
   await _switchThemeMode(tester, container, step.mode);
   final token = '${proofCase.tokenPrefix}${step.tokenInfix}$suffix';
-  _terminalFromView(tester).textInput(token);
-  await _waitForTerminalText(
+  terminalFromView(tester).textInput(token);
+  await waitForTerminalText(
     tester,
-    () => _terminalFromView(tester),
+    () => terminalFromView(tester),
     token,
     description: 'Timed out waiting for ${proofCase.label} ${step.id} token',
   );
-  final terminal = _terminalFromView(tester);
+  final terminal = terminalFromView(tester);
   final contrast = _minimumTokenContrast(terminal, step.theme, token);
-  final surface = _composerSurfaceForToken(terminal, step.theme, token);
+  final surface = composerSurfaceForToken(terminal, step.theme, token);
   await _waitForOpenCodeThemeSurface(
     tester,
     proofCase,
@@ -321,11 +325,11 @@ Future<void> _waitForOpenCodeThemeSurface(
     return;
   }
 
-  await _pumpUntil(
+  await pumpUntil(
     tester,
     () {
       final surface = _surfaceForTextOrNull(
-        _terminalFromView(tester),
+        terminalFromView(tester),
         theme,
         proofCase.expectedText,
       );
@@ -348,7 +352,7 @@ Future<void> _waitForOpenCodeThemeSurface(
   );
 
   final surface = _surfaceForTextOrNull(
-    _terminalFromView(tester),
+    terminalFromView(tester),
     theme,
     proofCase.expectedText,
   );
@@ -366,17 +370,17 @@ Future<void> _waitForOpenCodeViewportBackground(
     return;
   }
 
-  await _pumpUntil(
+  await pumpUntil(
     tester,
     () {
-      final stats = _viewportBackgroundStats(_terminalFromView(tester), theme);
+      final stats = _viewportBackgroundStats(terminalFromView(tester), theme);
       return stats.oppositeThemeFraction <= maxOppositeThemeFraction;
     },
     description: description,
     timeout: const Duration(seconds: 20),
   );
 
-  final stats = _viewportBackgroundStats(_terminalFromView(tester), theme);
+  final stats = _viewportBackgroundStats(terminalFromView(tester), theme);
   debugPrint(
     '${proofCase.id} $description oppositeThemeFraction='
     '${stats.oppositeThemeFraction} opposite=${stats.oppositeThemeCells} '
@@ -478,20 +482,9 @@ Future<({ProviderContainer container})> _pumpProofTerminal(
       .setThemeMode(ThemeMode.light);
   await tester.pumpAndSettle();
 
-  await _pumpUntilConnected(tester);
-  await _pumpUntilFound(tester, find.byType(MonkeyTerminalView));
+  await pumpUntilConnected(tester, description: 'SSH connection to proof host');
+  await pumpUntilFound(tester, find.byType(MonkeyTerminalView));
   return (container: container);
-}
-
-Future<void> _pumpUntilConnected(WidgetTester tester) async {
-  await _pumpUntil(
-    tester,
-    () => find.text('Connecting...').evaluate().isEmpty,
-    description: 'SSH connection to proof host',
-    timeout: const Duration(seconds: 60),
-  );
-  expect(find.textContaining('Failed to start shell'), findsNothing);
-  expect(find.textContaining('Connection failed'), findsNothing);
 }
 
 Future<void> _switchThemeMode(
@@ -503,73 +496,13 @@ Future<void> _switchThemeMode(
   await tester.pumpAndSettle(const Duration(seconds: 1));
 }
 
-Terminal _terminalFromView(WidgetTester tester) =>
-    tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView)).terminal;
-
-Future<void> _pumpUntilFound(
-  WidgetTester tester,
-  Finder finder, {
-  Duration timeout = const Duration(seconds: 30),
-}) async {
-  await _pumpUntil(
-    tester,
-    () => finder.evaluate().isNotEmpty,
-    description: 'finder $finder',
-    timeout: timeout,
-  );
-}
-
-Future<void> _pumpUntil(
-  WidgetTester tester,
-  bool Function() predicate, {
-  required String description,
-  Duration timeout = const Duration(seconds: 30),
-  Duration step = const Duration(milliseconds: 100),
-}) async {
-  final end = DateTime.now().add(timeout);
-  while (DateTime.now().isBefore(end)) {
-    await tester.pump(step);
-    if (predicate()) {
-      return;
-    }
-  }
-  fail('Timed out waiting for $description');
-}
-
-Future<void> _waitForTerminalText(
-  WidgetTester tester,
-  Terminal Function() terminal,
-  String expected, {
-  required String description,
-  Duration timeout = const Duration(seconds: 20),
-}) async {
-  await _pumpUntil(
-    tester,
-    () => _terminalBufferText(terminal()).contains(expected),
-    description: '$description\n${_terminalBufferText(terminal())}',
-    timeout: timeout,
-  );
-}
-
-String _terminalBufferText(Terminal terminal) {
-  final lines = <String>[];
-  for (var index = 0; index < terminal.buffer.lines.length; index += 1) {
-    lines.add(
-      terminal.buffer.lines[index]
-          .getText(0, terminal.buffer.viewWidth)
-          .trimRight(),
-    );
-  }
-  return lines.join('\n');
-}
-
 double _minimumTokenContrast(
   Terminal terminal,
   TerminalThemeData theme,
   String token,
 ) {
   final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
+  final palette = PaletteBuilder(xtermTheme).build();
   final cell = CellData.empty();
 
   for (var row = 0; row < terminal.buffer.lines.length; row += 1) {
@@ -588,10 +521,10 @@ double _minimumTokenContrast(
         continue;
       }
       line.getCellData(column, cell);
-      final colors = _effectiveCellColors(cell, xtermTheme, palette);
+      final colors = effectiveCellColors(cell, xtermTheme, palette);
       minimum = math.min(
         minimum,
-        _contrastRatio(colors.foreground, colors.background),
+        contrastRatio(colors.foreground, colors.background),
       );
     }
     if (minimum == double.infinity) {
@@ -603,52 +536,13 @@ double _minimumTokenContrast(
   fail('Could not find token "$token" in terminal buffer.');
 }
 
-({Color background, int sampledCells}) _composerSurfaceForToken(
-  Terminal terminal,
-  TerminalThemeData theme,
-  String token,
-) {
-  final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
-  final cell = CellData.empty();
-
-  for (var row = 0; row < terminal.buffer.lines.length; row += 1) {
-    final line = terminal.buffer.lines[row];
-    final text = line.getText(0, terminal.buffer.viewWidth);
-    final startColumn = text.indexOf(token);
-    if (startColumn == -1) {
-      continue;
-    }
-
-    line.getCellData(startColumn, cell);
-    final tokenSurfaceColor = _effectiveBackgroundCellColor(cell);
-    final background = _effectiveCellColors(
-      cell,
-      xtermTheme,
-      palette,
-    ).background;
-    var sampledCells = 0;
-
-    for (var column = 0; column < terminal.buffer.viewWidth; column += 1) {
-      line.getCellData(column, cell);
-      if (_effectiveBackgroundCellColor(cell) == tokenSurfaceColor) {
-        sampledCells += 1;
-      }
-    }
-
-    return (background: background, sampledCells: sampledCells);
-  }
-
-  fail('Could not find token "$token" in terminal buffer.');
-}
-
 ({Color background})? _surfaceForTextOrNull(
   Terminal terminal,
   TerminalThemeData theme,
   String text,
 ) {
   final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
+  final palette = PaletteBuilder(xtermTheme).build();
   final cell = CellData.empty();
 
   for (var row = 0; row < terminal.buffer.lines.length; row += 1) {
@@ -661,7 +555,7 @@ double _minimumTokenContrast(
 
     line.getCellData(startColumn, cell);
     return (
-      background: _effectiveCellColors(cell, xtermTheme, palette).background,
+      background: effectiveCellColors(cell, xtermTheme, palette).background,
     );
   }
 
@@ -671,7 +565,7 @@ double _minimumTokenContrast(
 ({int sampledCells, int oppositeThemeCells, double oppositeThemeFraction})
 _viewportBackgroundStats(Terminal terminal, TerminalThemeData theme) {
   final xtermTheme = theme.toXtermTheme();
-  final palette = _buildTerminalPalette(xtermTheme);
+  final palette = PaletteBuilder(xtermTheme).build();
   final cell = CellData.empty();
   var sampledCells = 0;
   var oppositeThemeCells = 0;
@@ -682,7 +576,7 @@ _viewportBackgroundStats(Terminal terminal, TerminalThemeData theme) {
     final line = terminal.buffer.lines[row];
     for (var column = 0; column < terminal.buffer.viewWidth; column += 1) {
       line.getCellData(column, cell);
-      final background = _effectiveCellColors(
+      final background = effectiveCellColors(
         cell,
         xtermTheme,
         palette,
@@ -703,81 +597,4 @@ _viewportBackgroundStats(Terminal terminal, TerminalThemeData theme) {
         ? 0
         : oppositeThemeCells / sampledCells,
   );
-}
-
-int _effectiveBackgroundCellColor(CellData cell) =>
-    (cell.flags & CellFlags.inverse) == 0 ? cell.background : cell.foreground;
-
-({Color foreground, Color background}) _effectiveCellColors(
-  CellData cell,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  var foreground = (cell.flags & CellFlags.inverse) == 0
-      ? _resolveForegroundColor(cell.foreground, xtermTheme, palette)
-      : _resolveBackgroundColor(cell.background, xtermTheme, palette);
-  final background = (cell.flags & CellFlags.inverse) == 0
-      ? _resolveBackgroundColor(cell.background, xtermTheme, palette)
-      : _resolveForegroundColor(cell.foreground, xtermTheme, palette);
-
-  if ((cell.flags & CellFlags.faint) != 0) {
-    foreground = resolveMonkeyTerminalFaintForegroundColor(
-      foreground: foreground,
-      background: background,
-    );
-  }
-  return (foreground: foreground, background: background);
-}
-
-Color _resolveForegroundColor(
-  int cellColor,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  final colorType = cellColor & CellColor.typeMask;
-  final colorValue = cellColor & CellColor.valueMask;
-  return switch (colorType) {
-    CellColor.normal => xtermTheme.foreground,
-    CellColor.named || CellColor.palette => palette[colorValue],
-    _ => Color.fromARGB(
-      0xFF,
-      (colorValue >> 16) & 0xFF,
-      (colorValue >> 8) & 0xFF,
-      colorValue & 0xFF,
-    ),
-  };
-}
-
-Color _resolveBackgroundColor(
-  int cellColor,
-  TerminalTheme xtermTheme,
-  List<Color> palette,
-) {
-  final colorType = cellColor & CellColor.typeMask;
-  final colorValue = cellColor & CellColor.valueMask;
-  return switch (colorType) {
-    CellColor.normal => xtermTheme.background,
-    CellColor.named || CellColor.palette => palette[colorValue],
-    _ => Color.fromARGB(
-      0xFF,
-      (colorValue >> 16) & 0xFF,
-      (colorValue >> 8) & 0xFF,
-      colorValue & 0xFF,
-    ),
-  };
-}
-
-List<Color> _buildTerminalPalette(TerminalTheme xtermTheme) =>
-    List<Color>.generate(
-      256,
-      (index) => resolveMonkeyTerminalPaletteColor(xtermTheme, index),
-      growable: false,
-    );
-
-double _contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
 }

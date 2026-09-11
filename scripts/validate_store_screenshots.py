@@ -6,14 +6,14 @@ import argparse
 import platform
 import re
 import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
-from PIL import Image
+import store_media
+
+from PIL import Image, ImageChops
 
 ROOT = Path(__file__).resolve().parents[1]
-SCREENSHOT_COUNT = 7
+SCREENSHOT_COUNT = 8
 IOS_SCREENSHOTS = {
     ROOT / 'ios/fastlane/screenshots/en-US': {
         'iphone_6_9': (1320, 2868),
@@ -105,28 +105,28 @@ def _validate_copilot_image_frame(path: Path) -> None:
     with Image.open(path) as image:
         rgb = image.convert('RGB')
         width, height = rgb.size
-        target = (64, 196, 255)
-
-        def is_frame_pixel(x: int, y: int) -> bool:
-            pixel = rgb.getpixel((x, y))
-            if not isinstance(pixel, tuple) or len(pixel) < 3:
-                return False
-            red, green, blue = pixel[:3]
-            return (
-                abs(red - target[0]) <= 18
-                and abs(green - target[1]) <= 18
-                and abs(blue - target[2]) <= 12
+        channels = [
+            channel.point([
+                255 if abs(value - target) <= tolerance else 0
+                for value in range(256)
+            ])
+            for channel, target, tolerance in zip(
+                rgb.split(), (64, 196, 255), (18, 18, 12),
             )
+        ]
+        mask = ImageChops.multiply(
+            ImageChops.multiply(channels[0], channels[1]), channels[2],
+        )
 
         horizontal_rows = [
             y
             for y in range(height)
-            if sum(is_frame_pixel(x, y) for x in range(width)) >= width * 0.2
+            if mask.crop((0, y, width, y + 1)).histogram()[255] >= width * 0.2
         ]
         vertical_columns = [
             x
             for x in range(width)
-            if sum(is_frame_pixel(x, y) for y in range(height)) >= height * 0.1
+            if mask.crop((x, 0, x + 1, height)).histogram()[255] >= height * 0.1
         ]
 
     def group_count(values: list[int]) -> int:
@@ -156,70 +156,11 @@ def _ocr_texts(paths: list[Path]) -> dict[Path, str]:
             'Run this validator on a macOS runner before syncing metadata.',
         )
 
-    swift_source = r'''
-import Foundation
-import Vision
-import AppKit
-
-let listPath = CommandLine.arguments[1]
-let contents = try String(contentsOfFile: listPath, encoding: .utf8)
-let urls = contents.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = false
-request.recognitionLanguages = ["en-US"]
-
-for url in urls {
-    guard let image = NSImage(contentsOf: url),
-          let tiff = image.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiff),
-          let cgImage = bitmap.cgImage else {
-        print("FILE\t\(url.path)\tERROR\tCould not load image")
-        continue
-    }
-    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-    try handler.perform([request])
-    let text = (request.results ?? [])
-        .compactMap { $0.topCandidates(1).first?.string }
-        .joined(separator: " ")
-        .replacingOccurrences(of: "\n", with: " ")
-    print("FILE\t\(url.path)")
-    print(text)
-    print("END_FILE")
-}
-'''
-    with tempfile.NamedTemporaryFile('w', suffix='.swift') as script:
-        with tempfile.NamedTemporaryFile('w') as file_list:
-            script.write(swift_source)
-            script.flush()
-            file_list.write('\n'.join(str(path) for path in paths))
-            file_list.flush()
-            result = subprocess.run(
-                ['swift', script.name, file_list.name],
-                check=True,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-
-    texts: dict[Path, str] = {}
-    for block in result.stdout.split('END_FILE'):
-        lines = [line for line in block.strip().splitlines() if line]
-        if not lines or not lines[0].startswith('FILE\t'):
-            continue
-        path = Path(lines[0].split('\t', 1)[1])
-        texts[path] = ' '.join(lines[1:])
-    return texts
+    return store_media._ocr_texts(paths)
 
 
 def _validate_ocr_content(paths: list[Path]) -> None:
     texts = _ocr_texts(paths)
-    missing_paths = [path for path in paths if path not in texts]
-    if missing_paths:
-        formatted_paths = ', '.join(
-            str(path.relative_to(ROOT)) for path in missing_paths
-        )
-        raise ValueError(f'OCR did not return text for {formatted_paths}.')
-
     for path, text in texts.items():
         for label, pattern in BAD_OCR_PATTERNS.items():
             if pattern.search(text):
@@ -256,7 +197,15 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         elif filename in {'06_iphone_6_9.png', '06_ipad_13.png', '6.png'}:
             _require_ocr_markers(path, text, ['Claude Code'])
         elif filename in {'07_iphone_6_9.png', '07_ipad_13.png', '7.png'}:
-            _require_ocr_markers(path, text, ['Message the agent', 'native agent window'])
+            _require_ocr_markers(
+                path, text,
+                ['Message the agent', 'reconnect'],
+            )
+        elif filename in {'08_iphone_6_9.png', '08_ipad_13.png', '8.png'}:
+            _require_ocr_markers(
+                path, text,
+                ['Agent Management', 'PRO', 'Copilot CLI', 'Claude Code'],
+            )
 
     for grouped_texts in monkeymux_texts.values():
         paths_description = ', '.join(
@@ -265,7 +214,7 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         _require_ocr_markers(
             paths_description,
             ' '.join(text for _, text in grouped_texts),
-            ['copilot', 'gemini', 'claude', 'codex', 'opencode', 'antigravity'],
+            ['copilot', 'claude', 'codex', 'opencode', 'antigravity'],
         )
 
 
@@ -312,6 +261,10 @@ def _text_contains_marker(
     normalized_text: str,
     compacted_text: str,
 ) -> bool:
+    if marker == 'PRO':
+        # A substring match would accept "prompt", "progress" or "provider"
+        # even when the store-only badge was accidentally omitted.
+        return re.search(r'\bpro\b', normalized_text) is not None
     return (
         marker.casefold() in normalized_text
         or _compact_ocr_text(marker) in compacted_text

@@ -20,10 +20,9 @@ func TestInspectProcessReportsZombieAsNotRunning(t *testing.T) {
 		t.Skipf("cannot start helper process: %v", err)
 	}
 	pid := cmd.Process.Pid
-	// Deliberately never Wait: the child must stay unreaped.
-	_ = cmd.Process.Release()
+	// Keep the child unreaped until ownership assertions finish.
 	t.Cleanup(func() {
-		_, _ = cmd.Process.Wait()
+		_ = cmd.Wait()
 	})
 
 	deadline := time.Now().Add(3 * time.Second)

@@ -150,6 +150,9 @@ Generate:
 
 ```bash
 platform=both  # or ios|android from --platform
+if [ "$platform" != both ]; then
+  ./scripts/store_assets.sh download
+fi
 python3 scripts/generate_store_screenshots.py "$platform"
 python3 scripts/generate_store_demo_videos.py "$platform"
 ```
@@ -158,7 +161,7 @@ Quality bar (fail the run if violated — see `docs/store-assets-prompt.md`):
 
 - Real app + live temporary SSH/MonkeyMux workspace
 - Copilot scenes show an image inline (no streamer mode / placeholder session renames)
-- MonkeyMux selector shows current agent family: Copilot CLI, Gemini CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw
+- MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw
 - No port-forward/subscription/checkout as primary scenes unless product direction changed
 - No secrets, local private paths, API keys, crash dialogs, empty shells
 
@@ -184,6 +187,9 @@ fi
 ```
 
 If media was generated in this run already, do **not** pass `--generate` again unless you intentionally want a second capture.
+For single-platform generation, restore the baseline in step 5 before capturing.
+Publishing existing local files validates both platforms; missing complementary
+media fails validation instead of restoring over fresh captures.
 
 Confirm:
 

@@ -247,7 +247,7 @@ void main() {
           cliPreferencesService: cliPrefsService,
         );
 
-        const preset = AgentLaunchPreset(tool: AgentLaunchTool.geminiCli);
+        const preset = AgentLaunchPreset(tool: AgentLaunchTool.cursorAgent);
         await expectLater(
           throwingCommand.execute(
             input: _minimalInput(),

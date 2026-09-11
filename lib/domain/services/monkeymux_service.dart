@@ -13,6 +13,7 @@ import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_installer_service.dart';
+import 'remote_file_service.dart' show shellEscapePosix;
 import 'remote_multiplexer_service.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
@@ -58,17 +59,16 @@ final monkeyMuxServiceProvider = Provider<MonkeyMuxService>(
       MonkeyMuxService(installer: ref.watch(monkeyMuxInstallerServiceProvider)),
 );
 
-/// How the helper should handle an already-running server with an older
-/// version when attaching to a MonkeyMux session.
+/// How the helper should handle an already-running MonkeyMux server on attach.
 enum MonkeyMuxServerUpdatePolicy {
-  /// Ask on the terminal. Intended for manual helper use only.
-  prompt('prompt'),
-
   /// Keep the current server and suppress terminal prompts.
   never('never'),
 
   /// Update without a terminal prompt.
-  always('always');
+  always('always'),
+
+  /// Reload without a terminal prompt, even when the version matches.
+  force('force');
 
   const MonkeyMuxServerUpdatePolicy(this.cliValue);
 
@@ -100,10 +100,6 @@ class MonkeyMuxServerStatus {
 
   /// Whether the server can be shut down through the control channel.
   bool get supportsShutdown => capabilities.contains('shutdown');
-
-  /// Whether attached clients can clip a focused client's shared PTY grid.
-  bool get supportsViewportClipping =>
-      capabilities.contains('client-viewport-clipping');
 
   /// Whether control input can preserve explicit bracketed-paste semantics.
   bool get supportsBracketedPasteControlInput =>
@@ -273,8 +269,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   static final _agentMetadataPeriodicTimers = <_MonkeyMuxWatchKey, Timer>{};
   static final _agentMetadataPeriodicSessions =
       <_MonkeyMuxWatchKey, ({SshSession session, String sessionName})>{};
-  static final _windowSnapshotGenerations = <_MonkeyMuxWatchKey, int>{};
-  static final _runtimeGenerations = <_MonkeyMuxWatchKey, int>{};
+  static final _runtimeTokens = <_MonkeyMuxWatchKey, Object>{};
   static final _appReviewDemoMuxStates =
       <_MonkeyMuxWatchKey, _AppReviewDemoMonkeyMuxState>{};
   static const _agentSessionMetadataFreshTtl = Duration(seconds: 5);
@@ -321,12 +316,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       'server_runtime_reset',
       fields: {'connectionId': connectionId},
     );
-    _runtimeGenerations[key] = (_runtimeGenerations[key] ?? 0) + 1;
+    _runtimeTokens.remove(key);
 
     void clearKeyState() {
       _windowSnapshotCache.remove(key);
       _serverStatusCache.remove(key);
-      _windowSnapshotGenerations.remove(key);
       _agentMetadataRefreshes.remove(key);
       _cancelAgentMetadataPeriodicRefresh(key);
       _agentMetadataRequestPanePids.remove(key);
@@ -358,19 +352,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     for (final key in demoKeys) {
       _appReviewDemoMuxStates.remove(key)?.dispose();
     }
-    for (final key
-        in _runtimeGenerations.keys
-            .where((key) => key.connectionId == connectionId)
-            .toList(growable: false)) {
-      _runtimeGenerations[key] = (_runtimeGenerations[key] ?? 0) + 1;
-    }
+    _runtimeTokens.removeWhere((key, _) => key.connectionId == connectionId);
     _windowSnapshotCache.removeWhere(
       (key, _) => key.connectionId == connectionId,
     );
     _serverStatusCache.removeWhere(
-      (key, _) => key.connectionId == connectionId,
-    );
-    _windowSnapshotGenerations.removeWhere(
       (key, _) => key.connectionId == connectionId,
     );
     _agentMetadataRefreshes.removeWhere(
@@ -492,11 +478,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     String sessionName,
     _MonkeyMuxWatchKey key,
   ) async {
-    final runtimeGeneration = _runtimeGenerations.putIfAbsent(key, () => 0);
+    final runtimeToken = _runtimeTokens.putIfAbsent(key, Object.new);
     final response = await _runControlCommand(session, sessionName, {
       'type': 'list_windows',
     });
-    if ((_runtimeGenerations[key] ?? 0) != runtimeGeneration) {
+    if (!identical(_runtimeTokens[key], runtimeToken)) {
       return response.windows;
     }
     _cacheWindows(key, response.windows);
@@ -831,12 +817,13 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     SshSession session,
     String sessionName,
     int windowIndex, {
+    String? windowId,
     String? extraFlags,
   }) async {
     if (isAppReviewDemoSession(session)) {
       final key = _MonkeyMuxWatchKey(session.connectionId, sessionName);
       final state = _appReviewDemoMuxState(key);
-      final closed = state.killWindow(windowIndex);
+      final closed = state.killWindow(windowIndex, windowId: windowId);
       _replaceCachedWindows(key, state.windows);
       if (closed != null) {
         _renderAppReviewDemoWindow(session, state.activeWindow);
@@ -846,7 +833,10 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     await _runControlCommand(session, sessionName, {
       'type': 'close_window',
       'clientId': session.monkeyMuxClientId,
-      'windowIndex': windowIndex,
+      if (windowId != null && windowId.trim().isNotEmpty)
+        'windowId': windowId.trim()
+      else
+        'windowIndex': windowIndex,
     });
   }
 
@@ -1127,7 +1117,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         r'for helper in "$HOME"/.monkeyssh/bin/monkeymux/*/*/monkeymux; do '
         r'[ -x "$helper" ] || continue; '
         r'"$helper" control --json '
-        '${_shellQuote(sessionName)}'
+        '${shellEscapePosix(sessionName)}'
         ' 2>/dev/null && exit 0; done; exit 1';
     try {
       final status = await session.runQueuedExec(
@@ -1188,13 +1178,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     );
   }
 
-  Future<
-    ({
-      Map<int, _MonkeyMuxAgentSessionMetadata> metadataByPanePid,
-      Set<int> panePids,
-    })?
-  >
-  _loadAgentMetadata(
+  Future<Map<int, _MonkeyMuxAgentSessionMetadata>?> _loadAgentMetadata(
     SshSession session,
     String sessionName,
     _MonkeyMuxWatchKey key,
@@ -1231,7 +1215,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
           'matchCount': metadataByPanePid.length,
         },
       );
-      return (metadataByPanePid: metadataByPanePid, panePids: panePids);
+      return metadataByPanePid;
     } on Object catch (error) {
       DiagnosticsLogService.instance.debug(
         'monkeymux.agent',
@@ -1289,19 +1273,18 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     _agentMetadataRequestPanePids[key] = panePids;
     late final Future<void> request;
     request = _loadAgentMetadata(session, sessionName, key, panePids).then((
-      metadataRefresh,
+      metadataByPanePid,
     ) {
       if (!identical(_agentMetadataRequests[key], request)) {
         return;
       }
-      if (metadataRefresh == null) {
+      if (metadataByPanePid == null) {
         return;
       }
       final previousWindows = _windowSnapshotCache[key] ?? windows;
       final result = _applyMonkeyMuxAgentSessionMetadata(
         previousWindows,
-        metadataRefresh.metadataByPanePid,
-        refreshedPanePids: metadataRefresh.panePids,
+        metadataByPanePid,
       );
       if (!result.changed) return;
       _replaceCachedWindows(key, result.windows);
@@ -1381,35 +1364,20 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   static void _cacheWindows(_MonkeyMuxWatchKey key, List<TmuxWindow> windows) {
     if (windows.isEmpty) {
       _windowSnapshotCache[key] = const <TmuxWindow>[];
-      _bumpWindowSnapshotGeneration(key);
       return;
     }
     final currentWindows = _windowSnapshotCache[key];
-    _windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
-      currentWindows == null
-          ? windows
-          : applyTmuxWindowChangeEvent(
-              currentWindows,
-              TmuxWindowListEvent(windows),
-            ),
+    _windowSnapshotCache[key] = applyTmuxWindowChangeEvent(
+      currentWindows ?? const [],
+      TmuxWindowListEvent(windows),
     );
-    _bumpWindowSnapshotGeneration(key);
   }
 
   static void _cacheWindowSnapshot(_MonkeyMuxWatchKey key, TmuxWindow window) {
-    final currentWindows = _windowSnapshotCache[key];
-    if (currentWindows == null || currentWindows.isEmpty) {
-      _windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable([window]);
-      _bumpWindowSnapshotGeneration(key);
-      return;
-    }
-    _windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
-      applyTmuxWindowChangeEvent(
-        currentWindows,
-        TmuxWindowSnapshotEvent(window),
-      ),
+    _windowSnapshotCache[key] = applyTmuxWindowChangeEvent(
+      _windowSnapshotCache[key] ?? const [],
+      TmuxWindowSnapshotEvent(window),
     );
-    _bumpWindowSnapshotGeneration(key);
   }
 
   static void _replaceCachedWindows(
@@ -1417,23 +1385,13 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     List<TmuxWindow> windows,
   ) {
     _windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(windows);
-    _bumpWindowSnapshotGeneration(key);
-  }
-
-  static void _bumpWindowSnapshotGeneration(_MonkeyMuxWatchKey key) {
-    _windowSnapshotGenerations.update(
-      key,
-      (value) => value + 1,
-      ifAbsent: () => 1,
-    );
   }
 }
 
 ({List<TmuxWindow> windows, bool changed}) _applyMonkeyMuxAgentSessionMetadata(
   List<TmuxWindow> windows,
-  Map<int, _MonkeyMuxAgentSessionMetadata> metadataByPanePid, {
-  Set<int>? refreshedPanePids,
-}) {
+  Map<int, _MonkeyMuxAgentSessionMetadata> metadataByPanePid,
+) {
   var changed = false;
   final enriched = windows
       .map((window) {
@@ -1448,37 +1406,16 @@ class MonkeyMuxService implements RemoteMultiplexerService {
           return window;
         }
         changed = true;
-        return window.copyWith(
-          activeAgentSessionId: metadata.sessionId,
-          agentSessionTitle: metadata.title,
-          activeAgentSessionConfidence: metadata.confidence,
-        );
+        return window
+            .copyWith(clearActiveAgentSessionMetadata: true)
+            .copyWith(
+              activeAgentSessionId: metadata.sessionId,
+              agentSessionTitle: metadata.title,
+              activeAgentSessionConfidence: metadata.confidence,
+            );
       })
       .toList(growable: false);
   return (windows: changed ? enriched : windows, changed: changed);
-}
-
-/// Applies live Copilot metadata to MonkeyMux windows for regression tests.
-@visibleForTesting
-List<TmuxWindow> applyMonkeyMuxAgentSessionMetadataForTesting(
-  List<TmuxWindow> windows,
-  Map<int, ({String sessionId, String? title})> metadataByPanePid, {
-  Set<int>? refreshedPanePids,
-}) {
-  final agentMetadataByPanePid = <int, _MonkeyMuxAgentSessionMetadata>{
-    for (final entry in metadataByPanePid.entries)
-      entry.key: (
-        tool: AgentLaunchTool.copilotCli,
-        sessionId: entry.value.sessionId,
-        title: entry.value.title,
-        confidence: AgentSessionConfidence.medium,
-      ),
-  };
-  return _applyMonkeyMuxAgentSessionMetadata(
-    windows,
-    agentMetadataByPanePid,
-    refreshedPanePids: refreshedPanePids,
-  ).windows;
 }
 
 Future<_MonkeyMuxControlResponse> _runOneShotControlCommand(
@@ -1487,51 +1424,58 @@ Future<_MonkeyMuxControlResponse> _runOneShotControlCommand(
   Map<String, Object?> request, {
   ValueChanged<MonkeyMuxServerStatus>? onServerStatus,
 }) async {
-  final execSession = await session.execute(command);
+  final execSession = await openSshExec(
+    session.execute(command),
+    _controlChannelOpenTimeout,
+  );
+  final lines = StreamIterator(
+    execSession.stdout
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter()),
+  );
   try {
     execSession.stderr.drain<void>().ignore();
     final requestId = request['id'] as String?;
     execSession.write(utf8.encode('${jsonEncode(request)}\n'));
-    final responseTimeout = _oneShotResponseTimeout(request);
-    await for (final line
-        in execSession.stdout
-            .cast<List<int>>()
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .timeout(responseTimeout)) {
-      final response = _MonkeyMuxControlResponse.tryParse(line);
-      if (response == null) {
-        continue;
+    return await (() async {
+      while (await lines.moveNext()) {
+        final line = lines.current;
+        final response = _MonkeyMuxControlResponse.tryParse(line);
+        if (response == null) {
+          continue;
+        }
+        if (response.type == 'hello') {
+          onServerStatus?.call(
+            MonkeyMuxServerStatus(
+              version: response.version,
+              capabilities: response.capabilities.toSet(),
+            ),
+          );
+          continue;
+        }
+        if (response.id != requestId) {
+          continue;
+        }
+        if (response.isError) {
+          throw _MonkeyMuxControlCommandException(
+            response.error ?? 'MonkeyMux failed.',
+          );
+        }
+        return response;
       }
-      if (response.type == 'hello') {
-        onServerStatus?.call(
-          MonkeyMuxServerStatus(
-            version: response.version,
-            capabilities: response.capabilities.toSet(),
-          ),
-        );
-        continue;
-      }
-      if (response.id != requestId) {
-        continue;
-      }
-      if (response.isError) {
-        throw _MonkeyMuxControlCommandException(
-          response.error ?? 'MonkeyMux failed.',
-        );
-      }
-      return response;
-    }
+      throw const MonkeyMuxInstallException(
+        'MonkeyMux control command closed without a response.',
+      );
+    })().timeout(_oneShotResponseTimeout(request));
   } finally {
+    lines.cancel().ignore();
     await _closeMonkeyMuxExecSession(
       execSession,
       ownerSession: session,
       operation: 'one_shot_control',
     );
   }
-  throw const MonkeyMuxInstallException(
-    'MonkeyMux control command closed without a response.',
-  );
 }
 
 Duration _oneShotResponseTimeout(Map<String, Object?> request) =>
@@ -1543,55 +1487,67 @@ Future<MonkeyMuxServerStatus?> _readRunningServerStatus(
   SshSession session,
   String command,
 ) async {
-  final execSession = await session.execute(command);
+  final execSession = await openSshExec(
+    session.execute(command),
+    const Duration(seconds: 5),
+  );
+  final lines = StreamIterator(
+    execSession.stdout
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter()),
+  );
   MonkeyMuxServerStatus? status;
   try {
     execSession.stderr.drain<void>().ignore();
-    await for (final line
-        in execSession.stdout
-            .cast<List<int>>()
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .timeout(const Duration(seconds: 5))) {
-      final response = _MonkeyMuxControlResponse.tryParse(line);
-      if (response == null) {
-        continue;
-      }
-      if (response.type == 'hello') {
-        status = MonkeyMuxServerStatus(
-          version: response.version,
-          capabilities: response.capabilities.toSet(),
-        );
-        // Helpers without native ACP window support cannot own an in-process
-        // bridge, so their hello is already a complete update-safety answer.
-        if (!status.capabilities.contains('acp-window-v1')) {
-          return status;
+    return await (() async {
+      while (await lines.moveNext()) {
+        final line = lines.current;
+        final response = _MonkeyMuxControlResponse.tryParse(line);
+        if (response == null) {
+          continue;
         }
-        continue;
+        if (response.type == 'hello') {
+          final helloStatus = MonkeyMuxServerStatus(
+            version: response.version,
+            capabilities: response.capabilities.toSet(),
+          );
+          status = helloStatus;
+          // Helpers without native ACP window support cannot own an in-process
+          // bridge, so their hello is already a complete update-safety answer.
+          if (!helloStatus.capabilities.contains('acp-window-v1')) {
+            return status;
+          }
+          continue;
+        }
+        final currentStatus = status;
+        if (response.type == 'window_list' && currentStatus != null) {
+          return MonkeyMuxServerStatus(
+            version: currentStatus.version,
+            capabilities: currentStatus.capabilities,
+            nativeAcpWindowCount: response.windows
+                .where(
+                  (window) => window.nativeAcpBridgeId?.isNotEmpty ?? false,
+                )
+                .length,
+          );
+        }
       }
-      if (response.type == 'window_list' && status != null) {
-        return MonkeyMuxServerStatus(
-          version: status.version,
-          capabilities: status.capabilities,
-          nativeAcpWindowCount: response.windows
-              .where((window) => window.nativeAcpBridgeId?.isNotEmpty ?? false)
-              .length,
-        );
-      }
-    }
+      return status;
+    })().timeout(const Duration(seconds: 5));
   } on TimeoutException {
     // A transitional helper may advertise ACP support but omit its initial
     // window list. Keep the version answer without claiming an unsafe update
     // is blocked; the helper's own replacement guard remains authoritative.
     return status;
   } finally {
+    lines.cancel().ignore();
     await _closeMonkeyMuxExecSession(
       execSession,
       ownerSession: session,
       operation: 'server_status',
     );
   }
-  return status;
 }
 
 /// Matches the `major.minor.patch` line `monkeymux version` prints, allowing an
@@ -1601,35 +1557,43 @@ final _monkeyMuxHelperVersionPattern = RegExp(
 );
 
 Future<String?> _readHelperVersion(SshSession session, String command) async {
-  final execSession = await session.execute(command);
+  final execSession = await openSshExec(
+    session.execute(command),
+    const Duration(seconds: 5),
+  );
+  final lines = StreamIterator(
+    execSession.stdout
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter()),
+  );
   try {
     execSession.stderr.drain<void>().ignore();
-    await for (final line
-        in execSession.stdout
-            .cast<List<int>>()
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .timeout(const Duration(seconds: 5))) {
-      // Login shells can print profile/banner text on stdout before the command
-      // output. Treating that as the version would make the comparison
-      // unparsable and silently suppress a legitimate update, so only accept
-      // lines that actually look like a version and otherwise fall through to
-      // the null result, which keeps the bundled manifest label as the answer.
-      final version = line.trim();
-      if (_monkeyMuxHelperVersionPattern.hasMatch(version)) {
-        return version;
+    return await (() async {
+      while (await lines.moveNext()) {
+        final line = lines.current;
+        // Login shells can print profile/banner text on stdout before the command
+        // output. Treating that as the version would make the comparison
+        // unparsable and silently suppress a legitimate update, so only accept
+        // lines that actually look like a version and otherwise fall through to
+        // the null result, which keeps the bundled manifest label as the answer.
+        final version = line.trim();
+        if (_monkeyMuxHelperVersionPattern.hasMatch(version)) {
+          return version;
+        }
       }
-    }
+      return null;
+    })().timeout(const Duration(seconds: 5));
   } on TimeoutException {
     return null;
   } finally {
+    lines.cancel().ignore();
     await _closeMonkeyMuxExecSession(
       execSession,
       ownerSession: session,
       operation: 'helper_version',
     );
   }
-  return null;
 }
 
 Future<void> _closeMonkeyMuxExecSession(
@@ -1875,19 +1839,9 @@ class _MonkeyMuxWindowChangeObserver {
       );
       if (_disposed || generation != _startGeneration) return;
       final command = _buildMonkeyMuxControlCommand(installation, sessionName);
-      final open = session.execute(command);
-      final controlSession = await open.timeout(
+      final controlSession = await openSshExec(
+        session.execute(command),
         _channelOpenTimeout,
-        onTimeout: () {
-          unawaited(
-            open.then(
-              (late) =>
-                  _closeControlSession(late, operation: 'start_open_timeout'),
-              onError: (Object _) {},
-            ),
-          );
-          throw TimeoutException('MonkeyMux control channel open timed out.');
-        },
       );
       if (_disposed || generation != _startGeneration) {
         await _closeControlSession(controlSession, operation: 'start_disposed');
@@ -2095,19 +2049,10 @@ class _MonkeyMuxWindowChangeObserver {
     });
   }
 
-  Duration _nextReconnectDelay() {
-    const baseDelay = Duration(milliseconds: 250);
-    const maxDelay = Duration(seconds: 5);
-    var factor = 1;
-    for (var i = 0; i < _reconnectAttempts && factor < 16; i += 1) {
-      factor *= 2;
-    }
-    final milliseconds = baseDelay.inMilliseconds * factor;
-    if (milliseconds >= maxDelay.inMilliseconds) {
-      return maxDelay;
-    }
-    return Duration(milliseconds: milliseconds);
-  }
+  /// Exponential backoff: 250ms doubling per attempt, capped at 4s.
+  Duration _nextReconnectDelay() => Duration(
+    milliseconds: 250 << (_reconnectAttempts < 4 ? _reconnectAttempts : 4),
+  );
 
   Future<void> dispose() => _disposeFuture ??= _dispose();
 
@@ -2359,20 +2304,23 @@ class _AppReviewDemoMonkeyMuxState {
     return activeWindow;
   }
 
-  TmuxWindow? killWindow(int windowIndex) {
+  TmuxWindow? killWindow(int windowIndex, {String? windowId}) {
+    final targetIndex = windowId == null
+        ? windowIndex
+        : _windows.indexWhere((window) => window.id == windowId);
     if (_windows.length <= 1 ||
-        windowIndex < 0 ||
-        windowIndex >= _windows.length) {
+        targetIndex < 0 ||
+        targetIndex >= _windows.length) {
       return null;
     }
-    final closed = _windows.removeAt(windowIndex);
+    final closed = _windows.removeAt(targetIndex);
     if (_activeIndex >= _windows.length) {
       _activeIndex = _windows.length - 1;
-    } else if (windowIndex < _activeIndex) {
+    } else if (targetIndex < _activeIndex) {
       _activeIndex -= 1;
     }
     emitWindowList();
-    return closed.toWindow(index: windowIndex, isActive: false);
+    return closed.toWindow(index: targetIndex, isActive: false);
   }
 
   void emitWindowList() {
@@ -2573,23 +2521,6 @@ ${_ansi('48;5;23;38;5;231', ' Patch ready ')}
 ${_ansi('38;5;245', '› Ask Codex for a follow-up')}
 ''';
   }
-  if (tool == AgentLaunchTool.geminiCli ||
-      window.name.toLowerCase().contains('gemini')) {
-    return '''
-${_ansi('38;5;99;1', '✦ Gemini CLI (demo)')} ${_ansi('38;5;245', '2.5 Pro')}
-
-${_ansi('38;5;99', 'loaded context')}
- ${_ansi('38;5;45', '✓')} PRODUCT.md
- ${_ansi('38;5;45', '✓')} DESIGN.md
- ${_ansi('38;5;45', '✓')} lib/domain/services
-
-${_ansi('38;5;45;1', 'Gemini summary')}
-  Local MonkeyMux state is active.
-  Window switches repaint the terminal.
-
-${_ansi('48;5;57;38;5;231', '  Enter prompt  ')} ${_ansi('38;5;245', 'ctrl+j newline')}
-''';
-  }
   if (tool == AgentLaunchTool.antigravity ||
       window.name.toLowerCase().contains('antigravity')) {
     return '''
@@ -2644,7 +2575,14 @@ TmuxWindow? _windowFromJson(Object? value) {
   final terminalBracketedPasteMode = explicitTerminalBracketedPasteMode is bool
       ? explicitTerminalBracketedPasteMode
       : _privateModeValue(privateModes, '2004');
-  final agentSessionId = _nonEmpty(value['agentSessionId'] as String?);
+  final storedTool = _nonEmpty(value['agentTool'] as String?);
+  final agentTool = _agentToolFromMonkeyMuxMetadata(storedTool);
+  final unsupportedTool =
+      agentTool == null &&
+      (storedTool != null || value['agentToolConfirmed'] == true);
+  final agentSessionId = unsupportedTool
+      ? null
+      : _nonEmpty(value['agentSessionId'] as String?);
   // The MonkeyMux server only raises the `#` alert flag when a background
   // window emits a terminal bell (agents ring the bell when they need input),
   // and clears it as soon as the window is selected. Parsing it restores the
@@ -2660,7 +2598,8 @@ TmuxWindow? _windowFromJson(Object? value) {
     panePid: value['panePid'] as int?,
     flags: _nonEmpty(value['flags'] as String?),
     paneTitle: _nonEmpty(value['paneTitle'] as String?),
-    agentTool: _agentToolFromMonkeyMuxMetadata(value['agentTool'] as String?),
+    agentTool: agentTool,
+    hasUnsupportedAgentTool: unsupportedTool,
     activeAgentSessionId: agentSessionId,
     activeAgentSessionConfidence:
         agentSessionId != null && value['agentSessionIdentityExact'] == true
@@ -2750,7 +2689,6 @@ List<TmuxWindow> applyMonkeyMuxAgentMetadataForTesting(
   return _applyMonkeyMuxAgentSessionMetadata(
     windows,
     parseAgentActiveSessionMetadataOutput(output, panePids),
-    refreshedPanePids: panePids,
   ).windows;
 }
 
@@ -2792,15 +2730,13 @@ String? _nonEmpty(String? value) {
   return trimmed == null || trimmed.isEmpty ? null : trimmed;
 }
 
-String _shellQuote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
-
 /// Quotes a single MonkeyMux command argument for the remote shell. POSIX hosts
 /// use single-quote escaping; Windows hosts use [_windowsQuoteArg], which
 /// follows the CommandLineToArgvW parsing rules so embedded quotes and trailing
 /// backslashes survive (helper path, session name, working directory, launch
 /// command).
 String _monkeyMuxQuoteArg(String value, {required bool windows}) =>
-    windows ? _windowsQuoteArg(value) : _shellQuote(value);
+    windows ? _windowsQuoteArg(value) : shellEscapePosix(value);
 
 /// Quotes [value] as a single Windows argument following the
 /// CommandLineToArgvW / C runtime rules (the same algorithm as Go's

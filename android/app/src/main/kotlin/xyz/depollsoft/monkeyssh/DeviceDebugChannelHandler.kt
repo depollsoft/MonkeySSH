@@ -394,20 +394,22 @@ object DeviceDebugChannelHandler {
         private val wifiManager =
             context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         private var resolving = false
-        private var discoveryStarted = false
         private var completed = false
         private var multicastLock: WifiManager.MulticastLock? = null
 
         private val timeoutRunnable = Runnable { complete(null) }
 
+        // NsdManager invokes listeners on its own thread. Every state change
+        // and the single Flutter reply run on the main thread so the timeout
+        // and a late resolution cannot race each other.
         private val discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(registrationType: String) {
-                discoveryStarted = true
-            }
+            override fun onDiscoveryStarted(registrationType: String) = Unit
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                pendingServices.add(serviceInfo)
-                resolveNext()
+                mainHandler.post {
+                    pendingServices.add(serviceInfo)
+                    resolveNext()
+                }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
@@ -418,17 +420,15 @@ object DeviceDebugChannelHandler {
                 serviceType: String,
                 errorCode: Int,
             ) {
-                fail("discovery_start_failed", errorCode)
+                mainHandler.post { fail("discovery_start_failed", errorCode) }
             }
 
+            // Discovery is only stopped after completion, so there is no
+            // pending result left to fail.
             override fun onStopDiscoveryFailed(
                 serviceType: String,
                 errorCode: Int,
-            ) {
-                if (!completed) {
-                    fail("discovery_stop_failed", errorCode)
-                }
-            }
+            ) = Unit
         }
 
         fun start() {
@@ -440,7 +440,6 @@ object DeviceDebugChannelHandler {
                     setReferenceCounted(false)
                     acquire()
                 }
-                discoveryStarted = true
                 nsdManager.discoverServices(
                     serviceType,
                     NsdManager.PROTOCOL_DNS_SD,
@@ -473,29 +472,37 @@ object DeviceDebugChannelHandler {
                         serviceInfo: NsdServiceInfo,
                         errorCode: Int,
                     ) {
-                        resolving = false
-                        resolveNext()
+                        mainHandler.post {
+                            resolving = false
+                            resolveNext()
+                        }
                     }
 
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                        resolving = false
-                        val address = resolvedAddresses(serviceInfo)
-                            .sortedBy { if (it is Inet4Address) 0 else 1 }
-                            .firstOrNull(::isLocalAddress)
-                        if (address != null && serviceInfo.port in 1..65535) {
-                            complete(
-                                mapOf(
-                                    "serviceName" to serviceInfo.serviceName,
-                                    "host" to address.hostAddress,
-                                    "port" to serviceInfo.port,
-                                ),
-                            )
-                            return
+                        mainHandler.post {
+                            resolving = false
+                            onServiceResolvedOnMain(serviceInfo)
                         }
-                        resolveNext()
                     }
                 },
             )
+        }
+
+        private fun onServiceResolvedOnMain(serviceInfo: NsdServiceInfo) {
+            val address = resolvedAddresses(serviceInfo)
+                .sortedBy { if (it is Inet4Address) 0 else 1 }
+                .firstOrNull(::isLocalAddress)
+            if (address != null && serviceInfo.port in 1..65535) {
+                complete(
+                    mapOf(
+                        "serviceName" to serviceInfo.serviceName,
+                        "host" to address.hostAddress,
+                        "port" to serviceInfo.port,
+                    ),
+                )
+                return
+            }
+            resolveNext()
         }
 
         private fun isLocalAddress(address: InetAddress): Boolean {
@@ -532,13 +539,11 @@ object DeviceDebugChannelHandler {
 
         private fun cleanup() {
             mainHandler.removeCallbacks(timeoutRunnable)
-            if (!discoveryStarted) {
-                return
-            }
             try {
                 nsdManager.stopServiceDiscovery(discoveryListener)
             } catch (_: IllegalArgumentException) {
-                // Android may already have stopped a failed discovery.
+                // Android may already have stopped a failed discovery, or the
+                // listener never registered because starting it threw.
             }
             multicastLock?.let { lock ->
                 if (lock.isHeld) {

@@ -251,9 +251,10 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
       result = result.where((t) => !t.isDark).toList();
     }
 
-    // Apply search filter
-    if (_searchQuery.isNotEmpty) {
-      final query = _searchQuery.toLowerCase();
+    // Apply search filter. Match on the same trimmed text the live repository
+    // search uses so surrounding whitespace never hides installed themes.
+    final query = _searchQuery.trim().toLowerCase();
+    if (query.isNotEmpty) {
       result = result
           .where((t) => t.name.toLowerCase().contains(query))
           .toList();
@@ -292,7 +293,7 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
           ),
           const SizedBox(height: 16),
         ],
-        if (darkThemes.isNotEmpty && _filter != _ThemeFilter.light) ...[
+        if (darkThemes.isNotEmpty) ...[
           const _SectionHeader(title: 'Dark Themes'),
           _ThemeGridSection(
             themes: darkThemes,
@@ -301,7 +302,7 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
           ),
           const SizedBox(height: 16),
         ],
-        if (lightThemes.isNotEmpty && _filter != _ThemeFilter.dark) ...[
+        if (lightThemes.isNotEmpty) ...[
           const _SectionHeader(title: 'Light Themes'),
           _ThemeGridSection(
             themes: lightThemes,
@@ -320,6 +321,8 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
   }
 
   void _handleThemeActivated(TerminalThemeData theme) {
+    _livePreviewGeneration++;
+    setState(() => _previewingScheme = null);
     if (!widget.previewOnTap) {
       widget.onThemeSelected(theme);
       return;
@@ -438,19 +441,23 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
       return;
     }
 
+    _livePreviewGeneration++;
     var didSelectTheme = false;
     setState(() => _importingSchemeId = scheme.id);
     try {
       final liveSchemeService = ref.read(itermColorSchemeServiceProvider);
+      final themeService = ref.read(terminalThemeServiceProvider);
       final importedTheme = await liveSchemeService.loadTheme(scheme);
       final builtInTheme = TerminalThemes.getById(importedTheme.id);
       final theme = builtInTheme ?? importedTheme.copyWith(isCustom: true);
 
       if (builtInTheme == null) {
-        await ref.read(terminalThemeServiceProvider).saveCustomTheme(theme);
-        ref
-          ..invalidate(allTerminalThemesProvider)
-          ..invalidate(customTerminalThemesProvider);
+        await themeService.saveCustomTheme(theme);
+        if (mounted) {
+          ref
+            ..invalidate(allTerminalThemesProvider)
+            ..invalidate(customTerminalThemesProvider);
+        }
       }
 
       if (mounted) {
@@ -530,12 +537,12 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
   Future<void> _deleteCustomTheme(TerminalThemeData theme) async {
     try {
       await ref.read(terminalThemeServiceProvider).deleteCustomTheme(theme.id);
-      ref
-        ..invalidate(allTerminalThemesProvider)
-        ..invalidate(customTerminalThemesProvider);
       if (!mounted) {
         return;
       }
+      ref
+        ..invalidate(allTerminalThemesProvider)
+        ..invalidate(customTerminalThemesProvider);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Deleted "${theme.name}"')));

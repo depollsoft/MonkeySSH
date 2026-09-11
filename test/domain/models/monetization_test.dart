@@ -2,6 +2,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 
 void main() {
+  group('Agent Management monetization', () {
+    test('registers the manager and automatic checks as Pro benefits', () {
+      const feature = MonetizationFeature.agentManagement;
+      expect(feature.label, 'Agent Management');
+      expect(feature.description, contains('Install, repair, and update'));
+      expect(feature.blockedAction, 'Manage remote coding agents');
+      expect(feature.blockedOutcome, contains('automatic update checks'));
+      expect(const MonetizationEntitlements.free().allows(feature), isFalse);
+      expect(const MonetizationEntitlements.pro().allows(feature), isTrue);
+    });
+  });
+
   group('concurrent ACP session monetization', () {
     test('describes only the concurrent-session upgrade boundary', () {
       const feature = MonetizationFeature.concurrentAcpSessions;

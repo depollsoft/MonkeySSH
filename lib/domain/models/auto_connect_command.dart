@@ -72,10 +72,6 @@ class TerminalCommandReview {
 
   /// Whether this command should be confirmed with the user before use.
   bool get requiresReview => reasons.isNotEmpty;
-
-  /// Whether the command contains multiple lines.
-  bool get isMultiline =>
-      reasons.contains(TerminalCommandReviewReason.multiline);
 }
 
 /// Resolves the effective auto-connect mode from persisted host fields.

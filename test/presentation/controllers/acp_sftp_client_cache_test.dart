@@ -13,6 +13,55 @@ class _FakeSftpClient extends Fake implements SftpClient {
 
 void main() {
   group('AcpSftpClientCache', () {
+    for (final liveConnection in <int?>[null, 2]) {
+      test(
+        'invalidation to $liveConnection supersedes an in-flight open',
+        () async {
+          final cache = AcpSftpClientCache();
+          final pending = Completer<SftpClient>();
+          final opening = cache.ensure(
+            connectionId: 1,
+            open: () => pending.future,
+          );
+          cache.invalidateIfStale(liveConnection);
+          pending.complete(_FakeSftpClient(1));
+          expect(await opening, isNull);
+          expect(cache.connectionId, isNull);
+        },
+      );
+    }
+
+    test(
+      'disconnect does not reuse an invalidated same-connection open',
+      () async {
+        final cache = AcpSftpClientCache();
+        final pending = Completer<SftpClient>();
+        final opening = cache.ensure(
+          connectionId: 1,
+          open: () => pending.future,
+        );
+        await cache.ensure(
+          connectionId: null,
+          open: () async => _FakeSftpClient(9),
+        );
+        final fresh = _FakeSftpClient(2);
+        final reopened = cache.ensure(connectionId: 1, open: () async => fresh);
+        pending.complete(_FakeSftpClient(1));
+        expect(await opening, isNull);
+        expect(await reopened, same(fresh));
+        expect(cache.clientForConnection(1), same(fresh));
+      },
+    );
+
+    test('same-connection invalidation keeps the pending open', () async {
+      final cache = AcpSftpClientCache();
+      final pending = Completer<SftpClient>();
+      final opening = cache.ensure(connectionId: 1, open: () => pending.future);
+      cache.invalidateIfStale(1);
+      final client = _FakeSftpClient(1);
+      pending.complete(client);
+      expect(await opening, same(client));
+    });
     test('opens once and reuses the client for the same connection', () async {
       final cache = AcpSftpClientCache();
       var opens = 0;

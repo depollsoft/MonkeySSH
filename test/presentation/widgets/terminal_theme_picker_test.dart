@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/iterm_color_scheme.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart';
@@ -26,6 +27,8 @@ final _remoteTheme = TerminalThemes.dracula.copyWith(
 );
 
 void main() {
+  setUpAll(() => registerFallbackValue(_remoteTheme));
+
   group('TerminalThemePicker', () {
     testWidgets(
       'previews installed themes instead of selecting in preview mode',
@@ -67,6 +70,32 @@ void main() {
       expect(previewedThemes, isEmpty);
     });
 
+    testWidgets('matches installed themes ignoring surrounding whitespace', (
+      tester,
+    ) async {
+      await _pumpPicker(
+        tester,
+        onThemeSelected: (_) {},
+        liveSchemeService: _FakeItermColorSchemeService(),
+      );
+
+      await tester.enterText(find.byType(TextField), ' dracula ');
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(ThemePreviewCard, TerminalThemes.dracula.name),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(
+          ThemePreviewCard,
+          TerminalThemes.defaultDarkTheme.name,
+        ),
+        findsNothing,
+      );
+    });
+
     testWidgets('previews downloadable live themes in preview mode', (
       tester,
     ) async {
@@ -90,6 +119,104 @@ void main() {
 
       expect(liveSchemeService.loadedSchemeIds, [_remoteScheme.id]);
       expect(previewedThemes.single.id, _remoteTheme.id);
+    });
+
+    testWidgets('installed choice supersedes a delayed remote preview', (
+      tester,
+    ) async {
+      final pendingTheme = Completer<TerminalThemeData>();
+      final previewedThemes = <TerminalThemeData>[];
+      await _pumpPicker(
+        tester,
+        onThemeSelected: (_) {},
+        onThemePreviewed: previewedThemes.add,
+        previewOnTap: true,
+        liveSchemeService: _FakeItermColorSchemeService(pendingTheme.future),
+      );
+      await tester.enterText(find.byType(TextField), 'dracula');
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text(_remoteScheme.name));
+      await tester.tap(find.text(_remoteScheme.name));
+      await tester.pump();
+      final installedTheme = find.widgetWithText(
+        ThemePreviewCard,
+        TerminalThemes.dracula.name,
+      );
+      await tester.ensureVisible(installedTheme);
+      await tester.tap(installedTheme);
+      await tester.pump();
+      pendingTheme.complete(_remoteTheme);
+      await tester.pumpAndSettle();
+
+      expect(previewedThemes.map((theme) => theme.id), [
+        TerminalThemes.dracula.id,
+      ]);
+      expect(find.text('Preview shown above'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('dismissed import finishes saving without selecting a theme', (
+      tester,
+    ) async {
+      final pendingTheme = Completer<TerminalThemeData>();
+      final themeService = _MockTerminalThemeService();
+      final selectedThemes = <TerminalThemeData>[];
+      when(() => themeService.saveCustomTheme(any())).thenAnswer((_) async {});
+      await _pumpPicker(
+        tester,
+        onThemeSelected: selectedThemes.add,
+        liveSchemeService: _FakeItermColorSchemeService(pendingTheme.future),
+        themeService: themeService,
+      );
+      await tester.enterText(find.byType(TextField), 'remote');
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Import theme'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      pendingTheme.complete(_remoteTheme);
+      await tester.pumpAndSettle();
+
+      final saved =
+          verify(
+                () => themeService.saveCustomTheme(captureAny()),
+              ).captured.single
+              as TerminalThemeData;
+      expect(saved.id, _remoteTheme.id);
+      expect(saved.isCustom, isTrue);
+      expect(selectedThemes, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('dismissal during deletion avoids disposed provider access', (
+      tester,
+    ) async {
+      final pendingDelete = Completer<void>();
+      final themeService = _MockTerminalThemeService();
+      when(
+        () => themeService.deleteCustomTheme(_remoteTheme.id),
+      ).thenAnswer((_) => pendingDelete.future);
+      await _pumpPicker(
+        tester,
+        onThemeSelected: (_) {},
+        themes: [_remoteTheme],
+        themeService: themeService,
+      );
+      await tester.longPress(
+        find.widgetWithText(ThemePreviewCard, _remoteTheme.name),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete theme'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      pendingDelete.complete();
+      await tester.pumpAndSettle();
+
+      verify(() => themeService.deleteCustomTheme(_remoteTheme.id)).called(1);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('dialog stays above keyboard and confirms previewed theme', (
@@ -233,12 +360,16 @@ Future<void> _pumpPicker(
   required ValueChanged<TerminalThemeData> onThemeSelected,
   ValueChanged<TerminalThemeData>? onThemePreviewed,
   ItermColorSchemeService? liveSchemeService,
+  TerminalThemeService? themeService,
+  List<TerminalThemeData> themes = _testThemes,
   bool previewOnTap = false,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
-        allTerminalThemesProvider.overrideWith((ref) async => _testThemes),
+        allTerminalThemesProvider.overrideWith((ref) async => themes),
+        if (themeService != null)
+          terminalThemeServiceProvider.overrideWithValue(themeService),
         if (liveSchemeService != null)
           itermColorSchemeServiceProvider.overrideWith(
             (ref) => liveSchemeService,
@@ -263,7 +394,11 @@ Future<void> _pumpPicker(
   await tester.pumpAndSettle();
 }
 
+class _MockTerminalThemeService extends Mock implements TerminalThemeService {}
+
 class _FakeItermColorSchemeService extends ItermColorSchemeService {
+  _FakeItermColorSchemeService([this._pendingTheme]);
+
   final loadedSchemeIds = <String>[];
   Future<TerminalThemeData>? _pendingTheme;
 
