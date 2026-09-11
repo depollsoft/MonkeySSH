@@ -161,7 +161,8 @@ func TestPrepareAgentLaunch(t *testing.T) {
 			case "cursor-agent":
 				prefix = []string{"--plugin-dir", filepath.Join(directory, "monkeymux-cursor-plugin")}
 			case "codex":
-				prefix = []string{"-c", codexIdentityHookConfig(shellQuote(executable) + " agent-identity-hook --tool codex")}
+				hook := shellQuote(executable) + " agent-identity-hook --tool codex"
+				prefix = []string{"-c", codexIdentityHookConfig(hook), "-c", codexIdentityHookTrustConfig(hook)}
 			}
 			assignFlag := agentLaunchSessionIDFlag(tool, args)
 			if assignFlag != "" {
@@ -307,6 +308,48 @@ func TestCodexIdentityHookConfig(t *testing.T) {
 		if strings.Contains(value, "dangerously-bypass-hook-trust") || strings.Contains(value, "notify=") {
 			t.Fatalf("unexpected trust override or notify hook: %s", value)
 		}
+	}
+}
+
+// Vectors come from values Codex itself persisted to config.toml after the
+// user trusted the hook in the pane; the second is the wrapper's real command.
+func TestCodexIdentityHookTrustedHash(t *testing.T) {
+	for _, tc := range []struct{ command, want string }{
+		{"bash /private/tmp/claude-501/-Users-depoll-Code-MonkeySSH/fc8e760a-62cf-4a6a-9ffa-a526bc6e6e8c/scratchpad/spike/hook.sh",
+			"sha256:10c8523ececf61dd6235483ae3c8af5e0661cadd54b6ba35fbdbade8fbcce932"},
+		{"'/Users/depoll/.monkeyssh/bin/monkeymux/0.1.192/darwin-arm64/monkeymux' agent-identity-hook --tool codex",
+			"sha256:1e2a689776af941f16481cfd33f791e07e2b6652dd631b7a5186fa89593e89ea"},
+	} {
+		if got := codexIdentityHookTrustedHash(tc.command, 5); got != tc.want {
+			t.Errorf("hash(%q) = %s, want %s", tc.command, got, tc.want)
+		}
+	}
+	// Characters serde_json leaves literal must not be HTML-escaped, and a
+	// different timeout is a different identity.
+	plain, html := codexIdentityHookTrustedHash("a<b>&c", 5), codexIdentityHookTrustedHash("a\\u003cb\\u003e\\u0026c", 5)
+	if plain == html {
+		t.Fatal("HTML-escaped and literal commands hashed alike")
+	}
+	if codexIdentityHookTrustedHash("x", 5) == codexIdentityHookTrustedHash("x", 6) {
+		t.Fatal("timeout is not part of the trust identity")
+	}
+}
+
+func TestCodexIdentityHookTrustConfig(t *testing.T) {
+	command := "'/opt/monkeymux' agent-identity-hook --tool codex"
+	value := codexIdentityHookTrustConfig(command)
+	want := `hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash="` +
+		codexIdentityHookTrustedHash(command, codexIdentityHookTimeoutSec) + `"}}`
+	if value != want {
+		t.Fatalf("trust override = %s, want %s", value, want)
+	}
+	if strings.Contains(value, "dangerously-bypass-hook-trust") {
+		t.Fatal("trust override must not bypass review for other hooks")
+	}
+	// Both overrides must describe the same command and the same timeout.
+	hooks := codexIdentityHookConfig(command)
+	if !strings.Contains(hooks, ",timeout="+strconv.Itoa(codexIdentityHookTimeoutSec)+"}") {
+		t.Fatalf("hooks override timeout drifted from the hashed one: %s", hooks)
 	}
 }
 

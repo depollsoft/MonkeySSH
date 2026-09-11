@@ -124,7 +124,7 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 	hookCommand := shellQuote(executable) + " agent-identity-hook --tool " + tool
 	var prefix []string
 	if tool == "codex" {
-		prefix = []string{"-c", codexIdentityHookConfig(hookCommand)}
+		prefix = []string{"-c", codexIdentityHookConfig(hookCommand), "-c", codexIdentityHookTrustConfig(hookCommand)}
 	} else {
 		directory, err := runtimeDirectory()
 		if err != nil {
@@ -236,10 +236,43 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 	return launch, nil
 }
 
+// codexIdentityHookTimeoutSec is the hook timeout written into the -c hooks
+// override. The trust hash covers it, so both come from this one constant.
+const codexIdentityHookTimeoutSec = 5
+
 func codexIdentityHookConfig(command string) string {
 	// TOML basic strings share these escapes with JSON, but not Go's \xNN.
 	escaped := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\r", "\\r", "\t", "\\t", "\b", "\\b", "\f", "\\f").Replace(command)
-	return `hooks.SessionStart=[{hooks=[{type="command",command="` + escaped + `",timeout=5}]}]`
+	return `hooks.SessionStart=[{hooks=[{type="command",command="` + escaped + `",timeout=` + strconv.Itoa(codexIdentityHookTimeoutSec) + `}]}]`
+}
+
+// codexIdentityHookTrustedHash reproduces Codex's hook trust identity
+// (codex-rs/hooks/src/engine/discovery.rs hook_hash and
+// config/src/fingerprint.rs version_for_toml): the sha256 of the compact,
+// recursively key-sorted JSON of the normalised SessionStart handler. Unset
+// fields (matcher, commandWindows, statusMessage, additionalContextLimit) are
+// omitted, exactly as Codex omits them before hashing.
+func codexIdentityHookTrustedHash(command string, timeoutSec int) string {
+	var quoted strings.Builder
+	encoder := json.NewEncoder(&quoted)
+	encoder.SetEscapeHTML(false) // serde_json never escapes <, > or &.
+	if err := encoder.Encode(command); err != nil {
+		return ""
+	}
+	identity := `{"event_name":"session_start","hooks":[{"async":false,"command":` +
+		strings.TrimSpace(quoted.String()) + `,"timeout":` + strconv.Itoa(timeoutSec) + `,"type":"command"}]}`
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(identity)))
+}
+
+// codexIdentityHookTrustConfig pre-trusts exactly the MonkeyMux identity hook
+// for this launch, so Codex neither shows "Hooks need review" nor needs
+// --dangerously-bypass-hook-trust (which would also bypass review for every
+// other hook). Codex merges hooks.state from the session-flags layer. The
+// value is an inline table because Codex's -c key parser splits on every dot
+// and the state key itself contains "config.toml".
+func codexIdentityHookTrustConfig(command string) string {
+	return `hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash="` +
+		codexIdentityHookTrustedHash(command, codexIdentityHookTimeoutSec) + `"}}`
 }
 
 func agentLaunchSessionIDFlag(tool string, args []string) string {
