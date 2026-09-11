@@ -37,7 +37,7 @@ class PreviewReleaseNotesTest < Minitest::Test
 
     notes = PreviewReleaseNotes.current
 
-    assert_includes notes, 'PR #794: Distribute builds through Firebase'
+    assert_equal 'Main build: PR #794: Distribute builds through Firebase', notes.lines.first.strip
     assert_includes notes, 'Branch: main'
     assert_includes notes, 'Last commit: abc1234 fix: include release context'
   end
@@ -45,6 +45,7 @@ class PreviewReleaseNotesTest < Minitest::Test
   def test_uses_newest_pr_commit_when_explicit_commit_is_missing
     ENV['FLUTTY_PR_NUMBER'] = '794'
     ENV['FLUTTY_PR_TITLE'] = 'Distribute builds through Firebase'
+    ENV['FLUTTY_BRANCH_NAME'] = 'feature/firebase'
     ENV['FLUTTY_PR_COMMITS'] = <<~COMMITS
       def5678 fix: newest change
       abc1234 feat: earlier change
@@ -53,6 +54,9 @@ class PreviewReleaseNotesTest < Minitest::Test
     notes = PreviewReleaseNotes.current
 
     assert_includes notes, 'Last commit: def5678 fix: newest change'
+    assert_equal 'PR #794: Distribute builds through Firebase', notes.lines.first.strip
+    assert_includes notes, 'Branch: feature/firebase'
+    refute_includes notes, 'Main build:'
   end
 
   def test_supports_direct_branch_push_without_a_pr
@@ -73,6 +77,19 @@ class PreviewReleaseNotesTest < Minitest::Test
 
     assert_operator notes.length, :<=, 500
     assert_match(/^PR #794: /, notes)
+    assert_match(/\nLast commit: abc1234 /, notes)
+  end
+
+  def test_main_origin_and_pr_survive_long_titles_and_commit_messages
+    ENV['FLUTTY_PR_NUMBER'] = '794'
+    ENV['FLUTTY_PR_TITLE'] = 'T' * 400
+    ENV['FLUTTY_BRANCH_NAME'] = 'main'
+    ENV['FLUTTY_LAST_COMMIT'] = "abc1234 #{'C' * 400}"
+
+    notes = PreviewReleaseNotes.current(max_length: 500)
+
+    assert_operator notes.length, :<=, 500
+    assert_match(/^Main build: PR #794: /, notes)
     assert_match(/\nLast commit: abc1234 /, notes)
   end
 end
