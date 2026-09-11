@@ -249,6 +249,7 @@ func clampConPtyDimension(value int) int16 {
 // winPty wraps a Windows pseudo console (ConPTY) and the two pipe endpoints the
 // parent uses to talk to the attached child process.
 type winPty struct {
+	pid       uint32
 	hpc       windows.Handle
 	backend   *conPtyBackend
 	writeFile *os.File // parent writes child's stdin (input pipe write end)
@@ -372,6 +373,7 @@ func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) 
 	}
 
 	windowPty := &winPty{
+		pid:       pid,
 		hpc:       hpc,
 		backend:   backend,
 		writeFile: os.NewFile(uintptr(writeHandle), "monkeymux-conpty-in"),

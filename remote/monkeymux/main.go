@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.191"
+	monkeyMuxVersion                  = "0.1.192"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -685,6 +685,8 @@ type muxServer struct {
 }
 
 type muxWindow struct {
+	inputMu                     sync.Mutex
+	nativePaste                 nativeConsolePasteFilter
 	id                          string
 	index                       int
 	name                        string
@@ -11378,7 +11380,29 @@ func (s *muxServer) writeWindowInput(
 	}
 	win32InputMode := window.win32InputMode
 	s.mu.Unlock()
-	if win32InputMode {
+	window.inputMu.Lock()
+	defer window.inputMu.Unlock()
+	// Native console readers receive encoded protocol bytes as typed keys.
+	// Query the console mode rather than inferring the reader from an app name.
+	// Ordinary keys need no probe: both reader types use the same encoding.
+	nativeConsoleInput := false
+	if win32InputMode && (bracketedPaste || bytes.Contains(data, []byte("\x1b]")) || bytes.Contains(data, []byte("\x1bP"))) {
+		if console, ok := window.pty.(interface{ virtualTerminalInputEnabled() (bool, error) }); ok {
+			vtInput, err := console.virtualTerminalInputEnabled()
+			nativeConsoleInput = err == nil && !vtInput
+		}
+	}
+	if nativeConsoleInput {
+		if bracketedPaste {
+			data = window.nativePaste.filter(data)
+			// Preserve literal escapes in the payload as characters, while
+			// never synthesizing key events for the removed paste delimiters.
+			data = encodeBracketedPasteInputForWin32InputMode(data)
+		} else {
+			data = terminalOscOrDcsSequencePattern.ReplaceAll(data, nil)
+			data = encodeTerminalInputForWin32InputMode(data)
+		}
+	} else if win32InputMode {
 		// ConPTY's input parser cannot disambiguate a bare ESC and drops raw
 		// OSC/DCS sequences, so a standalone Escape keystroke and synthetic
 		// replies (theme hints, clipboard responses, relayed query answers)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 )
@@ -397,6 +398,114 @@ func TestWriteWindowBareEscape(t *testing.T) {
 			}
 			if got := pty.String(); got != test.want {
 				t.Fatalf("PTY input = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+type consoleModeRecordingPty struct {
+	recordingPty
+	vtInput bool
+	modeErr error
+	probes  int
+}
+
+func (p *consoleModeRecordingPty) virtualTerminalInputEnabled() (bool, error) {
+	p.probes++
+	return p.vtInput, p.modeErr
+}
+
+func TestConsoleInputModeChangesAndProbeFailure(t *testing.T) {
+	pty := &consoleModeRecordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	const reply = "\x1b]11;rgb:0000/0000/0000\x07"
+	for _, state := range []struct {
+		vt  bool
+		err error
+	}{
+		{false, nil}, {true, nil}, {false, nil}, {false, errors.New("probe failed")},
+	} {
+		pty.vtInput, pty.modeErr = state.vt, state.err
+		if err := server.writeWindow(window.id, []byte(reply)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := win32EncodeSequence(reply) + win32EncodeSequence(reply)
+	if pty.String() != want || pty.probes != 4 {
+		t.Fatalf("input %q, probes %d; want %q and 4", pty.String(), pty.probes, want)
+	}
+	for _, key := range []string{"x", "\r", "\x1b", "\x1b[A"} {
+		if err := server.writeWindow(window.id, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pty.probes != 4 {
+		t.Fatal("ordinary keys must not launch console probes")
+	}
+}
+func TestConsoleReaderInputPolicy(t *testing.T) {
+	const reply = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
+	const paste = "\x1b[200~hello\x1b[201~"
+	for _, test := range []struct {
+		name, reader, input, want string
+		win32, paste              bool
+	}{
+		{"native paste", "native", paste, "hello", true, true},
+		{"split paste escape", "native", "\x1b", "", true, true},
+		{"native reply", "native", reply, "", true, false},
+		{"native DCS reply", "native", "\x1bP>|MonkeySSH\x1b\\", "", true, false},
+		{"mixed text and replies", "native", "a" + reply + "b", "ab", true, false},
+		{"pasted reply is user content", "native", "\x1b[200~" + reply + "\x1b[201~", string(encodeBracketedPasteInputForWin32InputMode([]byte(reply))), true, true},
+		{"native Escape", "native", "\x1b", win32InputModeEscapeKeyEvents, true, false},
+		{"native arrow", "native", "\x1b[A", "\x1b[A", true, false},
+		{"native Return", "native", "\r", "\r", true, false},
+		{"Unix reply", "native", reply, reply, false, false},
+		{"Unix paste", "native", paste, paste, false, true},
+		{"Windows VT reader reply", "vt", reply, win32EncodeSequence(reply), true, false},
+		{"Windows VT reader paste", "vt", paste, string(encodeBracketedPasteInputForWin32InputMode([]byte(paste))), true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pty := &consoleModeRecordingPty{vtInput: test.reader == "vt"}
+			window := &muxWindow{id: "@1", pty: pty, win32InputMode: test.win32}
+			server := newMuxServer("test")
+			server.windows = []*muxWindow{window}
+			if err := server.writeWindowInput(window.id, []byte(test.input), test.paste); err != nil {
+				t.Fatal(err)
+			}
+			if got := pty.String(); got != test.want {
+				t.Fatalf("PTY input = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeConsolePasteFilterAcrossEverySplit(t *testing.T) {
+	for _, test := range []struct{ name, input, want string }{
+		{"plain", "\x1b[200~hello\x1b[201~ ", "hello "},
+		{"unicode", "\x1b[200~héllo 🐒\x1b[201~", "héllo 🐒"},
+		{"8-bit framing", "\x9b200~hello\x9b201~", "hello"},
+		{"unicode continuation is not framing", "\x1b[200~\xc2\x9b201~text\x1b[201~", "\xc2\x9b201~text"},
+		{"multiple pastes", "\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~", "onetwo"},
+		{"nested start is content", "\x1b[200~\x1b[200~hello\x1b[201~", "\x1b[200~hello"},
+		{"control payload", "\x1b[200~a\r\nb\x1b]11;rgb:0000/0000/0000\x07\x1b[201~", "a\r\nb\x1b]11;rgb:0000/0000/0000\x07"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for split := 0; split <= len(test.input); split++ {
+				filter := &nativeConsolePasteFilter{}
+				got := append(filter.filter([]byte(test.input[:split])), filter.filter([]byte(test.input[split:]))...)
+				if string(got) != test.want || len(filter.carry) != 0 || filter.inPaste {
+					t.Fatalf("split %d: output %q, carry %q, inPaste %v; want %q", split, got, filter.carry, filter.inPaste, test.want)
+				}
+			}
+			filter := &nativeConsolePasteFilter{}
+			var got []byte
+			for _, value := range []byte(test.input) {
+				got = append(got, filter.filter([]byte{value})...)
+			}
+			if string(got) != test.want || len(filter.carry) != 0 || filter.inPaste {
+				t.Fatalf("byte-by-byte output %q, carry %q, inPaste %v; want %q", got, filter.carry, filter.inPaste, test.want)
 			}
 		})
 	}
