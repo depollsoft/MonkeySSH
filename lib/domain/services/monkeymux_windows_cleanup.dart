@@ -51,7 +51,7 @@ const _cleanupBody = r'''
     [IO.File]::WriteAllText($currentLease, '')
     $cutoff = [DateTime]::UtcNow.AddDays(-7)
     foreach ($version in @(Get-ChildItem -LiteralPath $cleanupRoot -Directory -Force)) {
-      if ($version.Name -notmatch '^[0-9]+.[0-9]+.[0-9]+$' -or
+      if ($version.Name -notmatch '^[0-9]+[.][0-9]+[.][0-9]+$' -or
           $null -eq (Get-PlainItem $version.FullName)) { continue }
       $platformDirectory = Get-PlainItem (Join-Path $version.FullName $cleanupPlatform)
       if ($null -eq $platformDirectory -or -not $platformDirectory.PSIsContainer) { continue }

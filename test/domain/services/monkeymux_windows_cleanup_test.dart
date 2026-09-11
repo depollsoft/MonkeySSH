@@ -84,6 +84,10 @@ Write-Output 'CONNECTION_CAN_CONTINUE'
       final unrecognizedVersion = await binary(
         'my-files/windows-amd64/$digest',
       );
+      final malformedVersions = [
+        for (final version in ['1x2y3', '12345', '1.2x3', '1x2.3'])
+          await binary('$version/windows-amd64/$digest'),
+      ];
       final unrecognizedBuild = await binary('0.1.4/windows-amd64/user-files');
       final withExtraFile = await binary('0.1.5/windows-amd64/$digest');
       final extra = File('${withExtraFile.parent.path}/keep.txt');
@@ -98,6 +102,7 @@ Write-Output 'CONNECTION_CAN_CONTINUE'
         recentUse,
         otherPlatform,
         unrecognizedVersion,
+        ...malformedVersions,
         unrecognizedBuild,
         extra,
       ]) {

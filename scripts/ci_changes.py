@@ -15,6 +15,16 @@ PAYLOAD_SCRIPTS = {
     'scripts/verify_monkeymux_assets.py',
 }
 
+# These Dart paths exercise Windows filesystem behavior that Linux test shards
+# cannot cover, even though they are outside the native windows/ directory.
+WINDOWS_TEST_INPUTS = {
+    'lib/domain/services/monkeymux_installer_service.dart',
+    'lib/domain/services/monkeymux_windows_cleanup.dart',
+    'lib/domain/services/windows_remote_powershell.dart',
+    'test/domain/services/monkeymux_installer_service_test.dart',
+    'test/domain/services/monkeymux_windows_cleanup_test.dart',
+}
+
 # Keep the non-required preview/deployment workflow triggers aligned with these
 # inputs. The regression test checks all three YAML lists against this one.
 MOBILE_PATHS = [
@@ -69,6 +79,7 @@ def classify(paths):
             or '/fastlane/' in path
         )
         result['tooling'] |= tooling
+        result['windows'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
 
         # Changes to the CI builder itself must exercise all its build jobs.
