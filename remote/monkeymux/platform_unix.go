@@ -455,31 +455,50 @@ func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replac
 	if restore == nil || ownerPID <= 0 {
 		return nil
 	}
-	return replacementPaneGroupsSystem().capture(restore, ownerPID, readProcessTable())
+	return replacementPaneGroupsSystem().capture(restore, ownerPID, readProcessTable)
 }
 
-func (system replacementPaneGroupSystem) capture(restore *serverRestore, ownerPID int, processes map[int]processInfo) []replacementPaneGroup {
+func (system replacementPaneGroupSystem) capture(restore *serverRestore, ownerPID int, readProcesses func() map[int]processInfo) []replacementPaneGroup {
 	var wrappers, panes []replacementPaneGroup
 	for _, window := range restore.Windows {
 		pid := window.PanePid
-		depth := processDepthFromAncestor(processes, pid, ownerPID)
-		if pid <= 0 || depth <= 0 {
-			continue
-		}
 		pane, ok := system.identity(pid)
 		if !ok {
 			continue
 		}
-		panes = append(panes, pane)
+		processes := readProcesses()
+		depth := processDepthFromAncestor(processes, pid, ownerPID)
+		if depth <= 0 {
+			continue
+		}
 		wrapperPID := pid
 		for step := 1; step < depth; step++ {
 			wrapperPID = processes[wrapperPID].ppid
 		}
-		if wrapperPID != pid {
-			if wrapper, ok := system.identity(wrapperPID); ok {
-				wrappers = append(wrappers, wrapper)
-			}
+		wrapper, wrapperOK := system.identity(wrapperPID)
+		// Bracket a fresh ancestry read with the pane and wrapper identities.
+		// A previous ps snapshot must never authorize a newly reused PID.
+		processes = readProcesses()
+		freshDepth := processDepthFromAncestor(processes, pid, ownerPID)
+		if freshDepth <= 0 {
+			continue
 		}
+		freshWrapper := pid
+		for step := 1; step < freshDepth; step++ {
+			freshWrapper = processes[freshWrapper].ppid
+		}
+		current, ok := system.identity(pid)
+		if !ok || !current.started.Equal(pane.started) || freshWrapper != wrapperPID {
+			continue
+		}
+		if wrapperPID != pid && wrapperOK {
+			currentWrapper, ok := system.identity(wrapperPID)
+			if !ok || !currentWrapper.started.Equal(wrapper.started) {
+				continue
+			}
+			wrappers = append(wrappers, wrapper)
+		}
+		panes = append(panes, pane)
 	}
 	// Put every verified wrapper first, even if another window lists it as a
 	// pane. Deduplicate shared groups without losing their kill ordering.

@@ -171,7 +171,7 @@ func TestReplacementPaneGroupsWrapperOrderingAndGuards(t *testing.T) {
 				tc.mutateCapture(processes, snapshots, groups)
 			}
 			// Duplicate windows must not cause duplicate signals.
-			captured := system.capture(&serverRestore{Windows: []restoreWindowState{{PanePid: pane}, {PanePid: pane}}}, owner, processes)
+			captured := system.capture(&serverRestore{Windows: []restoreWindowState{{PanePid: pane}, {PanePid: pane}}}, owner, func() map[int]processInfo { return processes })
 			var pids []int
 			for _, identity := range captured {
 				pids = append(pids, identity.pid)
@@ -218,5 +218,49 @@ func TestServerTerminationRechecksBeforeEscalation(t *testing.T) {
 		if !reflect.DeepEqual(signals, want) {
 			t.Fatalf("signals = %v, want %v", signals, want)
 		}
+	}
+}
+
+func TestReplacementCaptureRejectsIdentityChangesDuringAncestryRead(t *testing.T) {
+	for _, changed := range []string{"pane", "wrapper", "ancestry"} {
+		t.Run(changed, func(t *testing.T) {
+			const owner, wrapper, pane = 10, 20, 30
+			started := time.Unix(100, 123000)
+			processes := map[int]processInfo{
+				wrapper: {pid: wrapper, ppid: owner},
+				pane:    {pid: pane, ppid: wrapper},
+			}
+			snapshots := map[int]processSnapshot{
+				wrapper: {known: true, running: true, started: started},
+				pane:    {known: true, running: true, started: started},
+			}
+			system := replacementPaneGroupSystem{
+				alive:   func(int) bool { return true },
+				inspect: func(pid int) processSnapshot { return snapshots[pid] },
+				pgid:    func(pid int) (int, error) { return pid, nil },
+				kill:    func(int, syscall.Signal) error { t.Fatal("capture signaled a process"); return nil },
+			}
+			reads := 0
+			groups := system.capture(&serverRestore{Windows: []restoreWindowState{{PanePid: pane}}}, owner, func() map[int]processInfo {
+				reads++
+				if reads == 2 {
+					if changed == "ancestry" {
+						processes[wrapper] = processInfo{pid: wrapper, ppid: 999}
+					} else {
+						pid := pane
+						if changed == "wrapper" {
+							pid = wrapper
+						}
+						snapshot := snapshots[pid]
+						snapshot.started = snapshot.started.Add(time.Microsecond)
+						snapshots[pid] = snapshot
+					}
+				}
+				return processes
+			})
+			if len(groups) != 0 {
+				t.Fatalf("retained groups after %s changed: %v", changed, groups)
+			}
+		})
 	}
 }

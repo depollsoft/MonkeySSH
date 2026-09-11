@@ -2058,9 +2058,13 @@ func prepareRunningServerReplacement(
 		// Capture pane identities while their ancestry still leads to the old
 		// server. Shutdown can orphan them, and bare pids can be recycled before
 		// escalation. An unconfirmed server never authorizes process signals.
+		stillOwner := confirmedServerProcess(oldPID, session)
 		var panes []replacementPaneGroup
-		if oldPID.confirmedOwner(session) {
+		if stillOwner() {
 			panes = captureReplacementPaneGroups(restore, oldPID.pid)
+			if !stillOwner() {
+				panes = nil
+			}
 		}
 		if err := requestServerShutdown(session); err != nil {
 			// An unresponsive helper may never acknowledge shutdown. Preserve
@@ -2074,7 +2078,7 @@ func prepareRunningServerReplacement(
 			func() bool {
 				return terminateConfirmedServer(
 					func() pidOwnership { return pidRecordOwnership(oldPID, session) },
-					func() bool { return terminateProcessID(oldPID.pid, confirmedServerProcess(oldPID, session)) },
+					func() bool { return terminateProcessID(oldPID.pid, stillOwner) },
 				)
 			},
 			func() { reapReplacementPaneGroups(panes) },
