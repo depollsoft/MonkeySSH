@@ -14,6 +14,7 @@ import '../models/agent_usage.dart';
 import '../models/monetization.dart';
 import 'agent_session_discovery_service.dart';
 import 'agent_usage_parser.dart';
+import 'agent_usage_posix_command.dart';
 import 'agent_usage_windows_command.dart';
 import 'diagnostics_log_service.dart';
 import 'monetization_service.dart';
@@ -846,7 +847,7 @@ class AgentManagementService {
   ) async {
     if (!await _canManageAgents()) return const {};
     final existing = _inFlightUsageChecks[session.connectionId];
-    if (existing != null) await existing;
+    if (existing != null) return existing;
     late final Future<Map<String, AgentUsage>> check;
     check = _readUsage(session, runtimes).whenComplete(() {
       if (identical(_inFlightUsageChecks[session.connectionId], check)) {
@@ -885,9 +886,13 @@ class AgentManagementService {
       if (id != null &&
           (runtime.definition.kind == AgentRuntimeKind.cli ||
               runtime.definition.sharesCliInstallation ||
-              id == 'claude') &&
+              const {'claude', 'pi', 'antigravity'}.contains(id)) &&
           runtime.executablePath != null) {
-        selected[id] = runtime.executablePath!;
+        if (runtime.definition.kind == AgentRuntimeKind.cli) {
+          selected[id] = runtime.executablePath!;
+        } else {
+          selected.putIfAbsent(id, () => runtime.executablePath!);
+        }
       }
       result[runtime.definition.id] = AgentUsage(
         status: id == null
@@ -944,13 +949,12 @@ class AgentManagementService {
         'assets/scripts/agent_usage_probe.cjs',
       );
       final source = base64.encode(utf8.encode(script));
-      final input = base64.encode(utf8.encode(jsonEncode(pending)));
       final bootstrap =
           "process.env.MONKEYSSH_USAGE_PROBE='1';"
           "eval(Buffer.from('$source','base64').toString())";
       final command = session.remoteIsWindows
           ? buildWindowsAgentUsageCommand(pending)
-          : "$_profilePrefix node -e ${_shellQuote(bootstrap)} '$input' 2>/dev/null";
+          : '$_profilePrefix ${buildPosixAgentUsageCommand(bootstrap, pending)}';
       final response = await _run(
         session,
         command,

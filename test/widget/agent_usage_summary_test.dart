@@ -9,6 +9,7 @@ void main() {
     WidgetTester tester,
     AgentUsage usage, {
     double scale = 1,
+    bool expanded = true,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -21,7 +22,7 @@ void main() {
                 child: AgentUsageSummary(
                   usage: usage,
                   now: now,
-                  expanded: true,
+                  expanded: expanded,
                 ),
               ),
             ),
@@ -30,6 +31,49 @@ void main() {
       ),
     );
   }
+
+  testWidgets('failed accounts stay compact until expanded', (tester) async {
+    const usage = AgentUsage(
+      status: AgentUsageStatus.unavailable,
+      notices: [
+        AgentUsageNotice(
+          provider: 'Anthropic',
+          status: AgentUsageStatus.signInRequired,
+        ),
+        AgentUsageNotice(
+          provider: 'OpenAI',
+          status: AgentUsageStatus.unavailable,
+        ),
+      ],
+    );
+    await pump(tester, usage, expanded: false, scale: 2);
+    expect(find.textContaining('Anthropic'), findsOneWidget);
+    expect(find.textContaining('OpenAI'), findsNothing);
+    expect(find.text('1 more usage detail · expand above'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await pump(tester, usage, scale: 2);
+    expect(find.textContaining('OpenAI'), findsOneWidget);
+    expect(find.textContaining('expand above'), findsNothing);
+  });
+
+  testWidgets('singular reset and hidden quota labels use singular nouns', (
+    tester,
+  ) async {
+    const usage = AgentUsage(
+      status: AgentUsageStatus.available,
+      resetCredits: 1,
+      windows: [
+        AgentUsageWindow(label: 'A', unlimited: true),
+        AgentUsageWindow(label: 'B', unlimited: true),
+        AgentUsageWindow(label: 'C', unlimited: true),
+        AgentUsageWindow(label: 'D', unlimited: true),
+      ],
+    );
+    await pump(tester, usage, expanded: false);
+    expect(find.text('1 more usage detail · expand above'), findsOneWidget);
+    await pump(tester, usage);
+    expect(find.text('1 reset available'), findsOneWidget);
+  });
 
   testWidgets('past reset does not claim quota has been replenished', (
     tester,

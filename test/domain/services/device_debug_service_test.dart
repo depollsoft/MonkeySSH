@@ -10,11 +10,13 @@ import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 class _MockSshSession extends Mock implements SshSession {}
 
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockExecChannel extends Mock implements SSHSession {}
+class _MockExecChannel extends MockSessionWithChannel {}
 
 class _FakeAndroidDeviceDebugPlatform implements AndroidDeviceDebugPlatform {
   final endpoints = <AndroidAdbServiceKind, AndroidAdbEndpoint?>{};
@@ -219,7 +221,7 @@ void main() {
       final lateChannel = _MockExecChannel();
       opening.complete(lateChannel);
       await tester.pump();
-      verify(lateChannel.close).called(1);
+      verify(lateChannel.channel.destroy).called(1);
       verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
       blocker.complete();
       await blocked;

@@ -66,6 +66,8 @@ function spawnAgent(executable, args) {
   // Neither script type can be launched directly with CreateProcess.
   // Encode a literal PowerShell invocation instead of passing paths to cmd /c.
   if (process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(executable)) {
+    // PowerShell also treats smart apostrophes as delimiters. Doubling preserves
+    // the original character when the literal is parsed, including in paths.
     const quote = value => "'" + value.replace(/['\u2018\u2019\u201a\u201b]/g, '$&$&') + "'";
     const script = '& ' + [executable, ...args].map(quote).join(' ');
     executable = 'powershell.exe';
@@ -212,16 +214,19 @@ function keychain(service, account) {
     throw new Error('unavailable'); // Locked or inaccessible keychain.
   }
 }
-async function claude() {
-  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  let credentials = readJson(path.join(dir, '.credentials.json'));
-  if (!credentials.claudeAiOauth && process.platform === 'darwin' && !process.env.CLAUDE_CONFIG_DIR) {
-    const value = keychain('Claude Code-credentials');
-    if (value) { try { credentials = JSON.parse(value); } catch { throw new Error('unavailable'); } }
+async function claude(fetch = requestJson) {
+  let token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!token) {
+    const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+    let credentials = readJson(path.join(dir, '.credentials.json'));
+    if (!credentials.claudeAiOauth && process.platform === 'darwin' && !process.env.CLAUDE_CONFIG_DIR) {
+      const value = keychain('Claude Code-credentials');
+      if (value) { try { credentials = JSON.parse(value); } catch { throw new Error('unavailable'); } }
+    }
+    token = credentials.claudeAiOauth?.accessToken;
   }
-  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || credentials.claudeAiOauth?.accessToken;
   if (!token) throw new Error('signInRequired');
-  return claudeUsage(await requestJson('https://api.anthropic.com/api/oauth/usage', {
+  return claudeUsage(await fetch('https://api.anthropic.com/api/oauth/usage', {
     token, headers: {'anthropic-beta': 'oauth-2025-04-20'},
   }));
 }
@@ -229,7 +234,7 @@ async function claude() {
 // Provider-specific account readers. Authentication is read only; never refreshed.
 const providerNames = {
   anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'OpenAI Codex',
-  'github-copilot': 'GitHub Copilot', 'google-antigravity': 'Google Antigravity',
+  'github-copilot': 'GitHub Copilot', copilot: 'GitHub Copilot', 'google-antigravity': 'Google Antigravity',
   'google-gemini-cli': 'Google Gemini', google: 'Google', openrouter: 'OpenRouter',
   nous: 'Nous', xai: 'xAI', groq: 'Groq', mistral: 'Mistral', deepseek: 'DeepSeek',
   opencode: 'OpenCode Zen', 'opencode-go': 'OpenCode Go', ollama: 'Ollama',
@@ -278,14 +283,17 @@ function cursorUsage(data) {
   return {windows: [{label: 'Account access', restricted: policy.isInSlowPool === true,
     resetsAt: milliseconds(policy.resetAtMs)}]};
 }
-async function cursor() {
-  const dir = process.platform === 'darwin' ? path.join(os.homedir(), '.cursor') :
-    process.platform === 'win32' ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Cursor') :
-      path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cursor');
-  const credentials = readJson(path.join(dir, 'auth.json'));
-  const token = process.env.CURSOR_AUTH_TOKEN || keychain('cursor-access-token', 'cursor-user') || credentials.accessToken;
-  if (!token) throw new Error(credentials.apiKey || process.env.CURSOR_API_KEY ? 'notReported' : 'signInRequired');
-  return cursorUsage(await requestJson('https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitPolicyStatus', {
+async function cursor(fetch = requestJson) {
+  let token = process.env.CURSOR_AUTH_TOKEN;
+  if (!token) {
+    const dir = process.platform === 'darwin' ? path.join(os.homedir(), '.cursor') :
+      process.platform === 'win32' ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Cursor') :
+        path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cursor');
+    const credentials = readJson(path.join(dir, 'auth.json'));
+    token = keychain('cursor-access-token', 'cursor-user') || credentials.accessToken;
+    if (!token) throw new Error(credentials.apiKey || process.env.CURSOR_API_KEY ? 'notReported' : 'signInRequired');
+  }
+  return cursorUsage(await fetch('https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitPolicyStatus', {
     token, headers: {'Connect-Protocol-Version': '1'}, body: {},
   }));
 }
@@ -433,35 +441,35 @@ function nousUsage(data) {
   if (number(access.member_spend_cap_usd) > 0 && number(access.member_spend_usd) != null) windows.push(budget('Member spending limit', access.member_spend_usd, access.member_spend_cap_usd, null, 'USD'));
   return {windows};
 }
-async function providerUsage(id, credential) {
+async function providerUsage(id, credential, fetch = requestJson) {
   const c = credential.tokens || credential;
   const token = c.access || c.access_token || c.accessToken;
   const oauth = credential.type === 'oauth' || credential.auth_type === 'oauth' || Boolean(token);
   if (oauth && token) {
-    if (id === 'anthropic') return claudeUsage(await requestJson('https://api.anthropic.com/api/oauth/usage', {
+    if (id === 'anthropic') return claudeUsage(await fetch('https://api.anthropic.com/api/oauth/usage', {
       token, headers: {'anthropic-beta': 'oauth-2025-04-20'},
     }));
     if (id === 'openai' || id === 'openai-codex') {
       let account = c.accountId || c.account_id;
       if (!account) { try { account = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())['https://api.openai.com/auth']?.chatgpt_account_id; } catch {} }
-      return codexOAuthUsage(await requestJson('https://chatgpt.com/backend-api/wham/usage', {
+      return codexOAuthUsage(await fetch('https://chatgpt.com/backend-api/wham/usage', {
         token, headers: account ? {'ChatGPT-Account-Id': account} : {},
       }));
     }
-    if (id === 'github-copilot') {
+    if (id === 'github-copilot' || id === 'copilot') {
       const githubToken = [c.refresh, c.refresh_token, token].find(x => typeof x === 'string' && /^(ghu_|gho_|ghp_|github_pat_)/.test(x));
       if (!githubToken) throw new Error('unavailable');
-      return copilotOAuthUsage(await requestJson('https://api.github.com/copilot_internal/user', {token: githubToken}));
+      return copilotOAuthUsage(await fetch('https://api.github.com/copilot_internal/user', {token: githubToken}));
     }
-    if (['google-antigravity', 'google-gemini-cli'].includes(id)) return antigravityUsage(await requestJson(
+    if (['google-antigravity', 'google-gemini-cli'].includes(id)) return antigravityUsage(await fetch(
       'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota', {token,
         body: c.projectId ? {project: c.projectId} : {}}));
-    if (id === 'nous') return nousUsage(await requestJson('https://portal.nousresearch.com/api/oauth/account', {token}));
+    if (id === 'nous') return nousUsage(await fetch('https://portal.nousresearch.com/api/oauth/account', {token}));
   }
   if (id === 'openrouter') {
     const key = c.key || c.api_key;
     // Some tools allow shell commands as keys. Never evaluate those commands.
-    if (typeof key === 'string' && key.startsWith('sk-or-')) return openrouterUsage(await requestJson('https://openrouter.ai/api/v1/key', {token: key}));
+    if (typeof key === 'string' && key.startsWith('sk-or-')) return openrouterUsage(await fetch('https://openrouter.ai/api/v1/key', {token: key}));
   }
   return {windows: [], status: oauth && !token ? 'signInRequired' : 'notReported'};
 }
@@ -528,7 +536,7 @@ async function probe(id, executable) {
     return {status: statusOf(error)};
   }
 }
-module.exports = {codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
+module.exports = {claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
   openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());

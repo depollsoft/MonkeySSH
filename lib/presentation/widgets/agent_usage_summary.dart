@@ -35,6 +35,9 @@ class AgentUsageSummary extends StatelessWidget {
       context,
     ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
     if (snapshot == null || snapshot.status != AgentUsageStatus.available) {
+      final notices = snapshot?.notices ?? const <AgentUsageNotice>[];
+      final visible = expanded ? notices : notices.take(1);
+      final hidden = notices.length - visible.length;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -44,11 +47,13 @@ class AgentUsageSummary extends StatelessWidget {
               style: style,
             ),
           if (!checking && snapshot != null)
-            for (final notice in snapshot.notices)
+            for (final notice in visible)
               Text(
                 '${notice.provider} · ${_statusLabel(notice.status)}',
                 style: style,
               ),
+          if (!checking && hidden > 0)
+            Text(_moreDetailsLabel(hidden), style: style),
         ],
       );
     }
@@ -154,10 +159,12 @@ class AgentUsageSummary extends StatelessWidget {
               style: style,
             ),
           ),
-        if (hidden > 0)
-          Text('$hidden more usage details · expand above', style: style),
+        if (hidden > 0) Text(_moreDetailsLabel(hidden), style: style),
         if (expanded && snapshot.resetCredits != null)
-          Text('${snapshot.resetCredits} resets available', style: style),
+          Text(
+            '${snapshot.resetCredits} ${snapshot.resetCredits == 1 ? 'reset' : 'resets'} available',
+            style: style,
+          ),
         if (snapshot.checkedAt != null)
           Text(
             checking
@@ -169,6 +176,9 @@ class AgentUsageSummary extends StatelessWidget {
     );
   }
 }
+
+String _moreDetailsLabel(int count) =>
+    '$count more usage ${count == 1 ? 'detail' : 'details'} · expand above';
 
 String _statusLabel(AgentUsageStatus? status) => switch (status) {
   AgentUsageStatus.unsupported => 'Usage reporting not supported',
@@ -230,6 +240,32 @@ Widget agentUsagePreview() => MaterialApp(
               label: 'Weekly',
               usedPercent: 42,
               resetsAt: DateTime.now().add(const Duration(days: 3)),
+            ),
+          ],
+        ),
+      ),
+    ),
+  ),
+);
+
+/// Illustrative failed accounts for checking compact and expanded disclosure.
+@Preview(name: 'Unavailable usage', size: Size(320, 240))
+Widget unavailableAgentUsagePreview() => MaterialApp(
+  theme: FluttyTheme.light,
+  home: const Scaffold(
+    body: Padding(
+      padding: EdgeInsets.all(16),
+      child: AgentUsageSummary(
+        usage: AgentUsage(
+          status: AgentUsageStatus.unavailable,
+          notices: [
+            AgentUsageNotice(
+              provider: 'Anthropic',
+              status: AgentUsageStatus.signInRequired,
+            ),
+            AgentUsageNotice(
+              provider: 'OpenAI Codex',
+              status: AgentUsageStatus.unavailable,
             ),
           ],
         ),

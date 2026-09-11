@@ -512,7 +512,13 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 20),
                       child: Semantics(
+                        key: const ValueKey('agent-usage-announcement'),
                         liveRegion: true,
+                        label: _checkingUsage
+                            ? 'Checking account usage.'
+                            : _usage.isNotEmpty
+                            ? 'Account usage checks complete. Review each agent for results.'
+                            : null,
                         child: Row(
                           children: [
                             Icon(

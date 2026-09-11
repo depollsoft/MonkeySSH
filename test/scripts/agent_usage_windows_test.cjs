@@ -7,7 +7,7 @@ const {rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
 
 for (const extension of ['cmd', 'ps1']) for (const framed of [false, true]) {
   test(`Windows npm .${extension} launcher forwards ${framed ? 'Content-Length' : 'JSONL'} RPC`, {skip: process.platform !== 'win32'}, async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage quote ' é "));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage quote ' \u2018 \u2019 \u201a \u201b é "));
     try {
       const source = path.join(dir, 'fake-agent.cjs');
       fs.writeFileSync(source, `

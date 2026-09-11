@@ -5,9 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 class _Client extends Mock implements SSHClient {}
 
-class _Shell extends Mock implements SSHSession {}
+class _Shell extends MockSessionWithChannel {}
 
 void main() {
   testWidgets('Windows detection opening times out and closes a late probe', (
@@ -56,7 +58,7 @@ void main() {
     final lateProbe = _Shell();
     opening.complete(lateProbe);
     await tester.pump();
-    verify(lateProbe.close).called(1);
+    verify(lateProbe.channel.destroy).called(1);
     verifyNever(() => lateProbe.stdout);
     await session.closeShell(waitForStreams: false);
   });

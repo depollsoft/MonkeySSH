@@ -13,6 +13,8 @@ import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 void main() {
   group('AcpClientCapabilityService', () {
     late _ServerTransport transport;
@@ -131,7 +133,7 @@ void main() {
               final lateChannel = _MockTerminalSession();
               opening.complete(lateChannel);
               await tester.pump();
-              verify(lateChannel.close).called(1);
+              verify(lateChannel.channel.destroy).called(1);
             }
             verifyNever(channel.close);
             await tester.pump(limits.maxTerminalLifetime);
@@ -1714,7 +1716,7 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
 
 class _MockSshSession extends Mock implements SshSession {}
 
-class _MockTerminalSession extends Mock implements SSHSession {}
+class _MockTerminalSession extends MockSessionWithChannel {}
 
 final class _FakeTerminalExecutor implements AcpTerminalExecutor {
   final processes = <_FakeTerminalProcess>[];

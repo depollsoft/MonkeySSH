@@ -8,6 +8,9 @@ checks do not block installation or update controls. Refreshing the screen or
 re-checking a runtime requests usage again. CLI and ACP rows share the matching
 agent's account snapshot. These are account allowances, not usage attributed to
 an individual conversation.
+Overlapping usage requests share one in-flight check, including retryable
+failures. Standalone Claude, Pi, and Antigravity ACP adapters can read account
+usage without a separate CLI installation.
 
 Every supported agent has a reader:
 
@@ -48,6 +51,8 @@ macOS Claude Code keychain entry. Cursor supports `CURSOR_AUTH_TOKEN`, its defau
 macOS keychain entry, and its platform-specific auth file. Grok uses `GROK_HOME`
 or `~/.grok`. Expired tokens require signing in through the agent itself; the
 direct credential reader never refreshes tokens or changes authentication configuration.
+Claude and Cursor environment-token overrides bypass credential files and
+keychain reads, including when those stores cannot be read.
 The installed CLIs may maintain their own authentication sessions when queried.
 
 Successful and throttled checks stay in memory for two minutes per SSH connection.
@@ -58,6 +63,8 @@ bypasses other cached snapshots. The screen
 shows when usage was checked and labels past reset times without claiming the
 allowance has replenished. Missing reset times remain explicit. Rows with many
 quotas show a count of additional details that are available by expanding the row.
+Failed provider notices also stay compact until expanded. A single screen-level
+live region announces when account usage checks finish.
 
 Percentage quotas include a bar filled to the percentage remaining. Exhausted
 allowances show an empty bar; unlimited and unknown allowances have no bar.
@@ -72,6 +79,7 @@ including fnm, and falls back to Node beside a detected agent launcher. If Node
 cannot be found, the row reports that requirement explicitly. npm `.ps1`, `.cmd`,
 and `.bat` launchers run through PowerShell with a process-local execution-policy
 bypass, matching version detection.
+POSIX hosts likewise report missing Node.js separately from provider failures.
 
 Abandoned agent probes explicitly close their SSH channels, including commands
 that ignore end-of-input and channels that finish opening after a timeout.

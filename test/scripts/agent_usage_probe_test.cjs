@@ -2,6 +2,67 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {codexUsage, copilotUsage, claudeUsage, rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
 
+test('Claude and Cursor environment tokens bypass malformed and unreadable stores', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {claude, cursor} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-override-'));
+  const keys = ['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'CURSOR_AUTH_TOKEN', 'APPDATA', 'XDG_CONFIG_HOME'];
+  const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+  const homedir = os.homedir;
+  try {
+    os.homedir = () => dir;
+    process.env.CLAUDE_CONFIG_DIR = dir;
+    process.env.APPDATA = process.env.XDG_CONFIG_HOME = dir;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'CLAUDE_OVERRIDE';
+    process.env.CURSOR_AUTH_TOKEN = 'CURSOR_OVERRIDE';
+    const cursorDir = path.join(dir, process.platform === 'darwin' ? '.cursor' : process.platform === 'win32' ? 'Cursor' : 'cursor');
+    fs.mkdirSync(cursorDir);
+    const files = [path.join(dir, '.credentials.json'), path.join(cursorDir, 'auth.json')];
+    for (const invalid of ['malformed', 'unreadable']) {
+      for (const file of files) {
+        fs.rmSync(file, {force:true,recursive:true});
+        if (invalid === 'malformed') fs.writeFileSync(file, '{'); else fs.mkdirSync(file);
+      }
+      const c = await claude(async (_, options) => {
+        assert.equal(options.token, 'CLAUDE_OVERRIDE');
+        return {five_hour:{utilization:25}};
+      });
+      assert.equal(c.windows[0].usedPercent, 25);
+      const r = await cursor(async (_, options) => {
+        assert.equal(options.token, 'CURSOR_OVERRIDE');
+        return {};
+      });
+      assert.equal(r.windows[0].restricted, false);
+    }
+  } finally {
+    os.homedir = homedir;
+    for (const k of keys) saved[k] == null ? delete process.env[k] : process.env[k] = saved[k];
+    fs.rmSync(dir, {recursive:true,force:true});
+  }
+});
+
+test('Hermes copilot pool entries use GitHub quota and its provider label', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {configuredAccounts, multiProvider, providerUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-hermes-copilot-'));
+  const previous = process.env.HERMES_HOME;
+  try {
+    process.env.HERMES_HOME = dir;
+    fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({credential_pool:{copilot:[{access_token:'ghu_FIXTURE'}]}}));
+    const result = await multiProvider('hermes', configuredAccounts('hermes'), (id, c) => providerUsage(id, c, async (url, options) => {
+      assert.equal(url, 'https://api.github.com/copilot_internal/user');
+      assert.equal(options.token, 'ghu_FIXTURE');
+      return {quota_snapshots:{premium_interactions:{percent_remaining:75,entitlement:300,remaining:225}}};
+    }));
+    assert.equal(result.status, 'available');
+    assert.match(result.windows[0].label, /^GitHub Copilot/);
+    assert.equal(result.windows[0].usedPercent, 25);
+  } finally {
+    previous == null ? delete process.env.HERMES_HOME : process.env.HERMES_HOME = previous;
+    fs.rmSync(dir, {recursive:true,force:true});
+  }
+});
+
 test('Codex uses all buckets without duplicating the legacy bucket', () => {
   const bucket = {primary: {usedPercent: 40, windowDurationMins: 300, resetsAt: 1800000000}};
   const result = codexUsage({rateLimits: bucket, rateLimitsByLimitId: {

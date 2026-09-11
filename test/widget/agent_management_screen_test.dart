@@ -193,12 +193,22 @@ void main() {
   testWidgets('usage loads independently and refreshes with runtime checks', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
     final pending = Completer<Map<String, AgentUsage>>();
     when(
       () => service.readUsage(session, any()),
     ).thenAnswer((_) => pending.future);
     await pumpScreen(tester);
     expect(find.text('Checking usage…'), findsWidgets);
+    final announcement = find.byKey(const ValueKey('agent-usage-announcement'));
+    expect(
+      tester.widget<Semantics>(announcement).properties.liveRegion,
+      isTrue,
+    );
+    expect(
+      tester.getSemantics(announcement).label,
+      contains('Checking account usage.'),
+    );
     expect(refreshHandler(tester), isNotNull);
     pending.complete({
       'cli:claude': AgentUsage(
@@ -214,9 +224,14 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.text('5 hours · 0% remaining · Limit reached'), findsOneWidget);
+    expect(
+      tester.getSemantics(announcement).label,
+      contains('Account usage checks complete.'),
+    );
     await tester.tap(find.byKey(const ValueKey('agent-management-refresh')));
     await tester.pumpAndSettle();
     verify(() => service.readUsage(session, any())).called(2);
+    semantics.dispose();
   });
 
   for (final id in ['cli:antigravity', 'cli:cursor', 'cli:grok']) {

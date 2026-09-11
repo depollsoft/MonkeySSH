@@ -60,6 +60,85 @@ SshSession _remoteSession(_MockSshClient client, {int connectionId = 77}) =>
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('overlapping retryable usage checks share one probe', () async {
+    final client = _MockSshClient();
+    final opening = Completer<SSHSession>();
+    when(
+      () => client.execute(any(), pty: any(named: 'pty')),
+    ).thenAnswer((_) => opening.future);
+    final service = _unlockedManagementService(_MockDiscovery());
+    final session = _remoteSession(client);
+    final runtimes = [
+      AgentRuntimeInfo(
+        definition: agentCliRuntimeDefinitions.first,
+        status: AgentRuntimeStatus.installed,
+        executablePath: '/bin/claude',
+      ),
+    ];
+    final first = service.readUsage(session, runtimes);
+    await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
+    final second = service.readUsage(session, runtimes);
+    await pumpEventQueue();
+    opening.complete(
+      _execOutput(
+        '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}',
+      ),
+    );
+    final results = await Future.wait([first, second]);
+    expect(results[0], same(results[1]));
+    verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
+    await service.readUsage(session, runtimes);
+    verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
+  });
+
+  for (final id in ['pi', 'antigravity']) {
+    test(
+      '$id standalone ACP reads usage and prefers CLI in either row order',
+      () async {
+        final client = _MockSshClient();
+        final commands = <String>[];
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          commands.add(call.positionalArguments.first as String);
+          return _execOutput(
+            '__monkeyssh_usage__={"id":"$id","status":"unavailable"}',
+          );
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        final acp = AgentRuntimeInfo(
+          definition: agentRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'acp:$id',
+          ),
+          status: AgentRuntimeStatus.installed,
+          executablePath: '/bin/adapter',
+        );
+        final cli = AgentRuntimeInfo(
+          definition: agentRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'cli:$id',
+          ),
+          status: AgentRuntimeStatus.installed,
+          executablePath: '/bin/cli',
+        );
+        for (final rows in [
+          [acp],
+          [cli, acp],
+          [acp, cli],
+        ]) {
+          final result = await service.readUsage(session, rows);
+          expect(result.keys, contains('acp:$id'));
+          final match = RegExp(
+            "'([A-Za-z0-9+/=]+)' 2>/dev/null;",
+          ).firstMatch(commands.last)!;
+          final selected =
+              jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
+          expect(selected[id], rows.length == 1 ? '/bin/adapter' : '/bin/cli');
+        }
+      },
+    );
+  }
+
   test(
     'all installed CLI agents request usage and partial failures can retry',
     () async {
@@ -87,7 +166,7 @@ void main() {
       ];
       final result = await service.readUsage(session, runtimes);
       final match = RegExp(
-        r"'([A-Za-z0-9+/=]+)' 2>/dev/null$",
+        "'([A-Za-z0-9+/=]+)' 2>/dev/null;",
       ).firstMatch(commands.first)!;
       final requested =
           jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
