@@ -5,15 +5,13 @@ discovered, alongside upstream version checks. Windows version probes and
 upstream metadata lookups run with up to four workers per batch. POSIX version
 probes and usage readers also run concurrently. Usage
 checks do not block installation or update controls. Refreshing the screen or
-re-checking a runtime requests usage again. CLI and ACP rows share the matching
-agent's account snapshot. These are account allowances, not usage attributed to
-an individual conversation.
+re-checking a runtime requests usage again. Account usage is shown only for
+agent CLI rows; ACP adapters show installation and version information. These
+are account allowances, not usage attributed to an individual conversation.
 Overlapping usage requests for the same installed rows and executable paths
 share one in-flight check, including retryable failures. Changed selections wait
 for the active check and then request their own results. Cached usage is reused
-only for the same agent executable path. Standalone Claude, Pi,
-and Antigravity ACP adapters can read account usage without a separate CLI
-installation.
+only for the same agent executable path. ACP adapters do not request usage.
 
 Every supported agent has a reader:
 

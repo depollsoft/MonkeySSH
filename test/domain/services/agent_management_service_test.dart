@@ -155,53 +155,22 @@ void main() {
     );
   }
 
-  for (final id in ['pi', 'antigravity']) {
-    test(
-      '$id standalone ACP reads usage and prefers CLI in either row order',
-      () async {
-        final client = _MockSshClient();
-        final commands = <String>[];
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          call,
-        ) async {
-          commands.add(call.positionalArguments.first as String);
-          return _execOutput(
-            '__monkeyssh_usage__={"id":"$id","status":"unavailable"}',
-          );
-        });
-        final service = _unlockedManagementService(_MockDiscovery());
-        final session = _remoteSession(client);
-        final acp = AgentRuntimeInfo(
-          definition: agentRuntimeDefinitions.firstWhere(
-            (d) => d.id == 'acp:$id',
+  test('ACP adapters do not request or return account usage', () async {
+    final client = _MockSshClient();
+    final service = _unlockedManagementService(_MockDiscovery());
+    final runtimes = [
+      for (final definition in agentRuntimeDefinitions)
+        if (definition.kind == AgentRuntimeKind.acpAdapter)
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/adapter',
           ),
-          status: AgentRuntimeStatus.installed,
-          executablePath: '/bin/adapter',
-        );
-        final cli = AgentRuntimeInfo(
-          definition: agentRuntimeDefinitions.firstWhere(
-            (d) => d.id == 'cli:$id',
-          ),
-          status: AgentRuntimeStatus.installed,
-          executablePath: '/bin/cli',
-        );
-        for (final rows in [
-          [acp],
-          [cli, acp],
-          [acp, cli],
-        ]) {
-          final result = await service.readUsage(session, rows);
-          expect(result.keys, contains('acp:$id'));
-          final match = RegExp(
-            "'([A-Za-z0-9+/=]+)' 2>/dev/null;",
-          ).firstMatch(commands.last)!;
-          final selected =
-              jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
-          expect(selected[id], rows.length == 1 ? '/bin/adapter' : '/bin/cli');
-        }
-      },
-    );
-  }
+    ];
+    expect(runtimes, isNotEmpty);
+    expect(await service.readUsage(_remoteSession(client), runtimes), isEmpty);
+    verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+  });
 
   test(
     'all installed CLI agents request usage and partial failures can retry',
@@ -329,7 +298,7 @@ void main() {
     expect(calls, 1);
   });
   test(
-    'usage is gated and quota snapshots are shared and cached per connection',
+    'usage is gated, cached per connection, and excludes matching ACP rows',
     () async {
       var now = DateTime.utc(2026, 9, 10);
       final client = _MockSshClient();
@@ -373,7 +342,7 @@ void main() {
       expect(calls, 1);
       final result = concurrent.first;
       expect(result['cli:copilot']!.status, AgentUsageStatus.available);
-      expect(identical(result['cli:copilot'], result['acp:copilot']), isTrue);
+      expect(result.keys, ['cli:copilot']);
       now = now.add(const Duration(minutes: 2));
       await service.readUsage(session, runtimes);
       expect(calls, 2);

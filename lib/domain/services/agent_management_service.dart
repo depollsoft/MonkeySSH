@@ -849,7 +849,9 @@ class AgentManagementService {
     SshSession session,
     List<AgentRuntimeInfo> runtimes,
   ) async {
-    final snapshot = List<AgentRuntimeInfo>.of(runtimes);
+    final snapshot = runtimes
+        .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
+        .toList();
     if (!await _canManageAgents()) return const {};
     final selectedRows = [
       for (final runtime in snapshot)
@@ -907,16 +909,8 @@ class AgentManagementService {
         AgentLaunchTool.grokBuild => 'grok',
         null => null,
       };
-      if (id != null &&
-          (runtime.definition.kind == AgentRuntimeKind.cli ||
-              runtime.definition.sharesCliInstallation ||
-              const {'claude', 'pi', 'antigravity'}.contains(id)) &&
-          runtime.executablePath != null) {
-        if (runtime.definition.kind == AgentRuntimeKind.cli) {
-          selected[id] = runtime.executablePath!;
-        } else {
-          selected.putIfAbsent(id, () => runtime.executablePath!);
-        }
+      if (id != null && runtime.executablePath != null) {
+        selected[id] = runtime.executablePath!;
       }
       result[runtime.definition.id] = AgentUsage(
         status: id == null

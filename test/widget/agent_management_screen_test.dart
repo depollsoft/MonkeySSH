@@ -234,6 +234,45 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('ACP rows show neither usage checks nor usage results', (
+    tester,
+  ) async {
+    final pending = Completer<Map<String, AgentUsage>>();
+    List<AgentRuntimeInfo>? requested;
+    when(() => service.readUsage(session, any())).thenAnswer((call) {
+      requested = call.positionalArguments[1] as List<AgentRuntimeInfo>;
+      return pending.future;
+    });
+    await pumpScreen(tester);
+    final acpId = runtimes.last.definition.id;
+    expect(requested, isNotEmpty);
+    expect(
+      requested!.every(
+        (runtime) => runtime.definition.kind == AgentRuntimeKind.cli,
+      ),
+      isTrue,
+    );
+    expect(inRow(acpId, find.text('Checking usage…')), findsNothing);
+    expect(inRow('cli:claude', find.text('Checking usage…')), findsOneWidget);
+    pending.complete({
+      'cli:claude': const AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [AgentUsageWindow(label: 'CLI allowance', usedPercent: 25)],
+      ),
+      acpId: const AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [AgentUsageWindow(label: 'ACP allowance', usedPercent: 50)],
+      ),
+    });
+    await tester.pumpAndSettle();
+    expect(find.textContaining('CLI allowance'), findsOneWidget);
+    expect(find.textContaining('ACP allowance'), findsNothing);
+    await tester.tap(find.byKey(ValueKey('agent-details-$acpId')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('ACP allowance'), findsNothing);
+    expect(inRow(acpId, find.text('Installed version')), findsOneWidget);
+  });
+
   testWidgets('empty usage checks announce completion', (tester) async {
     final semantics = tester.ensureSemantics();
     runtimes = [

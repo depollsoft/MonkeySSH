@@ -93,7 +93,12 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
     final generation = ++_usageGeneration;
     setState(() => _checkingUsage = true);
     try {
-      final usage = await _service.readUsage(widget.session, _runtimes);
+      final usage = await _service.readUsage(
+        widget.session,
+        _runtimes
+            .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
+            .toList(),
+      );
       if (!mounted || generation != _usageGeneration) return;
       setState(() => _usage = usage);
     } on Object {
@@ -101,9 +106,10 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       setState(
         () => _usage = {
           for (final runtime in _runtimes)
-            runtime.definition.id: const AgentUsage(
-              status: AgentUsageStatus.unavailable,
-            ),
+            if (runtime.definition.kind == AgentRuntimeKind.cli)
+              runtime.definition.id: const AgentUsage(
+                status: AgentUsageStatus.unavailable,
+              ),
         },
       );
     } finally {
@@ -995,8 +1001,10 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                   ),
                 ),
               ],
-              if (runtime.status == AgentRuntimeStatus.installed ||
-                  runtime.status == AgentRuntimeStatus.updateAvailable) ...[
+              if (runtime.definition.kind == AgentRuntimeKind.cli &&
+                  (runtime.status == AgentRuntimeStatus.installed ||
+                      runtime.status ==
+                          AgentRuntimeStatus.updateAvailable)) ...[
                 const SizedBox(height: 8),
                 AgentUsageSummary(
                   usage: widget.usage,
