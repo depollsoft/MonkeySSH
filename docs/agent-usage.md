@@ -10,7 +10,8 @@ agent's account snapshot. These are account allowances, not usage attributed to
 an individual conversation.
 Overlapping usage requests for the same installed rows and executable paths
 share one in-flight check, including retryable failures. Changed selections wait
-for the active check and then request their own results. Standalone Claude, Pi,
+for the active check and then request their own results. Cached usage is reused
+only for the same agent executable path. Standalone Claude, Pi,
 and Antigravity ACP adapters can read account usage without a separate CLI
 installation.
 

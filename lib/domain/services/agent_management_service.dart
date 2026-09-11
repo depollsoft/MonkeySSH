@@ -578,8 +578,11 @@ class AgentManagementService {
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
   final Map<int, ({String selection, Future<Map<String, AgentUsage>> future})>
   _inFlightUsageChecks = {};
-  final Map<int, ({DateTime at, Map<String, AgentUsage> values})> _usageCache =
-      {};
+  final Map<
+    int,
+    ({DateTime at, Map<String, String> paths, Map<String, AgentUsage> values})
+  >
+  _usageCache = {};
 
   /// Number of retained connection snapshots.
   @visibleForTesting
@@ -929,7 +932,9 @@ class AgentManagementService {
     final parsed = <String, AgentUsage>{};
     final pending = <String, String>{};
     for (final entry in selected.entries) {
-      final usage = cached?.values[entry.key];
+      final usage = cached?.paths[entry.key] == entry.value
+          ? cached?.values[entry.key]
+          : null;
       final checkedAt = usage?.checkedAt;
       final resetPassed =
           usage?.windows.any(
@@ -1038,7 +1043,11 @@ class AgentManagementService {
     if (_usageCache.length >= _maxRuntimeCacheEntries) {
       _usageCache.remove(_usageCache.keys.first);
     }
-    _usageCache[session.connectionId] = (at: _now(), values: parsed);
+    _usageCache[session.connectionId] = (
+      at: _now(),
+      paths: selected,
+      values: parsed,
+    );
     return _mapUsageToRuntimes(runtimes, result, selected, parsed);
   }
 

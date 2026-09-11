@@ -133,19 +133,24 @@ void main() {
         expect(commands, hasLength(1));
         opening.complete(
           _execOutput(
-            '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}',
+            '__monkeyssh_usage__={"id":"claude","status":"available",'
+            '"windows":[{"label":"Weekly","usedPercent":25}]}',
           ),
         );
         final results = await Future.wait([first, second, third]);
-        expect(commands, hasLength(2));
+        expect(commands.length, 2);
         expect(results[1], same(results[2]));
-        expect(results[1].keys, contains(changed.definition.id));
+        expect(results[0]['cli:claude']!.status, AgentUsageStatus.available);
+        expect(
+          results[1][changed.definition.id]!.status,
+          AgentUsageStatus.signInRequired,
+        );
         final match = RegExp(
           "'([A-Za-z0-9+/=]+)' 2>/dev/null;",
         ).firstMatch(commands.last)!;
         final requested =
             jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
-        expect(requested[addAgent ? 'codex' : 'claude'], '/new/agent');
+        expect(requested, {addAgent ? 'codex' : 'claude': '/new/agent'});
       },
     );
   }
