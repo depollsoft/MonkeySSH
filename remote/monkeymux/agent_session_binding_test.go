@@ -17,6 +17,8 @@ var bindingTestIDs = []string{"11111111-1111-4111-8111-111111111111", "22222222-
 // Exercise the real parsers, including the SQLite reader, under a fake home.
 func bindingTestStore(t *testing.T, tool string) (string, func(string, string, time.Time) string) {
 	t.Helper()
+	bindingTestResetForeignOwnership()
+	t.Cleanup(bindingTestResetForeignOwnership)
 	originalTable := processTableForMetadata
 	processTableForMetadata = func() map[int]processInfo { return map[int]processInfo{} }
 	t.Cleanup(func() { processTableForMetadata = originalTable })
@@ -463,8 +465,28 @@ func bindingTestProcesses(t *testing.T, cwd string, started time.Time, processes
 	processOpenFilePathsForMetadata = func(pid int) []string { return files[pid] }
 }
 
+func bindingTestResetForeignOwnership() {
+	foreignOwnershipCache.Lock()
+	defer foreignOwnershipCache.Unlock()
+	foreignOwnershipCache.tools = nil
+}
+
+func bindingTestExpireForeignOwnership() {
+	foreignOwnershipCache.Lock()
+	defer foreignOwnershipCache.Unlock()
+	for tool, cached := range foreignOwnershipCache.tools {
+		if cached.snapshot != nil {
+			snapshot := *cached.snapshot
+			snapshot.at = time.Now().Add(-agentSessionStorePollInterval)
+			cached.snapshot = &snapshot
+			foreignOwnershipCache.tools[tool] = cached
+		}
+	}
+}
+
 // Advance the poll/cache clocks without sleeping or changing process lifetime.
 func bindingTestNextPoll(s *muxServer, w *muxWindow) {
+	bindingTestExpireForeignOwnership()
 	w.agentSessionWatch.lastPoll = time.Time{}
 	for tool, cached := range s.agentSessionBindings.stores {
 		cached.at = time.Now().Add(-agentSessionStorePollInterval)
@@ -1101,8 +1123,7 @@ func TestAgentSessionOwnershipExclusion(t *testing.T) {
 			cwd, write := bindingTestStore(t, tool)
 			now := time.Now()
 			home, _ := os.UserHomeDir()
-			// Only the tool's own processes are inspected for open session files,
-			// so the foreign owner runs the tool's executable too.
+			// A tool root can hold its session file directly.
 			executable := agentCommands[tool].executable
 			processes := map[int]processInfo{101: {pid: 101, comm: tool}, 201: {pid: 201, comm: executable}}
 			files := map[int][]string{}
@@ -1128,10 +1149,12 @@ func TestAgentSessionOwnershipExclusion(t *testing.T) {
 				t.Fatal("own descendant was excluded")
 			}
 			delete(processes, 201)
+			bindingTestExpireForeignOwnership()
 			if agentSessionOwnedElsewhere(tool, id, map[int]struct{}{101: {}}) {
 				t.Fatal("dead owner was excluded")
 			}
 			processTableForMetadata = func() map[int]processInfo { return nil }
+			bindingTestExpireForeignOwnership()
 			if !agentSessionOwnedElsewhere(tool, id, map[int]struct{}{101: {}}) {
 				t.Fatal("unknown ownership was not excluded")
 			}
@@ -1141,6 +1164,175 @@ func TestAgentSessionOwnershipExclusion(t *testing.T) {
 				t.Fatal("candidate with unknown ownership survived exclusion")
 			}
 		})
+	}
+}
+
+func TestAgentSessionOwnershipForeignWorkers(t *testing.T) {
+	for _, tool := range []string{"codex", "antigravity", "cursor-agent"} {
+		t.Run(tool, func(t *testing.T) {
+			cwd, write := bindingTestStore(t, tool)
+			now := time.Now()
+			id := bindingTestIDs[0]
+			path := write(id, cwd, now)
+			if tool == "antigravity" {
+				home, _ := os.UserHomeDir()
+				path = filepath.Join(home, ".gemini", "antigravity-cli", "presence", id+".lock")
+			}
+			executable := agentCommands[tool].executable
+			processes := map[int]processInfo{
+				100: {pid: 100, comm: "zsh"},
+				101: {pid: 101, ppid: 100, comm: executable, args: executable},
+				102: {pid: 102, ppid: 101, comm: "worker"},
+				201: {pid: 201, comm: executable, args: executable},
+				202: {pid: 202, ppid: 201, comm: "worker"},
+				301: {pid: 301, comm: "unrelated"},
+			}
+			files := map[int][]string{202: {path}, 301: {path}}
+			bindingTestProcesses(t, cwd, now.Add(-time.Minute), processes, files)
+			own := agentProcessTree(processes, 101)
+			if !agentSessionOwnedElsewhere(tool, id, own) {
+				t.Fatal("foreign worker's ownership was missed")
+			}
+			if agentSessionOwnedElsewhere(tool, id, agentProcessTree(processes, 201)) {
+				t.Fatal("window's own root and worker were treated as foreign")
+			}
+			watch := newAgentSessionWatch(tool, cwd, now.Add(-time.Minute), nil)
+			candidates := []agentSessionCandidate{{id: id, cwd: cwd, created: now}}
+			if got := excludeForeignAgentSessions(tool, candidates, own, watch, ""); len(got) != 0 {
+				t.Fatal("watcher retained a candidate held by a foreign worker")
+			}
+			restore := &serverRestore{Windows: []restoreWindowState{{ID: "@1", AgentTool: tool, AgentToolConfirmed: true, CurrentCommand: executable, PanePid: 100, Cwd: cwd}}}
+			enrichRestoreWithAgentSessionIDs(restore)
+			if got := restore.Windows[0].AgentSessionID; got != "" {
+				t.Fatalf("restore took foreign worker's session %q", got)
+			}
+			// Both trees can hold the same file. An own handle must not hide
+			// the foreign owner, and unrelated executables do not reserve IDs.
+			files[102] = []string{path}
+			bindingTestExpireForeignOwnership()
+			if !agentSessionOwnedElsewhere(tool, id, own) {
+				t.Fatal("own handle hid the foreign worker's ownership")
+			}
+			delete(files, 202)
+			bindingTestExpireForeignOwnership()
+			if agentSessionOwnedElsewhere(tool, id, own) {
+				t.Fatal("own tree or unrelated process was treated as foreign")
+			}
+		})
+	}
+}
+
+func TestAgentSessionForeignOwnershipRestoreProbeCount(t *testing.T) {
+	const tool = "cursor-agent"
+	cwd, write := bindingTestStore(t, tool)
+	now := time.Now()
+	processes := map[int]processInfo{
+		100: {pid: 100, comm: "zsh"},
+		101: {pid: 101, ppid: 100, comm: tool, args: tool},
+		201: {pid: 201, comm: tool, args: tool},
+		202: {pid: 202, ppid: 201, comm: "worker"},
+		203: {pid: 203, ppid: 201, comm: tool, args: tool},
+		204: {pid: 204, ppid: 203, comm: "worker"},
+		301: {pid: 301, comm: "unrelated"},
+	}
+	files := map[int][]string{}
+	for i := 0; i < 50; i++ {
+		path := write(fmt.Sprintf("%08d-1111-4111-8111-111111111111", i), cwd, now)
+		files[202] = append(files[202], path)
+		files[204] = append(files[204], path)
+	}
+	bindingTestProcesses(t, cwd, now.Add(-time.Minute), processes, files)
+	calls := map[int]int{}
+	processOpenFilePathsForMetadata = func(pid int) []string {
+		calls[pid]++
+		return files[pid]
+	}
+	restore := &serverRestore{Windows: []restoreWindowState{{ID: "@1", AgentTool: tool, AgentToolConfirmed: true, CurrentCommand: tool, PanePid: 100, Cwd: cwd}}}
+	enrichRestoreWithAgentSessionIDs(restore)
+	if got := restore.Windows[0].AgentSessionID; got != "" {
+		t.Fatalf("restore took foreign session %q", got)
+	}
+	for _, pid := range []int{201, 202, 203, 204} {
+		if calls[pid] != 1 {
+			t.Errorf("foreign PID %d probed %d times for 50 candidates, want 1", pid, calls[pid])
+		}
+	}
+	if calls[301] != 0 {
+		t.Fatal("unrelated process was probed")
+	}
+	if got := len(foreignOwnershipFor(tool).owners); got != 50 {
+		t.Fatalf("snapshot recorded %d sessions, want 50", got)
+	}
+}
+
+func TestAgentSessionForeignOwnershipCache(t *testing.T) {
+	cwd, write := bindingTestStore(t, "codex")
+	id := bindingTestIDs[0]
+	path := write(id, cwd, time.Now())
+	processes := map[int]processInfo{201: {pid: 201, comm: "codex"}, 202: {pid: 202, ppid: 201, comm: "worker"}}
+	files := map[int][]string{202: {path}}
+	bindingTestProcesses(t, cwd, time.Now(), processes, files)
+	tableCalls, fileCalls := 0, map[int]int{}
+	processTableForMetadata = func() map[int]processInfo {
+		tableCalls++
+		return processes
+	}
+	processOpenFilePathsForMetadata = func(pid int) []string {
+		fileCalls[pid]++
+		return files[pid]
+	}
+	first := foreignOwnershipFor("codex")
+	if !agentSessionOwnedElsewhere("codex", id, nil) || foreignOwnershipFor("codex") != first {
+		t.Fatal("calls within the poll interval did not reuse ownership")
+	}
+	if tableCalls != 1 || fileCalls[201] != 1 || fileCalls[202] != 1 {
+		t.Fatalf("cached calls repeated probes: tables=%d files=%v", tableCalls, fileCalls)
+	}
+	if agentSessionOwnedElsewhere("cursor-agent", id, nil) || tableCalls != 2 {
+		t.Fatal("different tools shared an ownership snapshot")
+	}
+	delete(files, 202)
+	if !agentSessionOwnedElsewhere("codex", id, nil) {
+		t.Fatal("ownership changed before the next poll")
+	}
+	bindingTestExpireForeignOwnership()
+	if agentSessionOwnedElsewhere("codex", id, nil) || foreignOwnershipFor("codex") == first {
+		t.Fatal("expired snapshot was not rebuilt")
+	}
+	if tableCalls != 3 || fileCalls[201] != 2 || fileCalls[202] != 2 {
+		t.Fatalf("expiry probes: tables=%d files=%v", tableCalls, fileCalls)
+	}
+}
+
+func TestAgentSessionForeignOwnershipConcurrentBuild(t *testing.T) {
+	cwd, write := bindingTestStore(t, "codex")
+	path := write(bindingTestIDs[0], cwd, time.Now())
+	bindingTestProcesses(t, cwd, time.Now(), map[int]processInfo{201: {pid: 201, comm: "codex"}}, nil)
+	entered, release := make(chan struct{}, 16), make(chan struct{})
+	processOpenFilePathsForMetadata = func(int) []string {
+		entered <- struct{}{}
+		<-release
+		return []string{path}
+	}
+	var wg sync.WaitGroup
+	snapshots := make([]*foreignOwnershipSnapshot, 16)
+	for i := range snapshots {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snapshots[i] = foreignOwnershipFor("codex")
+		}()
+	}
+	<-entered
+	close(release)
+	wg.Wait()
+	if len(entered) != 0 {
+		t.Fatalf("concurrent callers repeated the probe %d times", len(entered))
+	}
+	for _, snapshot := range snapshots {
+		if snapshot != snapshots[0] || !snapshot.ownedElsewhere(bindingTestIDs[0], nil) {
+			t.Fatal("concurrent callers did not share the completed snapshot")
+		}
 	}
 }
 
@@ -1231,6 +1423,7 @@ func TestAgentSessionFallbacksRejectForeignOwners(t *testing.T) {
 			// A stale lock/registry or dead file holder must not permanently
 			// reserve the session. The live window can now use cwd inference.
 			delete(processes, 201)
+			bindingTestExpireForeignOwnership()
 			enrichRestoreWithAgentSessionIDs(restore)
 			if restore.Windows[0].AgentSessionID != id {
 				t.Fatalf("dead owner still excluded session: %q", restore.Windows[0].AgentSessionID)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -85,83 +86,181 @@ func (s *muxServer) prepareAgentSessionWatch(tool, cwd string, options createWin
 	}
 }
 
-// agentSessionOwnedElsewhere uses the process snapshot as the liveness check.
-// OpenCode's database is shared: a foreign handle excludes all inferred rows,
-// since a database handle alone cannot establish ownership of a particular ID.
-func agentSessionOwnedElsewhere(tool, id string, windowPids map[int]struct{}) bool {
-	if id == "" {
-		return false
+// Snapshots include all tool trees so callers can exclude their own window's
+// PIDs without repeating process and open-file probes for each candidate.
+type foreignOwnershipSnapshot struct {
+	tool      string
+	owners    map[string][]int
+	at        time.Time
+	processes map[int]processInfo
+	home      string
+}
+
+type foreignOwnershipCacheEntry struct {
+	snapshot *foreignOwnershipSnapshot
+	loading  chan struct{}
+}
+
+var foreignOwnershipCache = struct {
+	sync.Mutex
+	tools map[string]foreignOwnershipCacheEntry
+}{}
+
+// Concurrent callers share the first build as well as subsequent cached reads.
+func foreignOwnershipFor(tool string) *foreignOwnershipSnapshot {
+	home, _ := os.UserHomeDir()
+	for {
+		foreignOwnershipCache.Lock()
+		cached := foreignOwnershipCache.tools[tool]
+		if cached.loading != nil {
+			foreignOwnershipCache.Unlock()
+			<-cached.loading
+			continue
+		}
+		if snapshot := cached.snapshot; snapshot != nil && snapshot.home == home &&
+			time.Since(snapshot.at) < agentSessionStorePollInterval {
+			foreignOwnershipCache.Unlock()
+			return snapshot
+		}
+		if foreignOwnershipCache.tools == nil {
+			foreignOwnershipCache.tools = map[string]foreignOwnershipCacheEntry{}
+		}
+		loading := make(chan struct{})
+		foreignOwnershipCache.tools[tool] = foreignOwnershipCacheEntry{loading: loading}
+		foreignOwnershipCache.Unlock()
+
+		snapshot := buildForeignOwnershipSnapshot(tool, home)
+		// Start the reuse interval after probing, which can itself take seconds.
+		snapshot.at = time.Now()
+		foreignOwnershipCache.Lock()
+		foreignOwnershipCache.tools[tool] = foreignOwnershipCacheEntry{snapshot: snapshot}
+		close(loading)
+		foreignOwnershipCache.Unlock()
+		return snapshot
 	}
-	processes := processTableForMetadata()
-	if processes == nil {
-		return true
+}
+
+func buildForeignOwnershipSnapshot(tool, home string) *foreignOwnershipSnapshot {
+	s := &foreignOwnershipSnapshot{tool: tool, home: home, owners: map[string][]int{}, processes: processTableForMetadata()}
+	if home == "" {
+		s.processes = nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return true
+	if s.processes == nil {
+		return s
 	}
-	foreign := func(pid int) bool {
-		_, alive := processes[pid]
-		_, own := windowPids[pid]
-		return alive && !own
+	add := func(id string, pid int) {
+		if _, alive := s.processes[pid]; id == "" || !alive {
+			return
+		}
+		for _, owner := range s.owners[id] {
+			if owner == pid {
+				return
+			}
+		}
+		s.owners[id] = append(s.owners[id], pid)
 	}
 	switch tool {
 	case "claude":
 		for _, candidate := range readClaudeSessionRegistry(home) {
-			if candidate.id == id && foreign(candidate.ownerPID) {
-				return true
-			}
+			add(candidate.id, candidate.ownerPID)
 		}
-		return false
+		return s
 	case "copilot":
-		locks, _ := filepath.Glob(filepath.Join(home, ".copilot", "session-state", id, "inuse.*.lock"))
+		locks, _ := filepath.Glob(filepath.Join(home, ".copilot", "session-state", "*", "inuse.*.lock"))
 		for _, lock := range locks {
-			if foreign(pidFromCopilotLockPath(lock)) {
-				return true
-			}
+			add(filepath.Base(filepath.Dir(lock)), pidFromCopilotLockPath(lock))
 		}
-		return false
+		return s
 	case "codex", "antigravity", "opencode", "cursor-agent":
 	default:
+		return s
+	}
+	roots := []int{}
+	for pid, info := range s.processes {
+		if agentToolFromCommandName(info.comm) == tool ||
+			agentToolFromCommandName(agentCommandNameFromProcessArgs(info.args)) == tool {
+			roots = append(roots, pid)
+		}
+	}
+	for pid := range s.processes {
+		for _, root := range roots {
+			if processDepthFromAncestor(s.processes, pid, root) < 0 {
+				continue
+			}
+			// Workers can hold exact ownership signals under other executable
+			// names. Probe each member once, even with nested tool roots.
+			for _, path := range processOpenFilePathsForMetadata(pid) {
+				add(s.sessionIDForPath(path), pid)
+			}
+			break
+		}
+	}
+	return s
+}
+
+// OpenCode's shared database cannot identify a particular session row.
+const foreignOwnershipAnySession = "*"
+
+func (s *foreignOwnershipSnapshot) sessionIDForPath(path string) string {
+	path = normalizedMetadataPath(path)
+	switch s.tool {
+	case "codex":
+		return codexSessionIDFromRolloutFile(path)
+	case "antigravity":
+		root := filepath.Join(s.home, ".gemini", "antigravity-cli")
+		dir, name := filepath.Dir(path), filepath.Base(path)
+		if dir == normalizedMetadataPath(filepath.Join(root, "presence")) && strings.HasSuffix(name, ".lock") {
+			return strings.TrimSuffix(name, ".lock")
+		}
+		if dir == normalizedMetadataPath(filepath.Join(root, "conversations")) {
+			for _, suffix := range []string{".db", ".db-wal", ".db-shm"} {
+				if strings.HasSuffix(name, suffix) {
+					return strings.TrimSuffix(name, suffix)
+				}
+			}
+		}
+	case "opencode":
+		db := normalizedMetadataPath(filepath.Join(s.home, ".local", "share", "opencode", "opencode.db"))
+		if path == db || path == db+"-wal" || path == db+"-shm" {
+			return foreignOwnershipAnySession
+		}
+	case "cursor-agent":
+		root := normalizedMetadataPath(filepath.Join(s.home, ".cursor", "chats"))
+		rel, err := filepath.Rel(root, path)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if err == nil && len(parts) >= 3 && parts[0] != ".." {
+			return parts[1]
+		}
+	}
+	return ""
+}
+
+// The captured process table supplies liveness until the next poll. Unknown
+// ownership excludes every inferred ID rather than risking a foreign binding.
+func (s *foreignOwnershipSnapshot) ownedElsewhere(id string, windowPids map[int]struct{}) bool {
+	if id == "" {
 		return false
 	}
-	for pid, info := range processes {
-		// Only the tool's own processes can hold its session files, and listing
-		// open files costs one lsof per process: never scan the whole machine.
-		if !foreign(pid) || (agentToolFromCommandName(info.comm) != tool &&
-			agentToolFromCommandName(agentCommandNameFromProcessArgs(info.args)) != tool) {
-			continue
-		}
-		for _, path := range processOpenFilePathsForMetadata(pid) {
-			path = normalizedMetadataPath(path)
-			switch tool {
-			case "codex":
-				if codexSessionIDFromRolloutFile(path) == id {
-					return true
-				}
-			case "antigravity":
-				root := filepath.Join(home, ".gemini", "antigravity-cli")
-				db := normalizedMetadataPath(filepath.Join(root, "conversations", id+".db"))
-				if path == db || path == db+"-wal" || path == db+"-shm" ||
-					path == normalizedMetadataPath(filepath.Join(root, "presence", id+".lock")) {
-					return true
-				}
-			case "opencode":
-				db := normalizedMetadataPath(filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
-				if path == db || path == db+"-wal" || path == db+"-shm" {
-					return true
-				}
-			case "cursor-agent":
-				root := normalizedMetadataPath(filepath.Join(home, ".cursor", "chats"))
-				rel, err := filepath.Rel(root, path)
-				parts := strings.Split(filepath.ToSlash(rel), "/")
-				if err == nil && len(parts) >= 3 && parts[0] != ".." && parts[1] == id {
-					return true
-				}
+	if s.processes == nil {
+		return true
+	}
+	for _, key := range []string{id, foreignOwnershipAnySession} {
+		for _, pid := range s.owners[key] {
+			_, alive := s.processes[pid]
+			_, own := windowPids[pid]
+			if alive && !own {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func agentSessionOwnedElsewhere(tool, id string, windowPids map[int]struct{}) bool {
+	if id == "" {
+		return false
+	}
+	return foreignOwnershipFor(tool).ownedElsewhere(id, windowPids)
 }
 
 func agentProcessTree(processes map[int]processInfo, pid int) map[int]struct{} {
