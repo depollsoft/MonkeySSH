@@ -1018,6 +1018,7 @@ void main() {
       final pending = manager.state.byKeyValue(key.value)!.pendingPermissions;
       expect(pending, hasLength(1));
       expect(pending.single.toolCallId, 't1');
+      expect(pending.single.toolTitle, 'Write file');
 
       await manager.respondToPermission(
         key,

@@ -126,6 +126,40 @@ void main() {
     expect(approved, isTrue);
   });
 
+  testWidgets('renders Pi extension UI as a direct choice', (tester) async {
+    final selected = <String>[];
+    final pending = session.AcpPendingPermission(
+      requestKey: 'req-wt',
+      sessionId: 'sess',
+      toolCallId: 'pi-ui-worktrees',
+      toolTitle: 'Managed worktrees',
+      options: const [
+        AcpPermissionOption(
+          id: 'choice-0',
+          name: 'wt/feature /worktrees/feature',
+          kind: AcpPermissionOptionKind.allowOnce,
+        ),
+      ],
+      requestedAt: DateTime(2026),
+    );
+    final prompt = acpToolPromptFromSession(
+      pending,
+      onSelect: (id) async => selected.add(id),
+      onCancel: () async {},
+    );
+
+    await _pump(tester, [prompt]);
+
+    expect(find.text('Managed worktrees'), findsOneWidget);
+    expect(find.text('Allow Managed worktrees?'), findsNothing);
+    expect(find.byIcon(Icons.tune), findsOneWidget);
+    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('Cancel request'), findsNothing);
+    await tester.tap(find.text('wt/feature /worktrees/feature'));
+    await tester.pump();
+    expect(selected, ['choice-0']);
+  });
+
   testWidgets('maps a session-manager pending permission to a tool prompt', (
     tester,
   ) async {
