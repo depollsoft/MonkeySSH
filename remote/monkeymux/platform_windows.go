@@ -786,21 +786,27 @@ func inspectProcess(pid int) processSnapshot {
 	return snapshot
 }
 
-func terminateProcessID(pid int) {
-	if pid <= 0 {
-		return
+// Unix pane process groups have no ConPTY equivalent. Server termination uses
+// taskkill /T below; separate cleanup of orphaned panes is currently a no-op.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replacementPaneGroup {
+	return nil
+}
+
+func reapReplacementPaneGroups(panes []replacementPaneGroup) {}
+
+// A failed taskkill may have only partially stopped the tree. A later server
+// exit alone cannot prove that its ConPTY agents were terminated as well.
+const allowExitAfterFailedTermination = false
+
+func terminateProcessID(pid int, stillOwner func() bool) bool {
+	if pid <= 0 || !stillOwner() {
+		return false
 	}
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprint(pid))
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := kill.Run(); err == nil {
-		return
-	}
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
-	if err != nil {
-		return
-	}
-	defer windows.CloseHandle(handle)
-	_ = windows.TerminateProcess(handle, 1)
+	// A successful tree termination is required. TerminateProcess on just the
+	// helper can orphan its agents and leave their session locks held.
+	return kill.Run() == nil
 }
 
 const supportsExplicitForegroundResizeSignal = false

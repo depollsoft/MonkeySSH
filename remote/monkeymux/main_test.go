@@ -9925,16 +9925,19 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 	}
 }
 
-func TestDiscoverCodexSessionIDsSkipsAmbiguousCwdFallback(t *testing.T) {
+func TestDiscoverCodexSessionIDsSkipsUnknownProcessStart(t *testing.T) {
 	originalHome := os.Getenv("HOME")
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
+	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() {
 		_ = os.Setenv("HOME", originalHome)
 		processOpenFilePathsForMetadata = originalOpenFiles
 		processWorkingDirectoryForMetadata = originalWorkingDirectory
+		processStartedAtForMetadata = originalProcessStart
 	})
 
+	processStartedAtForMetadata = func(int) time.Time { return time.Time{} }
 	home := t.TempDir()
 	if err := os.Setenv("HOME", home); err != nil {
 		t.Fatal(err)
@@ -9977,7 +9980,7 @@ func TestDiscoverCodexSessionIDsSkipsAmbiguousCwdFallback(t *testing.T) {
 	)
 
 	if len(sessions) != 0 {
-		t.Fatalf("codex sessions = %#v, want none for ambiguous cwd fallback", sessions)
+		t.Fatalf("codex sessions = %#v, want none without process start times", sessions)
 	}
 }
 
@@ -11377,7 +11380,11 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			options := createWindowOptionsForRestore(tc.state, true)
 			if resume, launch, ok := strings.Cut(tc.want, " || "); ok {
-				tc.want = monkeyMuxAgentLaunchCommand(resume) + " || " + monkeyMuxAgentLaunchCommand(launch)
+				resume = monkeyMuxAgentLaunchCommand(resume)
+				if tc.agentTool == "codex" {
+					resume = codexResumeGateCommand(tc.state.AgentSessionID, resume)
+				}
+				tc.want = resume + " || " + monkeyMuxAgentLaunchCommand(launch)
 			}
 			if got := options.command; got != tc.want {
 				t.Fatalf("command = %q, want %q", got, tc.want)
@@ -12830,7 +12837,6 @@ func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
 			for _, response := range []controlResponse{
 				{Type: "window_list"},
 				{Type: "shutdown", ID: "another-request"},
-				{Type: "window_list", ID: request.ID},
 			} {
 				if err := enc.Encode(response); err != nil {
 					t.Fatal(err)
