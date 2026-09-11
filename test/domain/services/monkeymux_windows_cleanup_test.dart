@@ -141,8 +141,8 @@ Write-Output 'CONNECTION_CAN_CONTINUE'
           '/c',
           'mklink',
           '/J',
-          linkedVersion,
-          outsideVersion.path,
+          linkedVersion.replaceAll('/', r'\'),
+          outsideVersion.path.replaceAll('/', r'\'),
         ]);
         expect(
           result.exitCode,
