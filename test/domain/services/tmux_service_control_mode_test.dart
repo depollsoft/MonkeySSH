@@ -1868,6 +1868,8 @@ void main() {
       'switch to another window',
       'repeat selection',
       'failed repeat selection',
+      'closed window',
+      'obsolete activity',
     ]) {
       test('selectWindow redraw suppression handles $scenario', () async {
         final client = _MockSshClient();
@@ -1880,6 +1882,7 @@ void main() {
         var activity = scenario == 'unknown baseline' ? null : 100;
         var targetIndex = 1;
         var otherActivity = 0;
+        var includeTarget = true;
         final unknownBaseline = activity == null;
         String windowLine(int index, String id, int? timestamp) => [
           '$index',
@@ -1919,7 +1922,7 @@ void main() {
           if (command.contains('list-windows')) {
             return _buildOpenExecSession(
               stdout:
-                  '${windowLine(targetIndex, '@2', activity)}\n'
+                  '${includeTarget ? '${windowLine(targetIndex, '@2', activity)}\n' : ''}'
                   '${windowLine(2, '@3', otherActivity == 0 ? activity : otherActivity)}\n${_doneMarker()}',
             );
           }
@@ -1988,6 +1991,13 @@ void main() {
           after.last.lastActivityEpochSeconds,
           scenario == 'switch to another window' ? 100 : 200,
         );
+        if (scenario == 'closed window') {
+          includeTarget = false;
+          expect(await service.listWindows(session, 'main'), hasLength(1));
+          includeTarget = true;
+          final replacement = await service.listWindows(session, 'main');
+          expect(replacement.first.lastActivityEpochSeconds, 200);
+        }
         if (scenario.contains('repeat selection')) {
           await service.selectWindow(session, 'main', 2, windowId: '@3');
           final repeat = service.selectWindow(
@@ -2015,6 +2025,11 @@ void main() {
         activity = 202;
         final realOutput = await service.listWindows(session, 'main');
         expect(realOutput.first.lastActivityEpochSeconds, 202);
+        if (scenario == 'obsolete activity') {
+          activity = 200;
+          final staleSnapshot = await service.listWindows(session, 'main');
+          expect(staleSnapshot.first.lastActivityEpochSeconds, 200);
+        }
       });
     }
 

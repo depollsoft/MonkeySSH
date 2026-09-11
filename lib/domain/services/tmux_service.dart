@@ -740,6 +740,9 @@ class TmuxService implements RemoteMultiplexerService {
         output,
         TmuxWindow.fromTmuxFormat,
       ).toList(growable: false);
+      state.windowSwitchActivitySuppressions[key]?.removeWhere(
+        (entry) => !parsedWindows.any(entry._matchesTarget),
+      );
       final activityFilteredWindows = _suppressWindowSwitchRedrawActivity(
         key,
         parsedWindows,
@@ -1975,20 +1978,27 @@ class TmuxService implements RemoteMultiplexerService {
         ?.windowSwitchActivitySuppressions[key];
     if (suppressions == null || suppressions.isEmpty) return windows;
     final now = DateTime.now();
-    return windows
+    final obsolete = <_TmuxWindowSwitchActivitySuppression>{};
+    final filtered = windows
         .map((window) {
           for (final suppression in suppressions) {
             if (!suppression._matchesTarget(window)) continue;
             final captureUntil = suppression.captureUntil;
-            return suppression.preserveBaselineForSyntheticRedraw(
+            final result = suppression.preserveBaselineForSyntheticRedraw(
               window,
               captureSyntheticActivity:
                   captureUntil == null || !now.isAfter(captureUntil),
             );
+            if (suppression.isObsoleteFor(window, now)) {
+              obsolete.add(suppression);
+            }
+            return result;
           }
           return window;
         })
         .toList(growable: false);
+    suppressions.removeWhere(obsolete.contains);
+    return filtered;
   }
 
   TmuxWindowSnapshotEvent _suppressWindowSwitchRedrawActivityEvent(
@@ -4315,6 +4325,16 @@ class _TmuxWindowSwitchActivitySuppression {
 
   bool _matchesTarget(TmuxWindow window) =>
       windowId != null ? window.id == windowId : window.index == windowIndex;
+
+  bool isObsoleteFor(TmuxWindow window, DateTime now) {
+    final deadline = captureUntil;
+    if (deadline == null) return false;
+    final captured = _syntheticActivityEpochSeconds;
+    if (captured == null && !now.isAfter(deadline)) return false;
+    final floor = captured ?? rawActivityFloorEpochSeconds;
+    final activity = window.lastActivityEpochSeconds;
+    return activity != null && (floor == null || activity > floor);
+  }
 
   TmuxWindow restoreActivityAfterFailure(TmuxWindow window) {
     final captured = _syntheticActivityEpochSeconds;
