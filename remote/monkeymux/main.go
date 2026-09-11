@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.195"
+	monkeyMuxVersion                  = "0.1.196"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -132,6 +132,9 @@ const (
 	// behind. Dial failure is not enough: the old process can still be in
 	// close() and later unlink the replacement's freshly rebound socket.
 	serverExitWaitTimeout = windowWatcherShutdownTimeout + time.Second
+	// A forced stop gets a separate, short exit confirmation. Keep the first
+	// wait long enough for the outgoing helper's graceful window teardown.
+	serverForcedExitWaitTimeout = time.Second
 	// How often a live server checks that its socket path still names the
 	// inode it is accepting on. An upgrade that unlinked by path leaves the
 	// replacement listening on an orphaned inode; republishing heals that.
@@ -2030,14 +2033,42 @@ func prepareRunningServerReplacement(
 		}, nil
 	}
 	if status.supportsCapability("shutdown") {
+		// Capture pane identities while their ancestry still leads to the old
+		// server. Shutdown can orphan them, and bare pids can be recycled before
+		// escalation. An unconfirmed server never authorizes process signals.
+		var panes map[int]time.Time
+		if oldPID.confirmedOwner(session) {
+			panes = captureReplacementPaneGroups(restore, oldPID.pid)
+		}
 		requestServerShutdown(session)
-		if !waitForServerProcessExit(session, oldPID, serverExitWaitTimeout) {
+		forced, err := stopServerForReplacement(
+			func(timeout time.Duration) bool {
+				return waitForServerProcessExit(session, oldPID, timeout)
+			},
+			func() {
+				// Resolve ownership again after the graceful wait; the pid may
+				// now name an unrelated process or another session's helper.
+				if oldPID.confirmedOwner(session) {
+					terminateProcessID(oldPID.pid)
+				}
+			},
+			func() { reapReplacementPaneGroups(panes) },
+		)
+		if err != nil {
 			fmt.Fprintf(
 				os.Stderr,
-				"monkeymux: running session did not exit; continuing with helper %s\r\n",
+				"monkeymux: running session did not exit after forced stop; continuing with helper %s\r\n",
 				status.displayVersion(),
 			)
-			return nil, errServerUpdateStillAlive
+			return nil, err
+		}
+		if forced {
+			fmt.Fprintf(
+				os.Stderr,
+				"monkeymux: force-stopped unresponsive helper %s; starting helper %s\r\n",
+				status.displayVersion(),
+				monkeyMuxVersion,
+			)
 		}
 	} else {
 		fmt.Fprintf(
@@ -2052,6 +2083,27 @@ func prepareRunningServerReplacement(
 		oldPID:        oldPID,
 		legacyHandoff: !status.supportsCapability("shutdown"),
 	}, nil
+}
+
+// stopServerForReplacement escalates only after the full graceful wait. The
+// caller supplies identity-checked signals; keeping the exit observer separate
+// lets tests cover hung helpers without killing a real server. Reap captured
+// panes even if termination made the server exit, since its children may still
+// hold agent session locks after becoming orphans.
+func stopServerForReplacement(
+	confirmExit func(time.Duration) bool,
+	terminate func(),
+	reap func(),
+) (bool, error) {
+	if confirmExit(serverExitWaitTimeout) {
+		return false, nil
+	}
+	terminate()
+	reap()
+	if !confirmExit(serverForcedExitWaitTimeout) {
+		return true, errServerUpdateStillAlive
+	}
+	return true, nil
 }
 
 func queryRunningServerStatusWithRetry(

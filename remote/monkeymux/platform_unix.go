@@ -375,6 +375,53 @@ func terminateProcessID(pid int) {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
 
+// captureReplacementPaneGroups must run before shutdown, while the confirmed
+// server is still an ancestor of its panes. PanePid can name a foreground job
+// rather than a direct child, so accept descendants that lead their own group.
+// Unknown ancestry or start times never authorize a later kill.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) map[int]time.Time {
+	panes := map[int]time.Time{}
+	if restore == nil || ownerPID <= 0 {
+		return panes
+	}
+	processes := readProcessTable()
+	for _, window := range restore.Windows {
+		pid := window.PanePid
+		if pid <= 0 || !processIDAlive(pid) ||
+			processDepthFromAncestor(processes, pid, ownerPID) <= 0 {
+			continue
+		}
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil || pgid != pid {
+			continue
+		}
+		snapshot := inspectProcess(pid)
+		if snapshot.known && snapshot.running && !snapshot.started.IsZero() {
+			panes[pid] = snapshot.started
+		}
+	}
+	return panes
+}
+
+// reapReplacementPaneGroups is best-effort cleanup of captured pane groups.
+// Liveness alone cannot distinguish a recycled pid: require the captured start
+// time as well, and never redirect a kill to a different process group. Check
+// immediately before signaling, as with the existing server ownership guard.
+func reapReplacementPaneGroups(panes map[int]time.Time) {
+	for pid, started := range panes {
+		if pid <= 0 || started.IsZero() || !processIDAlive(pid) {
+			continue
+		}
+		snapshot := inspectProcess(pid)
+		if !snapshot.known || !snapshot.running || !snapshot.started.Equal(started) {
+			continue
+		}
+		if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
+}
+
 func signalCommandProcessGroup(cmd *exec.Cmd, signal syscall.Signal) {
 	if cmd == nil || cmd.Process == nil {
 		return

@@ -784,6 +784,14 @@ func inspectProcess(pid int) processSnapshot {
 	return snapshot
 }
 
+// Unix pane process groups have no ConPTY equivalent. Server termination uses
+// taskkill /T below; separate cleanup of orphaned panes is currently a no-op.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) map[int]time.Time {
+	return nil
+}
+
+func reapReplacementPaneGroups(panes map[int]time.Time) {}
+
 func terminateProcessID(pid int) {
 	if pid <= 0 {
 		return
