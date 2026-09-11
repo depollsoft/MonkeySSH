@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,6 +198,97 @@ func TestRedrawWindowsFallback(t *testing.T) {
 			}
 			if !reflect.DeepEqual(simulated, test.want) {
 				t.Fatalf("redraw fallback = %#v, want %#v", simulated, test.want)
+			}
+		})
+	}
+}
+
+func TestConPtyNormalScreenReturnsWithoutSyntheticResize(t *testing.T) {
+	for _, command := range []string{"codex", "copilot", "powershell"} {
+		t.Run(command, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 80, 24)
+			pty := &resizeRecordingPty{}
+			window := &muxWindow{id: "@2", index: 1, foregroundCommand: command,
+				win32InputMode: true, pty: pty, ptyWidth: 80, ptyHeight: 24}
+			server.windows = []*muxWindow{{id: "@1", index: 0, win32InputMode: true}, window}
+			server.activeID = "@1"
+			window.appendHistoryLocked([]byte("COMPOSER_SAVED\r\n" + strings.Repeat("transcript\r\n", 20000) + "\x1b]11;?\x07"))
+			conn := &recordingConn{}
+			client := registerTestAttachClient(t, server, conn, "primary", 80, 24)
+			for i := 0; i < 2; i++ {
+				if err := server.selectWindow(window.id); err != nil {
+					t.Fatal(err)
+				}
+				if err := server.selectWindow("@1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := server.selectWindow(window.id); err != nil {
+				t.Fatal(err)
+			}
+			if !server.replayFocusedWindowToClient(client, 80, 24) {
+				t.Fatal("focus replay failed")
+			}
+			waitForTestAttachWrites(t, server)
+			if sizes := pty.snapshot(); len(sizes) != 0 {
+				t.Fatalf("return resized PTY: %#v", sizes)
+			}
+			if window.redrawForwardingPaused {
+				t.Fatal("return paused for a synthetic redraw")
+			}
+			replay := []byte(conn.String())
+			if !bytes.Contains(replay, []byte("COMPOSER_SAVED")) || !bytes.Contains(replay, []byte("transcript")) {
+				t.Fatal("return discarded retained screen content")
+			}
+			if bytes.Contains(replay, []byte("\x1b]11;?\x07")) {
+				t.Fatal("return replayed a terminal query")
+			}
+			if !bytes.Contains(replay, []byte(terminalSynchronizedOutputBegin)) || !bytes.Contains(replay, []byte(terminalSynchronizedOutputEnd)) {
+				t.Fatal("return was not an atomic screen replay")
+			}
+			server.width, server.height = 100, 30
+			if err := server.selectWindow(window.id); err != nil {
+				t.Fatal(err)
+			}
+			if sizes := pty.snapshot(); !reflect.DeepEqual(sizes, []recordedTerminalSize{{100, 30}}) {
+				t.Fatalf("real geometry change = %#v", sizes)
+			}
+		})
+	}
+}
+
+func TestConPtyAlternateScreenStillUsesForegroundRedraw(t *testing.T) {
+	window := &muxWindow{win32InputMode: true, privateModes: map[string]bool{"1049": true}}
+	if !window.usesForegroundRedrawReplayLocked() {
+		t.Fatal("alternate screen lost its foreground redraw")
+	}
+}
+
+func TestConPtyNormalScreenExplicitThemeRedraw(t *testing.T) {
+	for _, command := range []string{"codex", "copilot", "powershell"} {
+		t.Run(command, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 80, 24)
+			window := &muxWindow{id: "@1", foregroundCommand: command, win32InputMode: true,
+				pty: &resizeRecordingPty{}, ptyWidth: 80, ptyHeight: 24}
+			window.appendHistoryLocked([]byte("saved frame"))
+			server.windows = []*muxWindow{window}
+			server.activeID = window.id
+			registerTestAttachClient(t, server, &recordingConn{}, "primary", 80, 24)
+			original := simulateForegroundResize
+			t.Cleanup(func() { simulateForegroundResize = original })
+			redrew := false
+			simulateForegroundResize = func(candidate *muxWindow, width, height int) {
+				redrew = true
+				if candidate != window || width != 80 || height != 24 || !window.redrawForwardingPaused {
+					t.Fatal("explicit redraw lost its target, dimensions, or synchronized forwarding pause")
+				}
+				if !bytes.Contains(server.foregroundHistoryFallbackHistoryLocked(window), []byte("saved frame")) {
+					t.Fatal("explicit redraw lost its fallback frame")
+				}
+			}
+			server.forceForegroundThemeRedraw(window.id)
+			if redrew != (command != "powershell") {
+				t.Fatalf("theme redraw = %t for %s", redrew, command)
 			}
 		})
 	}
