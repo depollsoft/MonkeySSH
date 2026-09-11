@@ -11380,7 +11380,11 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			options := createWindowOptionsForRestore(tc.state, true)
 			if resume, launch, ok := strings.Cut(tc.want, " || "); ok {
-				tc.want = monkeyMuxAgentLaunchCommand(resume) + " || " + monkeyMuxAgentLaunchCommand(launch)
+				resume = monkeyMuxAgentLaunchCommand(resume)
+				if tc.agentTool == "codex" {
+					resume = codexResumeGateCommand(tc.state.AgentSessionID, resume)
+				}
+				tc.want = resume + " || " + monkeyMuxAgentLaunchCommand(launch)
 			}
 			if got := options.command; got != tc.want {
 				t.Fatalf("command = %q, want %q", got, tc.want)
@@ -12833,7 +12837,6 @@ func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
 			for _, response := range []controlResponse{
 				{Type: "window_list"},
 				{Type: "shutdown", ID: "another-request"},
-				{Type: "window_list", ID: request.ID},
 			} {
 				if err := enc.Encode(response); err != nil {
 					t.Fatal(err)

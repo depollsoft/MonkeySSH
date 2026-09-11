@@ -132,6 +132,9 @@ const (
 	// behind. Dial failure is not enough: the old process can still be in
 	// close() and later unlink the replacement's freshly rebound socket.
 	serverExitWaitTimeout = windowWatcherShutdownTimeout + time.Second
+	// A forced stop gets a separate, short exit confirmation. Keep the first
+	// wait long enough for the outgoing helper's graceful window teardown.
+	serverForcedExitWaitTimeout = time.Second
 	// How often a live server checks that its socket path still names the
 	// inode it is accepting on. An upgrade that unlinked by path leaves the
 	// replacement listening on an orphaned inode; republishing heals that.
@@ -1002,6 +1005,10 @@ func main() {
 		runAgentLaunchWrapper(os.Args[2:])
 	case "agent-identity-hook":
 		agentIdentityHookCommand(os.Args[2:])
+	case "wait-codex-session":
+		if len(os.Args) == 3 {
+			waitForCodexSession(os.Args[2])
+		}
 	case "cursor-agent-auth":
 		cursorAgentAuthCommand(os.Args[2:])
 	case "version", "--version", "-v":
@@ -2048,16 +2055,46 @@ func prepareRunningServerReplacement(
 		}, nil
 	}
 	if status.supportsCapability("shutdown") {
-		if err := requestServerShutdown(session); err != nil {
-			return nil, fmt.Errorf("monkeymux: could not request shutdown for session %q: %w", session, err)
+		// Capture pane identities while their ancestry still leads to the old
+		// server. Shutdown can orphan them, and bare pids can be recycled before
+		// escalation. An unconfirmed server never authorizes process signals.
+		var panes []replacementPaneGroup
+		if oldPID.confirmedOwner(session) {
+			panes = captureReplacementPaneGroups(restore, oldPID.pid)
 		}
-		if !waitForServerProcessExit(session, oldPID, serverExitWaitTimeout) {
+		if err := requestServerShutdown(session); err != nil {
+			// An unresponsive helper may never acknowledge shutdown. Preserve
+			// the error while still attempting identity-checked forced recovery.
+			fmt.Fprintf(os.Stderr, "monkeymux: shutdown request failed: %v; waiting for helper exit\r\n", err)
+		}
+		forced, err := stopServerForReplacement(
+			func(timeout time.Duration) bool {
+				return waitForServerProcessExit(session, oldPID, timeout)
+			},
+			func() {
+				// Resolve ownership again after the graceful wait; the pid may
+				// now name an unrelated process or another session's helper.
+				if oldPID.confirmedOwner(session) {
+					terminateProcessID(oldPID.pid)
+				}
+			},
+			func() { reapReplacementPaneGroups(panes) },
+		)
+		if err != nil {
 			fmt.Fprintf(
 				os.Stderr,
-				"monkeymux: running session did not exit; continuing with helper %s\r\n",
+				"monkeymux: running session did not exit after forced stop; continuing with helper %s\r\n",
 				status.displayVersion(),
 			)
-			return nil, errServerUpdateStillAlive
+			return nil, err
+		}
+		if forced {
+			fmt.Fprintf(
+				os.Stderr,
+				"monkeymux: force-stopped unresponsive helper %s; starting helper %s\r\n",
+				status.displayVersion(),
+				monkeyMuxVersion,
+			)
 		}
 	} else {
 		fmt.Fprintf(
@@ -2099,6 +2136,27 @@ func keepRespondingServerBeforeReplacement(
 		return false, nil
 	}
 	return false, errServerUpdateStillAlive
+}
+
+// stopServerForReplacement escalates only after the full graceful wait. The
+// caller supplies identity-checked signals; keeping the exit observer separate
+// lets tests cover hung helpers without killing a real server. Reap captured
+// panes even if termination made the server exit, since its children may still
+// hold agent session locks after becoming orphans.
+func stopServerForReplacement(
+	confirmExit func(time.Duration) bool,
+	terminate func(),
+	reap func(),
+) (bool, error) {
+	if confirmExit(serverExitWaitTimeout) {
+		return false, nil
+	}
+	terminate()
+	reap()
+	if !confirmExit(serverForcedExitWaitTimeout) {
+		return true, errServerUpdateStillAlive
+	}
+	return true, nil
 }
 
 func queryRunningServerStatusWithRetry(
@@ -3096,9 +3154,9 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 	if len(processes) > 0 {
 		processDiscoveredSessions = map[string]map[int]string{
 			"copilot":  discoverCopilotSessionIDs(processes, panePids),
-			"codex":    discoverAgentSessionIDs("codex", processes, panePids, paneWorkingDirectories),
-			"opencode": discoverAgentSessionIDs("opencode", processes, panePids, paneWorkingDirectories),
-			"claude":   discoverAgentSessionIDs("claude", processes, panePids, paneWorkingDirectories),
+			"codex":    discoverRestoreAgentSessionIDs("codex", processes, panePids, restore, paneWorkingDirectories),
+			"opencode": discoverRestoreAgentSessionIDs("opencode", processes, panePids, restore, paneWorkingDirectories),
+			"claude":   discoverRestoreAgentSessionIDs("claude", processes, panePids, restore, paneWorkingDirectories),
 		}
 	}
 	for i := range restore.Windows {
@@ -3172,10 +3230,16 @@ func assignAgentSessionsByWorkspace(
 ) map[int]string {
 	sessions := map[int]string{}
 	used := map[string]bool{}
+	for i, window := range restore.Windows {
+		if agentToolCandidateForRestore(window) == provider && window.AgentSessionIdentityExact && window.AgentSessionID != "" {
+			sessions[i] = window.AgentSessionID
+			used[window.AgentSessionID] = true
+		}
+	}
 	unresolved := []agentSessionFallback{}
 	liveProcesses := agentProcessesByPane(processes, panePids, provider)
 	for i, window := range restore.Windows {
-		if agentToolForRestore(window) != provider {
+		if agentToolForRestore(window) != provider || sessions[i] != "" {
 			continue
 		}
 		process, ok := liveProcesses[window.PanePid]
@@ -3198,7 +3262,7 @@ func assignAgentSessionsByWorkspace(
 			processStarted: processStartedAtForMetadata(process.pid),
 		})
 	}
-	assignRecentAgentSessions(provider, sessions, unresolved, sessionsForWorkspace)
+	assignRecentAgentSessions(provider, sessions, used, unresolved, sessionsForWorkspace)
 	return sessions
 }
 
@@ -4873,6 +4937,16 @@ func discoverAgentSessionIDs(
 	panePids map[int]struct{},
 	fallbackWorkingDirectories ...map[int]string,
 ) map[int]string {
+	return discoverRestoreAgentSessionIDs(tool, processes, panePids, nil, fallbackWorkingDirectories...)
+}
+
+func discoverRestoreAgentSessionIDs(
+	tool string,
+	processes map[int]processInfo,
+	panePids map[int]struct{},
+	restore *serverRestore,
+	fallbackWorkingDirectories ...map[int]string,
+) map[int]string {
 	var recentSessions func(string) []recentAgentSession
 	switch tool {
 	case "codex":
@@ -4900,6 +4974,16 @@ func discoverAgentSessionIDs(
 	}
 	sessions := map[int]string{}
 	used := map[string]bool{}
+	if restore != nil {
+		for _, window := range restore.Windows {
+			if agentToolCandidateForRestore(window) == tool && window.AgentSessionIdentityExact && window.AgentSessionID != "" {
+				if window.PanePid > 0 {
+					sessions[window.PanePid] = window.AgentSessionID
+				}
+				used[window.AgentSessionID] = true
+			}
+		}
+	}
 	unresolved := []agentSessionFallback{}
 	liveProcesses := agentProcessesByPane(processes, panePids, tool)
 	paneIDs := make([]int, 0, len(liveProcesses))
@@ -4908,6 +4992,9 @@ func discoverAgentSessionIDs(
 	}
 	sort.Ints(paneIDs)
 	for _, panePid := range paneIDs {
+		if sessions[panePid] != "" {
+			continue
+		}
 		process := liveProcesses[panePid]
 		workingDirectory := agentWorkingDirectoryForMetadata(
 			process.pid, panePid, fallbackWorkingDirectories,
@@ -4928,7 +5015,7 @@ func discoverAgentSessionIDs(
 			processStarted: processStartedAtForMetadata(process.pid),
 		})
 	}
-	assignRecentAgentSessions(tool, sessions, unresolved, recentSessions)
+	assignRecentAgentSessions(tool, sessions, used, unresolved, recentSessions)
 	return sessions
 }
 
@@ -5265,13 +5352,10 @@ type agentSessionFallback struct {
 func assignRecentAgentSessions(
 	tool string,
 	sessions map[int]string,
+	used map[string]bool,
 	unresolved []agentSessionFallback,
 	candidatesForDirectory func(string) []recentAgentSession,
 ) {
-	used := map[string]bool{}
-	for _, id := range sessions {
-		used[id] = true
-	}
 	sort.Slice(unresolved, func(i, j int) bool {
 		a, b := unresolved[i], unresolved[j]
 		if a.workingDirectory != b.workingDirectory {
@@ -5982,8 +6066,14 @@ func createWindowOptionsForRestore(
 				)
 				command = piResumeCommandWithFreshFallback(resume, launch)
 			} else {
+				resume = monkeyMuxAgentLaunchCommand(resume)
+				if agentTool == "codex" {
+					// Wrap the CLI before adding a shell sequence, so the identity
+					// hook remains active when the lock wait completes.
+					resume = codexResumeGateCommand(sessionID, resume)
+				}
 				command = agentResumeCommandWithFreshFallback(
-					monkeyMuxAgentLaunchCommand(resume),
+					resume,
 					monkeyMuxAgentLaunchCommand(launch),
 				)
 			}
@@ -15129,7 +15219,8 @@ func canonicalAgentCommandName(command string) string {
 // branch is reached solely when the resume itself failed to start. An
 // intentional close signals the whole process group (SIGHUP), which terminates
 // the shell before it can reach the fallback, so closing a window never
-// relaunches the agent.
+// relaunches the agent. During Codex server teardown, shutdownCodex freezes the
+// wrapping shell before TERM and leaves it stopped through the final group kill.
 func agentResumeCommandWithFreshFallback(resume string, launch string) string {
 	return piResumeCommandWithFreshFallback(resume, launch)
 }
@@ -16032,7 +16123,9 @@ func (s *muxServer) close() {
 	// Mark the windows closed while still holding s.mu. A watcher that outruns
 	// the bounded wait below then finds its window already closed and returns
 	// from markWindowClosed before touching any server state.
+	codexWindows := make(map[*muxWindow]bool)
 	for _, window := range windows {
+		codexWindows[window] = !window.closed && window.agentToolLocked() == "codex" && window.nativeAcpBridgeID == ""
 		window.closed = true
 		window.releaseRedrawForwardingStateLocked()
 		window.clearKittyGraphicsPendingLocked()
@@ -16052,36 +16145,48 @@ func (s *muxServer) close() {
 	for _, control := range controls {
 		_ = control.conn.Close()
 	}
+	shutdownDeadline := time.Now().Add(windowWatcherShutdownTimeout)
+	var teardowns sync.WaitGroup
+	var otherWindows []*muxWindow
 	for _, window := range windows {
+		if process, ok := window.proc.(interface {
+			shutdownCodex(*muxWindow, time.Time)
+		}); ok && codexWindows[window] {
+			teardowns.Add(1)
+			go func() {
+				defer teardowns.Done()
+				process.shutdownCodex(window, shutdownDeadline)
+				if window.pty != nil {
+					_ = window.closePty(window.pty)
+				}
+			}()
+			continue
+		}
+		otherWindows = append(otherWindows, window)
 		if window.proc != nil {
 			window.proc.Hangup()
 		}
 		if window.pty != nil {
-			// Closing the master also hangs up the terminal's foreground
-			// group, which is how a cooperative agent under the pane shell's
-			// job control learns to exit.
+			// Closing the master also hangs up the foreground job-control group.
 			_ = window.closePty(window.pty)
 		}
 	}
-	// A child that ignores SIGHUP (cursor-agent does) never lets its watcher
-	// finish, so close runs out the whole watcher bound below and the
-	// replacement helper's exit wait times out: the update is abandoned and the
-	// old server kept, every time. Give the hangups a moment to work, then
-	// force the survivors out; the restore snapshot already carries what they
-	// need to resume.
-	killSurvivingWindowProcesses(windows, foregroundGroups, windowHangupGrace)
+	// Codex gets its separate graceful lock-release deadline. Other agents
+	// still need forced cleanup when they ignore the initial terminal hangup.
+	killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
 	for _, window := range windows {
 		if window.nativeAcpBridgeID != "" {
 			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
 		}
 	}
+	teardowns.Wait()
 	// Closing the ptys ends the reader goroutines and the hangup above ends the
 	// child processes, so the watchers finish promptly. Wait for them so no
 	// goroutine mutates server state after close returns. The wait is bounded
 	// because a child that ignores SIGHUP must not be able to hang shutdown;
 	// marking the windows closed above is what makes overrunning a watcher
 	// harmless rather than a late mutation of server state.
-	s.waitForWindowWatchers(windowWatcherShutdownTimeout)
+	s.waitForWindowWatchers(time.Until(shutdownDeadline))
 	// A republisher may already have bound a replacement and be waiting to
 	// reacquire s.mu. Join it before close returns so it can observe closed and
 	// remove that listener's path rather than leaving stale socket residue.
@@ -16092,10 +16197,9 @@ func (s *muxServer) close() {
 	s.pendingWindowStarts.Wait()
 }
 
-// windowWatcherShutdownTimeout bounds how long close waits for the per-window
-// goroutines after hanging up the children and closing the ptys. They normally
-// finish immediately; the bound only exists so a child that ignores SIGHUP
-// cannot hang shutdown.
+// windowWatcherShutdownTimeout includes Codex's parallel graceful escalation
+// and the remaining watcher wait. Do not add the grace period to this budget:
+// server replacement allows only one additional second for the old server exit.
 const windowWatcherShutdownTimeout = 2 * time.Second
 
 // windowHangupGrace bounds how long close waits for hung-up children to exit

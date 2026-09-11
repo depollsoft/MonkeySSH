@@ -17,7 +17,7 @@ import (
 // is installed, and its existing reader seam on hosts without SQLite.
 func TestEnrichRestoreSharedCwdSessions(t *testing.T) {
 	for _, tool := range []string{"claude", "codex", "opencode", "antigravity", "cursor-agent"} {
-		for _, evidence := range []string{"fresh", "argv", "open-file"} {
+		for _, evidence := range []string{"fresh", "argv", "open-file", "exact"} {
 			if evidence == "open-file" && tool != "claude" && tool != "codex" {
 				continue
 			}
@@ -48,12 +48,20 @@ func TestEnrichRestoreSharedCwdSessions(t *testing.T) {
 						}
 						p.args += flag + ids[2]
 						processes[200] = p
-					} else {
+					} else if evidence == "open-file" {
 						processOpenFilePathsForMetadata = func(pid int) []string {
 							if pid == 200 {
 								return []string{paths[2]}
 							}
 							return nil
+						}
+					}
+					if evidence == "exact" {
+						for i := range restore.Windows {
+							if restore.Windows[i].PanePid == 100 {
+								restore.Windows[i].AgentSessionID = ids[2]
+								restore.Windows[i].AgentSessionIdentityExact = true
+							}
 						}
 					}
 					// All remaining candidates satisfy both unresolved lifetimes.
@@ -141,6 +149,61 @@ func TestEnrichRestoreSharedCwdDuplicateArgv(t *testing.T) {
 				t.Fatalf("session counts = %v, want one claimed, one fallback, one unresolved", counts)
 			}
 		})
+	}
+}
+
+// A foreign newest session must not consume a pairing slot and leave a local
+// pane unresolved after the final ownership guard removes it.
+func TestEnrichRestoreSharedCwdSkipsForeignSession(t *testing.T) {
+	for _, tool := range []string{"claude", "codex", "antigravity", "cursor-agent"} {
+		t.Run(tool, func(t *testing.T) {
+			home, cwd, now, processes, restore := sharedCwdRestoreFixture(t, tool)
+			for i := 1; i <= 3; i++ {
+				writeSharedCwdSession(t, tool, home, cwd, sharedCwdSessionID(i), now.Add(time.Duration(i-4)*time.Minute))
+			}
+			foreignID := sharedCwdSessionID(4)
+			path := writeSharedCwdSession(t, tool, home, cwd, foreignID, now)
+			command := tool
+			if tool == "antigravity" {
+				command = "agy"
+				path = filepath.Join(home, ".gemini", "antigravity-cli", "conversations", foreignID+".db")
+			}
+			processes[300] = processInfo{pid: 300, ppid: 1, comm: command, args: command}
+			if tool == "claude" {
+				bindingTestRegistry(t, 300, foreignID, cwd, now.Add(-time.Minute))
+			}
+			processOpenFilePathsForMetadata = func(pid int) []string {
+				if pid == 300 {
+					return []string{path}
+				}
+				return nil
+			}
+			bindingTestExpireForeignOwnership()
+			enrichRestoreWithAgentSessionIDs(restore)
+			for _, window := range restore.Windows {
+				want := sharedCwdSessionID(window.PanePid - 99)
+				if window.AgentSessionID != want {
+					t.Fatalf("pane %d session = %q, want %q", window.PanePid, window.AgentSessionID, want)
+				}
+			}
+		})
+	}
+}
+
+func TestEnrichRestoreSharedCwdReservesClaudeRegistry(t *testing.T) {
+	home, cwd, now, _, restore := sharedCwdRestoreFixture(t, "claude")
+	for i := 1; i <= 3; i++ {
+		writeSharedCwdSession(t, "claude", home, cwd, sharedCwdSessionID(i), now.Add(time.Duration(i-4)*time.Minute))
+	}
+	processStartedAtForMetadata = func(pid int) time.Time { return now.Add(time.Duration(pid-206) * time.Minute) }
+	bindingTestRegistry(t, 200, sharedCwdSessionID(3), cwd, processStartedAtForMetadata(200))
+	bindingTestExpireForeignOwnership()
+	enrichRestoreWithAgentSessionIDs(restore)
+	want := map[int]string{100: sharedCwdSessionID(3), 101: sharedCwdSessionID(1), 102: sharedCwdSessionID(2)}
+	for _, window := range restore.Windows {
+		if window.AgentSessionID != want[window.PanePid] {
+			t.Fatalf("pane %d session = %q, want %q", window.PanePid, window.AgentSessionID, want[window.PanePid])
+		}
 	}
 }
 

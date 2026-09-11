@@ -78,6 +78,9 @@ func (p *unixPty) foregroundProcessGroup() int {
 // unixProcess wraps the child process attached to a pty master.
 type unixProcess struct {
 	cmd *exec.Cmd
+	// Reserve the leader's PID while shutdown signals its process group.
+	reapMu  sync.Mutex
+	reaping bool
 }
 
 func (p *unixProcess) Pid() int {
@@ -88,13 +91,30 @@ func (p *unixProcess) Pid() int {
 }
 
 func (p *unixProcess) Wait() error {
+	return p.waitWithExitObserver(awaitWindowProcessExit)
+}
+
+func (p *unixProcess) waitWithExitObserver(observeExit func(int) bool) error {
 	if p.cmd == nil {
 		return nil
+	}
+	// An observer error is not proof of exit. Keep group signaling available
+	// during the blocking Wait below unless exit was actually observed.
+	if supportsWindowExitObservation && p.cmd.Process != nil && observeExit(p.cmd.Process.Pid) {
+		p.reapMu.Lock()
+		p.reaping = true
+		p.reapMu.Unlock()
 	}
 	return p.cmd.Wait()
 }
 
 func (p *unixProcess) Hangup() {
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaping {
+		_ = p.cmd.Process.Signal(syscall.SIGHUP)
+		return
+	}
 	signalCommandProcessGroup(p.cmd, syscall.SIGHUP)
 }
 
@@ -382,6 +402,104 @@ func terminateProcessID(pid int) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+}
+
+// replacementPaneGroupSystem keeps identity checks shared between capture and
+// reaping, and allows tests to model PID reuse and signal ordering.
+type replacementPaneGroupSystem struct {
+	alive   func(int) bool
+	inspect func(int) processSnapshot
+	pgid    func(int) (int, error)
+	kill    func(int, syscall.Signal) error
+}
+
+func replacementPaneGroupsSystem() replacementPaneGroupSystem {
+	return replacementPaneGroupSystem{
+		alive: processIDAlive, inspect: inspectProcess,
+		pgid: syscall.Getpgid, kill: syscall.Kill,
+	}
+}
+
+func (system replacementPaneGroupSystem) identity(pid int) (replacementPaneGroup, bool) {
+	if pid <= 0 || !system.alive(pid) {
+		return replacementPaneGroup{}, false
+	}
+	snapshot := system.inspect(pid)
+	if !snapshot.known || !snapshot.running || snapshot.started.IsZero() {
+		return replacementPaneGroup{}, false
+	}
+	if pgid, err := system.pgid(pid); err != nil || pgid != pid {
+		return replacementPaneGroup{}, false
+	}
+	return replacementPaneGroup{pid: pid, started: snapshot.started}, true
+}
+
+// captureReplacementPaneGroups must run before shutdown, while the confirmed
+// server is still an ancestor of its panes. PanePid can name a foreground job
+// below a wrapper shell in a separate group. Capture that direct child of the
+// server first so it cannot launch its resume || fresh fallback during reaping.
+// Unknown ancestry, start times, or group leadership never authorize a kill.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replacementPaneGroup {
+	if restore == nil || ownerPID <= 0 {
+		return nil
+	}
+	return replacementPaneGroupsSystem().capture(restore, ownerPID, readProcessTable())
+}
+
+func (system replacementPaneGroupSystem) capture(restore *serverRestore, ownerPID int, processes map[int]processInfo) []replacementPaneGroup {
+	var wrappers, panes []replacementPaneGroup
+	for _, window := range restore.Windows {
+		pid := window.PanePid
+		depth := processDepthFromAncestor(processes, pid, ownerPID)
+		if pid <= 0 || depth <= 0 {
+			continue
+		}
+		pane, ok := system.identity(pid)
+		if !ok {
+			continue
+		}
+		panes = append(panes, pane)
+		wrapperPID := pid
+		for step := 1; step < depth; step++ {
+			wrapperPID = processes[wrapperPID].ppid
+		}
+		if wrapperPID != pid {
+			if wrapper, ok := system.identity(wrapperPID); ok {
+				wrappers = append(wrappers, wrapper)
+			}
+		}
+	}
+	// Put every verified wrapper first, even if another window lists it as a
+	// pane. Deduplicate shared groups without losing their kill ordering.
+	var groups []replacementPaneGroup
+	seen := make(map[int]bool)
+	for _, group := range append(wrappers, panes...) {
+		if !seen[group.pid] {
+			seen[group.pid] = true
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// reapReplacementPaneGroups is best-effort cleanup of captured process groups.
+// Shutdown may have orphaned them, so ancestry is established during capture.
+// Recheck liveness, the exact start time and group leadership immediately before
+// each SIGKILL. Never redirect a kill to a different group or a recycled PID.
+func reapReplacementPaneGroups(panes []replacementPaneGroup) {
+	replacementPaneGroupsSystem().reap(panes)
+}
+
+func (system replacementPaneGroupSystem) reap(panes []replacementPaneGroup) {
+	for _, pane := range panes {
+		if pane.started.IsZero() {
+			continue
+		}
+		current, ok := system.identity(pane.pid)
+		if ok && current.started.Equal(pane.started) {
+			_ = system.kill(-pane.pid, syscall.SIGKILL)
+		}
+	}
 }
 
 func signalCommandProcessGroup(cmd *exec.Cmd, signal syscall.Signal) {
