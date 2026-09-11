@@ -52,9 +52,10 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 	for _, tc := range []struct{ command, want string }{
 		{"codex resume 'id'", invocation + " agent-launch codex resume 'id'"},
 		{`OPENCODE_PERMISSION='{"*":"allow"}' opencode`, `OPENCODE_PERMISSION='{"*":"allow"}' ` + invocation + " agent-launch opencode"},
-		{"'/opt/agent tools/claude' --resume X", invocation + " agent-launch claude --resume X"},
-		{"/opt/bin/codex --yolo", invocation + " agent-launch codex --yolo"},
-		{"claude-code --resume X", invocation + " agent-launch claude --resume X"},
+		{"'/opt/agent tools/claude' --resume X", invocation + " agent-launch claude --executable " + shellQuote("/opt/agent tools/claude") + " --resume X"},
+		{"/opt/bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("/opt/bin/codex") + " --yolo"},
+		{"claude-code --resume X", invocation + " agent-launch claude --executable " + shellQuote("claude-code") + " --resume X"},
+		{"./bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("./bin/codex") + " --yolo"},
 		{"pi --session saved", invocation + " pi-agent --session saved"},
 		{"pi", invocation + " pi-agent"},
 	} {
@@ -72,13 +73,15 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 func TestAgentLaunchWrapperDetection(t *testing.T) {
 	for _, tool := range []string{"claude", "codex", "opencode", "copilot", "cursor-agent"} {
 		for _, prefix := range []string{"", "monkeymux ", "/opt/bin/monkeymux ", "'/opt/with spaces/monkeymux' ", "cd /tmp && A=1 monkeymux "} {
-			command := prefix + "agent-launch " + tool + " --resume X"
-			for name, detect := range map[string]func(string) string{
-				"name": agentToolFromCommandName, "process": agentCommandNameFromProcessArgs,
-				"text": agentToolFromCommandText, "first word": firstShellWord,
-			} {
-				if got := detect(command); got != tool {
-					t.Errorf("%s(%q) = %q; want %q", name, command, got, tool)
+			for _, args := range []string{" --resume X", " --executable '/opt/agent tools/" + tool + "' --resume X"} {
+				command := prefix + "agent-launch " + tool + args
+				for name, detect := range map[string]func(string) string{
+					"wrapper": agentLaunchToolFromCommand, "name": agentToolFromCommandName, "process": agentCommandNameFromProcessArgs,
+					"text": agentToolFromCommandText, "first word": firstShellWord,
+				} {
+					if got := detect(command); got != tool {
+						t.Errorf("%s(%q) = %q; want %q", name, command, got, tool)
+					}
 				}
 			}
 		}
@@ -421,9 +424,134 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "agent-launch", filepath.Join(bin, "missing-agent"))
+	cmd := exec.CommandContext(ctx, os.Args[0], "agent-launch", "missing-agent")
 	output, err := cmd.CombinedOutput()
 	if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 127 || len(output) == 0 {
 		t.Fatalf("missing executable exit = %v, output %q", err, output)
+	}
+}
+
+func TestPrepareOpenCodeTUIConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, source string
+		set, merged  bool
+	}{
+		{name: "unset"},
+		{name: "merged", set: true, merged: true, source: `{"theme":"custom","keybinds":{"leader":"ctrl+a"},"large":9007199254740993,"plugin":["user-plugin",["configured-plugin",{"enabled":true}]]}`},
+		{name: "unreadable", set: true},
+		{name: "array", set: true, source: `[]`},
+		{name: "null", set: true, source: `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			var env []string
+			source := filepath.Join(t.TempDir(), "custom.json")
+			if tc.source != "" {
+				if err := os.WriteFile(source, []byte(tc.source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.set {
+				env = []string{"OPENCODE_TUI_CONFIG=" + source}
+			}
+			launch, err := prepareAgentLaunch("opencode", nil, env, "/monkeymux")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.replacedTUIConfig != (tc.set && !tc.merged) {
+				t.Fatalf("replacement notice = %v", launch.replacedTUIConfig)
+			}
+			path := strings.TrimPrefix(launch.env[0], "OPENCODE_TUI_CONFIG=")
+			if filepath.Base(path) != "monkeymux-opencode-tui.json" {
+				t.Fatalf("unexpected config path: %q", path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]json.RawMessage
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			var plugins []json.RawMessage
+			if err := json.Unmarshal(config["plugin"], &plugins); err != nil {
+				t.Fatal(err)
+			}
+			wantCount := 1
+			if tc.merged {
+				wantCount = 3
+				var original map[string]json.RawMessage
+				_ = json.Unmarshal([]byte(tc.source), &original)
+				for key, value := range original {
+					if key != "plugin" && !bytes.Equal(config[key], value) {
+						t.Errorf("changed %s: got %s, want %s", key, config[key], value)
+					}
+				}
+				var originalPlugins []json.RawMessage
+				_ = json.Unmarshal(original["plugin"], &originalPlugins)
+				if len(plugins) < 2 || !reflect.DeepEqual(plugins[:2], originalPlugins) {
+					t.Fatalf("lost caller plugins: %s", config["plugin"])
+				}
+			}
+			if len(plugins) != wantCount {
+				t.Fatalf("plugin count = %d, want %d", len(plugins), wantCount)
+			}
+			var pluginURL string
+			_ = json.Unmarshal(plugins[len(plugins)-1], &pluginURL)
+			if want := (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(filepath.Dir(path), "monkeymux-opencode-identity.mjs"))}).String(); pluginURL != want {
+				t.Fatalf("plugin URL = %q, want %q", pluginURL, want)
+			}
+			// Reusing the merged config must not add the plugin a second time.
+			again, err := prepareAgentLaunch("opencode", nil, launch.env, "/monkeymux")
+			if err != nil || again.replacedTUIConfig {
+				t.Fatalf("repeated merge: %v, notice=%v", err, again.replacedTUIConfig)
+			}
+			repeated, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(data, repeated) {
+				t.Fatalf("repeated merge changed config: %s, %v", repeated, err)
+			}
+			if tc.source != "" {
+				original, err := os.ReadFile(source)
+				if err != nil || string(original) != tc.source {
+					t.Fatal("modified caller's config file")
+				}
+			}
+		})
+	}
+}
+
+func TestAgentLaunchWrapperExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix exec and shell stub")
+	}
+	bin := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stub := filepath.Join(bin, "claude-code")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A different canonical executable must never be selected.
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, executable := range []string{"claude-code", stub, "./claude-code"} {
+		t.Run(executable, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "agent-launch", "claude", "--executable", executable, "--resume", "saved", "--executable", "agent-argument")
+			cmd.Dir = bin
+			output, err := cmd.CombinedOutput()
+			if err != nil || !strings.HasPrefix(string(output), "--settings\n") || !strings.HasSuffix(string(output), "--resume\nsaved\n--executable\nagent-argument\n") {
+				t.Fatalf("wrapper executable/args: %v, %q", err, output)
+			}
+		})
+	}
+	for _, args := range [][]string{{"--executable"}, {"--executable", ""}} {
+		cmd := exec.Command(os.Args[0], append([]string{"agent-launch", "claude"}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 || !strings.Contains(string(output), "requires a command") {
+			t.Fatalf("invalid executable flag: %v, %q", err, output)
+		}
 	}
 }

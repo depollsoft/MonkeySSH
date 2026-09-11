@@ -157,6 +157,8 @@ func TestEnrichRestoreCopilotFallsBackToCwd(t *testing.T) {
 // windows sharing a directory receive distinct sessions (most recent first) and
 // that a session already claimed elsewhere is never reused.
 func TestAssignCopilotSessionsByWorkingDirectoryDedups(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() { processStartedAtForMetadata = originalProcessStart })
 	home := t.TempDir()
@@ -191,12 +193,14 @@ func TestAssignCopilotSessionsByWorkingDirectoryDedups(t *testing.T) {
 			{Name: "Copilot CLI", AgentTool: "copilot", Cwd: project, PanePid: 202, LastActivityEpochSeconds: now.Add(-2 * time.Hour).Unix()},
 		},
 	}
+	processes := map[int]processInfo{
+		201: {pid: 201, ppid: 1, comm: "copilot", args: "copilot"},
+		202: {pid: 202, ppid: 1, comm: "copilot", args: "copilot"},
+	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	assignCopilotSessionsByWorkingDirectory(
 		restore,
-		map[int]processInfo{
-			201: {pid: 201, ppid: 1, comm: "copilot", args: "copilot"},
-			202: {pid: 202, ppid: 1, comm: "copilot", args: "copilot"},
-		},
+		processes,
 		map[int]struct{}{201: {}, 202: {}},
 	)
 
@@ -258,6 +262,8 @@ func TestCopilotCwdFallbackDoesNotResumeSessionFromBeforeFreshProcess(t *testing
 }
 
 func TestAssignCopilotSessionsByWorkingDirectoryNormalizesPaths(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() { processStartedAtForMetadata = originalProcessStart })
 	processStartedAtForMetadata = func(pid int) time.Time {
@@ -286,9 +292,11 @@ func TestAssignCopilotSessionsByWorkingDirectoryNormalizesPaths(t *testing.T) {
 			{Name: "Copilot CLI", AgentTool: "copilot", Cwd: linkDir, PanePid: 200},
 		},
 	}
+	processes := map[int]processInfo{200: {pid: 200, ppid: 1, comm: "copilot", args: "copilot"}}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	assignCopilotSessionsByWorkingDirectory(
 		restore,
-		map[int]processInfo{200: {pid: 200, ppid: 1, comm: "copilot", args: "copilot"}},
+		processes,
 		map[int]struct{}{200: {}},
 	)
 	if got := restore.Windows[0].AgentSessionID; got != "linked-session" {

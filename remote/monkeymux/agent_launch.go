@@ -51,14 +51,26 @@ export default {
 
 func runAgentLaunchWrapper(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: monkeymux agent-launch <tool> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: monkeymux agent-launch <tool> [--executable <command>] [args...]")
 		os.Exit(2)
 	}
 	tool, original := args[0], args[1:]
-	executable, err := exec.LookPath(tool)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(127)
+	commandName := tool
+	if len(original) > 0 && original[0] == "--executable" {
+		if len(original) < 2 || original[1] == "" {
+			fmt.Fprintln(os.Stderr, "monkeymux: --executable requires a command")
+			os.Exit(2)
+		}
+		commandName, original = original[1], original[2:]
+	}
+	executable := commandName
+	if !filepath.IsAbs(executable) && !strings.ContainsRune(filepath.ToSlash(executable), '/') {
+		var err error
+		executable, err = exec.LookPath(commandName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(127)
+		}
 	}
 	if runtime.GOOS == "windows" {
 		command := exec.Command(executable, original...)
@@ -90,7 +102,7 @@ func runAgentLaunchWrapper(args []string) {
 	if launch.assigned.ID != "" {
 		fmt.Fprint(os.Stdout, encodeAgentIdentityMarker(launch.assigned))
 	}
-	if err := syscall.Exec(executable, append([]string{tool}, launch.args...), launch.env); err != nil {
+	if err := syscall.Exec(executable, append([]string{commandName}, launch.args...), launch.env); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(126)
 	}
@@ -165,14 +177,36 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 				return launch, err
 			}
 			pluginURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(plugin)}).String()
-			path, err := writeJSON("monkeymux-opencode-tui.json", map[string]any{"plugin": []string{pluginURL}})
+			config := map[string]json.RawMessage{}
+			for _, value := range env {
+				if path, ok := strings.CutPrefix(value, "OPENCODE_TUI_CONFIG="); ok {
+					data, err := os.ReadFile(path)
+					var existing map[string]json.RawMessage
+					if err == nil && json.Unmarshal(data, &existing) == nil && existing != nil {
+						config = existing
+					} else {
+						launch.replacedTUIConfig = true
+					}
+					break
+				}
+			}
+			var plugins []json.RawMessage
+			_ = json.Unmarshal(config["plugin"], &plugins)
+			found := false
+			for _, plugin := range plugins {
+				var value string
+				if json.Unmarshal(plugin, &value) == nil && value == pluginURL {
+					found = true
+				}
+			}
+			if !found {
+				plugin, _ := json.Marshal(pluginURL)
+				plugins = append(plugins, plugin)
+			}
+			config["plugin"], _ = json.Marshal(plugins)
+			path, err := writeJSON("monkeymux-opencode-tui.json", config)
 			if err != nil {
 				return launch, err
-			}
-			for _, value := range env {
-				if strings.HasPrefix(value, "OPENCODE_TUI_CONFIG=") {
-					launch.replacedTUIConfig = true
-				}
 			}
 			launch.env = withAgentLaunchEnvironment(env, "OPENCODE_TUI_CONFIG", path)
 		}
@@ -406,5 +440,9 @@ func rewriteAgentLaunchCommand(command string) string {
 	if !ok {
 		return command
 	}
-	return command[:offset] + invocation + " agent-launch " + tool + command[offset+end:]
+	invocation += " agent-launch " + tool
+	if word != tool {
+		invocation += " --executable " + shellQuote(word)
+	}
+	return command[:offset] + invocation + command[offset+end:]
 }

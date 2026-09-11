@@ -93,6 +93,9 @@ func agentSessionOwnedElsewhere(tool, id string, windowPids map[int]struct{}) bo
 		return false
 	}
 	processes := processTableForMetadata()
+	if processes == nil {
+		return true
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return true
@@ -366,23 +369,27 @@ func readClaudeSessionRegistry(home string) []agentSessionCandidate {
 	paths, _ := filepath.Glob(filepath.Join(home, ".claude", "sessions", "*.json"))
 	var candidates []agentSessionCandidate
 	for _, path := range paths {
-		var raw struct {
-			PID       int    `json:"pid"`
-			SessionID string `json:"sessionId"`
-			Cwd       string `json:"cwd"`
-			StartedAt int64  `json:"startedAt"`
+		if candidate := readClaudeSessionRegistryEntry(path); candidate.id != "" {
+			candidates = append(candidates, candidate)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil || json.Unmarshal(data, &raw) != nil || raw.PID <= 0 || raw.SessionID == "" {
-			continue
-		}
-		if strconv.Itoa(raw.PID) != strings.TrimSuffix(filepath.Base(path), ".json") {
-			continue
-		}
-		candidates = append(candidates, agentSessionCandidate{id: raw.SessionID, cwd: normalizedMetadataPath(raw.Cwd),
-			created: unixDatabaseTime(strconv.FormatInt(raw.StartedAt, 10)), ownerPID: raw.PID, registry: true})
 	}
 	return candidates
+}
+
+func readClaudeSessionRegistryEntry(path string) agentSessionCandidate {
+	var raw struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"sessionId"`
+		Cwd       string `json:"cwd"`
+		StartedAt int64  `json:"startedAt"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &raw) != nil || raw.PID <= 0 || raw.SessionID == "" ||
+		strconv.Itoa(raw.PID) != strings.TrimSuffix(filepath.Base(path), ".json") {
+		return agentSessionCandidate{}
+	}
+	return agentSessionCandidate{id: raw.SessionID, cwd: normalizedMetadataPath(raw.Cwd),
+		created: unixDatabaseTime(strconv.FormatInt(raw.StartedAt, 10)), ownerPID: raw.PID, registry: true}
 }
 
 func readAntigravityConversationCandidates(home string) []agentSessionCandidate {
@@ -519,6 +526,38 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 			return
 		}
 		watch.lastPoll = now
+	}
+	if exact && tool == "claude" {
+		pid := 0
+		if watch != nil && !watch.exited {
+			pid = watch.registryPID
+			if pid == 0 {
+				pid = watch.pid
+			}
+		}
+		s.mu.Unlock()
+		if pid <= 0 {
+			return
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		candidate := readClaudeSessionRegistryEntry(filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json"))
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.windowByIDLocked(windowID) != w || w.closed || w.agentSessionWatch != watch || watch.exited ||
+			!w.agentSessionIdentityExact || w.agentToolLocked() != tool || candidate.id == "" ||
+			(!candidate.created.IsZero() && !watch.started.IsZero() && !sessionUpdatedDuringProcess(candidate.created, watch.started)) ||
+			s.exactAgentSessionOwnerLocked(tool, candidate.id, w) {
+			return
+		}
+		if w.agentSessionID != candidate.id {
+			w.agentSessionID = candidate.id
+			w.agentSessionPath, w.agentSessionDir = "", ""
+		}
+		watch.registryPID = candidate.ownerPID
+		return
 	}
 	panePIDs := map[int]struct{}{}
 	for _, window := range s.windows {

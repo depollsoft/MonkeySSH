@@ -531,10 +531,62 @@ func TestAgentSessionBindingClaudeRegistryChanges(t *testing.T) {
 		t.Fatal("previous registry ID remains reserved")
 	}
 	delete(processes, 101)
-	bindingTestNextPoll(s, w)
-	s.refreshAgentSessionBinding(w.id)
+	// Process discovery for another window retires exited exact owners.
+	other := bindingTestWindow("claude", cwd, "@2", started)
+	other.proc = bindingTestProcess{pid: 200}
+	s.windows = append(s.windows, other)
+	s.refreshAgentSessionBinding(other.id)
 	if !w.agentSessionWatch.exited || s.exactAgentSessionOwnerLocked("claude", bindingTestIDs[1], nil) {
 		t.Fatal("exited agent still reserves ID")
+	}
+}
+
+func TestAgentSessionBindingExactClaudeHookFollowsRegistry(t *testing.T) {
+	for _, registryPID := range []int{0, 102} {
+		t.Run(fmt.Sprint(registryPID), func(t *testing.T) {
+			cwd, _ := bindingTestStore(t, "claude")
+			started := time.Now().Add(-time.Second)
+			w := bindingTestWindow("claude", cwd, "@1", started)
+			w.proc = bindingTestProcess{pid: 100}
+			watch := w.agentSessionWatch
+			watch.pid, watch.registryPID = 101, registryPID
+			w.applyAgentIdentityPayloadLocked(identityTestPayload(agentIdentity{Tool: "claude", ID: bindingTestIDs[0], Source: "hook"}))
+			if !watch.done || !w.agentSessionIdentityExact {
+				t.Fatal("hook did not finish exact binding")
+			}
+			s := &muxServer{windows: []*muxWindow{w}}
+			bindingTestProcesses(t, cwd, started, nil, nil)
+			processTableForMetadata = func() map[int]processInfo {
+				t.Fatal("exact Claude refresh scanned processes")
+				return nil
+			}
+			processStartedAtForMetadata = func(int) time.Time {
+				t.Fatal("exact Claude refresh probed process start")
+				return time.Time{}
+			}
+			processWorkingDirectoryForMetadata = func(int) string {
+				t.Fatal("exact Claude refresh probed working directory")
+				return ""
+			}
+			calls := 0
+			processOpenFilePathsForMetadata = func(int) []string { calls++; return nil }
+			pid := watch.pid
+			if registryPID != 0 {
+				pid = registryPID
+				bindingTestRegistry(t, watch.pid, bindingTestIDs[0], cwd, started)
+			}
+			bindingTestRegistry(t, pid, bindingTestIDs[0], cwd, started)
+			s.refreshAgentSessionBinding(w.id)
+			bindingTestRegistry(t, pid, bindingTestIDs[1], cwd, started)
+			bindingTestNextPoll(s, w)
+			s.refreshAgentSessionBinding(w.id)
+			if w.agentSessionID != bindingTestIDs[1] || !w.agentSessionIdentityExact || !watch.done || watch.registryPID != pid {
+				t.Fatalf("hook-bound registry change lost: id=%q exact=%v done=%v pid=%d", w.agentSessionID, w.agentSessionIdentityExact, watch.done, watch.registryPID)
+			}
+			if calls != 0 || len(s.agentSessionBindings.stores) != 0 {
+				t.Fatalf("exact refresh scanned files: probes=%d stores=%d", calls, len(s.agentSessionBindings.stores))
+			}
+		})
 	}
 }
 
@@ -948,6 +1000,15 @@ func TestAgentSessionOwnershipExclusion(t *testing.T) {
 			delete(processes, 201)
 			if agentSessionOwnedElsewhere(tool, id, map[int]struct{}{101: {}}) {
 				t.Fatal("dead owner was excluded")
+			}
+			processTableForMetadata = func() map[int]processInfo { return nil }
+			if !agentSessionOwnedElsewhere(tool, id, map[int]struct{}{101: {}}) {
+				t.Fatal("unknown ownership was not excluded")
+			}
+			watch := newAgentSessionWatch(tool, cwd, now.Add(-time.Minute), nil)
+			candidates := []agentSessionCandidate{{id: id, cwd: cwd, created: now}}
+			if got := excludeForeignAgentSessions(tool, candidates, nil, watch, ""); len(got) != 0 {
+				t.Fatal("candidate with unknown ownership survived exclusion")
 			}
 		})
 	}

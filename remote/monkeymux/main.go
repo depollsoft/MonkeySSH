@@ -16377,6 +16377,10 @@ func requestServerShutdown(session string) {
 	if err != nil {
 		return
 	}
+	requestServerShutdownOnConnection(conn, session)
+}
+
+func requestServerShutdownOnConnection(conn net.Conn, session string) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
 
@@ -16389,8 +16393,9 @@ func requestServerShutdown(session string) {
 	if err := dec.Decode(&ignored); err != nil {
 		return
 	}
+	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := enc.Encode(controlMessage{
-		ID:      strconv.FormatInt(time.Now().UnixNano(), 10),
+		ID:      requestID,
 		Type:    "shutdown",
 		Session: session,
 	}); err != nil {
@@ -16401,8 +16406,12 @@ func requestServerShutdown(session string) {
 	// closing this end before it has read the request makes that hello write
 	// fail, the handler give up, and the queued shutdown vanish, so a busy
 	// session then never stops and no helper update can replace it.
-	var ack controlResponse
-	_ = dec.Decode(&ack)
+	for {
+		var ack controlResponse
+		if err := dec.Decode(&ack); err != nil || (ack.Type == "shutdown" && ack.ID == requestID) {
+			return
+		}
+	}
 }
 
 func waitForServerExit(session string, timeout time.Duration) bool {

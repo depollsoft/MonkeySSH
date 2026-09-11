@@ -9861,6 +9861,8 @@ func TestDiscoverCodexSessionIDsUsesOpenRolloutFile(t *testing.T) {
 }
 
 func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalHome := os.Getenv("HOME")
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
@@ -9909,6 +9911,7 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "codex", args: "codex"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 
 	sessions := discoverAgentSessionIDs("codex",
@@ -10020,6 +10023,8 @@ func TestDiscoverOpenCodeSessionIDsUsesProcessArgs(t *testing.T) {
 }
 
 func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalReader := openCodeSessionEntriesReader
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10051,6 +10056,7 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "opencode", args: "opencode"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	sessions := discoverAgentSessionIDs("opencode",
@@ -10135,6 +10141,8 @@ func TestDiscoverClaudeSessionIDsUsesOpenProjectFile(t *testing.T) {
 }
 
 func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10175,6 +10183,7 @@ func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -10222,6 +10231,8 @@ func writeClaudeWorktreeSessionFile(
 }
 
 func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10253,6 +10264,7 @@ func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -10340,6 +10352,8 @@ func TestClaudeSessionMatchesWorkingDirectoryUsesProjectDirWithoutRecordedCwd(t 
 // call leaves every later record naming a subdirectory while the pane's process
 // stays where it launched. That must not cost the window its resume.
 func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10385,6 +10399,7 @@ func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T)
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -12780,6 +12795,66 @@ func TestThemeHintDeliversModeReportAndFocusPair(t *testing.T) {
 				t.Fatal("theme hint was not sent")
 			}
 			waitForRecordedOutput(t, &pty.recordingConn, test.want)
+		})
+	}
+}
+
+func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
+	for _, acknowledge := range []bool{true, false} {
+		t.Run(fmt.Sprintf("acknowledge=%v", acknowledge), func(t *testing.T) {
+			const session = "shutdown-ack"
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			done := make(chan struct{})
+			started := time.Now()
+			go func() {
+				requestServerShutdownOnConnection(conn, session)
+				close(done)
+			}()
+			_ = peer.SetDeadline(time.Now().Add(socketTimeout + time.Second))
+			enc, dec := json.NewEncoder(peer), json.NewDecoder(peer)
+			var request controlMessage
+			if err := dec.Decode(&request); err != nil || request.Role != "control" {
+				t.Fatalf("control handshake: %+v, %v", request, err)
+			}
+			if err := enc.Encode(controlResponse{Type: "hello"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := dec.Decode(&request); err != nil || request.Type != "shutdown" || request.ID == "" {
+				t.Fatalf("shutdown request: %+v, %v", request, err)
+			}
+			for _, response := range []controlResponse{
+				{Type: "window_list"},
+				{Type: "shutdown", ID: "another-request"},
+				{Type: "window_list", ID: request.ID},
+			} {
+				if err := enc.Encode(response); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-done:
+				t.Fatal("returned before matching shutdown acknowledgement")
+			case <-time.After(50 * time.Millisecond):
+			}
+			if acknowledge {
+				if err := enc.Encode(controlResponse{Type: "shutdown", ID: request.ID, Status: "ok"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wait := time.Second
+			if !acknowledge {
+				wait += socketTimeout
+			}
+			select {
+			case <-done:
+				if !acknowledge && time.Since(started) < socketTimeout {
+					t.Fatal("returned before connection deadline without an acknowledgement")
+				}
+			case <-time.After(wait):
+				t.Fatal("shutdown wait did not end")
+			}
 		})
 	}
 }
