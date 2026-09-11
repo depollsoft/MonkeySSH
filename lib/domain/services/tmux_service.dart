@@ -1711,6 +1711,47 @@ class TmuxService implements RemoteMultiplexerService {
     Map<int, int>? clientImageSignatures,
     bool suppressReplay = false,
   }) async {
+    final state = _stateFor(session.connectionId);
+    final key = _TmuxWindowWatchKey(
+      connectionId: session.connectionId,
+      sessionName: sessionName,
+      extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
+    );
+    final pending = state.windowSelectRequests[key];
+    final selection = () async {
+      if (pending != null) {
+        try {
+          await pending;
+        } on Object {
+          // A failed earlier selection does not cancel the user's next one.
+        }
+      }
+      _requireState(session.connectionId, state);
+      await _selectWindow(
+        session,
+        sessionName,
+        windowIndex,
+        windowId: windowId,
+        extraFlags: extraFlags,
+      );
+    }();
+    state.windowSelectRequests[key] = selection;
+    try {
+      await selection;
+    } finally {
+      if (identical(state.windowSelectRequests[key], selection)) {
+        unawaited(state.windowSelectRequests.remove(key));
+      }
+    }
+  }
+
+  Future<void> _selectWindow(
+    SshSession session,
+    String sessionName,
+    int windowIndex, {
+    String? windowId,
+    String? extraFlags,
+  }) async {
     final targetWindowId = windowId?.trim();
     final safeWindowId =
         targetWindowId != null && isValidTmuxWindowId(targetWindowId)
@@ -1752,6 +1793,7 @@ class TmuxService implements RemoteMultiplexerService {
       activitySuppression?.captureUntil = DateTime.now().add(
         _windowSwitchActivityGracePeriod,
       );
+      activitySuppression?.previous = null;
     } on Object {
       if (activitySuppression != null &&
           (state.windowSwitchActivitySuppressions[key]?.remove(
@@ -1759,6 +1801,10 @@ class TmuxService implements RemoteMultiplexerService {
               ) ??
               false)) {
         if (_ownsState(session.connectionId, state)) {
+          final previous = activitySuppression.previous;
+          if (previous != null) {
+            state.windowSwitchActivitySuppressions[key]!.add(previous);
+          }
           final cached = state.windowSnapshotCache[key];
           if (cached != null) {
             state.windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
@@ -1902,7 +1948,15 @@ class TmuxService implements RemoteMultiplexerService {
         )
         .firstOrNull;
     if (targetWindow == null) return null;
+    final previous = state.windowSwitchActivitySuppressions[key]
+        ?.where((entry) => entry._matchesTarget(targetWindow))
+        .firstOrNull;
     final suppression = _TmuxWindowSwitchActivitySuppression(
+      previous: previous,
+      rawActivityFloorEpochSeconds:
+          previous?._syntheticActivityEpochSeconds ??
+          previous?.rawActivityFloorEpochSeconds ??
+          targetWindow.lastActivityEpochSeconds,
       windowIndex: windowIndex,
       windowId: targetWindow.id ?? windowId,
       baselineActivityEpochSeconds: targetWindow.lastActivityEpochSeconds,
@@ -2569,6 +2623,7 @@ class _TmuxConnectionState {
   Future<Set<AgentLaunchTool>>? installedAgentToolsRequest;
   final windowObservers = <_TmuxWindowWatchKey, _TmuxWindowChangeObserver>{};
   final windowListRequests = <_TmuxWindowWatchKey, Future<List<TmuxWindow>>>{};
+  final windowSelectRequests = <_TmuxWindowWatchKey, Future<void>>{};
   final windowSnapshotCache = <_TmuxWindowWatchKey, List<TmuxWindow>>{};
   final windowSwitchActivitySuppressions =
       <_TmuxWindowWatchKey, List<_TmuxWindowSwitchActivitySuppression>>{};
@@ -4244,8 +4299,14 @@ class _TmuxWindowSwitchActivitySuppression {
     required this.windowIndex,
     required this.windowId,
     required this.baselineActivityEpochSeconds,
+    required this.rawActivityFloorEpochSeconds,
+    required this.previous,
   });
 
+  // Keep the prior filter until this selection succeeds, so a failed repeat
+  // does not expose activity already attributed to an earlier redraw.
+  _TmuxWindowSwitchActivitySuppression? previous;
+  final int? rawActivityFloorEpochSeconds;
   final int windowIndex;
   final String? windowId;
   final int? baselineActivityEpochSeconds;
@@ -4282,11 +4343,16 @@ class _TmuxWindowSwitchActivitySuppression {
     // tmux exposes second-resolution activity, not output provenance. Treat
     // only the first transition as the switch redraw; a newer timestamp must
     // remain visible even if it arrives before the grace period ends.
-    if (_syntheticActivityEpochSeconds == null && captureSyntheticActivity) {
-      _syntheticActivityEpochSeconds = activity;
+    final isPreviouslySuppressed =
+        rawActivityFloorEpochSeconds != null &&
+        activity <= rawActivityFloorEpochSeconds!;
+    if (!isPreviouslySuppressed) {
+      if (_syntheticActivityEpochSeconds == null && captureSyntheticActivity) {
+        _syntheticActivityEpochSeconds = activity;
+      }
+      final captured = _syntheticActivityEpochSeconds;
+      if (captured == null || activity > captured) return window;
     }
-    final captured = _syntheticActivityEpochSeconds;
-    if (captured == null || activity > captured) return window;
     return window.copyWith(
       lastActivityEpochSeconds: baselineActivityEpochSeconds,
       clearLastActivityEpochSeconds: baselineActivityEpochSeconds == null,

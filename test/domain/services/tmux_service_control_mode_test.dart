@@ -1866,6 +1866,8 @@ void main() {
       'unknown baseline',
       'stable window ID',
       'switch to another window',
+      'repeat selection',
+      'failed repeat selection',
     ]) {
       test('selectWindow redraw suppression handles $scenario', () async {
         final client = _MockSshClient();
@@ -1904,7 +1906,12 @@ void main() {
           }
           if (command.contains('select-window')) {
             if (selectOpened.isCompleted) {
-              return _buildOpenExecSession(stdout: _doneMarker());
+              final failedRepeat =
+                  scenario == 'failed repeat selection' &&
+                  command.contains("'@2'");
+              return _buildOpenExecSession(
+                stdout: _doneMarker(failedRepeat ? 1 : 0),
+              );
             }
             selectOpened.complete();
             return selectResult.future;
@@ -1927,10 +1934,16 @@ void main() {
           windowId: '@2',
         );
         await selectOpened.future;
+        Future<void>? overlappingSwitch;
         if (scenario == 'switch to another window') {
-          // Complete the second selection while the first SSH command is still
-          // pending. Both targets must retain their own redraw baseline.
-          await service.selectWindow(session, 'main', 2, windowId: '@3');
+          // Request another target before the first command completes. The
+          // service must retain both baselines while serializing selections.
+          overlappingSwitch = service.selectWindow(
+            session,
+            'main',
+            2,
+            windowId: '@3',
+          );
           otherActivity = 300;
         }
         if (scenario.contains('slow command')) {
@@ -1950,6 +1963,7 @@ void main() {
           _buildOpenExecSession(stdout: _doneMarker(failed ? 1 : 0)),
         );
         await switchExpectation;
+        await overlappingSwitch;
         if (scenario == 'cleared connection') {
           await service.clearCache(session.connectionId);
           expect(
@@ -1974,10 +1988,33 @@ void main() {
           after.last.lastActivityEpochSeconds,
           scenario == 'switch to another window' ? 100 : 200,
         );
-        // A second timestamp must be visible even inside the grace period.
+        if (scenario.contains('repeat selection')) {
+          await service.selectWindow(session, 'main', 2, windowId: '@3');
+          final repeat = service.selectWindow(
+            session,
+            'main',
+            1,
+            windowId: '@2',
+          );
+          if (scenario == 'failed repeat selection') {
+            await expectLater(repeat, throwsA(isA<TmuxCommandException>()));
+          } else {
+            await repeat;
+          }
+          // An active-flag snapshot may still carry the first redraw timestamp.
+          final unchanged = await service.listWindows(session, 'main');
+          expect(unchanged.first.lastActivityEpochSeconds, 100);
+        }
         activity = 201;
+        final nextOutput = await service.listWindows(session, 'main');
+        expect(
+          nextOutput.first.lastActivityEpochSeconds,
+          scenario == 'repeat selection' ? 100 : 201,
+        );
+        // A newer timestamp after the redraw is real activity, even inside grace.
+        activity = 202;
         final realOutput = await service.listWindows(session, 'main');
-        expect(realOutput.first.lastActivityEpochSeconds, 201);
+        expect(realOutput.first.lastActivityEpochSeconds, 202);
       });
     }
 
