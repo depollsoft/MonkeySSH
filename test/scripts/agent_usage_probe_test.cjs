@@ -80,6 +80,7 @@ test('Copilot distinguishes exhausted, unlimited, missing, and paid overage', ()
       entitlementRequests: 300, overageAllowedWithExhaustedQuota: true,
       resetDate: '2026-10-01T00:00:00Z'},
     chat: {isUnlimitedEntitlement: true, entitlementRequests: -1},
+    completions: {entitlementRequests: 0, usedRequests: 0, remainingPercentage: 0},
     unknown: {},
   }});
   assert.equal(result.windows.length, 2);
@@ -220,11 +221,17 @@ test('Grok prefers current credits and keeps on-demand and prepaid separate', ()
     onDemandCap: {val: 5000}, onDemandUsed: {}, prepaidBalance: {val: 1234}}});
   assert.equal(r.windows.length, 3);
   assert.equal(r.windows[0].usedPercent, 42.5);
+  assert.equal(r.windows[0].used, null);
+  assert.equal(r.windows[0].limit, null);
   assert.equal(r.windows[0].resetsAt, '2026-10-01T00:00:00.000Z');
   assert.equal(r.windows[1].usedPercent, 0);
   assert.equal(r.windows[2].remaining, 12.34);
   assert.equal(r.windows[2].unit, 'USD');
   assert.equal(grokUsage({config: {monthlyLimit: {val: 0}, used: {val: 12}}}).windows.length, 0);
+  const legacy = grokUsage({config: {monthlyLimit: {val: 10000}, used: {val: 2000}}}).windows[0];
+  assert.equal(legacy.usedPercent, 20);
+  assert.equal(legacy.used, 20);
+  assert.equal(legacy.limit, 100);
 });
 
 test('Cursor reports a restriction without inventing a percentage', () => {

@@ -34,6 +34,7 @@ function copilotUsage(data) {
   const names = {premium_interactions: 'Premium requests', chat: 'Chat', completions: 'Completions'};
   return {windows: Object.entries(data.quotaSnapshots || {}).flatMap(([id, w]) => {
     if (!w || (!w.isUnlimitedEntitlement && number(w.remainingPercentage) == null)) return [];
+    if (!w.isUnlimitedEntitlement && w.entitlementRequests === 0) return [];
     return [{label: names[id] || String(id).slice(0, 60),
       usedPercent: w.isUnlimitedEntitlement ? null : 100 - w.remainingPercentage,
       unlimited: w.isUnlimitedEntitlement === true, used: number(w.usedRequests),
@@ -270,8 +271,8 @@ function grokUsage(data) {
   const percent = number(c.creditUsagePercent);
   const reset = date(c.currentPeriod?.end || c.billingPeriodEnd);
   if (percent != null || (cap > 0 && used != null) || reset) {
-    windows.push({...budget('Included credits', used == null ? null : used / 100,
-      cap == null ? null : cap / 100, reset, 'USD'), usedPercent: percent ?? (cap > 0 && used != null ? used / cap * 100 : null)});
+    windows.push({...budget('Included credits', percent != null || used == null ? null : used / 100,
+      percent != null || cap == null ? null : cap / 100, reset, 'USD'), usedPercent: percent ?? (cap > 0 && used != null ? used / cap * 100 : null)});
   }
   const demandUsed = cents(c.onDemandUsed), demandCap = cents(c.onDemandCap);
   if (demandCap > 0 && demandUsed != null) windows.push(budget('On-demand spending', demandUsed / 100, demandCap / 100, reset, 'USD'));

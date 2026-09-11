@@ -580,7 +580,12 @@ class AgentManagementService {
   _inFlightUsageChecks = {};
   final Map<
     int,
-    ({DateTime at, Map<String, String> paths, Map<String, AgentUsage> values})
+    ({
+      DateTime at,
+      Map<String, String> paths,
+      Map<String, AgentUsage> values,
+      Map<String, Set<DateTime>> refreshedResets,
+    })
   >
   _usageCache = {};
 
@@ -925,20 +930,21 @@ class AgentManagementService {
     final cached = _usageCache[session.connectionId];
     final parsed = <String, AgentUsage>{};
     final pending = <String, String>{};
+    final refreshedResets = <String, Set<DateTime>>{};
     for (final entry in selected.entries) {
       final usage = cached?.paths[entry.key] == entry.value
           ? cached?.values[entry.key]
           : null;
       final checkedAt = usage?.checkedAt;
-      final resetPassed =
-          usage?.windows.any(
-            (window) =>
-                window.resetsAt != null &&
-                checkedAt != null &&
-                window.resetsAt!.isAfter(checkedAt) &&
-                !window.resetsAt!.isAfter(_now()),
-          ) ??
-          false;
+      final refreshed = refreshedResets[entry.key] = {
+        if (usage != null) ...?cached?.refreshedResets[entry.key],
+      };
+      final passedResets = {
+        for (final window in usage?.windows ?? <AgentUsageWindow>[])
+          if (window.resetsAt != null && !window.resetsAt!.isAfter(_now()))
+            window.resetsAt!,
+      };
+      final resetPassed = passedResets.difference(refreshed).isNotEmpty;
       final throttled =
           usage?.status == AgentUsageStatus.rateLimited ||
           (usage?.notices.any(
@@ -959,6 +965,9 @@ class AgentManagementService {
         parsed[entry.key] = usage;
       } else {
         pending[entry.key] = entry.value;
+        // Recheck each elapsed reset once, even if it was already stale when
+        // first reported. Repeated stale responses must not cause a retry loop.
+        refreshed.addAll(passedResets);
       }
     }
     if (pending.isEmpty) {
@@ -1041,6 +1050,7 @@ class AgentManagementService {
       at: _now(),
       paths: selected,
       values: parsed,
+      refreshedResets: refreshedResets,
     );
     return _mapUsageToRuntimes(runtimes, result, selected, parsed);
   }

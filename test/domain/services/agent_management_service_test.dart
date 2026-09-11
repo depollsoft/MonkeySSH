@@ -417,38 +417,48 @@ void main() {
     },
   );
 
-  test('a newly passed reset bypasses the usage cooldown once', () async {
-    var now = DateTime.utc(2026, 9, 10, 12);
-    final client = _MockSshClient();
-    var calls = 0;
-    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-      _,
-    ) async {
-      calls++;
-      return _execOutput(
-        '__monkeyssh_usage__={"id":"claude","status":"available",'
-        '"windows":[{"label":"5 hours","usedPercent":100,"resetsAt":"2026-09-10T12:01:00Z"}]}',
-      );
-    });
-    final session = _remoteSession(client);
-    final service = AgentManagementService(
-      _MockDiscovery(),
-      canManageAgents: () async => true,
-      now: () => now,
+  for (final initiallyPast in [false, true]) {
+    test(
+      'a passed reset bypasses cooldown once (initially past: $initiallyPast)',
+      () async {
+        var now = DateTime.utc(2026, 9, 10, 12);
+        final reset = initiallyPast
+            ? '2026-09-10T11:59:00Z'
+            : '2026-09-10T12:01:00Z';
+        final client = _MockSshClient();
+        var calls = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          _,
+        ) async {
+          calls++;
+          return _execOutput(
+            '__monkeyssh_usage__={"id":"claude","status":"available",'
+            '"windows":[{"label":"5 hours","usedPercent":100,"resetsAt":"$reset"}]}',
+          );
+        });
+        final session = _remoteSession(client);
+        final service = AgentManagementService(
+          _MockDiscovery(),
+          canManageAgents: () async => true,
+          now: () => now,
+        );
+        final runtimes = [
+          AgentRuntimeInfo(
+            definition: agentCliRuntimeDefinitions.first,
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/claude',
+          ),
+        ];
+        await service.readUsage(session, runtimes);
+        await service.readUsage(session, runtimes);
+        expect(calls, initiallyPast ? 2 : 1);
+        now = now.add(const Duration(minutes: 1));
+        await service.readUsage(session, runtimes);
+        await service.readUsage(session, runtimes);
+        expect(calls, 2);
+      },
     );
-    final runtimes = [
-      AgentRuntimeInfo(
-        definition: agentCliRuntimeDefinitions.first,
-        status: AgentRuntimeStatus.installed,
-        executablePath: '/bin/claude',
-      ),
-    ];
-    await service.readUsage(session, runtimes);
-    now = now.add(const Duration(minutes: 1));
-    await service.readUsage(session, runtimes);
-    await service.readUsage(session, runtimes);
-    expect(calls, 2);
-  });
+  }
 
   testWidgets('stalled probe open fails and releases its queue slot', (
     tester,

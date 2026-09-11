@@ -2915,7 +2915,12 @@ void main() {
           find.byKey(const ValueKey('agent-management-refresh')),
           findsNothing,
         );
-        verifyNever(() => management.refreshAll(session));
+        verifyNever(
+          () => management.refreshAll(
+            session,
+            onDiscovered: any(named: 'onDiscovered'),
+          ),
+        );
       },
     );
 
