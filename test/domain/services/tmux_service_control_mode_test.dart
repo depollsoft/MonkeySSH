@@ -1927,6 +1927,12 @@ void main() {
           windowId: '@2',
         );
         await selectOpened.future;
+        if (scenario == 'switch to another window') {
+          // Complete the second selection while the first SSH command is still
+          // pending. Both targets must retain their own redraw baseline.
+          await service.selectWindow(session, 'main', 2, windowId: '@3');
+          otherActivity = 300;
+        }
         if (scenario.contains('slow command')) {
           await Future<void>.delayed(const Duration(milliseconds: 150));
         }
@@ -1964,14 +1970,10 @@ void main() {
           after.first.lastActivityEpochSeconds,
           shouldPreserve ? (unknownBaseline ? null : 100) : 200,
         );
-        expect(after.last.lastActivityEpochSeconds, 200);
-        if (scenario == 'switch to another window') {
-          await service.selectWindow(session, 'main', 2, windowId: '@3');
-          otherActivity = 300;
-          final secondSwitch = await service.listWindows(session, 'main');
-          expect(secondSwitch.first.lastActivityEpochSeconds, 100);
-          expect(secondSwitch.last.lastActivityEpochSeconds, 200);
-        }
+        expect(
+          after.last.lastActivityEpochSeconds,
+          scenario == 'switch to another window' ? 100 : 200,
+        );
         // A second timestamp must be visible even inside the grace period.
         activity = 201;
         final realOutput = await service.listWindows(session, 'main');
