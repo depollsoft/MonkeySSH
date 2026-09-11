@@ -102,10 +102,16 @@ func (w *muxWindow) applyAgentIdentityPayloadLocked(value string) {
 	if !ok || w.closed {
 		return
 	}
-	if commandTool := agentToolFromCommandName(w.currentCommandLocked()); commandTool != "" && commandTool != identity.Tool {
-		return
+	// Only a pane known to run this tool may bind its identity: the foreground
+	// command is the tool, or the window was created for it. Arbitrary output
+	// in a shell pane (a file containing a marker being printed) must never
+	// turn that pane into a restorable agent session.
+	commandTool := agentToolFromCommandName(w.currentCommandLocked())
+	confirmedTool := ""
+	if w.agentToolConfirmed {
+		confirmedTool = strings.TrimSpace(w.agentTool)
 	}
-	if tool := w.agentToolLocked(); tool != identity.Tool && tool != "" && w.agentToolConfirmed {
+	if commandTool != identity.Tool && confirmedTool != identity.Tool {
 		return
 	}
 	assigned := identity.Source == "assigned"

@@ -173,8 +173,13 @@ func TestApplyAgentIdentityPayloadLocked(t *testing.T) {
 		{"command matches", &muxWindow{command: "claude"}, "claude", true},
 		{"confirmed mismatch", &muxWindow{agentTool: "codex", agentToolConfirmed: true}, "claude", false},
 		{"command mismatch", &muxWindow{command: "codex", agentTool: "claude"}, "claude", false},
-		{"unconfirmed guess", &muxWindow{command: "zsh", agentTool: "codex"}, "claude", true},
-		{"empty tool", &muxWindow{command: "zsh"}, "claude", true},
+		{"confirmed match", &muxWindow{command: "zsh", agentTool: "claude", agentToolConfirmed: true}, "claude", true},
+		// Only positive evidence binds: a guessed or unknown tool must not let
+		// printed output (a file containing a marker) create an agent session.
+		{"unconfirmed guess", &muxWindow{command: "zsh", agentTool: "codex"}, "claude", false},
+		{"unconfirmed same guess", &muxWindow{command: "zsh", agentTool: "claude"}, "claude", false},
+		{"empty tool", &muxWindow{command: "zsh"}, "claude", false},
+		{"shell printing a marker", &muxWindow{command: "cat", name: "claude"}, "claude", false},
 		{"closed", &muxWindow{agentTool: "claude", closed: true}, "claude", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,7 +207,7 @@ func TestAgentIdentityExclusivity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, source := range []string{"startup", "assigned"} {
-				w := &muxWindow{agentTool: "claude"}
+				w := &muxWindow{agentTool: "claude", agentToolConfirmed: true}
 				other := &muxWindow{agentTool: tc.tool, agentSessionID: identityTestID, agentSessionIdentityExact: tc.exact, agentSessionAssigned: tc.assigned, closed: tc.closed, agentSessionWatch: &agentSessionWatch{exited: tc.exited}}
 				s := &muxServer{windows: []*muxWindow{other, w}}
 				s.observeAgentIdentityMetadataLocked(w, []byte(encodeAgentIdentityMarker(agentIdentity{Tool: "claude", ID: identityTestID, Source: source})))
