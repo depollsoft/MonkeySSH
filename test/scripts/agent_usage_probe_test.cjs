@@ -112,6 +112,43 @@ for (const framed of [true, false]) {
   });
 }
 
+for (const framed of [false, true]) {
+  test(`RPC drains final ${framed ? 'Content-Length' : 'JSONL'} response after process exit`, async t => {
+    const {EventEmitter} = require('node:events');
+    const {PassThrough} = require('node:stream');
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    t.mock.method(require('node:child_process'), 'spawn', () => {
+      queueMicrotask(() => {
+        child.emit('exit', 0);
+        const body = JSON.stringify({id: 2, result: {ok: true}});
+        child.stdout.end(framed ? `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}` : body + '\n');
+        child.emit('close', 0);
+      });
+      return child;
+    });
+    assert.deepEqual(await rpc('agent', [], 'account/get', framed, false), {ok: true});
+  });
+}
+
+test('RPC rejects a closed process without a response', async t => {
+  const {EventEmitter} = require('node:events');
+  const {PassThrough} = require('node:stream');
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  t.mock.method(require('node:child_process'), 'spawn', () => {
+    queueMicrotask(() => {
+      child.emit('exit', 0);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+    return child;
+  });
+  await assert.rejects(rpc('agent', [], 'account/get', false, false), /unavailable/);
+});
+
 test('RPC errors do not propagate provider error text', async () => {
   const source = `process.stdin.once('data', () => process.stdout.write(JSON.stringify({id:2,error:{message:'SECRET'}})+'\\n'));`;
   await assert.rejects(rpc(process.execPath, ['-e', source], 'account/get', false, false),

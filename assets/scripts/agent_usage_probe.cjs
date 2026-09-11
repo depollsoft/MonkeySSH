@@ -89,7 +89,8 @@ function rpc(executable, args, method, framed, initialize) {
     };
     const timer = setTimeout(() => finish(new Error('timeout')), 12000);
     child.on('error', () => finish(new Error('unavailable')));
-    child.on('exit', () => finish(new Error('unavailable')));
+    // The process can exit before its final piped stdout response is drained.
+    child.on('close', () => finish(new Error('unavailable')));
     child.stdin.on('error', () => finish(new Error('unavailable')));
     const send = message => {
       const body = JSON.stringify({jsonrpc: '2.0', ...message});
