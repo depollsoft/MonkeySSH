@@ -18,8 +18,12 @@ func windowProcessCommand(pid int) (string, bool) {
 }
 
 // Wait for exit without reaping: shutdown may still be signaling this PGID.
-func awaitWindowProcessExit(pid int) {
+func awaitWindowProcessExit(pid int) bool {
 	var info unix.Siginfo
-	for unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil) == unix.EINTR {
+	for {
+		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if err != unix.EINTR {
+			return err == nil
+		}
 	}
 }

@@ -15,10 +15,10 @@ func windowProcessCommand(pid int) (string, bool) {
 }
 
 // Kqueue observes exit without reaping, leaving the PID reserved for shutdown.
-func awaitWindowProcessExit(pid int) {
+func awaitWindowProcessExit(pid int) bool {
 	fd, err := unix.Kqueue()
 	if err != nil {
-		return
+		return false
 	}
 	defer unix.Close(fd)
 	unix.CloseOnExec(fd)
@@ -26,9 +26,12 @@ func awaitWindowProcessExit(pid int) {
 		Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}}
 	events := make([]unix.Kevent_t, 1)
 	for {
-		_, err = unix.Kevent(fd, changes, events, nil)
-		if err != unix.EINTR {
-			return
+		n, err := unix.Kevent(fd, changes, events, nil)
+		if err == unix.EINTR {
+			continue
 		}
+		return err == nil && n > 0 && events[0].Ident == uint64(pid) &&
+			events[0].Filter == unix.EVFILT_PROC && events[0].Flags&unix.EV_ERROR == 0 &&
+			events[0].Fflags&unix.NOTE_EXIT != 0
 	}
 }

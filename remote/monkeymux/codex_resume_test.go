@@ -13,9 +13,26 @@ type codexShutdownTestProcess struct {
 	release <-chan struct{}
 }
 
+func (p codexShutdownTestProcess) Hangup() {}
+
 func (p codexShutdownTestProcess) shutdownCodex(_ *muxWindow, deadline time.Time) {
 	p.started <- deadline
 	<-p.release
+}
+
+func TestCodexShutdownSelectsInteractiveWindow(t *testing.T) {
+	started := make(chan time.Time, 1)
+	release := make(chan struct{})
+	close(release)
+	window := &muxWindow{foregroundCommand: "codex",
+		proc: codexShutdownTestProcess{started: started, release: release}}
+	server := &muxServer{windows: []*muxWindow{window}}
+	server.close()
+	select {
+	case <-started:
+	default:
+		t.Fatal("interactive Codex window did not get graceful teardown")
+	}
 }
 
 func TestCodexShutdownWindowsShareBudget(t *testing.T) {

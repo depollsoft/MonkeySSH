@@ -4,4 +4,4 @@ package main
 
 const supportsWindowExitObservation = false
 
-func awaitWindowProcessExit(int) {}
+func awaitWindowProcessExit(int) bool { return false }

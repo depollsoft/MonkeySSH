@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.196"
+	monkeyMuxVersion                  = "0.1.197"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -2036,7 +2036,7 @@ func prepareRunningServerReplacement(
 		// Capture pane identities while their ancestry still leads to the old
 		// server. Shutdown can orphan them, and bare pids can be recycled before
 		// escalation. An unconfirmed server never authorizes process signals.
-		var panes map[int]time.Time
+		var panes []replacementPaneGroup
 		if oldPID.confirmedOwner(session) {
 			panes = captureReplacementPaneGroups(restore, oldPID.pid)
 		}
@@ -15975,7 +15975,7 @@ func (s *muxServer) close() {
 	// from markWindowClosed before touching any server state.
 	codexWindows := make(map[*muxWindow]bool)
 	for _, window := range windows {
-		codexWindows[window] = !window.closed && window.agentTool == "codex" && window.nativeAcpBridgeID == ""
+		codexWindows[window] = !window.closed && window.agentToolLocked() == "codex" && window.nativeAcpBridgeID == ""
 		window.closed = true
 		window.releaseRedrawForwardingStateLocked()
 		window.clearKittyGraphicsPendingLocked()
