@@ -3366,8 +3366,8 @@ func normalizedAgentWorkspacePath(value string) string {
 // ── Cursor Agent ─────────────────────────────────────────────────────────────
 // Cursor persists chats under ~/.cursor/chats/<workspaceHash>/<chatId>/meta.json.
 // A fresh `cursor-agent` launch carries no resumable id in its process args.
-// Match distinct chats for panes sharing a workspace, using only chats updated
-// during each Cursor process; older chats leave a fresh window fresh.
+// Reserve exact chats for panes sharing a workspace. Only a single unresolved
+// pane may use recent activity; ambiguous siblings remain fresh.
 
 type cursorChatEntry struct {
 	chatID    string
@@ -5350,12 +5350,9 @@ type agentSessionFallback struct {
 	windowPids       map[int]struct{}
 }
 
-// assignRecentAgentSessions pairs unresolved panes with distinct recent sessions.
-// Newer processes go first: their shorter lifetimes admit fewer candidates, so
-// an older process must not consume their only eligible session. Within a cwd,
-// prefer the most recently active unclaimed session, preserving the single-pane
-// policy. Recency is a fallback heuristic, not proof of ownership; unknown start
-// times and records predating a process remain ineligible.
+// assignRecentAgentSessions reserves exact owners before applying the existing
+// single-pane activity fallback. Mutable activity times cannot distinguish two
+// unresolved panes in the same directory, so keep those panes unbound.
 func assignRecentAgentSessions(
 	tool string,
 	sessions map[int]string,
@@ -5363,29 +5360,18 @@ func assignRecentAgentSessions(
 	unresolved []agentSessionFallback,
 	candidatesForDirectory func(string) []recentAgentSession,
 ) {
-	sort.Slice(unresolved, func(i, j int) bool {
-		a, b := unresolved[i], unresolved[j]
-		if a.workingDirectory != b.workingDirectory {
-			return a.workingDirectory < b.workingDirectory
-		}
-		if !a.processStarted.Equal(b.processStarted) {
-			return a.processStarted.After(b.processStarted)
-		}
-		return a.key < b.key
-	})
-	byDirectory := map[string][]recentAgentSession{}
+	counts := map[string]int{}
 	for _, window := range unresolved {
-		if window.workingDirectory == "" || window.processStarted.IsZero() {
+		counts[window.workingDirectory]++
+	}
+	for _, window := range unresolved {
+		if window.workingDirectory == "" || window.processStarted.IsZero() || counts[window.workingDirectory] != 1 {
 			continue
 		}
-		candidates, loaded := byDirectory[window.workingDirectory]
-		if !loaded {
-			candidates = candidatesForDirectory(window.workingDirectory)
-			sort.SliceStable(candidates, func(i, j int) bool {
-				return candidates[i].updatedAt.After(candidates[j].updatedAt)
-			})
-			byDirectory[window.workingDirectory] = candidates
-		}
+		candidates := candidatesForDirectory(window.workingDirectory)
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].updatedAt.After(candidates[j].updatedAt)
+		})
 		for _, candidate := range candidates {
 			if candidate.id == "" || used[candidate.id] ||
 				!sessionUpdatedDuringProcess(candidate.updatedAt, window.processStarted) ||

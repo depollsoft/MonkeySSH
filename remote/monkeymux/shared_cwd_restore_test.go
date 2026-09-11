@@ -31,7 +31,7 @@ func TestEnrichRestoreSharedCwdSessions(t *testing.T) {
 				// Neither newer activity elsewhere nor stale project history may win.
 				writeSharedCwdSession(t, tool, home, cwd+"-other", sharedCwdSessionID(4), now)
 				writeSharedCwdSession(t, tool, home, cwd, sharedCwdSessionID(5), now.Add(-time.Hour))
-				want := map[int]string{100: ids[0], 101: ids[1], 102: ids[2]}
+				want := map[int]string{100: "", 101: "", 102: ""}
 				if evidence != "fresh" {
 					// The oldest process owns the newest session. Reserve it before any
 					// fallback, even when its process is visited last in the map.
@@ -48,23 +48,33 @@ func TestEnrichRestoreSharedCwdSessions(t *testing.T) {
 						}
 						p.args += flag + ids[2]
 						processes[200] = p
+						p = processes[201]
+						p.args += flag + ids[0]
+						processes[201] = p
 					} else if evidence == "open-file" {
 						processOpenFilePathsForMetadata = func(pid int) []string {
 							if pid == 200 {
 								return []string{paths[2]}
+							}
+							if pid == 201 {
+								return []string{paths[0]}
 							}
 							return nil
 						}
 					}
 					if evidence == "exact" {
 						for i := range restore.Windows {
-							if restore.Windows[i].PanePid == 100 {
-								restore.Windows[i].AgentSessionID = ids[2]
+							if restore.Windows[i].PanePid == 100 || restore.Windows[i].PanePid == 101 {
+								id := ids[2]
+								if restore.Windows[i].PanePid == 101 {
+									id = ids[0]
+								}
+								restore.Windows[i].AgentSessionID = id
 								restore.Windows[i].AgentSessionIdentityExact = true
 							}
 						}
 					}
-					// All remaining candidates satisfy both unresolved lifetimes.
+					// Remaining candidates satisfy the unresolved process lifetime.
 					processStartedAtForMetadata = func(pid int) time.Time { return now.Add(time.Duration(pid-206) * time.Minute) }
 					want = map[int]string{100: ids[2], 101: ids[0], 102: ids[1]}
 				}
@@ -107,7 +117,7 @@ func TestEnrichRestoreSharedCwdInsufficientSessions(t *testing.T) {
 			for _, window := range restore.Windows {
 				got[window.PanePid] = window.AgentSessionID
 			}
-			want := map[int]string{100: "", 101: id, 102: ""}
+			want := map[int]string{100: "", 101: "", 102: ""}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("sessions = %v, want %v", got, want)
 			}
@@ -161,6 +171,12 @@ func TestEnrichRestoreSharedCwdSkipsForeignSession(t *testing.T) {
 			for i := 1; i <= 3; i++ {
 				writeSharedCwdSession(t, tool, home, cwd, sharedCwdSessionID(i), now.Add(time.Duration(i-4)*time.Minute))
 			}
+			for i := range restore.Windows {
+				if restore.Windows[i].PanePid != 102 {
+					restore.Windows[i].AgentSessionID = sharedCwdSessionID(restore.Windows[i].PanePid - 99)
+					restore.Windows[i].AgentSessionIdentityExact = true
+				}
+			}
 			foreignID := sharedCwdSessionID(4)
 			path := writeSharedCwdSession(t, tool, home, cwd, foreignID, now)
 			command := tool
@@ -197,6 +213,7 @@ func TestEnrichRestoreSharedCwdReservesClaudeRegistry(t *testing.T) {
 	}
 	processStartedAtForMetadata = func(pid int) time.Time { return now.Add(time.Duration(pid-206) * time.Minute) }
 	bindingTestRegistry(t, 200, sharedCwdSessionID(3), cwd, processStartedAtForMetadata(200))
+	bindingTestRegistry(t, 201, sharedCwdSessionID(1), cwd, processStartedAtForMetadata(201))
 	bindingTestExpireForeignOwnership()
 	enrichRestoreWithAgentSessionIDs(restore)
 	want := map[int]string{100: sharedCwdSessionID(3), 101: sharedCwdSessionID(1), 102: sharedCwdSessionID(2)}
@@ -204,6 +221,27 @@ func TestEnrichRestoreSharedCwdReservesClaudeRegistry(t *testing.T) {
 		if window.AgentSessionID != want[window.PanePid] {
 			t.Fatalf("pane %d session = %q, want %q", window.PanePid, window.AgentSessionID, want[window.PanePid])
 		}
+	}
+}
+
+func TestEnrichRestoreSharedCwdActivityDoesNotProveOwnership(t *testing.T) {
+	for _, tool := range []string{"claude", "codex", "opencode", "antigravity", "cursor-agent"} {
+		t.Run(tool, func(t *testing.T) {
+			home, cwd, now, processes, restore := sharedCwdRestoreFixture(t, tool)
+			restore.Windows = restore.Windows[:2]
+			delete(processes, 102)
+			delete(processes, 202)
+			// A started before B, then A's activity became newer than B's.
+			// Activity-based pairing would give A's conversation to B.
+			writeSharedCwdSession(t, tool, home, cwd, sharedCwdSessionID(1), now)
+			writeSharedCwdSession(t, tool, home, cwd, sharedCwdSessionID(2), now.Add(-time.Minute))
+			enrichRestoreWithAgentSessionIDs(restore)
+			for _, window := range restore.Windows {
+				if window.AgentSessionID != "" {
+					t.Fatalf("activity guessed pane %d owns %q", window.PanePid, window.AgentSessionID)
+				}
+			}
+		})
 	}
 }
 
