@@ -18,7 +18,7 @@ const agentSessionStorePollInterval = 2 * time.Second
 type agentSessionWatch struct {
 	tool, cwd                           string
 	pid, registryPID                    int
-	started, lastPoll                   time.Time
+	started, pidStarted, lastPoll       time.Time
 	baseline                            map[string]bool
 	firstSeen                           map[string]time.Time
 	processPIDs, claudePIDs, windowPIDs map[int]bool
@@ -229,7 +229,7 @@ func exactAgentSessionForProcess(tool, cwd string, process processInfo, processe
 	if watch == nil || len(pids) == 0 {
 		return w
 	}
-	watch.pid = process.pid
+	watch.pid, watch.pidStarted = process.pid, watch.started
 	watch.processPIDs, watch.claudePIDs = map[int]bool{}, map[int]bool{}
 	var openPaths []string
 	for pid := range pids {
@@ -532,36 +532,57 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 		watch.lastPoll = now
 	}
 	if exact && tool == "claude" {
+		if watch != nil && watch.exited {
+			s.mu.Unlock()
+			return
+		}
 		pid := 0
-		if watch != nil && !watch.exited {
+		if watch != nil {
 			pid = watch.registryPID
 			if pid == 0 {
 				pid = watch.pid
 			}
 		}
-		s.mu.Unlock()
-		if pid <= 0 {
+		if pid > 0 {
+			s.mu.Unlock()
+			started := processStartedAtForMetadata(pid)
+			s.mu.Lock()
+			if s.windowByIDLocked(windowID) != w || w.closed || w.agentSessionWatch != watch || watch.exited ||
+				!w.agentSessionIdentityExact || w.agentToolLocked() != tool {
+				s.mu.Unlock()
+				return
+			}
+			if started.IsZero() || (!watch.pidStarted.IsZero() && !started.Equal(watch.pidStarted)) {
+				watch.exited, watch.done = true, true
+				watch.baseline, watch.firstSeen = nil, nil
+				s.mu.Unlock()
+				return
+			}
+			watch.pidStarted = started
+			s.mu.Unlock()
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return
+			}
+			candidate := readClaudeSessionRegistryEntry(filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json"))
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.windowByIDLocked(windowID) != w || w.closed || w.agentSessionWatch != watch || watch.exited ||
+				!w.agentSessionIdentityExact || w.agentToolLocked() != tool || candidate.id == "" || candidate.ownerPID != pid ||
+				(candidate.cwd != "" && candidate.cwd != normalizedMetadataPath(w.cwd)) ||
+				(!candidate.created.IsZero() && !watch.started.IsZero() && !sessionUpdatedDuringProcess(candidate.created, watch.started)) ||
+				s.exactAgentSessionOwnerLocked(tool, candidate.id, w) {
+				return
+			}
+			if w.agentSessionID != candidate.id {
+				w.agentSessionID = candidate.id
+				w.agentSessionPath, w.agentSessionDir = "", ""
+			}
+			watch.registryPID = candidate.ownerPID
 			return
 		}
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		candidate := readClaudeSessionRegistryEntry(filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json"))
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.windowByIDLocked(windowID) != w || w.closed || w.agentSessionWatch != watch || watch.exited ||
-			!w.agentSessionIdentityExact || w.agentToolLocked() != tool || candidate.id == "" ||
-			(!candidate.created.IsZero() && !watch.started.IsZero() && !sessionUpdatedDuringProcess(candidate.created, watch.started)) ||
-			s.exactAgentSessionOwnerLocked(tool, candidate.id, w) {
-			return
-		}
-		if w.agentSessionID != candidate.id {
-			w.agentSessionID = candidate.id
-			w.agentSessionPath, w.agentSessionDir = "", ""
-		}
-		watch.registryPID = candidate.ownerPID
-		return
+		// A hook can arrive before discovery knows the Claude PID. Discover it
+		// once so later refreshes can follow the registry without scanning.
 	}
 	panePIDs := map[int]struct{}{}
 	for _, window := range s.windows {
@@ -661,7 +682,7 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 			watch.done = true
 		}
 	}
-	watch.pid, watch.lastPoll = process.pid, now
+	watch.pid, watch.pidStarted, watch.lastPoll = process.pid, started, now
 	watch.processPIDs, watch.claudePIDs, watch.windowPIDs = processPIDs, claudePIDs, windowPIDs
 	s.bindAgentSessionCandidatesLocked(w, watch, candidates, argsID, openPaths, now)
 }

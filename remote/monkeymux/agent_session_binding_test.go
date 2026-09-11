@@ -561,10 +561,6 @@ func TestAgentSessionBindingExactClaudeHookFollowsRegistry(t *testing.T) {
 				t.Fatal("exact Claude refresh scanned processes")
 				return nil
 			}
-			processStartedAtForMetadata = func(int) time.Time {
-				t.Fatal("exact Claude refresh probed process start")
-				return time.Time{}
-			}
 			processWorkingDirectoryForMetadata = func(int) string {
 				t.Fatal("exact Claude refresh probed working directory")
 				return ""
@@ -576,16 +572,140 @@ func TestAgentSessionBindingExactClaudeHookFollowsRegistry(t *testing.T) {
 				pid = registryPID
 				bindingTestRegistry(t, watch.pid, bindingTestIDs[0], cwd, started)
 			}
+			startCalls := 0
+			processStartedAtForMetadata = func(probedPID int) time.Time {
+				startCalls++
+				if probedPID != pid {
+					t.Fatalf("probed PID %d, want %d", probedPID, pid)
+				}
+				// Equal instants need not have the same location or monotonic data.
+				return started.Round(0).UTC()
+			}
+			refresh := func() {
+				t.Helper()
+				startCalls = 0
+				bindingTestNextPoll(s, w)
+				s.refreshAgentSessionBinding(w.id)
+				if startCalls != 1 {
+					t.Fatalf("start-time probes per refresh = %d, want 1", startCalls)
+				}
+			}
 			bindingTestRegistry(t, pid, bindingTestIDs[0], cwd, started)
-			s.refreshAgentSessionBinding(w.id)
+			refresh()
+			if !watch.pidStarted.Equal(started) {
+				t.Fatal("first refresh did not record process start")
+			}
 			bindingTestRegistry(t, pid, bindingTestIDs[1], cwd, started)
-			bindingTestNextPoll(s, w)
-			s.refreshAgentSessionBinding(w.id)
+			refresh()
 			if w.agentSessionID != bindingTestIDs[1] || !w.agentSessionIdentityExact || !watch.done || watch.registryPID != pid {
 				t.Fatalf("hook-bound registry change lost: id=%q exact=%v done=%v pid=%d", w.agentSessionID, w.agentSessionIdentityExact, watch.done, watch.registryPID)
 			}
+			for _, mismatch := range []string{"pid", "cwd"} {
+				t.Run(mismatch, func(t *testing.T) {
+					entryPID, entryCwd := pid, cwd
+					if mismatch == "pid" {
+						entryPID++
+					} else {
+						entryCwd = filepath.Join(cwd, "foreign")
+					}
+					home, _ := os.UserHomeDir()
+					bindingTestWriteFile(t, filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", pid)),
+						fmt.Sprintf(`{"pid":%d,"sessionId":%q,"cwd":%q,"startedAt":%d}`, entryPID, bindingTestIDs[0], entryCwd, started.UnixMilli()), started)
+					refresh()
+					if w.agentSessionID != bindingTestIDs[1] || watch.registryPID != pid || watch.exited {
+						t.Fatalf("mismatched registry changed binding: id=%q pid=%d exited=%v", w.agentSessionID, watch.registryPID, watch.exited)
+					}
+				})
+			}
+			bindingTestRegistry(t, pid, bindingTestIDs[0], "", started)
+			refresh()
+			if w.agentSessionID != bindingTestIDs[0] {
+				t.Fatal("registry without cwd was rejected")
+			}
 			if calls != 0 || len(s.agentSessionBindings.stores) != 0 {
 				t.Fatalf("exact refresh scanned files: probes=%d stores=%d", calls, len(s.agentSessionBindings.stores))
+			}
+		})
+	}
+}
+
+func TestAgentSessionBindingExactClaudeHookDiscoversUnknownPID(t *testing.T) {
+	cwd, _ := bindingTestStore(t, "claude")
+	started := time.Now().Add(-time.Second)
+	w := bindingTestWindow("claude", cwd, "@1", started.Add(-time.Second))
+	w.proc = bindingTestProcess{pid: 100}
+	watch := w.agentSessionWatch
+	w.applyAgentIdentityPayloadLocked(identityTestPayload(agentIdentity{Tool: "claude", ID: bindingTestIDs[0], Source: "hook"}))
+	if watch.pid != 0 || !watch.done || !w.agentSessionIdentityExact {
+		t.Fatal("expected exact hook binding before PID discovery")
+	}
+	s := &muxServer{windows: []*muxWindow{w}}
+	processes := map[int]processInfo{100: {pid: 100, comm: "zsh"}, 101: {pid: 101, ppid: 100, comm: "claude", args: "claude"}}
+	bindingTestProcesses(t, cwd, started, processes, nil)
+	bindingTestRegistry(t, 101, bindingTestIDs[0], cwd, started)
+	s.refreshAgentSessionBinding(w.id)
+	if watch.pid != 101 || !watch.pidStarted.Equal(started) {
+		t.Fatalf("Claude process was not discovered: pid=%d started=%v", watch.pid, watch.pidStarted)
+	}
+	processTableForMetadata = func() map[int]processInfo {
+		t.Fatal("known PID triggered another discovery")
+		return nil
+	}
+	processWorkingDirectoryForMetadata = func(int) string {
+		t.Fatal("known PID triggered a working-directory probe")
+		return ""
+	}
+	processOpenFilePathsForMetadata = func(int) []string {
+		t.Fatal("known PID triggered an open-file probe")
+		return nil
+	}
+	bindingTestRegistry(t, 101, bindingTestIDs[1], cwd, started)
+	bindingTestNextPoll(s, w)
+	s.refreshAgentSessionBinding(w.id)
+	if w.agentSessionID != bindingTestIDs[1] || !w.agentSessionIdentityExact {
+		t.Fatalf("registry change after discovery lost: id=%q exact=%v", w.agentSessionID, w.agentSessionIdentityExact)
+	}
+}
+
+func TestAgentSessionBindingExactClaudeHookRetiresChangedProcess(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gone=%v", gone), func(t *testing.T) {
+			cwd, _ := bindingTestStore(t, "claude")
+			started := time.Now().Add(-time.Minute)
+			w := bindingTestWindow("claude", cwd, "@1", started)
+			watch := w.agentSessionWatch
+			watch.pid, watch.pidStarted = 101, started
+			w.applyAgentIdentityPayloadLocked(identityTestPayload(agentIdentity{Tool: "claude", ID: bindingTestIDs[0], Source: "hook"}))
+			s := &muxServer{windows: []*muxWindow{w}}
+			bindingTestProcesses(t, cwd, started, nil, nil)
+			processTableForMetadata = func() map[int]processInfo {
+				t.Fatal("exact refresh scanned processes")
+				return nil
+			}
+			bindingTestRegistry(t, 101, bindingTestIDs[1], cwd, started)
+			s.refreshAgentSessionBinding(w.id)
+			if w.agentSessionID != bindingTestIDs[1] {
+				t.Fatal("initial registry change was lost")
+			}
+			processStartedAtForMetadata = func(int) time.Time {
+				if gone {
+					return time.Time{}
+				}
+				return started.Add(time.Second)
+			}
+			bindingTestRegistry(t, 101, bindingTestIDs[0], cwd, started.Add(time.Second))
+			bindingTestNextPoll(s, w)
+			s.refreshAgentSessionBinding(w.id)
+			if w.agentSessionID != bindingTestIDs[1] || !w.agentSessionIdentityExact || !watch.exited || !watch.done {
+				t.Fatalf("changed process rebound window: id=%q exact=%v exited=%v done=%v", w.agentSessionID, w.agentSessionIdentityExact, watch.exited, watch.done)
+			}
+			if watch.baseline != nil || watch.firstSeen != nil || s.exactAgentSessionOwnerLocked("claude", bindingTestIDs[1], nil) {
+				t.Fatal("exited watch still retains ownership")
+			}
+			bindingTestNextPoll(s, w)
+			s.refreshAgentSessionBinding(w.id)
+			if w.agentSessionID != bindingTestIDs[1] {
+				t.Fatal("retired watch lost its restore ID")
 			}
 		})
 	}
