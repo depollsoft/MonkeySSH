@@ -455,6 +455,137 @@ void main() {
     });
   }
 
+  test(
+    'Windows installs beside locked builds and reuses the verified copy',
+    () async {
+      final harness = _InstallHarness(
+        windows: true,
+        remote: _FakeRemoteFileService(homeDirectory: '/C:/Users/proof’s'),
+      );
+      const directory =
+          '/C:/Users/proof’s/.monkeyssh/bin/monkeymux/9.9.9/windows-amd64';
+      final target = '$directory/${harness.digest}/monkeymux.exe';
+      final locked = {
+        '$directory/monkeymux.exe',
+        '$directory/${'a' * 64}/monkeymux.exe',
+      };
+      final files = {...locked};
+      when(() => harness.sftp.remove(any())).thenAnswer((invocation) async {
+        final path = invocation.positionalArguments.single as String;
+        if (locked.contains(path)) {
+          return Future<void>.error(
+            SftpStatusError(
+              SftpStatusCode.permissionDenied,
+              'running executable',
+            ),
+          );
+        }
+        if (!files.remove(path)) {
+          return Future<void>.error(
+            SftpStatusError(SftpStatusCode.noSuchFile, 'missing'),
+          );
+        }
+      });
+      when(() => harness.sftp.rename(any(), any())).thenAnswer((
+        invocation,
+      ) async {
+        final destination = invocation.positionalArguments[1] as String;
+        expect(destination, target);
+        expect(files.contains(destination), isFalse);
+        files.add(destination);
+      });
+      when(
+        () => harness.client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        final command = invocation.positionalArguments.single as String;
+        harness.commands.add(command);
+        return _execSession(
+          _windowsOutputForCommand(
+            command,
+            expectedSha: harness.digest,
+            remoteFileService: harness.remote,
+          ),
+        );
+      });
+
+      final installed = await harness.installer.ensureInstalled(
+        harness.session,
+        confirmInstall: (_) async => true,
+      );
+      expect(installed.installedDuringCall, isTrue);
+      expect(files, {...locked, target});
+      expect(harness.remote.uploadCount, 1);
+      harness.installer.clearCache(harness.session.connectionId);
+      final reused = await harness.installer.ensureInstalled(harness.session);
+      expect(reused.executablePath, installed.executablePath);
+      expect(reused.installedDuringCall, isFalse);
+      expect(harness.remote.uploadCount, 1);
+      final launcher = decodeEncodedPowerShell(harness.commands.last);
+      expect(
+        launcher,
+        contains('9.9.9\\windows-amd64\\${harness.digest}\\monkeymux.exe'),
+      );
+    },
+  );
+
+  for (final failWith in ['confirmation', 'declined', 'upload']) {
+    test(
+      'passive install stops after $failWith and explicit retry recovers',
+      () async {
+        final harness = _InstallHarness();
+        if (failWith == 'upload') {
+          harness.finalize = (_) async => '__monkeymux_exec_done__:1\n';
+        }
+        final first = harness.installer.ensureInstalled(
+          harness.session,
+          confirmInstall: failWith == 'confirmation'
+              ? null
+              : (_) async => failWith != 'declined',
+        );
+        await expectLater(first, throwsA(isA<MonkeyMuxInstallException>()));
+        final commandCount = harness.commands.length;
+        for (var i = 0; i < 3; i++) {
+          await expectLater(
+            harness.installer.ensureInstalled(harness.session),
+            throwsA(isA<MonkeyMuxInstallException>()),
+          );
+        }
+        expect(harness.commands, hasLength(commandCount));
+        harness.finalize = null;
+        harness.remote.uploaded = false;
+        var prompted = false;
+        final recovered = await harness.installer.ensureInstalled(
+          harness.session,
+          confirmInstall: (_) async {
+            prompted = true;
+            return true;
+          },
+        );
+        expect(prompted, isTrue);
+        expect(recovered.installedDuringCall, isTrue);
+        expect(
+          await harness.installer.ensureInstalled(harness.session),
+          same(recovered),
+        );
+      },
+    );
+  }
+
+  test('disconnect clears passive install failure', () async {
+    final harness = _InstallHarness();
+    await expectLater(
+      harness.installer.ensureInstalled(harness.session),
+      throwsA(isA<MonkeyMuxInstallConfirmationRequiredException>()),
+    );
+    final commandCount = harness.commands.length;
+    harness.installer.clearCache(harness.session.connectionId);
+    await expectLater(
+      harness.installer.ensureInstalled(harness.session),
+      throwsA(isA<MonkeyMuxInstallConfirmationRequiredException>()),
+    );
+    expect(harness.commands.length, greaterThan(commandCount));
+  });
+
   for (final failure in [
     null,
     'checksum',
@@ -554,7 +685,7 @@ void main() {
         expect(
           installation.executablePath,
           r'C:\Users\proof’s\.monkeyssh\bin\monkeymux\9.9.9\windows-amd64\'
-          'monkeymux.exe',
+          '$expectedSha\\monkeymux.exe',
         );
         expect(installation.installedDuringCall, isTrue);
         expect(remoteFileService.uploadCount, 1);
@@ -562,7 +693,7 @@ void main() {
         expect(
           renames.single.$2,
           '/C:/Users/proof’s/.monkeyssh/bin/monkeymux/9.9.9/windows-amd64/'
-          'monkeymux.exe',
+          '$expectedSha/monkeymux.exe',
         );
         final launcherCommand = commands.singleWhere(
           (command) =>
@@ -576,7 +707,7 @@ void main() {
           contains('%~dp0.monkeymux-current'),
           contains(r'%~dp0..\..\.monkeyssh\bin\monkeymux'),
           isNot(contains('%USERPROFILE%')),
-          contains(r'9.9.9\windows-amd64\monkeymux.exe'),
+          contains('9.9.9\\windows-amd64\\$expectedSha\\monkeymux.exe'),
           contains('[System.IO.File]::Replace'),
           contains(r'$exists = Test-Path -LiteralPath $path'),
           contains(r'if ($exists -and $first -ne $managedMarker)'),

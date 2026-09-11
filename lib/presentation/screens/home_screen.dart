@@ -3481,7 +3481,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
         (_needsTmuxQuery ||
             (connectionState == SshConnectionState.connected &&
                 !_loadingWindows &&
-                (_sessionName == null || !_queried)))) {
+                !_queried))) {
       _tmuxQueryScheduled = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _tmuxQueryScheduled = false;

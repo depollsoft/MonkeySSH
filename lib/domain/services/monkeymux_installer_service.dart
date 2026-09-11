@@ -209,6 +209,7 @@ class MonkeyMuxInstallerService {
   final AssetBundle? _assetBundle;
   static final _installCache = <int, MonkeyMuxInstallation>{};
   static final _installRequests = <int, _MonkeyMuxInstallInFlight>{};
+  static final _passiveInstallFailures = <int, (Object, StackTrace)>{};
 
   /// Installs the helper if needed and returns its executable path.
   Future<MonkeyMuxInstallation> ensureInstalled(
@@ -243,6 +244,14 @@ class MonkeyMuxInstallerService {
       );
       return existingRequest.future;
     }
+    if (confirmInstall == null) {
+      final failure = _passiveInstallFailures[connectionId];
+      if (failure != null) {
+        Error.throwWithStackTrace(failure.$1, failure.$2);
+      }
+    } else {
+      _passiveInstallFailures.remove(connectionId);
+    }
     if (existingRequest != null) {
       DiagnosticsLogService.instance.debug(
         'monkeymux.install',
@@ -265,11 +274,26 @@ class MonkeyMuxInstallerService {
         confirmInstall: confirmInstall,
       ),
     );
-    request.future.then((installation) {
-      if (identical(_installRequests[connectionId], request)) {
-        _installCache[connectionId] = installation;
-      }
-    }, onError: (_) {}).ignore();
+    request.future
+        .then(
+          (installation) {
+            if (identical(_installRequests[connectionId], request)) {
+              _installCache[connectionId] = installation;
+              _passiveInstallFailures.remove(connectionId);
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            // Watchers cannot approve or repair an installation. Avoid repeating
+            // remote probes until an explicit install attempt or a reconnect.
+            if (identical(_installRequests[connectionId], request) &&
+                (request.canPrompt ||
+                    error is MonkeyMuxInstallConfirmationRequiredException ||
+                    error is MonkeyMuxInstallDeclinedException)) {
+              _passiveInstallFailures[connectionId] = (error, stackTrace);
+            }
+          },
+        )
+        .ignore();
     request.future.whenComplete(() {
       if (identical(_installRequests[connectionId], request)) {
         _installRequests.remove(connectionId);
@@ -282,6 +306,7 @@ class MonkeyMuxInstallerService {
   void clearCache(int connectionId) {
     _installCache.remove(connectionId);
     _installRequests.remove(connectionId);
+    _passiveInstallFailures.remove(connectionId);
   }
 
   Future<MonkeyMuxInstallation> _ensureInstalled(
@@ -302,11 +327,17 @@ class MonkeyMuxInstallerService {
       final homeDirectory = await _remoteFileService.resolveInitialDirectory(
         sftp,
       );
+      final isWindows = _isWindowsPlatform(platform);
+      // Windows locks running executables. Builds with the same helper version
+      // can have different bytes, so version alone is not a safe install key.
+      // Leave older builds available to their running server and attach clients.
+      final buildSubdirectory = isWindows
+          ? '/${entry.sha256.toLowerCase()}'
+          : '';
       final installDirectory = joinRemotePath(
         homeDirectory,
-        '.monkeyssh/bin/monkeymux/${manifest.version}/$platform',
+        '.monkeyssh/bin/monkeymux/${manifest.version}/$platform$buildSubdirectory',
       );
-      final isWindows = _isWindowsPlatform(platform);
       final executableName = isWindows ? 'monkeymux.exe' : 'monkeymux';
       final executableSftpPath = joinRemotePath(
         installDirectory,
@@ -393,6 +424,7 @@ class MonkeyMuxInstallerService {
         final temporaryCommandPath = isWindows
             ? sftpPathToWindowsShellPath(temporaryExecutablePath)
             : temporaryExecutablePath;
+        var installStage = 'upload';
         try {
           await _remoteFileService.uploadBytes(
             sftp: sftp,
@@ -400,6 +432,7 @@ class MonkeyMuxInstallerService {
             bytes: assetBytes,
           );
           if (isWindows) {
+            installStage = 'verify_upload';
             if (!await _remoteShaMatches(
               session,
               temporaryCommandPath,
@@ -411,13 +444,9 @@ class MonkeyMuxInstallerService {
                 'Uploaded MonkeyMux checksum verification failed.',
               );
             }
-            // SFTP rename cannot overwrite an existing file and there is no
-            // atomic force-move over cmd/PowerShell, so clear any stale target
-            // first, then rename the verified upload into place. Only ignore a
-            // missing target (the common fresh-install case); surface real errors
-            // (for example a permission error or a locked, running helper) so we
-            // abort with the existing binary intact instead of renaming onto a
-            // half-removed target.
+            // Only a corrupt copy of this exact build can occupy the target.
+            // Keep real permission errors visible; only absence is harmless.
+            installStage = 'remove_target';
             try {
               await sftp.remove(executableSftpPath);
             } on SftpStatusError catch (error) {
@@ -425,8 +454,10 @@ class MonkeyMuxInstallerService {
                 rethrow;
               }
             }
+            installStage = 'rename_upload';
             await sftp.rename(temporaryExecutablePath, executableSftpPath);
           } else {
+            installStage = 'finalize_upload';
             await _runRemoteCommand(
               session,
               r'__monkeymux_sha__=$(sha256sum '
@@ -441,6 +472,17 @@ class MonkeyMuxInstallerService {
             );
           }
         } on Object catch (error, stackTrace) {
+          DiagnosticsLogService.instance.warning(
+            'monkeymux.install',
+            'upload_failed',
+            fields: {
+              'connectionId': session.connectionId,
+              'platform': platform,
+              'stage': installStage,
+              'errorType': error.runtimeType,
+              if (error is SftpStatusError) 'sftpStatus': error.code,
+            },
+          );
           await _removeRemoteTemporaryFile(
             session,
             temporaryExecutablePath,
@@ -539,7 +581,9 @@ class MonkeyMuxInstallerService {
         '.monkeymux-current',
       );
       final pointerPath = sftpPathToWindowsShellPath(pointerSftpPath);
-      final relativeTarget = '$version\\$platform\\monkeymux.exe';
+      final buildDirectory = executablePath.split(r'\').reversed.elementAt(1);
+      final relativeTarget =
+          '$version\\$platform\\$buildDirectory\\monkeymux.exe';
       const managedMarker = '@REM Managed by MonkeySSH launcher v1';
       final script = <String>[
         r"$ErrorActionPreference = 'Stop'",
