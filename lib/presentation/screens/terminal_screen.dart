@@ -21,6 +21,7 @@ import 'package:path/path.dart' as path;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
+import '../../app/app_metadata.dart';
 import '../../app/routes.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -520,6 +521,46 @@ bool shouldPreserveTmuxBarSnapshotOnUpdate({
   required bool backendChanged,
   required bool recoveryChanged,
 }) => recoveryChanged && !sessionChanged && !backendChanged;
+
+/// Visibility and availability of the preview-only helper reload action.
+@visibleForTesting
+({bool visible, bool enabled}) resolveForceMonkeyMuxReloadMenuState({
+  required RemoteMuxBackend backend,
+  required bool connected,
+  required bool hasLiveControlChannel,
+  bool previewBuild = isPreviewBuild,
+}) => (
+  visible: previewBuild,
+  enabled:
+      previewBuild &&
+      connected &&
+      backend == RemoteMuxBackend.monkeyMux &&
+      hasLiveControlChannel,
+);
+
+/// A single reload scoped to the remote workspace across an SSH reconnect.
+///
+/// Reconnecting assigns a new connection ID. The owning reconnect attempt must
+/// cancel this request when it completes or is cancelled.
+@visibleForTesting
+class MonkeyMuxForcedReloadRequest {
+  /// Creates a request for the currently attached remote workspace.
+  MonkeyMuxForcedReloadRequest(this.sessionName);
+
+  /// Workspace to reload when the replacement SSH connection attaches.
+  final String sessionName;
+  bool _pending = true;
+
+  /// Consumes the request once, only for its intended workspace.
+  MonkeyMuxServerUpdatePolicy? consumePolicy(String attachingSessionName) {
+    if (!_pending || attachingSessionName != sessionName) return null;
+    _pending = false;
+    return MonkeyMuxServerUpdatePolicy.force;
+  }
+
+  /// Prevents a failed or cancelled attempt from forcing a later attach.
+  void cancel() => _pending = false;
+}
 
 /// Resolves a stored remote multiplexer backend for startup.
 ///
@@ -3625,6 +3666,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _monkeyMuxReconnectAttachPending = false;
   bool _monkeyMuxAttachEstablished = false;
   _PendingMonkeyMuxServerReplacement? _pendingMonkeyMuxServerReplacement;
+  MonkeyMuxForcedReloadRequest? _forcedMonkeyMuxReloadRequest;
   Future<void>? _monkeyMuxServerReplacementRecovery;
   Timer? _monkeyMuxServerReplacementRecoveryTimer;
   Completer<bool>? _monkeyMuxServerReplacementRecoveryDelay;
@@ -9336,8 +9378,36 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       installation,
       sessionName,
     );
-    if (!mounted) {
+    if (!mounted ||
+        _connectionCancelled ||
+        _connectionId != session.connectionId) {
       return MonkeyMuxServerUpdatePolicy.never;
+    }
+    final forcedPolicy = _forcedMonkeyMuxReloadRequest?.consumePolicy(
+      sessionName,
+    );
+    if (forcedPolicy != null) {
+      _forcedMonkeyMuxReloadRequest = null;
+      final runningVersion = status?.version?.trim();
+      if (runningVersion != null && runningVersion.isNotEmpty) {
+        _pendingMonkeyMuxServerReplacement = (
+          connectionId: session.connectionId,
+          sessionName: sessionName,
+          previousVersion: runningVersion,
+          targetVersion: runningVersion,
+          expiresAt: DateTime.now().add(const Duration(seconds: 30)),
+        );
+      }
+      DiagnosticsLogService.instance.info(
+        'monkeymux.install',
+        'forced_reload_requested',
+        fields: {
+          'connectionId': session.connectionId,
+          'supportsShutdown': status?.supportsShutdown ?? false,
+          'installedDuringCall': installation.installedDuringCall,
+        },
+      );
+      return forcedPolicy;
     }
     if (status == null || !status.needsUpdate(installation.version)) {
       return MonkeyMuxServerUpdatePolicy.never;
@@ -13427,6 +13497,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Abandons the in-flight connection attempt for this terminal's host.
   void _cancelConnectionAttempt() {
+    _forcedMonkeyMuxReloadRequest?.cancel();
+    _forcedMonkeyMuxReloadRequest = null;
     final cancelled = ref
         .read(activeSessionsProvider.notifier)
         .cancelConnectionAttempt(widget.hostId);
@@ -14065,6 +14137,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       _connectionId != null &&
                       connectionState == SshConnectionState.connected,
                 ),
+                if (_forceMonkeyMuxReloadMenuState.visible)
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.restart_alt_rounded,
+                    label: 'Force MonkeyMux Reload',
+                    action: 'force_monkeymux_reload',
+                    enabled: _forceMonkeyMuxReloadMenuState.enabled,
+                  ),
                 if (showsDeviceDebugAction)
                   _terminalOverflowSwitchMenuItem(
                     context: context,
@@ -15523,6 +15603,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  ({bool visible, bool enabled}) get _forceMonkeyMuxReloadMenuState {
+    final session = _activeSession();
+    final sessionName = _tmuxSessionName ?? session?.remoteMuxSessionName;
+    return resolveForceMonkeyMuxReloadMenuState(
+      backend: _activeMuxBackend,
+      connected:
+          !_isConnecting &&
+          session != null &&
+          _sessionsNotifier?.getState(session.connectionId) ==
+              SshConnectionState.connected,
+      hasLiveControlChannel:
+          session != null &&
+          sessionName != null &&
+          _monkeyMuxService.hasLiveControlChannel(session, sessionName),
+    );
+  }
+
   Future<void> _handleMenuAction(String action) async {
     switch (action) {
       case 'snippets':
@@ -15539,6 +15636,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         break;
       case 'port_forwards':
         await _openPortForwardsFromTerminal();
+        break;
+      case 'force_monkeymux_reload':
+        if (!_forceMonkeyMuxReloadMenuState.enabled) return;
+        final sessionName =
+            _tmuxSessionName ?? _activeSession()?.remoteMuxSessionName;
+        if (sessionName == null || sessionName.trim().isEmpty) return;
+        final request = MonkeyMuxForcedReloadRequest(sessionName.trim());
+        _forcedMonkeyMuxReloadRequest = request;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Forcing MonkeyMux reload…')),
+        );
+        try {
+          await _reconnect();
+        } finally {
+          request.cancel();
+          if (identical(_forcedMonkeyMuxReloadRequest, request)) {
+            _forcedMonkeyMuxReloadRequest = null;
+          }
+        }
         break;
       case 'toggle_device_debug':
         await _toggleDeviceDebug();

@@ -715,6 +715,8 @@ func killCommandProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+func processGroupAlive(pgid int) bool { return false }
+
 // processIDAlive reports whether a process with this pid exists. An access
 // error means it exists but cannot be opened by this caller, which is still
 // evidence that the pid is taken; only a missing process counts as gone.
@@ -807,6 +809,10 @@ const prefersVerticalForegroundRedrawResize = true
 // signalForegroundResize is a no-op on Windows: ResizePseudoConsole already
 // notifies the attached child of size changes.
 var signalForegroundResize = func(processGroup int) {}
+
+// killProcessGroup is a no-op on Windows: the window's process handle covers
+// the whole ConPTY job, so muxProcess.Kill already reaches every child.
+func killProcessGroup(processGroup int) {}
 
 // attachOutputWriter wraps the attach process's stdout so win32-input-mode
 // requests emitted by the window's child are hidden from the SSH server's own
@@ -1045,3 +1051,6 @@ func isStaleUnixSocketError(err error) bool {
 	return errors.Is(err, windows.WSAECONNREFUSED) ||
 		errors.Is(err, windows.ERROR_CONNECTION_REFUSED)
 }
+
+// ConPTY has no Unix slave device path for detached hooks.
+func writeAgentIdentityMarker(marker string) {}

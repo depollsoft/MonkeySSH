@@ -145,6 +145,20 @@ void main() {
   });
 
   group('buildMonkeyMuxAttachCommand', () {
+    test('passes the force reload policy to attach', () {
+      final command = buildMonkeyMuxAttachCommand(
+        executablePath: '/home/me/.monkeyssh/bin/monkeymux',
+        sessionName: 'work',
+        serverUpdatePolicy: MonkeyMuxServerUpdatePolicy.force,
+      );
+
+      expect(
+        command,
+        "'/home/me/.monkeyssh/bin/monkeymux' attach --quiet "
+        "--update-policy force 'work'",
+      );
+    });
+
     test('puts flags before the session and shell-quotes values', () {
       final command = buildMonkeyMuxAttachCommand(
         executablePath: '/home/me/.monkeyssh/bin/monkey mux',

@@ -33,8 +33,8 @@ func TestMonkeyMuxAgentLaunchCommandWrapsPiWithCurrentExecutable(t *testing.T) {
 	if got, want := monkeyMuxAgentLaunchCommand("pi --session-dir sessions"), invocation+" pi-agent --session-dir sessions"; got != want {
 		t.Fatalf("Pi create command = %q, want %q", got, want)
 	}
-	if got := monkeyMuxAgentLaunchCommand("opencode"); got != "opencode" {
-		t.Fatalf("non-Pi command was rewritten: %q", got)
+	if got := monkeyMuxAgentLaunchCommand("agy"); got != "agy" {
+		t.Fatalf("unsupported command was rewritten: %q", got)
 	}
 }
 
