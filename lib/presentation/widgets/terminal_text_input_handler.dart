@@ -17,6 +17,7 @@ import 'terminal_key_input.dart';
 const _deleteDetectionMarker = '\u200B\u200B';
 final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
+final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
 const _androidTerminalImeKeyChannel = MethodChannel(
   'xyz.depollsoft.monkeyssh/terminal_ime_keys',
@@ -1794,6 +1795,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     String currentText,
     ({int deletedCount, String appendedText, int deleteCursorOffset}) delta, {
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
+    bool beforeEnter = false,
   }) {
     _moveTerminalCursorTo(delta.deleteCursorOffset);
 
@@ -1807,6 +1809,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
       enterModifiers: enterModifiers,
+      beforeEnter: beforeEnter,
     );
 
     _lastSentText = currentText;
@@ -1840,6 +1843,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   int _sendAppendedTerminalInput(
     String text, {
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
+    bool beforeEnter = false,
   }) {
     if (text.isEmpty) {
       return 0;
@@ -1865,7 +1869,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         continue;
       }
 
-      _sendTerminalTextSegment(text.substring(segmentStart, index));
+      _sendTerminalTextSegment(
+        text.substring(segmentStart, index),
+        beforeEnter: true,
+      );
       _sendTerminalEnterFromTextInput(
         modifiers: newlineCount == modifierNewlineIndex ? enterModifiers : null,
       );
@@ -1874,15 +1881,32 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       segmentStart = index;
     }
 
-    _sendTerminalTextSegment(text.substring(segmentStart));
+    _sendTerminalTextSegment(
+      text.substring(segmentStart),
+      beforeEnter: beforeEnter,
+    );
     return newlineCount;
   }
 
-  void _sendTerminalTextSegment(String text) {
+  void _sendTerminalTextSegment(String text, {bool beforeEnter = false}) {
     if (text.isEmpty) {
       return;
     }
-    widget.terminal.textInput(_applyTerminalTextInputModifiers(text));
+    final input = _applyTerminalTextInputModifiers(text);
+    if (widget.terminal.bracketedPasteMode &&
+        input == text &&
+        (beforeEnter || text.runes.length > 1) &&
+        !_terminalTextControlPattern.hasMatch(text)) {
+      // IMEs commit whole words at once. Without explicit batch boundaries,
+      // prompt TUIs such as Codex infer a paste from the rapid characters and
+      // absorb the following Return as a pasted newline. Keep Enter outside
+      // the batch, and keep shortcuts/control input on the key input path.
+      // Even a single character can be held by the TUI's paste detector when
+      // an IME commits it together with Return.
+      widget.terminal.paste(text);
+    } else {
+      widget.terminal.textInput(input);
+    }
   }
 
   void _sendTerminalEnterFromTextInput({
@@ -3486,6 +3510,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       final newlineCount = _sendInputDelta(
         effectiveCurrentText,
         delta,
+        beforeEnter: pendingEnterActionArrived,
         enterModifiers: pendingEnterRepresentedByPayloadNewline
             ? _pendingComposingEnterModifiers
             : null,

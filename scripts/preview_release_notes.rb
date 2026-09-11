@@ -24,6 +24,7 @@ module PreviewReleaseNotes
                else
                  "Branch: #{branch_name}"
                end
+    identity = "Main build: #{identity}" if branch_name == 'main' && (pr_number || pr_title)
     required_lines = [identity]
     required_lines << "Last commit: #{last_commit}" if last_commit
     lines = fit_required_lines(required_lines, max_length)
