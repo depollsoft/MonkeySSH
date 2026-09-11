@@ -14,11 +14,12 @@ import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockSshSession extends Mock implements SSHSession {}
+class _MockSshSession extends MockSessionWithChannel {}
 
 class _MockSftpClient extends Mock implements SftpClient {}
 
@@ -132,7 +133,11 @@ void main() {
           } else {
             expect(stdout.hasListener, isFalse);
           }
-          verify(channel.close).called(1);
+          if (opens) {
+            verify(channel.close).called(1);
+          } else {
+            verify(channel.channel.destroy).called(1);
+          }
           verify(
             () => harness.client.execute(any(), pty: any(named: 'pty')),
           ).called(1);

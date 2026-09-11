@@ -2664,7 +2664,10 @@ void main() {
             () => management.checkForUpdates(session),
           ).thenAnswer((_) async => runtimes);
           when(
-            () => management.refreshAll(session),
+            () => management.refreshAll(
+              session,
+              onDiscovered: any(named: 'onDiscovered'),
+            ),
           ).thenAnswer((_) async => runtimes);
           for (final runtime in runtimes) {
             when(
@@ -2912,7 +2915,12 @@ void main() {
           find.byKey(const ValueKey('agent-management-refresh')),
           findsNothing,
         );
-        verifyNever(() => management.refreshAll(session));
+        verifyNever(
+          () => management.refreshAll(
+            session,
+            onDiscovered: any(named: 'onDiscovered'),
+          ),
+        );
       },
     );
 

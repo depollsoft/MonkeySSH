@@ -5,12 +5,17 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
 import '../models/agent_runtime_info.dart';
+import '../models/agent_usage.dart';
 import '../models/monetization.dart';
 import 'agent_session_discovery_service.dart';
+import 'agent_usage_parser.dart';
+import 'agent_usage_posix_command.dart';
+import 'agent_usage_windows_command.dart';
 import 'diagnostics_log_service.dart';
 import 'monetization_service.dart';
 import 'ssh_exec_queue.dart';
@@ -571,6 +576,18 @@ class AgentManagementService {
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
   _runtimeCache = {};
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
+  final Map<int, ({String selection, Future<Map<String, AgentUsage>> future})>
+  _inFlightUsageChecks = {};
+  final Map<
+    int,
+    ({
+      DateTime at,
+      Map<String, String> paths,
+      Map<String, AgentUsage> values,
+      Map<String, Set<DateTime>> refreshedResets,
+    })
+  >
+  _usageCache = {};
 
   /// Number of retained connection snapshots.
   @visibleForTesting
@@ -604,7 +621,10 @@ class AgentManagementService {
   }
 
   /// Invalidates session discovery and probes every supported runtime.
-  Future<List<AgentRuntimeInfo>> refreshAll(SshSession session) async {
+  Future<List<AgentRuntimeInfo>> refreshAll(
+    SshSession session, {
+    void Function(List<AgentRuntimeInfo>)? onDiscovered,
+  }) async {
     if (!await _canManageAgents()) return const [];
     final inFlight = _inFlightUpdateChecks[session.connectionId];
     if (inFlight != null) {
@@ -615,12 +635,13 @@ class AgentManagementService {
       }
     }
     _discovery.invalidateSession(session);
-    return _inspectAll(session);
+    return _inspectAll(session, onDiscovered: onDiscovered);
   }
 
   Future<List<AgentRuntimeInfo>> _inspectAll(
     SshSession session, {
     SshExecPriority priority = SshExecPriority.normal,
+    void Function(List<AgentRuntimeInfo>)? onDiscovered,
   }) async {
     final definitions = agentRuntimeDefinitions;
     final AgentRuntimeActionResult batch;
@@ -633,7 +654,9 @@ class AgentManagementService {
         ),
         priority: priority,
         timeout: Duration(
-          seconds: session.remoteIsWindows ? 8 + definitions.length * 6 : 8,
+          seconds: session.remoteIsWindows
+              ? 8 + ((definitions.length + 3) ~/ 4) * 6
+              : 8,
         ),
       );
     } on Object catch (error) {
@@ -651,6 +674,13 @@ class AgentManagementService {
     final installedDefinitions = definitions
         .where((definition) => snapshots[definition.id]?.executablePath != null)
         .toList(growable: false);
+    onDiscovered?.call([
+      for (final definition in definitions)
+        _resolveRuntimeInfo(
+          definition,
+          snapshots[definition.id] ?? const AgentProbeSnapshot(),
+        ),
+    ]);
     var metadata = <String, AgentMetadataSnapshot>{};
     if (installedDefinitions.isNotEmpty) {
       try {
@@ -661,7 +691,9 @@ class AgentManagementService {
             windows: session.remoteIsWindows,
           ),
           priority: priority,
-          timeout: Duration(seconds: 20 + installedDefinitions.length * 10),
+          timeout: Duration(
+            seconds: 20 + ((installedDefinitions.length + 3) ~/ 4) * 10,
+          ),
           keepPartialOutputOnTimeout: true,
         );
         metadata = parseAgentMetadataProbeOutput(metadataOutput.output);
@@ -816,6 +848,243 @@ class AgentManagementService {
     );
   }
 
+  /// Reads quotas only when the manager requests them, never during background
+  /// version checks. Credentials and provider responses remain on the host.
+  Future<Map<String, AgentUsage>> readUsage(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes,
+  ) async {
+    final snapshot = runtimes
+        .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
+        .toList();
+    if (!await _canManageAgents()) return const {};
+    final selectedRows = [
+      for (final runtime in snapshot)
+        if (runtime.status == AgentRuntimeStatus.installed ||
+            runtime.status == AgentRuntimeStatus.updateAvailable)
+          jsonEncode([runtime.definition.id, runtime.executablePath]),
+    ]..sort();
+    final selection = jsonEncode(selectedRows);
+    // Installs can change the selection while a probe is running. Queue that
+    // selection, then re-check so matching waiters still share the follow-up.
+    while (true) {
+      final existing = _inFlightUsageChecks[session.connectionId];
+      if (existing == null) break;
+      if (existing.selection == selection) return existing.future;
+      await existing.future;
+    }
+    late final Future<Map<String, AgentUsage>> check;
+    check = _readUsage(session, snapshot).whenComplete(() {
+      if (identical(
+        _inFlightUsageChecks[session.connectionId]?.future,
+        check,
+      )) {
+        _inFlightUsageChecks.remove(session.connectionId);
+      }
+    });
+    _inFlightUsageChecks[session.connectionId] = (
+      selection: selection,
+      future: check,
+    );
+    return check;
+  }
+
+  Future<Map<String, AgentUsage>> _readUsage(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes,
+  ) async {
+    final selected = <String, String>{};
+    final result = <String, AgentUsage>{};
+    for (final runtime in runtimes) {
+      if (runtime.status != AgentRuntimeStatus.installed &&
+          runtime.status != AgentRuntimeStatus.updateAvailable) {
+        continue;
+      }
+      final tool = runtime.definition.tool;
+      final id = switch (tool) {
+        AgentLaunchTool.claudeCode => 'claude',
+        AgentLaunchTool.codex => 'codex',
+        AgentLaunchTool.copilotCli => 'copilot',
+        AgentLaunchTool.openCode => 'opencode',
+        AgentLaunchTool.antigravity => 'antigravity',
+        AgentLaunchTool.cursorAgent => 'cursor',
+        AgentLaunchTool.pi => 'pi',
+        AgentLaunchTool.hermes => 'hermes',
+        AgentLaunchTool.openclaw => 'openclaw',
+        AgentLaunchTool.grokBuild => 'grok',
+        null => null,
+      };
+      if (id != null && runtime.executablePath != null) {
+        selected[id] = runtime.executablePath!;
+      }
+      result[runtime.definition.id] = AgentUsage(
+        status: id == null
+            ? AgentUsageStatus.unsupported
+            : AgentUsageStatus.unavailable,
+      );
+    }
+    if (selected.isEmpty) return result;
+    _usageCache.removeWhere(
+      (_, entry) => _now().difference(entry.at) >= const Duration(minutes: 2),
+    );
+    final cached = _usageCache[session.connectionId];
+    final parsed = <String, AgentUsage>{};
+    final pending = <String, String>{};
+    final refreshedResets = <String, Set<DateTime>>{};
+    for (final entry in selected.entries) {
+      final usage = cached?.paths[entry.key] == entry.value
+          ? cached?.values[entry.key]
+          : null;
+      final checkedAt = usage?.checkedAt;
+      final refreshed = refreshedResets[entry.key] = {
+        if (usage != null) ...?cached?.refreshedResets[entry.key],
+      };
+      final passedResets = {
+        for (final window in usage?.windows ?? <AgentUsageWindow>[])
+          if (window.resetsAt != null && !window.resetsAt!.isAfter(_now()))
+            window.resetsAt!,
+      };
+      final resetPassed = passedResets.difference(refreshed).isNotEmpty;
+      final throttled =
+          usage?.status == AgentUsageStatus.rateLimited ||
+          (usage?.notices.any(
+                (notice) => notice.status == AgentUsageStatus.rateLimited,
+              ) ??
+              false);
+      final reusable =
+          usage != null &&
+          checkedAt != null &&
+          (throttled ||
+              (usage.status == AgentUsageStatus.available &&
+                  !usage.notices.any(
+                    (notice) => notice.status != AgentUsageStatus.notReported,
+                  ))) &&
+          _now().difference(checkedAt) < const Duration(minutes: 2) &&
+          (throttled || !resetPassed);
+      if (reusable) {
+        parsed[entry.key] = usage;
+      } else {
+        pending[entry.key] = entry.value;
+        // Recheck each elapsed reset once, even if it was already stale when
+        // first reported. Repeated stale responses must not cause a retry loop.
+        refreshed.addAll(passedResets);
+      }
+    }
+    if (pending.isEmpty) {
+      return _mapUsageToRuntimes(runtimes, result, selected, parsed);
+    }
+    try {
+      final script = await rootBundle.loadString(
+        'assets/scripts/agent_usage_probe.cjs',
+      );
+      final source = base64.encode(utf8.encode(script));
+      final bootstrap =
+          "process.env.MONKEYSSH_USAGE_PROBE='1';"
+          "eval(Buffer.from('$source','base64').toString())";
+      final command = session.remoteIsWindows
+          ? buildWindowsAgentUsageCommand(pending)
+          : '$_profilePrefix ${buildPosixAgentUsageCommand(bootstrap, pending)}';
+      final response = await _run(
+        session,
+        command,
+        input: session.remoteIsWindows
+            ? Uint8List.fromList(utf8.encode('$source\n'))
+            : null,
+        timeout: const Duration(seconds: 18),
+        keepPartialOutputOnTimeout: true,
+      );
+      final values = parseAgentUsageOutput(response.output, checkedAt: _now());
+      parsed.addAll(values);
+      for (final entry in values.entries) {
+        DiagnosticsLogService.instance.debug(
+          'agent.usage',
+          'agent_result',
+          fields: {
+            'connectionId': session.connectionId,
+            // The parser accepts only built-in agent IDs and status enums.
+            'agentId': entry.key,
+            'status': entry.value.status.name,
+            'windowCount': entry.value.windows.length,
+            'noticeCount': entry.value.notices.length,
+          },
+        );
+      }
+      DiagnosticsLogService.instance.debug(
+        'agent.usage',
+        'check_complete',
+        fields: {
+          'connectionId': session.connectionId,
+          'windows': session.remoteIsWindows,
+          'requestedCount': pending.length,
+          'resultCount': values.length,
+          'exitCode': response.exitCode,
+          for (final status in AgentUsageStatus.values)
+            '${status.name}Count': values.values
+                .where((value) => value.status == status)
+                .length,
+        },
+      );
+    } on Object {
+      DiagnosticsLogService.instance.debug(
+        'agent.usage',
+        'check_failed',
+        fields: {
+          'connectionId': session.connectionId,
+          'windows': session.remoteIsWindows,
+          'requestedCount': pending.length,
+        },
+      );
+      // No raw provider or authentication errors enter diagnostics or UI.
+    }
+    for (final id in selected.keys) {
+      parsed.putIfAbsent(
+        id,
+        () =>
+            AgentUsage(status: AgentUsageStatus.unavailable, checkedAt: _now()),
+      );
+    }
+    if (_usageCache.length >= _maxRuntimeCacheEntries) {
+      _usageCache.remove(_usageCache.keys.first);
+    }
+    _usageCache[session.connectionId] = (
+      at: _now(),
+      paths: selected,
+      values: parsed,
+      refreshedResets: refreshedResets,
+    );
+    return _mapUsageToRuntimes(runtimes, result, selected, parsed);
+  }
+
+  Map<String, AgentUsage> _mapUsageToRuntimes(
+    List<AgentRuntimeInfo> runtimes,
+    Map<String, AgentUsage> result,
+    Map<String, String> selected,
+    Map<String, AgentUsage> parsed,
+  ) {
+    for (final runtime in runtimes) {
+      if (!result.containsKey(runtime.definition.id)) continue;
+      final id = switch (runtime.definition.tool) {
+        AgentLaunchTool.claudeCode => 'claude',
+        AgentLaunchTool.codex => 'codex',
+        AgentLaunchTool.copilotCli => 'copilot',
+        AgentLaunchTool.openCode => 'opencode',
+        AgentLaunchTool.antigravity => 'antigravity',
+        AgentLaunchTool.cursorAgent => 'cursor',
+        AgentLaunchTool.pi => 'pi',
+        AgentLaunchTool.hermes => 'hermes',
+        AgentLaunchTool.openclaw => 'openclaw',
+        AgentLaunchTool.grokBuild => 'grok',
+        null => null,
+      };
+      if (selected.containsKey(id)) {
+        result[runtime.definition.id] =
+            parsed[id] ??
+            AgentUsage(status: AgentUsageStatus.unavailable, checkedAt: _now());
+      }
+    }
+    return result;
+  }
+
   /// Installs or updates [definition], forwarding command output as it arrives.
   Future<AgentRuntimeActionResult> installOrUpdate(
     SshSession session,
@@ -926,12 +1195,14 @@ class AgentManagementService {
     ValueChanged<String>? onOutput,
     Duration? timeout = const Duration(seconds: 15),
     bool keepPartialOutputOnTimeout = false,
+    Uint8List? input,
     SshExecPriority priority = SshExecPriority.normal,
   }) => session.runQueuedExec(() async {
     final exec = await openSshExec(
       session.execute(command),
       timeout ?? const Duration(seconds: 15),
     );
+    var finished = false;
     try {
       final output = StringBuffer();
       void add(String chunk) {
@@ -947,12 +1218,20 @@ class AgentManagementService {
           .cast<List<int>>()
           .transform(utf8.decoder)
           .forEach(add);
-      final completion = Future.wait<void>([stdout, stderr, exec.done]);
+      if (input != null) exec.stdin.add(input);
+      final completion = Future.wait<void>([
+        stdout,
+        stderr,
+        exec.done,
+        if (input != null) exec.stdin.close(),
+      ]);
       if (timeout == null) {
         await completion;
+        finished = true;
       } else {
         try {
           await completion.timeout(timeout);
+          finished = true;
         } on TimeoutException {
           if (!keepPartialOutputOnTimeout) rethrow;
         }
@@ -964,7 +1243,13 @@ class AgentManagementService {
         exitCode: exitCode,
       );
     } finally {
-      exec.close();
+      if (finished) {
+        exec.close();
+      } else {
+        // EOF alone does not release a channel whose process ignores stdin.
+        // Send CHANNEL_CLOSE when abandoning a failed or timed-out probe.
+        exec.channel.destroy();
+      }
     }
   }, priority: priority);
 }
@@ -1089,31 +1374,56 @@ Map<String, AgentProbeSnapshot> parseAgentBatchProbeOutput(String output) {
   return snapshots;
 }
 
+// Runspaces work on Windows PowerShell 5.1 without extra modules. Each worker
+// returns a complete record so markers from different agents never interleave.
+String _windowsParallelRecords(List<String> records) {
+  final scripts = records
+      .map(
+        (record) => powerShellSingleQuote(
+          r'param($__flNpmGlobal, $__flPipxGlobal); '
+          r"$ErrorActionPreference='SilentlyContinue'; $ProgressPreference='SilentlyContinue';"
+          '$_windowsVersionRunner'
+          r'$__flOut=New-Object System.Text.StringBuilder; '
+          '$record'
+          r'$__flOut.ToString();',
+        ),
+      )
+      .join(',');
+  return r'$__flPool=[RunspaceFactory]::CreateRunspacePool(1,4); $__flPool.Open(); '
+      r'$__flJobs=@(); try { '
+      'foreach (\$__flScript in @($scripts)) { '
+      r'$__flWorker=[PowerShell]::Create(); $__flWorker.RunspacePool=$__flPool; '
+      r'[void]$__flWorker.AddScript($__flScript).AddArgument($__flNpmGlobal).AddArgument($__flPipxGlobal); '
+      r'$__flJobs+=@{Worker=$__flWorker; Handle=$__flWorker.BeginInvoke()} }; '
+      r'foreach ($__flJob in $__flJobs) { '
+      r'try { foreach ($__flRecord in $__flJob.Worker.EndInvoke($__flJob.Handle)) { '
+      r'$__flBytes=[Text.Encoding]::UTF8.GetBytes([string]$__flRecord); '
+      r'[Console]::OpenStandardOutput().Write($__flBytes,0,$__flBytes.Length) } } catch {} } '
+      r'} finally { foreach ($__flJob in $__flJobs) { $__flJob.Worker.Dispose() }; $__flPool.Dispose() };';
+}
+
+String _windowsRecordStart(AgentRuntimeDefinition definition) =>
+    r'[void]$__flOut.AppendLine('
+    '${powerShellSingleQuote('$_runtimeMarker${definition.id}')});';
+
+final _windowsRecordEnd =
+    r'[void]$__flOut.AppendLine('
+    '${powerShellSingleQuote(_runtimeEndMarker)});';
+
 /// Builds one remote command that probes every [definition].
 String buildAgentBatchProbeCommand(
   List<AgentRuntimeDefinition> definitions, {
   required bool windows,
 }) {
   if (windows) {
-    final body = StringBuffer(
-      '$powerShellProfilePathPreamble$_windowsVersionRunner',
-    );
-    for (final definition in definitions) {
-      body
-        ..write(
-          r'[void]$__flOut.AppendLine('
-          '${powerShellSingleQuote('$_runtimeMarker${definition.id}')});',
-        )
-        ..write(_buildWindowsProbeBody(definition))
-        ..write(
-          r'[void]$__flOut.AppendLine('
-          '${powerShellSingleQuote(_runtimeEndMarker)});'
-          '$powerShellUtf8OutputEpilogue'
-          r'[void]$__flOut.Clear();',
-        );
-    }
+    final records = [
+      for (final definition in definitions)
+        _windowsRecordStart(definition) +
+            _buildWindowsProbeBody(definition) +
+            _windowsRecordEnd,
+    ];
     return buildCompactWindowsPowerShellCommand(
-      powerShellUtf8OutputScript(body.toString()),
+      '$powerShellProfilePathPreamble${_windowsParallelRecords(records)}',
     );
   }
 
@@ -1156,7 +1466,10 @@ String buildAgentMetadataProbeCommand(
           ..write(
             r"$__flPipxGlobal = Invoke-AgentProbe '& pipx list --short 2>$null';",
           );
+    final records = <String>[];
+    final preamble = body.toString();
     for (final definition in definitions) {
+      body.clear();
       final package = definition.packageName;
       body
         ..write(
@@ -1224,27 +1537,33 @@ String buildAgentMetadataProbeCommand(
         )
         ..write(
           r'[void]$__flOut.AppendLine('
-          '${powerShellSingleQuote(_runtimeEndMarker)});'
-          '$powerShellUtf8OutputEpilogue'
-          r'[void]$__flOut.Clear();',
+          '${powerShellSingleQuote(_runtimeEndMarker)});',
         );
+      records.add(body.toString());
     }
     return buildCompactWindowsPowerShellCommand(
-      powerShellUtf8OutputScript(body.toString()),
+      '$preamble${_windowsParallelRecords(records)}',
     );
   }
 
   final command = StringBuffer('$_profilePrefix\n$_posixVersionRunner')
     ..write(
-      r'__fl_npm_global=$(__fl_agent_version npm list -g --depth=0 2>/dev/null || true); ',
+      r'__fl_meta_dir=$(mktemp -d "${TMPDIR:-/tmp}/monkeyssh-meta.XXXXXX") || exit 1; ',
     )
     ..write(
-      r'__fl_pipx_global=$(__fl_agent_version pipx list --short 2>/dev/null || true); ',
+      r'__fl_agent_version npm list -g --depth=0 > "$__fl_meta_dir/npm" 2>/dev/null & ',
     )
     ..write(
-      r'__fl_brew_global=$(__fl_agent_version brew list --versions 2>/dev/null || true); ',
-    );
-  for (final definition in definitions) {
+      r'__fl_agent_version pipx list --short > "$__fl_meta_dir/pipx" 2>/dev/null & ',
+    )
+    ..write(
+      r'__fl_agent_version brew list --versions > "$__fl_meta_dir/brew" 2>/dev/null & wait; ',
+    )
+    ..write(r'__fl_npm_global=$(cat "$__fl_meta_dir/npm"); ')
+    ..write(r'__fl_pipx_global=$(cat "$__fl_meta_dir/pipx"); ')
+    ..write(r'__fl_brew_global=$(cat "$__fl_meta_dir/brew"); ');
+  for (final (index, definition) in definitions.indexed) {
+    command.write('( ');
     final package = definition.packageName;
     final formula = definition.homebrewFormula;
     command
@@ -1325,8 +1644,15 @@ String buildAgentMetadataProbeCommand(
       ..write(
         '[ -n "\$__fl_latest" ] && printf ${_shellQuote('$_latestMarker%s\\n')} "\$__fl_latest"; ',
       )
-      ..write('printf ${_shellQuote('$_runtimeEndMarker\\n')}; ');
+      ..write('printf ${_shellQuote('$_runtimeEndMarker\\n')}; ')
+      ..write(') > "\$__fl_meta_dir/$index" 2>/dev/null & ');
+    if ((index + 1) % 4 == 0) command.write('wait; ');
   }
+  command.write('wait; ');
+  for (var index = 0; index < definitions.length; index++) {
+    command.write('cat "\$__fl_meta_dir/$index"; ');
+  }
+  command.write(r'rm -rf "$__fl_meta_dir"; ');
   return command.toString();
 }
 

@@ -138,6 +138,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    - assets/scripts/agent_usage_probe.cjs
     - assets/icons/monkeyssh_icon.png
     - assets/icons/monkeyssh_icon_monochrome.png
     - assets/monkeymux/manifest.json

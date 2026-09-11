@@ -47,7 +47,9 @@ Future<SSHSession> openSshExec(
   timeout,
   onTimeout: () {
     opening
-        .then((channel) => channel.close())
+        // SSHSession.close only sends EOF until the peer finishes. A command
+        // that ignores EOF must not keep an abandoned session slot occupied.
+        .then((session) => session.channel.destroy())
         .then<void>(
           (_) {},
           onError: (Object error, StackTrace stackTrace) {

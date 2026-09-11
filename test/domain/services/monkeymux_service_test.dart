@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
@@ -32,6 +33,8 @@ void main() {
             final opening = Completer<SSHSession>();
             final stdout = StreamController<Uint8List>();
             final channel = _buildSilentControlSession(stdout);
+            final underlying = _MockChannel();
+            when(() => channel.channel).thenReturn(underlying);
             when(
               () => installer.ensureInstalled(
                 session,
@@ -88,7 +91,11 @@ void main() {
             } else {
               expect(stdout.hasListener, isFalse);
             }
-            verify(channel.close).called(1);
+            if (opens) {
+              verify(channel.close).called(1);
+            } else {
+              verify(underlying.destroy).called(1);
+            }
             verify(
               () => client.execute(any(), pty: any(named: 'pty')),
             ).called(1);
@@ -1528,6 +1535,8 @@ void main() {
 class _MockSshClient extends Mock implements SSHClient {}
 
 class _MockExecSession extends Mock implements SSHSession {}
+
+class _MockChannel extends Mock implements SSHChannel {}
 
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 

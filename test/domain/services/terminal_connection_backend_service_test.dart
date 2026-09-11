@@ -15,9 +15,11 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockSshExecSession extends Mock implements SSHSession {}
+class _MockSshExecSession extends MockSessionWithChannel {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
@@ -64,7 +66,7 @@ void main() {
       final late = _buildExecSession();
       opening.complete(late);
       await tester.pump();
-      verify(late.close).called(1);
+      verify(late.channel.destroy).called(1);
     });
   }
 
