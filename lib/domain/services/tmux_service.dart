@@ -1753,13 +1753,12 @@ class TmuxService implements RemoteMultiplexerService {
         _windowSwitchActivityGracePeriod,
       );
     } on Object {
-      if (identical(
-        state.windowSwitchActivitySuppressions[key],
-        activitySuppression,
-      )) {
-        state.windowSwitchActivitySuppressions.remove(key);
-        if (_ownsState(session.connectionId, state) &&
-            activitySuppression != null) {
+      if (activitySuppression != null &&
+          (state.windowSwitchActivitySuppressions[key]?.remove(
+                activitySuppression,
+              ) ??
+              false)) {
+        if (_ownsState(session.connectionId, state)) {
           final cached = state.windowSnapshotCache[key];
           if (cached != null) {
             state.windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
@@ -1902,16 +1901,15 @@ class TmuxService implements RemoteMultiplexerService {
               : window.index == windowIndex,
         )
         .firstOrNull;
-    if (targetWindow == null) {
-      state.windowSwitchActivitySuppressions.remove(key);
-      return null;
-    }
+    if (targetWindow == null) return null;
     final suppression = _TmuxWindowSwitchActivitySuppression(
       windowIndex: windowIndex,
-      windowId: windowId,
+      windowId: targetWindow.id ?? windowId,
       baselineActivityEpochSeconds: targetWindow.lastActivityEpochSeconds,
     );
-    state.windowSwitchActivitySuppressions[key] = suppression;
+    state.windowSwitchActivitySuppressions.putIfAbsent(key, () => [])
+      ..removeWhere((entry) => entry._matchesTarget(targetWindow))
+      ..add(suppression);
     return suppression;
   }
 
@@ -1919,19 +1917,23 @@ class TmuxService implements RemoteMultiplexerService {
     _TmuxWindowWatchKey key,
     List<TmuxWindow> windows,
   ) {
-    final suppression = _connectionStates[key.connectionId]
+    final suppressions = _connectionStates[key.connectionId]
         ?.windowSwitchActivitySuppressions[key];
-    if (suppression == null) return windows;
-    final captureUntil = suppression.captureUntil;
-    final captureSyntheticActivity =
-        captureUntil == null || !DateTime.now().isAfter(captureUntil);
+    if (suppressions == null || suppressions.isEmpty) return windows;
+    final now = DateTime.now();
     return windows
-        .map(
-          (window) => suppression.preserveBaselineForSyntheticRedraw(
-            window,
-            captureSyntheticActivity: captureSyntheticActivity,
-          ),
-        )
+        .map((window) {
+          for (final suppression in suppressions) {
+            if (!suppression._matchesTarget(window)) continue;
+            final captureUntil = suppression.captureUntil;
+            return suppression.preserveBaselineForSyntheticRedraw(
+              window,
+              captureSyntheticActivity:
+                  captureUntil == null || !now.isAfter(captureUntil),
+            );
+          }
+          return window;
+        })
         .toList(growable: false);
   }
 
@@ -2569,7 +2571,7 @@ class _TmuxConnectionState {
   final windowListRequests = <_TmuxWindowWatchKey, Future<List<TmuxWindow>>>{};
   final windowSnapshotCache = <_TmuxWindowWatchKey, List<TmuxWindow>>{};
   final windowSwitchActivitySuppressions =
-      <_TmuxWindowWatchKey, _TmuxWindowSwitchActivitySuppression>{};
+      <_TmuxWindowWatchKey, List<_TmuxWindowSwitchActivitySuppression>>{};
   Map<int, _ActiveAgentSessionMetadata>? metadataCache;
   Future<void>? metadataRequest;
   Set<int>? metadataRequestPanePids;

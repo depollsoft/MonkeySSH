@@ -1865,6 +1865,7 @@ void main() {
       'cleared connection',
       'unknown baseline',
       'stable window ID',
+      'switch to another window',
     ]) {
       test('selectWindow redraw suppression handles $scenario', () async {
         final client = _MockSshClient();
@@ -1876,6 +1877,7 @@ void main() {
         final selectResult = Completer<SSHSession>();
         var activity = scenario == 'unknown baseline' ? null : 100;
         var targetIndex = 1;
+        var otherActivity = 0;
         final unknownBaseline = activity == null;
         String windowLine(int index, String id, int? timestamp) => [
           '$index',
@@ -1901,6 +1903,9 @@ void main() {
             );
           }
           if (command.contains('select-window')) {
+            if (selectOpened.isCompleted) {
+              return _buildOpenExecSession(stdout: _doneMarker());
+            }
             selectOpened.complete();
             return selectResult.future;
           }
@@ -1908,7 +1913,7 @@ void main() {
             return _buildOpenExecSession(
               stdout:
                   '${windowLine(targetIndex, '@2', activity)}\n'
-                  '${windowLine(2, '@3', activity)}\n${_doneMarker()}',
+                  '${windowLine(2, '@3', otherActivity == 0 ? activity : otherActivity)}\n${_doneMarker()}',
             );
           }
           return _buildOpenExecSession(stdout: _doneMarker());
@@ -1960,6 +1965,13 @@ void main() {
           shouldPreserve ? (unknownBaseline ? null : 100) : 200,
         );
         expect(after.last.lastActivityEpochSeconds, 200);
+        if (scenario == 'switch to another window') {
+          await service.selectWindow(session, 'main', 2, windowId: '@3');
+          otherActivity = 300;
+          final secondSwitch = await service.listWindows(session, 'main');
+          expect(secondSwitch.first.lastActivityEpochSeconds, 100);
+          expect(secondSwitch.last.lastActivityEpochSeconds, 200);
+        }
         // A second timestamp must be visible even inside the grace period.
         activity = 201;
         final realOutput = await service.listWindows(session, 'main');
