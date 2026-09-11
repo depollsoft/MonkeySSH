@@ -10916,7 +10916,7 @@ func TestCreateWindowOptionsForRestoreBuildsAgentResumeCommand(t *testing.T) {
 
 	options := createWindowOptionsForRestore(state, false)
 
-	if got := options.command; got != "copilot --resume 'session'\"'\"'s id' || copilot" {
+	if got := options.command; got != monkeyMuxAgentLaunchCommand("copilot --resume 'session'\"'\"'s id'")+" || "+monkeyMuxAgentLaunchCommand("copilot") {
 		t.Fatalf("command = %q, want quoted copilot resume with fresh fallback", got)
 	}
 	if len(options.history) != 0 {
@@ -11184,7 +11184,7 @@ func TestEnrichRestoreWithAgentSessionIDsUsesCursorChatStore(t *testing.T) {
 		t.Fatalf("agent session ID = %q, want new-chat", got)
 	}
 	options := createWindowOptionsForRestore(restore.Windows[0], true)
-	want := "cursor-agent --force --resume 'new-chat' || cursor-agent --force"
+	want := monkeyMuxAgentLaunchCommand("cursor-agent --force --resume 'new-chat'") + " || " + monkeyMuxAgentLaunchCommand("cursor-agent --force")
 	if got := options.command; got != want {
 		t.Fatalf("command = %q, want %q", got, want)
 	}
@@ -11376,6 +11376,9 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			options := createWindowOptionsForRestore(tc.state, true)
+			if resume, launch, ok := strings.Cut(tc.want, " || "); ok {
+				tc.want = monkeyMuxAgentLaunchCommand(resume) + " || " + monkeyMuxAgentLaunchCommand(launch)
+			}
 			if got := options.command; got != tc.want {
 				t.Fatalf("command = %q, want %q", got, tc.want)
 			}

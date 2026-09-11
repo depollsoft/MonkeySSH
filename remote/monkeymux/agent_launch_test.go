@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -63,7 +65,7 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 			t.Errorf("rewrite %q = %q; want %q", tc.command, got, tc.want)
 		}
 	}
-	for _, command := range []string{"", "  ", "agy --conversation X", "unknown --resume X", "echo claude", "A=claude unknown", "cd /tmp && unknown codex", "monkeymux pi-agent --session X", "A=1 pi", "'unterminated claude"} {
+	for _, command := range []string{"", "  ", "agy --conversation X", "unknown --resume X", "echo claude", "A=claude unknown", "cd /tmp && unknown codex", "monkeymux pi-agent --session X", "A=1 pi", "'unterminated claude", "~/bin/claude --resume X", "$HOME/bin/claude --resume X", "`pwd`/claude", "/opt/*/claude", `"$HOME/bin/claude"`} {
 		if got := monkeyMuxAgentLaunchCommand(command); got != command {
 			t.Errorf("changed unsupported command %q to %q", command, got)
 		}
@@ -462,7 +464,7 @@ func TestPrepareOpenCodeTUIConfig(t *testing.T) {
 				t.Fatalf("replacement notice = %v", launch.replacedTUIConfig)
 			}
 			path := strings.TrimPrefix(launch.env[0], "OPENCODE_TUI_CONFIG=")
-			if filepath.Base(path) != "monkeymux-opencode-tui.json" {
+			if !tc.merged && filepath.Base(path) != "monkeymux-opencode-tui.json" {
 				t.Fatalf("unexpected config path: %q", path)
 			}
 			data, err := os.ReadFile(path)
@@ -553,5 +555,65 @@ func TestAgentLaunchWrapperExecutable(t *testing.T) {
 		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 || !strings.Contains(string(output), "requires a command") {
 			t.Fatalf("invalid executable flag: %v, %q", err, output)
 		}
+	}
+}
+
+func TestPrepareOpenCodeTUIConfigsPersistIndependently(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	paths := make([]string, 2)
+	for i, theme := range []string{"light", "dark"} {
+		source := filepath.Join(t.TempDir(), "custom.json")
+		if err := os.WriteFile(source, []byte(fmt.Sprintf(`{"theme":%q}`, theme)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		launch, err := prepareAgentLaunch("opencode", nil, []string{"OPENCODE_TUI_CONFIG=" + source}, "/monkeymux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths[i] = strings.TrimPrefix(launch.env[0], "OPENCODE_TUI_CONFIG=")
+	}
+	if paths[0] == paths[1] {
+		t.Fatal("different configurations share a launch file")
+	}
+	for i, theme := range []string{"light", "dark"} {
+		data, err := os.ReadFile(paths[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config struct {
+			Theme string `json:"theme"`
+		}
+		if err := json.Unmarshal(data, &config); err != nil || config.Theme != theme {
+			t.Fatalf("persisted config = %s, error %v; want theme %q", data, err, theme)
+		}
+		digest := sha256.Sum256(data)
+		if want := fmt.Sprintf("monkeymux-opencode-tui-%x.json", digest[:8]); filepath.Base(paths[i]) != want {
+			t.Fatalf("config path = %q, want %q", paths[i], want)
+		}
+	}
+}
+
+func TestRestoreWrapsBothAgentLaunchLegs(t *testing.T) {
+	for _, tc := range []struct{ tool, marker string }{
+		{"claude", " agent-launch claude"},
+		{"copilot", " agent-launch copilot"},
+		{"codex", " agent-launch codex"},
+		{"opencode", " agent-launch opencode"},
+		{"cursor-agent", " agent-launch cursor-agent"},
+		{"pi", " pi-agent"},
+		{"antigravity", "agy"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			options := createWindowOptionsForRestore(restoreWindowState{AgentTool: tc.tool, AgentSessionID: "saved"}, false)
+			if got := strings.Count(options.command, tc.marker); got != 2 {
+				t.Fatalf("restore command = %q, want each leg to contain %q", options.command, tc.marker)
+			}
+			if tc.tool == "antigravity" && strings.Contains(options.command, "agent-launch") {
+				t.Fatalf("unsupported agy command wrapped: %q", options.command)
+			}
+			if got := monkeyMuxAgentLaunchCommand(options.command); got != options.command {
+				t.Fatalf("restore command rewrapped: %q", got)
+			}
+		})
 	}
 }

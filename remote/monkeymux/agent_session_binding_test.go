@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1155,5 +1156,25 @@ func TestRestoreAntigravityExactOwnershipBeforeHistory(t *testing.T) {
 				t.Fatalf("exact %s signal without history = %q, want %q", signal, got, want)
 			}
 		})
+	}
+}
+
+func TestProtectExactAgentSessionBindingsPrefersCapturedOwner(t *testing.T) {
+	restore := &serverRestore{Windows: []restoreWindowState{
+		{ID: "@1", AgentTool: "claude"},
+		{ID: "@2", AgentTool: "claude", AgentSessionID: "X", AgentSessionDir: "original-dir", AgentSessionPath: "original-path", AgentSessionIdentityExact: true},
+	}}
+	original := restore.Windows[1]
+	protect := protectExactAgentSessionBindings(restore)
+	restore.Windows[0].AgentSessionID = "X"
+	restore.Windows[0].AgentSessionDir = "inferred-dir"
+	restore.Windows[0].AgentSessionPath = "inferred-path"
+	restore.Windows[0].AgentSessionIdentityExact = true
+	protect()
+	if got := restore.Windows[1]; !reflect.DeepEqual(got, original) {
+		t.Fatalf("captured owner changed: %#v, want %#v", got, original)
+	}
+	if got := restore.Windows[0]; got.AgentSessionID != "" || got.AgentSessionDir != "" || got.AgentSessionPath != "" || got.AgentSessionIdentityExact {
+		t.Fatalf("inferred collision kept its binding: %#v", got)
 	}
 }

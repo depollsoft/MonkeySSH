@@ -3,7 +3,11 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -90,5 +94,47 @@ func TestKillSurvivingWindowProcessesSkipsExitedChildren(t *testing.T) {
 	killSurvivingWindowProcesses([]*muxWindow{{proc: proc}, {}}, nil, time.Second)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("waited %v for an already-exited child", elapsed)
+	}
+}
+
+func TestKillSurvivingWindowProcessesAfterGroupLeaderExits(t *testing.T) {
+	for _, ownGroup := range []bool{false, true} {
+		t.Run(fmt.Sprint("own-group-", ownGroup), func(t *testing.T) {
+			ready := filepath.Join(t.TempDir(), "ready")
+			cmd := exec.Command("/bin/sh", "-c", `(trap "" HUP; echo ready > "$1"; exec sleep 30) &
+while [ ! -s "$1" ]; do sleep 0.01; done`, "sh", ready)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			group := cmd.Process.Pid
+			t.Cleanup(func() { killProcessGroup(group) })
+			if err := cmd.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(ready); err != nil {
+				t.Fatal(err)
+			}
+			if processIDAlive(group) || !processGroupAlive(group) {
+				t.Fatal("expected exited group leader and a surviving group member")
+			}
+			_ = syscall.Kill(-group, syscall.SIGHUP)
+			time.Sleep(20 * time.Millisecond)
+			if !processGroupAlive(group) {
+				t.Fatal("group did not survive SIGHUP")
+			}
+			window := &muxWindow{}
+			if ownGroup {
+				window.proc = &unixProcess{cmd: cmd}
+			}
+			killSurvivingWindowProcesses([]*muxWindow{window}, map[*muxWindow]int{window: group}, 20*time.Millisecond)
+			deadline := time.Now().Add(2 * time.Second)
+			for processGroupAlive(group) && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if processGroupAlive(group) {
+				t.Fatalf("group %d survived shutdown after its leader exited", group)
+			}
+		})
 	}
 }

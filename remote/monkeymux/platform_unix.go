@@ -172,6 +172,15 @@ func processIDAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// processGroupAlive includes surviving members whose group leader has exited.
+func processGroupAlive(pgid int) bool {
+	if pgid <= 0 {
+		return false
+	}
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
 // inspectProcess reports what can be learned about pid. Linux answers from
 // procfs; elsewhere a single ps query is used, pinned to a fixed locale and
 // timezone so the start time it prints does not depend on the environment the

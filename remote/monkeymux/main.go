@@ -5895,7 +5895,10 @@ func createWindowOptionsForRestore(
 				)
 				command = piResumeCommandWithFreshFallback(resume, launch)
 			} else {
-				command = agentResumeCommandWithFreshFallback(resume, launch)
+				command = agentResumeCommandWithFreshFallback(
+					monkeyMuxAgentLaunchCommand(resume),
+					monkeyMuxAgentLaunchCommand(launch),
+				)
 			}
 		}
 	}
@@ -16039,7 +16042,7 @@ func killSurvivingWindowProcesses(windows []*muxWindow, foregroundGroups map[*mu
 			leader = window.proc.Pid()
 		}
 		leaderAlive := func() bool { return leader > 0 && processIDAlive(leader) }
-		groupAlive := func() bool { return group > 0 && group != leader && processIDAlive(group) }
+		groupAlive := func() bool { return processGroupAlive(group) }
 		for (leaderAlive() || groupAlive()) && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}

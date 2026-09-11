@@ -863,6 +863,15 @@ func protectExactAgentSessionBindings(restore *serverRestore) func() {
 				restore.Windows[i].AgentSessionIdentityExact = true
 			}
 		}
+		// Captured exact identities take priority over identities inferred later.
+		for i, window := range restore.Windows {
+			if _, captured := exact[i]; captured && window.AgentSessionIdentityExact && window.AgentSessionID != "" {
+				key := agentToolCandidateForRestore(window) + "\x00" + window.AgentSessionID
+				if _, exists := owners[key]; !exists {
+					owners[key] = i
+				}
+			}
+		}
 		for i, window := range restore.Windows {
 			if window.AgentSessionIdentityExact && window.AgentSessionID != "" {
 				key := agentToolCandidateForRestore(window) + "\x00" + window.AgentSessionID

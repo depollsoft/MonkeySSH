@@ -715,6 +715,8 @@ func killCommandProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+func processGroupAlive(pgid int) bool { return false }
+
 // processIDAlive reports whether a process with this pid exists. An access
 // error means it exists but cannot be opened by this caller, which is still
 // evidence that the pid is taken; only a missing process counts as gone.

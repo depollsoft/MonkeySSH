@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -178,12 +179,14 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 			}
 			pluginURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(plugin)}).String()
 			config := map[string]json.RawMessage{}
+			merged := false
 			for _, value := range env {
 				if path, ok := strings.CutPrefix(value, "OPENCODE_TUI_CONFIG="); ok {
 					data, err := os.ReadFile(path)
 					var existing map[string]json.RawMessage
 					if err == nil && json.Unmarshal(data, &existing) == nil && existing != nil {
 						config = existing
+						merged = true
 					} else {
 						launch.replacedTUIConfig = true
 					}
@@ -204,7 +207,17 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 				plugins = append(plugins, plugin)
 			}
 			config["plugin"], _ = json.Marshal(plugins)
-			path, err := writeJSON("monkeymux-opencode-tui.json", config)
+			data, err := json.Marshal(config)
+			if err != nil {
+				return launch, err
+			}
+			content := string(data) + "\n"
+			name := "monkeymux-opencode-tui.json"
+			if merged {
+				digest := sha256.Sum256([]byte(content))
+				name = fmt.Sprintf("monkeymux-opencode-tui-%x.json", digest[:8])
+			}
+			path, err := writeAgentLaunchFile(directory, name, content)
 			if err != nil {
 				return launch, err
 			}
@@ -428,6 +441,11 @@ func agentLaunchToolFromCommand(command string) string {
 func rewriteAgentLaunchCommand(command string) string {
 	offset := agentLaunchExecutableOffset(command)
 	word, end := agentLaunchShellWord(command[offset:])
+	// This parser does not expand shell words. Keep expansion-bearing paths
+	// in the shell rather than passing a literal path to --executable.
+	if strings.ContainsAny(command[offset:offset+end], "~$`*?[]{}") {
+		return command
+	}
 	tool := agentToolFromCommandName(filepath.Base(word))
 	if !agentLaunchToolSupported(tool) {
 		return command
