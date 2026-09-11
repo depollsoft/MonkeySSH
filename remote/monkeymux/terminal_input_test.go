@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 )
@@ -399,5 +400,256 @@ func TestWriteWindowBareEscape(t *testing.T) {
 				t.Fatalf("PTY input = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+type consoleModeRecordingPty struct {
+	recordingPty
+	vtInput bool
+	modeErr error
+	probes  int
+}
+
+func (p *consoleModeRecordingPty) virtualTerminalInputEnabled() (bool, error) {
+	p.probes++
+	return p.vtInput, p.modeErr
+}
+
+func TestConsoleInputModeChangesAndProbeFailure(t *testing.T) {
+	pty := &consoleModeRecordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	const reply = "\x1b]11;rgb:0000/0000/0000\x07"
+	for _, state := range []struct {
+		vt  bool
+		err error
+	}{
+		{false, nil}, {true, nil}, {false, nil}, {false, errors.New("probe failed")},
+	} {
+		pty.vtInput, pty.modeErr = state.vt, state.err
+		if err := server.writeWindow(window.id, []byte(reply)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := win32EncodeSequence(reply) + win32EncodeSequence(reply)
+	if pty.String() != want || pty.probes != 4 {
+		t.Fatalf("input %q, probes %d; want %q and 4", pty.String(), pty.probes, want)
+	}
+	for _, key := range []string{"x", "\r", "\x1b", "\x1b[A"} {
+		if err := server.writeWindow(window.id, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pty.probes != 4 {
+		t.Fatal("ordinary keys must not launch console probes")
+	}
+}
+func TestConsoleReaderInputPolicy(t *testing.T) {
+	const reply = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
+	const paste = "\x1b[200~hello\x1b[201~"
+	for _, test := range []struct {
+		name, reader, input, want string
+		win32, paste              bool
+	}{
+		{"native paste", "native", paste, string((&nativeConsolePasteFilter{}).encode([]byte(paste))), true, true},
+		{"split paste escape", "native", "\x1b", "", true, true},
+		{"native reply", "native", reply, "", true, false},
+		{"native DCS reply", "native", "\x1bP>|MonkeySSH\x1b\\", "", true, false},
+		{"mixed text and replies", "native", "a" + reply + "b", "ab", true, false},
+		{"pasted reply is user content", "native", "\x1b[200~" + reply + "\x1b[201~", string((&nativeConsolePasteFilter{}).encode([]byte(reply))), true, true},
+		{"native Escape", "native", "\x1b", win32InputModeEscapeKeyEvents, true, false},
+		{"native arrow", "native", "\x1b[A", "\x1b[A", true, false},
+		{"native Return", "native", "\r", "\r", true, false},
+		{"Unix reply", "native", reply, reply, false, false},
+		{"Unix paste", "native", paste, paste, false, true},
+		{"Windows VT reader reply", "vt", reply, win32EncodeSequence(reply), true, false},
+		{"Windows VT reader paste", "vt", paste, string(encodeBracketedPasteInputForWin32InputMode([]byte(paste))), true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pty := &consoleModeRecordingPty{vtInput: test.reader == "vt"}
+			window := &muxWindow{id: "@1", pty: pty, win32InputMode: test.win32}
+			server := newMuxServer("test")
+			server.windows = []*muxWindow{window}
+			var err error
+			if test.paste {
+				err = server.writeWindowInput(window.id, []byte(test.input), true)
+			} else {
+				err = server.writeWindow(window.id, []byte(test.input))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := pty.String(); got != test.want {
+				t.Fatalf("PTY input = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNativeConsolePasteFilterAcrossEverySplit(t *testing.T) {
+	for _, test := range []struct{ name, input, want string }{
+		{"plain", "\x1b[200~hello\x1b[201~ ", "hello "},
+		{"unicode", "\x1b[200~héllo 🐒\x1b[201~", "héllo 🐒"},
+		{"8-bit framing", "\x9b200~hello\x9b201~", "hello"},
+		{"unicode continuation is not framing", "\x1b[200~\xc2\x9b201~text\x1b[201~", "\xc2\x9b201~text"},
+		{"multiple pastes", "\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~", "onetwo"},
+		{"nested start is content", "\x1b[200~\x1b[200~hello\x1b[201~", "\x1b[200~hello"},
+		{"control payload", "\x1b[200~a\r\nb\x1b]11;rgb:0000/0000/0000\x07\x1b[201~", "a\r\nb\x1b]11;rgb:0000/0000/0000\x07"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for split := 0; split <= len(test.input); split++ {
+				filter := &nativeConsolePasteFilter{}
+				got := append(filter.filter([]byte(test.input[:split])), filter.filter([]byte(test.input[split:]))...)
+				if string(got) != test.want || len(filter.carry) != 0 || filter.inPaste {
+					t.Fatalf("split %d: output %q, carry %q, inPaste %v; want %q", split, got, filter.carry, filter.inPaste, test.want)
+				}
+			}
+			filter := &nativeConsolePasteFilter{}
+			var got []byte
+			for _, value := range []byte(test.input) {
+				got = append(got, filter.filter([]byte{value})...)
+			}
+			if string(got) != test.want || len(filter.carry) != 0 || filter.inPaste {
+				t.Fatalf("byte-by-byte output %q, carry %q, inPaste %v; want %q", got, filter.carry, filter.inPaste, test.want)
+			}
+		})
+	}
+}
+
+func TestNativePasteCharacterEventsPreserveRepeatsAndSplitUnicode(t *testing.T) {
+	const input = "\x1b[200~aa🐒\r\n\t\x1b[201~"
+	const up = "\x1b[0;0;0;0;0;1_"
+	const want = "\x1b[0;0;97;1;0;1_" + up + "\x1b[0;0;97;1;0;1_" + up +
+		"\x1b[0;0;55357;1;0;1_" + up + "\x1b[0;0;56338;1;0;1_" + up +
+		"\x1b[13;0;13;1;0;1_\x1b[13;0;0;0;0;1_" +
+		"\x1b[9;0;9;1;0;1_\x1b[9;0;0;0;0;1_"
+	for split := 0; split <= len(input); split++ {
+		encoder := &nativeConsolePasteFilter{}
+		got := append(encoder.encode([]byte(input[:split])), encoder.encode([]byte(input[split:]))...)
+		if string(got) != want {
+			t.Fatalf("split %d: events %q, want %q", split, got, want)
+		}
+	}
+	encoder := &nativeConsolePasteFilter{}
+	var got []byte
+	for _, value := range []byte(input) {
+		got = append(got, encoder.encode([]byte{value})...)
+	}
+	if string(got) != want {
+		t.Fatalf("byte-by-byte events %q, want %q", got, want)
+	}
+}
+
+func TestNativePasteChunksUseOneModeQuery(t *testing.T) {
+	pty := &consoleModeRecordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	const paste = "\x1b[200~hello\x1b[201~"
+	for _, value := range []byte(paste) {
+		if err := server.writeWindowInput(window.id, []byte{value}, true); err != nil {
+			t.Fatal(err)
+		}
+		// A transient query failure must not change an in-flight paste's mode.
+		pty.modeErr = errors.New("probe unavailable")
+	}
+	if pty.probes != 1 {
+		t.Fatalf("split paste used %d mode queries, want 1", pty.probes)
+	}
+	if want := string((&nativeConsolePasteFilter{}).encode([]byte(paste))); pty.String() != want {
+		t.Fatalf("split paste input %q, want %q", pty.String(), want)
+	}
+}
+
+func TestNativeConsoleRoutedResponseForms(t *testing.T) {
+	for _, reply := range []string{
+		"\x1b]11;rgb:ff/ff/ff\a", "\x1b]11;rgb:ff/ff/ff\x9c",
+		"\x9d11;rgb:ff/ff/ff\x1b\\", "\x9d11;rgb:ff/ff/ff\x9c",
+		"\x1bP!|00000000\x9c", "\x90!|00000000\x1b\\", "\x90!|00000000\x9c",
+	} {
+		for split := 0; split <= len(reply); split++ {
+			pty := &consoleModeRecordingPty{}
+			window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+			server := newMuxServer("test")
+			server.windows = []*muxWindow{window}
+			client := &attachClient{}
+			client.expectTerminalResponses(window.id, 1)
+			responses := 0
+			for _, fragment := range []string{reply[:split], reply[split:]} {
+				for _, action := range client.routeInput([]byte(fragment)).actions {
+					if action.userInput {
+						t.Fatalf("reply %q split %d routed as input", reply, split)
+					}
+					responses++
+					if err := server.writeWindow(action.windowID, action.data); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if responses == 0 || pty.String() != "" || pty.probes != 1 {
+				t.Fatalf("reply %q split %d: responses %d, input %q, probes %d", reply, split, responses, pty.String(), pty.probes)
+			}
+		}
+	}
+}
+
+func TestNativeConsoleStreamingResponsePreservesUserInput(t *testing.T) {
+	for _, framing := range [][2]string{{"\x1b]52;c;", "\x1b\\"}, {"\x9d52;c;", "\x9c"}, {"\x90!|", "\x1b\\"}} {
+		pty := &consoleModeRecordingPty{}
+		window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+		server := newMuxServer("test")
+		server.windows = []*muxWindow{window}
+		client := &attachClient{}
+		client.expectTerminalResponses(window.id, 1)
+		route := func(data []byte) {
+			for _, action := range client.routeInput(data).actions {
+				var err error
+				if action.userInput {
+					err = server.writeWindowInput(window.id, action.data, action.bracketedPaste)
+				} else {
+					err = server.writeWindow(action.windowID, action.data)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		route(append([]byte(framing[0]), bytes.Repeat([]byte("A"), terminalResponseCarryLimitBytes+1)...))
+		if window.nativeResponse.kind == 0 || pty.String() != "" {
+			t.Fatal("streamed prefix was not suppressed")
+		}
+		if err := server.writeWindowInput(window.id, []byte("key"), false); err != nil {
+			t.Fatal(err)
+		}
+		route([]byte("\x1b[200~paste\x1b[201~"))
+		pty.modeErr = errors.New("probe unavailable during response")
+		// UTF-8 continuation bytes resembling ST must not end suppression.
+		for _, fragment := range []string{"tail\xc2", "\x9cmore", framing[1][:1], framing[1][1:]} {
+			route([]byte(fragment))
+		}
+		route([]byte("after"))
+		want := "key" + string((&nativeConsolePasteFilter{}).encode([]byte("paste"))) + "after"
+		if pty.String() != want || window.nativeResponse.kind != 0 || pty.probes != 2 {
+			t.Fatalf("input %q, state %#v, probes %d; want %q and 2 probes", pty.String(), window.nativeResponse, pty.probes, want)
+		}
+	}
+}
+
+func TestNativeResponseFilterPreservesSplitUTF8(t *testing.T) {
+	const text = "\xc2\x9dtext\xc2\x90text\xc2\x9c"
+	for split := 0; split <= len(text); split++ {
+		pty := &consoleModeRecordingPty{}
+		window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+		server := newMuxServer("test")
+		server.windows = []*muxWindow{window}
+		for _, part := range []string{text[:split], text[split:]} {
+			if err := server.writeWindow(window.id, []byte(part)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if pty.String() != text || pty.probes != 0 {
+			t.Fatalf("split %d: input %q, probes %d", split, pty.String(), pty.probes)
+		}
 	}
 }

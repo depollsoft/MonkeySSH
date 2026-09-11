@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.191"
+	monkeyMuxVersion                  = "0.1.194"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -685,6 +685,9 @@ type muxServer struct {
 }
 
 type muxWindow struct {
+	inputMu                     sync.Mutex
+	nativePaste                 nativeConsolePasteFilter
+	nativeResponse              nativeConsoleResponseFilter
 	id                          string
 	index                       int
 	name                        string
@@ -5795,7 +5798,7 @@ func (s *muxServer) redrawRestoredWindow(windowID string) {
 		return
 	}
 	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -5826,7 +5829,7 @@ func (s *muxServer) forceForegroundThemeRedraw(windowID string) {
 		return
 	}
 	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -8312,8 +8315,9 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			continue
 		}
 		if action.windowID == "" {
-			s.writeActiveFromAttach(action.data)
-			continue
+			s.mu.Lock()
+			action.windowID = s.activeID
+			s.mu.Unlock()
 		}
 		_ = s.writeWindow(action.windowID, action.data)
 	}
@@ -9504,7 +9508,8 @@ func (s *muxServer) resizeWithRedraw(
 	s.resizeWindowLocked(window, width, height)
 	if window != nil &&
 		!window.closed &&
-		window.usesForegroundRedrawReplayLocked() &&
+		(window.usesForegroundRedrawReplayLocked() ||
+			(syntheticRedraw && window.supportsForegroundRedrawLocked())) &&
 		(forceRedraw || sizeChanged) {
 		// Genuine viewport changes rely on the real PTY resize and forward their
 		// reflow immediately. Restore/theme redraws always need the synthetic
@@ -9564,6 +9569,9 @@ func (s *muxServer) resizeActiveLocked(width int, height int) {
 
 func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int) {
 	if window == nil || window.closed || window.pty == nil {
+		return
+	}
+	if window.retainsConPtyNormalScreenLocked() && window.ptySizeIs(width, height) {
 		return
 	}
 	window.resizePty(width, height)
@@ -9629,7 +9637,8 @@ func (s *muxServer) simulateForegroundResizeIfAttached(
 ) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.isAttachConnectionLocked(conn) || window == nil || window.closed {
+	if !s.isAttachConnectionLocked(conn) || window == nil || window.closed ||
+		window.retainsConPtyNormalScreenLocked() {
 		return false
 	}
 	s.pauseAttachForwardingForRedrawLocked(
@@ -9644,7 +9653,8 @@ func (s *muxServer) simulateForegroundResizeIfAttached(
 func (s *muxServer) simulateForegroundResizeIfAnyAttached(window *muxWindow) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.attachCountLocked() == 0 || window == nil || window.closed {
+	if s.attachCountLocked() == 0 || window == nil || window.closed ||
+		window.retainsConPtyNormalScreenLocked() {
 		return false
 	}
 	s.pauseAttachForwardingForRedrawLocked(
@@ -9664,7 +9674,7 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	if window == nil ||
 		window.closed ||
 		s.attachCountLocked() == 0 ||
-		!window.usesForegroundRedrawReplayLocked() {
+		!window.supportsForegroundRedrawLocked() {
 		return
 	}
 	if _, _, ok := foregroundRedrawTemporarySize(width, height); !ok {
@@ -10067,6 +10077,16 @@ func (s *muxServer) replayBytesLockedWithSkip(
 	clientHas map[string]uint32,
 ) []byte {
 	history, historyStart := window.historyTailWithParserLocked()
+	if window.retainsConPtyNormalScreenLocked() {
+		// Keep the full bounded screen history: differential updates may leave
+		// the composer untouched beyond the short shell scrollback limit.
+		start := advanceReplayStartToTerminalGround(history, 0, historyStart)
+		history = stripTerminalQueriesFromReplay(history[start:])
+		history = window.withheldAttachOscSuffixTrimmedLocked(history)
+		images := window.kittyImageReplayLocked(clientHas)
+		replayHistory := append(images, history...)
+		return wrapSynchronizedTerminalOutput(nil, buildWindowReplay(window, replayHistory))
+	}
 	if window.usesForegroundRedrawReplayLocked() {
 		// The foreground app redraws its own cells on reattach (driven by a
 		// resize), so we must not replay the visible history or it would draw
@@ -10112,7 +10132,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
 	window *muxWindow,
 ) []byte {
-	if window == nil || !window.usesForegroundRedrawReplayLocked() {
+	if window == nil || !window.supportsForegroundRedrawLocked() {
 		return nil
 	}
 	history, historyStart := window.historyTailWithParserLocked()
@@ -10180,11 +10200,26 @@ func buildWindowReplay(window *muxWindow, history []byte) []byte {
 	return replay
 }
 
+// Explicit theme/restore redraws still repaint normal-screen console agents.
+// Switching back to their retained screen does not require that repaint.
+func (w *muxWindow) supportsForegroundRedrawLocked() bool {
+	return w != nil && (w.alternateScreenModeActiveLocked() || w.agentToolLocked() != "")
+}
+
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
 	if w == nil {
 		return false
 	}
-	return w.alternateScreenModeActiveLocked() || w.agentToolLocked() != ""
+	// ConPTY already maintains the normal screen and its retained VT output
+	// can restore that screen without asking the application to repaint its
+	// transcript. A temporary resize on every return makes normal-buffer TUIs
+	// reflow/reinsert history, visibly scrolling the restored window again.
+	return w.alternateScreenModeActiveLocked() ||
+		(!w.retainsConPtyNormalScreenLocked() && w.agentToolLocked() != "")
+}
+
+func (w *muxWindow) retainsConPtyNormalScreenLocked() bool {
+	return w != nil && w.win32InputMode && !w.alternateScreenModeActiveLocked()
 }
 
 func (w *muxWindow) alternateScreenModeActiveLocked() bool {
@@ -11355,14 +11390,16 @@ func capabilityHintDataFromString(data string) []byte {
 
 func (s *muxServer) sendFocusTransition(windowID string) {
 	go func() {
-		_ = s.writeWindow(windowID, []byte("\x1b[O"))
+		_ = s.writeWindowInput(windowID, []byte("\x1b[O"), false)
 		time.Sleep(50 * time.Millisecond)
-		_ = s.writeWindow(windowID, []byte("\x1b[I"))
+		_ = s.writeWindowInput(windowID, []byte("\x1b[I"), false)
 	}()
 }
 
+// Terminal replies have their own stream state, independent of user input and
+// focus events, which can arrive while a large reply is still being streamed.
 func (s *muxServer) writeWindow(windowID string, data []byte) error {
-	return s.writeWindowInput(windowID, data, false)
+	return s.writeWindowData(windowID, data, false, true)
 }
 
 func (s *muxServer) writeWindowInput(
@@ -11370,6 +11407,10 @@ func (s *muxServer) writeWindowInput(
 	data []byte,
 	bracketedPaste bool,
 ) error {
+	return s.writeWindowData(windowID, data, bracketedPaste, false)
+}
+
+func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste, response bool) error {
 	s.mu.Lock()
 	window := s.windowByIDLocked(windowID)
 	if window == nil || window.closed {
@@ -11378,7 +11419,42 @@ func (s *muxServer) writeWindowInput(
 	}
 	win32InputMode := window.win32InputMode
 	s.mu.Unlock()
-	if win32InputMode {
+	window.inputMu.Lock()
+	defer window.inputMu.Unlock()
+	// Native console readers receive encoded protocol bytes as typed keys.
+	// Query the console mode rather than inferring the reader from an app name.
+	// Ordinary keys need no probe: both reader types use the same encoding.
+	// Keep an already-started native paste on the same path until its closing
+	// marker arrives. A split paste needs one mode query, not one per packet.
+	responseFilter := window.nativeResponse
+	var filteredResponse []byte
+	var hasResponse bool
+	if win32InputMode && response {
+		filteredResponse, hasResponse = responseFilter.filter(data)
+	}
+	nativeConsoleInput := win32InputMode && ((bracketedPaste &&
+		(window.nativePaste.inPaste || len(window.nativePaste.carry) > 0)) ||
+		(response && window.nativeResponse.kind != 0))
+	if win32InputMode && !nativeConsoleInput && (bracketedPaste || hasResponse) {
+		if console, ok := window.pty.(interface{ virtualTerminalInputEnabled() (bool, error) }); ok {
+			vtInput, err := console.virtualTerminalInputEnabled()
+			nativeConsoleInput = err == nil && !vtInput
+		}
+	}
+	if win32InputMode && response {
+		if !nativeConsoleInput {
+			responseFilter.kind, responseFilter.escape = 0, false
+		}
+		window.nativeResponse = responseFilter
+	}
+	if nativeConsoleInput {
+		if bracketedPaste {
+			data = window.nativePaste.encode(data)
+		} else {
+			data = filteredResponse
+			data = encodeTerminalInputForWin32InputMode(data)
+		}
+	} else if win32InputMode {
 		// ConPTY's input parser cannot disambiguate a bare ESC and drops raw
 		// OSC/DCS sequences, so a standalone Escape keystroke and synthetic
 		// replies (theme hints, clipboard responses, relayed query answers)
@@ -11667,7 +11743,7 @@ func (w *muxWindow) historyTailWithParserLocked() (
 }
 
 func (w *muxWindow) historyLimitLocked() int {
-	if w.usesForegroundRedrawReplayLocked() {
+	if w.usesForegroundRedrawReplayLocked() || w.retainsConPtyNormalScreenLocked() {
 		return windowFullReplayHistoryLimitBytes
 	}
 	return windowHistoryLimitBytes
