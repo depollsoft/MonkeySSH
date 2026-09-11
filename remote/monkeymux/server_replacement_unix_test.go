@@ -194,3 +194,29 @@ func TestReplacementPaneGroupsWrapperOrderingAndGuards(t *testing.T) {
 		})
 	}
 }
+
+func TestServerTerminationRechecksBeforeEscalation(t *testing.T) {
+	for _, stillLive := range []bool{false, true} {
+		owner := true
+		var signals []syscall.Signal
+		if !terminateProcessWithSignals(100, func() bool { return owner }, func(pid int, signal syscall.Signal) error {
+			if pid != 100 {
+				t.Fatalf("unexpected PID %d", pid)
+			}
+			signals = append(signals, signal)
+			if signal == syscall.SIGTERM {
+				owner = stillLive
+			}
+			return nil
+		}, 0) {
+			t.Fatal("delivered TERM was not reported")
+		}
+		want := []syscall.Signal{syscall.SIGTERM}
+		if stillLive {
+			want = append(want, syscall.SIGKILL)
+		}
+		if !reflect.DeepEqual(signals, want) {
+			t.Fatalf("signals = %v, want %v", signals, want)
+		}
+	}
+}

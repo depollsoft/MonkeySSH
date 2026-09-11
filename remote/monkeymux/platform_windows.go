@@ -794,21 +794,19 @@ func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replac
 
 func reapReplacementPaneGroups(panes []replacementPaneGroup) {}
 
-func terminateProcessID(pid int) bool {
-	if pid <= 0 {
+// A failed taskkill may have only partially stopped the tree. A later server
+// exit alone cannot prove that its ConPTY agents were terminated as well.
+const allowExitAfterFailedTermination = false
+
+func terminateProcessID(pid int, stillOwner func() bool) bool {
+	if pid <= 0 || !stillOwner() {
 		return false
 	}
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprint(pid))
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := kill.Run(); err == nil {
-		return true
-	}
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(handle)
-	return windows.TerminateProcess(handle, 1) == nil
+	// A successful tree termination is required. TerminateProcess on just the
+	// helper can orphan its agents and leave their session locks held.
+	return kill.Run() == nil
 }
 
 const supportsExplicitForegroundResizeSignal = false

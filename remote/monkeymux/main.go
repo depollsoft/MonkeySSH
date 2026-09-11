@@ -1979,7 +1979,7 @@ func ensureServer(
 			// onto the replacement that just answered this dial.
 			if previousPID.pid != startedPID &&
 				previousPID.confirmedOwner(session) {
-				terminateProcessID(previousPID.pid)
+				terminateProcessID(previousPID.pid, confirmedServerProcess(previousPID, session))
 			}
 			return nil
 		}
@@ -2074,7 +2074,7 @@ func prepareRunningServerReplacement(
 			func() bool {
 				return terminateConfirmedServer(
 					func() pidOwnership { return pidRecordOwnership(oldPID, session) },
-					func() bool { return terminateProcessID(oldPID.pid) },
+					func() bool { return terminateProcessID(oldPID.pid, confirmedServerProcess(oldPID, session)) },
 				)
 			},
 			func() { reapReplacementPaneGroups(panes) },
@@ -2137,6 +2137,26 @@ func keepRespondingServerBeforeReplacement(
 	return false, errServerUpdateStillAlive
 }
 
+// Keep the original start identity through every escalation. A reused PID,
+// an exec into another program, or an unavailable ownership probe stops signals.
+func confirmedServerProcess(owner pidRecord, session string) func() bool {
+	return confirmedServerProcessWithQueries(
+		func() processSnapshot { return inspectReplacementProcess(owner.pid) },
+		func() pidOwnership { return pidRecordOwnership(owner, session) },
+	)
+}
+
+func confirmedServerProcessWithQueries(inspect func() processSnapshot, ownership func() pidOwnership) func() bool {
+	original := inspect()
+	return func() bool {
+		if !original.known || !original.running || original.started.IsZero() || ownership() != pidOwnershipLive {
+			return false
+		}
+		current := inspect()
+		return current.known && current.running && current.started.Equal(original.started)
+	}
+}
+
 // A failed signal can mean the owner exited after the first check. Only proof
 // that it is gone authorizes orphan cleanup; live and unknown remain blocked.
 func terminateConfirmedServer(ownership func() pidOwnership, terminate func() bool) bool {
@@ -2144,7 +2164,7 @@ func terminateConfirmedServer(ownership func() pidOwnership, terminate func() bo
 	case pidOwnershipGone:
 		return true
 	case pidOwnershipLive:
-		return terminate() || ownership() == pidOwnershipGone
+		return terminate() || (allowExitAfterFailedTermination && ownership() == pidOwnershipGone)
 	default:
 		return false
 	}
