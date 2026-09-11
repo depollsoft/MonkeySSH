@@ -6326,6 +6326,47 @@ func TestRedrawResizePreservesOneShotKittyTransmit(t *testing.T) {
 	waitForRecordedOutput(t, conn, want)
 }
 
+func TestRedrawBufferingPreservesRealWindowActivity(t *testing.T) {
+	server := newMuxServer("test")
+	baseline := time.Now().Add(-time.Minute)
+	window := &muxWindow{
+		id:                     "@1",
+		index:                  0,
+		lastActivity:           baseline,
+		redrawForwardingPaused: true,
+	}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+
+	server.handleWindowOutput(window.id, []byte("agent completed\r\n"))
+	if !window.lastActivity.After(baseline) {
+		t.Fatalf("buffered real output did not advance activity: %v", window.lastActivity)
+	}
+	activity := window.lastActivity
+	server.resumePausedAttachForwarding(window.id, window.redrawForwardingGeneration)
+	if window.redrawForwardingPaused {
+		t.Fatal("redraw forwarding did not resume")
+	}
+	if !window.lastActivity.Equal(activity) {
+		t.Fatalf("forwarding buffered output changed activity: %v, want %v", window.lastActivity, activity)
+	}
+}
+
+func TestWindowReplayDoesNotAdvanceActivity(t *testing.T) {
+	server := newMuxServer("test")
+	baseline := time.Now().Add(-time.Minute)
+	window := &muxWindow{id: "@1", history: []byte("idle prompt"), lastActivity: baseline}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+
+	if replay := server.activeReplayLocked(); !bytes.Contains(replay, []byte("idle prompt")) {
+		t.Fatalf("replay missing retained output: %q", replay)
+	}
+	if !window.lastActivity.Equal(baseline) {
+		t.Fatalf("replay advanced activity: %v", window.lastActivity)
+	}
+}
+
 func TestRedrawResizeDropsSupersededBufferedAttachOutput(t *testing.T) {
 	server := newMuxServer("test")
 	conn := &recordingConn{}

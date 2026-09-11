@@ -6461,6 +6461,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
+	// PTY output may contain real work even during a resize redraw pause.
+	// Replaying retained bytes bypasses this path and must not count as activity.
 	window.lastActivity = now
 	// Modes are observed before metadata so a `CSI ? 9001 h` arriving in the
 	// same chunk as a colour query is already reflected when the query is

@@ -71,19 +71,22 @@ class TmuxService implements RemoteMultiplexerService {
     Duration agentSessionMetadataPeriodicRefreshInterval = const Duration(
       seconds: 10,
     ),
+    Duration windowSwitchActivityGracePeriod = const Duration(seconds: 1),
   }) : _execOpenTimeout = execOpenTimeout,
        _execOutputTimeout = execOutputTimeout,
        _execChannelNow = execChannelNow,
        _agentSessionMetadataRefreshDebounce =
            agentSessionMetadataRefreshDebounce,
        _agentSessionMetadataPeriodicRefreshInterval =
-           agentSessionMetadataPeriodicRefreshInterval;
+           agentSessionMetadataPeriodicRefreshInterval,
+       _windowSwitchActivityGracePeriod = windowSwitchActivityGracePeriod;
 
   final Duration _execOpenTimeout;
   final Duration _execOutputTimeout;
   final DateTime Function()? _execChannelNow;
   final Duration _agentSessionMetadataRefreshDebounce;
   final Duration _agentSessionMetadataPeriodicRefreshInterval;
+  final Duration _windowSwitchActivityGracePeriod;
 
   static final _connectionStates = <int, _TmuxConnectionState>{};
 
@@ -718,6 +721,11 @@ class TmuxService implements RemoteMultiplexerService {
       'list_windows_start',
       fields: {'connectionId': session.connectionId},
     );
+    final key = _TmuxWindowWatchKey(
+      connectionId: session.connectionId,
+      sessionName: sessionName,
+      extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
+    );
     final quotedName = shellEscapePosix(sessionName);
     try {
       final output = await _execTmuxCommand(
@@ -732,10 +740,17 @@ class TmuxService implements RemoteMultiplexerService {
         output,
         TmuxWindow.fromTmuxFormat,
       ).toList(growable: false);
+      state.windowSwitchActivitySuppressions[key]?.removeWhere(
+        (entry) => !parsedWindows.any(entry._matchesTarget),
+      );
+      final activityFilteredWindows = _suppressWindowSwitchRedrawActivity(
+        key,
+        parsedWindows,
+      );
       final windows = List<TmuxWindow>.unmodifiable(
         _enrichWindowsWithCachedAgentSessionMetadata(
           session.connectionId,
-          parsedWindows,
+          activityFilteredWindows,
         ),
       );
       if (_ownsState(session.connectionId, state) && windows.isNotEmpty) {
@@ -1699,6 +1714,47 @@ class TmuxService implements RemoteMultiplexerService {
     Map<int, int>? clientImageSignatures,
     bool suppressReplay = false,
   }) async {
+    final state = _stateFor(session.connectionId);
+    final key = _TmuxWindowWatchKey(
+      connectionId: session.connectionId,
+      sessionName: sessionName,
+      extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
+    );
+    final pending = state.windowSelectRequests[key];
+    final selection = () async {
+      if (pending != null) {
+        try {
+          await pending;
+        } on Object {
+          // A failed earlier selection does not cancel the user's next one.
+        }
+      }
+      _requireState(session.connectionId, state);
+      await _selectWindow(
+        session,
+        sessionName,
+        windowIndex,
+        windowId: windowId,
+        extraFlags: extraFlags,
+      );
+    }();
+    state.windowSelectRequests[key] = selection;
+    try {
+      await selection;
+    } finally {
+      if (identical(state.windowSelectRequests[key], selection)) {
+        unawaited(state.windowSelectRequests.remove(key));
+      }
+    }
+  }
+
+  Future<void> _selectWindow(
+    SshSession session,
+    String sessionName,
+    int windowIndex, {
+    String? windowId,
+    String? extraFlags,
+  }) async {
     final targetWindowId = windowId?.trim();
     final safeWindowId =
         targetWindowId != null && isValidTmuxWindowId(targetWindowId)
@@ -1717,12 +1773,60 @@ class TmuxService implements RemoteMultiplexerService {
         'hasWindowId': hasTargetWindowId,
       },
     );
-    await _execTmuxCommand(
-      session,
-      sessionName,
-      'select-window -t $target',
-      extraFlags: extraFlags,
+    final key = _TmuxWindowWatchKey(
+      connectionId: session.connectionId,
+      sessionName: sessionName,
+      extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
     );
+    final state = _stateFor(session.connectionId);
+    final activitySuppression = _beginWindowSwitchActivitySuppression(
+      key,
+      windowIndex: windowIndex,
+      windowId: safeWindowId,
+    );
+    try {
+      await _execTmuxCommand(
+        session,
+        sessionName,
+        'select-window -t $target',
+        extraFlags: extraFlags,
+      );
+      // Keep capturing while SSH opens or queues the command. Completion starts
+      // the grace period without forgetting a snapshot received in flight.
+      activitySuppression?.captureUntil = DateTime.now().add(
+        _windowSwitchActivityGracePeriod,
+      );
+      activitySuppression?.previous = null;
+    } on Object {
+      if (activitySuppression != null &&
+          (state.windowSwitchActivitySuppressions[key]?.remove(
+                activitySuppression,
+              ) ??
+              false)) {
+        if (_ownsState(session.connectionId, state)) {
+          final previous = activitySuppression.previous;
+          if (previous != null) {
+            state.windowSwitchActivitySuppressions[key]!.add(previous);
+          }
+          final cached = state.windowSnapshotCache[key];
+          if (cached != null) {
+            state.windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
+              cached.map((window) {
+                final restored = activitySuppression
+                    .restoreActivityAfterFailure(window);
+                if (!identical(restored, window)) {
+                  state.windowObservers[key]?._emitEvent(
+                    TmuxWindowSnapshotEvent(restored),
+                  );
+                }
+                return restored;
+              }),
+            );
+          }
+        }
+      }
+      rethrow;
+    }
     DiagnosticsLogService.instance.info(
       'tmux.action',
       'select_window_complete',
@@ -1830,6 +1934,79 @@ class TmuxService implements RemoteMultiplexerService {
       );
     }
   }
+
+  _TmuxWindowSwitchActivitySuppression? _beginWindowSwitchActivitySuppression(
+    _TmuxWindowWatchKey key, {
+    required int windowIndex,
+    required String? windowId,
+  }) {
+    final state = _connectionStates[key.connectionId];
+    if (state == null) return null;
+    final windows = state.windowSnapshotCache[key];
+    final targetWindow = windows
+        ?.where(
+          (window) => windowId != null
+              ? window.id == windowId
+              : window.index == windowIndex,
+        )
+        .firstOrNull;
+    if (targetWindow == null) return null;
+    final previous = state.windowSwitchActivitySuppressions[key]
+        ?.where((entry) => entry._matchesTarget(targetWindow))
+        .firstOrNull;
+    final suppression = _TmuxWindowSwitchActivitySuppression(
+      previous: previous,
+      rawActivityFloorEpochSeconds:
+          previous?._syntheticActivityEpochSeconds ??
+          previous?.rawActivityFloorEpochSeconds ??
+          targetWindow.lastActivityEpochSeconds,
+      windowIndex: windowIndex,
+      windowId: targetWindow.id ?? windowId,
+      baselineActivityEpochSeconds: targetWindow.lastActivityEpochSeconds,
+    );
+    state.windowSwitchActivitySuppressions.putIfAbsent(key, () => [])
+      ..removeWhere((entry) => entry._matchesTarget(targetWindow))
+      ..add(suppression);
+    return suppression;
+  }
+
+  List<TmuxWindow> _suppressWindowSwitchRedrawActivity(
+    _TmuxWindowWatchKey key,
+    List<TmuxWindow> windows,
+  ) {
+    final suppressions = _connectionStates[key.connectionId]
+        ?.windowSwitchActivitySuppressions[key];
+    if (suppressions == null || suppressions.isEmpty) return windows;
+    final now = DateTime.now();
+    final obsolete = <_TmuxWindowSwitchActivitySuppression>{};
+    final filtered = windows
+        .map((window) {
+          for (final suppression in suppressions) {
+            if (!suppression._matchesTarget(window)) continue;
+            final captureUntil = suppression.captureUntil;
+            final result = suppression.preserveBaselineForSyntheticRedraw(
+              window,
+              captureSyntheticActivity:
+                  captureUntil == null || !now.isAfter(captureUntil),
+            );
+            if (suppression.isObsoleteFor(window, now)) {
+              obsolete.add(suppression);
+            }
+            return result;
+          }
+          return window;
+        })
+        .toList(growable: false);
+    suppressions.removeWhere(obsolete.contains);
+    return filtered;
+  }
+
+  TmuxWindowSnapshotEvent _suppressWindowSwitchRedrawActivityEvent(
+    _TmuxWindowWatchKey key,
+    TmuxWindowSnapshotEvent event,
+  ) => TmuxWindowSnapshotEvent(
+    _suppressWindowSwitchRedrawActivity(key, [event.window]).single,
+  );
 
   void _applyCachedWindowSnapshot(
     SshSession session,
@@ -2456,7 +2633,10 @@ class _TmuxConnectionState {
   Future<Set<AgentLaunchTool>>? installedAgentToolsRequest;
   final windowObservers = <_TmuxWindowWatchKey, _TmuxWindowChangeObserver>{};
   final windowListRequests = <_TmuxWindowWatchKey, Future<List<TmuxWindow>>>{};
+  final windowSelectRequests = <_TmuxWindowWatchKey, Future<void>>{};
   final windowSnapshotCache = <_TmuxWindowWatchKey, List<TmuxWindow>>{};
+  final windowSwitchActivitySuppressions =
+      <_TmuxWindowWatchKey, List<_TmuxWindowSwitchActivitySuppression>>{};
   Map<int, _ActiveAgentSessionMetadata>? metadataCache;
   Future<void>? metadataRequest;
   Set<int>? metadataRequestPanePids;
@@ -3763,10 +3943,19 @@ class _TmuxWindowChangeObserver {
       if (!_preserveScheduledReloadThroughSnapshots) {
         _cancelScheduledReload();
       }
+      final activityFilteredEvent = service
+          ._suppressWindowSwitchRedrawActivityEvent(
+            _TmuxWindowWatchKey(
+              connectionId: session.connectionId,
+              sessionName: sessionName,
+              extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
+            ),
+            event,
+          );
       service._applyCachedWindowSnapshot(
         session,
         sessionName,
-        event,
+        activityFilteredEvent,
         extraFlags: extraFlags,
       );
       DiagnosticsLogService.instance.debug(
@@ -3774,7 +3963,7 @@ class _TmuxWindowChangeObserver {
         'snapshot_event',
         fields: {'connectionId': session.connectionId},
       );
-      _emitEvent(event);
+      _emitEvent(activityFilteredEvent);
       return;
     }
     if (event == null && notification != _TmuxControlNotification.fallback) {
@@ -4112,6 +4301,82 @@ class _TmuxWindowChangeObserver {
       await _controller.close();
     }
     onDispose();
+  }
+}
+
+class _TmuxWindowSwitchActivitySuppression {
+  _TmuxWindowSwitchActivitySuppression({
+    required this.windowIndex,
+    required this.windowId,
+    required this.baselineActivityEpochSeconds,
+    required this.rawActivityFloorEpochSeconds,
+    required this.previous,
+  });
+
+  // Keep the prior filter until this selection succeeds, so a failed repeat
+  // does not expose activity already attributed to an earlier redraw.
+  _TmuxWindowSwitchActivitySuppression? previous;
+  final int? rawActivityFloorEpochSeconds;
+  final int windowIndex;
+  final String? windowId;
+  final int? baselineActivityEpochSeconds;
+  DateTime? captureUntil;
+  int? _syntheticActivityEpochSeconds;
+
+  bool _matchesTarget(TmuxWindow window) =>
+      windowId != null ? window.id == windowId : window.index == windowIndex;
+
+  bool isObsoleteFor(TmuxWindow window, DateTime now) {
+    final deadline = captureUntil;
+    if (deadline == null) return false;
+    final captured = _syntheticActivityEpochSeconds;
+    if (captured == null && !now.isAfter(deadline)) return false;
+    final floor = captured ?? rawActivityFloorEpochSeconds;
+    final activity = window.lastActivityEpochSeconds;
+    return activity != null && (floor == null || activity > floor);
+  }
+
+  TmuxWindow restoreActivityAfterFailure(TmuxWindow window) {
+    final captured = _syntheticActivityEpochSeconds;
+    if (!_matchesTarget(window) ||
+        captured == null ||
+        (window.lastActivityEpochSeconds != null &&
+            window.lastActivityEpochSeconds! >= captured)) {
+      return window;
+    }
+    // The selection failed, so an in-flight sample cannot be attributed to its
+    // redraw. Restore only activity; newer metadata and output stay intact.
+    return window.copyWith(lastActivityEpochSeconds: captured);
+  }
+
+  TmuxWindow preserveBaselineForSyntheticRedraw(
+    TmuxWindow window, {
+    required bool captureSyntheticActivity,
+  }) {
+    if (!_matchesTarget(window)) return window;
+    final activity = window.lastActivityEpochSeconds;
+    if (activity == null ||
+        (baselineActivityEpochSeconds != null &&
+            activity <= baselineActivityEpochSeconds!)) {
+      return window;
+    }
+    // tmux exposes second-resolution activity, not output provenance. Treat
+    // only the first transition as the switch redraw; a newer timestamp must
+    // remain visible even if it arrives before the grace period ends.
+    final isPreviouslySuppressed =
+        rawActivityFloorEpochSeconds != null &&
+        activity <= rawActivityFloorEpochSeconds!;
+    if (!isPreviouslySuppressed) {
+      if (_syntheticActivityEpochSeconds == null && captureSyntheticActivity) {
+        _syntheticActivityEpochSeconds = activity;
+      }
+      final captured = _syntheticActivityEpochSeconds;
+      if (captured == null || activity > captured) return window;
+    }
+    return window.copyWith(
+      lastActivityEpochSeconds: baselineActivityEpochSeconds,
+      clearLastActivityEpochSeconds: baselineActivityEpochSeconds == null,
+    );
   }
 }
 

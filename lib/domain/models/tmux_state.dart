@@ -232,6 +232,8 @@ class TmuxWindow {
     String? agentSessionTitle,
     AgentSessionConfidence? activeAgentSessionConfidence,
     bool clearActiveAgentSessionMetadata = false,
+    int? lastActivityEpochSeconds,
+    bool clearLastActivityEpochSeconds = false,
   }) => TmuxWindow(
     index: index,
     id: id ?? this.id,
@@ -263,7 +265,9 @@ class TmuxWindow {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: terminalProgress,
     idleSeconds: _snapshotIdleSeconds,
-    lastActivityEpochSeconds: lastActivityEpochSeconds,
+    lastActivityEpochSeconds: clearLastActivityEpochSeconds
+        ? null
+        : lastActivityEpochSeconds ?? this.lastActivityEpochSeconds,
   );
 
   /// A best-effort coding-agent session identifier found in tmux metadata.

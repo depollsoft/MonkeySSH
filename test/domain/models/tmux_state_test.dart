@@ -694,6 +694,19 @@ void main() {
       );
     });
 
+    test('copyWith can clear the activity timestamp', () {
+      const window = TmuxWindow(
+        index: 0,
+        name: 'shell',
+        isActive: false,
+        lastActivityEpochSeconds: 100,
+      );
+
+      final cleared = window.copyWith(clearLastActivityEpochSeconds: true);
+
+      expect(cleared.lastActivityEpochSeconds, isNull);
+    });
+
     test('equality works correctly', () {
       const a = TmuxWindow(index: 0, name: 'vim', isActive: true);
       const b = TmuxWindow(index: 0, name: 'vim', isActive: true);
