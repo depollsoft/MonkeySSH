@@ -794,21 +794,21 @@ func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replac
 
 func reapReplacementPaneGroups(panes []replacementPaneGroup) {}
 
-func terminateProcessID(pid int) {
+func terminateProcessID(pid int) bool {
 	if pid <= 0 {
-		return
+		return false
 	}
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprint(pid))
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := kill.Run(); err == nil {
-		return
+		return true
 	}
 	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
 	if err != nil {
-		return
+		return false
 	}
 	defer windows.CloseHandle(handle)
-	_ = windows.TerminateProcess(handle, 1)
+	return windows.TerminateProcess(handle, 1) == nil
 }
 
 const supportsExplicitForegroundResizeSignal = false

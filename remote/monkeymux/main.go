@@ -2071,11 +2071,16 @@ func prepareRunningServerReplacement(
 			func(timeout time.Duration) bool {
 				return waitForServerProcessExit(session, oldPID, timeout)
 			},
-			func() {
-				// Resolve ownership again after the graceful wait; the pid may
-				// now name an unrelated process or another session's helper.
-				if oldPID.confirmedOwner(session) {
-					terminateProcessID(oldPID.pid)
+			func() bool {
+				// Unknown ownership never authorizes cleanup of captured panes.
+				// A gone owner does; a live owner requires a successful signal.
+				switch pidRecordOwnership(oldPID, session) {
+				case pidOwnershipGone:
+					return true
+				case pidOwnershipLive:
+					return terminateProcessID(oldPID.pid)
+				default:
+					return false
 				}
 			},
 			func() { reapReplacementPaneGroups(panes) },
@@ -2141,17 +2146,19 @@ func keepRespondingServerBeforeReplacement(
 // stopServerForReplacement escalates only after the full graceful wait. The
 // caller supplies identity-checked signals; keeping the exit observer separate
 // lets tests cover hung helpers without killing a real server. Reap captured
-// panes even if termination made the server exit, since its children may still
-// hold agent session locks after becoming orphans.
+// panes only when termination succeeds or the old owner is proven gone, since
+// unknown ownership must leave the running helper and its panes untouched.
 func stopServerForReplacement(
 	confirmExit func(time.Duration) bool,
-	terminate func(),
+	terminate func() bool,
 	reap func(),
 ) (bool, error) {
 	if confirmExit(serverExitWaitTimeout) {
 		return false, nil
 	}
-	terminate()
+	if !terminate() {
+		return false, errServerUpdateStillAlive
+	}
 	reap()
 	if !confirmExit(serverForcedExitWaitTimeout) {
 		return true, errServerUpdateStillAlive

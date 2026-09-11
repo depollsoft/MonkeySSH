@@ -389,19 +389,23 @@ func runProcessQuery(name string, args ...string) (string, error) {
 
 }
 
-func terminateProcessID(pid int) {
+// terminateProcessID reports whether a termination signal was delivered.
+func terminateProcessID(pid int) bool {
 	if pid <= 0 {
-		return
+		return false
 	}
-	_ = syscall.Kill(pid, syscall.SIGTERM)
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return false
+	}
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if !processIDAlive(pid) {
-			return
+			return true
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+	return true
 }
 
 // replacementPaneGroupSystem keeps identity checks shared between capture and
