@@ -1967,96 +1967,123 @@ void main() {
       });
     }
 
-    test('selectWindow filters control-mode redraw snapshots', () async {
-      final client = _MockSshClient();
-      final session = _buildSession(client, connectionId: 70);
-      const service = TmuxService();
-      final stdoutController = StreamController<Uint8List>();
-      final writes = <String>[];
-      final snapshots = <TmuxWindowSnapshotEvent>[];
-      String windowLine(int activity) => [
-        '2',
-        'shell',
-        '1',
-        'zsh',
-        '/tmp',
-        '*',
-        'shell',
-        '$activity',
-        'zsh',
-        '',
-        '@2',
-        '',
-        '',
-        '',
-        '',
-      ].join(tmuxWindowFieldSeparator);
-      void emitSnapshot(int activity) {
-        final refresh = writes.firstWhere(
-          (value) => value.startsWith('refresh-client '),
+    for (final selectFails in [false, true]) {
+      test('selectWindow filters control snapshots, fails=$selectFails', () async {
+        final client = _MockSshClient();
+        final session = _buildSession(client, connectionId: 70);
+        const service = TmuxService();
+        final stdoutController = StreamController<Uint8List>();
+        final writes = <String>[];
+        final snapshots = <TmuxWindowSnapshotEvent>[];
+        var failNextSelect = selectFails;
+        var redrawActivity = 200;
+        String windowLine(int activity) => [
+          '2',
+          'shell',
+          '1',
+          'zsh',
+          '/tmp',
+          '*',
+          'shell',
+          '$activity',
+          'zsh',
+          '',
+          '@2',
+          '',
+          '',
+          '',
+          '',
+        ].join(tmuxWindowFieldSeparator);
+        void emitSnapshot(int activity) {
+          final refresh = writes.firstWhere(
+            (value) => value.startsWith('refresh-client '),
+          );
+          final name = RegExp(
+            r"flutty-[^:'\s]+",
+          ).firstMatch(refresh)!.group(0)!;
+          stdoutController.add(
+            _utf8Bytes(
+              '%subscription-changed $name \$1 @2 2 %2 : ${windowLine(activity)}\n',
+            ),
+          );
+        }
+
+        final controlSession = _buildInteractiveExecSession(
+          stdoutController: stdoutController,
+          onWrite: (value) {
+            writes.add(value);
+            if (value.startsWith('refresh-client ') ||
+                value.startsWith('select-window ')) {
+              scheduleMicrotask(() {
+                final selecting = value.startsWith('select-window ');
+                if (selecting) emitSnapshot(redrawActivity);
+                final marker = selecting && failNextSelect ? '%error' : '%end';
+                stdoutController.add(
+                  _utf8Bytes('%begin 1 1 0\n$marker 1 1 0\n'),
+                );
+                if (selecting) failNextSelect = false;
+              });
+            }
+          },
         );
-        final name = RegExp(r"flutty-[^:'\s]+").firstMatch(refresh)!.group(0)!;
-        stdoutController.add(
-          _utf8Bytes(
-            '%subscription-changed $name \$1 @2 2 %2 : ${windowLine(activity)}\n',
+        _stubExec(client, (command) async {
+          if (command.contains('list-windows')) {
+            return _buildOpenExecSession(
+              stdout: '${windowLine(100)}\n${_doneMarker()}',
+            );
+          }
+          if (command.contains('command -v tmux')) {
+            return _buildOpenExecSession(
+              stdout: 'zsh\n/usr/bin/tmux\n${_doneMarker()}',
+            );
+          }
+          expect(command, contains('attach-session'));
+          return controlSession;
+        });
+        final baseline = await service.listWindows(session, 'main');
+        expect(baseline.single.lastActivityEpochSeconds, 100);
+        final subscription = service.watchWindowChanges(session, 'main').listen(
+          (event) {
+            if (event is TmuxWindowSnapshotEvent) snapshots.add(event);
+          },
+        );
+        addTearDown(() async {
+          await subscription.cancel();
+          await service.clearCache(session.connectionId);
+          await stdoutController.close();
+        });
+        await untilCalled(() => controlSession.write(any()));
+        final switching = service.selectWindow(session, 'main', 2);
+        if (selectFails) {
+          await expectLater(switching, throwsA(isA<TmuxCommandException>()));
+        } else {
+          await switching;
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(snapshots.first.window.lastActivityEpochSeconds, 100);
+        if (selectFails) {
+          expect(
+            snapshots.map((event) => event.window.lastActivityEpochSeconds),
+            [100, 200],
+          );
+          // The restored timestamp must also become the next switch's baseline.
+          redrawActivity = 201;
+          await service.selectWindow(session, 'main', 2);
+          await Future<void>.delayed(Duration.zero);
+          expect(snapshots.last.window.lastActivityEpochSeconds, 200);
+        }
+        emitSnapshot(202);
+        await Future<void>.delayed(Duration.zero);
+        expect(snapshots.last.window.lastActivityEpochSeconds, 202);
+        expect(writes, contains("select-window -t 'main':2\n"));
+        verifyNever(
+          () => client.execute(
+            any(that: contains('select-window')),
+            pty: any(named: 'pty'),
           ),
         );
-      }
-
-      final controlSession = _buildInteractiveExecSession(
-        stdoutController: stdoutController,
-        onWrite: (value) {
-          writes.add(value);
-          if (value.startsWith('refresh-client ') ||
-              value.startsWith('select-window ')) {
-            scheduleMicrotask(() {
-              if (value.startsWith('select-window ')) emitSnapshot(200);
-              stdoutController.add(_utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'));
-            });
-          }
-        },
-      );
-      _stubExec(client, (command) async {
-        if (command.contains('list-windows')) {
-          return _buildOpenExecSession(
-            stdout: '${windowLine(100)}\n${_doneMarker()}',
-          );
-        }
-        if (command.contains('command -v tmux')) {
-          return _buildOpenExecSession(
-            stdout: 'zsh\n/usr/bin/tmux\n${_doneMarker()}',
-          );
-        }
-        expect(command, contains('attach-session'));
-        return controlSession;
       });
-      final baseline = await service.listWindows(session, 'main');
-      expect(baseline.single.lastActivityEpochSeconds, 100);
-      final subscription = service.watchWindowChanges(session, 'main').listen((
-        event,
-      ) {
-        if (event is TmuxWindowSnapshotEvent) snapshots.add(event);
-      });
-      addTearDown(() async {
-        await subscription.cancel();
-        await service.clearCache(session.connectionId);
-        await stdoutController.close();
-      });
-      await untilCalled(() => controlSession.write(any()));
-      await service.selectWindow(session, 'main', 2);
-      await Future<void>.delayed(Duration.zero);
-      expect(snapshots.single.window.lastActivityEpochSeconds, 100);
-      emitSnapshot(201);
-      await Future<void>.delayed(Duration.zero);
-      expect(snapshots.last.window.lastActivityEpochSeconds, 201);
-      expect(writes, contains("select-window -t 'main':2\n"));
-      verifyNever(
-        () => client.execute(
-          any(that: contains('select-window')),
-          pty: any(named: 'pty'),
-        ),
-      );
-    });
+    }
 
     test(
       'createWindow falls back to exec while watcher open is pending',

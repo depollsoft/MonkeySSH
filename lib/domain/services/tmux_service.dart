@@ -1758,6 +1758,24 @@ class TmuxService implements RemoteMultiplexerService {
         activitySuppression,
       )) {
         state.windowSwitchActivitySuppressions.remove(key);
+        if (_ownsState(session.connectionId, state) &&
+            activitySuppression != null) {
+          final cached = state.windowSnapshotCache[key];
+          if (cached != null) {
+            state.windowSnapshotCache[key] = List<TmuxWindow>.unmodifiable(
+              cached.map((window) {
+                final restored = activitySuppression
+                    .restoreActivityAfterFailure(window);
+                if (!identical(restored, window)) {
+                  state.windowObservers[key]?._emitEvent(
+                    TmuxWindowSnapshotEvent(restored),
+                  );
+                }
+                return restored;
+              }),
+            );
+          }
+        }
       }
       rethrow;
     }
@@ -4232,14 +4250,27 @@ class _TmuxWindowSwitchActivitySuppression {
   DateTime? captureUntil;
   int? _syntheticActivityEpochSeconds;
 
+  bool _matchesTarget(TmuxWindow window) =>
+      windowId != null ? window.id == windowId : window.index == windowIndex;
+
+  TmuxWindow restoreActivityAfterFailure(TmuxWindow window) {
+    final captured = _syntheticActivityEpochSeconds;
+    if (!_matchesTarget(window) ||
+        captured == null ||
+        (window.lastActivityEpochSeconds != null &&
+            window.lastActivityEpochSeconds! >= captured)) {
+      return window;
+    }
+    // The selection failed, so an in-flight sample cannot be attributed to its
+    // redraw. Restore only activity; newer metadata and output stay intact.
+    return window.copyWith(lastActivityEpochSeconds: captured);
+  }
+
   TmuxWindow preserveBaselineForSyntheticRedraw(
     TmuxWindow window, {
     required bool captureSyntheticActivity,
   }) {
-    final matchesTarget = windowId != null
-        ? window.id == windowId
-        : window.index == windowIndex;
-    if (!matchesTarget) return window;
+    if (!_matchesTarget(window)) return window;
     final activity = window.lastActivityEpochSeconds;
     if (activity == null ||
         (baselineActivityEpochSeconds != null &&
