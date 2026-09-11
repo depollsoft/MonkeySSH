@@ -6,6 +6,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/message/msg_channel.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
@@ -22,6 +24,8 @@ class _MockSshClient extends Mock implements SSHClient {}
 
 class _MockExecSession extends Mock implements SSHSession {}
 
+class _MockChannel extends Mock implements SSHChannel {}
+
 class _MockDiscovery extends Mock implements AgentSessionDiscoveryService {}
 
 AgentManagementService _unlockedManagementService(
@@ -30,6 +34,7 @@ AgentManagementService _unlockedManagementService(
 
 SSHSession _execOutput(String output, {int exitCode = 0}) {
   final exec = _MockExecSession();
+  when(() => exec.channel).thenReturn(_MockChannel());
   when(() => exec.stdout).thenAnswer(
     (_) => Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(output))),
   );
@@ -369,8 +374,43 @@ void main() {
     final late = _execOutput('late');
     opening.complete(late);
     await tester.pump();
-    verify(late.close).called(1);
+    final underlying = late.channel;
+    verify(underlying.destroy).called(1);
   });
+
+  testWidgets(
+    'timed-out probes close channels even when the peer ignores EOF',
+    (tester) async {
+      final messages = <Object>[];
+      final channel = SSHChannelController(
+        localId: 0,
+        localMaximumPacketSize: 32768,
+        localInitialWindowSize: 65536,
+        remoteId: 0,
+        remoteInitialWindowSize: 65536,
+        remoteMaximumPacketSize: 32768,
+        sendMessage: messages.add,
+      );
+      final exec = SSHSession(channel.channel);
+      var closed = false;
+      unawaited(exec.done.then((_) => closed = true));
+      final client = _MockSshClient();
+      when(
+        () => client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((_) async => exec);
+      final session = _remoteSession(client);
+      final result = _unlockedManagementService(
+        _MockDiscovery(),
+      ).refreshAll(session);
+      await tester.pump();
+      expect(closed, isFalse);
+      await tester.pump(const Duration(seconds: 8));
+      expect((await result).first.status, AgentRuntimeStatus.failed);
+      expect(messages.whereType<SSH_Message_Channel_Close>(), hasLength(1));
+      expect(closed, isTrue);
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 0);
+    },
+  );
 
   tearDown(resetQueuedSshExecsForTesting);
   group('parseAgentVersion', () {

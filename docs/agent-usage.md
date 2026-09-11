@@ -73,6 +73,13 @@ cannot be found, the row reports that requirement explicitly. npm `.ps1`, `.cmd`
 and `.bat` launchers run through PowerShell with a process-local execution-policy
 bypass, matching version detection.
 
+Abandoned agent probes explicitly close their SSH channels, including commands
+that ignore end-of-input and channels that finish opening after a timeout.
+This prevents those probes from retaining session slots on the SSH connection.
+If every agent reports `SSHChannelOpenError`, the failure precedes agent
+execution. Reconnect the host to test with a fresh SSH connection; signing in to
+an agent does not resolve a channel-open failure.
+
 Credentials, raw responses, and provider error text stay on the SSH host. Only
 normalized quota figures and status records return to MonkeySSH. Usage is not
 persisted or sent to telemetry. Diagnostics record built-in agent IDs, statuses, window/notice counts, aggregate

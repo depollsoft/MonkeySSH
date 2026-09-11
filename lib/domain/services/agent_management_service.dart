@@ -1164,6 +1164,7 @@ class AgentManagementService {
       session.execute(command),
       timeout ?? const Duration(seconds: 15),
     );
+    var finished = false;
     try {
       final output = StringBuffer();
       void add(String chunk) {
@@ -1188,9 +1189,11 @@ class AgentManagementService {
       ]);
       if (timeout == null) {
         await completion;
+        finished = true;
       } else {
         try {
           await completion.timeout(timeout);
+          finished = true;
         } on TimeoutException {
           if (!keepPartialOutputOnTimeout) rethrow;
         }
@@ -1202,7 +1205,13 @@ class AgentManagementService {
         exitCode: exitCode,
       );
     } finally {
-      exec.close();
+      if (finished) {
+        exec.close();
+      } else {
+        // EOF alone does not release a channel whose process ignores stdin.
+        // Send CHANNEL_CLOSE when abandoning a failed or timed-out probe.
+        exec.channel.destroy();
+      }
     }
   }, priority: priority);
 }
