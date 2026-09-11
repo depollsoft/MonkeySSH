@@ -3286,7 +3286,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       value = _stripIosBackspaceRunway(value);
       _currentEditingState = value;
 
-      if (_editingPrefixLength(value.text) < _initEditingState.text.length) {
+      // IMEs can replace the whole editing buffer, including the hidden
+      // backspace markers, when committing dictation or replacement text.
+      // Only marker loss without remaining text is a delete signal. Otherwise
+      // process the text normally and restore the markers during the sync below.
+      if (_editingPrefixLength(value.text) < _initEditingState.text.length &&
+          _extractRawInputText(value.text).isEmpty) {
         final deletedCount = _textLengthInGraphemes(_lastSentText);
         final clearedBufferedInput = deletedCount > 0;
         if (_pendingAndroidHardwareBackspaces > 0) {
