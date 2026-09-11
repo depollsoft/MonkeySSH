@@ -426,8 +426,12 @@ func readAntigravityConversationCandidates(home string) []agentSessionCandidate 
 			continue
 		}
 		id := strings.TrimSuffix(filepath.Base(path), ".db")
-		row := summaries[id]
-		if row.Parent != "" || row.Depth > 0 {
+		// Without a summary row (sqlite3 missing, query failed, or the row not
+		// written yet) nothing proves the conversation is top-level, and a
+		// subagent database held open by the pane's tree would otherwise pass
+		// as an exact signal. Missing metadata means pending, not top-level.
+		row, known := summaries[id]
+		if !known || row.Parent != "" || row.Depth > 0 {
 			continue
 		}
 		candidate := agentSessionCandidate{id: id, path: path, created: info.ModTime(),

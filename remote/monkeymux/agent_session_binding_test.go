@@ -743,12 +743,21 @@ func TestAgentSessionBindingAntigravityConversations(t *testing.T) {
 				open = []string{filepath.Join(root, "presence", bindingTestIDs[0]+".lock")}
 			}
 			pollBindingTest(s, w, time.Now(), "", open...)
-			if mode == "subagent" {
+			switch mode {
+			case "subagent":
 				if w.agentSessionIdentityExact {
 					t.Fatal("nested conversation bound")
 				}
-			} else if w.agentSessionID != bindingTestIDs[0] || !w.agentSessionIdentityExact || w.agentSessionPath != path {
-				t.Fatalf("conversation not bound: %q", w.agentSessionID)
+			case "missing-summaries":
+				// No summary row means nothing proves the conversation is
+				// top-level: even an owned presence lock stays pending.
+				if w.agentSessionID != "" {
+					t.Fatalf("conversation bound without summary metadata: %q", w.agentSessionID)
+				}
+			default:
+				if w.agentSessionID != bindingTestIDs[0] || !w.agentSessionIdentityExact || w.agentSessionPath != path {
+					t.Fatalf("conversation not bound: %q", w.agentSessionID)
+				}
 			}
 		})
 	}
@@ -1110,7 +1119,7 @@ func TestAgentSessionFallbacksRejectForeignOwners(t *testing.T) {
 }
 
 func TestRestoreAntigravityExactOwnershipBeforeHistory(t *testing.T) {
-	for _, signal := range []string{"database", "presence"} {
+	for _, signal := range []string{"database", "presence", "database-without-summary"} {
 		t.Run(signal, func(t *testing.T) {
 			cwd, _ := bindingTestStore(t, "antigravity")
 			home, _ := os.UserHomeDir()
@@ -1121,12 +1130,29 @@ func TestRestoreAntigravityExactOwnershipBeforeHistory(t *testing.T) {
 			if signal == "presence" {
 				path = filepath.Join(root, "presence", id+".lock")
 			}
+			// Ownership signals only count once a summary row proves the
+			// conversation is top-level; a subagent database held open by the
+			// pane's tree must never bind the parent window.
+			want := ""
+			if signal != "database-without-summary" {
+				sqlite, err := exec.LookPath("sqlite3")
+				if err != nil {
+					t.Skip("sqlite3 unavailable")
+				}
+				quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+				workspaces := fmt.Sprintf(`["file://%s"]`, filepath.ToSlash(cwd))
+				query := fmt.Sprintf("PRAGMA journal_mode=WAL; CREATE TABLE conversation_summaries (conversation_id TEXT, workspace_uris TEXT, parent_conversation_id TEXT, nesting_depth INTEGER); INSERT INTO conversation_summaries VALUES (%s, %s, '', 0);", quote(id), quote(workspaces))
+				if out, err := exec.Command(sqlite, filepath.Join(root, "conversation_summaries.db"), query).CombinedOutput(); err != nil {
+					t.Fatalf("create summary: %v: %s", err, out)
+				}
+				want = id
+			}
 			processes := map[int]processInfo{100: {pid: 100, comm: "zsh"}, 101: {pid: 101, ppid: 100, comm: "agy", args: "agy"}, 102: {pid: 102, ppid: 101, comm: "worker"}}
 			bindingTestProcesses(t, cwd, time.Now().Add(-time.Minute), processes, map[int][]string{102: {path}})
 			restore := &serverRestore{Windows: []restoreWindowState{{ID: "@1", AgentTool: "antigravity", AgentToolConfirmed: true, CurrentCommand: "agy", PanePid: 100, Cwd: cwd}}}
 			enrichRestoreWithAgentSessionIDs(restore)
-			if got := restore.Windows[0].AgentSessionID; got != id {
-				t.Fatalf("exact %s signal without history = %q, want %q", signal, got, id)
+			if got := restore.Windows[0].AgentSessionID; got != want {
+				t.Fatalf("exact %s signal without history = %q, want %q", signal, got, want)
 			}
 		})
 	}
