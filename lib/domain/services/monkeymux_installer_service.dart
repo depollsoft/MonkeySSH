@@ -286,6 +286,8 @@ class MonkeyMuxInstallerService {
           onError: (Object error, StackTrace stackTrace) {
             // Watchers cannot approve or repair an installation. Avoid repeating
             // remote probes until an explicit install attempt or a reconnect.
+            // Keep transient probe/channel failures retryable when no install
+            // was attempted, so an existing helper can recover automatically.
             if (identical(_installRequests[connectionId], request) &&
                 (request.canPrompt ||
                     error is MonkeyMuxInstallConfirmationRequiredException ||

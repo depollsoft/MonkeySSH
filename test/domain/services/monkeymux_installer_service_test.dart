@@ -670,6 +670,32 @@ void main() {
     expect(harness.commands.length, greaterThan(commandCount));
   });
 
+  test(
+    'passive probe retries transient channel failure for an existing helper',
+    () async {
+      final harness = _InstallHarness(
+        remote: _FakeRemoteFileService()..uploaded = true,
+      );
+      var attempts = 0;
+      when(harness.client.sftp).thenAnswer((_) async {
+        if (++attempts == 1) {
+          throw TimeoutException('temporary channel failure');
+        }
+        return harness.sftp;
+      });
+      await expectLater(
+        harness.installer.ensureInstalled(harness.session),
+        throwsA(isA<TimeoutException>()),
+      );
+      final recovered = await harness.installer.ensureInstalled(
+        harness.session,
+      );
+      expect(recovered.installedDuringCall, isFalse);
+      expect(attempts, 2);
+      expect(harness.remote.uploadCount, 0);
+    },
+  );
+
   for (final failure in [
     null,
     'checksum',
