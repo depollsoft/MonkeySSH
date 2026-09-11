@@ -21,7 +21,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(LinearProgressIndicator), findsWidgets);
     await binding.takeScreenshot('$device-ios');
-    for (final id in ['opencode', 'cursor', 'hermes']) {
+    for (final id in ['claude', 'opencode', 'cursor', 'hermes']) {
       final heading = find.byKey(ValueKey('agent-details-cli:$id'));
       await Scrollable.ensureVisible(tester.element(heading), alignment: 0.05);
       await tester.pumpAndSettle();
@@ -30,7 +30,9 @@ void main() {
       await Scrollable.ensureVisible(tester.element(heading), alignment: 0.05);
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      if (id == 'opencode') {
+      if (id == 'claude') {
+        expect(find.text('Weekly · Fable · 85% remaining'), findsOneWidget);
+      } else if (id == 'opencode') {
         expect(
           find.textContaining('Anthropic · Usage unavailable'),
           findsOneWidget,

@@ -163,6 +163,12 @@ class _PreviewManagement extends Fake implements AgentManagementService {
             usedPercent: 28,
             resetsAt: now.add(const Duration(days: 3)),
           ),
+          if (id == 'cli:claude')
+            AgentUsageWindow(
+              label: 'Weekly · Fable',
+              usedPercent: 15,
+              resetsAt: now.add(const Duration(days: 3)),
+            ),
         ],
       },
     );

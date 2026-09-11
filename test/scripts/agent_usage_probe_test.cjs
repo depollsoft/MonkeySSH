@@ -100,6 +100,31 @@ test('Claude accepts zero utilization and ignores account fields', () => {
   assert.ok(!JSON.stringify(result).includes('SECRET'));
 });
 
+test('Claude includes reported Fable weekly allowances without inferring a quota', () => {
+  const reset = '2026-09-13T00:00:00.000Z';
+  assert.deepEqual(claudeUsage({
+    five_hour: {utilization: 10},
+    seven_day: {utilization: 30},
+    limits: [
+      {kind: 'weekly_scoped', percent: 15, resets_at: reset, scope: {model: {display_name: 'Fable'}}},
+      {kind: 'weekly_scoped', percent: 0, resets_at: 1789257600, scope: {model: {display_name: 'Fable 5.1'}}},
+    ],
+  }).windows, [
+    {label: '5 hours', usedPercent: 10, resetsAt: null},
+    {label: 'Weekly', usedPercent: 30, resetsAt: null},
+    {label: 'Weekly · Fable', usedPercent: 15, resetsAt: reset},
+    {label: 'Weekly · Fable 5.1', usedPercent: 0, resetsAt: reset},
+  ]);
+  for (const limits of [undefined, null, {}, [null,
+    {kind: 'weekly_scoped', percent: 20},
+    {kind: 'weekly_scoped', percent: '20', scope: {model: {display_name: 'Fable'}}},
+    {kind: 'monthly_scoped', percent: 20, scope: {model: {display_name: 'Fable'}}},
+    {kind: 'weekly_scoped', percent: 20, scope: {model: {display_name: 'PRIVATE_ACCOUNT'}}},
+  ]]) {
+    assert.deepEqual(claudeUsage({limits}).windows, []);
+  }
+});
+
 for (const framed of [true, false]) {
   test(`RPC supports fragmented ${framed ? 'Content-Length' : 'JSONL'} responses`, async () => {
     const source = `process.stdin.once('data', () => {

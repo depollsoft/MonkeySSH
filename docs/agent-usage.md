@@ -17,7 +17,7 @@ Every supported agent has a reader:
 
 | Agent | Source and reported information |
 | --- | --- |
-| Claude Code | Existing host OAuth credentials and the account usage endpoint. Reports five-hour, weekly, and model-specific windows. |
+| Claude Code | Existing host OAuth credentials and the account usage endpoint. Reports five-hour, weekly, and model-specific windows, including Fable weekly allowances when returned. |
 | Codex | Installed CLI's `account/rateLimits/read` app-server method. Reports every returned bucket and earned resets available. Never redeems a reset. |
 | Copilot CLI | Installed CLI's `account.getQuota` stdio method. Reports allowances, unlimited categories, resets, and paid overage availability. |
 | OpenCode | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
@@ -116,3 +116,13 @@ against its CLI and the [CodexBar reader](https://github.com/steipete/CodexBar/b
 Contract fixtures cover every agent. Live account checks have succeeded locally
 for Claude, Codex, Copilot, OpenCode, and Pi. Authenticated live checks for the
 remaining providers and Windows hosts still need suitable accounts/hosts.
+
+Fable weekly usage comes from the OAuth usage response's `limits` entries with
+`kind: weekly_scoped` and `scope.model.display_name: Fable` (also accepts versioned
+Fable names). Its `percent` and `resets_at` are displayed directly; no allowance
+is inferred from the overall weekly percentage or plan name. This projection
+matches the installed Claude Code 2.1.268 `/usage` reader. Accounts without a
+reported Fable allowance show no Fable bar. Anthropic describes plan eligibility
+in [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+Authenticated Fable-specific reads still need verification; the parser and native
+preview have fixture coverage.

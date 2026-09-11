@@ -46,11 +46,21 @@ function claudeUsage(data) {
   const names = {five_hour: '5 hours', seven_day: 'Weekly', seven_day_opus: 'Weekly · Opus',
     seven_day_sonnet: 'Weekly · Sonnet', seven_day_oauth_apps: 'Weekly · OAuth apps',
     seven_day_cowork: 'Weekly · Cowork'};
-  return {windows: Object.entries(names).flatMap(([key, label]) => {
+  const windows = Object.entries(names).flatMap(([key, label]) => {
     const w = data[key];
     return number(w?.utilization) == null ? [] :
       [{label, usedPercent: w.utilization, resetsAt: date(w.resets_at)}];
-  })};
+  });
+  // Claude Code's /usage projects model allowances from limits, separately
+  // from the legacy five_hour/seven_day fields. percent is already 0–100.
+  for (const limit of Array.isArray(data.limits) ? data.limits : []) {
+    const model = limit?.scope?.model?.display_name;
+    if (limit?.kind !== 'weekly_scoped' || typeof model !== 'string' ||
+        !/^fable(?: [0-9]+(?:\.[0-9]+)*)?$/i.test(model) || number(limit.percent) == null) continue;
+    windows.push({label: `Weekly · ${model.replace(/^fable/i, 'Fable')}`,
+      usedPercent: limit.percent, resetsAt: date(limit.resets_at)});
+  }
+  return {windows};
 }
 function stop(child) {
   if (!child.pid) return;
