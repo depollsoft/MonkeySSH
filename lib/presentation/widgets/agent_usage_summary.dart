@@ -111,7 +111,9 @@ class AgentUsageSummary extends StatelessWidget {
                           child: LinearProgressIndicator(
                             value: remainingPercent / 100,
                             minHeight: 4,
-                            backgroundColor: scheme.surfaceContainerHighest,
+                            backgroundColor: scheme.onSurface.withValues(
+                              alpha: 0.16,
+                            ),
                             color: resetPassed
                                 ? scheme.outline
                                 : scheme.primary,

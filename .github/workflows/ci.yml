@@ -718,11 +718,14 @@ jobs:
         shell: bash
         run: scripts/cache_sqlite3_native_assets.sh windows-x64
 
-      - name: Test Windows agent probes
-        run: |
-          node --test test/scripts/agent_usage_windows_test.cjs
-          flutter test --no-pub test/domain/services/agent_usage_windows_command_test.dart test/domain/services/agent_probe_parallel_test.dart
-          flutter test --no-pub test/domain/services/agent_management_service_test.dart --plain-name "full Windows probe executes through cmd and PowerShell"
+      - name: Test Windows usage RPC transport
+        run: node --test test/scripts/agent_usage_windows_test.cjs
+
+      - name: Test Windows usage launch and parallel probes
+        run: flutter test --no-pub test/domain/services/agent_usage_windows_command_test.dart test/domain/services/agent_probe_parallel_test.dart
+
+      - name: Test Windows agent command wrapping
+        run: flutter test --no-pub test/domain/services/agent_management_service_test.dart --plain-name "full Windows probe executes through cmd and PowerShell"
 
       - name: Build Windows
         run: flutter build windows --release --no-tree-shake-icons
