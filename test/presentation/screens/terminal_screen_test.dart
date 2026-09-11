@@ -2664,7 +2664,10 @@ void main() {
             () => management.checkForUpdates(session),
           ).thenAnswer((_) async => runtimes);
           when(
-            () => management.refreshAll(session),
+            () => management.refreshAll(
+              session,
+              onDiscovered: any(named: 'onDiscovered'),
+            ),
           ).thenAnswer((_) async => runtimes);
           for (final runtime in runtimes) {
             when(

@@ -62,13 +62,14 @@ function stop(child) {
 }
 function spawnAgent(executable, args) {
   // Use a neutral directory so no project configuration is loaded.
-  // npm launchers on Windows are .cmd files, which CreateProcess cannot run.
+  // PowerShell detection may resolve npm .ps1 launchers before their .cmd siblings.
+  // Neither script type can be launched directly with CreateProcess.
   // Encode a literal PowerShell invocation instead of passing paths to cmd /c.
-  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
+  if (process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(executable)) {
     const quote = value => "'" + value.replace(/['\u2018\u2019\u201a\u201b]/g, '$&$&') + "'";
     const script = '& ' + [executable, ...args].map(quote).join(' ');
     executable = 'powershell.exe';
-    args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+    args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
   }
   return cp.spawn(executable, args, {cwd: os.tmpdir(),
     detached: process.platform !== 'win32', windowsHide: true,
@@ -130,7 +131,19 @@ function rpc(executable, args, method, framed, initialize) {
     else send({id: 2, method, params: {}});
   });
 }
-function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } }
+function parseCredentials(text) {
+  const value = JSON.parse(text.replace(/^\uFEFF/, ''));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('unavailable');
+  return value;
+}
+function readJson(file) {
+  try { return parseCredentials(fs.readFileSync(file, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return {};
+    // A malformed or unreadable credential store is not an empty account list.
+    throw new Error('unavailable');
+  }
+}
 const requestCache = new Map();
 function requestJson(url, {token, headers = {}, body, local = false} = {}) {
   const address = new URL(url);
@@ -454,7 +467,13 @@ async function providerUsage(id, credential) {
 }
 function configuredAccounts(id) {
   let data;
-  if (id === 'opencode') data = readJson(path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'auth.json'));
+  if (id === 'opencode') {
+    // Match OpenCode's Auth.all override and XDG data directory on every OS.
+    if (process.env.OPENCODE_AUTH_CONTENT) {
+      try { data = parseCredentials(process.env.OPENCODE_AUTH_CONTENT); } catch {}
+    }
+    data ||= readJson(path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'auth.json'));
+  }
   else if (id === 'pi') data = readJson(path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), 'auth.json'));
   else {
     data = readJson(path.join(process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'), 'auth.json'));
@@ -471,7 +490,7 @@ function configuredAccounts(id) {
       if (seen.has(key)) return false; seen.add(key); return true;
     });
   }
-  return Object.entries(data).filter(([, c]) => c && typeof c === 'object' && ['oauth', 'api', 'api_key'].includes(c.type));
+  return Object.entries(data).filter(([, c]) => c && typeof c === 'object' && ['oauth', 'api', 'api_key', 'wellknown'].includes(c.type));
 }
 async function multiProvider(id, accounts = configuredAccounts(id), reader = providerUsage) {
   if (!accounts.length) return {windows: [], notices: [], status: 'noAccounts'};

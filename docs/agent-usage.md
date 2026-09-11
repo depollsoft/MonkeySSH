@@ -36,10 +36,12 @@ The credential stores are OpenCode's `$XDG_DATA_HOME/opencode/auth.json`
 (default `~/.local/share/opencode/auth.json`), Pi's
 `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`), and Hermes's
 `$HERMES_HOME/auth.json` (default `~/.hermes/auth.json`). These readers inspect
-saved accounts, including inactive accounts. They do not resolve project-specific
+saved accounts, including inactive accounts. OpenCode also honors its
+`OPENCODE_AUTH_CONTENT` override before reading the file. They do not resolve project-specific
 configuration, run key-generating shell commands, or discover keys supplied only
-through environment variables or an external credential plugin. An empty saved
-store is reported as such, not as zero usage.
+through other environment variables or an external credential plugin. An empty saved
+store is reported as such, not as zero usage. Unreadable or malformed stores
+report an unavailable check; UTF-8 byte-order marks are accepted.
 
 Claude also supports `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, and the default
 macOS Claude Code keychain entry. Cursor supports `CURSOR_AUTH_TOKEN`, its default
@@ -67,12 +69,15 @@ not start an agent session. Requests and subprocesses have time limits. Windows
 receives the reader through SSH standard input to stay within command-line limits.
 The Windows launcher loads the same user profile PATH as version detection,
 including fnm, and falls back to Node beside a detected agent launcher. If Node
-cannot be found, the row reports that requirement explicitly.
+cannot be found, the row reports that requirement explicitly. npm `.ps1`, `.cmd`,
+and `.bat` launchers run through PowerShell with a process-local execution-policy
+bypass, matching version detection.
 
 Credentials, raw responses, and provider error text stay on the SSH host. Only
 normalized quota figures and status records return to MonkeySSH. Usage is not
-persisted or sent to telemetry. Diagnostics record only check status counts,
-platform, connection ID, and exit status, never quota figures or credentials. Provider endpoints that are not
+persisted or sent to telemetry. Diagnostics record built-in agent IDs, statuses, window/notice counts, aggregate
+status counts, platform, connection ID, and exit status, never quota figures or
+credentials. Provider endpoints that are not
 public API contracts can change independently of MonkeySSH; failures remain
 visible and can be retried.
 

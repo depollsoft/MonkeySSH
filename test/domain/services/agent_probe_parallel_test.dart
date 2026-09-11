@@ -104,7 +104,8 @@ while (@(Get-ChildItem -LiteralPath ${powerShellSingleQuote(root.path)} -Filter 
     () async {
       final root = await Directory.systemTemp.createTemp('parallel-metadata-');
       addTearDown(() => root.delete(recursive: true));
-      final npm = File('${root.path}/npm');
+      final npm = File('${root.path}/.local/bin/npm');
+      await npm.parent.create(recursive: true);
       await npm.writeAsString('''
 #!/bin/sh
 [ "\$1" = view ] || exit 0
@@ -135,6 +136,7 @@ echo 1.2.3
         '/bin/sh',
         [file.path],
         environment: {'HOME': root.path, 'PATH': '${root.path}:/usr/bin:/bin'},
+        includeParentEnvironment: false,
       ).timeout(const Duration(seconds: 20));
       expect(result.exitCode, 0, reason: '${result.stderr}');
       final values = parseAgentMetadataProbeOutput(result.stdout as String);

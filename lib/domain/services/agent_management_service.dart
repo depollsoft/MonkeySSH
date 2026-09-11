@@ -962,6 +962,20 @@ class AgentManagementService {
       );
       final values = parseAgentUsageOutput(response.output, checkedAt: _now());
       parsed.addAll(values);
+      for (final entry in values.entries) {
+        DiagnosticsLogService.instance.debug(
+          'agent.usage',
+          'agent_result',
+          fields: {
+            'connectionId': session.connectionId,
+            // The parser accepts only built-in agent IDs and status enums.
+            'agentId': entry.key,
+            'status': entry.value.status.name,
+            'windowCount': entry.value.windows.length,
+            'noticeCount': entry.value.notices.length,
+          },
+        );
+      }
       DiagnosticsLogService.instance.debug(
         'agent.usage',
         'check_complete',

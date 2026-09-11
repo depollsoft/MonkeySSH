@@ -185,9 +185,10 @@ for (const id of ['pi', 'opencode', 'hermes']) {
 test('saved accounts stay scoped to each tool and Hermes deduplicates its pool', () => {
   const fs = require('fs'), os = require('os'), path = require('path');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-accounts-'));
-  const keys = ['PI_CODING_AGENT_DIR', 'XDG_DATA_HOME', 'HERMES_HOME'];
+  const keys = ['PI_CODING_AGENT_DIR', 'XDG_DATA_HOME', 'HERMES_HOME', 'OPENCODE_AUTH_CONTENT'];
   const previous = Object.fromEntries(keys.map(k => [k, process.env[k]]));
   try {
+    delete process.env.OPENCODE_AUTH_CONTENT;
     process.env.PI_CODING_AGENT_DIR = path.join(dir, 'pi');
     process.env.XDG_DATA_HOME = path.join(dir, 'data');
     process.env.HERMES_HOME = path.join(dir, 'hermes');
@@ -236,4 +237,39 @@ test('Antigravity uses the quota-summary request schema and falls back on older 
   assert.deepEqual(methods, ['RetrieveUserQuotaSummary', 'GetUserStatus']);
   assert.equal(result.windows[0].usedPercent, 25);
   assert.ok(!JSON.stringify(result).includes('SECRET'));
+});
+
+
+test('OpenCode matches inline auth precedence, BOM files, and credential read failures', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-opencode-auth-'));
+  const previous = {XDG_DATA_HOME: process.env.XDG_DATA_HOME, OPENCODE_AUTH_CONTENT: process.env.OPENCODE_AUTH_CONTENT};
+  try {
+    process.env.XDG_DATA_HOME = dir;
+    delete process.env.OPENCODE_AUTH_CONTENT;
+    assert.deepEqual(configuredAccounts('opencode'), []);
+    fs.mkdirSync(path.join(dir, 'opencode'));
+    const file = path.join(dir, 'opencode', 'auth.json');
+    fs.writeFileSync(file, '\uFEFF' + JSON.stringify({openai: {type: 'oauth', access: 'FILE'}}));
+    assert.equal(configuredAccounts('opencode')[0][1].access, 'FILE');
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({anthropic: {type: 'oauth', access: 'INLINE'}});
+    assert.equal(configuredAccounts('opencode')[0][1].access, 'INLINE');
+    process.env.OPENCODE_AUTH_CONTENT = '{';
+    assert.equal(configuredAccounts('opencode')[0][1].access, 'FILE');
+    process.env.OPENCODE_AUTH_CONTENT = '{}';
+    assert.deepEqual(configuredAccounts('opencode'), []);
+    delete process.env.OPENCODE_AUTH_CONTENT;
+    fs.writeFileSync(file, JSON.stringify({custom: {type: 'wellknown', key: 'KEY', token: 'TOKEN'}}));
+    assert.equal((await multiProvider('opencode')).notices[0].status, 'notReported');
+    for (const malformed of ['{', 'null', '[]']) {
+      fs.writeFileSync(file, malformed);
+      assert.deepEqual(await require('../../assets/scripts/agent_usage_probe.cjs').probe('opencode', ''), {status: 'unavailable'});
+    }
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    assert.throws(() => configuredAccounts('opencode'), /unavailable/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) value == null ? delete process.env[key] : process.env[key] = value;
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
 });

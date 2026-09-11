@@ -1985,7 +1985,7 @@ esac
       'Windows probe timeouts terminate descendants and handle cleanup failures',
       () async {
         final script = decodeEncodedPowerShell(
-          buildAgentBatchProbeCommand([], windows: true),
+          buildAgentMetadataProbeCommand([], windows: true),
         );
         final root = await Directory.systemTemp.createTemp(
           'monkeyssh-probe-cleanup-',
@@ -1993,7 +1993,7 @@ esac
         addTearDown(() => root.delete(recursive: true));
         final fixture = File('${root.path}/cleanup.ps1')
           ..writeAsStringSync(
-            script +
+            script.substring(0, script.indexOf(r'$__flNpmGlobal =')) +
                 r'''
 $ErrorActionPreference = 'Stop';
 function New-Object([string]$TypeName) {
