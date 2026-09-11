@@ -13,6 +13,9 @@ type codexShutdownTestProcess struct {
 	release <-chan struct{}
 }
 
+// Windows probes the pane PID while capturing shutdown process groups.
+func (p codexShutdownTestProcess) Pid() int { return 0 }
+
 func (p codexShutdownTestProcess) Hangup() {}
 
 func (p codexShutdownTestProcess) shutdownCodex(_ *muxWindow, deadline time.Time) {
