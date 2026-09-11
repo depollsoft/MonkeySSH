@@ -3,6 +3,9 @@
 package main
 
 import (
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -17,6 +20,10 @@ const (
 )
 
 func (p *unixProcess) shutdownCodex(window *muxWindow, deadline time.Time) {
+	p.shutdownCodexWithCommand(window, deadline, windowProcessCommand)
+}
+
+func (p *unixProcess) shutdownCodexWithCommand(window *muxWindow, deadline time.Time, lookup func(int) (string, bool)) {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	if p.cmd == nil || p.cmd.Process == nil {
@@ -34,17 +41,23 @@ func (p *unixProcess) shutdownCodex(window *muxWindow, deadline time.Time) {
 	// until all group signals are finished. Never stop a directly launched CLI.
 	// Inspect the current image: a shell may have exec'd Codex since Start.
 	// Stopping that CLI would defeat the graceful disconnect entirely.
-	command, known := windowProcessCommand(p.cmd.Process.Pid)
+	foreground := foregroundProcessGroupForWindow(window)
+	command, known := lookup(p.cmd.Process.Pid)
 	if !known {
-		signalCommandProcessGroup(p.cmd, syscall.SIGHUP)
+		// Without an image, take the forced path. Stop the possible wrapper
+		// before killing its foreground job so resume || fresh cannot run.
+		if err := p.cmd.Process.Signal(syscall.SIGSTOP); err == nil {
+			if foreground > 0 && foreground != p.cmd.Process.Pid {
+				_ = syscall.Kill(-foreground, syscall.SIGKILL)
+			}
+		}
 		signalCommandProcessGroup(p.cmd, syscall.SIGKILL)
 		return
 	}
-	shell := isShellCommandName(command)
+	shell := codexProcessIsShell(command, p.cmd)
 	if shell {
 		_ = p.cmd.Process.Signal(syscall.SIGSTOP)
 	}
-	foreground := foregroundProcessGroupForWindow(window)
 	signalGroup := func(signal syscall.Signal) {
 		if shell && foreground > 0 && foreground != p.cmd.Process.Pid {
 			_ = syscall.Kill(-foreground, signal)
@@ -67,4 +80,22 @@ func waitCodexShutdownStage(grace time.Duration, deadline time.Time) {
 	if grace > 0 {
 		time.Sleep(grace)
 	}
+}
+
+// BusyBox reports its multicall executable even when invoked through /bin/sh.
+// Use the launch path/argv only for that image, never for an exec'd Codex CLI.
+func codexProcessIsShell(command string, cmd *exec.Cmd) bool {
+	isShell := func(name string) bool {
+		return isShellCommandName(name) || strings.EqualFold(filepath.Base(name), "ash")
+	}
+	if isShell(command) {
+		return true
+	}
+	if filepath.Base(command) != "busybox" || cmd == nil {
+		return false
+	}
+	if isShell(cmd.Path) || (len(cmd.Args) > 0 && isShell(cmd.Args[0])) {
+		return true
+	}
+	return len(cmd.Args) > 1 && isShell(cmd.Args[1])
 }

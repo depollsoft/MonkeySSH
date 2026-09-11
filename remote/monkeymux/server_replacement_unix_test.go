@@ -60,7 +60,7 @@ func TestReapReplacementPaneGroupsSkipsMissingPIDs(t *testing.T) {
 func TestReapReplacementPaneGroupsSkipsUnconfirmedPIDs(t *testing.T) {
 	cmd := startReplacementTestPane(t)
 	pid := cmd.Process.Pid
-	snapshot := inspectProcess(pid)
+	snapshot := inspectReplacementProcess(pid)
 	if !snapshot.known || snapshot.started.IsZero() {
 		t.Fatal("cannot inspect test pane identity")
 	}
@@ -121,6 +121,11 @@ func TestReplacementPaneGroupsWrapperOrderingAndGuards(t *testing.T) {
 		{name: "recycled foreground", mutateReap: func(snapshots map[int]processSnapshot, _ map[int]int) {
 			snapshot := snapshots[pane]
 			snapshot.started = started.Add(time.Hour)
+			snapshots[pane] = snapshot
+		}, wantCapture: []int{wrapper, pane}, wantKilled: []int{wrapper}},
+		{name: "recycled foreground within same second", mutateReap: func(snapshots map[int]processSnapshot, _ map[int]int) {
+			snapshot := snapshots[pane]
+			snapshot.started = started.Add(time.Microsecond)
 			snapshots[pane] = snapshot
 		}, wantCapture: []int{wrapper, pane}, wantKilled: []int{wrapper}},
 		{name: "wrapper changed group", mutateReap: func(_ map[int]processSnapshot, groups map[int]int) {

@@ -57,8 +57,8 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 		if _, err := os.Stat(shell); os.IsNotExist(err) {
 			continue
 		}
-		for _, mode := range []string{"term-exit", "ignores-term-and-hup", "deliberate-close"} {
-			graceful := mode != "ignores-term-and-hup"
+		for _, mode := range []string{"term-exit", "ignores-term-and-hup", "deliberate-close", "busybox", "lookup-failed"} {
+			graceful := mode != "ignores-term-and-hup" && mode != "lookup-failed"
 			name := filepath.Base(shell) + "/" + mode
 			t.Run(name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -84,6 +84,10 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 					t.Fatal(err)
 				}
 				window := &muxWindow{id: "@1", agentTool: "codex", proc: proc, pty: windowPty}
+				if mode == "busybox" || mode == "lookup-failed" {
+					window.proc = &codexShutdownLookupProcess{unixProcess: proc.(*unixProcess),
+						lookup: func(int) (string, bool) { return "busybox", mode == "busybox" }}
+				}
 				server := &muxServer{windows: []*muxWindow{window}}
 				server.windowWatchers.Add(2)
 				go func() { defer server.windowWatchers.Done(); server.readWindow(window) }()
@@ -91,6 +95,7 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 				go func() { defer server.windowWatchers.Done(); _ = proc.Wait(); close(reaped) }()
 				t.Cleanup(server.close)
 				waitRejectedCondition(t, "agent readiness", func() bool { _, err := os.Stat(ready); return err == nil })
+				foreground := foregroundProcessGroupForWindow(window)
 				start := time.Now()
 				if mode == "deliberate-close" {
 					if _, err := server.closeWindow(window.id); err != nil {
@@ -109,6 +114,9 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 				if !errors.Is(cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone) {
 					t.Fatal("process still alive")
 				}
+				if mode == "lookup-failed" && foreground > 0 && inspectProcess(foreground).running {
+					t.Fatal("foreground agent survived failed image lookup")
+				}
 				if _, err := os.Stat(relaunched); !os.IsNotExist(err) {
 					t.Fatalf("fresh fallback ran: %v", err)
 				}
@@ -126,6 +134,36 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+type codexShutdownLookupProcess struct {
+	*unixProcess
+	lookup func(int) (string, bool)
+}
+
+func (p *codexShutdownLookupProcess) shutdownCodex(window *muxWindow, deadline time.Time) {
+	p.shutdownCodexWithCommand(window, deadline, p.lookup)
+}
+
+func TestCodexProcessIsShell(t *testing.T) {
+	for _, tc := range []struct {
+		image string
+		path  string
+		args  []string
+		want  bool
+	}{
+		{"sh", "/bin/sh", []string{"sh"}, true},
+		{"ash", "/bin/ash", []string{"ash"}, true},
+		{"busybox", "/bin/sh", []string{"sh"}, true},
+		{"busybox", "/bin/busybox", []string{"sh"}, true},
+		{"busybox", "/bin/busybox", []string{"busybox", "ash", "-c", "codex"}, true},
+		{"busybox", "/bin/busybox", []string{"busybox", "sleep", "120"}, false},
+		{"codex", "/bin/sh", []string{"sh", "-c", "exec codex"}, false},
+	} {
+		if got := codexProcessIsShell(tc.image, &exec.Cmd{Path: tc.path, Args: tc.args}); got != tc.want {
+			t.Errorf("image %q launch %q %v: shell=%v, want %v", tc.image, tc.path, tc.args, got, tc.want)
 		}
 	}
 }

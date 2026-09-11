@@ -419,7 +419,7 @@ type replacementPaneGroupSystem struct {
 
 func replacementPaneGroupsSystem() replacementPaneGroupSystem {
 	return replacementPaneGroupSystem{
-		alive: processIDAlive, inspect: inspectProcess,
+		alive: processIDAlive, inspect: inspectReplacementProcess,
 		pgid: syscall.Getpgid, kill: syscall.Kill,
 	}
 }
