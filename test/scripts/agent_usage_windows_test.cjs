@@ -22,6 +22,9 @@ for (const framed of [false, true]) {
       fs.copyFileSync(process.execPath, path.join(dir, 'node.exe'));
       fs.writeFileSync(launcher, '@echo off\r\n"%~dp0node.exe" "%~dp0fake-agent.cjs" %*\r\n');
       assert.deepEqual(await rpc(launcher, [], 'account/get', framed, false), {ok:true});
-    } finally { fs.rmSync(dir, {recursive:true,force:true}); }
+    } finally {
+      // Windows keeps executables locked until asynchronous process-tree cleanup finishes.
+      await fs.promises.rm(dir, {recursive:true,force:true,maxRetries:10,retryDelay:100});
+    }
   });
 }
