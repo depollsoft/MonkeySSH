@@ -22,6 +22,7 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/windows_remote_powershell.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
 const _bridgeId = '0123456789abcdef0123456789abcdef';
@@ -103,7 +104,7 @@ String _historyOutput(int sequence, Map<String, Object?> data) => _frame({
 
 class _MockSshClient extends Mock implements SSHClient {}
 
-class _MockSshChannel extends Mock implements SSHSession {}
+class _MockSshChannel extends MockSessionWithChannel {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
@@ -288,7 +289,7 @@ void main() {
     final late = _MockSshChannel();
     opening.complete(late);
     await tester.pump();
-    verify(late.close).called(1);
+    verify(late.channel.destroy).called(1);
   });
 
   testWidgets('stalled reconnect open times out and retries after backoff', (
@@ -360,7 +361,7 @@ void main() {
     final late = _MockSshChannel();
     opening.complete(late);
     await tester.pump();
-    verify(late.close).called(1);
+    verify(late.channel.destroy).called(1);
     expect(transport.isConnected, isTrue);
     // Stream cancellation can complete outside the fake microtask flush. Keep
     // cleanup in the real async zone so its follow-up futures can also settle.

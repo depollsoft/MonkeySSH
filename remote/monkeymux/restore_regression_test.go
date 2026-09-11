@@ -307,6 +307,7 @@ func TestAgentResumeCommandWithFreshFallback(t *testing.T) {
 // longer be resumed), the window must fall back to a fresh launch and stay
 // open instead of vanishing.
 func TestRestoreAgentWindowSurvivesFailedResume(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	binDir := t.TempDir()
 	marker := filepath.Join(binDir, "fresh-launched")
 	// Fake agent: any --resume invocation fails (like Copilot CLI's "No

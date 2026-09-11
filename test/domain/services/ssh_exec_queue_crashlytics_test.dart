@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
@@ -300,7 +301,7 @@ void main() {
         }
         await pumpEventQueue();
         expect(deliveries, 1);
-        expect(exec.closeCalls, lateError == null ? 1 : 0);
+        expect(exec.destroyCalls, lateError == null ? 1 : 0);
         expect(activeQueuedSshExecCountForTesting(connectionId), 0);
         if (lateError is SSHStateError) {
           await service.clearCache(connectionId);
@@ -335,7 +336,7 @@ void main() {
         service.listWindows(session, 'main'),
         throwsA(isA<SSHStateError>()),
       );
-      expect(exec.closeCalls, 1);
+      expect(exec.destroyCalls, 1);
       expect(session.executeCalls, 1);
     }),
   );
@@ -387,7 +388,11 @@ class _FakeExec extends Fake implements SSHSession {
 
   final String output;
   int closeCalls = 0;
+  int destroyCalls = 0;
   SSHError? closeError;
+
+  @override
+  late final SSHChannel channel = _FakeExecChannel(this);
 
   @override
   Stream<Uint8List> get stdout => Stream.value(
@@ -404,6 +409,18 @@ class _FakeExec extends Fake implements SSHSession {
   void close() {
     closeCalls++;
     final error = closeError;
+    if (error != null) Error.throwWithStackTrace(error, StackTrace.current);
+  }
+}
+
+class _FakeExecChannel extends Fake implements SSHChannel {
+  _FakeExecChannel(this.session);
+  final _FakeExec session;
+
+  @override
+  void destroy() {
+    session.destroyCalls++;
+    final error = session.closeError;
     if (error != null) Error.throwWithStackTrace(error, StackTrace.current);
   }
 }

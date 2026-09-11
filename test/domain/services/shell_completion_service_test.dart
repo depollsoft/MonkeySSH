@@ -9,11 +9,12 @@ import 'package:monkeyssh/domain/services/shell_completion_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
 class _MockSshClient extends Mock implements ssh.SSHClient {}
 
-class _MockSshExecSession extends Mock implements ssh.SSHSession {}
+class _MockSshExecSession extends MockSessionWithChannel {}
 
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 
@@ -220,7 +221,7 @@ void main() {
       }
       await pumpEventQueue();
       for (final channel in channels) {
-        verify(channel.close).called(1);
+        verify(channel.channel.destroy).called(1);
       }
     });
   }

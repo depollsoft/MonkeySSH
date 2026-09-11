@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
@@ -32,6 +33,8 @@ void main() {
             final opening = Completer<SSHSession>();
             final stdout = StreamController<Uint8List>();
             final channel = _buildSilentControlSession(stdout);
+            final underlying = _MockChannel();
+            when(() => channel.channel).thenReturn(underlying);
             when(
               () => installer.ensureInstalled(
                 session,
@@ -88,7 +91,11 @@ void main() {
             } else {
               expect(stdout.hasListener, isFalse);
             }
-            verify(channel.close).called(1);
+            if (opens) {
+              verify(channel.close).called(1);
+            } else {
+              verify(underlying.destroy).called(1);
+            }
             verify(
               () => client.execute(any(), pty: any(named: 'pty')),
             ).called(1);
@@ -138,6 +145,20 @@ void main() {
   });
 
   group('buildMonkeyMuxAttachCommand', () {
+    test('passes the force reload policy to attach', () {
+      final command = buildMonkeyMuxAttachCommand(
+        executablePath: '/home/me/.monkeyssh/bin/monkeymux',
+        sessionName: 'work',
+        serverUpdatePolicy: MonkeyMuxServerUpdatePolicy.force,
+      );
+
+      expect(
+        command,
+        "'/home/me/.monkeyssh/bin/monkeymux' attach --quiet "
+        "--update-policy force 'work'",
+      );
+    });
+
     test('puts flags before the session and shell-quotes values', () {
       final command = buildMonkeyMuxAttachCommand(
         executablePath: '/home/me/.monkeyssh/bin/monkey mux',
@@ -1528,6 +1549,8 @@ void main() {
 class _MockSshClient extends Mock implements SSHClient {}
 
 class _MockExecSession extends Mock implements SSHSession {}
+
+class _MockChannel extends Mock implements SSHChannel {}
 
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 

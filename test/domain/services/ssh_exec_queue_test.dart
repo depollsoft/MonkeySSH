@@ -1,11 +1,14 @@
 import 'dart:async';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 
 class _MockExecSession extends Mock implements SSHSession {}
+
+class _MockChannel extends Mock implements SSHChannel {}
 
 void main() {
   tearDown(resetQueuedSshExecsForTesting);
@@ -35,6 +38,7 @@ void main() {
       for (final opening in openings) {
         if (lateResult == 'channel') {
           final channel = _MockExecSession();
+          when(() => channel.channel).thenReturn(_MockChannel());
           channels.add(channel);
           opening.complete(channel);
         } else if (lateResult == 'error') {
@@ -43,7 +47,8 @@ void main() {
       }
       await pumpEventQueue();
       for (final channel in channels) {
-        verify(channel.close).called(1);
+        final underlying = channel.channel;
+        verify(underlying.destroy).called(1);
       }
     });
   }
