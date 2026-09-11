@@ -19,6 +19,8 @@ void main() {
     await tester.pumpAndSettle();
     await Future<void>.delayed(const Duration(seconds: 1));
     await tester.pumpAndSettle();
+    expect(find.byType(LinearProgressIndicator), findsWidgets);
+    await binding.takeScreenshot('$device-ios');
     for (final id in ['opencode', 'cursor', 'hermes']) {
       final heading = find.byKey(ValueKey('agent-details-cli:$id'));
       await Scrollable.ensureVisible(tester.element(heading), alignment: 0.05);

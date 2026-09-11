@@ -15,6 +15,9 @@ enum AgentUsageStatus {
   /// The agent must be running to expose its local usage interface.
   needsRunning,
 
+  /// Node.js cannot be found in the remote user environment.
+  runtimeUnavailable,
+
   /// Authentication is missing or expired.
   signInRequired,
 

@@ -506,7 +506,7 @@ void main() {
                 );
               }
               final currentPackage = script
-                  .replaceAll("''", "'")
+                  .replaceAll(RegExp("'+"), "'")
                   .contains("npm view '$package'");
               return _execOutput(
                 '__monkeyssh_agent_runtime__=cli:pi\n'
@@ -2097,7 +2097,7 @@ foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-rac
       expect(script, contains('Get-Command'));
       expect(
         script,
-        contains(r"'__monkeyssh_agent_path__=' + $__flCommand.Source"),
+        contains(r"''__monkeyssh_agent_path__='' + $__flCommand.Source"),
       );
       expect(script, contains('Invoke-AgentProbe'));
       expect(script, contains('__monkeyssh_agent_version__='));

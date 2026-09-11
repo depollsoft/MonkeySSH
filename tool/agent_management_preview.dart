@@ -169,7 +169,10 @@ class _PreviewManagement extends Fake implements AgentManagementService {
   }
 
   @override
-  Future<List<AgentRuntimeInfo>> refreshAll(SshSession session) async {
+  Future<List<AgentRuntimeInfo>> refreshAll(
+    SshSession session, {
+    void Function(List<AgentRuntimeInfo>)? onDiscovered,
+  }) async {
     await Future<void>.delayed(const Duration(milliseconds: 650));
     return List.of(_runtimes);
   }

@@ -1,6 +1,9 @@
 # Agent account usage
 
-Agent Management checks account usage after loading installed versions. Usage
+Agent Management starts account usage checks as soon as installed agents are
+discovered, alongside upstream version checks. Windows version probes and
+upstream metadata lookups run with up to four workers per batch. POSIX version
+probes and usage readers also run concurrently. Usage
 checks do not block installation or update controls. Refreshing the screen or
 re-checking a runtime requests usage again. CLI and ACP rows share the matching
 agent's account snapshot. These are account allowances, not usage attributed to
@@ -54,15 +57,22 @@ shows when usage was checked and labels past reset times without claiming the
 allowance has replenished. Missing reset times remain explicit. Rows with many
 quotas show a count of additional details that are available by expanding the row.
 
+Percentage quotas include a bar filled to the percentage remaining. Exhausted
+allowances show an empty bar; unlimited and unknown allowances have no bar.
+
 The remote reader requires Node.js and uses built-in libraries. No package is
 installed or updated. Codex, Copilot, and OpenClaw start temporary read-only CLI
 processes without sending prompts. Antigravity reuses a running process; it does
 not start an agent session. Requests and subprocesses have time limits. Windows
 receives the reader through SSH standard input to stay within command-line limits.
+The Windows launcher loads the same user profile PATH as version detection,
+including fnm, and falls back to Node beside a detected agent launcher. If Node
+cannot be found, the row reports that requirement explicitly.
 
 Credentials, raw responses, and provider error text stay on the SSH host. Only
 normalized quota figures and status records return to MonkeySSH. Usage is not
-persisted or sent to diagnostics or telemetry. Provider endpoints that are not
+persisted or sent to telemetry. Diagnostics record only check status counts,
+platform, connection ID, and exit status, never quota figures or credentials. Provider endpoints that are not
 public API contracts can change independently of MonkeySSH; failures remain
 visible and can be retried.
 

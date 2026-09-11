@@ -68,13 +68,17 @@ void main() {
         detectionSource: 'npm or PATH',
       ),
     ];
-    when(() => service.refreshAll(session)).thenAnswer((_) async => runtimes);
+    when(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).thenAnswer((_) async => runtimes);
   });
 
   Future<void> pumpScreen(
     WidgetTester tester, {
     Stream<MonetizationState>? states,
     TextScaler? textScaler,
+    bool settle = true,
   }) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -95,7 +99,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    if (settle) await tester.pumpAndSettle();
   }
 
   /// Advances frames while indeterminate spinners keep the tree from settling.
@@ -155,6 +159,37 @@ void main() {
     runtimes[index] = runtime;
   }
 
+  testWidgets('usage starts before upstream version metadata completes', (
+    tester,
+  ) async {
+    final metadata = Completer<List<AgentRuntimeInfo>>();
+    when(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).thenAnswer((invocation) {
+      final callback =
+          invocation.namedArguments[#onDiscovered]
+              as void Function(List<AgentRuntimeInfo>);
+      callback(runtimes);
+      return metadata.future;
+    });
+    when(() => service.readUsage(session, any())).thenAnswer(
+      (_) async => {
+        runtimes.first.definition.id: const AgentUsage(
+          status: AgentUsageStatus.available,
+          windows: [AgentUsageWindow(label: 'Weekly', usedPercent: 25)],
+        ),
+      },
+    );
+    await pumpScreen(tester, settle: false);
+    await pumpFrames(tester);
+    expect(metadata.isCompleted, isFalse);
+    expect(find.text('Weekly · 75% remaining'), findsOneWidget);
+    metadata.complete(runtimes);
+    await tester.pumpAndSettle();
+    verify(() => service.readUsage(session, any())).called(1);
+  });
+
   testWidgets('usage loads independently and refreshes with runtime checks', (
     tester,
   ) async {
@@ -178,7 +213,7 @@ void main() {
       ),
     });
     await tester.pumpAndSettle();
-    expect(find.text('5 hours · 100% used · Limit reached'), findsOneWidget);
+    expect(find.text('5 hours · 0% remaining · Limit reached'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('agent-management-refresh')));
     await tester.pumpAndSettle();
     verify(() => service.readUsage(session, any())).called(2);
@@ -250,11 +285,17 @@ void main() {
       findsNothing,
     );
     expect(find.byKey(const ValueKey('agent-update-all')), findsNothing);
-    verifyNever(() => service.refreshAll(session));
+    verifyNever(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    );
     await tester.tap(find.text('Unlock Pro'));
     await tester.pumpAndSettle();
     expect(find.text('Manage remote coding agents'), findsOneWidget);
-    verifyNever(() => service.refreshAll(session));
+    verifyNever(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    );
   });
 
   testWidgets('revoking Pro hides manager controls and blocks stale actions', (
@@ -286,7 +327,10 @@ void main() {
         onOutput: any(named: 'onOutput'),
       ),
     );
-    verifyNever(() => service.refreshAll(session));
+    verifyNever(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    );
   });
 
   testWidgets('store capture redacts executable paths in rows and details', (
@@ -426,7 +470,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    verify(() => service.refreshAll(session)).called(1);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(1);
   });
 
   testWidgets('header refresh re-probes all runtimes', (tester) async {
@@ -435,7 +482,10 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agent-management-refresh')));
     await tester.pumpAndSettle();
 
-    verify(() => service.refreshAll(session)).called(2);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(2);
   });
 
   testWidgets(
@@ -520,7 +570,12 @@ void main() {
           findsOneWidget,
         );
         expect(find.byType(CircularProgressIndicator), findsNothing);
-        verify(() => service.refreshAll(session)).called(1);
+        verify(
+          () => service.refreshAll(
+            session,
+            onDiscovered: any(named: 'onDiscovered'),
+          ),
+        ).called(1);
         await tester.tap(find.text('Close'));
         await tester.pumpAndSettle();
         expect(refreshHandler(tester), isNotNull);
@@ -604,7 +659,10 @@ void main() {
         onOutput: any(named: 'onOutput'),
       ),
     ).called(1);
-    verify(() => service.refreshAll(session)).called(2);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(2);
   });
   for (final returnsFailure in [false, true]) {
     testWidgets(
@@ -680,7 +738,12 @@ void main() {
           isNotNull,
         );
         verify(() => service.inspect(session, acp.definition)).called(1);
-        verifyNever(() => service.refreshAll(session));
+        verifyNever(
+          () => service.refreshAll(
+            session,
+            onDiscovered: any(named: 'onDiscovered'),
+          ),
+        );
 
         when(() => service.inspect(session, acp.definition)).thenAnswer(
           (_) async => AgentRuntimeInfo(
@@ -723,7 +786,8 @@ void main() {
       });
     }
     when(
-      () => service.refreshAll(session),
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
     ).thenAnswer((_) async => runtimes.toList());
     await pumpScreen(tester);
     expect(find.text('2 updates available'), findsOneWidget);
@@ -770,7 +834,10 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(recheck);
     await pumpFrames(tester);
-    verifyNever(() => service.refreshAll(session));
+    verifyNever(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    );
     verifyNever(() => service.inspect(session, runtimes[2].definition));
     expect(started, ['cli:claude']);
 
@@ -803,7 +870,10 @@ void main() {
           .onPressed,
       isNull,
     );
-    verifyNever(() => service.refreshAll(session));
+    verifyNever(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    );
 
     replaceRuntime(installedFrom(second));
     completers['cli:copilot']!.complete(
@@ -818,7 +888,10 @@ void main() {
     expect(inRow('cli:copilot', find.text('Installed v2.1.0')), findsOneWidget);
     expect(refreshHandler(tester), isNotNull);
     expect(recheckHandler(tester, 'acp:claude'), isNotNull);
-    verify(() => service.refreshAll(session)).called(1);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(1);
   });
 
   testWidgets('revoking Pro mid-queue stops the remaining bulk updates', (

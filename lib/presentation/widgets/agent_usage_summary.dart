@@ -72,10 +72,13 @@ class AgentUsageSummary extends StatelessWidget {
                   !resetPassed &&
                   ((window.usedPercent ?? 0) >= 100 ||
                       (window.restricted ?? false));
+              final remainingPercent = window.usedPercent == null
+                  ? null
+                  : (100 - window.usedPercent!).clamp(0.0, 100.0);
               final amount = window.unlimited
                   ? 'Unlimited'
                   : window.usedPercent != null
-                  ? '${_number(window.usedPercent!)}% used'
+                  ? '${_number(remainingPercent!)}% remaining'
                   : window.remaining != null
                   ? '${_amount(window.remaining!, window.unit)} remaining'
                   : window.restricted != null
@@ -100,6 +103,29 @@ class AgentUsageSummary extends StatelessWidget {
                         fontWeight: exhausted ? FontWeight.w600 : null,
                       ),
                     ),
+                    if (!window.unlimited && remainingPercent != null)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: remainingPercent / 100,
+                            minHeight: 4,
+                            backgroundColor: scheme.surfaceContainerHighest,
+                            color: resetPassed
+                                ? scheme.outline
+                                : scheme.primary,
+                            semanticsLabel:
+                                '${window.label} allowance remaining',
+                            semanticsValue: '${_number(remainingPercent)}%',
+                          ),
+                        ),
+                      ),
+                    if (expanded && (window.usedPercent ?? 0) > 100)
+                      Text(
+                        '${_number(window.usedPercent!)}% used including overage',
+                        style: style,
+                      ),
                     if (!window.unlimited)
                       Text(
                         _resetLabel(context, window.resetsAt, clock),
@@ -146,6 +172,8 @@ String _statusLabel(AgentUsageStatus? status) => switch (status) {
   AgentUsageStatus.unsupported => 'Usage reporting not supported',
   AgentUsageStatus.notReported => 'Quota not reported by provider',
   AgentUsageStatus.noAccounts => 'No accounts found in saved credentials',
+  AgentUsageStatus.runtimeUnavailable =>
+    'Usage checks need Node.js on the host',
   AgentUsageStatus.needsRunning => 'Start the agent on the host to check usage',
   AgentUsageStatus.signInRequired => 'Usage unavailable · sign in on the host',
   AgentUsageStatus.rateLimited => 'Usage check rate limited · try again later',

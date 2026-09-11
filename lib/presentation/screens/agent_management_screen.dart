@@ -125,12 +125,21 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       _refreshError = null;
     });
     try {
-      final runtimes = await _service.refreshAll(widget.session);
+      var usageStarted = false;
+      final runtimes = await _service.refreshAll(
+        widget.session,
+        onDiscovered: (discovered) {
+          if (!mounted) return;
+          setState(() => _runtimes = discovered);
+          usageStarted = true;
+          unawaited(_refreshUsage());
+        },
+      );
       if (!mounted) return;
       setState(() => _runtimes = runtimes);
       widget.onRuntimesRefreshed?.call(runtimes);
       widget.onProvidersRefreshed?.call();
-      unawaited(_refreshUsage());
+      if (!usageStarted) unawaited(_refreshUsage());
     } on Object catch (error) {
       if (!mounted) return;
       setState(() => _refreshError = error.toString());

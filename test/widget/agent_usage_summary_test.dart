@@ -47,7 +47,7 @@ void main() {
         ],
       ),
     );
-    expect(find.text('Weekly · 100% used'), findsOneWidget);
+    expect(find.text('Weekly · 0% remaining'), findsOneWidget);
     expect(find.text('Reset time passed · re-check usage'), findsOneWidget);
     expect(find.textContaining('Limit reached'), findsNothing);
   });
@@ -66,6 +66,7 @@ void main() {
     );
     expect(find.text('Chat · Unlimited'), findsOneWidget);
     expect(find.textContaining('0%'), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
   });
 
   testWidgets('large text wraps limits, reset details, and paid overage', (
@@ -177,11 +178,41 @@ void main() {
           home: Scaffold(body: AgentUsageSummary(usage: usage)),
         ),
       );
-      expect(find.text('Quota 4 · 20% used'), findsNothing);
+      expect(find.text('Quota 4 · 80% remaining'), findsNothing);
       expect(find.text('2 more usage details · expand above'), findsOneWidget);
       await pump(tester, usage);
-      expect(find.text('Quota 5 · 20% used'), findsOneWidget);
+      expect(find.text('Quota 5 · 80% remaining'), findsOneWidget);
       expect(find.textContaining('more usage details'), findsNothing);
     },
   );
+  testWidgets('bars show the remaining fraction and clamp paid overage', (
+    tester,
+  ) async {
+    await pump(
+      tester,
+      const AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [
+          AgentUsageWindow(label: 'Unused', usedPercent: 0),
+          AgentUsageWindow(label: 'Partial', usedPercent: 27.5),
+          AgentUsageWindow(label: 'Exhausted', usedPercent: 100),
+          AgentUsageWindow(
+            label: 'Overage',
+            usedPercent: 120,
+            overageAllowed: true,
+          ),
+        ],
+      ),
+    );
+    final bars = tester
+        .widgetList<LinearProgressIndicator>(
+          find.byType(LinearProgressIndicator),
+        )
+        .toList();
+    expect(bars.map((bar) => bar.value), [1.0, 0.725, 0.0, 0.0]);
+    expect(bars[1].semanticsValue, '72.5%');
+    expect(find.text('Partial · 72.5% remaining'), findsOneWidget);
+    expect(find.text('120% used including overage'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
