@@ -11230,7 +11230,7 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 				AgentTool:      "codex",
 				AgentSessionID: "codex-session",
 			},
-			want:      "codex --yolo resume 'codex-session' || codex --yolo",
+			want:      codexResumeGateInvocation("codex-session") + "; codex --yolo resume 'codex-session' || codex --yolo",
 			agentTool: "codex",
 		},
 		{

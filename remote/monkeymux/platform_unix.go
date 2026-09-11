@@ -78,6 +78,9 @@ func (p *unixPty) foregroundProcessGroup() int {
 // unixProcess wraps the child process attached to a pty master.
 type unixProcess struct {
 	cmd *exec.Cmd
+	// Reserve the leader's PID while shutdown signals its process group.
+	reapMu  sync.Mutex
+	reaping bool
 }
 
 func (p *unixProcess) Pid() int {
@@ -91,10 +94,22 @@ func (p *unixProcess) Wait() error {
 	if p.cmd == nil {
 		return nil
 	}
+	if supportsWindowExitObservation && p.cmd.Process != nil {
+		awaitWindowProcessExit(p.cmd.Process.Pid)
+		p.reapMu.Lock()
+		p.reaping = true
+		p.reapMu.Unlock()
+	}
 	return p.cmd.Wait()
 }
 
 func (p *unixProcess) Hangup() {
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaping {
+		_ = p.cmd.Process.Signal(syscall.SIGHUP)
+		return
+	}
 	signalCommandProcessGroup(p.cmd, syscall.SIGHUP)
 }
 

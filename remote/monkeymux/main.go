@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.191"
+	monkeyMuxVersion                  = "0.1.193"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -988,6 +988,10 @@ func main() {
 		acpCommand(os.Args[2:])
 	case "pi-agent":
 		piAgentCommand(os.Args[2:])
+	case "wait-codex-session":
+		if len(os.Args) == 3 {
+			waitForCodexSession(os.Args[2])
+		}
 	case "cursor-agent-auth":
 		cursorAgentAuthCommand(os.Args[2:])
 	case "version", "--version", "-v":
@@ -14916,7 +14920,11 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 	if sessionID == "_continue" && descriptor.supportsContinue {
 		return launch + " --continue"
 	}
-	return launch + " " + descriptor.resumeArgument + " " + quotedSessionID
+	resume := launch + " " + descriptor.resumeArgument + " " + quotedSessionID
+	if tool == "codex" {
+		return codexResumeGateCommand(sessionID, resume)
+	}
+	return resume
 }
 
 func canonicalAgentCommandName(command string) string {
@@ -14939,7 +14947,8 @@ func canonicalAgentCommandName(command string) string {
 // branch is reached solely when the resume itself failed to start. An
 // intentional close signals the whole process group (SIGHUP), which terminates
 // the shell before it can reach the fallback, so closing a window never
-// relaunches the agent.
+// relaunches the agent. During Codex server teardown, shutdownCodex freezes the
+// wrapping shell before TERM and leaves it stopped through the final group kill.
 func agentResumeCommandWithFreshFallback(resume string, launch string) string {
 	return piResumeCommandWithFreshFallback(resume, launch)
 }
@@ -15836,7 +15845,9 @@ func (s *muxServer) close() {
 	// Mark the windows closed while still holding s.mu. A watcher that outruns
 	// the bounded wait below then finds its window already closed and returns
 	// from markWindowClosed before touching any server state.
+	codexWindows := make(map[*muxWindow]bool)
 	for _, window := range windows {
+		codexWindows[window] = !window.closed && window.agentTool == "codex" && window.nativeAcpBridgeID == ""
 		window.closed = true
 		window.releaseRedrawForwardingStateLocked()
 		window.clearKittyGraphicsPendingLocked()
@@ -15856,24 +15867,35 @@ func (s *muxServer) close() {
 	for _, control := range controls {
 		_ = control.conn.Close()
 	}
+	shutdownDeadline := time.Now().Add(windowWatcherShutdownTimeout)
+	var teardowns sync.WaitGroup
 	for _, window := range windows {
-		if window.proc != nil {
-			window.proc.Hangup()
-		}
-		if window.pty != nil {
-			_ = window.closePty(window.pty)
-		}
-		if window.nativeAcpBridgeID != "" {
-			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
-		}
+		teardowns.Add(1)
+		go func() {
+			defer teardowns.Done()
+			if process, ok := window.proc.(interface {
+				shutdownCodex(*muxWindow, time.Time)
+			}); ok && codexWindows[window] {
+				process.shutdownCodex(window, shutdownDeadline)
+			} else if window.proc != nil {
+				window.proc.Hangup()
+			}
+			if window.pty != nil {
+				_ = window.closePty(window.pty)
+			}
+			if window.nativeAcpBridgeID != "" {
+				_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
+			}
+		}()
 	}
+	teardowns.Wait()
 	// Closing the ptys ends the reader goroutines and the hangup above ends the
 	// child processes, so the watchers finish promptly. Wait for them so no
 	// goroutine mutates server state after close returns. The wait is bounded
 	// because a child that ignores SIGHUP must not be able to hang shutdown;
 	// marking the windows closed above is what makes overrunning a watcher
 	// harmless rather than a late mutation of server state.
-	s.waitForWindowWatchers(windowWatcherShutdownTimeout)
+	s.waitForWindowWatchers(time.Until(shutdownDeadline))
 	// A republisher may already have bound a replacement and be waiting to
 	// reacquire s.mu. Join it before close returns so it can observe closed and
 	// remove that listener's path rather than leaving stale socket residue.
@@ -15884,10 +15906,9 @@ func (s *muxServer) close() {
 	s.pendingWindowStarts.Wait()
 }
 
-// windowWatcherShutdownTimeout bounds how long close waits for the per-window
-// goroutines after hanging up the children and closing the ptys. They normally
-// finish immediately; the bound only exists so a child that ignores SIGHUP
-// cannot hang shutdown.
+// windowWatcherShutdownTimeout includes Codex's parallel graceful escalation
+// and the remaining watcher wait. Do not add the grace period to this budget:
+// server replacement allows only one additional second for the old server exit.
 const windowWatcherShutdownTimeout = 2 * time.Second
 
 func (s *muxServer) waitForWindowWatchers(timeout time.Duration) {
