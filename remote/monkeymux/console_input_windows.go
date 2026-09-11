@@ -3,8 +3,9 @@
 package main
 
 import (
-	"context"
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -17,9 +18,9 @@ import (
 
 const consoleInputModeCommand = "--internal-console-input-mode"
 
-// Attaching a console is process-wide. Run the query in an isolated, hidden
-// helper so it cannot detach the server from its own console or interfere with
-// other windows. This also works when the executable is a Go test binary.
+// Attaching a console is process-wide. Keep one isolated, hidden reader per
+// PTY, rather than launching and attaching a process for every mobile input
+// batch. Each request still reads the current mode; it is never cached.
 func init() {
 	if len(os.Args) != 3 || os.Args[1] != consoleInputModeCommand {
 		return
@@ -29,7 +30,6 @@ func init() {
 		os.Exit(2)
 	}
 	kernel := windows.NewLazySystemDLL("kernel32.dll")
-	// The helper starts detached, but FreeConsole also covers manual invocation.
 	_, _, _ = kernel.NewProc("FreeConsole").Call()
 	attached, _, _ := kernel.NewProc("AttachConsole").Call(uintptr(pid))
 	if attached == 0 {
@@ -40,33 +40,120 @@ func init() {
 	if err != nil {
 		os.Exit(1)
 	}
-	var mode uint32
-	err = windows.GetConsoleMode(input, &mode)
+	requests := bufio.NewReader(os.Stdin)
+	for {
+		if _, err := requests.ReadByte(); err != nil {
+			break
+		}
+		var mode uint32
+		if err := windows.GetConsoleMode(input, &mode); err != nil {
+			break
+		}
+		if _, err := fmt.Fprintln(os.Stdout, mode); err != nil {
+			break
+		}
+	}
 	_ = windows.CloseHandle(input)
 	_, _, _ = kernel.NewProc("FreeConsole").Call()
-	if err != nil {
-		os.Exit(1)
-	}
-	fmt.Fprintln(os.Stdout, mode)
 	os.Exit(0)
 }
 
-func (p *winPty) virtualTerminalInputEnabled() (bool, error) {
-	if p.pid == 0 {
-		return false, fmt.Errorf("console process unavailable")
+type consoleInputModeReader struct {
+	cmd    *exec.Cmd
+	input  io.WriteCloser
+	output io.ReadCloser
+	reader *bufio.Reader
+}
+
+func startConsoleInputModeReader(pid uint32) (*consoleInputModeReader, error) {
+	if pid == 0 {
+		return nil, fmt.Errorf("console process unavailable")
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, consoleInputModeCommand, strconv.FormatUint(uint64(p.pid), 10))
+	cmd := exec.Command(executable, consoleInputModeCommand, strconv.FormatUint(uint64(pid), 10))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.DETACHED_PROCESS}
-	output, err := cmd.Output()
+	input, err := cmd.StdinPipe()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	mode, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 32)
-	return mode&windows.ENABLE_VIRTUAL_TERMINAL_INPUT != 0, err
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = input.Close()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = input.Close()
+		_ = output.Close()
+		return nil, err
+	}
+	return &consoleInputModeReader{cmd: cmd, input: input, output: output, reader: bufio.NewReader(output)}, nil
+}
+
+func (r *consoleInputModeReader) close() {
+	_ = r.input.Close()
+	_ = r.output.Close()
+	_ = r.cmd.Process.Kill()
+	_ = r.cmd.Wait()
+}
+
+func (p *winPty) closeConsoleInputModeReader() {
+	p.inputModeMu.Lock()
+	defer p.inputModeMu.Unlock()
+	if p.inputModeReader != nil {
+		p.inputModeReader.close()
+		p.inputModeReader = nil
+	}
+}
+
+func (p *winPty) virtualTerminalInputEnabled() (bool, error) {
+	p.inputModeMu.Lock()
+	defer p.inputModeMu.Unlock()
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return false, os.ErrClosed
+	}
+	if p.inputModeReader == nil {
+		reader, err := startConsoleInputModeReader(p.pid)
+		if err != nil {
+			return false, err
+		}
+		p.inputModeReader = reader
+	}
+	reader := p.inputModeReader
+	type result struct {
+		vt  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		if _, err := reader.input.Write([]byte{'?'}); err != nil {
+			done <- result{err: err}
+			return
+		}
+		line, err := reader.reader.ReadString('\n')
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		mode, err := strconv.ParseUint(strings.TrimSpace(line), 10, 32)
+		done <- result{vt: mode&windows.ENABLE_VIRTUAL_TERMINAL_INPUT != 0, err: err}
+	}()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	var answer result
+	select {
+	case answer = <-done:
+	case <-timer.C:
+		answer.err = fmt.Errorf("console input mode query timed out")
+	}
+	if answer.err != nil {
+		reader.close()
+		p.inputModeReader = nil
+	}
+	return answer.vt, answer.err
 }

@@ -452,12 +452,12 @@ func TestConsoleReaderInputPolicy(t *testing.T) {
 		name, reader, input, want string
 		win32, paste              bool
 	}{
-		{"native paste", "native", paste, "hello", true, true},
+		{"native paste", "native", paste, string((&nativeConsolePasteFilter{}).encode([]byte(paste))), true, true},
 		{"split paste escape", "native", "\x1b", "", true, true},
 		{"native reply", "native", reply, "", true, false},
 		{"native DCS reply", "native", "\x1bP>|MonkeySSH\x1b\\", "", true, false},
 		{"mixed text and replies", "native", "a" + reply + "b", "ab", true, false},
-		{"pasted reply is user content", "native", "\x1b[200~" + reply + "\x1b[201~", string(encodeBracketedPasteInputForWin32InputMode([]byte(reply))), true, true},
+		{"pasted reply is user content", "native", "\x1b[200~" + reply + "\x1b[201~", string((&nativeConsolePasteFilter{}).encode([]byte(reply))), true, true},
 		{"native Escape", "native", "\x1b", win32InputModeEscapeKeyEvents, true, false},
 		{"native arrow", "native", "\x1b[A", "\x1b[A", true, false},
 		{"native Return", "native", "\r", "\r", true, false},
@@ -508,5 +508,50 @@ func TestNativeConsolePasteFilterAcrossEverySplit(t *testing.T) {
 				t.Fatalf("byte-by-byte output %q, carry %q, inPaste %v; want %q", got, filter.carry, filter.inPaste, test.want)
 			}
 		})
+	}
+}
+
+func TestNativePasteCharacterEventsPreserveRepeatsAndSplitUnicode(t *testing.T) {
+	const input = "\x1b[200~aa🐒\r\n\t\x1b[201~"
+	const up = "\x1b[0;0;0;0;0;1_"
+	const want = "\x1b[0;0;97;1;0;1_" + up + "\x1b[0;0;97;1;0;1_" + up +
+		"\x1b[0;0;55357;1;0;1_" + up + "\x1b[0;0;56338;1;0;1_" + up +
+		"\x1b[13;0;13;1;0;1_\x1b[13;0;0;0;0;1_" +
+		"\x1b[9;0;9;1;0;1_\x1b[9;0;0;0;0;1_"
+	for split := 0; split <= len(input); split++ {
+		encoder := &nativeConsolePasteFilter{}
+		got := append(encoder.encode([]byte(input[:split])), encoder.encode([]byte(input[split:]))...)
+		if string(got) != want {
+			t.Fatalf("split %d: events %q, want %q", split, got, want)
+		}
+	}
+	encoder := &nativeConsolePasteFilter{}
+	var got []byte
+	for _, value := range []byte(input) {
+		got = append(got, encoder.encode([]byte{value})...)
+	}
+	if string(got) != want {
+		t.Fatalf("byte-by-byte events %q, want %q", got, want)
+	}
+}
+
+func TestNativePasteChunksUseOneModeQuery(t *testing.T) {
+	pty := &consoleModeRecordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{window}
+	const paste = "\x1b[200~hello\x1b[201~"
+	for _, value := range []byte(paste) {
+		if err := server.writeWindowInput(window.id, []byte{value}, true); err != nil {
+			t.Fatal(err)
+		}
+		// A transient query failure must not change an in-flight paste's mode.
+		pty.modeErr = errors.New("probe unavailable")
+	}
+	if pty.probes != 1 {
+		t.Fatalf("split paste used %d mode queries, want 1", pty.probes)
+	}
+	if want := string((&nativeConsolePasteFilter{}).encode([]byte(paste))); pty.String() != want {
+		t.Fatalf("split paste input %q, want %q", pty.String(), want)
 	}
 }

@@ -249,11 +249,13 @@ func clampConPtyDimension(value int) int16 {
 // winPty wraps a Windows pseudo console (ConPTY) and the two pipe endpoints the
 // parent uses to talk to the attached child process.
 type winPty struct {
-	pid       uint32
-	hpc       windows.Handle
-	backend   *conPtyBackend
-	writeFile *os.File // parent writes child's stdin (input pipe write end)
-	readFile  *os.File // parent reads child's stdout (output pipe read end)
+	inputModeMu     sync.Mutex
+	inputModeReader *consoleInputModeReader
+	pid             uint32
+	hpc             windows.Handle
+	backend         *conPtyBackend
+	writeFile       *os.File // parent writes child's stdin (input pipe write end)
+	readFile        *os.File // parent reads child's stdout (output pipe read end)
 
 	mu        sync.Mutex
 	closed    bool
@@ -282,6 +284,7 @@ func (p *winPty) Close() error {
 		p.mu.Lock()
 		p.closed = true
 		p.mu.Unlock()
+		p.closeConsoleInputModeReader()
 		// Closing the pseudo console terminates the attached process tree and
 		// causes the output pipe to reach EOF (after any final frame is
 		// flushed), so the reader goroutine unblocks and exits.

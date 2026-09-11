@@ -90,6 +90,7 @@ func TestBundledConPtyPreservesBracketedPasteInWin32InputMode(t *testing.T) {
 	}
 	const paste = "\x1b[200~hello\x1b[201~!"
 	window := &muxWindow{id: "@1", win32InputMode: true, pty: &winPty{pid: pid, writeFile: consoleFixture.input}}
+	t.Cleanup(window.pty.(*winPty).closeConsoleInputModeReader)
 	if vt, err := window.pty.(*winPty).virtualTerminalInputEnabled(); err != nil || !vt {
 		t.Fatalf("console input mode: VT=%v, error=%v; want VT enabled", vt, err)
 	}
@@ -129,6 +130,7 @@ func TestBundledConPtyNativeInputDoesNotLeakProtocolText(t *testing.T) {
 	}
 	window := &muxWindow{id: "@1", win32InputMode: true,
 		pty: &winPty{pid: pid, writeFile: fixture.input}}
+	t.Cleanup(window.pty.(*winPty).closeConsoleInputModeReader)
 	if vt, err := window.pty.(*winPty).virtualTerminalInputEnabled(); err != nil || vt {
 		t.Fatalf("console input mode: VT=%v, error=%v; want native input", vt, err)
 	}
@@ -138,13 +140,13 @@ func TestBundledConPtyNativeInputDoesNotLeakProtocolText(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Exercise framing split across writes, like mobile keyboard batches.
-	for _, input := range []string{"\x1b[200~hello", "\x1b", "[20", "1~", "!"} {
+	for _, input := range []string{"\x1b[200~hello\r", "\nworld\t\xf0", "\x9f\x90\x92", "\x1b", "[20", "1~", "!"} {
 		if err := server.writeWindowInput(window.id, []byte(input), true); err != nil {
 			t.Fatal(err)
 		}
 	}
 	got := string(fixture.finish(true))
-	want := "INPUT_HEX:" + hex.EncodeToString([]byte("hello!"))
+	want := "INPUT_HEX:" + hex.EncodeToString([]byte("hello\rworld\t🐒!"))
 	if !strings.Contains(got, want) {
 		t.Fatalf("console input missing %q; output=%q", want, got)
 	}
@@ -309,6 +311,14 @@ func runConPtyBracketedPasteTestHelper() {
 			nil,
 		); err != nil {
 			os.Exit(3)
+		}
+		if os.Getenv("MONKEYMUX_CONPTY_MODE_TOGGLE") == "1" && count == 1 && buffer[0] == '^' {
+			var mode uint32
+			if windows.GetConsoleMode(stdin, &mode) != nil ||
+				windows.SetConsoleMode(stdin, mode^windows.ENABLE_VIRTUAL_TERMINAL_INPUT) != nil {
+				os.Exit(4)
+			}
+			continue
 		}
 		received = append(received, buffer[:count]...)
 		if count > 0 && buffer[count-1] == '!' {
@@ -478,4 +488,71 @@ func TestConPtyFixtureCleanupTerminatesUnfinishedChild(t *testing.T) {
 	if _, err := fixture.input.Write([]byte("late input")); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("input survived cleanup: %v", err)
 	}
+}
+
+func TestConsoleInputModeReaderIsPersistentAndTracksChanges(t *testing.T) {
+	if os.Getenv("MONKEYMUX_CONPTY_BRACKETED_PASTE_TEST_HELPER") == "1" {
+		runConPtyBracketedPasteTestHelper()
+		os.Exit(0)
+	}
+	backend := loadTestConPtyBackend(t)
+	env := append(os.Environ(), conPtyBracketedPasteHelperEnvironment,
+		"MONKEYMUX_CONPTY_NATIVE_INPUT=1", "MONKEYMUX_CONPTY_MODE_TOGGLE=1")
+	write, read, console, process, pid, err := startConPtyWithBackend(
+		backend, conPtyTestCommand(t), env, "", 120, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := ownTestConPty(t, backend, write, read, console, process)
+	select {
+	case <-fixture.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper not ready")
+	}
+	pty := &winPty{pid: pid, writeFile: fixture.input}
+	t.Cleanup(pty.closeConsoleInputModeReader)
+	if vt, err := pty.virtualTerminalInputEnabled(); err != nil || vt {
+		t.Fatalf("initial VT mode = %v, %v", vt, err)
+	}
+	reader := pty.inputModeReader
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		if _, err := pty.virtualTerminalInputEnabled(); err != nil {
+			t.Fatal(err)
+		}
+		if pty.inputModeReader != reader {
+			t.Fatal("query restarted the mode reader")
+		}
+	}
+	t.Logf("50 warm mode queries: %s", time.Since(start))
+	for _, want := range []bool{true, false} {
+		if _, err := fixture.input.Write([]byte{'^'}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for {
+			vt, err := pty.virtualTerminalInputEnabled()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pty.inputModeReader != reader {
+				t.Fatal("mode change restarted reader")
+			}
+			if vt == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("VT mode did not change to %v", want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	pty.closeConsoleInputModeReader()
+	if reader.cmd.ProcessState == nil || !reader.cmd.ProcessState.Exited() {
+		t.Fatal("mode reader was not reaped on close")
+	}
+	if _, err := fixture.input.Write([]byte{'!'}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.finish(true)
 }
