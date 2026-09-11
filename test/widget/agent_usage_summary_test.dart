@@ -170,12 +170,34 @@ void main() {
     );
     expect(find.text('Cursor · Usage restricted'), findsOneWidget);
     expect(find.text(r'Nous balance · $12.34 remaining'), findsOneWidget);
+    expect(find.text('Reset time not reported'), findsNothing);
     expect(
       find.textContaining('Anthropic · Usage unavailable'),
       findsOneWidget,
     );
     expect(find.textContaining('%'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('balance reset hints appear only when a reset is supplied', (
+    tester,
+  ) async {
+    await pump(
+      tester,
+      AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [
+          AgentUsageWindow(
+            label: 'Expiring credits',
+            remaining: 5,
+            resetsAt: now.add(const Duration(hours: 1)),
+          ),
+          const AgentUsageWindow(label: 'Weekly', usedPercent: 25),
+        ],
+      ),
+    );
+    expect(find.textContaining('Resets '), findsOneWidget);
+    expect(find.text('Reset time not reported'), findsOneWidget);
   });
 
   testWidgets(

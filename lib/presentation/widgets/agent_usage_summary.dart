@@ -133,7 +133,13 @@ class AgentUsageSummary extends StatelessWidget {
                         '${_number(window.usedPercent!)}% used including overage',
                         style: style,
                       ),
-                    if (!window.unlimited)
+                    if (!window.unlimited &&
+                        (window.remaining == null ||
+                            window.usedPercent != null ||
+                            window.used != null ||
+                            window.limit != null ||
+                            window.restricted != null ||
+                            window.resetsAt != null))
                       Text(
                         _resetLabel(context, window.resetsAt, clock),
                         style: style,

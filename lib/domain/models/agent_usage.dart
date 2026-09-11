@@ -75,7 +75,7 @@ class AgentUsageWindow {
   final String? unit;
 }
 
-/// In-memory account usage snapshot, shared by an agent's CLI and adapters.
+/// In-memory account usage snapshot for an agent CLI.
 class AgentUsage {
   /// Creates a usage snapshot.
   const AgentUsage({
