@@ -91,6 +91,65 @@ void main() {
     verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
   });
 
+  for (final addAgent in [true, false]) {
+    test(
+      'queues and coalesces usage after ${addAgent ? 'an install' : 'a path change'}',
+      () async {
+        final client = _MockSshClient();
+        final opening = Completer<SSHSession>();
+        final commands = <String>[];
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          commands.add(call.positionalArguments.first as String);
+          if (commands.length == 1) return opening.future;
+          return _execOutput(
+            '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}\n'
+            '__monkeyssh_usage__={"id":"codex","status":"signInRequired"}',
+          );
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        final original = AgentRuntimeInfo(
+          definition: agentCliRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'cli:claude',
+          ),
+          status: AgentRuntimeStatus.installed,
+          executablePath: '/bin/claude',
+        );
+        final changed = AgentRuntimeInfo(
+          definition: agentCliRuntimeDefinitions.firstWhere(
+            (d) => d.id == (addAgent ? 'cli:codex' : 'cli:claude'),
+          ),
+          status: AgentRuntimeStatus.installed,
+          executablePath: '/new/agent',
+        );
+        final first = service.readUsage(session, [original]);
+        await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
+        final selection = [if (addAgent) original, changed];
+        final second = service.readUsage(session, selection);
+        final third = service.readUsage(session, selection.reversed.toList());
+        await pumpEventQueue();
+        expect(commands, hasLength(1));
+        opening.complete(
+          _execOutput(
+            '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}',
+          ),
+        );
+        final results = await Future.wait([first, second, third]);
+        expect(commands, hasLength(2));
+        expect(results[1], same(results[2]));
+        expect(results[1].keys, contains(changed.definition.id));
+        final match = RegExp(
+          "'([A-Za-z0-9+/=]+)' 2>/dev/null;",
+        ).firstMatch(commands.last)!;
+        final requested =
+            jsonDecode(utf8.decode(base64.decode(match[1]!))) as Map;
+        expect(requested[addAgent ? 'codex' : 'claude'], '/new/agent');
+      },
+    );
+  }
+
   for (final id in ['pi', 'antigravity']) {
     test(
       '$id standalone ACP reads usage and prefers CLI in either row order',

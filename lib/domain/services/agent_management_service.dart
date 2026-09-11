@@ -576,7 +576,8 @@ class AgentManagementService {
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
   _runtimeCache = {};
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
-  final Map<int, Future<Map<String, AgentUsage>>> _inFlightUsageChecks = {};
+  final Map<int, ({String selection, Future<Map<String, AgentUsage>> future})>
+  _inFlightUsageChecks = {};
   final Map<int, ({DateTime at, Map<String, AgentUsage> values})> _usageCache =
       {};
 
@@ -845,16 +846,36 @@ class AgentManagementService {
     SshSession session,
     List<AgentRuntimeInfo> runtimes,
   ) async {
+    final snapshot = List<AgentRuntimeInfo>.of(runtimes);
     if (!await _canManageAgents()) return const {};
-    final existing = _inFlightUsageChecks[session.connectionId];
-    if (existing != null) return existing;
+    final selectedRows = [
+      for (final runtime in snapshot)
+        if (runtime.status == AgentRuntimeStatus.installed ||
+            runtime.status == AgentRuntimeStatus.updateAvailable)
+          jsonEncode([runtime.definition.id, runtime.executablePath]),
+    ]..sort();
+    final selection = jsonEncode(selectedRows);
+    // Installs can change the selection while a probe is running. Queue that
+    // selection, then re-check so matching waiters still share the follow-up.
+    while (true) {
+      final existing = _inFlightUsageChecks[session.connectionId];
+      if (existing == null) break;
+      if (existing.selection == selection) return existing.future;
+      await existing.future;
+    }
     late final Future<Map<String, AgentUsage>> check;
-    check = _readUsage(session, runtimes).whenComplete(() {
-      if (identical(_inFlightUsageChecks[session.connectionId], check)) {
+    check = _readUsage(session, snapshot).whenComplete(() {
+      if (identical(
+        _inFlightUsageChecks[session.connectionId]?.future,
+        check,
+      )) {
         _inFlightUsageChecks.remove(session.connectionId);
       }
     });
-    _inFlightUsageChecks[session.connectionId] = check;
+    _inFlightUsageChecks[session.connectionId] = (
+      selection: selection,
+      future: check,
+    );
     return check;
   }
 

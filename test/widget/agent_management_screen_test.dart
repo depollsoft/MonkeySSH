@@ -234,6 +234,38 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('empty usage checks announce completion', (tester) async {
+    final semantics = tester.ensureSemantics();
+    runtimes = [
+      for (final definition in agentCliRuntimeDefinitions)
+        AgentRuntimeInfo(
+          definition: definition,
+          status: AgentRuntimeStatus.notInstalled,
+        ),
+    ];
+    final pending = Completer<Map<String, AgentUsage>>();
+    when(
+      () => service.readUsage(session, any()),
+    ).thenAnswer((_) => pending.future);
+    await pumpScreen(tester);
+    final announcement = find.byKey(const ValueKey('agent-usage-announcement'));
+    expect(
+      tester.getSemantics(announcement).label,
+      contains('Checking account usage.'),
+    );
+    pending.complete({});
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Semantics>(announcement).properties.liveRegion,
+      isTrue,
+    );
+    expect(
+      tester.getSemantics(announcement).label,
+      contains('Account usage checks complete.'),
+    );
+    semantics.dispose();
+  });
+
   for (final id in ['cli:antigravity', 'cli:cursor', 'cli:grok']) {
     testWidgets('$id offers Install and runs the managed action', (
       tester,

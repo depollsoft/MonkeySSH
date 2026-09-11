@@ -516,7 +516,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                         liveRegion: true,
                         label: _checkingUsage
                             ? 'Checking account usage.'
-                            : _usage.isNotEmpty
+                            : _usageGeneration > 0
                             ? 'Account usage checks complete. Review each agent for results.'
                             : null,
                         child: Row(
