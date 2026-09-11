@@ -622,6 +622,56 @@ void main() {
   });
 
   group('MonkeyMux agent metadata', () {
+    for (final fullList in [false, true]) {
+      test('Codex title survives repeated helper updates, list=$fullList', () {
+        const sep = tmuxWindowFieldSeparator;
+        const snapshot = {
+          'index': 3,
+          'id': '@7',
+          'panePid': 42,
+          'name': 'codex',
+          'active': true,
+          'currentCommand': 'codex',
+          'currentPath': '/work/MonkeySSH',
+          'paneTitle': 'Show agent usage limits | MonkeySSH',
+          'agentTool': 'codex',
+          'agentSessionId': 'codex-session',
+          'agentSessionIdentityExact': true,
+        };
+        final window = parseMonkeyMuxWindowSnapshotForTesting(snapshot)!;
+        var windows = [window];
+        for (var refresh = 0; refresh < 3; refresh++) {
+          windows = applyMonkeyMuxAgentMetadataForTesting(
+            windows,
+            'codex${sep}codex-session${sep}501${sep}42${sep}high${sep}Show agent usage limits\n',
+          );
+          final title = windows.single.displayTitle;
+          final subtitle = windows.single.secondaryTitle;
+          final handle = windows.single.handleTitle;
+          expect(title, 'Show agent usage limits');
+          expect(subtitle, contains('MonkeySSH'));
+
+          final updated = parseMonkeyMuxWindowSnapshotForTesting({
+            ...snapshot,
+            'flags': '#',
+            'lastActivityEpochSeconds': refresh + 1,
+          })!;
+          windows = applyTmuxWindowChangeEvent(
+            windows,
+            fullList
+                ? TmuxWindowListEvent([updated])
+                : TmuxWindowSnapshotEvent(updated),
+          );
+          expect(windows.single.displayTitle, title);
+          expect(windows.single.secondaryTitle, subtitle);
+          expect(windows.single.handleTitle, handle);
+          expect(windows.single.activeAgentSessionId, 'codex-session');
+          expect(windows.single.hasAlert, isTrue);
+          expect(windows.single.lastActivityEpochSeconds, refresh + 1);
+        }
+      });
+    }
+
     test('refreshes metadata for every supported agent pane', () {
       const windows = [
         TmuxWindow(
