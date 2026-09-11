@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
+import 'monkeymux_windows_cleanup.dart';
 import 'remote_file_service.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
@@ -627,6 +628,13 @@ class MonkeyMuxInstallerService {
         r'''  '"%~dp0..\..\.monkeyssh\bin\monkeymux\%MONKEYMUX_TARGET%" %*',''',
         "  'exit /b %errorlevel%'",
         ')',
+        buildMonkeyMuxWindowsCleanupScript(
+          installRoot: sftpPathToWindowsShellPath(
+            joinRemotePath(homeDirectory, '.monkeyssh/bin/monkeymux'),
+          ),
+          executablePath: executablePath,
+          platform: platform,
+        ),
         "Write-Output 'MONKEYMUX_LAUNCHER_MANAGED'",
       ].join('\n');
       final output = await _runRawRemoteCommand(
@@ -639,6 +647,20 @@ class MonkeyMuxInstallerService {
           !output.contains('MONKEYMUX_LAUNCHER_PRESERVED')) {
         throw const MonkeyMuxInstallException(
           'Could not install the MonkeyMux command launcher.',
+        );
+      }
+      final cleanup = RegExp(
+        r'MONKEYMUX_CLEANUP:(\d+):(\d+)',
+      ).firstMatch(output);
+      if (cleanup != null) {
+        DiagnosticsLogService.instance.info(
+          'monkeymux.install',
+          'old_builds_cleanup',
+          fields: {
+            'connectionId': session.connectionId,
+            'removedCount': int.tryParse(cleanup[1]!),
+            'retainedCount': int.tryParse(cleanup[2]!),
+          },
         );
       }
     } else {
