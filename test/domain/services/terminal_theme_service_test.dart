@@ -211,6 +211,25 @@ void main() {
   });
 
   group('TerminalAppThemeOverrideNotifier', () {
+    test(
+      'late cleanup preserves a replacement owner and tolerates disposal',
+      () {
+        final container = ProviderContainer();
+        final notifier = container.read(
+          terminalAppThemeOverrideProvider.notifier,
+        );
+        final oldOwner = Object();
+        final newOwner = Object();
+        notifier
+          ..activeOverride = TerminalAppThemeOverride(owner: oldOwner)
+          ..activeOverride = TerminalAppThemeOverride(owner: newOwner)
+          ..clearForOwner(oldOwner);
+        expect(notifier.activeOverride?.owner, same(newOwner));
+        container.dispose();
+        expect(() => notifier.clearForOwner(newOwner), returnsNormally);
+      },
+    );
+
     test('does not notify for repeated equivalent overrides', () {
       final container = ProviderContainer();
       addTearDown(container.dispose);

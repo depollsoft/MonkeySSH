@@ -13591,7 +13591,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _clearAppThemeOverride();
+    // Provider notifications must wait until the widget tree finishes unmounting.
+    // The owner check preserves any replacement terminal's override.
+    scheduleMicrotask(_clearAppThemeOverride);
     _sharedClipboardSubscription.close();
     _sharedClipboardLocalReadSubscription.close();
     _terminalWakeLockSubscription.close();

@@ -974,8 +974,21 @@ class StoreDemoEnvironment:
         self._monkeymux_send_keys('claude', 'C-l')
         time.sleep(2)
         self._drive_claude_to_ready_prompt()
-        time.sleep(3)
-        self._assert_claude_pane_privacy_safe()
+        self._monkeymux_send_literal(
+            'claude',
+            'Explain how MonkeyMux keeps an SSH workspace useful when a phone '
+            'loses its connection. Use two short bullets, under 40 words total. '
+            'Do not use tools or read files.',
+        )
+        self._monkeymux_send_keys('claude', 'Enter')
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            text = self._capture_visible_pane('claude')
+            if _claude_response_ready(text):
+                self._assert_claude_pane_privacy_safe()
+                return
+            time.sleep(1)
+        raise RuntimeError('Claude Code did not finish its live store-demo response.')
 
     def _drive_claude_to_ready_prompt(self) -> None:
         deadline = time.time() + 90
@@ -1546,6 +1559,15 @@ def _claude_prompt_ready(text: str) -> bool:
     return _visible_text_contains_marker(text, 'Claude Code') and (
         _visible_text_contains_marker(text, 'shortcuts')
         or ('❯' in text and _visible_text_contains_marker(text, 'Claude Code Workspace'))
+    )
+
+
+def _claude_response_ready(text: str) -> bool:
+    return (
+        _claude_prompt_ready(text)
+        and any(marker in text for marker in ('⏺', '●'))
+        and _visible_text_contains_marker(text, '· done')
+        and not _visible_text_contains_marker(text.lower(), 'esc to interrupt')
     )
 
 

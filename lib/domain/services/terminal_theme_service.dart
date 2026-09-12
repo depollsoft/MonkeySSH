@@ -60,7 +60,7 @@ class TerminalAppThemeOverrideNotifier
 
   /// Clears the active terminal app-theme override if [owner] created it.
   void clearForOwner(Object owner) {
-    if (identical(state?.owner, owner)) {
+    if (ref.mounted && identical(state?.owner, owner)) {
       state = null;
     }
   }

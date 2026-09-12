@@ -52,6 +52,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/domain/services/terminal_theme_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
@@ -3391,6 +3392,47 @@ void main() {
 
       expect(sftpOpenCount, 2);
     });
+
+    testWidgets(
+      'clears the host app theme after terminal unmount without interrupting cleanup',
+      (tester) async {
+        session.terminalThemeLightId =
+            monkey_themes.TerminalThemes.githubLightDefault.id;
+        final visible = ValueNotifier(true);
+        addTearDown(visible.dispose);
+        await tester.pumpWidget(
+          buildScreen(
+            child: Consumer(
+              builder: (context, ref, _) {
+                ref.watch(terminalAppThemeOverrideProvider);
+                return MaterialApp(
+                  home: ValueListenableBuilder<bool>(
+                    valueListenable: visible,
+                    builder: (_, show, _) => show
+                        ? TerminalScreen(
+                            hostId: host.id,
+                            connectionId: session.connectionId,
+                          )
+                        : const SizedBox(),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(TerminalScreen)),
+        );
+        expect(container.read(terminalAppThemeOverrideProvider), isNotNull);
+        visible.value = false;
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(tester.takeException(), isNull);
+        expect(container.read(terminalAppThemeOverrideProvider), isNull);
+      },
+    );
 
     testWidgets('shows jump host indicator for tunneled sessions', (
       tester,
