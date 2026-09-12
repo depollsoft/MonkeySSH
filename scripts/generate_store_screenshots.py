@@ -575,7 +575,6 @@ class StoreDemoEnvironment:
     def _setup_monkeymux(self) -> None:
         self._prepare_demo_dir()
         self._teardown_monkeymux()
-        dummy_anthropic_key = 'sk' + '-ant-api03-' + ('0' * 64) + '-dummy'
         self._write_pane_script(
             'copilot',
             f"""
@@ -597,9 +596,10 @@ class StoreDemoEnvironment:
               BASH_SILENCE_DEPRECATION_WARNING=1 \\
               CLAUDE_CODE_HIDE_ACCOUNT_INFO=1 \\
               CLAUDE_CODE_HIDE_CWD=1 \\
-              ANTHROPIC_API_KEY={dummy_anthropic_key} \\
               {self._shell_quote(self._claude)} \\
-              --bare --model sonnet \\
+              --model sonnet \\
+              --settings '{{"disableAllHooks":true}}' \\
+              --strict-mcp-config --disable-slash-commands \\
               --name 'Claude Code Workspace'
             """,
         )
@@ -973,7 +973,7 @@ class StoreDemoEnvironment:
         self._drive_claude_to_ready_prompt()
         self._monkeymux_send_keys('claude', 'C-l')
         time.sleep(2)
-        self._wait_for_visible_text('claude', ['shortcuts'])
+        self._drive_claude_to_ready_prompt()
         time.sleep(3)
         self._assert_claude_pane_privacy_safe()
 
@@ -981,10 +981,14 @@ class StoreDemoEnvironment:
         deadline = time.time() + 90
         while time.time() < deadline:
             text = self._capture_visible_pane('claude')
-            if _visible_text_contains_marker(text, 'shortcuts') and (
-                _visible_text_contains_marker(text, 'Claude Code')
-                or _visible_text_contains_marker(text, 'Claude Code Workspace')
-            ):
+            if any(_visible_text_contains_marker(text.lower(), marker) for marker in (
+                'authentication rejected', 'invalid api key', 'not logged in',
+            )):
+                raise RuntimeError(
+                    'Claude Code capture authentication failed; check the CLI login '
+                    'and any ANTHROPIC_API_KEY override before retrying.',
+                )
+            if _claude_prompt_ready(text):
                 return
             if _visible_text_contains_marker(text, 'Choose the text style'):
                 self._monkeymux_send_keys('claude', 'Enter')
@@ -1528,6 +1532,21 @@ def _visible_text_contains_marker(text: str, marker: str) -> bool:
     compact_text = re.sub(r'\s+', '', text)
     compact_marker = re.sub(r'\s+', '', marker)
     return compact_marker in compact_text
+
+
+def _claude_prompt_ready(text: str) -> bool:
+    # Claude 2.1.270 replaced the shortcuts footer with an agent-navigation
+    # hint. Require the application header and an input/footer marker, while
+    # excluding setup screens that also mention Claude Code.
+    if any(_visible_text_contains_marker(text, marker) for marker in (
+        'Yes, I trust this folder', 'Choose the text style',
+        'Detected a custom API key',
+    )):
+        return False
+    return _visible_text_contains_marker(text, 'Claude Code') and (
+        _visible_text_contains_marker(text, 'shortcuts')
+        or ('❯' in text and _visible_text_contains_marker(text, 'Claude Code Workspace'))
+    )
 
 
 def _visible_text_contains_marker_group(
