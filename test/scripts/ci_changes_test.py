@@ -28,6 +28,19 @@ class ClassificationTest(unittest.TestCase):
                 result = self.assert_platforms([path], [])
                 self.assertTrue(result['run_check'])
 
+    def test_monkeymux_cleanup_changes_run_windows_coverage(self):
+        for path in [
+            'lib/domain/services/monkeymux_installer_service.dart',
+            'lib/domain/services/monkeymux_windows_cleanup.dart',
+            'lib/domain/services/windows_remote_powershell.dart',
+            'test/domain/services/monkeymux_installer_service_test.dart',
+            'test/domain/services/monkeymux_windows_cleanup_test.dart',
+        ]:
+            with self.subTest(path=path):
+                result = self.assert_platforms([path], ['windows'])
+                self.assertTrue(result['run_check'])
+                self.assertFalse(result['go'])
+
     def test_release_and_workflow_tooling_do_not_require_flutter(self):
         for path in [
             '.github/workflows/security.yml', '.github/actions/deployment-status/action.yml',

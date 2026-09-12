@@ -40,6 +40,22 @@ The workflow artifact is only an internal build handoff. The final Flutter
 application still contains all six helpers, preserving installation on remote
 hosts without a separate web download.
 
+## Windows host cleanup
+
+Windows helpers install under
+`~/.monkeyssh/bin/monkeymux/<version>/<platform>/<sha256>/monkeymux.exe`, so
+updating does not require deleting an executable used by a running helper.
+After a verified install or reuse updates the managed command launcher, the
+installer records the build's use in `.last-used` and prunes older builds for
+that Windows platform, including the legacy layout without a checksum folder.
+
+Cleanup keeps the current build, builds installed or used within seven days,
+and executables Windows refuses to delete because they are running or locked.
+Locked copies are retried on a later connection. It skips linked paths and
+unrecognized files, removes only empty directories, and never blocks a
+connection if cleanup fails. Custom launchers are preserved and skip cleanup.
+This policy applies to Windows hosts; POSIX version directories are retained.
+
 ## One-time Git history cleanup
 
 Removing the generated files in an ordinary commit stops future repository

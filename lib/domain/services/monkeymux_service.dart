@@ -59,14 +59,16 @@ final monkeyMuxServiceProvider = Provider<MonkeyMuxService>(
       MonkeyMuxService(installer: ref.watch(monkeyMuxInstallerServiceProvider)),
 );
 
-/// How the helper should handle an already-running server with an older
-/// version when attaching to a MonkeyMux session.
+/// How the helper should handle an already-running MonkeyMux server on attach.
 enum MonkeyMuxServerUpdatePolicy {
   /// Keep the current server and suppress terminal prompts.
   never('never'),
 
   /// Update without a terminal prompt.
-  always('always');
+  always('always'),
+
+  /// Reload without a terminal prompt, even when the version matches.
+  force('force');
 
   const MonkeyMuxServerUpdatePolicy(this.cliValue);
 

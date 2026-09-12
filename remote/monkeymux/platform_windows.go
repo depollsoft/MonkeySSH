@@ -715,6 +715,8 @@ func killCommandProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+func processGroupAlive(pgid int) bool { return false }
+
 // processIDAlive reports whether a process with this pid exists. An access
 // error means it exists but cannot be opened by this caller, which is still
 // evidence that the pid is taken; only a missing process counts as gone.
@@ -784,21 +786,27 @@ func inspectProcess(pid int) processSnapshot {
 	return snapshot
 }
 
-func terminateProcessID(pid int) {
-	if pid <= 0 {
-		return
+// Unix pane process groups have no ConPTY equivalent. Server termination uses
+// taskkill /T below; separate cleanup of orphaned panes is currently a no-op.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replacementPaneGroup {
+	return nil
+}
+
+func reapReplacementPaneGroups(panes []replacementPaneGroup) {}
+
+// A failed taskkill may have only partially stopped the tree. A later server
+// exit alone cannot prove that its ConPTY agents were terminated as well.
+const allowExitAfterFailedTermination = false
+
+func terminateProcessID(pid int, stillOwner func() bool) bool {
+	if pid <= 0 || !stillOwner() {
+		return false
 	}
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprint(pid))
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := kill.Run(); err == nil {
-		return
-	}
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
-	if err != nil {
-		return
-	}
-	defer windows.CloseHandle(handle)
-	_ = windows.TerminateProcess(handle, 1)
+	// A successful tree termination is required. TerminateProcess on just the
+	// helper can orphan its agents and leave their session locks held.
+	return kill.Run() == nil
 }
 
 const supportsExplicitForegroundResizeSignal = false
@@ -807,6 +815,10 @@ const prefersVerticalForegroundRedrawResize = true
 // signalForegroundResize is a no-op on Windows: ResizePseudoConsole already
 // notifies the attached child of size changes.
 var signalForegroundResize = func(processGroup int) {}
+
+// killProcessGroup is a no-op on Windows: the window's process handle covers
+// the whole ConPTY job, so muxProcess.Kill already reaches every child.
+func killProcessGroup(processGroup int) {}
 
 // attachOutputWriter wraps the attach process's stdout so win32-input-mode
 // requests emitted by the window's child are hidden from the SSH server's own
@@ -1045,3 +1057,6 @@ func isStaleUnixSocketError(err error) bool {
 	return errors.Is(err, windows.WSAECONNREFUSED) ||
 		errors.Is(err, windows.ERROR_CONNECTION_REFUSED)
 }
+
+// ConPTY has no Unix slave device path for detached hooks.
+func writeAgentIdentityMarker(marker string) {}

@@ -455,6 +455,247 @@ void main() {
     });
   }
 
+  test(
+    'Windows launcher command runs through cmd and prunes unused builds',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'monkeymux-launcher-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final home = '${directory.path}/home’s folder';
+      final harness = _InstallHarness(
+        windows: true,
+        remote: _FakeRemoteFileService(
+          homeDirectory: '/${home.replaceAll(r'\', '/')}',
+        )..uploaded = true,
+      );
+      when(
+        () => harness.client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        final command = invocation.positionalArguments.single as String;
+        harness.commands.add(command);
+        return _execSession(
+          _windowsOutputForCommand(
+            command,
+            expectedSha: harness.digest,
+            remoteFileService: harness.remote,
+          ),
+        );
+      });
+      final root = '$home/.monkeyssh/bin/monkeymux';
+      final current = File(
+        '$root/9.9.9/windows-amd64/${harness.digest}/monkeymux.exe',
+      );
+      await current.parent.create(recursive: true);
+      await current.writeAsBytes(harness.binary);
+      final previous = File('$root/0.1.0/windows-amd64/monkeymux.exe');
+      await previous.parent.create(recursive: true);
+      await previous.writeAsBytes(harness.binary);
+      await previous.setLastModified(
+        DateTime.now().subtract(const Duration(days: 30)),
+      );
+      await harness.installer.ensureInstalled(harness.session);
+      final command = harness.commands.singleWhere(
+        (command) => command.startsWith('powershell '),
+      );
+      expect(command.length, lessThan(7500));
+      final batch = File('${directory.path}/install.cmd');
+      await batch.writeAsString('@echo off\r\n$command\r\n');
+      final result = await Process.run('cmd.exe', [
+        '/d',
+        '/c',
+        batch.path,
+      ]).timeout(const Duration(seconds: 20));
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      expect(result.stdout, contains('MONKEYMUX_LAUNCHER_MANAGED'));
+      expect(result.stdout, contains('MONKEYMUX_CLEANUP:1:0'));
+      expect(previous.existsSync(), isFalse);
+      expect(current.existsSync(), isTrue);
+      final pointer = File('$home/.local/bin/.monkeymux-current');
+      expect(
+        await pointer.readAsString(),
+        contains('9.9.9\\windows-amd64\\${harness.digest}\\monkeymux.exe'),
+      );
+
+      // A custom launcher must leave both its pointer and old builds alone.
+      final launcher = File('$home/.local/bin/monkeymux.cmd');
+      await launcher.writeAsString('@REM custom launcher\r\n');
+      await previous.parent.create(recursive: true);
+      await previous.writeAsBytes(harness.binary);
+      await previous.setLastModified(
+        DateTime.now().subtract(const Duration(days: 30)),
+      );
+      final custom = await Process.run('cmd.exe', [
+        '/d',
+        '/c',
+        batch.path,
+      ]).timeout(const Duration(seconds: 20));
+      expect(custom.exitCode, 0, reason: '${custom.stdout}\n${custom.stderr}');
+      expect(custom.stdout, contains('MONKEYMUX_LAUNCHER_PRESERVED'));
+      expect(custom.stdout, isNot(contains('MONKEYMUX_CLEANUP')));
+      expect(await launcher.readAsString(), '@REM custom launcher\r\n');
+      expect(previous.existsSync(), isTrue);
+    },
+    skip: !Platform.isWindows,
+  );
+
+  test(
+    'Windows installs beside locked builds and reuses the verified copy',
+    () async {
+      final harness = _InstallHarness(
+        windows: true,
+        remote: _FakeRemoteFileService(homeDirectory: '/C:/Users/proof’s'),
+      );
+      const directory =
+          '/C:/Users/proof’s/.monkeyssh/bin/monkeymux/9.9.9/windows-amd64';
+      final target = '$directory/${harness.digest}/monkeymux.exe';
+      final locked = {
+        '$directory/monkeymux.exe',
+        '$directory/${'a' * 64}/monkeymux.exe',
+      };
+      final files = {...locked};
+      when(() => harness.sftp.remove(any())).thenAnswer((invocation) async {
+        final path = invocation.positionalArguments.single as String;
+        if (locked.contains(path)) {
+          return Future<void>.error(
+            SftpStatusError(
+              SftpStatusCode.permissionDenied,
+              'running executable',
+            ),
+          );
+        }
+        if (!files.remove(path)) {
+          return Future<void>.error(
+            SftpStatusError(SftpStatusCode.noSuchFile, 'missing'),
+          );
+        }
+      });
+      when(() => harness.sftp.rename(any(), any())).thenAnswer((
+        invocation,
+      ) async {
+        final destination = invocation.positionalArguments[1] as String;
+        expect(destination, target);
+        expect(files.contains(destination), isFalse);
+        files.add(destination);
+      });
+      when(
+        () => harness.client.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        final command = invocation.positionalArguments.single as String;
+        harness.commands.add(command);
+        return _execSession(
+          _windowsOutputForCommand(
+            command,
+            expectedSha: harness.digest,
+            remoteFileService: harness.remote,
+          ),
+        );
+      });
+
+      final installed = await harness.installer.ensureInstalled(
+        harness.session,
+        confirmInstall: (_) async => true,
+      );
+      expect(installed.installedDuringCall, isTrue);
+      expect(files, {...locked, target});
+      expect(harness.remote.uploadCount, 1);
+      harness.installer.clearCache(harness.session.connectionId);
+      final reused = await harness.installer.ensureInstalled(harness.session);
+      expect(reused.executablePath, installed.executablePath);
+      expect(reused.installedDuringCall, isFalse);
+      expect(harness.remote.uploadCount, 1);
+      final launcher = decodeEncodedPowerShell(harness.commands.last);
+      expect(
+        launcher,
+        contains('9.9.9\\windows-amd64\\${harness.digest}\\monkeymux.exe'),
+      );
+    },
+  );
+
+  for (final failWith in ['confirmation', 'declined', 'upload']) {
+    test(
+      'passive install stops after $failWith and explicit retry recovers',
+      () async {
+        final harness = _InstallHarness();
+        if (failWith == 'upload') {
+          harness.finalize = (_) async => '__monkeymux_exec_done__:1\n';
+        }
+        final first = harness.installer.ensureInstalled(
+          harness.session,
+          confirmInstall: failWith == 'confirmation'
+              ? null
+              : (_) async => failWith != 'declined',
+        );
+        await expectLater(first, throwsA(isA<MonkeyMuxInstallException>()));
+        final commandCount = harness.commands.length;
+        for (var i = 0; i < 3; i++) {
+          await expectLater(
+            harness.installer.ensureInstalled(harness.session),
+            throwsA(isA<MonkeyMuxInstallException>()),
+          );
+        }
+        expect(harness.commands, hasLength(commandCount));
+        harness.finalize = null;
+        harness.remote.uploaded = false;
+        var prompted = false;
+        final recovered = await harness.installer.ensureInstalled(
+          harness.session,
+          confirmInstall: (_) async {
+            prompted = true;
+            return true;
+          },
+        );
+        expect(prompted, isTrue);
+        expect(recovered.installedDuringCall, isTrue);
+        expect(
+          await harness.installer.ensureInstalled(harness.session),
+          same(recovered),
+        );
+      },
+    );
+  }
+
+  test('disconnect clears passive install failure', () async {
+    final harness = _InstallHarness();
+    await expectLater(
+      harness.installer.ensureInstalled(harness.session),
+      throwsA(isA<MonkeyMuxInstallConfirmationRequiredException>()),
+    );
+    final commandCount = harness.commands.length;
+    harness.installer.clearCache(harness.session.connectionId);
+    await expectLater(
+      harness.installer.ensureInstalled(harness.session),
+      throwsA(isA<MonkeyMuxInstallConfirmationRequiredException>()),
+    );
+    expect(harness.commands.length, greaterThan(commandCount));
+  });
+
+  test(
+    'passive probe retries transient channel failure for an existing helper',
+    () async {
+      final harness = _InstallHarness(
+        remote: _FakeRemoteFileService()..uploaded = true,
+      );
+      var attempts = 0;
+      when(harness.client.sftp).thenAnswer((_) async {
+        if (++attempts == 1) {
+          throw TimeoutException('temporary channel failure');
+        }
+        return harness.sftp;
+      });
+      await expectLater(
+        harness.installer.ensureInstalled(harness.session),
+        throwsA(isA<TimeoutException>()),
+      );
+      final recovered = await harness.installer.ensureInstalled(
+        harness.session,
+      );
+      expect(recovered.installedDuringCall, isFalse);
+      expect(attempts, 2);
+      expect(harness.remote.uploadCount, 0);
+    },
+  );
+
   for (final failure in [
     null,
     'checksum',
@@ -554,7 +795,7 @@ void main() {
         expect(
           installation.executablePath,
           r'C:\Users\proof’s\.monkeyssh\bin\monkeymux\9.9.9\windows-amd64\'
-          'monkeymux.exe',
+          '$expectedSha\\monkeymux.exe',
         );
         expect(installation.installedDuringCall, isTrue);
         expect(remoteFileService.uploadCount, 1);
@@ -562,13 +803,14 @@ void main() {
         expect(
           renames.single.$2,
           '/C:/Users/proof’s/.monkeyssh/bin/monkeymux/9.9.9/windows-amd64/'
-          'monkeymux.exe',
+          '$expectedSha/monkeymux.exe',
         );
         final launcherCommand = commands.singleWhere(
           (command) =>
               command.contains('powershell -NoProfile -NonInteractive'),
         );
         final launcherScript = decodeEncodedPowerShell(launcherCommand);
+        expect(launcherCommand.length, lessThan(7500));
         for (final matcher in [
           contains(r'.local\bin\monkeymux.cmd'),
           contains(r"'C:\Users\proof’’s\.local\bin\monkeymux.cmd'"),
@@ -576,7 +818,7 @@ void main() {
           contains('%~dp0.monkeymux-current'),
           contains(r'%~dp0..\..\.monkeyssh\bin\monkeymux'),
           isNot(contains('%USERPROFILE%')),
-          contains(r'9.9.9\windows-amd64\monkeymux.exe'),
+          contains('9.9.9\\windows-amd64\\$expectedSha\\monkeymux.exe'),
           contains('[System.IO.File]::Replace'),
           contains(r'$exists = Test-Path -LiteralPath $path'),
           contains(r'if ($exists -and $first -ne $managedMarker)'),

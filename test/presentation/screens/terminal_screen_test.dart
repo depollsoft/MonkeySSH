@@ -839,6 +839,53 @@ TextEditingValue _editingValue(String text, {required int selectionOffset}) =>
     );
 
 void main() {
+  group('forced MonkeyMux reload', () {
+    test('only preview builds show the menu action', () {
+      for (final previewBuild in [false, true]) {
+        final state = resolveForceMonkeyMuxReloadMenuState(
+          previewBuild: previewBuild,
+          backend: RemoteMuxBackend.monkeyMux,
+          connected: true,
+          hasLiveControlChannel: true,
+        );
+        expect(state.visible, previewBuild);
+        expect(state.enabled, previewBuild);
+      }
+    });
+
+    test('requires a connected MonkeyMux session with live control', () {
+      for (final backend in RemoteMuxBackend.values) {
+        for (final connected in [false, true]) {
+          for (final liveControl in [false, true]) {
+            final state = resolveForceMonkeyMuxReloadMenuState(
+              previewBuild: true,
+              backend: backend,
+              connected: connected,
+              hasLiveControlChannel: liveControl,
+            );
+            expect(state.visible, isTrue);
+            expect(
+              state.enabled,
+              backend == RemoteMuxBackend.monkeyMux && connected && liveControl,
+            );
+          }
+        }
+      }
+    });
+
+    test('consumes force exactly once for the requested workspace', () {
+      final request = MonkeyMuxForcedReloadRequest('work');
+      expect(request.consumePolicy('other'), isNull);
+      expect(request.consumePolicy('work'), MonkeyMuxServerUpdatePolicy.force);
+      expect(request.consumePolicy('work'), isNull);
+    });
+
+    test('failed or cancelled reconnect cannot force a later attach', () {
+      final request = MonkeyMuxForcedReloadRequest('work')..cancel();
+      expect(request.consumePolicy('work'), isNull);
+    });
+  });
+
   setUpAll(() {
     registerFallbackValue(const SSHPtyConfig());
     registerFallbackValue(const HostsCompanion());

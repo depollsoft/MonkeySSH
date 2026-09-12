@@ -78,6 +78,9 @@ func (p *unixPty) foregroundProcessGroup() int {
 // unixProcess wraps the child process attached to a pty master.
 type unixProcess struct {
 	cmd *exec.Cmd
+	// Reserve the leader's PID while shutdown signals its process group.
+	reapMu  sync.Mutex
+	reaping bool
 }
 
 func (p *unixProcess) Pid() int {
@@ -88,13 +91,30 @@ func (p *unixProcess) Pid() int {
 }
 
 func (p *unixProcess) Wait() error {
+	return p.waitWithExitObserver(awaitWindowProcessExit)
+}
+
+func (p *unixProcess) waitWithExitObserver(observeExit func(int) bool) error {
 	if p.cmd == nil {
 		return nil
+	}
+	// An observer error is not proof of exit. Keep group signaling available
+	// during the blocking Wait below unless exit was actually observed.
+	if supportsWindowExitObservation && p.cmd.Process != nil && observeExit(p.cmd.Process.Pid) {
+		p.reapMu.Lock()
+		p.reaping = true
+		p.reapMu.Unlock()
 	}
 	return p.cmd.Wait()
 }
 
 func (p *unixProcess) Hangup() {
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaping {
+		_ = p.cmd.Process.Signal(syscall.SIGHUP)
+		return
+	}
 	signalCommandProcessGroup(p.cmd, syscall.SIGHUP)
 }
 
@@ -104,14 +124,29 @@ func (p *unixProcess) Kill() {
 
 // startWindow launches cmd attached to a new pty sized to cols x rows.
 func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) {
-	file, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-	})
+	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return nil, nil, err
 	}
-	return &unixPty{file: file}, &unixProcess{cmd: cmd}, nil
+	defer tty.Close()
+	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+		_ = ptmx.Close()
+		return nil, nil, err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty = true, true
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = withPaneTTYEnvironment(cmd.Env, tty.Name())
+	if err := cmd.Start(); err != nil {
+		_ = ptmx.Close()
+		return nil, nil, err
+	}
+	return &unixPty{file: ptmx}, &unixProcess{cmd: cmd}, nil
 }
 
 // detachedDaemonSysProcAttrs returns the SysProcAttr to use when starting the
@@ -154,6 +189,15 @@ func processIDAlive(pid int) bool {
 		return false
 	}
 	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// processGroupAlive includes surviving members whose group leader has exited.
+func processGroupAlive(pgid int) bool {
+	if pgid <= 0 {
+		return false
+	}
+	err := syscall.Kill(-pgid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
@@ -345,19 +389,148 @@ func runProcessQuery(name string, args ...string) (string, error) {
 
 }
 
-func terminateProcessID(pid int) {
-	if pid <= 0 {
-		return
+const allowExitAfterFailedTermination = true
+
+// terminateProcessID reports whether a termination signal was delivered.
+func terminateProcessID(pid int, stillOwner func() bool) bool {
+	return terminateProcessWithSignals(pid, stillOwner, syscall.Kill, 500*time.Millisecond)
+}
+
+func terminateProcessWithSignals(pid int, stillOwner func() bool, signal func(int, syscall.Signal) error, grace time.Duration) bool {
+	if pid <= 0 || !stillOwner() {
+		return false
 	}
-	_ = syscall.Kill(pid, syscall.SIGTERM)
-	deadline := time.Now().Add(500 * time.Millisecond)
+	if err := signal(pid, syscall.SIGTERM); err != nil {
+		return false
+	}
+	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
-		if !processIDAlive(pid) {
-			return
+		if !stillOwner() {
+			return true
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if stillOwner() {
+		_ = signal(pid, syscall.SIGKILL)
+	}
+	return true
+}
+
+// replacementPaneGroupSystem keeps identity checks shared between capture and
+// reaping, and allows tests to model PID reuse and signal ordering.
+type replacementPaneGroupSystem struct {
+	alive   func(int) bool
+	inspect func(int) processSnapshot
+	pgid    func(int) (int, error)
+	kill    func(int, syscall.Signal) error
+}
+
+func replacementPaneGroupsSystem() replacementPaneGroupSystem {
+	return replacementPaneGroupSystem{
+		alive: processIDAlive, inspect: inspectReplacementProcess,
+		pgid: syscall.Getpgid, kill: syscall.Kill,
+	}
+}
+
+func (system replacementPaneGroupSystem) identity(pid int) (replacementPaneGroup, bool) {
+	if pid <= 0 || !system.alive(pid) {
+		return replacementPaneGroup{}, false
+	}
+	snapshot := system.inspect(pid)
+	if !snapshot.known || !snapshot.running || snapshot.started.IsZero() {
+		return replacementPaneGroup{}, false
+	}
+	if pgid, err := system.pgid(pid); err != nil || pgid != pid {
+		return replacementPaneGroup{}, false
+	}
+	return replacementPaneGroup{pid: pid, started: snapshot.started}, true
+}
+
+// captureReplacementPaneGroups must run before shutdown, while the confirmed
+// server is still an ancestor of its panes. PanePid can name a foreground job
+// below a wrapper shell in a separate group. Capture that direct child of the
+// server first so it cannot launch its resume || fresh fallback during reaping.
+// Unknown ancestry, start times, or group leadership never authorize a kill.
+func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replacementPaneGroup {
+	if restore == nil || ownerPID <= 0 {
+		return nil
+	}
+	return replacementPaneGroupsSystem().capture(restore, ownerPID, readProcessTable)
+}
+
+func (system replacementPaneGroupSystem) capture(restore *serverRestore, ownerPID int, readProcesses func() map[int]processInfo) []replacementPaneGroup {
+	var wrappers, panes []replacementPaneGroup
+	for _, window := range restore.Windows {
+		pid := window.PanePid
+		pane, ok := system.identity(pid)
+		if !ok {
+			continue
+		}
+		processes := readProcesses()
+		depth := processDepthFromAncestor(processes, pid, ownerPID)
+		if depth <= 0 {
+			continue
+		}
+		wrapperPID := pid
+		for step := 1; step < depth; step++ {
+			wrapperPID = processes[wrapperPID].ppid
+		}
+		wrapper, wrapperOK := system.identity(wrapperPID)
+		// Bracket a fresh ancestry read with the pane and wrapper identities.
+		// A previous ps snapshot must never authorize a newly reused PID.
+		processes = readProcesses()
+		freshDepth := processDepthFromAncestor(processes, pid, ownerPID)
+		if freshDepth <= 0 {
+			continue
+		}
+		freshWrapper := pid
+		for step := 1; step < freshDepth; step++ {
+			freshWrapper = processes[freshWrapper].ppid
+		}
+		current, ok := system.identity(pid)
+		if !ok || !current.started.Equal(pane.started) || freshWrapper != wrapperPID {
+			continue
+		}
+		if wrapperPID != pid && wrapperOK {
+			currentWrapper, ok := system.identity(wrapperPID)
+			if !ok || !currentWrapper.started.Equal(wrapper.started) {
+				continue
+			}
+			wrappers = append(wrappers, wrapper)
+		}
+		panes = append(panes, pane)
+	}
+	// Put every verified wrapper first, even if another window lists it as a
+	// pane. Deduplicate shared groups without losing their kill ordering.
+	var groups []replacementPaneGroup
+	seen := make(map[int]bool)
+	for _, group := range append(wrappers, panes...) {
+		if !seen[group.pid] {
+			seen[group.pid] = true
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// reapReplacementPaneGroups is best-effort cleanup of captured process groups.
+// Shutdown may have orphaned them, so ancestry is established during capture.
+// Recheck liveness, the exact start time and group leadership immediately before
+// each SIGKILL. Never redirect a kill to a different group or a recycled PID.
+func reapReplacementPaneGroups(panes []replacementPaneGroup) {
+	replacementPaneGroupsSystem().reap(panes)
+}
+
+func (system replacementPaneGroupSystem) reap(panes []replacementPaneGroup) {
+	for _, pane := range panes {
+		if pane.started.IsZero() {
+			continue
+		}
+		current, ok := system.identity(pane.pid)
+		if ok && current.started.Equal(pane.started) {
+			_ = system.kill(-pane.pid, syscall.SIGKILL)
+		}
+	}
 }
 
 func signalCommandProcessGroup(cmd *exec.Cmd, signal syscall.Signal) {
@@ -378,6 +551,16 @@ var signalForegroundResize = func(processGroup int) {
 		return
 	}
 	_ = syscall.Kill(-processGroup, syscall.SIGWINCH)
+}
+
+// killProcessGroup force-terminates every process in processGroup. Shutdown
+// uses it for a pane's foreground group, which an interactive pane shell keeps
+// separate from its own group under job control.
+func killProcessGroup(processGroup int) {
+	if processGroup <= 0 {
+		return
+	}
+	_ = syscall.Kill(-processGroup, syscall.SIGKILL)
 }
 
 // attachOutputWriter returns w unchanged: POSIX pseudo-terminals do not
@@ -619,4 +802,25 @@ func socketInfoIdentity(info os.FileInfo) (socketIdentity, error) {
 
 func isStaleUnixSocketError(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// Hooks may run without a controlling terminal. The pane slave is inherited
+// through the environment and must still be a real terminal when opened.
+func writeAgentIdentityMarker(marker string) {
+	path, set := os.LookupEnv("MONKEYMUX_PANE_TTY")
+	if !set {
+		path = "/dev/tty"
+	} else if !strings.HasPrefix(path, "/dev/") || path == "/dev/tty" || filepath.Clean(path) != path {
+		return
+	}
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFCHR || !term.IsTerminal(fd) {
+		return
+	}
+	_, _ = unix.Write(fd, []byte(marker))
 }

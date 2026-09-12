@@ -359,6 +359,58 @@ func TestPrepareRunningServerReplacementNoopsForCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestPrepareRunningServerReplacementForceRequiresSnapshotForCurrentVersion(t *testing.T) {
+	isolateTestRuntime(t)
+	outcome, err := prepareRunningServerReplacement(
+		fmt.Sprintf("force-nosnap-%d", time.Now().UnixNano()),
+		runningServerStatus{version: monkeyMuxVersion},
+		serverUpdatePolicyForce,
+		false,
+	)
+	if !errors.Is(err, errServerUpdateNoSnapshot) || outcome != nil {
+		t.Fatalf("forced replacement = (%#v, %v), want (nil, %v)", outcome, err, errServerUpdateNoSnapshot)
+	}
+}
+
+func TestKeepRespondingServerBeforeReplacement(t *testing.T) {
+	shutdown := &ensureServerReplacement{oldPID: pidRecord{pid: 10}}
+	legacy := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true}
+	native := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true, keepOldProcess: true}
+	for _, test := range []struct {
+		name        string
+		policy      string
+		version     string
+		pid         int
+		replacement *ensureServerReplacement
+		keep        bool
+		wantErr     error
+	}{
+		{"no replacement", serverUpdatePolicyForce, monkeyMuxVersion, 10, nil, true, nil},
+		{"normal concurrent replacement", serverUpdatePolicyAlways, monkeyMuxVersion, 20, shutdown, true, nil},
+		{"normal old server", serverUpdatePolicyAlways, "0.1.0", 10, legacy, false, nil},
+		{"force same pid same version", serverUpdatePolicyForce, monkeyMuxVersion, 10, shutdown, false, errServerUpdateStillAlive},
+		{"force same pid old version", serverUpdatePolicyForce, "0.1.0", 10, shutdown, false, errServerUpdateStillAlive},
+		{"force different pid same version", serverUpdatePolicyForce, monkeyMuxVersion, 20, shutdown, true, nil},
+		{"force different pid old version", serverUpdatePolicyForce, "0.1.0", 20, shutdown, true, nil},
+		{"force current pid unknown", serverUpdatePolicyForce, monkeyMuxVersion, 0, shutdown, false, errServerUpdateStillAlive},
+		{"force outgoing pid unknown", serverUpdatePolicyForce, monkeyMuxVersion, 20, &ensureServerReplacement{}, false, errServerUpdateStillAlive},
+		{"force legacy outgoing", serverUpdatePolicyForce, monkeyMuxVersion, 10, legacy, false, nil},
+		{"force legacy unknown pid", serverUpdatePolicyForce, monkeyMuxVersion, 0, legacy, false, nil},
+		{"force legacy concurrent replacement", serverUpdatePolicyForce, monkeyMuxVersion, 20, legacy, true, nil},
+		{"force native outgoing", serverUpdatePolicyForce, monkeyMuxVersion, 10, native, false, nil},
+		{"force native concurrent replacement", serverUpdatePolicyForce, monkeyMuxVersion, 20, native, true, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			keep, err := keepRespondingServerBeforeReplacement(
+				runningServerStatus{version: test.version}, pidRecord{pid: test.pid}, test.replacement, test.policy,
+			)
+			if keep != test.keep || !errors.Is(err, test.wantErr) {
+				t.Fatalf("guard = (%t, %v), want (%t, %v)", keep, err, test.keep, test.wantErr)
+			}
+		})
+	}
+}
+
 // startForeignProcess starts a long-lived process that is not a MonkeyMux
 // helper, so tests can exercise the recycled-pid paths with a pid that really
 // is alive on this host.

@@ -232,6 +232,8 @@ class TmuxWindow {
     String? agentSessionTitle,
     AgentSessionConfidence? activeAgentSessionConfidence,
     bool clearActiveAgentSessionMetadata = false,
+    int? lastActivityEpochSeconds,
+    bool clearLastActivityEpochSeconds = false,
   }) => TmuxWindow(
     index: index,
     id: id ?? this.id,
@@ -263,7 +265,9 @@ class TmuxWindow {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: terminalProgress,
     idleSeconds: _snapshotIdleSeconds,
-    lastActivityEpochSeconds: lastActivityEpochSeconds,
+    lastActivityEpochSeconds: clearLastActivityEpochSeconds
+        ? null
+        : lastActivityEpochSeconds ?? this.lastActivityEpochSeconds,
   );
 
   /// A best-effort coding-agent session identifier found in tmux metadata.
@@ -673,9 +677,14 @@ TmuxWindow _preserveActiveAgentSessionMetadata(
   TmuxWindow existing,
   TmuxWindow updated,
 ) {
-  if (updated.hasUnsupportedAgentTool ||
-      updated.activeAgentSessionId != null ||
-      updated.agentSessionTitle != null) {
+  if (updated.hasUnsupportedAgentTool || updated.agentSessionTitle != null) {
+    return updated;
+  }
+  // MonkeyMux snapshots report the live session ID but omit its title, which
+  // arrives in a separate metadata probe. Keep that title for the same session
+  // so each snapshot does not switch the UI back to the terminal title.
+  if (updated.activeAgentSessionId != null &&
+      updated.activeAgentSessionId != existing.activeAgentSessionId) {
     return updated;
   }
   if (existing.activeAgentSessionId == null &&
@@ -689,7 +698,9 @@ TmuxWindow _preserveActiveAgentSessionMetadata(
   return updated.copyWith(
     activeAgentSessionId: existing.activeAgentSessionId,
     agentSessionTitle: existing.agentSessionTitle,
-    activeAgentSessionConfidence: existing.activeAgentSessionConfidence,
+    activeAgentSessionConfidence:
+        updated.activeAgentSessionConfidence ??
+        existing.activeAgentSessionConfidence,
   );
 }
 

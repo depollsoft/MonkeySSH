@@ -419,6 +419,8 @@ func TestNormalizeServerUpdatePolicy(t *testing.T) {
 		{"prompt", serverUpdatePolicyPrompt},
 		{" never ", serverUpdatePolicyNever},
 		{"ALWAYS", serverUpdatePolicyAlways},
+		{"force", serverUpdatePolicyForce},
+		{" FORCE ", serverUpdatePolicyForce},
 	} {
 		got, err := normalizeServerUpdatePolicy(test.input)
 		if err != nil {
@@ -504,6 +506,25 @@ func TestShouldUpdateRunningServerPromptUsesTerminalPrompt(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Update now?") {
 		t.Fatalf("prompt policy output = %q, want update prompt", output.String())
+	}
+}
+
+func TestShouldUpdateRunningServerForceSkipsPrompt(t *testing.T) {
+	for _, version := range []string{"0.1.0", monkeyMuxVersion} {
+		t.Run(version, func(t *testing.T) {
+			var output bytes.Buffer
+			input := strings.NewReader("n\n")
+			if !shouldUpdateRunningServer(input, &output, "work", runningServerStatus{version: version}, serverUpdatePolicyForce) {
+				t.Fatal("force policy did not request reload")
+			}
+			if input.Len() != 2 {
+				t.Fatal("force policy read stdin")
+			}
+			want := fmt.Sprintf("monkeymux: forcing reload of session %q on helper %s\r\n", "work", version)
+			if output.String() != want {
+				t.Fatalf("force output = %q, want %q", output.String(), want)
+			}
+		})
 	}
 }
 
@@ -6305,6 +6326,47 @@ func TestRedrawResizePreservesOneShotKittyTransmit(t *testing.T) {
 	waitForRecordedOutput(t, conn, want)
 }
 
+func TestRedrawBufferingPreservesRealWindowActivity(t *testing.T) {
+	server := newMuxServer("test")
+	baseline := time.Now().Add(-time.Minute)
+	window := &muxWindow{
+		id:                     "@1",
+		index:                  0,
+		lastActivity:           baseline,
+		redrawForwardingPaused: true,
+	}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+
+	server.handleWindowOutput(window.id, []byte("agent completed\r\n"))
+	if !window.lastActivity.After(baseline) {
+		t.Fatalf("buffered real output did not advance activity: %v", window.lastActivity)
+	}
+	activity := window.lastActivity
+	server.resumePausedAttachForwarding(window.id, window.redrawForwardingGeneration)
+	if window.redrawForwardingPaused {
+		t.Fatal("redraw forwarding did not resume")
+	}
+	if !window.lastActivity.Equal(activity) {
+		t.Fatalf("forwarding buffered output changed activity: %v, want %v", window.lastActivity, activity)
+	}
+}
+
+func TestWindowReplayDoesNotAdvanceActivity(t *testing.T) {
+	server := newMuxServer("test")
+	baseline := time.Now().Add(-time.Minute)
+	window := &muxWindow{id: "@1", history: []byte("idle prompt"), lastActivity: baseline}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+
+	if replay := server.activeReplayLocked(); !bytes.Contains(replay, []byte("idle prompt")) {
+		t.Fatalf("replay missing retained output: %q", replay)
+	}
+	if !window.lastActivity.Equal(baseline) {
+		t.Fatalf("replay advanced activity: %v", window.lastActivity)
+	}
+}
+
 func TestRedrawResizeDropsSupersededBufferedAttachOutput(t *testing.T) {
 	server := newMuxServer("test")
 	conn := &recordingConn{}
@@ -9840,6 +9902,8 @@ func TestDiscoverCodexSessionIDsUsesOpenRolloutFile(t *testing.T) {
 }
 
 func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalHome := os.Getenv("HOME")
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
@@ -9888,6 +9952,7 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "codex", args: "codex"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 
 	sessions := discoverAgentSessionIDs("codex",
@@ -9901,16 +9966,19 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 	}
 }
 
-func TestDiscoverCodexSessionIDsSkipsAmbiguousCwdFallback(t *testing.T) {
+func TestDiscoverCodexSessionIDsSkipsUnknownProcessStart(t *testing.T) {
 	originalHome := os.Getenv("HOME")
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
+	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() {
 		_ = os.Setenv("HOME", originalHome)
 		processOpenFilePathsForMetadata = originalOpenFiles
 		processWorkingDirectoryForMetadata = originalWorkingDirectory
+		processStartedAtForMetadata = originalProcessStart
 	})
 
+	processStartedAtForMetadata = func(int) time.Time { return time.Time{} }
 	home := t.TempDir()
 	if err := os.Setenv("HOME", home); err != nil {
 		t.Fatal(err)
@@ -9953,7 +10021,7 @@ func TestDiscoverCodexSessionIDsSkipsAmbiguousCwdFallback(t *testing.T) {
 	)
 
 	if len(sessions) != 0 {
-		t.Fatalf("codex sessions = %#v, want none for ambiguous cwd fallback", sessions)
+		t.Fatalf("codex sessions = %#v, want none without process start times", sessions)
 	}
 }
 
@@ -9999,6 +10067,8 @@ func TestDiscoverOpenCodeSessionIDsUsesProcessArgs(t *testing.T) {
 }
 
 func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalReader := openCodeSessionEntriesReader
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10030,6 +10100,7 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "opencode", args: "opencode"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	sessions := discoverAgentSessionIDs("opencode",
@@ -10114,6 +10185,8 @@ func TestDiscoverClaudeSessionIDsUsesOpenProjectFile(t *testing.T) {
 }
 
 func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10154,6 +10227,7 @@ func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -10201,6 +10275,8 @@ func writeClaudeWorktreeSessionFile(
 }
 
 func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10232,6 +10308,7 @@ func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -10319,6 +10396,8 @@ func TestClaudeSessionMatchesWorkingDirectoryUsesProjectDirWithoutRecordedCwd(t 
 // call leaves every later record naming a subdirectory while the pane's process
 // stays where it launched. That must not cost the window its resume.
 func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T) {
+	originalTable := processTableForMetadata
+	t.Cleanup(func() { processTableForMetadata = originalTable })
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
@@ -10364,6 +10443,7 @@ func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T)
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
+	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
 
@@ -10880,7 +10960,7 @@ func TestCreateWindowOptionsForRestoreBuildsAgentResumeCommand(t *testing.T) {
 
 	options := createWindowOptionsForRestore(state, false)
 
-	if got := options.command; got != "copilot --resume 'session'\"'\"'s id' || copilot" {
+	if got := options.command; got != monkeyMuxAgentLaunchCommand("copilot --resume 'session'\"'\"'s id'")+" || "+monkeyMuxAgentLaunchCommand("copilot") {
 		t.Fatalf("command = %q, want quoted copilot resume with fresh fallback", got)
 	}
 	if len(options.history) != 0 {
@@ -11036,13 +11116,24 @@ func TestCursorAgentToolMapping(t *testing.T) {
 
 func TestLiveCursorWindowPublishesSessionFromFalseConversationMetadata(t *testing.T) {
 	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() { processStartedAtForMetadata = originalProcessStart })
+	originalProcessTable := processTableForMetadata
+	t.Cleanup(func() {
+		processStartedAtForMetadata = originalProcessStart
+		processTableForMetadata = originalProcessTable
+	})
 	now := time.Now()
 	processStartedAtForMetadata = func(pid int) time.Time {
 		if pid == 201 {
 			return now.Add(-time.Second)
 		}
 		return time.Time{}
+	}
+	// The live-agent rule only lets a running cursor-agent own a chat.
+	processTableForMetadata = func() map[int]processInfo {
+		return map[int]processInfo{
+			200: {pid: 200, ppid: 1, comm: "zsh", args: "zsh"},
+			201: {pid: 201, ppid: 200, comm: "cursor-agent", args: "cursor-agent"},
+		}
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -11137,7 +11228,7 @@ func TestEnrichRestoreWithAgentSessionIDsUsesCursorChatStore(t *testing.T) {
 		t.Fatalf("agent session ID = %q, want new-chat", got)
 	}
 	options := createWindowOptionsForRestore(restore.Windows[0], true)
-	want := "cursor-agent --force --resume 'new-chat' || cursor-agent --force"
+	want := monkeyMuxAgentLaunchCommand("cursor-agent --force --resume 'new-chat'") + " || " + monkeyMuxAgentLaunchCommand("cursor-agent --force")
 	if got := options.command; got != want {
 		t.Fatalf("command = %q, want %q", got, want)
 	}
@@ -11329,6 +11420,13 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			options := createWindowOptionsForRestore(tc.state, true)
+			if resume, launch, ok := strings.Cut(tc.want, " || "); ok {
+				resume = monkeyMuxAgentLaunchCommand(resume)
+				if tc.agentTool == "codex" {
+					resume = codexResumeGateCommand(tc.state.AgentSessionID, resume)
+				}
+				tc.want = resume + " || " + monkeyMuxAgentLaunchCommand(launch)
+			}
 			if got := options.command; got != tc.want {
 				t.Fatalf("command = %q, want %q", got, tc.want)
 			}
@@ -12748,6 +12846,65 @@ func TestThemeHintDeliversModeReportAndFocusPair(t *testing.T) {
 				t.Fatal("theme hint was not sent")
 			}
 			waitForRecordedOutput(t, &pty.recordingConn, test.want)
+		})
+	}
+}
+
+func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
+	for _, acknowledge := range []bool{true, false} {
+		t.Run(fmt.Sprintf("acknowledge=%v", acknowledge), func(t *testing.T) {
+			const session = "shutdown-ack"
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			done := make(chan struct{})
+			started := time.Now()
+			go func() {
+				requestServerShutdownOnConnection(conn, session)
+				close(done)
+			}()
+			_ = peer.SetDeadline(time.Now().Add(socketTimeout + time.Second))
+			enc, dec := json.NewEncoder(peer), json.NewDecoder(peer)
+			var request controlMessage
+			if err := dec.Decode(&request); err != nil || request.Role != "control" {
+				t.Fatalf("control handshake: %+v, %v", request, err)
+			}
+			if err := enc.Encode(controlResponse{Type: "hello"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := dec.Decode(&request); err != nil || request.Type != "shutdown" || request.ID == "" {
+				t.Fatalf("shutdown request: %+v, %v", request, err)
+			}
+			for _, response := range []controlResponse{
+				{Type: "window_list"},
+				{Type: "shutdown", ID: "another-request"},
+			} {
+				if err := enc.Encode(response); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-done:
+				t.Fatal("returned before matching shutdown acknowledgement")
+			case <-time.After(50 * time.Millisecond):
+			}
+			if acknowledge {
+				if err := enc.Encode(controlResponse{Type: "shutdown", ID: request.ID, Status: "ok"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wait := time.Second
+			if !acknowledge {
+				wait += socketTimeout
+			}
+			select {
+			case <-done:
+				if !acknowledge && time.Since(started) < socketTimeout {
+					t.Fatal("returned before connection deadline without an acknowledgement")
+				}
+			case <-time.After(wait):
+				t.Fatal("shutdown wait did not end")
+			}
 		})
 	}
 }

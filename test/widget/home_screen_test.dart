@@ -27,6 +27,7 @@ import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -1426,6 +1427,80 @@ void main() {
   });
 
   for (final backend in [RemoteMuxBackend.tmux, RemoteMuxBackend.monkeyMux]) {
+    testWidgets('failed ${backend.name} badge query waits for retry timer', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final tmux = _MockTmuxService();
+      final monkeyMux = _MockMonkeyMuxService();
+      final session = _badgeSession()
+        ..remoteMuxBackend = backend
+        ..remoteMuxSessionName = 'work';
+      final sessions = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          _buildActiveConnection(
+            connectionId: 7,
+            hostId: 1,
+            remoteMuxBackend: backend,
+          ),
+        ],
+        initialSessions: [session],
+      );
+      when(
+        () => tmux.watchWindowChanges(session, any()),
+      ).thenAnswer((_) => _idleWindowChanges());
+      when(
+        () => monkeyMux.watchWindowChanges(session, any()),
+      ).thenAnswer((_) => _idleWindowChanges());
+      var queries = 0;
+      final listWindows = backend == RemoteMuxBackend.monkeyMux
+          ? () => monkeyMux.listWindows(session, any())
+          : () => tmux.listWindows(session, any());
+      when(listWindows).thenAnswer((_) async {
+        queries++;
+        if (queries == 1) {
+          throw const MonkeyMuxInstallConfirmationRequiredException();
+        }
+        return const [TmuxWindow(index: 0, name: 'editor', isActive: true)];
+      });
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          initialTab: HomeScreenTab.connections,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessions),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(
+                  id: 1,
+                  label: 'Alpha',
+                  sortOrder: 0,
+                  remoteMuxBackend: backend,
+                ),
+              ]),
+            ),
+            tmuxServiceProvider.overrideWithValue(tmux),
+            monkeyMuxServiceProvider.overrideWithValue(monkeyMux),
+            acpSessionManagerProvider.overrideWithValue(
+              FakeAcpSessionManager(),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(queries, 1);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(queries, 1);
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
+      expect(queries, 2);
+      expect(find.text('work · 1 windows'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     testWidgets(
       'preview updates reuse preferences and saved ${backend.name} presets refresh the badge',
       (tester) async {

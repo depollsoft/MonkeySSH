@@ -694,6 +694,19 @@ void main() {
       );
     });
 
+    test('copyWith can clear the activity timestamp', () {
+      const window = TmuxWindow(
+        index: 0,
+        name: 'shell',
+        isActive: false,
+        lastActivityEpochSeconds: 100,
+      );
+
+      final cleared = window.copyWith(clearLastActivityEpochSeconds: true);
+
+      expect(cleared.lastActivityEpochSeconds, isNull);
+    });
+
     test('equality works correctly', () {
       const a = TmuxWindow(index: 0, name: 'vim', isActive: true);
       const b = TmuxWindow(index: 0, name: 'vim', isActive: true);
@@ -917,6 +930,66 @@ void main() {
       expect(updated.single.activeAgentSessionId, 'session-1');
       expect(updated.single.agentSessionTitle, 'Fix tmux session labels');
     });
+
+    for (final fullList in [false, true]) {
+      test('session metadata merge respects identity, list=$fullList', () {
+        const existing = TmuxWindow(
+          index: 1,
+          id: '@7',
+          panePid: 42,
+          name: 'codex',
+          isActive: true,
+          currentCommand: 'codex',
+          activeAgentSessionId: 'session-1',
+          agentSessionTitle: 'Original title',
+          activeAgentSessionConfidence: AgentSessionConfidence.medium,
+        );
+        final snapshot = existing
+            .copyWith(clearActiveAgentSessionMetadata: true)
+            .copyWith(activeAgentSessionId: 'session-1');
+        for (final (incoming, expectedTitle, expectedConfidence) in [
+          (snapshot, 'Original title', AgentSessionConfidence.medium),
+          (
+            snapshot.copyWith(
+              activeAgentSessionConfidence: AgentSessionConfidence.high,
+            ),
+            'Original title',
+            AgentSessionConfidence.high,
+          ),
+          (
+            snapshot.copyWith(agentSessionTitle: 'Renamed session'),
+            'Renamed session',
+            null,
+          ),
+          (snapshot.copyWith(activeAgentSessionId: 'session-2'), null, null),
+          (snapshot.copyWith(panePid: 43), null, null),
+          (snapshot.copyWith(currentCommand: 'claude'), null, null),
+          (snapshot.copyWith(hasUnsupportedAgentTool: true), null, null),
+        ]) {
+          final updated = applyTmuxWindowChangeEvent(
+            [existing],
+            fullList
+                ? TmuxWindowListEvent([incoming])
+                : TmuxWindowSnapshotEvent(incoming),
+          ).single;
+          expect(updated.agentSessionTitle, expectedTitle);
+          expect(updated.activeAgentSessionId, incoming.activeAgentSessionId);
+          expect(updated.activeAgentSessionConfidence, expectedConfidence);
+        }
+
+        // A title without a known session ID cannot be assigned to a new ID.
+        final unknownSession = existing
+            .copyWith(clearActiveAgentSessionMetadata: true)
+            .copyWith(agentSessionTitle: 'Unbound title');
+        final updated = applyTmuxWindowChangeEvent(
+          [unknownSession],
+          fullList
+              ? TmuxWindowListEvent([snapshot])
+              : TmuxWindowSnapshotEvent(snapshot),
+        ).single;
+        expect(updated.agentSessionTitle, isNull);
+      });
+    }
   });
 
   group('resolveTmuxReloadedWindows', () {

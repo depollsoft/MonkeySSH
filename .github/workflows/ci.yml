@@ -727,6 +727,12 @@ jobs:
       - name: Test Windows agent command wrapping
         run: flutter test --no-pub test/domain/services/agent_management_service_test.dart --plain-name "full Windows probe executes through cmd and PowerShell"
 
+      - name: Test MonkeyMux build cleanup with Windows file locks
+        run: flutter test --no-pub test/domain/services/monkeymux_windows_cleanup_test.dart
+
+      - name: Test MonkeyMux launcher through the Windows shell
+        run: flutter test --no-pub test/domain/services/monkeymux_installer_service_test.dart --plain-name "Windows launcher command runs through cmd and prunes unused builds"
+
       - name: Build Windows
         run: flutter build windows --release --no-tree-shake-icons
 
