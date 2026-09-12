@@ -84,20 +84,23 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
         if (!current()) return;
         previous = usage;
         controller.add(resolveAgentUsageRings(request.tool, usage, now: now()));
-        var delay = const Duration(minutes: 2);
+        var delay = agentUsageRefreshInterval(request.tool);
         final checkedAt = usage?.checkedAt;
-        if (checkedAt != null) {
-          final expiry = checkedAt
-              .add(const Duration(minutes: 2))
-              .difference(now());
+        final throttled = usage?.isRateLimited ?? false;
+        if (throttled) {
+          final fallback = (checkedAt ?? now()).add(
+            agentUsageThrottleBackoff(1),
+          );
+          final retryAt = usage?.retryAt;
+          final deadline = retryAt != null && retryAt.isAfter(fallback)
+              ? retryAt
+              : fallback;
+          final wait = deadline.difference(now());
+          delay = wait > Duration.zero ? wait : agentUsageThrottleBackoff(1);
+        } else if (checkedAt != null) {
+          final expiry = checkedAt.add(delay).difference(now());
           if (expiry > Duration.zero && expiry < delay) delay = expiry;
         }
-        final throttled =
-            usage?.status == AgentUsageStatus.rateLimited ||
-            (usage?.notices.any(
-                  (notice) => notice.status == AgentUsageStatus.rateLimited,
-                ) ??
-                false);
         if (!throttled) {
           for (final window in usage?.windows ?? <AgentUsageWindow>[]) {
             if (!isAgentUsageRingWindow(request.tool, window)) continue;

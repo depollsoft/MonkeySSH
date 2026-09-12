@@ -56,11 +56,28 @@ Claude and Cursor environment-token overrides bypass credential files and
 keychain reads, including when those stores cannot be read.
 The installed CLIs may maintain their own authentication sessions when queried.
 
-Successful and throttled checks stay in memory for two minutes per SSH connection.
-Sign-in failures, transient failures, and partial snapshots with failed accounts
-can retry immediately unless a provider has throttled the check. Throttling holds
-the agent snapshot for two minutes, including partial results. A passed reset
-bypasses other cached snapshots. The screen
+Successful snapshots are reused for five minutes for Claude and two minutes for
+other agents, within the same SSH session and executable path. Reading one
+agent preserves the other agents' cached snapshots and reset markers. Sign-in
+and transient failures remain retryable unless throttling is active.
+
+HTTP `Retry-After` is retained as a sanitized relative duration, accepting seconds
+or an HTTP date and bounding malformed/extreme input to at most seven days.
+Rate-limit cooldowns start at five minutes, then grow to 10, 20, and 30 minutes
+on repeated throttling; a longer server deadline wins. Cooldown metadata is
+bounded and shared per saved host and agent, so switching windows, opening Agent
+Management, changing an executable path, or reconnecting cannot immediately
+repeat the blocked check. Quota values themselves remain session-scoped. Manual
+refresh and elapsed quota resets do not bypass an active cooldown, including
+partial multi-provider responses. A fully successful response clears backoff;
+unrelated or partially failed responses cannot shorten it.
+
+The manager shows the next allowed usage-check time. This is a usage-endpoint
+throttle, not an indication that the account's model allowance is exhausted.
+No extra live request is needed to display the retry time. Cooldowns and caches
+stay in memory only; no credentials or raw response headers are persisted.
+A passed quota reset can bypass an otherwise fresh success snapshot once, but
+never a throttle. The screen
 shows when usage was checked and labels past reset times without claiming the
 allowance has replenished. Missing reset times remain explicit. Rows with many
 quotas show a count of additional details that are available by expanding the row.
@@ -128,8 +145,9 @@ rings and stops polling without overwriting the preference.
 
 A visible, connected, foreground icon requests only its agent's quotas. The
 initial path/version probe targets that CLI and never fetches upstream version
-metadata or installs anything. Refreshes respect the existing two-minute usage
-cache and provider throttling, with a bounded refresh at a reported reset.
+metadata or installs anything. Claude refreshes normally every five minutes;
+other agents use two minutes. Refreshes honor the shared cache and longer provider
+cooldowns, with a bounded refresh at a reported reset only when not throttled.
 Hiding the bar, covering the terminal route, disabling rings, disconnecting, or
 backgrounding the app stops scheduled checks. Already-started requests remain
 bounded; late results cannot update a different agent or disposed subscription.

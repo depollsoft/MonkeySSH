@@ -597,6 +597,62 @@ class AgentManagementService {
   >
   _usageCache = {};
 
+  // Cooldowns contain no quota values or account identifiers. They survive a
+  // reconnect to the same saved host; quota snapshots themselves stay session-bound.
+  final _usageCooldowns =
+      <(int, String), ({DateTime checkedAt, DateTime retryAt, int attempts})>{};
+
+  AgentUsage? _activeUsageCooldown(SshSession session, String id) {
+    _usageCooldowns.removeWhere(
+      (_, entry) =>
+          _now().difference(entry.retryAt) >= const Duration(hours: 1),
+    );
+    final held = _usageCooldowns[(session.hostId, id)];
+    if (held == null || !held.retryAt.isAfter(_now())) return null;
+    return AgentUsage(
+      status: AgentUsageStatus.rateLimited,
+      checkedAt: held.checkedAt,
+      retryAt: held.retryAt,
+    );
+  }
+
+  AgentUsage _rememberUsageCooldown(
+    SshSession session,
+    String id,
+    AgentUsage usage,
+  ) {
+    final key = (session.hostId, id);
+    if (!usage.isRateLimited) {
+      if (usage.status == AgentUsageStatus.available &&
+          !usage.notices.any(
+            (notice) => notice.status != AgentUsageStatus.notReported,
+          )) {
+        _usageCooldowns.remove(key);
+      }
+      return usage;
+    }
+    final previous = _usageCooldowns[key];
+    final attempts = (previous?.attempts ?? 0) >= 4
+        ? 4
+        : (previous?.attempts ?? 0) + 1;
+    var retryAt = _now().add(agentUsageThrottleBackoff(attempts));
+    if (usage.retryAt?.isAfter(retryAt) ?? false) retryAt = usage.retryAt!;
+    if (previous?.retryAt.isAfter(retryAt) ?? false) {
+      retryAt = previous!.retryAt;
+    }
+    _usageCooldowns.remove(key);
+    if (_usageCooldowns.length >=
+        _maxRuntimeCacheEntries * agentCliRuntimeDefinitions.length) {
+      _usageCooldowns.remove(_usageCooldowns.keys.first);
+    }
+    _usageCooldowns[key] = (
+      checkedAt: usage.checkedAt ?? _now(),
+      retryAt: retryAt,
+      attempts: attempts,
+    );
+    return usage.withRetryAt(retryAt);
+  }
+
   /// Number of retained connection snapshots.
   @visibleForTesting
   int get cachedConnectionCount => _runtimeCache.length;
@@ -874,6 +930,8 @@ class AgentManagementService {
         .where((item) => item.tool == tool)
         .firstOrNull;
     if (definition == null) return null;
+    final cooldown = _activeUsageCooldown(session, definition.id.substring(4));
+    if (cooldown != null) return cooldown;
     final cache = _usageRuntimeCache[session] ??= {};
     var runtime = cache[tool];
     if (runtime == null || _now().difference(runtime.at) >= _updateCheckTtl) {
@@ -954,6 +1012,7 @@ class AgentManagementService {
     List<AgentRuntimeInfo> runtimes,
   ) async {
     final selected = <String, String>{};
+    final refreshIntervals = <String, Duration>{};
     final result = <String, AgentUsage>{};
     for (final runtime in runtimes) {
       if (runtime.status != AgentRuntimeStatus.installed &&
@@ -976,6 +1035,7 @@ class AgentManagementService {
       };
       if (id != null && runtime.executablePath != null) {
         selected[id] = runtime.executablePath!;
+        refreshIntervals[id] = agentUsageRefreshInterval(tool);
       }
       result[runtime.definition.id] = AgentUsage(
         status: id == null
@@ -985,7 +1045,11 @@ class AgentManagementService {
     }
     if (selected.isEmpty) return result;
     _usageCache.removeWhere(
-      (_, entry) => _now().difference(entry.at) >= const Duration(minutes: 2),
+      (_, entry) =>
+          _now().difference(entry.at) >= const Duration(hours: 1) &&
+          !entry.values.values.any(
+            (usage) => usage.retryAt?.isAfter(_now()) ?? false,
+          ),
     );
     final snapshot = _usageCache[session.connectionId];
     final cached = identical(snapshot?.session, session) ? snapshot : null;
@@ -997,6 +1061,13 @@ class AgentManagementService {
           ? cached?.values[entry.key]
           : null;
       final checkedAt = usage?.checkedAt;
+      final cooldown = _activeUsageCooldown(session, entry.key);
+      if (cooldown != null) {
+        parsed[entry.key] = (usage?.isRateLimited ?? false)
+            ? usage!.withRetryAt(cooldown.retryAt!)
+            : cooldown;
+        continue;
+      }
       final refreshed = refreshedResets[entry.key] = {
         if (usage != null) ...?cached?.refreshedResets[entry.key],
       };
@@ -1005,23 +1076,20 @@ class AgentManagementService {
           if (window.resetsAt != null && !window.resetsAt!.isAfter(_now()))
             window.resetsAt!,
       };
+      // Retaining other agents must not retain an unbounded history of resets.
+      refreshed.removeWhere((reset) => !passedResets.contains(reset));
       final resetPassed = passedResets.difference(refreshed).isNotEmpty;
-      final throttled =
-          usage?.status == AgentUsageStatus.rateLimited ||
-          (usage?.notices.any(
-                (notice) => notice.status == AgentUsageStatus.rateLimited,
-              ) ??
-              false);
       final reusable =
           usage != null &&
           checkedAt != null &&
-          (throttled ||
+          ((usage.isRateLimited && (usage.retryAt?.isAfter(_now()) ?? false)) ||
               (usage.status == AgentUsageStatus.available &&
+                  !usage.isRateLimited &&
                   !usage.notices.any(
                     (notice) => notice.status != AgentUsageStatus.notReported,
-                  ))) &&
-          _now().difference(checkedAt) < const Duration(minutes: 2) &&
-          (throttled || !resetPassed);
+                  ) &&
+                  _now().difference(checkedAt) < refreshIntervals[entry.key]! &&
+                  !resetPassed));
       if (reusable) {
         parsed[entry.key] = usage;
       } else {
@@ -1054,7 +1122,15 @@ class AgentManagementService {
         timeout: const Duration(seconds: 18),
         keepPartialOutputOnTimeout: true,
       );
-      final values = parseAgentUsageOutput(response.output, checkedAt: _now());
+      final rawValues = parseAgentUsageOutput(
+        response.output,
+        checkedAt: _now(),
+      );
+      final values = <String, AgentUsage>{
+        for (final entry in rawValues.entries)
+          if (pending.containsKey(entry.key))
+            entry.key: _rememberUsageCooldown(session, entry.key, entry.value),
+      };
       parsed.addAll(values);
       for (final entry in values.entries) {
         DiagnosticsLogService.instance.debug(
@@ -1110,9 +1186,11 @@ class AgentManagementService {
     _usageCache[session.connectionId] = (
       session: session,
       at: _now(),
-      paths: selected,
-      values: parsed,
-      refreshedResets: refreshedResets,
+      // A ring reads one agent; the manager reads many. Preserve unrelated
+      // snapshots and their reset markers instead of erasing their cooldowns.
+      paths: {...?cached?.paths, ...selected},
+      values: {...?cached?.values, ...parsed},
+      refreshedResets: {...?cached?.refreshedResets, ...refreshedResets},
     );
     return _mapUsageToRuntimes(runtimes, result, selected, parsed);
   }

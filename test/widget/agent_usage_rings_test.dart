@@ -68,6 +68,7 @@ class Reader extends Fake implements AgentManagementService {
   Completer<AgentUsage?>? pending;
   final pendingByTool = <AgentLaunchTool, Completer<AgentUsage?>>{};
   DateTime? reset;
+  DateTime? retryAt;
   AgentUsageStatus status = AgentUsageStatus.available;
   List<AgentUsageWindow>? reportedWindows;
   @override
@@ -82,6 +83,7 @@ class Reader extends Fake implements AgentManagementService {
     return AgentUsage(
       status: status,
       checkedAt: now,
+      retryAt: retryAt,
       windows:
           reportedWindows ??
           [
@@ -314,7 +316,7 @@ void main() {
       await pumpIcon(tester, reader, Billing(pro), Preference(!pro));
       expect(reader.calls, 0);
       expect(find.byType(SplitUsageRing), findsNothing);
-      await tester.pump(const Duration(minutes: 3));
+      await tester.pump(const Duration(minutes: 10));
       expect(reader.calls, 0);
     });
   }
@@ -331,8 +333,8 @@ void main() {
       );
       expect(reader.calls, 1);
       expect(find.byType(SplitUsageRing), findsOneWidget);
-      reader.now = reader.now.add(const Duration(minutes: 2));
-      await tester.pump(const Duration(minutes: 2));
+      reader.now = reader.now.add(const Duration(minutes: 5));
+      await tester.pump(const Duration(minutes: 5));
       await tester.pumpAndSettle();
       expect(reader.calls, 2);
       for (final state in [
@@ -344,7 +346,7 @@ void main() {
       }
       await tester.pumpAndSettle();
       // Paused Flutter apps do not render frames; polling must stop without a rebuild.
-      await tester.pump(const Duration(minutes: 3));
+      await tester.pump(const Duration(minutes: 10));
       expect(reader.calls, 2);
       for (final state in [
         AppLifecycleState.hidden,
@@ -358,7 +360,7 @@ void main() {
       await preference.setEnabled(enabled: false);
       await tester.pumpAndSettle();
       expect(find.byType(SplitUsageRing), findsNothing);
-      await tester.pump(const Duration(minutes: 3));
+      await tester.pump(const Duration(minutes: 10));
       expect(reader.calls, 3);
       await preference.setEnabled(enabled: true);
       await tester.pumpAndSettle();
@@ -367,7 +369,7 @@ void main() {
           .markDisconnected();
       await tester.pumpAndSettle();
       expect(find.byType(SplitUsageRing), findsNothing);
-      await tester.pump(const Duration(minutes: 3));
+      await tester.pump(const Duration(minutes: 10));
       expect(reader.calls, 4);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -398,7 +400,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.byType(SplitUsageRing), findsNothing);
-    await tester.pump(const Duration(minutes: 3));
+    await tester.pump(const Duration(minutes: 10));
     expect(reader.calls, 1);
     await tester.pumpWidget(const SizedBox.shrink());
     unawaited(changes.close());
@@ -447,6 +449,65 @@ void main() {
       },
     );
   }
+  testWidgets(
+    'Claude keeps its last fresh meter during a scheduled read but hides a throttle',
+    (tester) async {
+      final reader = Reader();
+      await pumpIcon(tester, reader, Billing(true), Preference(true));
+      reader
+        ..pending = Completer<AgentUsage?>()
+        ..now = reader.now.add(const Duration(minutes: 5, seconds: 1));
+      await tester.pump(const Duration(minutes: 5, seconds: 1));
+      await tester.pumpAndSettle();
+      expect(reader.calls, 2);
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      reader.pending!.complete(
+        AgentUsage(
+          status: AgentUsageStatus.rateLimited,
+          checkedAt: reader.now,
+          retryAt: reader.now.add(const Duration(minutes: 15)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('Claude normal polling waits five minutes rather than two', (
+    tester,
+  ) async {
+    final reader = Reader();
+    await pumpIcon(tester, reader, Billing(true), Preference(true));
+    reader.now = reader.now.add(const Duration(minutes: 2));
+    await tester.pump(const Duration(minutes: 2));
+    expect(reader.calls, 1);
+    reader.now = reader.now.add(const Duration(minutes: 3));
+    await tester.pump(const Duration(minutes: 3));
+    await tester.pumpAndSettle();
+    expect(reader.calls, 2);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'ring timer respects a server deadline longer than the polling interval',
+    (tester) async {
+      final reader = Reader()..status = AgentUsageStatus.rateLimited;
+      reader.retryAt = reader.now.add(const Duration(minutes: 15));
+      await pumpIcon(tester, reader, Billing(true), Preference(true));
+      expect(reader.calls, 1);
+      reader.now = reader.now.add(const Duration(minutes: 5));
+      await tester.pump(const Duration(minutes: 5));
+      expect(reader.calls, 1);
+      reader.now = reader.now.add(const Duration(minutes: 10));
+      await tester.pump(const Duration(minutes: 10));
+      await tester.pumpAndSettle();
+      expect(reader.calls, 2);
+      expect(find.byType(SplitUsageRing), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('probe: two visible consumers share one remote request', (
     tester,
   ) async {
@@ -594,8 +655,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      reader.now = reader.now.add(const Duration(minutes: 3));
-      await tester.pump(const Duration(minutes: 3));
+      reader.now = reader.now.add(const Duration(minutes: 10));
+      await tester.pump(const Duration(minutes: 10));
       expect(reader.calls, 1);
       navigator.pop();
       await tester.pumpAndSettle();

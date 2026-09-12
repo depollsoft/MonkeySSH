@@ -97,6 +97,12 @@ Map<String, AgentUsage> parseAgentUsageOutput(
         }
       }
       final credits = _number(data['resetCredits']);
+      final retryAfter = _number(data['retryAfterSeconds']);
+      final throttled =
+          status == AgentUsageStatus.rateLimited ||
+          notices.any(
+            (notice) => notice.status == AgentUsageStatus.rateLimited,
+          );
       result[id as String] = AgentUsage(
         status: status == AgentUsageStatus.available && windows.isEmpty
             ? AgentUsageStatus.unavailable
@@ -104,6 +110,11 @@ Map<String, AgentUsage> parseAgentUsageOutput(
         windows: status == AgentUsageStatus.available ? windows : const [],
         notices: notices,
         checkedAt: checkedAt,
+        retryAt: throttled && retryAfter != null && retryAfter > 0
+            ? checkedAt.add(
+                Duration(seconds: retryAfter.clamp(1, 604800).ceil()),
+              )
+            : null,
         resetCredits: credits != null && credits >= 0 ? credits.toInt() : null,
       );
     } on Object {

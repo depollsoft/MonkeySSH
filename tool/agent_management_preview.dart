@@ -26,7 +26,13 @@ const _access = MonetizationState(
   debugUnlocked: false,
 );
 
-void main() {
+void main() => runAgentManagementPreview();
+
+/// Runs native UI fixtures without SSH requests or real account access.
+void runAgentManagementPreview({
+  bool claudeRateLimited = false,
+  ThemeMode themeMode = ThemeMode.system,
+}) {
   WidgetsFlutterBinding.ensureInitialized();
 
   runApp(
@@ -39,9 +45,10 @@ void main() {
         debugShowCheckedModeBanner: false,
         theme: FluttyTheme.light,
         darkTheme: FluttyTheme.dark,
+        themeMode: themeMode,
         home: AgentManagementScreen(
           session: _PreviewSession(),
-          service: _PreviewManagement(),
+          service: _PreviewManagement(claudeRateLimited: claudeRateLimited),
         ),
       ),
     ),
@@ -58,6 +65,8 @@ class _PreviewBilling extends Fake implements MonetizationService {
 class _PreviewSession extends Fake implements SshSession {}
 
 class _PreviewManagement extends Fake implements AgentManagementService {
+  _PreviewManagement({this.claudeRateLimited = false});
+  final bool claudeRateLimited;
   final _runtimes = [
     for (final definition in agentRuntimeDefinitions) _sample(definition),
   ];
@@ -105,9 +114,16 @@ class _PreviewManagement extends Fake implements AgentManagementService {
       runtime.definition.id: _sampleUsage(runtime.definition.id),
   };
 
-  static AgentUsage _sampleUsage(String id) {
+  AgentUsage _sampleUsage(String id) {
     final now = DateTime.now();
     final reset = now.add(const Duration(hours: 2));
+    if (id == 'cli:claude' && claudeRateLimited) {
+      return AgentUsage(
+        status: AgentUsageStatus.rateLimited,
+        checkedAt: now,
+        retryAt: now.add(const Duration(minutes: 15)),
+      );
+    }
     if (id == 'cli:antigravity') {
       return AgentUsage(status: AgentUsageStatus.needsRunning, checkedAt: now);
     }

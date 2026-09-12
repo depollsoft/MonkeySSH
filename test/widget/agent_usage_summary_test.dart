@@ -32,6 +32,48 @@ void main() {
     );
   }
 
+  testWidgets(
+    'throttled usage shows the next allowed check without a countdown timer',
+    (tester) async {
+      final retryAt = now.add(const Duration(minutes: 15));
+      await pump(
+        tester,
+        AgentUsage(
+          status: AgentUsageStatus.rateLimited,
+          checkedAt: now,
+          retryAt: retryAt,
+        ),
+        scale: 2,
+      );
+      expect(find.textContaining('Usage check rate limited'), findsOneWidget);
+      expect(find.textContaining('Next usage check after'), findsOneWidget);
+      final context = tester.element(find.byType(AgentUsageSummary));
+      final time = MaterialLocalizations.of(
+        context,
+      ).formatTimeOfDay(TimeOfDay.fromDateTime(retryAt.toLocal()));
+      expect(find.textContaining(time), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(tester.takeException(), isNull);
+      await pump(
+        tester,
+        AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: now,
+          retryAt: retryAt,
+          windows: const [AgentUsageWindow(label: 'Weekly', usedPercent: 25)],
+          notices: const [
+            AgentUsageNotice(
+              provider: 'Anthropic',
+              status: AgentUsageStatus.rateLimited,
+            ),
+          ],
+        ),
+      );
+      expect(find.textContaining('Next usage check after'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    },
+  );
+
   testWidgets('failed accounts stay compact until expanded', (tester) async {
     const usage = AgentUsage(
       status: AgentUsageStatus.unavailable,

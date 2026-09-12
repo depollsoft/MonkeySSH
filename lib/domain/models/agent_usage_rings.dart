@@ -62,11 +62,18 @@ AgentUsageRings? resolveAgentUsageRings(
   AgentUsage? usage, {
   required DateTime now,
 }) {
+  // Keep a valid meter visible while the scheduled read is in flight. Claude
+  // now refreshes every five minutes, so allow one bounded minute of grace.
+  final refreshGrace =
+      agentUsageRefreshInterval(tool) + const Duration(minutes: 1);
+  final staleAfter = refreshGrace > const Duration(minutes: 5)
+      ? refreshGrace
+      : const Duration(minutes: 5);
   if (!supportsAgentUsageRings(tool) ||
       usage == null ||
       usage.status != AgentUsageStatus.available ||
       usage.checkedAt == null ||
-      now.difference(usage.checkedAt!) > const Duration(minutes: 5) ||
+      now.difference(usage.checkedAt!) >= staleAfter ||
       usage.notices.isNotEmpty) {
     return null;
   }

@@ -10,7 +10,7 @@
 - [x] The existing MonkeyMux bar height, gestures, agent marks, and native badges remain intact. No quota-specific tap action or extra row.
 - [x] Options has exactly `Show usage rings`, saved app-wide and on by default for Pro. Free accounts get a Pro badge and upgrade flow; no quota checks run without Pro.
 - [x] Persisted opt-out loads before any reads. Losing Pro hides meters and cancels refreshes without overwriting the preference.
-- [x] Foreground/connected/visible-only reads share requests, respect the two-minute cache and provider backoff, refresh relevant reset categories, and discard stale-window responses.
+- [x] Foreground/connected/visible-only reads share requests, respect the per-agent cache and provider backoff, refresh relevant reset categories, and discard stale-window responses.
 - [x] Missing, unlimited, duplicate, unreported, or expired percentages are never inferred as zero or 100%. If no usable allowance remains, the original icon is shown.
 - [x] No quota values, account identifiers, credentials, or user content added to application diagnostics or telemetry.
 
@@ -26,6 +26,29 @@
 Native fixture entry point: `tool/usage_rings_feature_preview.dart`.
 Capture test: `integration_test/usage_rings_feature_test.dart`.
 Current PNGs: `/tmp/monkeymux-usage-rings-expanded/`, including `android-meter-states.png` and `ipad-extra-agent-states.png`. These are labeled sample-data fixtures using production components, not screenshots of authenticated account readings.
+
+## Claude usage throttling follow-up
+
+- [x] Reproduced the bug with fake SSH: checking Codex after a Claude 429 erased the old per-selection cache, so returning to Claude made a third request instead of reusing its cooldown.
+- [x] Preserve unrelated successful and throttled snapshots when a single-agent ring updates the shared cache. Retained reset markers are bounded to currently relevant reset times.
+- [x] Preserve sanitized HTTP Retry-After seconds/date hints through direct and multi-provider readers. HTTP-date parsing uses the server Date header when available to avoid host clock skew.
+- [x] Keep bounded cooldown metadata per saved host/agent across SSH reconnects and path changes, without sharing quota values across sessions.
+- [x] Back off repeated throttles for 5, 10, 20, then 30 minutes, or longer when the provider requires it. Partial failures and unrelated reads do not reset or extend that deadline spuriously.
+- [x] Poll Claude normally at five minutes and other agents at two. Ring timers honor longer cooldowns, and a short freshness grace avoids hiding a valid meter during the scheduled request.
+- [x] Show the next allowed check time in Agent Management without a countdown timer or any additional provider request.
+
+Validation: 114 combined parser/service/ring/summary checks passed, plus targeted
+success-cache, partial-backoff, and reset-marker regressions; two existing
+PowerShell-dependent cases skipped on this Mac. All 30 Node usage-probe tests
+passed, including a local HTTP 429 server. The projection/ring suite also passed
+34 checks after the polling freshness adjustment. The native simulated-throttle
+fixture passed on Android with JDK 17 and on iPad; images are under
+`/tmp/monkeymux-usage-cooldown/`. The normal Agent Management screen suite was
+rerun for the new summary line and preview helper.
+
+**No live Claude request was made while investigating this rate-limit report.**
+The API must still allow the cooldown to expire; the fix prevents premature
+retries rather than attempting to bypass provider throttling.
 
 ## History and limits
 

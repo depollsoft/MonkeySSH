@@ -2,6 +2,60 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {codexUsage, copilotUsage, claudeUsage, rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
 
+test('Retry-After accepts seconds and HTTP dates without exposing raw data', () => {
+  const {retryAfterSeconds} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const now = Date.UTC(2026, 8, 12, 12);
+  assert.equal(retryAfterSeconds('900', now), 900);
+  assert.equal(retryAfterSeconds('Sat, 12 Sep 2026 12:15:00 GMT', now), 900);
+  for (const value of ['', '0', '-1', 'not a date']) assert.equal(retryAfterSeconds(value, now), undefined);
+  assert.equal(retryAfterSeconds('999999999', now), 604800);
+});
+
+test('HTTP 429 shares one request and preserves only the sanitized cooldown', async () => {
+  const http = require('http');
+  const {requestJson} = require('../../assets/scripts/agent_usage_probe.cjs');
+  let requests = 0;
+  const server = http.createServer((request, response) => {
+    requests++;
+    response.writeHead(429, request.url.endsWith('/dated') ? {
+      Date: 'Sat, 12 Sep 2026 12:00:00 GMT', 'Retry-After': 'Sat, 12 Sep 2026 12:15:00 GMT',
+    } : {'Retry-After': '900'});
+    response.end('PRIVATE_RESPONSE');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/usage`;
+    const results = await Promise.allSettled([
+      requestJson(url, {token:'FIXTURE', local:true}),
+      requestJson(url, {token:'FIXTURE', local:true}),
+    ]);
+    assert.equal(requests, 1);
+    for (const result of results) {
+      assert.equal(result.status, 'rejected');
+      assert.equal(result.reason.message, 'rateLimited');
+      assert.equal(result.reason.retryAfterSeconds, 900);
+      assert.ok(!JSON.stringify(result.reason).includes('PRIVATE_RESPONSE'));
+    }
+    await assert.rejects(requestJson(url + '/dated', {local:true}), {message:'rateLimited', retryAfterSeconds:900});
+    assert.equal(requests, 2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('multi-provider failures preserve the longest throttle hint and successful quotas', async () => {
+  const {multiProvider} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const result = await multiProvider('pi', [['anthropic', {}], ['openai', {}]], async id => {
+    if (id === 'anthropic') throw Object.assign(new Error('rateLimited'), {retryAfterSeconds: 1200});
+    return {windows:[{label:'Weekly', usedPercent:25}]};
+  });
+  assert.equal(result.status, 'available');
+  assert.equal(result.retryAfterSeconds, 1200);
+  assert.equal(result.notices[0].status, 'rateLimited');
+  assert.equal(result.windows[0].usedPercent, 25);
+});
+
 test('Claude and Cursor environment tokens bypass malformed and unreadable stores', async () => {
   const fs = require('fs'), os = require('os'), path = require('path');
   const {claude, cursor} = require('../../assets/scripts/agent_usage_probe.cjs');
