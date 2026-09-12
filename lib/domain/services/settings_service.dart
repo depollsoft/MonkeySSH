@@ -62,6 +62,9 @@ abstract final class SettingKeys {
   /// Ask before closing a tmux or MonkeyMux terminal window.
   static const confirmMuxWindowClose = 'confirm_mux_window_close';
 
+  /// Show Pro account-usage rings on the active MonkeyMux agent icon.
+  static const showUsageRings = 'show_usage_rings';
+
   /// Auto-lock timeout in minutes.
   static const autoLockTimeout = 'auto_lock_timeout';
 
@@ -768,6 +771,26 @@ final sharedClipboardLocalReadProvider = FutureProvider<bool>((ref) async {
   if (!ref.mounted) return value;
   return ref.watch(sharedClipboardLocalReadNotifierProvider);
 });
+
+/// Initialized preference: prevents a default-on probe before saved opt-out loads.
+final showUsageRingsProvider = FutureProvider<bool>((ref) async {
+  final value = await ref
+      .watch(showUsageRingsNotifierProvider.notifier)
+      .initializedValue();
+  if (!ref.mounted) return value;
+  return ref.watch(showUsageRingsNotifierProvider);
+});
+
+/// Persists the user's choice independently of current Pro entitlement.
+class ShowUsageRingsNotifier extends _BooleanSettingsNotifier {
+  /// Defaults on; access is separately guarded by the Pro feature gate.
+  ShowUsageRingsNotifier()
+    : super(SettingKeys.showUsageRings, defaultValue: true);
+}
+
+/// Writable usage-ring preference.
+final showUsageRingsNotifierProvider =
+    NotifierProvider<ShowUsageRingsNotifier, bool>(ShowUsageRingsNotifier.new);
 
 /// Notifier for shared clipboard remote-to-local writes.
 class SharedClipboardNotifier extends _BooleanSettingsNotifier {

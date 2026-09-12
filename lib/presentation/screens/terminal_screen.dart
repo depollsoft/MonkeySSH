@@ -85,6 +85,8 @@ import '../widgets/acp_native_starting_view.dart';
 import '../widgets/acp_new_session_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/agent_tool_icon.dart';
+import '../widgets/agent_usage_rings.dart';
+import '../widgets/agent_usage_rings_menu_item.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
@@ -4341,6 +4343,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         label: _showTmuxBar ? 'Hide tmux Bar' : 'Show tmux Bar',
         action: 'toggle_tmux_bar',
       ),
+    if (_isTmuxActive && _activeMuxBackend == RemoteMuxBackend.monkeyMux)
+      const AgentUsageRingsMenuItem(),
     if (!nativeAgentActive && isMobile)
       _terminalOverflowCheckboxMenuItem(
         context: context,

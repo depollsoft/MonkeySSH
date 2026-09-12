@@ -461,6 +461,14 @@ void main() {
         'feature': 'agent_management',
         'source': 'feature_gate',
       });
+      await service.logPaywallShown(
+        feature: 'agentUsageRings',
+        source: 'feature_gate',
+      );
+      expect(analytics.events[4].parameters, {
+        'feature': 'agent_usage_rings',
+        'source': 'feature_gate',
+      });
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       await service.logAppStarted(

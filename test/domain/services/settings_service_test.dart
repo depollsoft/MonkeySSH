@@ -39,6 +39,51 @@ void main() {
     await db.close();
   });
 
+  group('usage rings preference', () {
+    test(
+      'defaults on and retains opt-out across provider recreation',
+      () async {
+        var container = ProviderContainer(
+          overrides: [settingsServiceProvider.overrideWithValue(service)],
+        );
+        expect(await container.read(showUsageRingsProvider.future), isTrue);
+        await container
+            .read(showUsageRingsNotifierProvider.notifier)
+            .setEnabled(enabled: false);
+        expect(
+          await service.getBool(SettingKeys.showUsageRings, defaultValue: true),
+          isFalse,
+        );
+        container.dispose();
+        container = ProviderContainer(
+          overrides: [settingsServiceProvider.overrideWithValue(service)],
+        );
+        expect(await container.read(showUsageRingsProvider.future), isFalse);
+        container.dispose();
+      },
+    );
+    test(
+      'does not publish the default before a saved opt-out finishes loading',
+      () async {
+        final delayed = _DelayedBoolSettingsService(db);
+        final container = ProviderContainer(
+          overrides: [settingsServiceProvider.overrideWithValue(delayed)],
+        );
+        final subscription = container.listen(
+          showUsageRingsProvider,
+          (_, _) {},
+        );
+        expect(container.read(showUsageRingsProvider).isLoading, isTrue);
+        await delayed.readStarted.future;
+        expect(container.read(showUsageRingsProvider).asData, isNull);
+        delayed.loadedValue.complete(false);
+        expect(await container.read(showUsageRingsProvider.future), isFalse);
+        subscription.close();
+        container.dispose();
+      },
+    );
+  });
+
   group('SettingsService', () {
     group('String settings', () {
       test('getString returns null when not set', () async {

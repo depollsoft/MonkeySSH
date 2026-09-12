@@ -10,6 +10,7 @@ import 'package:dartssh2/src/message/msg_channel.dart';
 import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
@@ -59,6 +60,110 @@ SshSession _remoteSession(_MockSshClient client, {int connectionId = 77}) =>
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'active usage reader checks one CLI without upstream metadata and reuses its path',
+    () async {
+      final client = _MockSshClient();
+      final commands = <String>[];
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        call,
+      ) async {
+        final command = call.positionalArguments.first as String;
+        commands.add(command);
+        return _execOutput(
+          command.contains('__monkeyssh_agent_path__')
+              ? '__monkeyssh_agent_runtime__=cli:claude\n__monkeyssh_agent_path__=/bin/claude\n__monkeyssh_agent_version__=1.0\n__monkeyssh_agent_runtime_end__\n'
+              : '__monkeyssh_usage__={"id":"claude","status":"available","windows":[{"label":"5 hours","usedPercent":42}]}',
+        );
+      });
+      final service = _unlockedManagementService(_MockDiscovery());
+      final session = _remoteSession(client);
+      final first = await service.readUsageForTool(
+        session,
+        AgentLaunchTool.claudeCode,
+      );
+      expect(first!.windows.single.usedPercent, 42);
+      await service.readUsageForTool(session, AgentLaunchTool.claudeCode);
+      expect(commands, hasLength(2));
+      expect(commands.first, isNot(contains('cli:codex')));
+      expect(commands.first, isNot(contains('__monkeyssh_agent_latest__')));
+    },
+  );
+  test('active usage reader does no work without Pro', () async {
+    final client = _MockSshClient();
+    final service = AgentManagementService(
+      _MockDiscovery(),
+      canManageAgents: () async => false,
+    );
+    expect(
+      await service.readUsageForTool(
+        _remoteSession(client),
+        AgentLaunchTool.claudeCode,
+      ),
+      isNull,
+    );
+    verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+  });
+  test(
+    'abandoning active usage after path discovery prevents the quota request',
+    () async {
+      final client = _MockSshClient();
+      var current = true;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        _,
+      ) async {
+        current = false;
+        return _execOutput(
+          '__monkeyssh_agent_runtime__=cli:claude\n__monkeyssh_agent_path__=/bin/claude\n__monkeyssh_agent_runtime_end__\n',
+        );
+      });
+      final service = _unlockedManagementService(_MockDiscovery());
+      expect(
+        await service.readUsageForTool(
+          _remoteSession(client),
+          AgentLaunchTool.claudeCode,
+          shouldContinue: () => current,
+        ),
+        isNull,
+      );
+      verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
+    },
+  );
+  test(
+    'replacement SSH session cannot reuse the previous account quota cache',
+    () async {
+      final client = _MockSshClient();
+      var count = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        _,
+      ) async {
+        count++;
+        return _execOutput(
+          '__monkeyssh_usage__={"id":"claude","status":"available","windows":[{"label":"5 hours","usedPercent":$count}]}',
+        );
+      });
+      final service = _unlockedManagementService(_MockDiscovery());
+      final runtimes = [
+        AgentRuntimeInfo(
+          definition: agentCliRuntimeDefinitions.first,
+          status: AgentRuntimeStatus.installed,
+          executablePath: '/bin/claude',
+        ),
+      ];
+      final original = await service.readUsage(
+        _remoteSession(client),
+        runtimes,
+      );
+      final replacement = await service.readUsage(
+        _remoteSession(client),
+        runtimes,
+      );
+      expect(count, 2);
+      expect(original.values.single.windows.single.usedPercent, 1);
+      expect(replacement.values.single.windows.single.usedPercent, 2);
+    },
+  );
 
   test('overlapping retryable usage checks share one probe', () async {
     final client = _MockSshClient();

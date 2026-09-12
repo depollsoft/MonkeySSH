@@ -5,13 +5,13 @@ discovered, alongside upstream version checks. Windows version probes and
 upstream metadata lookups run with up to four workers per batch. POSIX version
 probes and usage readers also run concurrently. Usage
 checks do not block installation or update controls. Refreshing the screen or
-re-checking a runtime requests usage again. Account usage is shown only for
+re-checking a runtime requests usage again. In Agent Management, usage is shown only for
 agent CLI rows; ACP adapters show installation and version information. These
 are account allowances, not usage attributed to an individual conversation.
 Overlapping usage requests for the same installed rows and executable paths
 share one in-flight check, including retryable failures. Changed selections wait
 for the active check and then request their own results. Cached usage is reused
-only for the same agent executable path. ACP adapters do not request usage.
+only for the same SSH session and agent executable path. ACP adapters do not request usage.
 
 Every supported agent has a reader:
 
@@ -96,6 +96,43 @@ status counts, platform, connection ID, and exit status, never quota figures or
 credentials. Provider endpoints that are not
 public API contracts can change independently of MonkeySSH; failures remain
 visible and can be retried.
+
+## MonkeyMux usage rings · Pro
+
+The current Claude Code or Codex icon can show split account-allowance rings in
+MonkeyMux's existing bottom bar or tablet sidebar. The top half is the account's
+five-hour allowance; the bottom half is the account-wide weekly allowance.
+Filled arcs mean remaining quota. Rings add no tap action, percentage label, or
+extra bar row. Native-chat badges and window-switcher gestures are preserved.
+
+**Options > Show usage rings** controls the feature. It defaults on for Pro and
+is saved app-wide. Free accounts see the Pro badge and upgrade flow rather than
+rings; no usage-ring requests run without Pro. The saved preference loads before
+any read, so a stored opt-out cannot briefly start a probe. Losing Pro hides the
+rings and stops polling without overwriting the preference.
+
+A visible, connected, foreground icon requests only its agent's quotas. The
+initial path/version probe targets that one CLI and never fetches upstream
+version metadata or installs anything. Refreshes respect the existing two-minute
+usage cache and provider throttling, with a bounded refresh at a reported reset.
+Hiding the bar, covering the terminal route, disabling rings, disconnecting, or
+backgrounding the app stops scheduled checks. Already-started requests remain
+bounded; late results cannot update a different agent or disposed subscription.
+Session identity also separates cached quotas after reconnects.
+
+Only unambiguous `5 hours` and `Weekly` categories from these two readers are
+shown. Model-specific caps, duplicate categories, monetary balances, unlimited
+allowances, and unreported percentages are not converted into ring values. An
+elapsed reset hides that half until fresh data arrives; it never refills the
+ring speculatively. Missing halves are omitted, while a reported zero retains
+an empty track. Unsupported or unavailable readings leave the original icon.
+
+These are the CLI's host-account allowances as read by Agent Management, not
+consumption attributed to the current conversation. Pane-local credential
+overrides are not resolved. Multi-provider tools such as Pi and OpenCode do not
+get rings until their active account and applicable quotas can be identified
+without guessing from saved credentials. Usage values are not added to telemetry
+or diagnostics; only the existing allowlisted paywall feature token is registered.
 
 ## Implementation references
 

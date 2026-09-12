@@ -576,11 +576,19 @@ class AgentManagementService {
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
   _runtimeCache = {};
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
-  final Map<int, ({String selection, Future<Map<String, AgentUsage>> future})>
+  final Map<
+    int,
+    ({
+      SshSession session,
+      String selection,
+      Future<Map<String, AgentUsage>> future,
+    })
+  >
   _inFlightUsageChecks = {};
   final Map<
     int,
     ({
+      SshSession session,
       DateTime at,
       Map<String, String> paths,
       Map<String, AgentUsage> values,
@@ -848,8 +856,56 @@ class AgentManagementService {
     );
   }
 
-  /// Reads quotas only when the manager requests them, never during background
-  /// version checks. Credentials and provider responses remain on the host.
+  final _usageRuntimeCache =
+      Expando<
+        Map<AgentLaunchTool, ({DateTime at, AgentRuntimeInfo runtime})>
+      >();
+
+  /// Reads one installed CLI's account allowances without update/registry checks.
+  /// [shouldContinue] prevents a quota read after an abandoned path probe.
+  Future<AgentUsage?> readUsageForTool(
+    SshSession session,
+    AgentLaunchTool tool, {
+    bool Function()? shouldContinue,
+  }) async {
+    bool current() => shouldContinue?.call() ?? true;
+    if (!current() || !await _canManageAgents() || !current()) return null;
+    final definition = agentCliRuntimeDefinitions
+        .where((item) => item.tool == tool)
+        .firstOrNull;
+    if (definition == null) return null;
+    final cache = _usageRuntimeCache[session] ??= {};
+    var runtime = cache[tool];
+    if (runtime == null || _now().difference(runtime.at) >= _updateCheckTtl) {
+      final result = await _run(
+        session,
+        buildAgentBatchProbeCommand([
+          definition,
+        ], windows: session.remoteIsWindows),
+        priority: SshExecPriority.low,
+        timeout: const Duration(seconds: 14),
+      );
+      if (!current()) return null;
+      final path = parseAgentBatchProbeOutput(
+        result.output,
+      )[definition.id]?.executablePath;
+      final installed = AgentRuntimeInfo(
+        definition: definition,
+        status: path == null
+            ? AgentRuntimeStatus.notInstalled
+            : AgentRuntimeStatus.installed,
+        executablePath: path,
+      );
+      runtime = (at: _now(), runtime: installed);
+      cache[tool] = runtime;
+    }
+    if (!current()) return null;
+    final usage = await readUsage(session, [runtime.runtime]);
+    return current() ? usage[definition.id] : null;
+  }
+
+  /// Reads quotas requested by the manager or a visible Pro usage-ring icon.
+  /// Never runs as part of version checks. Credentials remain on the host.
   Future<Map<String, AgentUsage>> readUsage(
     SshSession session,
     List<AgentRuntimeInfo> runtimes,
@@ -870,7 +926,10 @@ class AgentManagementService {
     while (true) {
       final existing = _inFlightUsageChecks[session.connectionId];
       if (existing == null) break;
-      if (existing.selection == selection) return existing.future;
+      if (identical(existing.session, session) &&
+          existing.selection == selection) {
+        return existing.future;
+      }
       await existing.future;
     }
     late final Future<Map<String, AgentUsage>> check;
@@ -883,6 +942,7 @@ class AgentManagementService {
       }
     });
     _inFlightUsageChecks[session.connectionId] = (
+      session: session,
       selection: selection,
       future: check,
     );
@@ -927,7 +987,8 @@ class AgentManagementService {
     _usageCache.removeWhere(
       (_, entry) => _now().difference(entry.at) >= const Duration(minutes: 2),
     );
-    final cached = _usageCache[session.connectionId];
+    final snapshot = _usageCache[session.connectionId];
+    final cached = identical(snapshot?.session, session) ? snapshot : null;
     final parsed = <String, AgentUsage>{};
     final pending = <String, String>{};
     final refreshedResets = <String, Set<DateTime>>{};
@@ -1047,6 +1108,7 @@ class AgentManagementService {
       _usageCache.remove(_usageCache.keys.first);
     }
     _usageCache[session.connectionId] = (
+      session: session,
       at: _now(),
       paths: selected,
       values: parsed,
