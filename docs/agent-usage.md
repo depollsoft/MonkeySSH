@@ -5,13 +5,13 @@ discovered, alongside upstream version checks. Windows version probes and
 upstream metadata lookups run with up to four workers per batch. POSIX version
 probes and usage readers also run concurrently. Usage
 checks do not block installation or update controls. Refreshing the screen or
-re-checking a runtime requests usage again. Account usage is shown only for
+re-checking a runtime requests usage again. In Agent Management, usage is shown only for
 agent CLI rows; ACP adapters show installation and version information. These
 are account allowances, not usage attributed to an individual conversation.
 Overlapping usage requests for the same installed rows and executable paths
 share one in-flight check, including retryable failures. Changed selections wait
 for the active check and then request their own results. Cached usage is reused
-only for the same agent executable path. ACP adapters do not request usage.
+only for the same SSH session and agent executable path. ACP adapters do not request usage.
 
 Every supported agent has a reader:
 
@@ -56,11 +56,28 @@ Claude and Cursor environment-token overrides bypass credential files and
 keychain reads, including when those stores cannot be read.
 The installed CLIs may maintain their own authentication sessions when queried.
 
-Successful and throttled checks stay in memory for two minutes per SSH connection.
-Sign-in failures, transient failures, and partial snapshots with failed accounts
-can retry immediately unless a provider has throttled the check. Throttling holds
-the agent snapshot for two minutes, including partial results. A passed reset
-bypasses other cached snapshots. The screen
+Successful snapshots are reused for five minutes for Claude and two minutes for
+other agents, within the same SSH session and executable path. Reading one
+agent preserves the other agents' cached snapshots and reset markers. Sign-in
+and transient failures remain retryable unless throttling is active.
+
+HTTP `Retry-After` is retained as a sanitized relative duration, accepting seconds
+or an HTTP date and bounding malformed/extreme input to at most seven days.
+Rate-limit cooldowns start at five minutes, then grow to 10, 20, and 30 minutes
+on repeated throttling; a longer server deadline wins. Cooldown metadata is
+bounded and shared per saved host and agent, so switching windows, opening Agent
+Management, changing an executable path, or reconnecting cannot immediately
+repeat the blocked check. Quota values themselves remain session-scoped. Manual
+refresh and elapsed quota resets do not bypass an active cooldown, including
+partial multi-provider responses. A fully successful response clears backoff;
+unrelated or partially failed responses cannot shorten it.
+
+The manager shows the next allowed usage-check time. This is a usage-endpoint
+throttle, not an indication that the account's model allowance is exhausted.
+No extra live request is needed to display the retry time. Cooldowns and caches
+stay in memory only; no credentials or raw response headers are persisted.
+A passed quota reset can bypass an otherwise fresh success snapshot once, but
+never a throttle. The screen
 shows when usage was checked and labels past reset times without claiming the
 allowance has replenished. Missing reset times remain explicit. Rows with many
 quotas show a count of additional details that are available by expanding the row.
@@ -96,6 +113,60 @@ status counts, platform, connection ID, and exit status, never quota figures or
 credentials. Provider endpoints that are not
 public API contracts can change independently of MonkeySSH; failures remain
 visible and can be retried.
+
+## MonkeyMux usage rings · Pro
+
+Claude Code, Codex, Antigravity, and Grok Build can show remaining account
+allowances around the current agent icon in MonkeyMux's existing bottom bar or
+tablet sidebar. **Zero used means a full meter.** As usage grows, the colored arc
+shrinks: 23% used leaves 77% filled, and 100% used leaves an empty track.
+
+Only actual reported quotas occupy the circle:
+
+- One quota uses the whole circle. This includes Codex accounts that report a
+  weekly limit but no account-wide five-hour limit, and Grok's included credits.
+- Two quotas use the top and bottom halves. For Claude Code and Codex, the
+  five-hour allowance stays above the account-wide weekly allowance.
+- Antigravity exposes its numerical quota groups as separate, equal segments.
+  Group positions use stable label order rather than guessing an active model.
+  More than two reported groups divide the circle into additional segments.
+
+There are no dashed placeholders or empty halves for unreported quotas. A
+reported zero remains a real empty meter; no reported numerical allowance means
+no ring. Provider labels and percentages are available to accessibility services.
+Rings add no tap action, percentage label, or bar row. Native-chat badges and
+window-switcher gestures are preserved.
+
+**Options > Show usage rings** controls the feature. It defaults on for Pro and
+is saved app-wide. Free accounts see the Pro badge and upgrade flow rather than
+rings; no usage-ring requests run without Pro. The saved preference loads before
+any read, so a stored opt-out cannot briefly start a probe. Losing Pro hides the
+rings and stops polling without overwriting the preference.
+
+A visible, connected, foreground icon requests only its agent's quotas. The
+initial path/version probe targets that CLI and never fetches upstream version
+metadata or installs anything. Claude refreshes normally every five minutes;
+other agents use two minutes. Refreshes honor the shared cache and longer provider
+cooldowns, with a bounded refresh at a reported reset only when not throttled.
+Hiding the bar, covering the terminal route, disabling rings, disconnecting, or
+backgrounding the app stops scheduled checks. Already-started requests remain
+bounded; late results cannot update a different agent or disposed subscription.
+Session identity separates cached quotas after reconnects.
+
+Claude/Codex model-specific caps are not substituted for account-wide quotas.
+Grok uses the reported included-credit percentage; on-demand spending caps and
+prepaid balances are not mixed into that meter. Antigravity uses the numerical
+groups returned by the same reader as Agent Management. Duplicate labels,
+unlimited allowances, balances without a total, unreported percentages, and
+elapsed resets do not produce a guessed percentage. An elapsed quota is removed
+until fresh data arrives, never refilled speculatively.
+
+These are host-account allowances, not consumption attributed to the current
+conversation. Pane-local credential overrides are not resolved. Multi-provider
+tools such as Pi and OpenCode still need an explicit active-account selection
+rather than a guess from all saved credentials. Usage values are not added to
+telemetry or diagnostics; only the existing allowlisted paywall feature token is
+registered.
 
 ## Implementation references
 

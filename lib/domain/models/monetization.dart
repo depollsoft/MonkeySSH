@@ -113,6 +113,9 @@ enum MonetizationFeature {
   /// Remote agent installation, repair, version checks, and updates.
   agentManagement,
 
+  /// Live account-allowance rings in the MonkeyMux window bar.
+  agentUsageRings,
+
   /// More than one concurrently live ACP coding-agent session.
   concurrentAcpSessions,
 
@@ -129,6 +132,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.autoConnectAutomation => 'Auto-connect automation',
     MonetizationFeature.agentLaunchPresets => 'Agent launch presets',
     MonetizationFeature.agentManagement => 'Agent Management',
+    MonetizationFeature.agentUsageRings => 'Agent usage rings',
     MonetizationFeature.concurrentAcpSessions => 'Parallel native chats',
     MonetizationFeature.hostSpecificThemes => 'Host-specific themes',
   };
@@ -145,6 +149,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Save repeatable startup flows for tools like Codex, Claude Code, Copilot CLI, or OpenCode.',
     MonetizationFeature.agentManagement =>
       'Install, repair, and update coding agents on your remote hosts.',
+    MonetizationFeature.agentUsageRings =>
+      'See remaining agent allowances in the MonkeyMux bar.',
     MonetizationFeature.concurrentAcpSessions =>
       'Keep multiple native agent chats connected across hosts and providers.',
     MonetizationFeature.hostSpecificThemes =>
@@ -161,6 +167,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.agentLaunchPresets =>
       'Save coding-agent launch presets',
     MonetizationFeature.agentManagement => 'Manage remote coding agents',
+    MonetizationFeature.agentUsageRings => 'Show agent usage rings',
     MonetizationFeature.concurrentAcpSessions =>
       'Connect another native agent chat',
     MonetizationFeature.hostSpecificThemes => 'Save a host-specific theme',
@@ -182,6 +189,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Unlock Pro to keep this host on its own terminal theme while preserving your app defaults.',
     MonetizationFeature.agentManagement =>
       'Unlock Pro to install, repair, and update agents, with automatic update checks.',
+    MonetizationFeature.agentUsageRings =>
+      'Unlock Pro to see live account-usage rings without leaving the terminal.',
   };
 }
 

@@ -1,3 +1,21 @@
+import 'agent_launch_preset.dart';
+
+/// Normal usage-read cadence. Claude's OAuth usage endpoint is more restrictive.
+Duration agentUsageRefreshInterval(AgentLaunchTool? tool) =>
+    tool == AgentLaunchTool.claudeCode
+    ? const Duration(minutes: 5)
+    : const Duration(minutes: 2);
+
+/// Conservative backoff for throttling when the provider gives no longer delay.
+Duration agentUsageThrottleBackoff(int attempts) => Duration(
+  minutes: switch (attempts) {
+    <= 1 => 5,
+    2 => 10,
+    3 => 20,
+    _ => 30,
+  },
+);
+
 /// Availability of account quota information on the remote host.
 enum AgentUsageStatus {
   /// A quota snapshot was returned.
@@ -84,6 +102,7 @@ class AgentUsage {
     this.checkedAt,
     this.resetCredits,
     this.notices = const [],
+    this.retryAt,
   });
 
   /// Availability of usage data.
@@ -100,6 +119,24 @@ class AgentUsage {
 
   /// Accounts whose quota is missing, including partial check failures.
   final List<AgentUsageNotice> notices;
+
+  /// Earliest next usage request after a provider throttle, in client time.
+  final DateTime? retryAt;
+
+  /// Includes partial multi-provider responses with a throttled account.
+  bool get isRateLimited =>
+      status == AgentUsageStatus.rateLimited ||
+      notices.any((notice) => notice.status == AgentUsageStatus.rateLimited);
+
+  /// Retains the original snapshot age and data while attaching its cooldown.
+  AgentUsage withRetryAt(DateTime retryAt) => AgentUsage(
+    status: status,
+    windows: windows,
+    checkedAt: checkedAt,
+    resetCredits: resetCredits,
+    notices: notices,
+    retryAt: retryAt,
+  );
 }
 
 /// Availability for one provider within a multi-provider agent.

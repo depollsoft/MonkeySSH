@@ -9,6 +9,59 @@ void main() {
   String record(Map<String, Object?> values) =>
       '__monkeyssh_usage__=${jsonEncode(values)}';
 
+  test('preserves sanitized Retry-After only for throttled responses', () {
+    final held = parseAgentUsageOutput(
+      record({
+        'id': 'claude',
+        'status': 'rateLimited',
+        'retryAfterSeconds': 900,
+      }),
+      checkedAt: now,
+    )['claude']!;
+    expect(held.retryAt, now.add(const Duration(minutes: 15)));
+    expect(held.isRateLimited, isTrue);
+    final partial = parseAgentUsageOutput(
+      record({
+        'id': 'pi',
+        'status': 'available',
+        'retryAfterSeconds': 1200,
+        'windows': [
+          {'label': 'Weekly', 'usedPercent': 25},
+        ],
+        'notices': [
+          {'provider': 'Anthropic', 'status': 'rateLimited'},
+        ],
+      }),
+      checkedAt: now,
+    )['pi']!;
+    expect(partial.retryAt, now.add(const Duration(minutes: 20)));
+    expect(partial.windows.single.usedPercent, 25);
+    for (final invalid in ['900', -1, 0, null]) {
+      expect(
+        parseAgentUsageOutput(
+          record({
+            'id': 'claude',
+            'status': 'rateLimited',
+            'retryAfterSeconds': invalid,
+          }),
+          checkedAt: now,
+        )['claude']!.retryAt,
+        isNull,
+      );
+    }
+    expect(
+      parseAgentUsageOutput(
+        record({
+          'id': 'claude',
+          'status': 'unavailable',
+          'retryAfterSeconds': 900,
+        }),
+        checkedAt: now,
+      )['claude']!.retryAt,
+      isNull,
+    );
+  });
+
   test(
     'keeps quota windows, unlimited status, reset time, and earned resets',
     () {

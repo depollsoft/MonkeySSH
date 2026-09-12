@@ -2,6 +2,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 
 void main() {
+  test('usage rings are registered and gated by Pro', () {
+    const feature = MonetizationFeature.agentUsageRings;
+    expect(feature.label, 'Agent usage rings');
+    expect(feature.description, contains('MonkeyMux bar'));
+    expect(feature.blockedAction, 'Show agent usage rings');
+    expect(feature.blockedOutcome, contains('Unlock Pro'));
+    expect(const MonetizationEntitlements.free().allows(feature), isFalse);
+    expect(const MonetizationEntitlements.pro().allows(feature), isTrue);
+  });
   group('Agent Management monetization', () {
     test('registers the manager and automatic checks as Pro benefits', () {
       const feature = MonetizationFeature.agentManagement;

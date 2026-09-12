@@ -158,6 +158,18 @@ function readJson(file) {
     throw new Error('unavailable');
   }
 }
+// Normalize only a bounded delay. Raw headers, responses, and credentials never
+// leave the host. Relative seconds avoid differences between host/client clocks.
+function retryAfterSeconds(value, now = Date.now()) {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const text = value.trim();
+  const seconds = /^\d+$/.test(text) ? Number(text) : (Date.parse(text) - now) / 1000;
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(604800, Math.ceil(seconds)) : undefined;
+}
+function retryFields(error) {
+  return error?.message === 'rateLimited' && number(error.retryAfterSeconds) > 0
+    ? {retryAfterSeconds: Math.min(604800, Math.ceil(error.retryAfterSeconds))} : {};
+}
 const requestCache = new Map();
 function requestJson(url, {token, headers = {}, body, local = false} = {}) {
   const address = new URL(url);
@@ -176,8 +188,14 @@ function requestJson(url, {token, headers = {}, body, local = false} = {}) {
       }}, response => {
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(response.statusCode === 429 ? 'rateLimited' :
-          response.statusCode === 401 ? 'signInRequired' : 'unavailable')); return;
+        const error = new Error(response.statusCode === 429 ? 'rateLimited' :
+          response.statusCode === 401 ? 'signInRequired' : 'unavailable');
+        if (response.statusCode === 429) {
+          const serverNow = Date.parse(response.headers.date);
+          error.retryAfterSeconds = retryAfterSeconds(response.headers['retry-after'],
+            Number.isFinite(serverNow) ? serverNow : Date.now());
+        }
+        reject(error); return;
       }
       let text = '';
       response.on('data', chunk => {
@@ -523,10 +541,12 @@ async function multiProvider(id, accounts = configuredAccounts(id), reader = pro
       const result = await reader(provider, credential);
       return {windows: result.windows.map(w => ({...w, label: `${name} · ${w.label}`.slice(0, 100)})),
         notices: result.windows.length ? [] : [{provider: name, status: result.status || 'unavailable'}]};
-    } catch (error) { return {windows: [], notices: [{provider: name, status: statusOf(error)}]}; }
+    } catch (error) { return {windows: [], notices: [{provider: name, status: statusOf(error)}], ...retryFields(error)}; }
   }));
   const windows = results.flatMap(r => r.windows), notices = results.flatMap(r => r.notices);
-  return {windows, notices, status: windows.length ? 'available' : 'notReported'};
+  const retry = results.reduce((max, result) => Math.max(max, result.retryAfterSeconds || 0), 0);
+  return {windows, notices, status: windows.length ? 'available' : 'notReported',
+    ...(retry > 0 ? {retryAfterSeconds: retry} : {})};
 }
 
 async function probe(id, executable) {
@@ -545,10 +565,10 @@ async function probe(id, executable) {
     else return {status: 'unsupported'};
     return {...result, status: result.status || (result.windows.length ? 'available' : 'unavailable')};
   } catch (error) {
-    return {status: statusOf(error)};
+    return {status: statusOf(error), ...retryFields(error)};
   }
 }
-module.exports = {claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
+module.exports = {requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
   openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());

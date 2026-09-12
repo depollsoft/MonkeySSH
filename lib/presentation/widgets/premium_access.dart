@@ -14,8 +14,23 @@ Future<bool> requireMonetizationFeatureAccess({
   required MonetizationFeature feature,
   String? blockedAction,
   String? blockedOutcome,
+}) => requireMonetizationFeatureAccessWithService(
+  context: context,
+  service: ref.read(monetizationServiceProvider),
+  feature: feature,
+  blockedAction: blockedAction,
+  blockedOutcome: blockedOutcome,
+);
+
+/// Variant for menu actions whose WidgetRef is unmounted before dispatch.
+/// Callers capture the service and a stable navigator context while building.
+Future<bool> requireMonetizationFeatureAccessWithService({
+  required BuildContext context,
+  required MonetizationService service,
+  required MonetizationFeature feature,
+  String? blockedAction,
+  String? blockedOutcome,
 }) async {
-  final service = ref.read(monetizationServiceProvider);
   if (await service.canUseFeature(feature)) {
     return true;
   }

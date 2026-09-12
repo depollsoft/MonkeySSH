@@ -34,6 +34,30 @@ class AgentUsageSummary extends StatelessWidget {
     final style = Theme.of(
       context,
     ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+    final clock = now ?? DateTime.now();
+    final retryAt = snapshot?.retryAt;
+    String? retryLabel;
+    if (!checking &&
+        (snapshot?.isRateLimited ?? false) &&
+        retryAt != null &&
+        retryAt.isAfter(clock)) {
+      final local = retryAt.toLocal();
+      final localNow = clock.toLocal();
+      final localizations = MaterialLocalizations.of(context);
+      final time = localizations.formatTimeOfDay(
+        TimeOfDay.fromDateTime(local),
+        alwaysUse24HourFormat:
+            MediaQuery.maybeOf(context)?.alwaysUse24HourFormat ?? false,
+      );
+      final sameDay =
+          local.year == localNow.year &&
+          local.month == localNow.month &&
+          local.day == localNow.day;
+      final when = sameDay
+          ? time
+          : '${localizations.formatShortDate(local)}, $time';
+      retryLabel = 'Next usage check after $when';
+    }
     if (snapshot == null || snapshot.status != AgentUsageStatus.available) {
       final notices = snapshot?.notices ?? const <AgentUsageNotice>[];
       final visible = expanded ? notices : notices.take(1);
@@ -54,10 +78,10 @@ class AgentUsageSummary extends StatelessWidget {
               ),
           if (!checking && hidden > 0)
             Text(_moreDetailsLabel(hidden), style: style),
+          if (retryLabel != null) Text(retryLabel, style: style),
         ],
       );
     }
-    final clock = now ?? DateTime.now();
     final windows = expanded ? snapshot.windows : snapshot.windows.take(3);
     final notices = expanded ? snapshot.notices : snapshot.notices.take(1);
     final hidden =
@@ -166,6 +190,7 @@ class AgentUsageSummary extends StatelessWidget {
             ),
           ),
         if (hidden > 0) Text(_moreDetailsLabel(hidden), style: style),
+        if (retryLabel != null) Text(retryLabel, style: style),
         if (expanded && snapshot.resetCredits != null)
           Text(
             '${snapshot.resetCredits} ${snapshot.resetCredits == 1 ? 'reset' : 'resets'} available',

@@ -1381,11 +1381,36 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     required AgentLaunchTool? nativeWindowTool,
   }) {
     final color = theme.colorScheme.primary;
+    Widget withUsage(
+      Widget icon,
+      AgentLaunchTool? tool, {
+      double diameter = 28,
+    }) {
+      if (tool == null ||
+          widget.activeMuxBackend != RemoteMuxBackend.monkeyMux) {
+        return icon;
+      }
+      return AgentUsageRingIcon(
+        key: ValueKey((widget.session, tool)),
+        session: widget.session,
+        tool: tool,
+        diameter: diameter,
+        child: icon,
+      );
+    }
+
     if (nativeWindowIndex != null) {
-      return buildNativeAcpHandleIcon(theme: theme, tool: nativeWindowTool);
+      return withUsage(
+        buildNativeAcpHandleIcon(theme: theme, tool: nativeWindowTool),
+        nativeWindowTool,
+        diameter: 32,
+      );
     }
     if (activeWindowTool != null) {
-      return AgentToolIcon(tool: activeWindowTool, size: 16, color: color);
+      return withUsage(
+        AgentToolIcon(tool: activeWindowTool, size: 16, color: color),
+        activeWindowTool,
+      );
     }
     if (widget.activeMuxBackend == RemoteMuxBackend.monkeyMux) {
       return ImageIcon(

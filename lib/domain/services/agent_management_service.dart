@@ -576,11 +576,20 @@ class AgentManagementService {
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
   _runtimeCache = {};
   final Map<int, Future<List<AgentRuntimeInfo>>> _inFlightUpdateChecks = {};
-  final Map<int, ({String selection, Future<Map<String, AgentUsage>> future})>
+  final Map<
+    int,
+    ({
+      SshSession session,
+      String selection,
+      List<bool Function()> observers,
+      Future<Map<String, AgentUsage>> future,
+    })
+  >
   _inFlightUsageChecks = {};
   final Map<
     int,
     ({
+      SshSession session,
       DateTime at,
       Map<String, String> paths,
       Map<String, AgentUsage> values,
@@ -588,6 +597,62 @@ class AgentManagementService {
     })
   >
   _usageCache = {};
+
+  // Cooldowns contain no quota values or account identifiers. They survive a
+  // reconnect to the same saved host; quota snapshots themselves stay session-bound.
+  final _usageCooldowns =
+      <(int, String), ({DateTime checkedAt, DateTime retryAt, int attempts})>{};
+
+  AgentUsage? _activeUsageCooldown(SshSession session, String id) {
+    _usageCooldowns.removeWhere(
+      (_, entry) =>
+          _now().difference(entry.retryAt) >= const Duration(hours: 1),
+    );
+    final held = _usageCooldowns[(session.hostId, id)];
+    if (held == null || !held.retryAt.isAfter(_now())) return null;
+    return AgentUsage(
+      status: AgentUsageStatus.rateLimited,
+      checkedAt: held.checkedAt,
+      retryAt: held.retryAt,
+    );
+  }
+
+  AgentUsage _rememberUsageCooldown(
+    SshSession session,
+    String id,
+    AgentUsage usage,
+  ) {
+    final key = (session.hostId, id);
+    if (!usage.isRateLimited) {
+      if (usage.status == AgentUsageStatus.available &&
+          !usage.notices.any(
+            (notice) => notice.status != AgentUsageStatus.notReported,
+          )) {
+        _usageCooldowns.remove(key);
+      }
+      return usage;
+    }
+    final previous = _usageCooldowns[key];
+    final attempts = (previous?.attempts ?? 0) >= 4
+        ? 4
+        : (previous?.attempts ?? 0) + 1;
+    var retryAt = _now().add(agentUsageThrottleBackoff(attempts));
+    if (usage.retryAt?.isAfter(retryAt) ?? false) retryAt = usage.retryAt!;
+    if (previous?.retryAt.isAfter(retryAt) ?? false) {
+      retryAt = previous!.retryAt;
+    }
+    _usageCooldowns.remove(key);
+    if (_usageCooldowns.length >=
+        _maxRuntimeCacheEntries * agentCliRuntimeDefinitions.length) {
+      _usageCooldowns.remove(_usageCooldowns.keys.first);
+    }
+    _usageCooldowns[key] = (
+      checkedAt: usage.checkedAt ?? _now(),
+      retryAt: retryAt,
+      attempts: attempts,
+    );
+    return usage.withRetryAt(retryAt);
+  }
 
   /// Number of retained connection snapshots.
   @visibleForTesting
@@ -634,6 +699,7 @@ class AgentManagementService {
         // A stale background failure must not abort an explicit refresh.
       }
     }
+    _invalidateUsageRuntime(session);
     _discovery.invalidateSession(session);
     return _inspectAll(session, onDiscovered: onDiscovered);
   }
@@ -748,6 +814,9 @@ class AgentManagementService {
         message: 'Agent Management requires MonkeySSH Pro.',
       );
     }
+    if (definition.kind == AgentRuntimeKind.cli && definition.tool != null) {
+      _invalidateUsageRuntime(session, tool: definition.tool);
+    }
     try {
       final probeOutput = await _run(
         session,
@@ -848,16 +917,101 @@ class AgentManagementService {
     );
   }
 
-  /// Reads quotas only when the manager requests them, never during background
-  /// version checks. Credentials and provider responses remain on the host.
+  final _usageRuntimeCache =
+      Expando<
+        Map<AgentLaunchTool, ({DateTime at, AgentRuntimeInfo runtime})>
+      >();
+
+  final _usageRuntimeRevisions = Expando<Map<AgentLaunchTool, Object>>();
+
+  void _invalidateUsageRuntime(SshSession session, {AgentLaunchTool? tool}) {
+    if (tool == null) {
+      _usageRuntimeCache[session] = null;
+      _usageRuntimeRevisions[session] = null;
+    } else {
+      _usageRuntimeCache[session]?.remove(tool);
+      final revisions = _usageRuntimeRevisions[session] ??= {};
+      revisions[tool] = Object();
+    }
+  }
+
+  /// Reads one installed CLI's account allowances without update/registry checks.
+  /// [shouldContinue] prevents a quota read after an abandoned path probe.
+  Future<AgentUsage?> readUsageForTool(
+    SshSession session,
+    AgentLaunchTool tool, {
+    bool Function()? shouldContinue,
+  }) async {
+    bool current() => shouldContinue?.call() ?? true;
+    if (!current() || !await _canManageAgents() || !current()) return null;
+    final definition = agentCliRuntimeDefinitions
+        .where((item) => item.tool == tool)
+        .firstOrNull;
+    if (definition == null) return null;
+    final cooldown = _activeUsageCooldown(session, definition.id.substring(4));
+    if (cooldown != null) return cooldown;
+    final cache = _usageRuntimeCache[session] ??= {};
+    final revisions = _usageRuntimeRevisions[session] ??= {};
+    final revision = revisions.putIfAbsent(tool, Object.new);
+    bool runtimeCurrent() =>
+        current() &&
+        identical(_usageRuntimeRevisions[session], revisions) &&
+        identical(revisions[tool], revision);
+    var runtime = cache[tool];
+    if (runtime == null || _now().difference(runtime.at) >= _updateCheckTtl) {
+      final AgentRuntimeActionResult result;
+      try {
+        result = await _run(
+          session,
+          buildAgentBatchProbeCommand([
+            definition,
+          ], windows: session.remoteIsWindows),
+          priority: SshExecPriority.low,
+          timeout: const Duration(seconds: 14),
+          shouldContinue: runtimeCurrent,
+        );
+      } on _UsageReadCancelled {
+        return null;
+      }
+      if (!runtimeCurrent()) return null;
+      final snapshot = parseAgentBatchProbeOutput(result.output)[definition.id];
+      // A failed/incomplete probe is not proof that the CLI is absent.
+      if (!result.succeeded || snapshot == null) return null;
+      final path = snapshot.executablePath;
+      final installed = AgentRuntimeInfo(
+        definition: definition,
+        status: path == null
+            ? AgentRuntimeStatus.notInstalled
+            : AgentRuntimeStatus.installed,
+        executablePath: path,
+      );
+      runtime = (at: _now(), runtime: installed);
+      cache[tool] = runtime;
+    }
+    if (!runtimeCurrent()) return null;
+    final usage = await _readUsageWhenCurrent(session, [
+      runtime.runtime,
+    ], shouldContinue: runtimeCurrent);
+    return runtimeCurrent() ? usage[definition.id] : null;
+  }
+
+  /// Reads quotas requested by the manager or a visible Pro usage-ring icon.
+  /// Never runs as part of version checks. Credentials remain on the host.
   Future<Map<String, AgentUsage>> readUsage(
     SshSession session,
     List<AgentRuntimeInfo> runtimes,
-  ) async {
+  ) => _readUsageWhenCurrent(session, runtimes);
+
+  Future<Map<String, AgentUsage>> _readUsageWhenCurrent(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes, {
+    bool Function()? shouldContinue,
+  }) async {
+    bool current() => shouldContinue?.call() ?? true;
+    if (!current() || !await _canManageAgents() || !current()) return const {};
     final snapshot = runtimes
         .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
         .toList();
-    if (!await _canManageAgents()) return const {};
     final selectedRows = [
       for (final runtime in snapshot)
         if (runtime.status == AgentRuntimeStatus.installed ||
@@ -865,35 +1019,57 @@ class AgentManagementService {
           jsonEncode([runtime.definition.id, runtime.executablePath]),
     ]..sort();
     final selection = jsonEncode(selectedRows);
-    // Installs can change the selection while a probe is running. Queue that
-    // selection, then re-check so matching waiters still share the follow-up.
     while (true) {
+      if (!current() || !await _canManageAgents() || !current()) {
+        return const {};
+      }
       final existing = _inFlightUsageChecks[session.connectionId];
       if (existing == null) break;
-      if (existing.selection == selection) return existing.future;
-      await existing.future;
-    }
-    late final Future<Map<String, AgentUsage>> check;
-    check = _readUsage(session, snapshot).whenComplete(() {
-      if (identical(
-        _inFlightUsageChecks[session.connectionId]?.future,
-        check,
-      )) {
-        _inFlightUsageChecks.remove(session.connectionId);
+      if (identical(existing.session, session) &&
+          existing.selection == selection) {
+        // A dismissed ring must not cancel another visible consumer's request.
+        existing.observers.add(current);
+        final result = await existing.future;
+        return current() && await _canManageAgents() && current()
+            ? result
+            : const {};
       }
-    });
+      await existing.future;
+      if (!current()) return const {};
+    }
+    final observers = <bool Function()>[current];
+    bool requested() => observers.any((observer) => observer());
+    late final Future<Map<String, AgentUsage>> check;
+    check = _readUsage(session, snapshot, shouldContinue: requested)
+        .whenComplete(() {
+          if (identical(
+            _inFlightUsageChecks[session.connectionId]?.future,
+            check,
+          )) {
+            _inFlightUsageChecks.remove(session.connectionId);
+          }
+        });
     _inFlightUsageChecks[session.connectionId] = (
+      session: session,
       selection: selection,
+      observers: observers,
       future: check,
     );
-    return check;
+    final result = await check;
+    // Dispatched reads still cache useful responses and cooldowns, but cancelled
+    // callers receive no result and cannot publish it into a different window.
+    return current() && await _canManageAgents() && current()
+        ? result
+        : const {};
   }
 
   Future<Map<String, AgentUsage>> _readUsage(
     SshSession session,
-    List<AgentRuntimeInfo> runtimes,
-  ) async {
+    List<AgentRuntimeInfo> runtimes, {
+    required bool Function() shouldContinue,
+  }) async {
     final selected = <String, String>{};
+    final refreshIntervals = <String, Duration>{};
     final result = <String, AgentUsage>{};
     for (final runtime in runtimes) {
       if (runtime.status != AgentRuntimeStatus.installed &&
@@ -916,6 +1092,7 @@ class AgentManagementService {
       };
       if (id != null && runtime.executablePath != null) {
         selected[id] = runtime.executablePath!;
+        refreshIntervals[id] = agentUsageRefreshInterval(tool);
       }
       result[runtime.definition.id] = AgentUsage(
         status: id == null
@@ -925,9 +1102,14 @@ class AgentManagementService {
     }
     if (selected.isEmpty) return result;
     _usageCache.removeWhere(
-      (_, entry) => _now().difference(entry.at) >= const Duration(minutes: 2),
+      (_, entry) =>
+          _now().difference(entry.at) >= const Duration(hours: 1) &&
+          !entry.values.values.any(
+            (usage) => usage.retryAt?.isAfter(_now()) ?? false,
+          ),
     );
-    final cached = _usageCache[session.connectionId];
+    final snapshot = _usageCache[session.connectionId];
+    final cached = identical(snapshot?.session, session) ? snapshot : null;
     final parsed = <String, AgentUsage>{};
     final pending = <String, String>{};
     final refreshedResets = <String, Set<DateTime>>{};
@@ -936,6 +1118,13 @@ class AgentManagementService {
           ? cached?.values[entry.key]
           : null;
       final checkedAt = usage?.checkedAt;
+      final cooldown = _activeUsageCooldown(session, entry.key);
+      if (cooldown != null) {
+        parsed[entry.key] = (usage?.isRateLimited ?? false)
+            ? usage!.withRetryAt(cooldown.retryAt!)
+            : cooldown;
+        continue;
+      }
       final refreshed = refreshedResets[entry.key] = {
         if (usage != null) ...?cached?.refreshedResets[entry.key],
       };
@@ -944,23 +1133,20 @@ class AgentManagementService {
           if (window.resetsAt != null && !window.resetsAt!.isAfter(_now()))
             window.resetsAt!,
       };
+      // Retaining other agents must not retain an unbounded history of resets.
+      refreshed.removeWhere((reset) => !passedResets.contains(reset));
       final resetPassed = passedResets.difference(refreshed).isNotEmpty;
-      final throttled =
-          usage?.status == AgentUsageStatus.rateLimited ||
-          (usage?.notices.any(
-                (notice) => notice.status == AgentUsageStatus.rateLimited,
-              ) ??
-              false);
       final reusable =
           usage != null &&
           checkedAt != null &&
-          (throttled ||
+          ((usage.isRateLimited && (usage.retryAt?.isAfter(_now()) ?? false)) ||
               (usage.status == AgentUsageStatus.available &&
+                  !usage.isRateLimited &&
                   !usage.notices.any(
                     (notice) => notice.status != AgentUsageStatus.notReported,
-                  ))) &&
-          _now().difference(checkedAt) < const Duration(minutes: 2) &&
-          (throttled || !resetPassed);
+                  ) &&
+                  _now().difference(checkedAt) < refreshIntervals[entry.key]! &&
+                  !resetPassed));
       if (reusable) {
         parsed[entry.key] = usage;
       } else {
@@ -974,9 +1160,11 @@ class AgentManagementService {
       return _mapUsageToRuntimes(runtimes, result, selected, parsed);
     }
     try {
+      if (!shouldContinue()) throw const _UsageReadCancelled();
       final script = await rootBundle.loadString(
         'assets/scripts/agent_usage_probe.cjs',
       );
+      if (!shouldContinue()) throw const _UsageReadCancelled();
       final source = base64.encode(utf8.encode(script));
       final bootstrap =
           "process.env.MONKEYSSH_USAGE_PROBE='1';"
@@ -992,8 +1180,17 @@ class AgentManagementService {
             : null,
         timeout: const Duration(seconds: 18),
         keepPartialOutputOnTimeout: true,
+        shouldContinue: shouldContinue,
       );
-      final values = parseAgentUsageOutput(response.output, checkedAt: _now());
+      final rawValues = parseAgentUsageOutput(
+        response.output,
+        checkedAt: _now(),
+      );
+      final values = <String, AgentUsage>{
+        for (final entry in rawValues.entries)
+          if (pending.containsKey(entry.key))
+            entry.key: _rememberUsageCooldown(session, entry.key, entry.value),
+      };
       parsed.addAll(values);
       for (final entry in values.entries) {
         DiagnosticsLogService.instance.debug(
@@ -1024,6 +1221,8 @@ class AgentManagementService {
                 .length,
         },
       );
+    } on _UsageReadCancelled {
+      return const {};
     } on Object {
       DiagnosticsLogService.instance.debug(
         'agent.usage',
@@ -1047,10 +1246,13 @@ class AgentManagementService {
       _usageCache.remove(_usageCache.keys.first);
     }
     _usageCache[session.connectionId] = (
+      session: session,
       at: _now(),
-      paths: selected,
-      values: parsed,
-      refreshedResets: refreshedResets,
+      // A ring reads one agent; the manager reads many. Preserve unrelated
+      // snapshots and their reset markers instead of erasing their cooldowns.
+      paths: {...?cached?.paths, ...selected},
+      values: {...?cached?.values, ...parsed},
+      refreshedResets: {...?cached?.refreshedResets, ...refreshedResets},
     );
     return _mapUsageToRuntimes(runtimes, result, selected, parsed);
   }
@@ -1183,6 +1385,10 @@ class AgentManagementService {
         },
       );
       rethrow;
+    } finally {
+      if (definition.kind == AgentRuntimeKind.cli && definition.tool != null) {
+        _invalidateUsageRuntime(session, tool: definition.tool);
+      }
     }
     _runtimeCache.remove(session.connectionId);
     _discovery.invalidateSession(session);
@@ -1197,7 +1403,12 @@ class AgentManagementService {
     bool keepPartialOutputOnTimeout = false,
     Uint8List? input,
     SshExecPriority priority = SshExecPriority.normal,
+    bool Function()? shouldContinue,
   }) => session.runQueuedExec(() async {
+    if (shouldContinue != null &&
+        (!shouldContinue() || !await _canManageAgents() || !shouldContinue())) {
+      throw const _UsageReadCancelled();
+    }
     final exec = await openSshExec(
       session.execute(command),
       timeout ?? const Duration(seconds: 15),
@@ -1252,6 +1463,10 @@ class AgentManagementService {
       }
     }
   }, priority: priority);
+}
+
+class _UsageReadCancelled implements Exception {
+  const _UsageReadCancelled();
 }
 
 /// Parsed executable and version output for one runtime probe.
@@ -1757,8 +1972,10 @@ String _buildOfficialAgentInstallerCommand(
 final agentManagementServiceProvider = Provider<AgentManagementService>(
   (ref) => AgentManagementService(
     ref.watch(agentSessionDiscoveryServiceProvider),
-    canManageAgents: () => ref
-        .read(monetizationServiceProvider)
-        .canUseFeature(MonetizationFeature.agentManagement),
+    canManageAgents: () => ref.mounted
+        ? ref
+              .read(monetizationServiceProvider)
+              .canUseFeature(MonetizationFeature.agentManagement)
+        : Future.value(false),
   ),
 );
