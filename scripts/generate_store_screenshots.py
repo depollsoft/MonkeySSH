@@ -945,6 +945,9 @@ class StoreDemoEnvironment:
             'outside this workspace.'
         )
         self._monkeymux_send_literal('copilot', prompt)
+        # Let the CLI finish processing the text event before submitting it.
+        # Recent Copilot builds can consume an immediate Enter with that event.
+        time.sleep(1)
         self._monkeymux_send_keys('copilot', 'Enter')
         self._wait_for_copilot_image_display()
 
