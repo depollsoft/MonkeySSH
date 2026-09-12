@@ -578,7 +578,7 @@ class StoreDemoEnvironment:
         self._write_pane_script(
             'copilot',
             f"""
-            exec env COPILOT_ALLOW_ALL=0 TERM=xterm-kitty \\
+            exec env COPILOT_ALLOW_ALL=false TERM=xterm-kitty \\
               {self._shell_quote(self._copilot)} \\
               --no-remote \\
               --log-level default \\
