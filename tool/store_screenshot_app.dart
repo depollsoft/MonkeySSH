@@ -774,6 +774,24 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     // never stalls the recorded flow.
     await _ensureMuxReady();
 
+    // The video briefly leaves the terminal route between native and CLI
+    // windows. Keep its control observer alive while the capture driver is
+    // still issuing commands, even when no terminal widget is subscribed.
+    final session = ref
+        .read(activeSessionsProvider.notifier)
+        .getSession(_connectionId!)!;
+    final subscription = ref
+        .read(monkeyMuxServiceProvider)
+        .watchWindowChanges(session, _muxSessionName)
+        .listen((_) {});
+    try {
+      await _runVideoDemoScenes(terminalHostId);
+    } finally {
+      await subscription.cancel();
+    }
+  }
+
+  Future<void> _runVideoDemoScenes(int terminalHostId) async {
     final base = '/terminal/$terminalHostId?connectionId=$_connectionId';
 
     // Beat 1: a real Copilot ACP session in the embedded native agent window.
