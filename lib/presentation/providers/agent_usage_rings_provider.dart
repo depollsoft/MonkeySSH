@@ -48,6 +48,8 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
       final now = ref.watch(agentUsageRingsClockProvider);
       final controller = StreamController<AgentUsageRings?>();
       Timer? timer;
+      Timer? expiryTimer;
+      var expiryRevision = 0;
       var disposed = false;
       var revision = 0;
       AppLifecycleListener? lifecycle;
@@ -58,19 +60,44 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
       ref.onDispose(() {
         disposed = true;
         timer?.cancel();
+        expiryTimer?.cancel();
         lifecycle?.dispose();
         unawaited(controller.close());
       });
+
+      void publish(AgentUsage? usage) {
+        expiryTimer?.cancel();
+        final token = ++expiryRevision;
+        if (disposed || !foreground()) return;
+        final time = now();
+        final rings = resolveAgentUsageRings(request.tool, usage, now: time);
+        controller.add(rings);
+        if (rings == null || usage == null || usage.checkedAt == null) return;
+        var deadline = usage.checkedAt!.add(
+          agentUsageSnapshotMaxAge(request.tool),
+        );
+        for (final window in usage.windows) {
+          if (!isAgentUsageRingWindow(request.tool, window)) continue;
+          final reset = window.resetsAt;
+          if (reset != null &&
+              reset.isAfter(time) &&
+              reset.isBefore(deadline)) {
+            deadline = reset;
+          }
+        }
+        // Expiry is presentation-only. A blocked read must neither extend a
+        // snapshot's lifetime nor cause an extra quota request at this deadline.
+        expiryTimer = Timer(deadline.difference(time), () {
+          if (!disposed && token == expiryRevision) publish(usage);
+        });
+      }
 
       Future<void> refresh() async {
         if (disposed || !foreground()) return;
         final generation = ++revision;
         bool current() =>
             !disposed && ref.mounted && generation == revision && foreground();
-        // Drop an elapsed half immediately, without pretending it has replenished.
-        controller.add(
-          resolveAgentUsageRings(request.tool, previous, now: now()),
-        );
+        publish(previous);
         AgentUsage? usage;
         try {
           usage = await service.readUsageForTool(
@@ -83,7 +110,7 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
         }
         if (!current()) return;
         previous = usage;
-        controller.add(resolveAgentUsageRings(request.tool, usage, now: now()));
+        publish(usage);
         var delay = agentUsageRefreshInterval(request.tool);
         final checkedAt = usage?.checkedAt;
         final throttled = usage?.isRateLimited ?? false;
@@ -125,7 +152,9 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
         onStateChange: (state) {
           if (disposed) return;
           revision++;
+          expiryRevision++;
           timer?.cancel();
+          expiryTimer?.cancel();
           if (state == AppLifecycleState.resumed) unawaited(refresh());
         },
       );

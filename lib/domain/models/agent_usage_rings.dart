@@ -54,6 +54,15 @@ bool isAgentUsageRingWindow(AgentLaunchTool tool, AgentUsageWindow window) =>
       _ => false,
     };
 
+/// Hard display-age limit, independent of how long an SSH request is queued.
+Duration agentUsageSnapshotMaxAge(AgentLaunchTool tool) {
+  final refreshGrace =
+      agentUsageRefreshInterval(tool) + const Duration(minutes: 1);
+  return refreshGrace > const Duration(minutes: 5)
+      ? refreshGrace
+      : const Duration(minutes: 5);
+}
+
 /// Projects the same reported numerical allowances used by Agent Management.
 /// Claude/Codex scoped model limits are not substitutes for account-wide limits.
 /// Antigravity shows its reported groups rather than guessing an active model.
@@ -62,13 +71,7 @@ AgentUsageRings? resolveAgentUsageRings(
   AgentUsage? usage, {
   required DateTime now,
 }) {
-  // Keep a valid meter visible while the scheduled read is in flight. Claude
-  // now refreshes every five minutes, so allow one bounded minute of grace.
-  final refreshGrace =
-      agentUsageRefreshInterval(tool) + const Duration(minutes: 1);
-  final staleAfter = refreshGrace > const Duration(minutes: 5)
-      ? refreshGrace
-      : const Duration(minutes: 5);
+  final staleAfter = agentUsageSnapshotMaxAge(tool);
   if (!supportsAgentUsageRings(tool) ||
       usage == null ||
       usage.status != AgentUsageStatus.available ||

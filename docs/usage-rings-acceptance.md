@@ -58,6 +58,8 @@ retries rather than attempting to bypass provider throttling.
 - [x] Empty capacity tracks use opaque, alpha-composited theme colors with at least 3:1 contrast in light and dark themes. The track is thinner than remaining-quota strokes, so the two states differ by both color and weight.
 - [x] Current-direction wording describes preserved bar invariants rather than claiming production code is untouched. The PR summary explicitly states five-minute Claude polling, two minutes for other agents, and successful Android/iPad fixture validation.
 
+- [x] An independent presentation timer expires stale snapshots and elapsed quota windows even while SSH refresh work is queued. Fresh responses reschedule expiry; disposal/backgrounding cancel it. Expiry never starts an extra provider request. Two additional regressions cover a blocked refresh beyond the freshness deadline and replacement of the old expiry timer.
+
 The focused review suite covers ten runtime/queue race cases, plus loading-state
 checkbox and actual painted-track contrast regressions. The existing service and
 widget suites were exercised as well. No live provider requests were made for

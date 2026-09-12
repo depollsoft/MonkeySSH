@@ -530,6 +530,56 @@ void main() {
     },
   );
 
+  testWidgets(
+    'pending refresh expires the displayed snapshot without another read',
+    (tester) async {
+      final reader = Reader();
+      await pumpIcon(tester, reader, Billing(true), Preference(true));
+      reader
+        ..pending = Completer<AgentUsage?>()
+        ..now = reader.now.add(const Duration(minutes: 5, seconds: 1));
+      await tester.pump(const Duration(minutes: 5, seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      expect(reader.calls, 2);
+      reader.now = reader.now.add(const Duration(seconds: 59));
+      await tester.pump(const Duration(seconds: 59));
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsNothing);
+      expect(reader.calls, 2);
+      reader.pending!.complete(
+        AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: reader.now,
+          windows: const [AgentUsageWindow(label: 'Weekly', usedPercent: 25)],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        75,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('a fresh response replaces the prior snapshot expiry timer', (
+    tester,
+  ) async {
+    final reader = Reader();
+    await pumpIcon(tester, reader, Billing(true), Preference(true));
+    reader.now = reader.now.add(const Duration(minutes: 5));
+    await tester.pump(const Duration(minutes: 5));
+    await tester.pumpAndSettle();
+    expect(reader.calls, 2);
+    reader.now = reader.now.add(const Duration(minutes: 1));
+    await tester.pump(const Duration(minutes: 1));
+    await tester.pumpAndSettle();
+    expect(find.byType(SplitUsageRing), findsOneWidget);
+    expect(reader.calls, 2);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Claude normal polling waits five minutes rather than two', (
     tester,
   ) async {
