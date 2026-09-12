@@ -24,9 +24,11 @@ void main() => runApp(const UsageRingsFeaturePreview());
 class UsageRingsFeaturePreview extends StatefulWidget {
   const UsageRingsFeaturePreview({
     this.tool = AgentLaunchTool.claudeCode,
+    this.codexUsedPercent = 23,
     super.key,
   });
   final AgentLaunchTool tool;
+  final double codexUsedPercent;
   @override
   State<UsageRingsFeaturePreview> createState() =>
       _UsageRingsFeaturePreviewState();
@@ -36,7 +38,7 @@ class _UsageRingsFeaturePreviewState extends State<UsageRingsFeaturePreview> {
   final billing = _Billing();
   final updates = StreamController<MonetizationState>.broadcast();
   final preference = _Preference();
-  final reader = _Reader();
+  late final reader = _Reader(widget.codexUsedPercent);
   final session = _Session();
   final menu = MenuController();
   bool expanded = false;
@@ -84,9 +86,12 @@ class _UsageRingsFeaturePreviewState extends State<UsageRingsFeaturePreview> {
                 ),
                 const SizedBox(height: 28),
                 Text(
-                  widget.tool == AgentLaunchTool.codex
-                      ? r'$ codex'
-                      : r'$ claude',
+                  switch (widget.tool) {
+                    AgentLaunchTool.codex => r'$ codex',
+                    AgentLaunchTool.antigravity => r'$ agy',
+                    AgentLaunchTool.grokBuild => r'$ grok',
+                    _ => r'$ claude',
+                  },
                   style: TextStyle(
                     fontFamily: 'JetBrains Mono',
                     color: scheme.onSurfaceVariant,
@@ -272,6 +277,9 @@ class _Preference extends ShowUsageRingsNotifier {
 }
 
 class _Reader extends Fake implements AgentManagementService {
+  _Reader(this.codexUsedPercent);
+  final double codexUsedPercent;
+
   @override
   Future<AgentUsage?> readUsageForTool(
     SshSession session,
@@ -280,26 +288,49 @@ class _Reader extends Fake implements AgentManagementService {
   }) async => AgentUsage(
     status: AgentUsageStatus.available,
     checkedAt: DateTime.now(),
-    windows: tool == AgentLaunchTool.codex
-        ? const [
-            AgentUsageWindow(label: 'Weekly', usedPercent: 23),
-            AgentUsageWindow(
-              label: 'codex_bengalfox · 5 hours',
-              usedPercent: 0,
-            ),
-            AgentUsageWindow(label: 'codex_bengalfox · Weekly', usedPercent: 0),
-          ]
-        : [
-            AgentUsageWindow(
-              label: '5 hours',
-              usedPercent: 42,
-              resetsAt: DateTime.now().add(const Duration(hours: 1)),
-            ),
-            AgentUsageWindow(
-              label: 'Weekly',
-              usedPercent: 36,
-              resetsAt: DateTime.now().add(const Duration(days: 3)),
-            ),
-          ],
+    windows: switch (tool) {
+      AgentLaunchTool.codex => [
+        AgentUsageWindow(label: 'Weekly', usedPercent: codexUsedPercent),
+        const AgentUsageWindow(
+          label: 'codex_bengalfox · 5 hours',
+          usedPercent: 0,
+        ),
+        const AgentUsageWindow(
+          label: 'codex_bengalfox · Weekly',
+          usedPercent: 0,
+        ),
+      ],
+      AgentLaunchTool.grokBuild => const [
+        AgentUsageWindow(
+          label: 'Included credits',
+          usedPercent: 0,
+          unit: 'USD',
+        ),
+        AgentUsageWindow(
+          label: 'On-demand spending',
+          usedPercent: 50,
+          unit: 'USD',
+        ),
+        AgentUsageWindow(label: 'Prepaid balance', remaining: 25, unit: 'USD'),
+      ],
+      AgentLaunchTool.antigravity => const [
+        AgentUsageWindow(label: 'Fast · Basic', usedPercent: 0),
+        AgentUsageWindow(label: 'Thinking · Pro', usedPercent: 25),
+        AgentUsageWindow(label: 'Tools · Coding', usedPercent: 50),
+        AgentUsageWindow(label: 'Vision · Pro', usedPercent: 75),
+      ],
+      _ => [
+        AgentUsageWindow(
+          label: '5 hours',
+          usedPercent: 42,
+          resetsAt: DateTime.now().add(const Duration(hours: 1)),
+        ),
+        AgentUsageWindow(
+          label: 'Weekly',
+          usedPercent: 36,
+          resetsAt: DateTime.now().add(const Duration(days: 3)),
+        ),
+      ],
+    },
   );
 }

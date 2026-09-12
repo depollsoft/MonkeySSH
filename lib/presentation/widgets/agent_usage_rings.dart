@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -93,8 +94,8 @@ class _AgentUsageRingIconState extends ConsumerState<AgentUsageRingIcon>
   }
 }
 
-/// Static, top/bottom usage arcs with small gaps at 3 and 9 o'clock.
-/// A dashed half means unreported; an empty continuous track means zero.
+/// Remaining-allowance meter: one quota uses the whole circle, two use halves,
+/// and additional reported groups use equal segments. Unknown is never zero.
 class SplitUsageRing extends StatelessWidget {
   /// Creates a non-interactive ring around an existing icon.
   const SplitUsageRing({
@@ -120,14 +121,15 @@ class SplitUsageRing extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!rings.isAvailable) return child;
-    String value(double? remaining) => remaining == null
-        ? 'not reported'
-        : '${remaining.round()} percent remaining';
+    String value(double remaining) => '${remaining.round()} percent remaining';
+    final values = [
+      for (final segment in rings.segments)
+        '${segment.label}: ${value(segment.remaining)}',
+    ];
     final scheme = Theme.of(context).colorScheme;
     return Semantics(
       label: '$agentLabel account allowance',
-      value:
-          '5-hour: ${value(rings.shortTerm)}; weekly: ${value(rings.weekly)}',
+      value: values.join('; '),
       child: SizedBox.square(
         dimension: diameter,
         child: CustomPaint(
@@ -138,14 +140,6 @@ class SplitUsageRing extends StatelessWidget {
             secondary: _readableColor(scheme.onSurfaceVariant, scheme),
             warning: _readableColor(scheme.tertiary, scheme),
             track: scheme.outlineVariant,
-            unknown: _readableColor(
-              Color.lerp(
-                scheme.surfaceContainerHighest,
-                scheme.onSurfaceVariant,
-                0.5,
-              )!,
-              scheme,
-            ),
           ),
           child: Center(child: child),
         ),
@@ -178,49 +172,25 @@ class _SplitUsageRingPainter extends CustomPainter {
     required this.secondary,
     required this.warning,
     required this.track,
-    required this.unknown,
   });
   final AgentUsageRings rings;
   final Color primary;
   final Color secondary;
   final Color warning;
   final Color track;
-  final Color unknown;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const gap = math.pi / 22.5;
-    const sweep = math.pi - 2 * gap;
     final rect = Rect.fromCircle(
       center: size.center(Offset.zero),
       radius: size.shortestSide / 2 - 1,
     );
-    void half(double start, double? remaining, Color color) {
+    void meter(double start, double sweep, double remaining, Color color) {
       final paint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.8
         ..strokeCap = StrokeCap.round
         ..color = track;
-      if (remaining == null) {
-        // Missing data must not look exhausted, and must not borrow a scoped
-        // model bucket. Six short dashes carry no numerical fill value.
-        const count = 6;
-        const step = sweep / count;
-        const dash = step * 0.35;
-        paint
-          ..color = unknown
-          ..strokeWidth = 1.2;
-        for (var index = 0; index < count; index++) {
-          canvas.drawArc(
-            rect,
-            start + index * step + (step - dash) / 2,
-            dash,
-            false,
-            paint,
-          );
-        }
-        return;
-      }
       canvas.drawArc(rect, start, sweep, false, paint);
       if (remaining <= 0) return;
       paint.color = remaining <= 15 ? warning : color;
@@ -233,19 +203,32 @@ class _SplitUsageRingPainter extends CustomPainter {
       );
     }
 
-    half(-math.pi + gap, rings.shortTerm, primary);
-    half(gap, rings.weekly, secondary);
+    final segments = rings.segments;
+    if (segments.length == 1) {
+      meter(-math.pi / 2, math.pi * 2, segments.single.remaining, primary);
+    } else if (segments.isNotEmpty) {
+      final span = math.pi * 2 / segments.length;
+      final gap = math.min(math.pi / 22.5, span * 0.06);
+      // Keep the established top/bottom layout for two quotas.
+      final origin = segments.length == 2 ? -math.pi : -math.pi / 2;
+      for (var index = 0; index < segments.length; index++) {
+        meter(
+          origin + index * span + gap,
+          span - 2 * gap,
+          segments[index].remaining,
+          index.isEven ? primary : secondary,
+        );
+      }
+    }
   }
 
   @override
   bool shouldRepaint(_SplitUsageRingPainter oldDelegate) =>
-      rings.shortTerm != oldDelegate.rings.shortTerm ||
-      rings.weekly != oldDelegate.rings.weekly ||
+      !listEquals(rings.segments, oldDelegate.rings.segments) ||
       primary != oldDelegate.primary ||
       secondary != oldDelegate.secondary ||
       warning != oldDelegate.warning ||
-      track != oldDelegate.track ||
-      unknown != oldDelegate.unknown;
+      track != oldDelegate.track;
 }
 
 /// Isolated preview; no SSH reads or entitlement checks are performed.

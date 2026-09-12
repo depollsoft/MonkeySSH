@@ -100,7 +100,7 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
                 false);
         if (!throttled) {
           for (final window in usage?.windows ?? <AgentUsageWindow>[]) {
-            if (window.label != '5 hours' && window.label != 'Weekly') continue;
+            if (!isAgentUsageRingWindow(request.tool, window)) continue;
             final reset = window.resetsAt?.difference(now());
             if (reset != null && reset > Duration.zero && reset < delay) {
               delay = reset;

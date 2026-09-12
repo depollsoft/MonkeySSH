@@ -1,38 +1,40 @@
 # Usage rings implementation acceptance
 
-- [x] Split arcs wrap the current MonkeyMux agent mark on phone and sidebar; no new gesture, label, row, or bar height. Native badges retain extra clearance.
-- [x] Options has exactly `Show usage rings`, persisted app-wide and on by default for Pro. Free accounts get a Pro badge and the correct upgrade feature.
-- [x] Pro entitlement and the initialized preference gate display and remote reads. Revocation hides rings and cancels refreshes without overwriting opt-out.
-- [x] Only foreground, connected, visible active-agent readers run. No upstream version metadata or installations. Shared requests, two-minute cache cadence, reset refresh, late-response isolation.
-- [x] The account-wide five-hour/weekly projection rejects ambiguous, model-specific, stale, expired-reset, unlimited, and unreported percentages. No inferred zero or replenishment.
-- [x] Feature enum, paywall copy, setting key, providers, Options registration, and widget wrapper verified in production source.
-- [x] Focused model, service, settings, widget, lifecycle, menu and entitlement tests pass. Direct provider refresh probes and native screenshots use production components.
-- [x] No credentials, quota values, paths, or user content added to diagnostics/telemetry. Only the paywall feature token was added to its existing allowlist.
+## Current behavior
 
-## Verification evidence
+- [x] Zero used starts full; the colored arc represents remaining quota and drains to empty as usage increases.
+- [x] One reported quota uses a full circle, two use top/bottom halves, and additional Antigravity groups use separate segments. There are no dashed placeholders or unused empty halves.
+- [x] Claude Code and Codex use account-wide five-hour/weekly quotas without substituting scoped model limits. Codex weekly-only responses use a full-circle weekly meter.
+- [x] Grok Build uses included-credit percentage, excluding paid spending caps and prepaid balances without a comparable allowance.
+- [x] Antigravity uses reported numerical groups in stable label order, without inventing an active model. Live reader returned four distinct numerical buckets.
+- [x] The existing MonkeyMux bar height, gestures, agent marks, and native badges remain intact. No quota-specific tap action or extra row.
+- [x] Options has exactly `Show usage rings`, saved app-wide and on by default for Pro. Free accounts get a Pro badge and upgrade flow; no quota checks run without Pro.
+- [x] Persisted opt-out loads before any reads. Losing Pro hides meters and cancels refreshes without overwriting the preference.
+- [x] Foreground/connected/visible-only reads share requests, respect the two-minute cache and provider backoff, refresh relevant reset categories, and discard stale-window responses.
+- [x] Missing, unlimited, duplicate, unreported, or expired percentages are never inferred as zero or 100%. If no usable allowance remains, the original icon is shown.
+- [x] No quota values, account identifiers, credentials, or user content added to application diagnostics or telemetry.
 
-- 150 domain/model/settings/management-service checks passed. Two existing Windows execution cases skip without PowerShell on this Mac.
-- 171 existing navigator, terminal-layout, and upgrade-screen regression checks passed.
-- 14 production feature widget tests passed, including shared readers, stale-window response isolation, reset/backoff behavior, covered routes, backgrounding, Pro revocation, opt-out, checkbox persistence interaction, and upgrade routing.
-- The updated telemetry allowlist test passed.
-- Native integration checks passed on iPhone 17 Pro and iPad Pro 11-inch M5 simulators. The native pass caught a dismissed-menu WidgetRef lifetime bug; the fix captures stable owners before menu dismissal, with a widget regression test and native confirmation.
-- Native PNGs are in `/tmp/monkeymux-usage-rings-feature/`. They show production ring/provider/menu components in a labeled fixture with sample quotas, not authenticated live account readings. The fixture entry point is `tool/usage_rings_feature_preview.dart`; capture test is `integration_test/usage_rings_feature_test.dart`.
+## Verification
 
-## Deliberate limits
+- 41 current projection, ring-widget, provider/lifecycle, Options, and Agent Management summary checks passed.
+- Exact painter assertions cover 100%, 77%, 25%, and 0% remaining for whole-circle and split modes, plus independent labeled group segments.
+- Grok and Antigravity provider tests verify initial full meters and reset refreshes for their own category names.
+- Native integration passed on the Android phone emulator with JDK 17 and on the iPad simulator. Captures show Codex full-to-empty progression, four Antigravity groups, Grok included credits, and Pro/on/off Options states.
+- Read-only live quota probes succeeded for Codex, Antigravity, and Grok. Codex reported only the normal account's weekly limit; Antigravity returned four numerical buckets; Grok returned one included-credit percentage. No prompts, installs, resets, or account modifications were performed.
+- Prior service/settings/Pro registration, telemetry allowlist, and navigation/layout regression coverage remains in the branch. The post-change navigator/layout checks were rerun for the expanded agent support.
 
-- Rings currently use Claude Code and Codex account-wide `5 hours`/`Weekly` buckets. Multi-provider agents and scoped model caps remain unprojected rather than guessing an active account/model.
-- The reader uses the host CLI credential context, not pane-local credential overrides. These are account allowances, not per-window consumption.
-- Already-started remote requests are bounded and their results are discarded after cancellation; the feature does not forcibly kill unrelated shared Agent Management reads.
-- Authenticated live account verification and physical-device validation were not performed. Parser/SSH command contracts and platform command regressions were exercised by the targeted suite.
+Native fixture entry point: `tool/usage_rings_feature_preview.dart`.
+Capture test: `integration_test/usage_rings_feature_test.dart`.
+Current PNGs: `/tmp/monkeymux-usage-rings-expanded/`, including `android-meter-states.png` and `ipad-extra-agent-states.png`. These are labeled sample-data fixtures using production components, not screenshots of authenticated account readings.
 
-## Reported Codex mismatch follow-up
+## History and limits
 
-- [x] Merged `origin/main` at `d9eb3f04` into the PR branch before applying the correction.
-- [x] Reproduced the supplied screenshot's account-wide weekly bucket with 23% used, plus separate model-specific five-hour/weekly buckets with 0% used.
-- [x] Confirmed both the account summary and the ring use 77% remaining, not 23%. Model-specific 100% allowances are not substituted for a missing account-wide five-hour allowance.
-- [x] Corrected the misleading presentation: an unreported half now uses six short dashes, while zero is an empty continuous track. Both missing still means no ring.
-- [x] Added exact painter assertions for 0%, 77%, and 100% remaining, the dashed state, and accessible unreported/remaining labels.
-- [x] 179 targeted Dart model/widget/summary/navigator/layout cases passed across the post-merge regression run and the corrected Canvas-float-tolerance assertion. All 27 Node usage-probe tests passed.
-- [x] Native integration passed on an Android phone emulator with JDK 17 and the iPad simulator. Both exercise the screenshot-shaped data and Pro/on/off menu behavior.
+The branch includes the requested merge of `origin/main` through `d9eb3f04`.
+The first weekly-only fix used dashed missing halves. That treatment is now
+superseded by the full-circle fallback, so a high remaining allowance no longer
+looks like a partly empty two-quota gauge.
 
-Updated native PNGs are in `/tmp/monkeymux-usage-rings-correction/`; the screenshot-case filenames end in `codex-weekly-77-unreported-short-term.png`. They are labeled fixtures using the production provider and painter, not authenticated live readings.
+Physical-device validation was not performed. Two earlier Windows execution
+regressions require PowerShell and were skipped on this Mac. Multi-provider
+saved-account stores and pane-local credential overrides remain outside this
+feature's account-selection scope.

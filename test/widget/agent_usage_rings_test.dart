@@ -69,6 +69,7 @@ class Reader extends Fake implements AgentManagementService {
   final pendingByTool = <AgentLaunchTool, Completer<AgentUsage?>>{};
   DateTime? reset;
   AgentUsageStatus status = AgentUsageStatus.available;
+  List<AgentUsageWindow>? reportedWindows;
   @override
   Future<AgentUsage?> readUsageForTool(
     SshSession session,
@@ -81,14 +82,16 @@ class Reader extends Fake implements AgentManagementService {
     return AgentUsage(
       status: status,
       checkedAt: now,
-      windows: [
-        AgentUsageWindow(
-          label: '5 hours',
-          usedPercent: tool == AgentLaunchTool.codex ? 70 : 42,
-          resetsAt: reset,
-        ),
-        const AgentUsageWindow(label: 'Weekly', usedPercent: 18),
-      ],
+      windows:
+          reportedWindows ??
+          [
+            AgentUsageWindow(
+              label: '5 hours',
+              usedPercent: tool == AgentLaunchTool.codex ? 70 : 42,
+              resetsAt: reset,
+            ),
+            const AgentUsageWindow(label: 'Weekly', usedPercent: 18),
+          ],
     );
   }
 }
@@ -115,58 +118,109 @@ class RecordingRingCanvas extends Fake implements Canvas {
 }
 
 void main() {
-  testWidgets(
-    'missing half is dashed, zero is empty, and weekly fill remains 77 percent',
-    (tester) async {
-      for (final shortTerm in <double?>[null, 0, 77, 100]) {
-        await tester.pumpWidget(
-          MaterialApp(
-            home: Center(
-              child: SplitUsageRing(
-                rings: AgentUsageRings(shortTerm: shortTerm, weekly: 77),
-                agentLabel: 'Codex',
-                child: const Icon(Icons.code, size: 16),
-              ),
-            ),
+  Future<RecordingRingCanvas> draw(
+    WidgetTester tester,
+    AgentUsageRings rings,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Center(
+          child: SplitUsageRing(
+            rings: rings,
+            agentLabel: 'Agent',
+            child: const Icon(Icons.code, size: 16),
           ),
+        ),
+      ),
+    );
+    final painter = tester
+        .widget<CustomPaint>(find.byKey(const ValueKey('split-usage-ring')))
+        .painter!;
+    final canvas = RecordingRingCanvas();
+    painter.paint(canvas, const Size(28, 28));
+    return canvas;
+  }
+
+  testWidgets('one known quota starts full and drains across the whole circle', (
+    tester,
+  ) async {
+    for (final weekly in [true, false]) {
+      for (final remaining in [100.0, 77.0, 25.0, 0.0]) {
+        final rings = AgentUsageRings(
+          shortTerm: weekly ? null : remaining,
+          weekly: weekly ? remaining : null,
         );
-        final painter = tester
-            .widget<CustomPaint>(find.byKey(const ValueKey('split-usage-ring')))
-            .painter!;
-        final canvas = RecordingRingCanvas();
-        painter.paint(canvas, const Size(28, 28));
-        final top = canvas.arcs.where((arc) => arc.start < 0).toList();
-        final bottom = canvas.arcs.where((arc) => arc.start > 0).toList();
-        const sweep = math.pi - 2 * math.pi / 22.5;
-        expect(bottom, hasLength(2));
-        expect(bottom[0].sweep, closeTo(sweep, 0.00001));
-        expect(bottom[1].sweep, closeTo(sweep * .77, 0.00001));
-        if (shortTerm == null) {
-          expect(top, hasLength(6));
+        final canvas = await draw(tester, rings);
+        expect(canvas.arcs, hasLength(remaining == 0 ? 1 : 2));
+        expect(canvas.arcs.first.start, closeTo(-math.pi / 2, 0.00001));
+        expect(canvas.arcs.first.sweep, closeTo(math.pi * 2, 0.00001));
+        if (remaining > 0) {
           expect(
-            top.every(
-              (arc) =>
-                  (arc.strokeWidth - 1.2).abs() < 0.001 &&
-                  arc.sweep < sweep / 6,
-            ),
-            isTrue,
+            canvas.arcs.last.sweep,
+            closeTo(math.pi * 2 * remaining / 100, 0.00001),
           );
-          final handle = tester.ensureSemantics();
-          try {
-            expect(
-              tester.getSemantics(find.byType(SplitUsageRing)).value,
-              '5-hour: not reported; weekly: 77 percent remaining',
-            );
-          } finally {
-            handle.dispose();
-          }
-        } else if (shortTerm == 0) {
-          expect(top, hasLength(1));
-          expect(top.single.sweep, closeTo(sweep, 0.00001));
-        } else {
-          expect(top, hasLength(2));
-          expect(top[1].sweep, closeTo(sweep * shortTerm / 100, 0.00001));
         }
+        final semantics = tester.ensureSemantics();
+        try {
+          expect(
+            tester.getSemantics(find.byType(SplitUsageRing)).value,
+            '${weekly ? 'weekly' : '5-hour'}: ${remaining.round()} percent remaining',
+          );
+        } finally {
+          semantics.dispose();
+        }
+      }
+    }
+  });
+
+  testWidgets(
+    'two reported quotas retain independently draining top and bottom halves',
+    (tester) async {
+      const sweep = math.pi - 2 * math.pi / 22.5;
+      for (final remaining in [100.0, 77.0, 25.0, 0.0]) {
+        final canvas = await draw(
+          tester,
+          AgentUsageRings(shortTerm: remaining, weekly: remaining),
+        );
+        for (final top in [true, false]) {
+          final arcs = canvas.arcs
+              .where((arc) => top ? arc.start < 0 : arc.start > 0)
+              .toList();
+          expect(arcs, hasLength(remaining == 0 ? 1 : 2));
+          expect(arcs.first.sweep, closeTo(sweep, 0.00001));
+          if (remaining > 0) {
+            expect(arcs.last.sweep, closeTo(sweep * remaining / 100, 0.00001));
+          }
+        }
+      }
+    },
+  );
+
+  testWidgets(
+    'provider groups use independent segments with their own quota labels',
+    (tester) async {
+      final canvas = await draw(
+        tester,
+        const AgentUsageRings(
+          segments: [
+            (label: 'Fast', remaining: 100),
+            (label: 'Pro', remaining: 50),
+            (label: 'Thinking', remaining: 0),
+          ],
+        ),
+      );
+      expect(canvas.arcs, hasLength(5));
+      expect(canvas.arcs[1].sweep, closeTo(canvas.arcs[0].sweep, 0.00001));
+      expect(canvas.arcs[3].sweep, closeTo(canvas.arcs[2].sweep * .5, 0.00001));
+      expect(canvas.arcs[4].start, greaterThan(canvas.arcs[2].start));
+      final semantics = tester.ensureSemantics();
+      try {
+        expect(
+          tester.getSemantics(find.byType(SplitUsageRing)).value,
+          'Fast: 100 percent remaining; Pro: 50 percent remaining; Thinking: 0 percent remaining',
+        );
+      } finally {
+        semantics.dispose();
       }
     },
   );
@@ -349,6 +403,50 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     unawaited(changes.close());
   });
+  for (final tool in [AgentLaunchTool.antigravity, AgentLaunchTool.grokBuild]) {
+    testWidgets(
+      '${tool.name} uses its own quota categories and refreshes on reset',
+      (tester) async {
+        final reader = Reader();
+        reader.reportedWindows = [
+          AgentUsageWindow(
+            label: tool == AgentLaunchTool.grokBuild
+                ? 'Included credits'
+                : 'Thinking · Pro',
+            usedPercent: 0,
+            resetsAt: reader.now.add(const Duration(seconds: 30)),
+          ),
+        ];
+        await pumpIcon(
+          tester,
+          reader,
+          Billing(true),
+          Preference(true),
+          body: AgentUsageRingIcon(
+            session: Session(),
+            tool: tool,
+            child: const Icon(Icons.code),
+          ),
+        );
+        expect(reader.calls, 1);
+        expect(
+          tester
+              .widget<SplitUsageRing>(find.byType(SplitUsageRing))
+              .rings
+              .segments
+              .single
+              .remaining,
+          100,
+        );
+        reader.now = reader.now.add(const Duration(seconds: 30));
+        await tester.pump(const Duration(seconds: 30));
+        await tester.pumpAndSettle();
+        expect(reader.calls, 2);
+        expect(find.byType(SplitUsageRing), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
   testWidgets('probe: two visible consumers share one remote request', (
     tester,
   ) async {

@@ -33,6 +33,125 @@ void main() {
     },
   );
 
+  test('reported usage drains from full to empty rather than filling up', () {
+    for (final used in [0.0, 23.0, 75.0, 100.0]) {
+      final rings = project(
+        snapshot([AgentUsageWindow(label: 'Weekly', usedPercent: used)]),
+      )!;
+      expect(rings.segments, [(label: 'weekly', remaining: 100 - used)]);
+    }
+  });
+
+  test(
+    'Grok included credits get a meter, paid spending and prepaid balances do not',
+    () {
+      final rings = project(
+        snapshot(const [
+          AgentUsageWindow(
+            label: 'Included credits',
+            usedPercent: 0,
+            unit: 'USD',
+          ),
+          AgentUsageWindow(
+            label: 'On-demand spending',
+            usedPercent: 80,
+            unit: 'USD',
+          ),
+          AgentUsageWindow(
+            label: 'Prepaid balance',
+            remaining: 25,
+            unit: 'USD',
+          ),
+        ]),
+        tool: AgentLaunchTool.grokBuild,
+      )!;
+      expect(rings.segments, [(label: 'Included credits', remaining: 100.0)]);
+      expect(
+        project(
+          snapshot(const [
+            AgentUsageWindow(
+              label: 'Prepaid balance',
+              remaining: 25,
+              unit: 'USD',
+            ),
+          ]),
+          tool: AgentLaunchTool.grokBuild,
+        ),
+        isNull,
+      );
+      final partlyUsed = project(
+        snapshot(const [
+          AgentUsageWindow(label: 'Included credits', usedPercent: 25),
+        ]),
+        tool: AgentLaunchTool.grokBuild,
+      )!;
+      expect(partlyUsed.segments.single.remaining, 75);
+    },
+  );
+
+  test(
+    'Antigravity reports its numerical groups in stable order without guessing an active model',
+    () {
+      const windows = [
+        AgentUsageWindow(label: 'Thinking · Pro', usedPercent: 25),
+        AgentUsageWindow(label: 'Fast · Basic', usedPercent: 0),
+        AgentUsageWindow(label: 'Unknown group', remaining: 15),
+      ];
+      final a = project(snapshot(windows), tool: AgentLaunchTool.antigravity)!;
+      final b = project(
+        snapshot(windows.reversed.toList()),
+        tool: AgentLaunchTool.antigravity,
+      )!;
+      expect(a.segments, [
+        (label: 'Fast · Basic', remaining: 100.0),
+        (label: 'Thinking · Pro', remaining: 75.0),
+      ]);
+      expect(b.segments, a.segments);
+    },
+  );
+
+  test(
+    'Antigravity omits duplicate, expired, and unlimited group percentages',
+    () {
+      final usage = snapshot([
+        const AgentUsageWindow(label: 'Duplicate', usedPercent: 10),
+        const AgentUsageWindow(label: 'Duplicate', usedPercent: 20),
+        AgentUsageWindow(label: 'Expired', usedPercent: 100, resetsAt: now),
+        const AgentUsageWindow(label: 'Unlimited', unlimited: true),
+        const AgentUsageWindow(label: 'Pro', usedPercent: 100),
+      ]);
+      expect(project(usage, tool: AgentLaunchTool.antigravity)!.segments, [
+        (label: 'Pro', remaining: 0.0),
+      ]);
+    },
+  );
+
+  test('provider quota categories are registered for reset scheduling', () {
+    expect(supportsAgentUsageRings(AgentLaunchTool.antigravity), isTrue);
+    expect(supportsAgentUsageRings(AgentLaunchTool.grokBuild), isTrue);
+    expect(
+      isAgentUsageRingWindow(
+        AgentLaunchTool.antigravity,
+        const AgentUsageWindow(label: 'Pro', usedPercent: 25),
+      ),
+      isTrue,
+    );
+    expect(
+      isAgentUsageRingWindow(
+        AgentLaunchTool.grokBuild,
+        const AgentUsageWindow(label: 'Included credits', usedPercent: 25),
+      ),
+      isTrue,
+    );
+    expect(
+      isAgentUsageRingWindow(
+        AgentLaunchTool.grokBuild,
+        const AgentUsageWindow(label: 'On-demand spending', usedPercent: 25),
+      ),
+      isFalse,
+    );
+  });
+
   test('projects account-wide windows and ignores scoped model caps', () {
     final usage = snapshot(const [
       AgentUsageWindow(label: '5 hours', usedPercent: 42),

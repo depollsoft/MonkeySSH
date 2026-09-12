@@ -99,11 +99,26 @@ visible and can be retried.
 
 ## MonkeyMux usage rings · Pro
 
-The current Claude Code or Codex icon can show split account-allowance rings in
-MonkeyMux's existing bottom bar or tablet sidebar. The top half is the account's
-five-hour allowance; the bottom half is the account-wide weekly allowance.
-Filled arcs mean remaining quota. Rings add no tap action, percentage label, or
-extra bar row. Native-chat badges and window-switcher gestures are preserved.
+Claude Code, Codex, Antigravity, and Grok Build can show remaining account
+allowances around the current agent icon in MonkeyMux's existing bottom bar or
+tablet sidebar. **Zero used means a full meter.** As usage grows, the colored arc
+shrinks: 23% used leaves 77% filled, and 100% used leaves an empty track.
+
+Only actual reported quotas occupy the circle:
+
+- One quota uses the whole circle. This includes Codex accounts that report a
+  weekly limit but no account-wide five-hour limit, and Grok's included credits.
+- Two quotas use the top and bottom halves. For Claude Code and Codex, the
+  five-hour allowance stays above the account-wide weekly allowance.
+- Antigravity exposes its numerical quota groups as separate, equal segments.
+  Group positions use stable label order rather than guessing an active model.
+  More than two reported groups divide the circle into additional segments.
+
+There are no dashed placeholders or empty halves for unreported quotas. A
+reported zero remains a real empty meter; no reported numerical allowance means
+no ring. Provider labels and percentages are available to accessibility services.
+Rings add no tap action, percentage label, or bar row. Native-chat badges and
+window-switcher gestures are preserved.
 
 **Options > Show usage rings** controls the feature. It defaults on for Pro and
 is saved app-wide. Free accounts see the Pro badge and upgrade flow rather than
@@ -112,28 +127,28 @@ any read, so a stored opt-out cannot briefly start a probe. Losing Pro hides the
 rings and stops polling without overwriting the preference.
 
 A visible, connected, foreground icon requests only its agent's quotas. The
-initial path/version probe targets that one CLI and never fetches upstream
-version metadata or installs anything. Refreshes respect the existing two-minute
-usage cache and provider throttling, with a bounded refresh at a reported reset.
+initial path/version probe targets that CLI and never fetches upstream version
+metadata or installs anything. Refreshes respect the existing two-minute usage
+cache and provider throttling, with a bounded refresh at a reported reset.
 Hiding the bar, covering the terminal route, disabling rings, disconnecting, or
 backgrounding the app stops scheduled checks. Already-started requests remain
 bounded; late results cannot update a different agent or disposed subscription.
-Session identity also separates cached quotas after reconnects.
+Session identity separates cached quotas after reconnects.
 
-Only unambiguous `5 hours` and `Weekly` categories from these two readers are
-shown. Model-specific caps, duplicate categories, monetary balances, unlimited
-allowances, and unreported percentages are not converted into ring values. An
-elapsed reset hides that half until fresh data arrives; it never refills the
-ring speculatively. If only one allowance is reported, the missing half uses
-a dashed marker, distinct from a reported zero with an empty continuous track.
-If neither allowance is reported, no ring is shown. Unsupported or unavailable readings leave the original icon.
+Claude/Codex model-specific caps are not substituted for account-wide quotas.
+Grok uses the reported included-credit percentage; on-demand spending caps and
+prepaid balances are not mixed into that meter. Antigravity uses the numerical
+groups returned by the same reader as Agent Management. Duplicate labels,
+unlimited allowances, balances without a total, unreported percentages, and
+elapsed resets do not produce a guessed percentage. An elapsed quota is removed
+until fresh data arrives, never refilled speculatively.
 
-These are the CLI's host-account allowances as read by Agent Management, not
-consumption attributed to the current conversation. Pane-local credential
-overrides are not resolved. Multi-provider tools such as Pi and OpenCode do not
-get rings until their active account and applicable quotas can be identified
-without guessing from saved credentials. Usage values are not added to telemetry
-or diagnostics; only the existing allowlisted paywall feature token is registered.
+These are host-account allowances, not consumption attributed to the current
+conversation. Pane-local credential overrides are not resolved. Multi-provider
+tools such as Pi and OpenCode still need an explicit active-account selection
+rather than a guess from all saved credentials. Usage values are not added to
+telemetry or diagnostics; only the existing allowlisted paywall feature token is
+registered.
 
 ## Implementation references
 

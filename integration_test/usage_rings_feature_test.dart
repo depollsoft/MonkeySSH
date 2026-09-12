@@ -23,24 +23,56 @@ void main() {
       androidSurfaceReady = true;
       await tester.pump();
     }
+    // Native platform capture can race the raster thread after provider updates.
+    await tester.pump(const Duration(milliseconds: 200));
     await binding.takeScreenshot(name);
   }
 
   testWidgets(
-    'weekly-only Codex is not displayed as an exhausted short-term quota',
+    'one reported quota is full at zero used and drains as usage increases',
     (tester) async {
-      await tester.pumpWidget(
-        const UsageRingsFeaturePreview(tool: AgentLaunchTool.codex),
-      );
-      await tester.pumpAndSettle();
-      final rings = tester
-          .widget<SplitUsageRing>(find.byType(SplitUsageRing))
-          .rings;
-      expect(rings.shortTerm, isNull);
-      expect(rings.weekly, 77);
-      expect(tester.takeException(), isNull);
-      await capture(tester, '$device-codex-weekly-77-unreported-short-term');
-      await tester.pumpWidget(const SizedBox.shrink());
+      for (final used in [0.0, 23.0, 75.0, 100.0]) {
+        await tester.pumpWidget(
+          UsageRingsFeaturePreview(
+            tool: AgentLaunchTool.codex,
+            codexUsedPercent: used,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final rings = tester
+            .widget<SplitUsageRing>(find.byType(SplitUsageRing))
+            .rings;
+        expect(rings.segments, [(label: 'weekly', remaining: 100 - used)]);
+        expect(tester.takeException(), isNull);
+        await capture(
+          tester,
+          '$device-codex-${(100 - used).round()}-remaining',
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
+    },
+  );
+  testWidgets(
+    'Antigravity groups and Grok included credits render production rings',
+    (tester) async {
+      for (final tool in [
+        AgentLaunchTool.antigravity,
+        AgentLaunchTool.grokBuild,
+      ]) {
+        await tester.pumpWidget(UsageRingsFeaturePreview(tool: tool));
+        await tester.pumpAndSettle();
+        final rings = tester
+            .widget<SplitUsageRing>(find.byType(SplitUsageRing))
+            .rings;
+        expect(rings.segments.first.remaining, 100);
+        expect(
+          rings.segments.length,
+          tool == AgentLaunchTool.antigravity ? 4 : 1,
+        );
+        expect(tester.takeException(), isNull);
+        await capture(tester, '$device-${tool.name}-remaining');
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
     },
   );
   testWidgets('native Pro option controls the production usage rings', (
