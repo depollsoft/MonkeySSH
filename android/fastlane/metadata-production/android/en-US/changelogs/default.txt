@@ -1,7 +1,7 @@
 What's new
 
-- Agent Management (Pro): install, repair, and update coding agents and their ACP adapters on a host, with version checks and batch updates for supported installs.
-- A dot on the terminal menu shows when agent updates are available.
-- Native agent windows reconnect more reliably after sleep or a stale MonkeyMux bridge.
-- Windows hosts: agents launch through PowerShell and stray color codes are gone.
-- Gemini CLI support removed; saved presets for it are ignored.
+- Pro: see agent usage, remaining allowances, and reset times in Agent Management, plus usage rings for supported agents in MonkeyMux.
+- More reliable session recovery after MonkeyMux updates, including agents sharing a folder.
+- Fixed dictation, paste, and Return-key input.
+- Improved Windows installation and agent detection.
+- Fixed flickering titles, redraws, false activity indicators, and connection stalls.
