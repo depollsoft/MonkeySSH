@@ -102,12 +102,13 @@ jobs:
           chmod +x scripts/store_assets.sh
           scripts/store_assets.sh download
 
-      - name: Install screenshot validation dependencies
+      - name: Install media validation dependencies
         if: steps.inputs.outputs.platform == 'both' || steps.inputs.outputs.platform == 'ios' || steps.inputs.outputs.platform == 'android'
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet --upgrade pip
           .venv/bin/python -m pip install --quiet Pillow
+          brew install ffmpeg
 
       - name: Validate demo videos / App Previews
         if: steps.inputs.outputs.platform == 'both' || steps.inputs.outputs.platform == 'ios' || steps.inputs.outputs.platform == 'android'

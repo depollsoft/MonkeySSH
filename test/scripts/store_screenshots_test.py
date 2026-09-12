@@ -83,7 +83,6 @@ class ProCaptionTest(unittest.TestCase):
         self.assertIn('_sceneNames[index] != _selectedScene', source)
         script = (ROOT / 'scripts/generate_store_screenshots.py').read_text()
         self.assertIn('STORE_SCREENSHOT_SCENE={scene}', script)
-        self.assertIn('--bare --model sonnet', script)
 
     def test_gallery_only_never_launches_a_demo_workspace(self):
         with patch.object(sys, 'argv', ['capture', '--gallery-only']):
@@ -135,6 +134,38 @@ class ProCaptionTest(unittest.TestCase):
                             [call.args for call in send.call_args_list],
                             [('claude', key) for key in keys],
                         )
+
+    def test_claude_ready_with_legacy_and_current_footers(self):
+        for text in (
+            'Claude Code v2.1.0\n❯\n? for shortcuts',
+            'ClaudeCodev2.1.270\nSonnet5\nClaudeCodeWorkspace─\n❯ Try"fixlint"\n←foragents',
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(capture._claude_prompt_ready(text))
+                demo = object.__new__(capture.StoreDemoEnvironment)
+                with patch.object(demo, '_capture_visible_pane', return_value=text):
+                    demo._drive_claude_to_ready_prompt()
+
+    def test_claude_setup_is_not_a_ready_prompt(self):
+        self.assertFalse(capture._claude_prompt_ready(
+            "Claude Code'll be able to read files\n❯ No, exit\nYes, I trust this folder",
+        ))
+        self.assertFalse(capture._claude_prompt_ready('Claude Code v2.1.270'))
+
+    def test_claude_capture_requires_a_finished_response(self):
+        prompt = 'ClaudeCodeWorkspace\n❯\n←foragents'
+        self.assertFalse(capture._claude_response_ready(prompt))
+        response = '⏺ Sessions keep running.\n✻Bakedfor2s·done1:34PM\n' + prompt
+        self.assertTrue(capture._claude_response_ready(response))
+        self.assertFalse(capture._claude_response_ready(response + '\nesctointerrupt'))
+
+    def test_claude_auth_failure_is_actionable_without_exposing_pane(self):
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        text = 'ClaudeCodeWorkspace\n❯\nauthenticationrejected(401)\nprivate content'
+        with patch.object(demo, '_capture_visible_pane', return_value=text):
+            with self.assertRaisesRegex(RuntimeError, 'capture authentication failed') as error:
+                demo._drive_claude_to_ready_prompt()
+        self.assertNotIn('private content', str(error.exception))
 
     def test_native_scene_has_no_badge_when_available_free(self):
         self.assertNotIn('native_copilot', capture.PRO_SCENE_CAPTIONS)

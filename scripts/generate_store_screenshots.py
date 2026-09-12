@@ -575,11 +575,10 @@ class StoreDemoEnvironment:
     def _setup_monkeymux(self) -> None:
         self._prepare_demo_dir()
         self._teardown_monkeymux()
-        dummy_anthropic_key = 'sk' + '-ant-api03-' + ('0' * 64) + '-dummy'
         self._write_pane_script(
             'copilot',
             f"""
-            exec env COPILOT_ALLOW_ALL=0 TERM=xterm-kitty \\
+            exec env COPILOT_ALLOW_ALL=false TERM=xterm-kitty \\
               {self._shell_quote(self._copilot)} \\
               --no-remote \\
               --log-level default \\
@@ -597,9 +596,10 @@ class StoreDemoEnvironment:
               BASH_SILENCE_DEPRECATION_WARNING=1 \\
               CLAUDE_CODE_HIDE_ACCOUNT_INFO=1 \\
               CLAUDE_CODE_HIDE_CWD=1 \\
-              ANTHROPIC_API_KEY={dummy_anthropic_key} \\
               {self._shell_quote(self._claude)} \\
-              --bare --model sonnet \\
+              --model sonnet \\
+              --settings '{{"disableAllHooks":true}}' \\
+              --strict-mcp-config --disable-slash-commands \\
               --name 'Claude Code Workspace'
             """,
         )
@@ -945,6 +945,9 @@ class StoreDemoEnvironment:
             'outside this workspace.'
         )
         self._monkeymux_send_literal('copilot', prompt)
+        # Let the CLI finish processing the text event before submitting it.
+        # Recent Copilot builds can consume an immediate Enter with that event.
+        time.sleep(1)
         self._monkeymux_send_keys('copilot', 'Enter')
         self._wait_for_copilot_image_display()
 
@@ -973,18 +976,35 @@ class StoreDemoEnvironment:
         self._drive_claude_to_ready_prompt()
         self._monkeymux_send_keys('claude', 'C-l')
         time.sleep(2)
-        self._wait_for_visible_text('claude', ['shortcuts'])
-        time.sleep(3)
-        self._assert_claude_pane_privacy_safe()
+        self._drive_claude_to_ready_prompt()
+        self._monkeymux_send_literal(
+            'claude',
+            'Explain how MonkeyMux keeps an SSH workspace useful when a phone '
+            'loses its connection. Use two short bullets, under 40 words total. '
+            'Do not use tools or read files.',
+        )
+        self._monkeymux_send_keys('claude', 'Enter')
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            text = self._capture_visible_pane('claude')
+            if _claude_response_ready(text):
+                self._assert_claude_pane_privacy_safe()
+                return
+            time.sleep(1)
+        raise RuntimeError('Claude Code did not finish its live store-demo response.')
 
     def _drive_claude_to_ready_prompt(self) -> None:
         deadline = time.time() + 90
         while time.time() < deadline:
             text = self._capture_visible_pane('claude')
-            if _visible_text_contains_marker(text, 'shortcuts') and (
-                _visible_text_contains_marker(text, 'Claude Code')
-                or _visible_text_contains_marker(text, 'Claude Code Workspace')
-            ):
+            if any(_visible_text_contains_marker(text.lower(), marker) for marker in (
+                'authentication rejected', 'invalid api key', 'not logged in',
+            )):
+                raise RuntimeError(
+                    'Claude Code capture authentication failed; check the CLI login '
+                    'and any ANTHROPIC_API_KEY override before retrying.',
+                )
+            if _claude_prompt_ready(text):
                 return
             if _visible_text_contains_marker(text, 'Choose the text style'):
                 self._monkeymux_send_keys('claude', 'Enter')
@@ -1528,6 +1548,30 @@ def _visible_text_contains_marker(text: str, marker: str) -> bool:
     compact_text = re.sub(r'\s+', '', text)
     compact_marker = re.sub(r'\s+', '', marker)
     return compact_marker in compact_text
+
+
+def _claude_prompt_ready(text: str) -> bool:
+    # Claude 2.1.270 replaced the shortcuts footer with an agent-navigation
+    # hint. Require the application header and an input/footer marker, while
+    # excluding setup screens that also mention Claude Code.
+    if any(_visible_text_contains_marker(text, marker) for marker in (
+        'Yes, I trust this folder', 'Choose the text style',
+        'Detected a custom API key',
+    )):
+        return False
+    return _visible_text_contains_marker(text, 'Claude Code') and (
+        _visible_text_contains_marker(text, 'shortcuts')
+        or ('❯' in text and _visible_text_contains_marker(text, 'Claude Code Workspace'))
+    )
+
+
+def _claude_response_ready(text: str) -> bool:
+    return (
+        _claude_prompt_ready(text)
+        and any(marker in text for marker in ('⏺', '●'))
+        and _visible_text_contains_marker(text, '· done')
+        and not _visible_text_contains_marker(text.lower(), 'esc to interrupt')
+    )
 
 
 def _visible_text_contains_marker_group(

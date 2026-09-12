@@ -1,9 +1,8 @@
 What's new
 
-- Agent Management (Pro): install, repair, and update coding agents and their ACP adapters on a host from your phone. See installed and latest versions, or update supported installations together.
-- A dot on the terminal menu now shows when agent updates are available. Turn it off under Settings > Agent update indicators.
-- Native agent windows reconnect more reliably after the phone sleeps or a MonkeyMux bridge goes stale.
-- Retrying a prompt after an error no longer shows the old error.
-- On Windows hosts, agents launch through PowerShell and stray color codes no longer spill into the terminal.
-- Gemini CLI support has been removed. Saved presets for it are ignored instead of failing.
-- Layout fixes for the home screen and for MonkeyMux sheets under the keyboard.
+- Pro: see account usage, remaining allowances, and reset times in Agent Management when the agent reports them. Usage rings around supported agent icons in MonkeyMux show remaining allowances.
+- MonkeyMux restores agent sessions more reliably after updates, including multiple sessions in the same folder.
+- Fixed dictation, paste delivery, and Return-key submission with the on-screen keyboard.
+- Improved MonkeyMux installation, agent detection, and terminal input on Windows hosts.
+- Fixed flickering Codex titles, incomplete terminal redraws, and false activity indicators when switching windows.
+- Fixed crashes and connection stalls affecting SSH, file transfers, and native agent windows.
