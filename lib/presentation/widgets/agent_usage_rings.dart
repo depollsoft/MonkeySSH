@@ -139,7 +139,11 @@ class SplitUsageRing extends StatelessWidget {
             primary: _readableColor(scheme.primary, scheme),
             secondary: _readableColor(scheme.onSurfaceVariant, scheme),
             warning: _readableColor(scheme.tertiary, scheme),
-            track: scheme.outlineVariant,
+            track: _readableColor(
+              scheme.surfaceContainerHighest,
+              scheme,
+              minContrast: 3,
+            ),
           ),
           child: Center(child: child),
         ),
@@ -148,21 +152,33 @@ class SplitUsageRing extends StatelessWidget {
   }
 }
 
-Color _readableColor(Color color, ColorScheme scheme) {
+Color _readableColor(
+  Color color,
+  ColorScheme scheme, {
+  double minContrast = 4.5,
+}) {
   double contrast(Color a, Color b) {
     final x = a.computeLuminance();
     final y = b.computeLuminance();
     return (math.max(x, y) + .05) / (math.min(x, y) + .05);
   }
 
+  // Default light-theme ink is translucent black87. Composite it before
+  // measuring contrast; raw RGB luminance ignores alpha.
+  final background = Color.alphaBlend(
+    scheme.surfaceContainerHighest,
+    scheme.surface,
+  );
+  final start = Color.alphaBlend(color, background);
+  final foreground = Color.alphaBlend(scheme.onSurface, background);
   for (var step = 0; step <= 20; step++) {
-    final candidate = Color.lerp(color, scheme.onSurface, step / 20)!;
-    if (contrast(candidate, scheme.surface) >= 4.5 &&
-        contrast(candidate, scheme.surfaceContainerHighest) >= 4.5) {
+    final candidate = Color.lerp(start, foreground, step / 20)!;
+    if (contrast(candidate, scheme.surface) >= minContrast &&
+        contrast(candidate, background) >= minContrast) {
       return candidate;
     }
   }
-  return scheme.onSurface;
+  return foreground;
 }
 
 class _SplitUsageRingPainter extends CustomPainter {
@@ -188,12 +204,16 @@ class _SplitUsageRingPainter extends CustomPainter {
     void meter(double start, double sweep, double remaining, Color color) {
       final paint = Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.8
+        ..strokeWidth = 1
         ..strokeCap = StrokeCap.round
         ..color = track;
       canvas.drawArc(rect, start, sweep, false, paint);
       if (remaining <= 0) return;
-      paint.color = remaining <= 15 ? warning : color;
+      // A thin neutral capacity track stays visible at zero. Remaining quota
+      // is distinguished by both color and a heavier stroke, not color alone.
+      paint
+        ..color = remaining <= 15 ? warning : color
+        ..strokeWidth = 1.8;
       canvas.drawArc(
         rect,
         start,

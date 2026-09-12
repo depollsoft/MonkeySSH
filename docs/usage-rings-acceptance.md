@@ -50,6 +50,19 @@ rerun for the new summary line and preview helper.
 The API must still allow the cooldown to expire; the fix prevents premature
 retries rather than attempting to bypass provider throttling.
 
+## PR review corrections
+
+- [x] Explicit runtime re-check, full refresh, and install/update completion invalidate the corresponding usage-path cache without clearing provider cooldowns. Generation guards prevent late path probes from restoring stale negative entries, and failed/incomplete probes are not cached as missing installations.
+- [x] Ring cancellation is checked after service-queue waits, after asset loading, and at actual SSH-queue dispatch. Coalesced live consumers keep their request; already-dispatched responses still record provider cooldowns without publishing to cancelled callers.
+- [x] The Options checkbox persists the selected callback value, including when the persisted setting is still loading.
+- [x] Empty capacity tracks use opaque, alpha-composited theme colors with at least 3:1 contrast in light and dark themes. The track is thinner than remaining-quota strokes, so the two states differ by both color and weight.
+- [x] Current-direction wording describes preserved bar invariants rather than claiming production code is untouched. The PR summary explicitly states five-minute Claude polling, two minutes for other agents, and successful Android/iPad fixture validation.
+
+The focused review suite covers ten runtime/queue race cases, plus loading-state
+checkbox and actual painted-track contrast regressions. The existing service and
+widget suites were exercised as well. No live provider requests were made for
+these review fixes.
+
 ## History and limits
 
 The branch includes the requested merge of `origin/main` through `d9eb3f04`.

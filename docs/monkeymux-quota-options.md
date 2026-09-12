@@ -6,13 +6,20 @@ Mode: Operate. Scope: current MonkeyMux window, phone bar and tablet sidebar.
 
 ## Current direction
 
-The user prefers seeing both quotas, wants the existing MonkeyMux bar retained, and does not want tapping the quota to navigate to usage details. They proposed splitting a ring into top and bottom halves instead of concentric tracks.
+The production MonkeyMux handle wraps the existing agent mark with a Pro-gated
+remaining-usage meter. One reported quota uses the full circle, two use halves,
+and additional Antigravity groups use equal segments. Claude/Codex five-hour and
+weekly quotas keep their established top/bottom order when both are present.
 
-The current preview compares concentric rings against a split ring. The split ring keeps a 28dp outside diameter around the existing 16dp mark, with short-term allowance on top and weekly allowance below. Both halves fill clockwise; small fixed gaps at 3 and 9 o'clock distinguish them. Each half retains its own value and warning state. The two quotas never swap positions.
+The bar's dimensions, window-switcher gestures, and native identity badges are
+preserved. There is no new quota tap action, percentage label, or row. The empty
+capacity track is a thin neutral line with at least 3:1 contrast against the
+resolved surfaces; remaining allowance uses a heavier, distinctly colored line.
 
-Neither treatment adds percentage labels, quota navigation, or a new row inside the bar. The preview handle now reveals a sample window switcher rather than usage details. Production bar code and behavior are untouched. Numeric captions under the samples belong only to the comparison page, not to the proposed bar.
-
-The initial options and behavior proposals below are retained as design history, not the current implementation brief.
+The comparison preview and options below record the design exploration, not an
+unchanged production implementation. Captions under comparison samples are
+preview annotations only. Current behavior and test evidence live in
+`agent-usage.md` and `usage-rings-acceptance.md`.
 
 ## Intent
 

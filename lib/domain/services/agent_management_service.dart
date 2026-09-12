@@ -581,6 +581,7 @@ class AgentManagementService {
     ({
       SshSession session,
       String selection,
+      List<bool Function()> observers,
       Future<Map<String, AgentUsage>> future,
     })
   >
@@ -698,6 +699,7 @@ class AgentManagementService {
         // A stale background failure must not abort an explicit refresh.
       }
     }
+    _invalidateUsageRuntime(session);
     _discovery.invalidateSession(session);
     return _inspectAll(session, onDiscovered: onDiscovered);
   }
@@ -812,6 +814,9 @@ class AgentManagementService {
         message: 'Agent Management requires MonkeySSH Pro.',
       );
     }
+    if (definition.kind == AgentRuntimeKind.cli && definition.tool != null) {
+      _invalidateUsageRuntime(session, tool: definition.tool);
+    }
     try {
       final probeOutput = await _run(
         session,
@@ -917,6 +922,19 @@ class AgentManagementService {
         Map<AgentLaunchTool, ({DateTime at, AgentRuntimeInfo runtime})>
       >();
 
+  final _usageRuntimeRevisions = Expando<Map<AgentLaunchTool, Object>>();
+
+  void _invalidateUsageRuntime(SshSession session, {AgentLaunchTool? tool}) {
+    if (tool == null) {
+      _usageRuntimeCache[session] = null;
+      _usageRuntimeRevisions[session] = null;
+    } else {
+      _usageRuntimeCache[session]?.remove(tool);
+      final revisions = _usageRuntimeRevisions[session] ??= {};
+      revisions[tool] = Object();
+    }
+  }
+
   /// Reads one installed CLI's account allowances without update/registry checks.
   /// [shouldContinue] prevents a quota read after an abandoned path probe.
   Future<AgentUsage?> readUsageForTool(
@@ -933,20 +951,33 @@ class AgentManagementService {
     final cooldown = _activeUsageCooldown(session, definition.id.substring(4));
     if (cooldown != null) return cooldown;
     final cache = _usageRuntimeCache[session] ??= {};
+    final revisions = _usageRuntimeRevisions[session] ??= {};
+    final revision = revisions.putIfAbsent(tool, Object.new);
+    bool runtimeCurrent() =>
+        current() &&
+        identical(_usageRuntimeRevisions[session], revisions) &&
+        identical(revisions[tool], revision);
     var runtime = cache[tool];
     if (runtime == null || _now().difference(runtime.at) >= _updateCheckTtl) {
-      final result = await _run(
-        session,
-        buildAgentBatchProbeCommand([
-          definition,
-        ], windows: session.remoteIsWindows),
-        priority: SshExecPriority.low,
-        timeout: const Duration(seconds: 14),
-      );
-      if (!current()) return null;
-      final path = parseAgentBatchProbeOutput(
-        result.output,
-      )[definition.id]?.executablePath;
+      final AgentRuntimeActionResult result;
+      try {
+        result = await _run(
+          session,
+          buildAgentBatchProbeCommand([
+            definition,
+          ], windows: session.remoteIsWindows),
+          priority: SshExecPriority.low,
+          timeout: const Duration(seconds: 14),
+          shouldContinue: runtimeCurrent,
+        );
+      } on _UsageReadCancelled {
+        return null;
+      }
+      if (!runtimeCurrent()) return null;
+      final snapshot = parseAgentBatchProbeOutput(result.output)[definition.id];
+      // A failed/incomplete probe is not proof that the CLI is absent.
+      if (!result.succeeded || snapshot == null) return null;
+      final path = snapshot.executablePath;
       final installed = AgentRuntimeInfo(
         definition: definition,
         status: path == null
@@ -957,9 +988,11 @@ class AgentManagementService {
       runtime = (at: _now(), runtime: installed);
       cache[tool] = runtime;
     }
-    if (!current()) return null;
-    final usage = await readUsage(session, [runtime.runtime]);
-    return current() ? usage[definition.id] : null;
+    if (!runtimeCurrent()) return null;
+    final usage = await _readUsageWhenCurrent(session, [
+      runtime.runtime,
+    ], shouldContinue: runtimeCurrent);
+    return runtimeCurrent() ? usage[definition.id] : null;
   }
 
   /// Reads quotas requested by the manager or a visible Pro usage-ring icon.
@@ -967,11 +1000,18 @@ class AgentManagementService {
   Future<Map<String, AgentUsage>> readUsage(
     SshSession session,
     List<AgentRuntimeInfo> runtimes,
-  ) async {
+  ) => _readUsageWhenCurrent(session, runtimes);
+
+  Future<Map<String, AgentUsage>> _readUsageWhenCurrent(
+    SshSession session,
+    List<AgentRuntimeInfo> runtimes, {
+    bool Function()? shouldContinue,
+  }) async {
+    bool current() => shouldContinue?.call() ?? true;
+    if (!current() || !await _canManageAgents() || !current()) return const {};
     final snapshot = runtimes
         .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
         .toList();
-    if (!await _canManageAgents()) return const {};
     final selectedRows = [
       for (final runtime in snapshot)
         if (runtime.status == AgentRuntimeStatus.installed ||
@@ -979,38 +1019,55 @@ class AgentManagementService {
           jsonEncode([runtime.definition.id, runtime.executablePath]),
     ]..sort();
     final selection = jsonEncode(selectedRows);
-    // Installs can change the selection while a probe is running. Queue that
-    // selection, then re-check so matching waiters still share the follow-up.
     while (true) {
+      if (!current() || !await _canManageAgents() || !current()) {
+        return const {};
+      }
       final existing = _inFlightUsageChecks[session.connectionId];
       if (existing == null) break;
       if (identical(existing.session, session) &&
           existing.selection == selection) {
-        return existing.future;
+        // A dismissed ring must not cancel another visible consumer's request.
+        existing.observers.add(current);
+        final result = await existing.future;
+        return current() && await _canManageAgents() && current()
+            ? result
+            : const {};
       }
       await existing.future;
+      if (!current()) return const {};
     }
+    final observers = <bool Function()>[current];
+    bool requested() => observers.any((observer) => observer());
     late final Future<Map<String, AgentUsage>> check;
-    check = _readUsage(session, snapshot).whenComplete(() {
-      if (identical(
-        _inFlightUsageChecks[session.connectionId]?.future,
-        check,
-      )) {
-        _inFlightUsageChecks.remove(session.connectionId);
-      }
-    });
+    check = _readUsage(session, snapshot, shouldContinue: requested)
+        .whenComplete(() {
+          if (identical(
+            _inFlightUsageChecks[session.connectionId]?.future,
+            check,
+          )) {
+            _inFlightUsageChecks.remove(session.connectionId);
+          }
+        });
     _inFlightUsageChecks[session.connectionId] = (
       session: session,
       selection: selection,
+      observers: observers,
       future: check,
     );
-    return check;
+    final result = await check;
+    // Dispatched reads still cache useful responses and cooldowns, but cancelled
+    // callers receive no result and cannot publish it into a different window.
+    return current() && await _canManageAgents() && current()
+        ? result
+        : const {};
   }
 
   Future<Map<String, AgentUsage>> _readUsage(
     SshSession session,
-    List<AgentRuntimeInfo> runtimes,
-  ) async {
+    List<AgentRuntimeInfo> runtimes, {
+    required bool Function() shouldContinue,
+  }) async {
     final selected = <String, String>{};
     final refreshIntervals = <String, Duration>{};
     final result = <String, AgentUsage>{};
@@ -1103,9 +1160,11 @@ class AgentManagementService {
       return _mapUsageToRuntimes(runtimes, result, selected, parsed);
     }
     try {
+      if (!shouldContinue()) throw const _UsageReadCancelled();
       final script = await rootBundle.loadString(
         'assets/scripts/agent_usage_probe.cjs',
       );
+      if (!shouldContinue()) throw const _UsageReadCancelled();
       final source = base64.encode(utf8.encode(script));
       final bootstrap =
           "process.env.MONKEYSSH_USAGE_PROBE='1';"
@@ -1121,6 +1180,7 @@ class AgentManagementService {
             : null,
         timeout: const Duration(seconds: 18),
         keepPartialOutputOnTimeout: true,
+        shouldContinue: shouldContinue,
       );
       final rawValues = parseAgentUsageOutput(
         response.output,
@@ -1161,6 +1221,8 @@ class AgentManagementService {
                 .length,
         },
       );
+    } on _UsageReadCancelled {
+      return const {};
     } on Object {
       DiagnosticsLogService.instance.debug(
         'agent.usage',
@@ -1323,6 +1385,10 @@ class AgentManagementService {
         },
       );
       rethrow;
+    } finally {
+      if (definition.kind == AgentRuntimeKind.cli && definition.tool != null) {
+        _invalidateUsageRuntime(session, tool: definition.tool);
+      }
     }
     _runtimeCache.remove(session.connectionId);
     _discovery.invalidateSession(session);
@@ -1337,7 +1403,12 @@ class AgentManagementService {
     bool keepPartialOutputOnTimeout = false,
     Uint8List? input,
     SshExecPriority priority = SshExecPriority.normal,
+    bool Function()? shouldContinue,
   }) => session.runQueuedExec(() async {
+    if (shouldContinue != null &&
+        (!shouldContinue() || !await _canManageAgents() || !shouldContinue())) {
+      throw const _UsageReadCancelled();
+    }
     final exec = await openSshExec(
       session.execute(command),
       timeout ?? const Duration(seconds: 15),
@@ -1392,6 +1463,10 @@ class AgentManagementService {
       }
     }
   }, priority: priority);
+}
+
+class _UsageReadCancelled implements Exception {
+  const _UsageReadCancelled();
 }
 
 /// Parsed executable and version output for one runtime probe.
@@ -1897,8 +1972,10 @@ String _buildOfficialAgentInstallerCommand(
 final agentManagementServiceProvider = Provider<AgentManagementService>(
   (ref) => AgentManagementService(
     ref.watch(agentSessionDiscoveryServiceProvider),
-    canManageAgents: () => ref
-        .read(monetizationServiceProvider)
-        .canUseFeature(MonetizationFeature.agentManagement),
+    canManageAgents: () => ref.mounted
+        ? ref
+              .read(monetizationServiceProvider)
+              .canUseFeature(MonetizationFeature.agentManagement)
+        : Future.value(false),
   ),
 );

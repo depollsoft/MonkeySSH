@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:monkeyssh/app/routes.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/agent_usage_rings.dart';
@@ -60,6 +61,19 @@ class Preference extends ShowUsageRingsNotifier {
   @override
   Future<void> setEnabled({required bool enabled}) async =>
       state = this.enabled = enabled;
+}
+
+class DelayedPreference extends Preference {
+  DelayedPreference() : super(true);
+  final loaded = Completer<bool>();
+  final writes = <bool>[];
+  @override
+  Future<bool> initializedValue() => loaded.future;
+  @override
+  Future<void> setEnabled({required bool enabled}) async {
+    writes.add(enabled);
+    await super.setEnabled(enabled: enabled);
+  }
 }
 
 class Reader extends Fake implements AgentManagementService {
@@ -120,6 +134,48 @@ class RecordingRingCanvas extends Fake implements Canvas {
 }
 
 void main() {
+  testWidgets(
+    'capacity tracks meet contrast and stay distinct from remaining quota',
+    (tester) async {
+      for (final theme in [FluttyTheme.light, FluttyTheme.dark]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: theme,
+            home: const Center(
+              child: SplitUsageRing(
+                rings: AgentUsageRings(shortTerm: 50, weekly: 50),
+                agentLabel: 'Agent',
+                child: Icon(Icons.code, size: 16),
+              ),
+            ),
+          ),
+        );
+        final painter = tester
+            .widget<CustomPaint>(find.byKey(const ValueKey('split-usage-ring')))
+            .painter!;
+        final canvas = RecordingRingCanvas();
+        painter.paint(canvas, const Size(28, 28));
+        for (final index in [0, 2]) {
+          final track = canvas.arcs[index];
+          final fill = canvas.arcs[index + 1];
+          expect(track.color.a, 1);
+          expect(track.strokeWidth, lessThan(fill.strokeWidth));
+          expect(track.color, isNot(fill.color));
+          for (final background in [
+            theme.colorScheme.surface,
+            theme.colorScheme.surfaceContainerHighest,
+          ]) {
+            final a = track.color.computeLuminance();
+            final b = background.computeLuminance();
+            expect(
+              (math.max(a, b) + .05) / (math.min(a, b) + .05),
+              greaterThanOrEqualTo(3),
+            );
+          }
+        }
+      }
+    },
+  );
   Future<RecordingRingCanvas> draw(
     WidgetTester tester,
     AgentUsageRings rings,
@@ -664,6 +720,39 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+  testWidgets(
+    'loading checkbox persists the selected value instead of inverting the later default',
+    (tester) async {
+      final preference = DelayedPreference();
+      await pumpIcon(
+        tester,
+        Reader(),
+        Billing(true),
+        preference,
+        body: const AgentUsageRingsMenuItem(),
+      );
+      expect(
+        tester
+            .widget<CheckboxMenuButton>(find.byType(CheckboxMenuButton))
+            .value,
+        isFalse,
+      );
+      await tester.tap(find.text('Show usage rings'));
+      await tester.pumpAndSettle();
+      expect(preference.writes, [true]);
+      preference.loaded.complete(true);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<CheckboxMenuButton>(find.byType(CheckboxMenuButton))
+            .value,
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('dismissed Options submenu still applies its checkbox action', (
     tester,
   ) async {

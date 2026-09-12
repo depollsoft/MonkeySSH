@@ -30,7 +30,8 @@ class AgentUsageRingsMenuItem extends ConsumerWidget {
       style: TerminalMenuStyles.itemButtonStyle(context),
       value: allowed && enabled,
       trailingIcon: allowed ? null : const PremiumBadge(),
-      onChanged: (_) async {
+      onChanged: (selected) async {
+        if (selected == null) return;
         if (!await requireMonetizationFeatureAccessWithService(
               context: navigationContext,
               service: service,
@@ -39,9 +40,7 @@ class AgentUsageRingsMenuItem extends ConsumerWidget {
             !navigationContext.mounted) {
           return;
         }
-        final current = await notifier.initializedValue();
-        if (!navigationContext.mounted) return;
-        await notifier.setEnabled(enabled: !allowed || !current);
+        await notifier.setEnabled(enabled: selected);
       },
       child: Text(
         'Show usage rings',

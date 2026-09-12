@@ -64,6 +64,325 @@ SshSession _remoteSession(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  group('usage review regressions', () {
+    final definition = agentCliRuntimeDefinitions.first;
+    final runtime = AgentRuntimeInfo(
+      definition: definition,
+      status: AgentRuntimeStatus.installed,
+      executablePath: '/bin/claude',
+    );
+    String pathReply({required bool installed}) =>
+        '__monkeyssh_agent_runtime__=cli:claude\n'
+        '${installed ? '__monkeyssh_agent_path__=/bin/claude\n__monkeyssh_agent_version__=1.0.0\n' : ''}'
+        '__monkeyssh_agent_runtime_end__\n';
+    const metadata =
+        '__monkeyssh_agent_runtime__=cli:claude\n'
+        '__monkeyssh_agent_source__=npm global\n__monkeyssh_agent_installed__=1.0.0\n'
+        '__monkeyssh_agent_latest__=1.0.0\n__monkeyssh_agent_runtime_end__\n';
+    const quota =
+        '__monkeyssh_usage__={"id":"claude","status":"available","windows":[{"label":"Weekly","usedPercent":25}]}';
+
+    for (final action in ['inspect', 'refreshAll', 'install']) {
+      test('missing CLI becomes readable immediately after $action', () async {
+        var installed = false;
+        final client = _MockSshClient();
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          final command = call.positionalArguments.first as String;
+          if (command.contains('__monkeyssh_agent_path__')) {
+            return _execOutput(pathReply(installed: installed));
+          }
+          if (command.contains('MONKEYSSH_USAGE_PROBE')) {
+            return _execOutput(quota);
+          }
+          return _execOutput(metadata);
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        expect(
+          await service.readUsageForTool(session, AgentLaunchTool.claudeCode),
+          isNull,
+        );
+        installed = true;
+        if (action == 'inspect') {
+          await service.inspect(session, definition);
+        } else if (action == 'refreshAll') {
+          await service.refreshAll(session);
+        } else {
+          expect(
+            (await service.installOrUpdate(
+              session,
+              definition,
+              update: false,
+            )).succeeded,
+            isTrue,
+          );
+        }
+        expect(
+          (await service.readUsageForTool(
+            session,
+            AgentLaunchTool.claudeCode,
+          ))!.windows.single.usedPercent,
+          25,
+        );
+      });
+    }
+
+    test('a late path probe cannot overwrite an explicit recheck', () async {
+      final client = _MockSshClient();
+      final stale = Completer<SSHSession>();
+      var probes = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        call,
+      ) async {
+        final command = call.positionalArguments.first as String;
+        if (command.contains('__monkeyssh_agent_path__')) {
+          probes++;
+          if (probes == 1) return stale.future;
+          return _execOutput(pathReply(installed: true));
+        }
+        return _execOutput(
+          command.contains('MONKEYSSH_USAGE_PROBE') ? quota : metadata,
+        );
+      });
+      final service = _unlockedManagementService(_MockDiscovery());
+      final session = _remoteSession(client);
+      final old = service.readUsageForTool(session, AgentLaunchTool.claudeCode);
+      await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
+      await service.inspect(session, definition);
+      stale.complete(_execOutput(pathReply(installed: false)));
+      expect(await old, isNull);
+      expect(
+        (await service.readUsageForTool(
+          session,
+          AgentLaunchTool.claudeCode,
+        ))!.status,
+        AgentUsageStatus.available,
+      );
+    });
+
+    test(
+      'a failed path probe is not cached as a missing installation',
+      () async {
+        final client = _MockSshClient();
+        var probes = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          if ((call.positionalArguments.first as String).contains(
+            '__monkeyssh_agent_path__',
+          )) {
+            probes++;
+            return probes == 1
+                ? _execOutput('', exitCode: 1)
+                : _execOutput(pathReply(installed: true));
+          }
+          return _execOutput(quota);
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        expect(
+          await service.readUsageForTool(session, AgentLaunchTool.claudeCode),
+          isNull,
+        );
+        expect(
+          (await service.readUsageForTool(
+            session,
+            AgentLaunchTool.claudeCode,
+          ))!.status,
+          AgentUsageStatus.available,
+        );
+        expect(probes, 2);
+      },
+    );
+
+    test(
+      'a queued path lookup is skipped after the ring is cancelled',
+      () async {
+        final client = _MockSshClient();
+        final session = _remoteSession(client, connectionId: 882);
+        final release = Completer<void>();
+        final blockers = [
+          for (var i = 0; i < 2; i++)
+            runQueuedSshExec(session.connectionId, () => release.future),
+        ];
+        await pumpEventQueue();
+        final service = _unlockedManagementService(_MockDiscovery());
+        var visible = true;
+        final cancelled = service.readUsageForTool(
+          session,
+          AgentLaunchTool.claudeCode,
+          shouldContinue: () => visible,
+        );
+        await pumpEventQueue();
+        expect(pendingQueuedSshExecCountForTesting(session.connectionId), 1);
+        visible = false;
+        release.complete();
+        await Future.wait(blockers);
+        expect(await cancelled, isNull);
+        verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+      },
+    );
+
+    test(
+      'already-dispatched cancelled reads still retain provider cooldowns',
+      () async {
+        final client = _MockSshClient();
+        final response = Completer<SSHSession>();
+        var quotaReads = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          if ((call.positionalArguments.first as String).contains(
+            '__monkeyssh_agent_path__',
+          )) {
+            return _execOutput(pathReply(installed: true));
+          }
+          quotaReads++;
+          return response.future;
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        var visible = true;
+        final cancelled = service.readUsageForTool(
+          session,
+          AgentLaunchTool.claudeCode,
+          shouldContinue: () => visible,
+        );
+        await pumpEventQueue();
+        expect(quotaReads, 1);
+        visible = false;
+        response.complete(
+          _execOutput(
+            '__monkeyssh_usage__={"id":"claude","status":"rateLimited","retryAfterSeconds":900}',
+          ),
+        );
+        expect(await cancelled, isNull);
+        final held = await service.readUsageForTool(
+          session,
+          AgentLaunchTool.claudeCode,
+        );
+        expect(held!.status, AgentUsageStatus.rateLimited);
+        expect(held.retryAt, isNotNull);
+        expect(quotaReads, 1);
+      },
+    );
+
+    test(
+      'ring cancelled behind another tool never starts a new quota probe',
+      () async {
+        final client = _MockSshClient();
+        final blocked = Completer<SSHSession>();
+        var quotaReads = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+          call,
+        ) async {
+          if ((call.positionalArguments.first as String).contains(
+            '__monkeyssh_agent_path__',
+          )) {
+            return _execOutput(pathReply(installed: true));
+          }
+          quotaReads++;
+          if (quotaReads == 2) return blocked.future;
+          return _execOutput(
+            '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}',
+          );
+        });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        await service.readUsageForTool(session, AgentLaunchTool.claudeCode);
+        final other = service.readUsage(session, [
+          AgentRuntimeInfo(
+            definition: agentCliRuntimeDefinitions.firstWhere(
+              (d) => d.id == 'cli:codex',
+            ),
+            status: AgentRuntimeStatus.installed,
+            executablePath: '/bin/codex',
+          ),
+        ]);
+        await pumpEventQueue();
+        expect(quotaReads, 2);
+        var visible = true;
+        final cancelled = service.readUsageForTool(
+          session,
+          AgentLaunchTool.claudeCode,
+          shouldContinue: () => visible,
+        );
+        await pumpEventQueue();
+        visible = false;
+        blocked.complete(
+          _execOutput(
+            '__monkeyssh_usage__={"id":"codex","status":"available","windows":[{"label":"Weekly","usedPercent":25}]}',
+          ),
+        );
+        await other;
+        expect(await cancelled, isNull);
+        expect(quotaReads, 2);
+      },
+    );
+
+    for (final liveConsumer in [false, true]) {
+      test(
+        'SSH queue cancellation retains live consumer=$liveConsumer',
+        () async {
+          final client = _MockSshClient();
+          var quotaReads = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+            call,
+          ) async {
+            if ((call.positionalArguments.first as String).contains(
+              '__monkeyssh_agent_path__',
+            )) {
+              return _execOutput(pathReply(installed: true));
+            }
+            quotaReads++;
+            return _execOutput(
+              quotaReads == 1
+                  ? '__monkeyssh_usage__={"id":"claude","status":"signInRequired"}'
+                  : quota,
+            );
+          });
+          final service = _unlockedManagementService(_MockDiscovery());
+          final session = _remoteSession(
+            client,
+            connectionId: liveConsumer ? 880 : 881,
+          );
+          await service.readUsageForTool(session, AgentLaunchTool.claudeCode);
+          final release = Completer<void>();
+          final blockers = [
+            for (var i = 0; i < 2; i++)
+              runQueuedSshExec(session.connectionId, () => release.future),
+          ];
+          await pumpEventQueue();
+          var visible = true;
+          final cancelled = service.readUsageForTool(
+            session,
+            AgentLaunchTool.claudeCode,
+            shouldContinue: () => visible,
+          );
+          await pumpEventQueue();
+          expect(pendingQueuedSshExecCountForTesting(session.connectionId), 1);
+          final surviving = liveConsumer
+              ? service.readUsage(session, [runtime])
+              : null;
+          await pumpEventQueue();
+          visible = false;
+          release.complete();
+          await Future.wait(blockers);
+          expect(await cancelled, isNull);
+          if (surviving != null) {
+            expect(
+              (await surviving)['cli:claude']!.status,
+              AgentUsageStatus.available,
+            );
+          }
+          expect(quotaReads, liveConsumer ? 2 : 1);
+        },
+      );
+    }
+  });
+
   test(
     'a partial non-throttle failure does not reset the previous backoff attempt',
     () async {
