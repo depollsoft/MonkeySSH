@@ -124,8 +124,9 @@ Only unambiguous `5 hours` and `Weekly` categories from these two readers are
 shown. Model-specific caps, duplicate categories, monetary balances, unlimited
 allowances, and unreported percentages are not converted into ring values. An
 elapsed reset hides that half until fresh data arrives; it never refills the
-ring speculatively. Missing halves are omitted, while a reported zero retains
-an empty track. Unsupported or unavailable readings leave the original icon.
+ring speculatively. If only one allowance is reported, the missing half uses
+a dashed marker, distinct from a reported zero with an empty continuous track.
+If neither allowance is reported, no ring is shown. Unsupported or unavailable readings leave the original icon.
 
 These are the CLI's host-account allowances as read by Agent Management, not
 consumption attributed to the current conversation. Pane-local credential

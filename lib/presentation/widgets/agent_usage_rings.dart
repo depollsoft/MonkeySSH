@@ -94,6 +94,7 @@ class _AgentUsageRingIconState extends ConsumerState<AgentUsageRingIcon>
 }
 
 /// Static, top/bottom usage arcs with small gaps at 3 and 9 o'clock.
+/// A dashed half means unreported; an empty continuous track means zero.
 class SplitUsageRing extends StatelessWidget {
   /// Creates a non-interactive ring around an existing icon.
   const SplitUsageRing({
@@ -137,6 +138,14 @@ class SplitUsageRing extends StatelessWidget {
             secondary: _readableColor(scheme.onSurfaceVariant, scheme),
             warning: _readableColor(scheme.tertiary, scheme),
             track: scheme.outlineVariant,
+            unknown: _readableColor(
+              Color.lerp(
+                scheme.surfaceContainerHighest,
+                scheme.onSurfaceVariant,
+                0.5,
+              )!,
+              scheme,
+            ),
           ),
           child: Center(child: child),
         ),
@@ -169,12 +178,14 @@ class _SplitUsageRingPainter extends CustomPainter {
     required this.secondary,
     required this.warning,
     required this.track,
+    required this.unknown,
   });
   final AgentUsageRings rings;
   final Color primary;
   final Color secondary;
   final Color warning;
   final Color track;
+  final Color unknown;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -185,12 +196,31 @@ class _SplitUsageRingPainter extends CustomPainter {
       radius: size.shortestSide / 2 - 1,
     );
     void half(double start, double? remaining, Color color) {
-      if (remaining == null) return;
       final paint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.8
         ..strokeCap = StrokeCap.round
         ..color = track;
+      if (remaining == null) {
+        // Missing data must not look exhausted, and must not borrow a scoped
+        // model bucket. Six short dashes carry no numerical fill value.
+        const count = 6;
+        const step = sweep / count;
+        const dash = step * 0.35;
+        paint
+          ..color = unknown
+          ..strokeWidth = 1.2;
+        for (var index = 0; index < count; index++) {
+          canvas.drawArc(
+            rect,
+            start + index * step + (step - dash) / 2,
+            dash,
+            false,
+            paint,
+          );
+        }
+        return;
+      }
       canvas.drawArc(rect, start, sweep, false, paint);
       if (remaining <= 0) return;
       paint.color = remaining <= 15 ? warning : color;
@@ -214,7 +244,8 @@ class _SplitUsageRingPainter extends CustomPainter {
       primary != oldDelegate.primary ||
       secondary != oldDelegate.secondary ||
       warning != oldDelegate.warning ||
-      track != oldDelegate.track;
+      track != oldDelegate.track ||
+      unknown != oldDelegate.unknown;
 }
 
 /// Isolated preview; no SSH reads or entitlement checks are performed.

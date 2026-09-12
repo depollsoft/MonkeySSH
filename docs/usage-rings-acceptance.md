@@ -23,4 +23,16 @@
 - Rings currently use Claude Code and Codex account-wide `5 hours`/`Weekly` buckets. Multi-provider agents and scoped model caps remain unprojected rather than guessing an active account/model.
 - The reader uses the host CLI credential context, not pane-local credential overrides. These are account allowances, not per-window consumption.
 - Already-started remote requests are bounded and their results are discarded after cancellation; the feature does not forcibly kill unrelated shared Agent Management reads.
-- Authenticated live account verification, Android-native capture, and physical-device validation were not performed in this worktree. Parser/SSH command contracts and platform command regressions were exercised by the targeted suite.
+- Authenticated live account verification and physical-device validation were not performed. Parser/SSH command contracts and platform command regressions were exercised by the targeted suite.
+
+## Reported Codex mismatch follow-up
+
+- [x] Merged `origin/main` at `d9eb3f04` into the PR branch before applying the correction.
+- [x] Reproduced the supplied screenshot's account-wide weekly bucket with 23% used, plus separate model-specific five-hour/weekly buckets with 0% used.
+- [x] Confirmed both the account summary and the ring use 77% remaining, not 23%. Model-specific 100% allowances are not substituted for a missing account-wide five-hour allowance.
+- [x] Corrected the misleading presentation: an unreported half now uses six short dashes, while zero is an empty continuous track. Both missing still means no ring.
+- [x] Added exact painter assertions for 0%, 77%, and 100% remaining, the dashed state, and accessible unreported/remaining labels.
+- [x] 179 targeted Dart model/widget/summary/navigator/layout cases passed across the post-merge regression run and the corrected Canvas-float-tolerance assertion. All 27 Node usage-probe tests passed.
+- [x] Native integration passed on an Android phone emulator with JDK 17 and the iPad simulator. Both exercise the screenshot-shaped data and Pro/on/off menu behavior.
+
+Updated native PNGs are in `/tmp/monkeymux-usage-rings-correction/`; the screenshot-case filenames end in `codex-weekly-77-unreported-short-term.png`. They are labeled fixtures using the production provider and painter, not authenticated live readings.

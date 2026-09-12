@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs, avoid_positional_boolean_parameters
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -92,7 +93,84 @@ class Reader extends Fake implements AgentManagementService {
   }
 }
 
+class RecordingRingCanvas extends Fake implements Canvas {
+  final arcs =
+      <({double start, double sweep, double strokeWidth, Color color})>[];
+
+  @override
+  void drawArc(
+    Rect rect,
+    double startAngle,
+    double sweepAngle,
+    bool useCenter,
+    Paint paint,
+  ) {
+    arcs.add((
+      start: startAngle,
+      sweep: sweepAngle,
+      strokeWidth: paint.strokeWidth,
+      color: paint.color,
+    ));
+  }
+}
+
 void main() {
+  testWidgets(
+    'missing half is dashed, zero is empty, and weekly fill remains 77 percent',
+    (tester) async {
+      for (final shortTerm in <double?>[null, 0, 77, 100]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Center(
+              child: SplitUsageRing(
+                rings: AgentUsageRings(shortTerm: shortTerm, weekly: 77),
+                agentLabel: 'Codex',
+                child: const Icon(Icons.code, size: 16),
+              ),
+            ),
+          ),
+        );
+        final painter = tester
+            .widget<CustomPaint>(find.byKey(const ValueKey('split-usage-ring')))
+            .painter!;
+        final canvas = RecordingRingCanvas();
+        painter.paint(canvas, const Size(28, 28));
+        final top = canvas.arcs.where((arc) => arc.start < 0).toList();
+        final bottom = canvas.arcs.where((arc) => arc.start > 0).toList();
+        const sweep = math.pi - 2 * math.pi / 22.5;
+        expect(bottom, hasLength(2));
+        expect(bottom[0].sweep, closeTo(sweep, 0.00001));
+        expect(bottom[1].sweep, closeTo(sweep * .77, 0.00001));
+        if (shortTerm == null) {
+          expect(top, hasLength(6));
+          expect(
+            top.every(
+              (arc) =>
+                  (arc.strokeWidth - 1.2).abs() < 0.001 &&
+                  arc.sweep < sweep / 6,
+            ),
+            isTrue,
+          );
+          final handle = tester.ensureSemantics();
+          try {
+            expect(
+              tester.getSemantics(find.byType(SplitUsageRing)).value,
+              '5-hour: not reported; weekly: 77 percent remaining',
+            );
+          } finally {
+            handle.dispose();
+          }
+        } else if (shortTerm == 0) {
+          expect(top, hasLength(1));
+          expect(top.single.sweep, closeTo(sweep, 0.00001));
+        } else {
+          expect(top, hasLength(2));
+          expect(top[1].sweep, closeTo(sweep * shortTerm / 100, 0.00001));
+        }
+      }
+    },
+  );
+
   testWidgets('split ring stays non-interactive and fits the existing bar', (
     tester,
   ) async {

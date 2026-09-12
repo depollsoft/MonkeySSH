@@ -22,7 +22,11 @@ import 'package:monkeyssh/presentation/widgets/terminal_menu_style.dart';
 void main() => runApp(const UsageRingsFeaturePreview());
 
 class UsageRingsFeaturePreview extends StatefulWidget {
-  const UsageRingsFeaturePreview({super.key});
+  const UsageRingsFeaturePreview({
+    this.tool = AgentLaunchTool.claudeCode,
+    super.key,
+  });
+  final AgentLaunchTool tool;
   @override
   State<UsageRingsFeaturePreview> createState() =>
       _UsageRingsFeaturePreviewState();
@@ -62,9 +66,9 @@ class _UsageRingsFeaturePreviewState extends State<UsageRingsFeaturePreview> {
           final scheme = Theme.of(context).colorScheme;
           final icon = AgentUsageRingIcon(
             session: session,
-            tool: AgentLaunchTool.claudeCode,
+            tool: widget.tool,
             child: AgentToolIcon(
-              tool: AgentLaunchTool.claudeCode,
+              tool: widget.tool,
               size: 16,
               color: scheme.primary,
             ),
@@ -80,7 +84,9 @@ class _UsageRingsFeaturePreviewState extends State<UsageRingsFeaturePreview> {
                 ),
                 const SizedBox(height: 28),
                 Text(
-                  r'$ claude',
+                  widget.tool == AgentLaunchTool.codex
+                      ? r'$ codex'
+                      : r'$ claude',
                   style: TextStyle(
                     fontFamily: 'JetBrains Mono',
                     color: scheme.onSurfaceVariant,
@@ -274,17 +280,26 @@ class _Reader extends Fake implements AgentManagementService {
   }) async => AgentUsage(
     status: AgentUsageStatus.available,
     checkedAt: DateTime.now(),
-    windows: [
-      AgentUsageWindow(
-        label: '5 hours',
-        usedPercent: 42,
-        resetsAt: DateTime.now().add(const Duration(hours: 1)),
-      ),
-      AgentUsageWindow(
-        label: 'Weekly',
-        usedPercent: 36,
-        resetsAt: DateTime.now().add(const Duration(days: 3)),
-      ),
-    ],
+    windows: tool == AgentLaunchTool.codex
+        ? const [
+            AgentUsageWindow(label: 'Weekly', usedPercent: 23),
+            AgentUsageWindow(
+              label: 'codex_bengalfox · 5 hours',
+              usedPercent: 0,
+            ),
+            AgentUsageWindow(label: 'codex_bengalfox · Weekly', usedPercent: 0),
+          ]
+        : [
+            AgentUsageWindow(
+              label: '5 hours',
+              usedPercent: 42,
+              resetsAt: DateTime.now().add(const Duration(hours: 1)),
+            ),
+            AgentUsageWindow(
+              label: 'Weekly',
+              usedPercent: 36,
+              resetsAt: DateTime.now().add(const Duration(days: 3)),
+            ),
+          ],
   );
 }

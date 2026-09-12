@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/agent_usage_rings.dart';
+import 'package:monkeyssh/domain/services/agent_usage_parser.dart';
 
 void main() {
   final now = DateTime.utc(2026, 9, 8, 12);
@@ -15,6 +16,22 @@ void main() {
     AgentUsage usage, {
     AgentLaunchTool tool = AgentLaunchTool.claudeCode,
   }) => resolveAgentUsageRings(tool, usage, now: now);
+
+  test(
+    'reported Codex weekly 77 percent is not inverted or replaced by scoped 100 percent',
+    () {
+      final usage = parseAgentUsageOutput(
+        '__monkeyssh_usage__={"id":"codex","status":"available","windows":[ '
+        '{"label":"Weekly","usedPercent":23}, '
+        '{"label":"codex_bengalfox · 5 hours","usedPercent":0}, '
+        '{"label":"codex_bengalfox · Weekly","usedPercent":0}]}',
+        checkedAt: now,
+      )['codex']!;
+      final rings = project(usage, tool: AgentLaunchTool.codex)!;
+      expect(rings.weekly, 77);
+      expect(rings.shortTerm, isNull);
+    },
+  );
 
   test('projects account-wide windows and ignores scoped model caps', () {
     final usage = snapshot(const [

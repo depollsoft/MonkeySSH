@@ -63,6 +63,21 @@ test('Hermes copilot pool entries use GitHub quota and its provider label', asyn
   }
 });
 
+test('Codex weekly-only account stays separate from unused model buckets', () => {
+  const result = codexUsage({rateLimitsByLimitId: {
+    codex: {primary: {usedPercent: 23, windowDurationMins: 10080}},
+    codex_bengalfox: {
+      primary: {usedPercent: 0, windowDurationMins: 300},
+      secondary: {usedPercent: 0, windowDurationMins: 10080},
+    },
+  }});
+  assert.deepEqual(result.windows.map(({label, usedPercent}) => ({label, usedPercent})), [
+    {label: 'Weekly', usedPercent: 23},
+    {label: 'codex_bengalfox · 5 hours', usedPercent: 0},
+    {label: 'codex_bengalfox · Weekly', usedPercent: 0},
+  ]);
+});
+
 test('Codex uses all buckets without duplicating the legacy bucket', () => {
   const bucket = {primary: {usedPercent: 40, windowDurationMins: 300, resetsAt: 1800000000}};
   const result = codexUsage({rateLimits: bucket, rateLimitsByLimitId: {
