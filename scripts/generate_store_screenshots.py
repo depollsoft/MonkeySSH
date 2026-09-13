@@ -621,7 +621,7 @@ class StoreDemoEnvironment:
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
               --pure --log-level ERROR \\
-              --prompt 'Inspect the release checklist image and keep this agent session ready.'
+              --prompt 'Explain in two short bullets how a persistent SSH workspace helps when switching between phone and desktop. Keep the answer under 40 words. Do not use tools, read files, or search for images.'
             """,
         )
         for name in self._agent_executables:
