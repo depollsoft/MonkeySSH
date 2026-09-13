@@ -127,48 +127,66 @@ void main() {
     expect(find.text('settings'), findsNothing);
   });
 
-  testWidgets('ACP notification opens chat above connections', (tester) async {
-    final router = GoRouter(
-      initialLocation: '/settings',
-      routes: [
-        GoRoute(
-          path: '/',
-          builder: (context, state) => Scaffold(
-            body: Text('home:${state.uri.queryParameters['tab'] ?? 'hosts'}'),
+  for (final kind in AcpNotificationKind.values) {
+    testWidgets('ACP $kind opens its terminal above connections on every tap', (
+      tester,
+    ) async {
+      final locations = <Uri>[];
+      final router = GoRouter(
+        initialLocation: '/settings',
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => Scaffold(
+              body: Text('home:${state.uri.queryParameters['tab'] ?? 'hosts'}'),
+            ),
           ),
-        ),
-        GoRoute(
-          path: '/settings',
-          builder: (context, state) => const Scaffold(body: Text('settings')),
-        ),
-        GoRoute(
-          path: acpAgentChatRoutePath,
-          builder: (context, state) => const Scaffold(body: Text('agent chat')),
-        ),
-      ],
-    );
-    addTearDown(router.dispose);
-
-    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
-    await tester.pumpAndSettle();
-    openAcpNotificationStack(
-      router: router,
-      payload: const AcpNotificationPayload(
-        kind: AcpNotificationKind.writeApproval,
-        hostId: 7,
-        providerId: 'builtin:copilot-cli',
-        bridgeId: 'bridge-1',
-        acpSessionId: 'session-1',
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('agent chat'), findsOneWidget);
-    expect(router.canPop(), isTrue);
-    router.pop();
-    await tester.pumpAndSettle();
-    expect(find.text('home:connections'), findsOneWidget);
-  });
+          GoRoute(
+            path: '/settings',
+            builder: (context, state) => const Scaffold(body: Text('settings')),
+          ),
+          GoRoute(
+            path: '/terminal/:hostId',
+            builder: (context, state) {
+              locations.add(state.uri);
+              return Scaffold(
+                body: Text('terminal:${state.pathParameters['hostId']}'),
+              );
+            },
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      for (final tap in ['first', 'repeat']) {
+        openAcpNotificationStack(
+          router: router,
+          payload: AcpNotificationPayload(
+            kind: kind,
+            hostId: 7,
+            providerId: 'builtin:copilot-cli',
+            bridgeId: 'bridge-1',
+            acpSessionId: 'session-1',
+          ),
+          notificationTapId: tap,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('terminal:7'), findsOneWidget);
+        expect(locations.last.queryParameters, {
+          'p': 'builtin:copilot-cli',
+          'b': 'bridge-1',
+          's': 'session-1',
+          'notificationTap': tap,
+        });
+        expect(router.canPop(), isTrue);
+      }
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.text('home:connections'), findsOneWidget);
+      expect(router.canPop(), isFalse);
+    });
+  }
 
   testWidgets('terminal notification opens terminal above connections', (
     tester,

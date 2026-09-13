@@ -47,6 +47,7 @@ import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
+import '../../domain/services/acp_notification_target.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/agent_management_service.dart';
@@ -3500,6 +3501,7 @@ class TerminalScreen extends ConsumerStatefulWidget {
     required this.hostId,
     this.connectionId,
     this.initialTmuxSessionName,
+    this.initialNativeAcpSessionKey,
     this.initialTmuxWindowIndex,
     this.initialTmuxWindowId,
     this.initialTmuxWindowRequiresVisibleSession = false,
@@ -3514,6 +3516,9 @@ class TerminalScreen extends ConsumerStatefulWidget {
 
   /// Optional existing connection ID to reuse.
   final int? connectionId;
+
+  /// Native session to select inside the owning MonkeyMux window.
+  final AcpSessionKey? initialNativeAcpSessionKey;
 
   /// Optional tmux session to focus after opening the terminal.
   final String? initialTmuxSessionName;
@@ -3681,6 +3686,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   double _terminalViewportReservedBottomPadding = 0;
   bool _reserveMuxChromeBeforeActivation = false;
   _InitialTmuxWindowTarget? _pendingInitialTmuxWindowTarget;
+  AcpSessionKey? _pendingInitialNativeAcpSessionKey;
   bool _showTmuxBar = true;
   bool _isTmuxBarExpanded = false;
   double _tmuxSidebarDragOffset = 0;
@@ -4534,6 +4540,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _deviceDebugSessionRegistry = ref.read(deviceDebugSessionServiceProvider);
     _isTmuxBarExpanded = widget.initiallyExpandTmuxWindows;
     _pendingInitialTmuxWindowTarget = _buildInitialTmuxWindowTarget(widget);
+    _pendingInitialNativeAcpSessionKey = widget.initialNativeAcpSessionKey;
     WidgetsBinding.instance.addObserver(this);
     _sharedClipboardSubscription = ref.listenManual<bool>(
       sharedClipboardNotifierProvider,
@@ -7225,7 +7232,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     await _loadTheme(reason: 'initial_load');
     if (!mounted) return;
-    await _connect(preferredConnectionId: widget.connectionId);
+    var connectionId = widget.connectionId;
+    final nativeTarget = _pendingInitialNativeAcpSessionKey;
+    if (connectionId == null && nativeTarget != null) {
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      connectionId = await resolveAcpNotificationConnection(
+        target: nativeTarget,
+        sessions: ref
+            .read(activeSessionsProvider)
+            .keys
+            .map(sessions.getSession)
+            .whereType<SshSession>(),
+        listWindows: (session, workspace) =>
+            _monkeyMuxService.listWindows(session, workspace),
+      );
+      if (!mounted) return;
+    }
+    await _connect(preferredConnectionId: connectionId);
   }
 
   Future<void> _loadTheme({
@@ -7444,7 +7467,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool stillOwnsSession() => mounted && identical(session, _activeSession());
     if (!stillOwnsSession()) return;
 
-    _activeNativeAcpSessionKey = session.activeNativeAcpSessionKey;
+    _activeNativeAcpSessionKey = _pendingInitialNativeAcpSessionKey == null
+        ? session.activeNativeAcpSessionKey
+        : null;
     session.setTerminalParsingPaused(
       paused: _activeNativeAcpSessionKey != null,
     );
@@ -10907,6 +10932,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String sessionName,
     List<TmuxWindow> windows,
   ) async {
+    if (_pendingInitialNativeAcpSessionKey != null &&
+        _activeMuxBackend == RemoteMuxBackend.monkeyMux) {
+      _syncActiveNativeAcpMuxWindow(session, windows);
+      if (_pendingInitialNativeAcpSessionKey != null) {
+        _pendingInitialNativeAcpSessionKey = null;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('The native agent window is no longer available.'),
+          ),
+        );
+      }
+      return;
+    }
     final target = _pendingInitialTmuxWindowTarget;
     if (target == null || target.sessionName != sessionName) {
       return;
@@ -11246,16 +11284,35 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     List<TmuxWindow> windows,
   ) {
-    final active = windows.where((window) => window.isActive).firstOrNull;
+    final target = _pendingInitialNativeAcpSessionKey;
+    final requestedWindow = target == null
+        ? null
+        : windows
+              .where(
+                (window) =>
+                    window.nativeAcpBridgeId == target.bridgeId &&
+                    window.nativeAcpProviderId == target.providerId,
+              )
+              .firstOrNull;
+    if (target != null && requestedWindow == null) {
+      return;
+    }
+    if (requestedWindow != null) {
+      _pendingInitialNativeAcpSessionKey = null;
+    }
+    final active =
+        requestedWindow ??
+        windows.where((window) => window.isActive).firstOrNull;
     final bridgeId = active?.nativeAcpBridgeId;
     final providerId = active?.nativeAcpProviderId;
     if (active == null || bridgeId == null || providerId == null) {
       _autoOpenedNativeAcpBridgeId = null;
       return;
     }
-    if (_nativeAcpLaunchState != null ||
-        _activeNativeAcpSessionKey?.bridgeId == bridgeId ||
-        _autoOpenedNativeAcpBridgeId == bridgeId) {
+    if (requestedWindow == null &&
+        (_nativeAcpLaunchState != null ||
+            _activeNativeAcpSessionKey?.bridgeId == bridgeId ||
+            _autoOpenedNativeAcpBridgeId == bridgeId)) {
       return;
     }
     _autoOpenedNativeAcpBridgeId = bridgeId;

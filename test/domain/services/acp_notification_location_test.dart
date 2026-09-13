@@ -36,7 +36,7 @@ void main() {
       expect(location.startsWith('/home'), isFalse);
     });
 
-    test('notification tap deep-links to the specific chat', () {
+    test('notification tap deep-links to the native terminal', () {
       const payload = AcpNotificationPayload(
         kind: AcpNotificationKind.permission,
         hostId: 3,
@@ -48,8 +48,7 @@ void main() {
       final location = buildAcpNotificationLocation(payload);
       final uri = Uri.parse(location);
 
-      expect(uri.path, acpAgentChatRoutePath);
-      expect(uri.queryParameters[acpAgentChatHostQueryKey], '3');
+      expect(uri.path, '/terminal/3');
       expect(uri.queryParameters[acpAgentChatSessionQueryKey], 'session-2');
       expect(location.startsWith('/home'), isFalse);
     });

@@ -57,6 +57,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_theme_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
+import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
@@ -1657,6 +1658,8 @@ void main() {
 
     Future<void> pumpScreen(
       WidgetTester tester, {
+      AcpSessionKey? initialNativeAcpSessionKey,
+      bool resolveConnection = false,
       ThemeMode themeMode = ThemeMode.light,
       ActiveSessionsNotifier? activeSessions,
       TmuxService? tmuxService,
@@ -1713,7 +1716,8 @@ void main() {
             themeMode: themeMode,
             home: TerminalScreen(
               hostId: host.id,
-              connectionId: session.connectionId,
+              connectionId: resolveConnection ? null : session.connectionId,
+              initialNativeAcpSessionKey: initialNativeAcpSessionKey,
             ),
           ),
         ),
@@ -8242,6 +8246,96 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(SplitUsageRing), findsNothing);
     });
+
+    testWidgets(
+      'native notification selects an inactive window inside the terminal',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1100, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final key = AcpSessionKey.of(
+          hostId: host.id,
+          providerId: AcpBuiltinProviderIds.pi,
+          bridgeId: 'notification-bridge',
+          acpSessionId: 'notification-session',
+        );
+        final acpManager = FakeAcpSessionManager(
+          sessions: [fakeAcpSession(key: key, providerLabel: 'Pi')],
+        );
+        addTearDown(acpManager.dispose);
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        session
+          ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+          ..remoteMuxSessionName = 'work';
+        var windows = <TmuxWindow>[
+          const TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'Pi',
+            isActive: false,
+            nativeAcpBridgeId: key.bridgeId,
+            nativeAcpProviderId: key.providerId,
+          ),
+        ];
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+        ).thenAnswer((_) async => true);
+        when(
+          () => monkeyMuxService.listWindows(session, 'work'),
+        ).thenAnswer((_) async => windows);
+        when(
+          () => monkeyMuxService.watchWindowChanges(session, 'work'),
+        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(
+          () => monkeyMuxService.selectWindow(
+            session,
+            'work',
+            any(),
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+            suppressReplay: any(named: 'suppressReplay'),
+          ),
+        ).thenAnswer((invocation) async {
+          final index = invocation.positionalArguments[2] as int;
+          windows = windows
+              .map((window) => window.copyWith(isActive: window.index == index))
+              .toList();
+        });
+        when(
+          () => tmuxService.prefetchInstalledAgentTools(session),
+        ).thenAnswer((_) async {});
+        await pumpScreen(
+          tester,
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+          acpSessionManager: acpManager,
+          initialNativeAcpSessionKey: key,
+          resolveConnection: true,
+        );
+        await tester.pumpAndSettle();
+        final chat = tester.widget<AgentChatScreen>(
+          find.byType(AgentChatScreen),
+        );
+        expect(chat.embedded, isTrue);
+        expect(chat.acpSessionId, key.acpSessionId);
+        expect(session.activeNativeAcpSessionKey, key);
+        expect(windows.singleWhere((window) => window.isActive).index, 2);
+        expect(acpManager.reconnects, isEmpty);
+        await tester.tap(find.byKey(const ValueKey('tmux-sidebar-window-0')));
+        await tester.pumpAndSettle();
+        expect(find.byType(AgentChatScreen), findsNothing);
+        expect(session.activeNativeAcpSessionKey, isNull);
+        expect(windows.singleWhere((window) => window.isActive).index, 0);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
 
     testWidgets('Pi handle follows live model-provider changes', (
       tester,

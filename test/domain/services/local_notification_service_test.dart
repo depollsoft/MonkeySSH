@@ -467,7 +467,7 @@ void main() {
     });
   });
 
-  test('buildAcpNotificationLocation deep-links to the specific chat', () {
+  test('buildAcpNotificationLocation deep-links to the native terminal', () {
     final location = buildAcpNotificationLocation(
       const AcpNotificationPayload(
         kind: AcpNotificationKind.completion,
@@ -479,8 +479,7 @@ void main() {
     );
 
     final uri = Uri.parse(location);
-    expect(uri.path, acpAgentChatRoutePath);
-    expect(uri.queryParameters[acpAgentChatHostQueryKey], '3');
+    expect(uri.path, '/terminal/3');
     expect(uri.queryParameters[acpAgentChatSessionQueryKey], 'session-1');
     // Must not target the nonexistent /home route.
     expect(location.startsWith('/home'), isFalse);
