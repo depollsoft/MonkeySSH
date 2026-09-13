@@ -1,8 +1,48 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 
 void main() {
+  testWidgets('clearing a stale IME inset restores only bottom safe padding', (
+    tester,
+  ) async {
+    final keyboard = SystemKeyboardVisibilityController.instance
+      ..debugSetVisible(visible: true);
+    addTearDown(() => keyboard.debugSetVisible(visible: null));
+    late MediaQueryData resolved;
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(
+          padding: EdgeInsets.fromLTRB(4, 0, 6, 0),
+          viewPadding: EdgeInsets.fromLTRB(4, 44, 6, 34),
+          viewInsets: EdgeInsets.fromLTRB(1, 2, 3, 300),
+        ),
+        child: PlatformKeyboardInsetMediaQuery(
+          child: Builder(
+            builder: (context) {
+              resolved = MediaQuery.of(context);
+              return const SizedBox();
+            },
+          ),
+        ),
+      ),
+    );
+    expect(resolved.viewInsets.bottom, 300);
+    expect(resolved.padding, const EdgeInsets.fromLTRB(4, 0, 6, 0));
+
+    keyboard.debugSetVisible(visible: false);
+    await tester.pump();
+    expect(resolved.viewInsets, const EdgeInsets.fromLTRB(1, 2, 3, 0));
+    expect(resolved.padding, const EdgeInsets.fromLTRB(4, 0, 6, 34));
+    expect(resolved.viewPadding, const EdgeInsets.fromLTRB(4, 44, 6, 34));
+
+    keyboard.debugSetVisible(visible: true);
+    await tester.pump();
+    expect(resolved.viewInsets.bottom, 300);
+    expect(resolved.padding.bottom, 0);
+  });
+
   group('resolveSystemBottomInset', () {
     test('reserves the navigation bar while no keyboard inset applies', () {
       const mediaQuery = MediaQueryData(
