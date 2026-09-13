@@ -29,7 +29,7 @@ platform :ios do
   }.freeze
 
   SCREENSHOTS_PATH = './fastlane/screenshots'.freeze
-  APP_PREVIEWS_PATH = './fastlane/app-previews'.freeze
+  APP_PREVIEWS_PATH = File.expand_path('app-previews', __dir__).freeze
 
   TEAM_ID = '43AWMS3YJX'.freeze
 

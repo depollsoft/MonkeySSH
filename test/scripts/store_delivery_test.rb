@@ -78,7 +78,7 @@ end
 class FastfileHarness
   attr_reader :lanes, :calls
 
-  def initialize
+  def initialize(preserve_metadata_lane: false)
     @lanes = {}
     @calls = []
     file = File.expand_path('../../ios/fastlane/Fastfile', __dir__)
@@ -87,7 +87,7 @@ class FastfileHarness
     @lanes[:check_match_persistence] = proc {}
     @lanes[:testflight_release_notes] = proc { ['Changes', {'en-US': {whats_new: 'Changes'}}] }
     @lanes[:resolved_ipa_path] = proc { |options| options.fetch(:ipa_path) }
-    @lanes[:sync_metadata] = proc { |options| @calls << [:sync_metadata, options] }
+    @lanes[:sync_metadata] = proc { |options| @calls << [:sync_metadata, options] } unless preserve_metadata_lane
   end
 
   def default_platform(*) = nil
@@ -99,7 +99,7 @@ class FastfileHarness
 
   def method_missing(name, *args)
     return instance_exec(*args, &@lanes.fetch(name)) if @lanes.key?(name)
-    return @calls << [name, args.first] if %i[pilot match].include?(name)
+    return @calls << [name, args.first] if %i[pilot match deliver].include?(name)
 
     super
   end
@@ -115,6 +115,28 @@ class FastfileDeliveryTest < Minitest::Test
 
   def teardown
     ENV.replace(@env)
+  end
+
+  def test_metadata_upload_discovers_previews_from_fastlanes_working_directory
+    harness = FastfileHarness.new(preserve_metadata_lane: true)
+    harness.lanes[:check_metadata_editable] = proc { '1.2.3' }
+    %i[patch_app_store_ready_for_review_lookup patch_deliver_review_attachment_fetch
+       patch_deliver_review_information_sync].each do |lane|
+      harness.lanes[lane] = proc {}
+    end
+    fastlane_dir = File.expand_path('../../ios/fastlane', __dir__)
+    previews_dir = File.join(fastlane_dir, 'app-previews')
+    existed = Dir.exist?(previews_dir)
+    FileUtils.mkdir_p(previews_dir)
+    Dir.mktmpdir('preview-test-', previews_dir) do |locale_dir|
+      File.write(File.join(locale_dir, 'iphone_67_1.mov'), 'test preview')
+      Dir.chdir(fastlane_dir) { harness.sync_metadata(app_version: '1.2.3') }
+      options = harness.calls.assoc(:deliver).last
+      assert_equal previews_dir, options[:app_previews_path]
+      assert options[:overwrite_preview_videos]
+    end
+  ensure
+    Dir.rmdir(previews_dir) if previews_dir && !existed && Dir.exist?(previews_dir)
   end
 
   def test_ci_beta_upload_passes_notes_to_followup_instead_of_waiting_on_mac
