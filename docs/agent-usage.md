@@ -170,6 +170,8 @@ and OpenAI/Codex use account-wide five-hour/weekly limits. GitHub Copilot, Googl
 Antigravity/Gemini, OpenRouter, and Nous show their reported numerical quotas;
 balances without totals and unlimited allowances remain hidden. Failures from
 unrelated saved providers do not hide the selected provider's valid quotas.
+Reopening the rings during another provider's cooldown retains that same-session
+snapshot with its original timestamp, without making another request.
 Pi terminal panes and other multi-provider tools remain without rings when the
 active provider is unknown. Usage values are not added to telemetry or diagnostics; only the existing allowlisted paywall feature token is
 registered.

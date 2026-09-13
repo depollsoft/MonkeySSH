@@ -13,6 +13,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/agent_usage_rings.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
@@ -737,6 +738,96 @@ void main() {
       await input.close();
     },
   );
+
+  for (final fromManager in [false, true]) {
+    test('Pi retains Codex quotas during another provider cooldown after '
+        '${fromManager ? 'management' : 'ring'} read', () async {
+      var now = DateTime.utc(2026, 9, 12, 12);
+      final checkedAt = now;
+      final client = _MockSshClient();
+      var calls = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        call,
+      ) async {
+        calls++;
+        final command = call.positionalArguments.first as String;
+        return _execOutput(
+          command.contains('__monkeyssh_agent_path__')
+              ? '__monkeyssh_agent_runtime__=cli:pi\n__monkeyssh_agent_path__=/bin/pi\n__monkeyssh_agent_runtime_end__\n'
+              : '__monkeyssh_usage__={"id":"pi","status":"available","windows":[{"label":"OpenAI Codex · Weekly","usedPercent":17}], '
+                    '"notices":[{"provider":"Anthropic","status":"rateLimited"}],"retryAfterSeconds":900}',
+        );
+      });
+      final service = AgentManagementService(
+        _MockDiscovery(),
+        canManageAgents: () async => true,
+        now: () => now,
+      );
+      final session = _remoteSession(client);
+      final runtime = AgentRuntimeInfo(
+        definition: agentCliRuntimeDefinitions.firstWhere(
+          (d) => d.tool == AgentLaunchTool.pi,
+        ),
+        status: AgentRuntimeStatus.installed,
+        executablePath: '/bin/pi',
+      );
+      final first = fromManager
+          ? (await service.readUsage(session, [runtime]))['cli:pi']!
+          : (await service.readUsageForTool(session, AgentLaunchTool.pi))!;
+      expect(first.status, AgentUsageStatus.available);
+      final initialCalls = calls;
+      now = now.add(const Duration(minutes: 1));
+      final second = (await service.readUsageForTool(
+        session,
+        AgentLaunchTool.pi,
+      ))!;
+      expect(second.status, AgentUsageStatus.available);
+      expect(second.checkedAt, checkedAt);
+      expect(second.retryAt, first.retryAt);
+      expect(
+        resolveAgentUsageRings(
+          AgentLaunchTool.pi,
+          second,
+          now: now,
+          modelProvider: 'openai-codex',
+        )!.weekly,
+        83,
+      );
+      expect(
+        resolveAgentUsageRings(
+          AgentLaunchTool.pi,
+          second,
+          now: now,
+          modelProvider: 'anthropic',
+        ),
+        isNull,
+      );
+      expect(
+        calls,
+        initialCalls,
+        reason: 'Cooldown must prevent both path and quota probes',
+      );
+      now = checkedAt.add(const Duration(minutes: 6));
+      final stale = await service.readUsageForTool(session, AgentLaunchTool.pi);
+      expect(stale!.checkedAt, checkedAt);
+      expect(
+        resolveAgentUsageRings(
+          AgentLaunchTool.pi,
+          stale,
+          now: now,
+          modelProvider: 'openai-codex',
+        ),
+        isNull,
+      );
+      final reconnected = await service.readUsageForTool(
+        _remoteSession(client),
+        AgentLaunchTool.pi,
+      );
+      expect(reconnected!.windows, isEmpty);
+      expect(reconnected.retryAt, first.retryAt);
+      expect(calls, initialCalls);
+    });
+  }
 
   test(
     'server cooldown survives cache age, path changes, and reconnects on the same host',
