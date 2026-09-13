@@ -1,10 +1,8 @@
 What's new in this beta
 
-- Pro: see account usage, remaining allowances, and reset times in Agent Management when the agent reports them. Usage rings around supported agent icons in MonkeyMux show remaining allowances.
-- MonkeyMux restores agent sessions more reliably after updates, including multiple sessions in the same folder.
-- Fixed dictation, paste delivery, and Return-key submission with the on-screen keyboard.
-- Improved MonkeyMux installation, agent detection, and terminal input on Windows hosts.
-- Fixed flickering Codex titles, incomplete terminal redraws, and false activity indicators when switching windows.
-- Fixed crashes and connection stalls affecting SSH, file transfers, and native agent windows.
+- Pro: Pi usage rings now follow the selected model provider in terminal panes and native chat, showing reported remaining allowances.
+- Pi keeps valid usage readings when another provider temporarily limits refreshes.
+
+Update MonkeyMux and restart existing Pi terminal panes to enable the new rings.
 
 Please report rough edges through the support link.
