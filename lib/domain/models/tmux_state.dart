@@ -53,6 +53,7 @@ class TmuxWindow {
     this.agentTool,
     this.hasUnsupportedAgentTool = false,
     this.activeAgentSessionId,
+    this.agentModelProvider,
     this.agentSessionTitle,
     this.activeAgentSessionConfidence,
     this.nativeAcpBridgeId,
@@ -152,6 +153,9 @@ class TmuxWindow {
 
   /// Live coding-agent session id observed from process metadata, if available.
   final String? activeAgentSessionId;
+
+  /// Selected model provider reported by the live agent extension.
+  final String? agentModelProvider;
 
   /// Live coding-agent session title observed from process metadata, if
   /// available.
@@ -258,6 +262,7 @@ class TmuxWindow {
     activeAgentSessionConfidence: clearActiveAgentSessionMetadata
         ? null
         : activeAgentSessionConfidence ?? this.activeAgentSessionConfidence,
+    agentModelProvider: agentModelProvider,
     nativeAcpBridgeId: nativeAcpBridgeId,
     nativeAcpProviderId: nativeAcpProviderId,
     terminalReportsMouseWheel: terminalReportsMouseWheel,
@@ -546,6 +551,7 @@ class TmuxWindow {
           agentTool == other.agentTool &&
           hasUnsupportedAgentTool == other.hasUnsupportedAgentTool &&
           activeAgentSessionId == other.activeAgentSessionId &&
+          agentModelProvider == other.agentModelProvider &&
           agentSessionTitle == other.agentSessionTitle &&
           activeAgentSessionConfidence == other.activeAgentSessionConfidence &&
           nativeAcpBridgeId == other.nativeAcpBridgeId &&
@@ -572,6 +578,7 @@ class TmuxWindow {
     agentTool,
     hasUnsupportedAgentTool,
     activeAgentSessionId,
+    agentModelProvider,
     agentSessionTitle,
     activeAgentSessionConfidence,
     nativeAcpBridgeId,

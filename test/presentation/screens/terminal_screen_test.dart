@@ -8152,6 +8152,97 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
 
+    testWidgets('terminal Pi handle follows reported provider changes', (
+      tester,
+    ) async {
+      final usageService = _MockAgentManagementService();
+      when(
+        () => usageService.readUsageForTool(
+          session,
+          AgentLaunchTool.pi,
+          shouldContinue: any(named: 'shouldContinue'),
+        ),
+      ).thenAnswer(
+        (_) async => AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: DateTime.now(),
+          windows: const [
+            AgentUsageWindow(label: 'Anthropic · Weekly', usedPercent: 20),
+            AgentUsageWindow(label: 'OpenAI Codex · Weekly', usedPercent: 17),
+          ],
+        ),
+      );
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+      addTearDown(events.close);
+      TmuxWindow piWindow(String? provider, {bool active = true}) => TmuxWindow(
+        index: 0,
+        id: '@1',
+        name: 'Pi',
+        isActive: active,
+        currentCommand: 'pi',
+        agentTool: AgentLaunchTool.pi,
+        agentModelProvider: provider,
+      );
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(
+        () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+      ).thenAnswer((_) async => true);
+      when(
+        () => monkeyMuxService.listWindows(session, 'work'),
+      ).thenAnswer((_) async => [piWindow('openai-codex')]);
+      when(
+        () => monkeyMuxService.watchWindowChanges(session, 'work'),
+      ).thenAnswer((_) => events.stream);
+      when(
+        () => tmuxService.prefetchInstalledAgentTools(session),
+      ).thenAnswer((_) async {});
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        agentManagementService: usageService,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        83,
+      );
+      events.add(TmuxWindowSnapshotEvent(piWindow('anthropic')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        80,
+      );
+      for (final provider in ['custom-provider', null]) {
+        events.add(TmuxWindowSnapshotEvent(piWindow(provider)));
+        await tester.pumpAndSettle();
+        expect(find.byType(SplitUsageRing), findsNothing);
+      }
+      // A known provider on a background pane must not supply the active pane.
+      events.add(
+        TmuxWindowListEvent([
+          piWindow('openai-codex', active: false),
+          const TmuxWindow(
+            index: 1,
+            id: '@2',
+            name: 'Pi',
+            isActive: true,
+            currentCommand: 'pi',
+            agentTool: AgentLaunchTool.pi,
+          ),
+        ]),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsNothing);
+    });
+
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
     ) async {

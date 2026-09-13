@@ -5,7 +5,7 @@
 - [x] Zero used starts full; the colored arc represents remaining quota and drains to empty as usage increases.
 - [x] One reported quota uses a full circle, two use top/bottom halves, and additional Antigravity groups use separate segments. There are no dashed placeholders or unused empty halves.
 - [x] Claude Code and Codex use account-wide five-hour/weekly quotas without substituting scoped model limits. Codex weekly-only responses use a full-circle weekly meter.
-- [x] Native Pi selects quotas from its live model provider and updates on provider changes. Unknown providers and non-numerical allowances stay hidden. Quotas come from Pi's own saved accounts.
+- [x] Terminal and native Pi select quotas from its live model provider and updates on provider changes. Unknown providers and non-numerical allowances stay hidden. Quotas come from Pi's own saved accounts.
 - [x] Grok Build uses included-credit percentage, excluding paid spending caps and prepaid balances without a comparable allowance.
 - [x] Antigravity uses reported numerical groups in stable label order, without inventing an active model. Live reader returned four distinct numerical buckets.
 - [x] The existing MonkeyMux bar height, gestures, agent marks, and native badges remain intact. No quota-specific tap action or extra row.

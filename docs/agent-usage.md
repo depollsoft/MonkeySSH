@@ -116,7 +116,7 @@ visible and can be retried.
 
 ## MonkeyMux usage rings · Pro
 
-Claude Code, Codex, Antigravity, Grok Build, and native Pi can show remaining account
+Claude Code, Codex, Antigravity, Grok Build, and Pi can show remaining account
 allowances around the current agent icon in MonkeyMux's existing bottom bar or
 tablet sidebar. **Zero used means a full meter.** As usage grows, the colored arc
 shrinks: 23% used leaves 77% filled, and 100% used leaves an empty track.
@@ -163,18 +163,21 @@ until fresh data arrives, never refilled speculatively.
 
 These are host-account allowances, not consumption attributed to the current
 conversation. Pane-local credential overrides are not resolved. Multi-provider
-tools need a known active provider. Native Pi reads the provider from its live
-model selection and filters Pi's saved-account quotas to that provider. Rings
-follow provider changes and disappear when the selection is unknown. Anthropic
+tools need a known active provider. Pi reports the provider through its MonkeyMux
+identity extension for terminal panes, or its live model selection for native
+chat. Both filter Pi's saved-account quotas to that provider. Rings follow provider
+changes and disappear when the selection is unknown. Anthropic
 and OpenAI/Codex use account-wide five-hour/weekly limits. GitHub Copilot, Google
 Antigravity/Gemini, OpenRouter, and Nous show their reported numerical quotas;
 balances without totals and unlimited allowances remain hidden. Failures from
 unrelated saved providers do not hide the selected provider's valid quotas.
 Reopening the rings during another provider's cooldown retains that same-session
 snapshot with its original timestamp, without making another request.
-Pi terminal panes and other multi-provider tools remain without rings when the
-active provider is unknown. Usage values are not added to telemetry or diagnostics; only the existing allowlisted paywall feature token is
-registered.
+After updating MonkeyMux, restart existing Pi panes so they load the updated
+identity extension. Older extensions and unknown providers leave the rings hidden.
+Other multi-provider tools remain without rings when the active provider is
+unknown. Usage values are not added to telemetry or diagnostics; only the
+existing allowlisted paywall feature token is registered.
 
 ## Implementation references
 

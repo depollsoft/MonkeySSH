@@ -1395,7 +1395,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         key: ValueKey((widget.session, tool)),
         session: widget.session,
         tool: tool,
-        modelProvider: piUsageModelProvider(_activeNativeAcpEntry),
+        modelProvider: nativeWindowIndex != null
+            ? piUsageModelProvider(_activeNativeAcpEntry)
+            : _displayedWindows
+                  ?.where((window) => window.isActive)
+                  .firstOrNull
+                  ?.agentModelProvider,
         diameter: diameter,
         child: icon,
       );

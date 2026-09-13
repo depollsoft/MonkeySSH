@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.198"
+	monkeyMuxVersion                  = "0.1.199"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -557,6 +557,7 @@ type windowSnapshot struct {
 	PaneTitle                 string                    `json:"paneTitle,omitempty"`
 	AgentTool                 string                    `json:"agentTool,omitempty"`
 	AgentToolConfirmed        bool                      `json:"agentToolConfirmed,omitempty"`
+	AgentModelProvider        string                    `json:"agentModelProvider,omitempty"`
 	AgentSessionID            string                    `json:"agentSessionId,omitempty"`
 	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
 	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
@@ -703,6 +704,7 @@ type muxWindow struct {
 	command                     string
 	agentTool                   string
 	agentToolConfirmed          bool
+	agentModelProvider          string
 	agentSessionID              string
 	agentSessionDir             string
 	agentSessionPath            string
@@ -841,6 +843,7 @@ type windowBroadcastIdentity struct {
 	command               string
 	paneTitle             string
 	agentTool             string
+	agentModelProvider    string
 	panePid               int
 	alert                 bool
 	progressActive        bool
@@ -1046,15 +1049,17 @@ func usageAndExit() {
 }
 
 const piIdentityExtensionSource = `export default function (pi) {
-  const publish = (_event, ctx) => {
+  const publish = (ctx, model) => {
     const id = ctx.sessionManager.getSessionId();
     const file = ctx.sessionManager.getSessionFile();
     if (!id || !file) return;
-    const payload = Buffer.from(JSON.stringify({ id, file }), "utf8")
+    const payload = Buffer.from(JSON.stringify({ id, file, provider: model?.provider ?? null }), "utf8")
       .toString("base64url");
     process.stdout.write("\u001b]1337;MonkeyMuxPi=" + payload + "\u0007");
   };
-  pi.on("session_start", publish);
+  pi.on("session_start", (_event, ctx) => publish(ctx, ctx.model));
+  pi.on("model_select", (event, ctx) => publish(ctx, event.model));
+  pi.on("session_shutdown", (_event, ctx) => publish(ctx, undefined));
 }
 `
 
@@ -9162,6 +9167,7 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		PaneTitle:                 window.paneTitle,
 		AgentTool:                 window.agentToolLocked(),
 		AgentToolConfirmed:        window.agentToolConfirmedLocked(),
+		AgentModelProvider:        window.agentModelProvider,
 		AgentSessionID:            window.agentSessionID,
 		AgentSessionDir:           window.agentSessionDir,
 		AgentSessionPath:          window.agentSessionPath,
@@ -14762,13 +14768,14 @@ func (w *muxWindow) agentToolLocked() string {
 
 func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 	identity := windowBroadcastIdentity{
-		name:      w.name,
-		cwd:       w.cwd,
-		command:   w.currentCommandLocked(),
-		paneTitle: w.paneTitle,
-		agentTool: w.agentToolLocked(),
-		panePid:   w.metadataProcessIDLocked(),
-		alert:     w.alert,
+		name:               w.name,
+		cwd:                w.cwd,
+		command:            w.currentCommandLocked(),
+		paneTitle:          w.paneTitle,
+		agentTool:          w.agentToolLocked(),
+		agentModelProvider: w.agentModelProvider,
+		panePid:            w.metadataProcessIDLocked(),
+		alert:              w.alert,
 	}
 	if progress := w.terminalProgress; progress != nil {
 		identity.progressActive = true
@@ -15892,8 +15899,9 @@ func (w *muxWindow) applyPiIdentityPayloadLocked(value string) {
 		return
 	}
 	var identity struct {
-		ID   string `json:"id"`
-		File string `json:"file"`
+		ID       string `json:"id"`
+		File     string `json:"file"`
+		Provider string `json:"provider"`
 	}
 	if json.Unmarshal(data, &identity) != nil {
 		return
@@ -15904,6 +15912,14 @@ func (w *muxWindow) applyPiIdentityPayloadLocked(value string) {
 		!filepath.IsAbs(identity.File) ||
 		!strings.HasSuffix(strings.ToLower(identity.File), ".jsonl") {
 		return
+	}
+	// Only known quota providers are exposed as window metadata. Missing or
+	// custom providers clear a previous selection, including older extensions.
+	w.agentModelProvider = ""
+	switch identity.Provider {
+	case "anthropic", "openai", "openai-codex", "github-copilot",
+		"google-antigravity", "google-gemini-cli", "openrouter", "nous":
+		w.agentModelProvider = identity.Provider
 	}
 	w.agentSessionID = identity.ID
 	w.agentSessionPath = identity.File
