@@ -85,7 +85,7 @@ TARGETS = {
         screenshot_target=store_screenshots.TARGETS['ios_ipad'],
         outputs=(
             # App Store iPad 13" slot: full-screen native app at 1200x1600.
-            VideoOutput('app_preview', f'{APP_PREVIEW_DIR}/ipad_13_1.mov', 1200, 1600),
+            VideoOutput('app_preview', f'{APP_PREVIEW_DIR}/ipad_pro_3gen_129_1.mov', 1200, 1600),
         ),
     ),
     'android': DemoVideoTarget(

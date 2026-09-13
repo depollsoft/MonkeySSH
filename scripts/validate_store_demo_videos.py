@@ -57,7 +57,7 @@ TARGETS = [
     VideoTarget(
         name='ipad_app_preview',
         platform='ios',
-        rel_path='ios/fastlane/app-previews/en-US/ipad_13_1.mov',
+        rel_path='ios/fastlane/app-previews/en-US/ipad_pro_3gen_129_1.mov',
         size=(1200, 1600),
         live_crop=_APP_PREVIEW_CROP,
         slot='App Store iPad 13" app preview',
