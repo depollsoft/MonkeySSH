@@ -92,4 +92,24 @@ class VideoValidationTest(unittest.TestCase):
                 with ocr, self.assertRaisesRegex(ValueError, error):
                     videos._validate_sampled_ocr_content('ffmpeg', {Path('/video.mov'): info})
                 captures = [c.args[0] for c in run.call_args_list if c.args[0][0] == 'ffmpeg']
-                self.assertEqual([c[5] for c in captures], ['2.000', '5.000', '8.400', '11.600', '15.000', '18.000'])
+                self.assertEqual([c[5] for c in captures], [f'{index / 2:.3f}' for index in range(40)])
+
+
+    def test_each_video_requires_the_full_agent_family(self):
+        from store_media import AGENT_LABELS
+        paths = [Path('/phone.mov'), Path('/tablet.mov')]
+        info = videos.VideoInfo(886, 1920, 20, True)
+        for missing in (False, True):
+            def ocr(frames):
+                return {frame: ' '.join(AGENT_LABELS[:-1] if missing and frame.name.startswith('tablet-') else AGENT_LABELS)
+                        for frame in frames}
+            with self.subTest(missing=missing), \
+                 patch.object(videos.platform, 'system', return_value='Darwin'), \
+                 patch.object(videos.shutil, 'which', return_value='swift'), \
+                 patch.object(videos.subprocess, 'run', return_value=Mock(stdout='')), \
+                 patch.object(videos, '_ocr_texts', side_effect=ocr):
+                if missing:
+                    with self.assertRaisesRegex(ValueError, 'tablet.mov.*OpenClaw'):
+                        videos._validate_sampled_ocr_content('ffmpeg', dict.fromkeys(paths, info))
+                else:
+                    videos._validate_sampled_ocr_content('ffmpeg', dict.fromkeys(paths, info))

@@ -349,6 +349,19 @@ Each device gets eight screenshots. The final two show a real native chat and Ag
 
 Run the caption and scene-contract regression checks with `python3 -m unittest discover -s test/scripts -p 'store_screenshots_test.py'` on macOS with Pillow installed. For a screenshot-only refresh, download the current archive before generation to preserve existing videos, then publish without `--generate` so the archive restore does not overwrite the new captures. Omit `--sync` when preparing a PR rather than updating live listings. The publisher also regenerates and uploads `monkeyssh-agent-workspace.png`, the release-hosted README gallery, from the current iPhone native-chat and Agent Management captures. To preview that composition without launching the app, run `python3 scripts/generate_store_screenshots.py --gallery-only`. To replace only a failed scene while preserving validated captures, use `python3 scripts/generate_store_screenshots.py both --scene terminal_claude` or another registered scene name. This still captures the real app and live SSH workspace; it is not a mock or image-only fallback. Set `ANDROID_SERIAL` to a dedicated emulator when other projects are running locally. Android capture checks the foreground activity and fails rather than saving another app's screen.
 
+Before capture, run `python3 scripts/generate_store_screenshots.py --check-environment`.
+Both generators require real Copilot CLI, Claude Code, Codex, OpenCode,
+Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw executables on PATH.
+Missing tools stop the run before temporary SSH sessions or simulator changes.
+Exited agent panes also fail capture; no shell or printed-transcript fallback
+is used. Configure the capture host beforehand, including any required logins
+and the OpenClaw gateway. The generators never install or update those tools.
+
+The MonkeyMux screenshot scene shows the start of the live list on phones and
+the end on tablets. Videos scroll through both ends. OCR validation requires
+all nine agent labels across each platform's screenshots and within every
+video, including a standalone Pi label so Copilot cannot satisfy that check.
+
 Generated screenshot counts, dimensions, and OCR content can be validated locally on macOS with `python3 scripts/validate_store_screenshots.py` after installing Pillow.
 Short product demo videos can be recorded with `python3 scripts/generate_store_demo_videos.py [ios|android|both]` and validated with `python3 scripts/validate_store_demo_videos.py [ios|android|all]`. The video generator reuses the real screenshot capture environment, records native simulator/emulator screen video while the app opens a real Copilot ACP conversation in the embedded native agent window, then walks Claude Code, the MonkeyMux window switcher, OpenCode, a real image paste into Copilot CLI, and a Copilot prompt against that screenshot, then composes that single recording into store-compliant deliverables. Copilot screenshot/video scenes must show the CLI displaying the image inline; the harness must not enable streamer mode or rename sessions to placeholders. App Store **app previews** are full-screen native captures at the exact device slot resolution — `ios/fastlane/app-previews/en-US/iphone_67_1.mov` (886x1920) and `ipad_13_1.mov` (1200x1600) — with fading caption overlays and a silent audio track, because App Store Connect validates resolution at upload. The **Google Play preview** is a 16:9 landscape branded promo at `store/demo-videos/google-play/monkeyssh-google-play-promo.mp4` (1920x1080); Google Play videos are externally hosted, so this MP4 is uploaded to YouTube and referenced by URL in Play Console rather than synced by Fastlane. The portrait branded canvas is kept for ads under `store/demo-videos/ads/`. The validator enforces per-slot resolution, 15-30s duration, H.264, an audio track on the Apple previews, and that the live app region advances through scenes.
 

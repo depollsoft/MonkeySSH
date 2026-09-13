@@ -26,6 +26,7 @@ ANDROID_SCREENSHOTS = {
     'tenInchScreenshots': (1600, 2560),
 }
 BAD_OCR_PATTERNS = {
+    'placeholder agent pane': re.compile(r'agent session ready|CLI \(demo\)', re.IGNORECASE),
     'splash screen': re.compile(r'MonkeySSH\s*[βB]\s+SSH Terminal', re.IGNORECASE),
     'old prompt transcript': re.compile(
         r'Next two checks|release[- ]readiness|64 concise|sign[- ]off',
@@ -188,7 +189,7 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         elif filename in {'03_iphone_6_9.png', '03_ipad_13.png', '3.png'}:
             _require_ocr_markers(path, text, ['Snippets'])
         elif filename in {'04_iphone_6_9.png', '04_ipad_13.png', '4.png'}:
-            _require_ocr_markers(path, text, ['New Window'])
+            _require_ocr_markers(path, text, ['Workspace'])
             monkeymux_texts.setdefault(_monkeymux_scene_group(path), []).append(
                 (path, text),
             )
@@ -211,10 +212,8 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         paths_description = ', '.join(
             str(path.relative_to(ROOT)) for path, _ in grouped_texts
         )
-        _require_ocr_markers(
-            paths_description,
-            ' '.join(text for _, text in grouped_texts),
-            ['copilot', 'claude', 'codex', 'opencode', 'antigravity'],
+        store_media.require_agent_family(
+            ' '.join(text for _, text in grouped_texts), paths_description,
         )
 
 

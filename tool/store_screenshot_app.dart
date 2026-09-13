@@ -133,6 +133,20 @@ class _ScreenshotTarget {
   final List<List<String>> pathsByScene;
 }
 
+// Must match scripts/store_media.py. Readiness checks names, not a count that
+// could be satisfied by duplicate, unrelated, or native chat windows.
+const _requiredStoreAgentWindows = <String>{
+  'copilot',
+  'claude',
+  'codex',
+  'opencode',
+  'antigravity',
+  'cursor-agent',
+  'pi',
+  'hermes',
+  'openclaw',
+};
+
 const _sceneNames = <String>[
   'terminal_copilot',
   'hosts',
@@ -709,6 +723,11 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       '&expandTmux=1',
     );
     await Future<void>.delayed(const Duration(seconds: 4));
+    // Phone shows the beginning; tablets show the end of the same live list.
+    // Together the store screenshot set exposes every required agent family.
+    await _scrollMuxWindows(
+      toEnd: !{'ios_phone', 'android_phone'}.contains(_targetName),
+    );
     await _announceScene(3);
 
     _go(
@@ -818,7 +837,10 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     // persistent SSH workspace before moving to the next captioned beat.
     _emitBeat(3);
     _go('$base&expandTmux=1');
-    await Future<void>.delayed(const Duration(milliseconds: 1800));
+    await _scrollMuxWindows(toEnd: false);
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    await _scrollMuxWindows(toEnd: true);
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
     await _selectMonkeyMuxWindow('opencode');
     _go(base);
     await _hideKeyboard();
@@ -917,7 +939,8 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
         final windows = await muxService
             .listWindows(session, _muxSessionName)
             .timeout(const Duration(seconds: 8));
-        if (windows.length >= 5) {
+        final names = windows.map((window) => window.name).toSet();
+        if (names.containsAll(_requiredStoreAgentWindows)) {
           await Future<void>.delayed(const Duration(milliseconds: 400));
           return;
         }
@@ -928,6 +951,42 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     throw TimeoutException('MonkeyMux windows did not become ready.');
+  }
+
+  Future<void> _scrollMuxWindows({required bool toEnd}) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (DateTime.now().isBefore(deadline)) {
+      ScrollableState? list;
+      void findScrollable(Element element) {
+        if (element is StatefulElement && element.state is ScrollableState) {
+          list = element.state as ScrollableState;
+          return;
+        }
+        element.visitChildren(findScrollable);
+      }
+
+      void findList(Element element) {
+        if (element.widget.key == const ValueKey('tmux-window-list')) {
+          element.visitChildren(findScrollable);
+          return;
+        }
+        element.visitChildren(findList);
+      }
+
+      WidgetsBinding.instance.rootElement?.visitChildren(findList);
+      final position = list?.position;
+      if (position != null && position.hasContentDimensions) {
+        await position.animateTo(
+          toEnd ? position.maxScrollExtent : position.minScrollExtent,
+          duration: const Duration(milliseconds: 600),
+          curve: Curves.easeInOut,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    throw TimeoutException('Live MonkeyMux window list is unavailable.');
   }
 
   Future<void> _hideKeyboard() async {

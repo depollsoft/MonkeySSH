@@ -31,6 +31,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
+from store_media import AGENT_EXECUTABLES, require_agent_executables
+
 ROOT = Path(__file__).resolve().parents[1]
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
@@ -132,6 +134,10 @@ def main() -> None:
     if args.gallery_only:
         _write_iphone_gallery()
         return
+    if args.check_environment:
+        require_agent_executables()
+        print("All required store-capture agent CLIs are available.")
+        return
     targets = _targets_for_platform(args.platform)
     with StoreDemoEnvironment(seed_platform=args.platform) as demo:
         for target in targets:
@@ -159,6 +165,10 @@ def _parse_args() -> argparse.Namespace:
         '--gallery-only', action='store_true',
         help='Compose the README gallery from existing iPhone captures, without launching the app.',
     )
+    parser.add_argument(
+        '--check-environment', action='store_true',
+        help='Check required live agent executables without starting a capture.',
+    )
     return parser.parse_args()
 
 
@@ -178,6 +188,7 @@ def _run_target(
     target: ScreenshotTarget, demo: StoreDemoEnvironment, *, scene: str | None = None,
 ) -> None:
     print(f'Generating {target.name} screenshots...')
+    demo._require_live_agent_windows()
     demo.reset_monkeymux()
     if target.platform == 'ios':
         device_id = _boot_ios_simulator(_ios_simulator_name(target))
@@ -334,6 +345,7 @@ def _build_android_screenshot_apk(
 
 class StoreDemoEnvironment:
     def __init__(self, *, seed_platform: str = 'both') -> None:
+        self._agent_executables = require_agent_executables()
         self._seed_platform = seed_platform
         self._tmpdir = Path(tempfile.mkdtemp(prefix='monkeyssh-store-demo-'))
         self.username = getpass.getuser()
@@ -347,15 +359,9 @@ class StoreDemoEnvironment:
         self._monkeymux_control: _MonkeyMuxControl | None = None
         self._owned_monkeymux_process_groups: set[int] = set()
         self._window_ids: dict[str, str] = {}
-        copilot = shutil.which('copilot')
-        if copilot is None:
-            raise RuntimeError('GitHub Copilot CLI is required for the first store screenshot.')
-        self._copilot = copilot
-        claude = shutil.which('claude')
-        if claude is None:
-            raise RuntimeError('Claude Code CLI is required for the Claude store screenshot.')
-        self._claude = claude
-        self._opencode = shutil.which('opencode')
+        self._copilot = self._agent_executables['copilot']
+        self._claude = self._agent_executables['claude']
+        self._opencode = self._agent_executables['opencode']
         # Populated after the light-mode app capture; used for video image paste.
         self.demo_image_b64: str | None = None
         # Preserve the developer's Copilot streamerMode across the run.
@@ -603,51 +609,56 @@ class StoreDemoEnvironment:
               --name 'Claude Code Workspace'
             """,
         )
-        self._write_pane_script(
-            'codex',
-            """
-            clear
-            printf 'Codex agent session ready\\n'
-            printf 'Keep long-running coding sessions alive in MonkeyMux.\\n'
-            """,
-        )
         opencode_home = self._tmpdir / 'opencode-home'
         (opencode_home / '.config/opencode').mkdir(parents=True, exist_ok=True)
         (opencode_home / '.config/opencode/tui.json').write_text('{"theme":"system"}\n')
-        opencode_body = (
+        self._write_pane_script(
+            'opencode',
             f"""
             exec env \\
               HOME={self._shell_quote(str(opencode_home))} \\
               PATH={self._shell_quote(os.environ.get('PATH', ''))} \\
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
-              --pure \\
-              --log-level ERROR \\
+              --pure --log-level ERROR \\
               --prompt 'Inspect the release checklist image and keep this agent session ready.'
-            """
-            if self._opencode is not None
-            else """
-            clear
-            printf 'OpenCode agent session ready\\n'
-            printf 'Launch another coding assistant in its own remote window.\\n'
-            """
-        )
-        self._write_pane_script('opencode', opencode_body)
-        self._write_pane_script(
-            'antigravity',
-            """
-            clear
-            printf 'Antigravity agent session ready\\n'
-            printf 'Use MonkeyMux to keep multiple agents running side by side.\\n'
             """,
         )
+        for name in AGENT_EXECUTABLES:
+            if name in ('copilot', 'claude', 'opencode'):
+                continue
+            command = self._shell_quote(self._agent_executables[name])
+            if name == 'openclaw':
+                command += ' tui'
+            self._write_pane_script(name, f'exec {command}')
         self._start_monkeymux_windows()
+        time.sleep(1)
+        self._require_live_agent_windows()
         # Capture a real light-mode app screenshot before driving Copilot so the
         # seeded image is clearly the product UI (and contrasts in the dark TUI).
         self._capture_light_mode_demo_image()
         self._drive_copilot_start_screen()
         self._drive_claude_full_screen()
+        self._require_live_agent_windows()
         self.reset_monkeymux()
+
+    def _require_live_agent_windows(self) -> None:
+        response = self._monkeymux_request({"type": "list_windows"})
+        windows = response.get('windows')
+        if not isinstance(windows, list):
+            raise RuntimeError('MonkeyMux did not return live store agent windows.')
+        by_name = {window.get('name'): window for window in windows
+                   if isinstance(window, dict)}
+        for name in AGENT_EXECUTABLES:
+            pid = by_name.get(name, {}).get("panePid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+                raise RuntimeError(f"Live store agent pane is missing: {name}")
+            try:
+                os.kill(pid, 0)
+            except PermissionError:
+                pass  # The process exists but is not signalable by this user.
+            except ProcessLookupError as error:
+                raise RuntimeError(f"Store agent exited before capture: {name}") from error
 
     def _prepare_demo_dir(self) -> None:
         marker = self.demo_dir / '.monkeyssh-release-workspace'
@@ -677,6 +688,10 @@ class StoreDemoEnvironment:
                     '3. codex   - Codex CLI workspace',
                     '4. opencode - OpenCode CLI workspace',
                     '5. antigravity - Antigravity CLI workspace',
+                    '6. cursor-agent - Cursor Agent workspace',
+                    '7. pi - Pi workspace',
+                    '8. hermes - Hermes workspace',
+                    '9. openclaw - OpenClaw workspace',
                     '',
                 ]
             )
@@ -857,7 +872,9 @@ class StoreDemoEnvironment:
         )
         self._monkeymux_control = self._open_monkeymux_control()
         self._refresh_monkeymux_windows()
-        for window in ('claude', 'codex', 'opencode', 'antigravity'):
+        for window in AGENT_EXECUTABLES:
+            if window == 'copilot':
+                continue
             response = self._monkeymux_request(
                 {
                     'type': 'create_window',
@@ -873,16 +890,6 @@ class StoreDemoEnvironment:
         self.reset_monkeymux()
 
     def _write_pane_script(self, window: str, body: str) -> None:
-        rcfile = self._tmpdir / f'{window}-bashrc'
-        rcfile.write_text(
-            '\n'.join(
-                [
-                    'export BASH_SILENCE_DEPRECATION_WARNING=1',
-                    f"PS1='release-workspace {window} % '",
-                    '',
-                ]
-            )
-        )
         script = self._tmpdir / f'{window}-pane.sh'
         script.write_text(
             '\n'.join(
@@ -890,9 +897,8 @@ class StoreDemoEnvironment:
                     '#!/bin/bash',
                     'set -e',
                     'export BASH_SILENCE_DEPRECATION_WARNING=1',
-                    f'cd {self.demo_dir}',
+                    f'cd {self._shell_quote(str(self.demo_dir))}',
                     body.strip(),
-                    f"exec bash --rcfile {rcfile} -i",
                     '',
                 ]
             )
