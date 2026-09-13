@@ -19,6 +19,7 @@ import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
@@ -59,6 +60,7 @@ import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart'
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
+import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
@@ -8148,6 +8150,93 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    testWidgets('Pi handle follows live model-provider changes', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const bridgeId = '0123456789abcdef0123456789abcdef';
+      final key = fakeAcpKey(
+        hostId: host.id,
+        providerId: AcpBuiltinProviderIds.pi,
+        bridgeId: bridgeId,
+        acpSessionId: 'native-session',
+      );
+      final initial = fakeAcpSession(key: key, providerLabel: 'Pi').copyWith(
+        modelState: const AcpModelState(currentModelId: 'anthropic/claude'),
+      );
+      final acpManager = FakeAcpSessionManager(sessions: [initial]);
+      addTearDown(acpManager.dispose);
+      session.activeNativeAcpSessionKey = key;
+      addTearDown(() => session.activeNativeAcpSessionKey = null);
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(
+        () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+      ).thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: bridgeId,
+            nativeAcpProviderId: AcpBuiltinProviderIds.pi,
+          ),
+        ],
+      );
+      when(
+        () => monkeyMuxService.watchWindowChanges(session, 'work'),
+      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(
+        () => tmuxService.prefetchInstalledAgentTools(session),
+      ).thenAnswer((_) async {});
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        acpSessionManager: acpManager,
+      );
+      await tester.pump();
+      final icon = find.byType(AgentUsageRingIcon);
+      expect(icon, findsOneWidget);
+      expect(
+        tester.widget<AgentUsageRingIcon>(icon).modelProvider,
+        'anthropic',
+      );
+      acpManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(
+              modelState: const AcpModelState(
+                currentModelId: 'openai-codex/gpt',
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      expect(
+        tester.widget<AgentUsageRingIcon>(icon).modelProvider,
+        'openai-codex',
+      );
+      acpManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(
+              modelState: const AcpModelState(currentModelId: 'unknown/model'),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      expect(tester.widget<AgentUsageRingIcon>(icon).modelProvider, isNull);
+    });
 
     testWidgets(
       'shows live native-session progress in its real MonkeyMux pane',

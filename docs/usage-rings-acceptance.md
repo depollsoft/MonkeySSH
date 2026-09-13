@@ -5,6 +5,7 @@
 - [x] Zero used starts full; the colored arc represents remaining quota and drains to empty as usage increases.
 - [x] One reported quota uses a full circle, two use top/bottom halves, and additional Antigravity groups use separate segments. There are no dashed placeholders or unused empty halves.
 - [x] Claude Code and Codex use account-wide five-hour/weekly quotas without substituting scoped model limits. Codex weekly-only responses use a full-circle weekly meter.
+- [x] Native Pi selects quotas from its live model provider and updates on provider changes. Unknown providers and non-numerical allowances stay hidden. Quotas come from Pi's own saved accounts.
 - [x] Grok Build uses included-credit percentage, excluding paid spending caps and prepaid balances without a comparable allowance.
 - [x] Antigravity uses reported numerical groups in stable label order, without inventing an active model. Live reader returned four distinct numerical buckets.
 - [x] The existing MonkeyMux bar height, gestures, agent marks, and native badges remain intact. No quota-specific tap action or extra row.
@@ -34,7 +35,7 @@ Current PNGs: `/tmp/monkeymux-usage-rings-expanded/`, including `android-meter-s
 - [x] Preserve sanitized HTTP Retry-After seconds/date hints through direct and multi-provider readers. HTTP-date parsing uses the server Date header when available to avoid host clock skew.
 - [x] Keep bounded cooldown metadata per saved host/agent across SSH reconnects and path changes, without sharing quota values across sessions.
 - [x] Back off repeated throttles for 5, 10, 20, then 30 minutes, or longer when the provider requires it. Partial failures and unrelated reads do not reset or extend that deadline spuriously.
-- [x] Poll Claude normally at five minutes and other agents at two. Ring timers honor longer cooldowns, and a short freshness grace avoids hiding a valid meter during the scheduled request.
+- [x] Poll Claude and Pi normally at five minutes and other agents at two. Ring timers honor longer cooldowns, and a short freshness grace avoids hiding a valid meter during the scheduled request.
 - [x] Show the next allowed check time in Agent Management without a countdown timer or any additional provider request.
 
 Validation: 114 combined parser/service/ring/summary checks passed, plus targeted

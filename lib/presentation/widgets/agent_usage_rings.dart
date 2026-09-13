@@ -19,6 +19,7 @@ class AgentUsageRingIcon extends ConsumerStatefulWidget {
     required this.session,
     required this.tool,
     required this.child,
+    this.modelProvider,
     this.diameter = 28,
     super.key,
   });
@@ -28,6 +29,9 @@ class AgentUsageRingIcon extends ConsumerStatefulWidget {
 
   /// Current foreground agent.
   final AgentLaunchTool tool;
+
+  /// Live model provider for multi-provider agents such as Pi.
+  final String? modelProvider;
 
   /// Existing agent mark, including any native badge.
   final Widget child;
@@ -68,7 +72,10 @@ class _AgentUsageRingIconState extends ConsumerState<AgentUsageRingIcon>
     if (!_foreground ||
         !TickerMode.valuesOf(context).enabled ||
         ModalRoute.isCurrentOf(context) == false ||
-        !supportsAgentUsageRings(widget.tool) ||
+        !supportsAgentUsageRings(
+          widget.tool,
+          modelProvider: widget.modelProvider,
+        ) ||
         !ref.watch(agentUsageRingsEnabledProvider) ||
         ref.watch(
               activeSessionsProvider.select(
@@ -80,7 +87,11 @@ class _AgentUsageRingIconState extends ConsumerState<AgentUsageRingIcon>
     }
     final rings = ref
         .watch(
-          agentUsageRingsProvider((session: widget.session, tool: widget.tool)),
+          agentUsageRingsProvider((
+            session: widget.session,
+            tool: widget.tool,
+            modelProvider: widget.modelProvider,
+          )),
         )
         .asData
         ?.value;

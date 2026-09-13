@@ -1,3 +1,6 @@
+import 'acp_protocol.dart';
+import 'acp_provider.dart';
+import 'acp_session_state.dart';
 import 'agent_launch_preset.dart';
 import 'agent_usage.dart';
 
@@ -34,25 +37,81 @@ class AgentUsageRings {
       shortTerm != null || weekly != null || _segments.isNotEmpty;
 }
 
-/// Agents with numerical quota readers that do not need an inferred provider.
-bool supportsAgentUsageRings(AgentLaunchTool tool) => switch (tool) {
-  AgentLaunchTool.claudeCode ||
-  AgentLaunchTool.codex ||
-  AgentLaunchTool.antigravity ||
-  AgentLaunchTool.grokBuild => true,
-  _ => false,
+// Names emitted by the existing Pi multi-provider quota probe.
+const _piUsageProviders = {
+  'anthropic': 'Anthropic',
+  'openai': 'OpenAI',
+  'openai-codex': 'OpenAI Codex',
+  'github-copilot': 'GitHub Copilot',
+  'google-antigravity': 'Google Antigravity',
+  'google-gemini-cli': 'Google Gemini',
+  'openrouter': 'OpenRouter',
+  'nous': 'Nous',
 };
+
+/// Reads Pi's live provider-qualified model selection, never a saved default.
+String? piUsageModelProvider(AcpSessionState? session) {
+  if (session == null || session.key.providerId != AcpBuiltinProviderIds.pi) {
+    return null;
+  }
+  final option = session.configOptions
+      .whereType<AcpSelectConfigOption>()
+      .where((option) => option.category?.toLowerCase() == 'model')
+      .firstOrNull;
+  final model = option?.currentValue ?? session.modelState?.currentModelId;
+  if (model == null) return null;
+  final separator = model.indexOf('/');
+  if (separator <= 0 || separator == model.length - 1) return null;
+  final provider = model.substring(0, separator);
+  return _piUsageProviders.containsKey(provider) ? provider : null;
+}
+
+/// Agents with numerical quota readers, including Pi's known active provider.
+bool supportsAgentUsageRings(AgentLaunchTool tool, {String? modelProvider}) =>
+    switch (tool) {
+      AgentLaunchTool.claudeCode ||
+      AgentLaunchTool.codex ||
+      AgentLaunchTool.antigravity ||
+      AgentLaunchTool.grokBuild => true,
+      AgentLaunchTool.pi => _piUsageProviders.containsKey(modelProvider),
+      _ => false,
+    };
+
+bool _usesAccountWindows(AgentLaunchTool tool, String? modelProvider) =>
+    tool == AgentLaunchTool.claudeCode ||
+    tool == AgentLaunchTool.codex ||
+    (tool == AgentLaunchTool.pi &&
+        const {'anthropic', 'openai', 'openai-codex'}.contains(modelProvider));
+
+String? _ringWindowLabel(
+  AgentLaunchTool tool,
+  AgentUsageWindow window,
+  String? modelProvider,
+) {
+  if (tool != AgentLaunchTool.pi) return window.label;
+  final provider = _piUsageProviders[modelProvider];
+  if (provider == null || !window.label.startsWith('$provider · ')) return null;
+  return window.label.substring(provider.length + 3);
+}
 
 /// Categories used by the ring and its reset scheduler.
 /// Grok paid spending/prepaid balances remain separate from included credits.
-bool isAgentUsageRingWindow(AgentLaunchTool tool, AgentUsageWindow window) =>
-    switch (tool) {
-      AgentLaunchTool.claudeCode || AgentLaunchTool.codex =>
-        window.label == '5 hours' || window.label == 'Weekly',
-      AgentLaunchTool.grokBuild => window.label == 'Included credits',
-      AgentLaunchTool.antigravity => true,
-      _ => false,
-    };
+bool isAgentUsageRingWindow(
+  AgentLaunchTool tool,
+  AgentUsageWindow window, {
+  String? modelProvider,
+}) {
+  final label = _ringWindowLabel(tool, window, modelProvider);
+  if (label == null) return false;
+  if (_usesAccountWindows(tool, modelProvider)) {
+    return label == '5 hours' || label == 'Weekly';
+  }
+  return switch (tool) {
+    AgentLaunchTool.grokBuild => label == 'Included credits',
+    AgentLaunchTool.antigravity || AgentLaunchTool.pi => true,
+    _ => false,
+  };
+}
 
 /// Hard display-age limit, independent of how long an SSH request is queued.
 Duration agentUsageSnapshotMaxAge(AgentLaunchTool tool) {
@@ -70,19 +129,30 @@ AgentUsageRings? resolveAgentUsageRings(
   AgentLaunchTool tool,
   AgentUsage? usage, {
   required DateTime now,
+  String? modelProvider,
 }) {
   final staleAfter = agentUsageSnapshotMaxAge(tool);
-  if (!supportsAgentUsageRings(tool) ||
+  if (!supportsAgentUsageRings(tool, modelProvider: modelProvider) ||
       usage == null ||
       usage.status != AgentUsageStatus.available ||
       usage.checkedAt == null ||
       now.difference(usage.checkedAt!) >= staleAfter ||
-      usage.notices.isNotEmpty) {
+      usage.notices.any(
+        (notice) =>
+            tool != AgentLaunchTool.pi ||
+            notice.provider == _piUsageProviders[modelProvider] ||
+            notice.provider.startsWith(
+              '${_piUsageProviders[modelProvider]} · ',
+            ),
+      )) {
     return null;
   }
 
   final eligible = usage.windows
-      .where((window) => isAgentUsageRingWindow(tool, window))
+      .where(
+        (window) =>
+            isAgentUsageRingWindow(tool, window, modelProvider: modelProvider),
+      )
       .toList();
   double? remaining(AgentUsageWindow window) {
     final used = window.usedPercent;
@@ -97,12 +167,16 @@ AgentUsageRings? resolveAgentUsageRings(
   }
 
   double? named(String label) {
-    final matches = eligible.where((window) => window.label == label).toList();
+    final matches = eligible
+        .where(
+          (window) => _ringWindowLabel(tool, window, modelProvider) == label,
+        )
+        .toList();
     return matches.length == 1 ? remaining(matches.single) : null;
   }
 
   final AgentUsageRings rings;
-  if (tool == AgentLaunchTool.claudeCode || tool == AgentLaunchTool.codex) {
+  if (_usesAccountWindows(tool, modelProvider)) {
     rings = AgentUsageRings(
       shortTerm: named('5 hours'),
       weekly: named('Weekly'),

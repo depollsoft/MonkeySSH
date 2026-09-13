@@ -452,6 +452,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           before.providerLabel != after.providerLabel ||
           before.cwd != after.cwd ||
           before.isLive != after.isLive ||
+          piUsageModelProvider(before) != piUsageModelProvider(after) ||
           AcpActivitySnapshot.fromSession(before) !=
               AcpActivitySnapshot.fromSession(after)) {
         return false;
@@ -1394,6 +1395,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         key: ValueKey((widget.session, tool)),
         session: widget.session,
         tool: tool,
+        modelProvider: piUsageModelProvider(_activeNativeAcpEntry),
         diameter: diameter,
         child: icon,
       );

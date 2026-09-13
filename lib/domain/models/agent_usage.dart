@@ -1,8 +1,9 @@
 import 'agent_launch_preset.dart';
 
-/// Normal usage-read cadence. Claude's OAuth usage endpoint is more restrictive.
+/// Normal usage-read cadence. Anthropic's OAuth endpoint is more restrictive.
+/// Pi's multi-provider reader can include Anthropic alongside other accounts.
 Duration agentUsageRefreshInterval(AgentLaunchTool? tool) =>
-    tool == AgentLaunchTool.claudeCode
+    (tool == AgentLaunchTool.claudeCode || tool == AgentLaunchTool.pi)
     ? const Duration(minutes: 5)
     : const Duration(minutes: 2);
 
