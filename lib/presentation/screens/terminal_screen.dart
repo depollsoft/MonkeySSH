@@ -3693,6 +3693,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   AcpSessionKey? _activeNativeAcpSessionKey;
   String? _autoOpenedNativeAcpBridgeId;
   String? _openingNativeAcpBridgeId;
+  String? _openingNativeAcpSessionId;
   int? _openingNativeAcpRequestGeneration;
   String? _nativeAcpReconnectOwnedKeyValue;
   Future<void>? _openingNativeAcpWindow;
@@ -10937,6 +10938,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _syncActiveNativeAcpMuxWindow(session, windows);
       if (_pendingInitialNativeAcpSessionKey != null) {
         _pendingInitialNativeAcpSessionKey = null;
+        ref
+            .read(activeSessionsProvider.notifier)
+            .updateSessionNativeAcpFocus(session.connectionId, key: null);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('The native agent window is no longer available.'),
@@ -11323,6 +11327,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         bridgeId: bridgeId,
         providerId: providerId,
         workingDirectory: active.currentPath,
+        requestedSessionId: target?.acpSessionId,
       ),
     );
   }
@@ -11990,11 +11995,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required String bridgeId,
     required String providerId,
     String? workingDirectory,
+    String? requestedSessionId,
     int? requestGeneration,
   }) {
     final opening = _openingNativeAcpWindow;
     if (opening != null &&
         _openingNativeAcpBridgeId == bridgeId &&
+        _openingNativeAcpSessionId == requestedSessionId &&
         _openingNativeAcpRequestGeneration ==
             _nativeAcpWindowRequestGeneration) {
       return opening;
@@ -12023,6 +12030,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           bridgeId: bridgeId,
           providerId: providerId,
           workingDirectory: workingDirectory,
+          requestedSessionId: requestedSessionId,
           requestGeneration: requestedGeneration,
         ),
       );
@@ -12031,6 +12039,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final completer = Completer<void>();
     final cancellation = Completer<void>();
     _openingNativeAcpBridgeId = bridgeId;
+    _openingNativeAcpSessionId = requestedSessionId;
     _openingNativeAcpRequestGeneration = requestedGeneration;
     _openingNativeAcpWindow = completer.future;
     _nativeAcpWindowCancellation = cancellation;
@@ -12058,6 +12067,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           bridgeId: bridgeId,
           providerId: providerId,
           workingDirectory: workingDirectory,
+          requestedSessionId: requestedSessionId,
           requestGeneration: requestedGeneration,
           cancellation: cancellation.future,
         );
@@ -12068,6 +12078,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         if (identical(_openingNativeAcpWindow, completer.future)) {
           _openingNativeAcpWindow = null;
           _openingNativeAcpBridgeId = null;
+          _openingNativeAcpSessionId = null;
           _openingNativeAcpRequestGeneration = null;
         }
         if (identical(_nativeAcpWindowCancellation, cancellation)) {
@@ -12087,6 +12098,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required int requestGeneration,
     required Future<void> cancellation,
     String? workingDirectory,
+    String? requestedSessionId,
   }) async {
     bool requestIsCurrent() =>
         mounted && requestGeneration == _nativeAcpWindowRequestGeneration;
@@ -12097,7 +12109,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           (session) =>
               session.key.hostId == sshSession.hostId &&
               session.key.bridgeId == bridgeId &&
-              session.key.providerId == providerId,
+              session.key.providerId == providerId &&
+              (requestedSessionId == null ||
+                  session.key.acpSessionId == requestedSessionId),
         )
         .firstOrNull;
     if (tracked != null && tracked.isLive) {
@@ -12140,8 +12154,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         .firstOrNull;
     final remoteSessionId = bridge?.sessionId?.trim();
     AcpRecentSessionRef? recent;
-    if ((remoteSessionId == null || remoteSessionId.isEmpty) &&
-        tracked == null) {
+    if (tracked == null &&
+        (requestedSessionId != null ||
+            remoteSessionId == null ||
+            remoteSessionId.isEmpty)) {
       final recents = await manager.loadRecentSessions();
       if (!requestIsCurrent()) return;
       recent = recents
@@ -12149,16 +12165,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             (candidate) =>
                 candidate.hostId == sshSession.hostId &&
                 candidate.bridgeId == bridgeId &&
-                candidate.providerId == providerId,
+                candidate.providerId == providerId &&
+                (requestedSessionId == null ||
+                    candidate.acpSessionId == requestedSessionId),
           )
           .firstOrNull;
     }
     if (!mounted || requestGeneration != _nativeAcpWindowRequestGeneration) {
       return;
     }
-    final acpSessionId = remoteSessionId?.isNotEmpty ?? false
-        ? remoteSessionId!
-        : tracked?.key.acpSessionId ?? recent?.acpSessionId;
+    final acpSessionId =
+        requestedSessionId ??
+        ((remoteSessionId?.isNotEmpty ?? false)
+            ? remoteSessionId!
+            : tracked?.key.acpSessionId ?? recent?.acpSessionId);
     if (acpSessionId == null || acpSessionId.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
