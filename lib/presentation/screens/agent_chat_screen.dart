@@ -43,6 +43,7 @@ import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../controllers/acp_composer_controller.dart';
 import '../controllers/acp_sftp_client_cache.dart';
+import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
@@ -59,6 +60,7 @@ import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/system_bottom_inset.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
@@ -215,6 +217,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   @override
   void initState() {
     super.initState();
+    unawaited(SystemKeyboardVisibilityController.instance.initialize());
     _key = AcpSessionKey.of(
       hostId: widget.hostId,
       providerId: widget.providerId,
@@ -1227,26 +1230,32 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
     if (isWide && !widget.embedded) {
-      return Scaffold(
-        body: Row(
-          children: [
-            AcpSessionRail(currentKey: _key),
-            Expanded(
-              child: _buildConversation(
-                session,
-                showBack: true,
-                contentWrapper: wrapContent,
+      return PlatformKeyboardInsetMediaQuery(
+        child: Scaffold(
+          body: Row(
+            children: [
+              AcpSessionRail(currentKey: _key),
+              Expanded(
+                child: _buildConversation(
+                  session,
+                  showBack: true,
+                  contentWrapper: wrapContent,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     }
-    return _buildConversation(
+    final conversation = _buildConversation(
       session,
       showBack: !widget.embedded,
       contentWrapper: wrapContent,
     );
+    // Embedded chat inherits keyboard layout from its terminal shell.
+    return widget.embedded
+        ? conversation
+        : PlatformKeyboardInsetMediaQuery(child: conversation);
   }
 
   AcpNativePreviewSnapshot? _buildNativePreview(

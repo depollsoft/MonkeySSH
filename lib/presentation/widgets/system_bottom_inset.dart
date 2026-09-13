@@ -59,6 +59,17 @@ class PlatformKeyboardInsetMediaQuery extends StatelessWidget {
         return MediaQuery(
           data: mediaQuery.copyWith(
             viewInsets: mediaQuery.viewInsets.copyWith(bottom: keyboardInset),
+            // Flutter derives padding from viewPadding minus viewInsets. When
+            // clearing stale geometry, restore the uncovered navigation bar
+            // without reviving padding already consumed by an ancestor.
+            padding: keyboardInset == mediaQuery.viewInsets.bottom
+                ? mediaQuery.padding
+                : mediaQuery.padding.copyWith(
+                    bottom: math.max(
+                      0,
+                      mediaQuery.viewPadding.bottom - keyboardInset,
+                    ),
+                  ),
           ),
           child: child!,
         );

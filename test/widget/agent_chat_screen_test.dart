@@ -24,6 +24,7 @@ import 'package:monkeyssh/domain/services/acp_concurrency_policy.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_chat_typography.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
@@ -65,6 +66,7 @@ Widget _wrap(
   SftpClient? sftpClient,
   AcpChatAttachmentActionsBuilder? attachmentActionsBuilder,
   EdgeInsets mediaPadding = EdgeInsets.zero,
+  EdgeInsets mediaViewInsets = EdgeInsets.zero,
 }) {
   final ssh = _MockSshService();
   final launchPreferences = _MockHostCliLaunchPreferencesService();
@@ -93,8 +95,17 @@ Widget _wrap(
       home: MediaQuery(
         data: MediaQueryData(
           size: size,
-          padding: mediaPadding,
+          padding: EdgeInsets.fromLTRB(
+            mediaPadding.left,
+            mediaPadding.top,
+            mediaPadding.right,
+            (mediaPadding.bottom - mediaViewInsets.bottom).clamp(
+              0,
+              double.infinity,
+            ),
+          ),
           viewPadding: mediaPadding,
+          viewInsets: mediaViewInsets,
         ),
         child: AgentChatScreen(
           hostId: key.hostId,
@@ -120,6 +131,62 @@ Widget _wrap(
 }
 
 void main() {
+  for (final width in [390.0, 1100.0]) {
+    testWidgets(
+      'standalone chat clears a stale keyboard inset at width $width',
+      (tester) async {
+        final size = Size(width, 800);
+        tester.view
+          ..physicalSize = size
+          ..devicePixelRatio = 1;
+        final keyboard = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: null);
+        final manager = FakeAcpSessionManager(sessions: [fakeAcpSession()]);
+        addTearDown(() {
+          keyboard.debugSetVisible(visible: null);
+          tester.view
+            ..resetPhysicalSize()
+            ..resetDevicePixelRatio();
+          manager.dispose();
+        });
+        await tester.pumpWidget(
+          _wrap(
+            manager,
+            size: size,
+            mediaPadding: const EdgeInsets.only(bottom: 34),
+            mediaViewInsets: const EdgeInsets.only(bottom: 300),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final composer = find.byType(AcpComposer);
+        // Until the platform responds, keep normal keyboard avoidance.
+        expect(tester.getBottomLeft(composer).dy, 500);
+        keyboard.debugSetVisible(visible: true);
+        await tester.enterText(find.byType(TextField), 'Keep this draft');
+        await tester.pumpAndSettle();
+        expect(tester.getBottomLeft(composer).dy, 500);
+
+        // System Back can hide the IME without clearing focus or its old inset.
+        keyboard.debugSetVisible(visible: false);
+        await tester.pumpAndSettle();
+        expect(tester.getBottomLeft(composer).dy, 766);
+        expect(
+          tester
+              .widget<EditableText>(find.byType(EditableText))
+              .focusNode
+              .hasFocus,
+          isTrue,
+        );
+        expect(find.text('Keep this draft'), findsOneWidget);
+
+        keyboard.debugSetVisible(visible: true);
+        await tester.pumpAndSettle();
+        expect(tester.getBottomLeft(composer).dy, 500);
+      },
+    );
+  }
+
   testWidgets('unrelated session updates do not rebuild the conversation', (
     tester,
   ) async {
