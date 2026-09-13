@@ -1682,6 +1682,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
 
     return SingleChildScrollView(
+      key: const ValueKey('tmux-window-list'),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

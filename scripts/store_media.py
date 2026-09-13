@@ -1,9 +1,65 @@
 """Shared OCR and duration probes for store media."""
 
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+
+# Shared by capture preflight and media validation. These are actual CLI panes,
+# not labels attached to shell placeholders.
+AGENT_EXECUTABLES = {
+    'copilot': ('copilot',),
+    'claude': ('claude',),
+    'codex': ('codex', 'codex-cli'),
+    'opencode': ('opencode',),
+    'antigravity': ('agy', 'antigravity', 'antigravity-cli'),
+    'cursor-agent': ('cursor-agent',),
+    'pi': ('pi',),
+    'hermes': ('hermes', 'hermes-agent'),
+    'openclaw': ('openclaw',),
+}
+OPTIONAL_AGENT_NAMES = frozenset({'hermes', 'openclaw'})
+REQUIRED_AGENT_NAMES = frozenset(AGENT_EXECUTABLES) - OPTIONAL_AGENT_NAMES
+AGENT_LABELS = (
+    'Copilot CLI', 'Claude Code', 'Codex', 'OpenCode', 'Antigravity',
+    'Cursor Agent', 'Pi',
+)
+
+
+def require_agent_executables() -> dict[str, str]:
+    resolved = {}
+    missing = []
+    for name, aliases in AGENT_EXECUTABLES.items():
+        executable = next((path for alias in aliases if (path := shutil.which(alias))), None)
+        if executable is None:
+            if name not in OPTIONAL_AGENT_NAMES:
+                missing.append('/'.join(aliases))
+        else:
+            resolved[name] = executable
+    if missing:
+        raise RuntimeError(
+            'Store capture requires real agent CLIs on PATH. Missing: '
+            + ', '.join(missing)
+            + '. Configure a capture host with these tools before retrying; '
+            'no placeholder panes will be created.'
+        )
+    return resolved
+
+
+def require_agent_family(text: str, source: str) -> None:
+    compact = re.sub(r'[^a-z0-9]+', '', text.casefold())
+    missing = []
+    for label in AGENT_LABELS:
+        # Pi must be a whole word: Copilot also contains the letters "pi".
+        found = (re.search(r'\bpi\b', text, re.IGNORECASE) is not None
+                 if label == 'Pi' else
+                 re.sub(r'[^a-z0-9]+', '', label.casefold()) in compact)
+        if not found:
+            missing.append(label)
+    if missing:
+        raise ValueError(f'{source} is missing agent-family content: {", ".join(missing)}')
 
 
 def _ocr_texts(paths: list[Path]) -> dict[Path, str]:

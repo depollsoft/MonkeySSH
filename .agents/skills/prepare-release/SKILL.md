@@ -36,7 +36,7 @@ If flags conflict (`--ship` + `--no-ship`, `--media-only` + `--copy-only`), ask 
 1. **Branch from `origin/main`** after fetch unless the user says otherwise. Open PRs against `main`.
 2. **Never commit regenerated store media** (screenshots, App Previews, demo videos). Publish with `scripts/store_assets.sh`.
 3. Listing **copy**, feature graphics, and app icons stay in git.
-4. Generation needs a real Mac environment: Xcode simulators and/or a running Android emulator, plus authenticated `copilot` and `claude` CLIs and Python Pillow.
+4. Generation needs a real Mac environment: Xcode simulators and/or a running Android emulator, plus the real agent CLIs listed in step 5 and Python Pillow.
 5. If live SSH/MonkeyMux capture cannot be created, **stop** — do not substitute mocks.
 6. Prefer Conventional Commits. Include required commit trailers when this environment specifies them.
 7. Use JDK 17 for any local Android build (`JAVA_HOME="$(/usr/libexec/java_home -v 17)"`).
@@ -135,7 +135,8 @@ Skip if `--skip-media` or `--copy-only`.
 Prereqs to verify first:
 
 ```bash
-command -v flutter && command -v python3 && command -v copilot && command -v claude
+command -v flutter && command -v python3
+python3 scripts/generate_store_screenshots.py --check-environment
 python3 - <<'PY'
 from PIL import Image  # noqa: F401
 print('Pillow OK')
@@ -145,6 +146,12 @@ xcrun simctl list devices available | head
 # Android (if platform includes android)
 adb devices
 ```
+
+The shared preflight requires Copilot CLI, Claude Code, Codex, OpenCode,
+Antigravity, Cursor Agent, and Pi on PATH. Hermes and OpenClaw are optional;
+omit their panes when absent, without placeholders. Configure any
+required logins and, if installed, the OpenClaw gateway on the capture host beforehand.
+Missing tools or exited panes are errors, never reasons to create placeholders.
 
 Generate:
 
@@ -161,7 +168,7 @@ Quality bar (fail the run if violated — see `docs/store-assets-prompt.md`):
 
 - Real app + live temporary SSH/MonkeyMux workspace
 - Copilot scenes show an image inline (no streamer mode / placeholder session renames)
-- MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw
+- MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, plus Hermes and OpenClaw when installed
 - No port-forward/subscription/checkout as primary scenes unless product direction changed
 - No secrets, local private paths, API keys, crash dialogs, empty shells
 

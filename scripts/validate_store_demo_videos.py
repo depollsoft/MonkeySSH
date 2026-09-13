@@ -12,10 +12,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from store_media import _ocr_texts
+from store_media import _ocr_texts, require_agent_family
 
 ROOT = Path(__file__).resolve().parents[1]
 BAD_VIDEO_OCR_PATTERNS = {
+    'placeholder agent pane': re.compile(r'agent session ready|CLI \(demo\)', re.IGNORECASE),
     'Android system error dialog': re.compile(
         r"Pixel Launcher|isn[’']t responding|not responding|Close app",
         re.IGNORECASE,
@@ -267,6 +268,7 @@ def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> 
 
     with tempfile.TemporaryDirectory(prefix='monkeyssh-demo-video-ocr-') as tmpdir:
         frame_paths: list[Path] = []
+        frames_by_video: dict[Path, list[Path]] = {}
         tmpdir_path = Path(tmpdir)
         for video_path, info in infos.items():
             for index, timestamp in enumerate(_sample_times(info.duration)):
@@ -290,6 +292,7 @@ def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> 
                     check=True,
                 )
                 frame_paths.append(frame_path)
+                frames_by_video.setdefault(video_path, []).append(frame_path)
 
         texts = _ocr_texts(frame_paths)
         for frame_path, text in texts.items():
@@ -299,15 +302,16 @@ def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> 
                         f'{frame_path.name} appears to contain {label}; '
                         'regenerate store-quality demo videos before syncing assets',
                     )
+        for video_path, frames in frames_by_video.items():
+            require_agent_family(
+                ' '.join(texts[frame] for frame in frames), str(video_path),
+            )
 
 
 def _sample_times(duration: float) -> list[float]:
-    if duration <= 4:
-        return [max(duration / 2, 0)]
-    return [
-        min(max(1.0, duration * ratio), max(duration - 0.5, 0))
-        for ratio in (0.1, 0.25, 0.42, 0.58, 0.75, 0.9)
-    ]
+    # The navigator scrolls during a short beat. Sparse percentage samples can
+    # miss either end of its agent list, so inspect frames every half second.
+    return [index / 2 for index in range(max(1, int(duration * 2)))]
 
 
 def _probe_videos(

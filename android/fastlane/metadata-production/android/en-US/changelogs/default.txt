@@ -1,7 +1,6 @@
 What's new
 
-- Pro: see agent usage, remaining allowances, and reset times in Agent Management, plus usage rings for supported agents in MonkeyMux.
-- More reliable session recovery after MonkeyMux updates, including agents sharing a folder.
-- Fixed dictation, paste, and Return-key input.
-- Improved Windows installation and agent detection.
-- Fixed flickering titles, redraws, false activity indicators, and connection stalls.
+- Pro: Pi usage rings now follow the selected model provider in terminal panes and native chat, showing reported remaining allowances.
+- Pi keeps valid usage readings when another provider temporarily limits refreshes.
+
+Update MonkeyMux and restart existing Pi terminal panes to enable the new rings.

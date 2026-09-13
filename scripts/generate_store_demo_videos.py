@@ -155,6 +155,7 @@ def _run_target(
     scene_hold_ms: int,
 ) -> None:
     print(f'Recording {target.name} demo video...')
+    demo._require_live_agent_windows()
     demo.reset_monkeymux()
     screenshot_target = target.screenshot_target
     if screenshot_target.platform == 'ios':

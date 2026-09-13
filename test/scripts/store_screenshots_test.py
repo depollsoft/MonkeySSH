@@ -1,6 +1,7 @@
 """Store caption and scene-contract checks. Run on macOS with Pillow."""
 
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,92 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import generate_store_screenshots as capture
 import validate_store_screenshots as validate
+import store_media
+
+
+class LiveAgentCaptureTest(unittest.TestCase):
+    def test_preflight_reports_all_missing_tools_before_creating_resources(self):
+        def which(name):
+            return None if name in {'codex', 'codex-cli', 'pi'} else '/bin/' + name
+        with patch.object(store_media.shutil, 'which', side_effect=which), \
+             patch.object(capture.tempfile, 'mkdtemp') as temporary_directory:
+            with self.assertRaisesRegex(RuntimeError, 'codex/codex-cli, pi'):
+                capture.StoreDemoEnvironment()
+            temporary_directory.assert_not_called()
+
+    def test_missing_optional_agents_are_omitted_without_placeholder_panes(self):
+        def which(name):
+            return None if name in {'hermes', 'hermes-agent', 'openclaw'} else '/bin/' + name
+        with patch.object(store_media.shutil, 'which', side_effect=which):
+            found = store_media.require_agent_executables()
+        self.assertEqual(set(found), store_media.REQUIRED_AGENT_NAMES)
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        demo._agent_executables = found
+        windows = [{'name': name, 'panePid': index + 100}
+                   for index, name in enumerate(found)]
+        with patch.object(demo, '_monkeymux_request', return_value={'windows': windows}), \
+             patch.object(capture.os, 'kill'):
+            demo._require_live_agent_windows()
+
+    def test_preflight_resolves_executable_aliases(self):
+        def which(name):
+            return None if name in {'agy', 'antigravity', 'hermes'} else '/tools/' + name
+        with patch.object(store_media.shutil, 'which', side_effect=which):
+            found = store_media.require_agent_executables()
+        self.assertEqual(found['antigravity'], '/tools/antigravity-cli')
+        self.assertEqual(found['hermes'], '/tools/hermes-agent')
+        self.assertEqual(len(found), 9)
+
+    def test_failed_agent_does_not_fall_back_to_an_interactive_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            demo = object.__new__(capture.StoreDemoEnvironment)
+            demo._tmpdir = demo.demo_dir = Path(directory)
+            demo._write_pane_script('codex', 'exec /usr/bin/false')
+            result = subprocess.run(
+                [str(Path(directory) / 'codex-pane.sh')],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=2,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b'')
+
+    def test_live_windows_reject_missing_and_exited_agents(self):
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        demo._agent_executables = dict(store_media.AGENT_EXECUTABLES)
+        windows = [{'name': name, 'panePid': index + 100}
+                   for index, name in enumerate(store_media.AGENT_EXECUTABLES)]
+        with patch.object(demo, '_monkeymux_request', return_value={'windows': windows[:-1]}), \
+             patch.object(capture.os, 'kill'):
+            with self.assertRaisesRegex(RuntimeError, 'missing: openclaw'):
+                demo._require_live_agent_windows()
+        with patch.object(demo, '_monkeymux_request', return_value={'windows': windows}), \
+             patch.object(capture.os, 'kill', side_effect=ProcessLookupError):
+            with self.assertRaisesRegex(RuntimeError, 'exited before capture: copilot'):
+                demo._require_live_agent_windows()
+
+    def test_family_requires_every_agent_and_does_not_count_copilot_as_pi(self):
+        all_labels = ' '.join(store_media.AGENT_LABELS)
+        store_media.require_agent_family(all_labels, 'test')
+        for label in store_media.AGENT_LABELS:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, re.escape(label)):
+                    store_media.require_agent_family(all_labels.replace(label, ''), 'test')
+
+    def test_family_can_span_phone_and_tablet_scroll_positions(self):
+        phone = ROOT / 'ios/fastlane/screenshots/en-US/04_iphone_6_9.png'
+        tablet = ROOT / 'ios/fastlane/screenshots/en-US/04_ipad_13.png'
+        texts = {phone: 'Workspace ' + ' '.join(store_media.AGENT_LABELS[:5]),
+                 tablet: 'Workspace New window ' + ' '.join(store_media.AGENT_LABELS[4:])}
+        with patch.object(validate, '_ocr_texts', return_value=texts):
+            validate._validate_ocr_content([phone, tablet])
+        texts[tablet] = texts[tablet].replace('Pi', '')
+        with patch.object(validate, '_ocr_texts', return_value=texts):
+            with self.assertRaisesRegex(ValueError, 'Pi'):
+                validate._validate_ocr_content([phone, tablet])
+
+    def test_app_readiness_contract_matches_capture_agents(self):
+        source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
+        block = source.split('const _requiredStoreAgentWindows = <String>{', 1)[1].split('};', 1)[0]
+        self.assertEqual(set(re.findall(r"'([^']+)'", block)), set(store_media.REQUIRED_AGENT_NAMES))
 
 
 class ProCaptionTest(unittest.TestCase):
@@ -276,6 +363,7 @@ class CaptureLaunchTest(unittest.TestCase):
                                 raise cleanup_error
 
                         with patch.object(demo, 'reset_monkeymux'), \
+                             patch.object(demo, '_require_live_agent_windows'), \
                              patch.object(capture, '_android_device_id', return_value='device'), \
                              patch.object(capture, '_adb_path', return_value=Path('/adb')), \
                              patch.object(capture.subprocess, 'check_output', return_value='Physical: 100'), \
