@@ -148,8 +148,9 @@ adb devices
 ```
 
 The shared preflight requires Copilot CLI, Claude Code, Codex, OpenCode,
-Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw on PATH. Configure any
-required logins and the OpenClaw gateway on the capture host beforehand.
+Antigravity, Cursor Agent, and Pi on PATH. Hermes and OpenClaw are optional;
+omit their panes when absent, without placeholders. Configure any
+required logins and, if installed, the OpenClaw gateway on the capture host beforehand.
 Missing tools or exited panes are errors, never reasons to create placeholders.
 
 Generate:
@@ -167,7 +168,7 @@ Quality bar (fail the run if violated — see `docs/store-assets-prompt.md`):
 
 - Real app + live temporary SSH/MonkeyMux workspace
 - Copilot scenes show an image inline (no streamer mode / placeholder session renames)
-- MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw
+- MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, plus Hermes and OpenClaw when installed
 - No port-forward/subscription/checkout as primary scenes unless product direction changed
 - No secrets, local private paths, API keys, crash dialogs, empty shells
 

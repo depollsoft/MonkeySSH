@@ -20,12 +20,26 @@ import store_media
 class LiveAgentCaptureTest(unittest.TestCase):
     def test_preflight_reports_all_missing_tools_before_creating_resources(self):
         def which(name):
-            return None if name in {'hermes', 'hermes-agent', 'openclaw'} else '/bin/' + name
+            return None if name in {'codex', 'codex-cli', 'pi'} else '/bin/' + name
         with patch.object(store_media.shutil, 'which', side_effect=which), \
              patch.object(capture.tempfile, 'mkdtemp') as temporary_directory:
-            with self.assertRaisesRegex(RuntimeError, 'hermes/hermes-agent, openclaw'):
+            with self.assertRaisesRegex(RuntimeError, 'codex/codex-cli, pi'):
                 capture.StoreDemoEnvironment()
             temporary_directory.assert_not_called()
+
+    def test_missing_optional_agents_are_omitted_without_placeholder_panes(self):
+        def which(name):
+            return None if name in {'hermes', 'hermes-agent', 'openclaw'} else '/bin/' + name
+        with patch.object(store_media.shutil, 'which', side_effect=which):
+            found = store_media.require_agent_executables()
+        self.assertEqual(set(found), store_media.REQUIRED_AGENT_NAMES)
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        demo._agent_executables = found
+        windows = [{'name': name, 'panePid': index + 100}
+                   for index, name in enumerate(found)]
+        with patch.object(demo, '_monkeymux_request', return_value={'windows': windows}), \
+             patch.object(capture.os, 'kill'):
+            demo._require_live_agent_windows()
 
     def test_preflight_resolves_executable_aliases(self):
         def which(name):
@@ -50,6 +64,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
 
     def test_live_windows_reject_missing_and_exited_agents(self):
         demo = object.__new__(capture.StoreDemoEnvironment)
+        demo._agent_executables = dict(store_media.AGENT_EXECUTABLES)
         windows = [{'name': name, 'panePid': index + 100}
                    for index, name in enumerate(store_media.AGENT_EXECUTABLES)]
         with patch.object(demo, '_monkeymux_request', return_value={'windows': windows[:-1]}), \
@@ -76,15 +91,15 @@ class LiveAgentCaptureTest(unittest.TestCase):
                  tablet: 'Workspace New window ' + ' '.join(store_media.AGENT_LABELS[4:])}
         with patch.object(validate, '_ocr_texts', return_value=texts):
             validate._validate_ocr_content([phone, tablet])
-        texts[tablet] = texts[tablet].replace('OpenClaw', '')
+        texts[tablet] = texts[tablet].replace('Pi', '')
         with patch.object(validate, '_ocr_texts', return_value=texts):
-            with self.assertRaisesRegex(ValueError, 'OpenClaw'):
+            with self.assertRaisesRegex(ValueError, 'Pi'):
                 validate._validate_ocr_content([phone, tablet])
 
     def test_app_readiness_contract_matches_capture_agents(self):
         source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
         block = source.split('const _requiredStoreAgentWindows = <String>{', 1)[1].split('};', 1)[0]
-        self.assertEqual(set(re.findall(r"'([^']+)'", block)), set(store_media.AGENT_EXECUTABLES))
+        self.assertEqual(set(re.findall(r"'([^']+)'", block)), set(store_media.REQUIRED_AGENT_NAMES))
 
 
 class ProCaptionTest(unittest.TestCase):

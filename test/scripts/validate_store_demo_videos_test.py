@@ -109,7 +109,7 @@ class VideoValidationTest(unittest.TestCase):
                  patch.object(videos.subprocess, 'run', return_value=Mock(stdout='')), \
                  patch.object(videos, '_ocr_texts', side_effect=ocr):
                 if missing:
-                    with self.assertRaisesRegex(ValueError, 'tablet.mov.*OpenClaw'):
+                    with self.assertRaisesRegex(ValueError, 'tablet.mov.*Pi'):
                         videos._validate_sampled_ocr_content('ffmpeg', dict.fromkeys(paths, info))
                 else:
                     videos._validate_sampled_ocr_content('ffmpeg', dict.fromkeys(paths, info))

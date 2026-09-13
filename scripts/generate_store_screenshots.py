@@ -31,7 +31,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from store_media import AGENT_EXECUTABLES, require_agent_executables
+from store_media import require_agent_executables
 
 ROOT = Path(__file__).resolve().parents[1]
 ADB: Path | None = None
@@ -624,7 +624,7 @@ class StoreDemoEnvironment:
               --prompt 'Inspect the release checklist image and keep this agent session ready.'
             """,
         )
-        for name in AGENT_EXECUTABLES:
+        for name in self._agent_executables:
             if name in ('copilot', 'claude', 'opencode'):
                 continue
             command = self._shell_quote(self._agent_executables[name])
@@ -649,7 +649,7 @@ class StoreDemoEnvironment:
             raise RuntimeError('MonkeyMux did not return live store agent windows.')
         by_name = {window.get('name'): window for window in windows
                    if isinstance(window, dict)}
-        for name in AGENT_EXECUTABLES:
+        for name in self._agent_executables:
             pid = by_name.get(name, {}).get("panePid")
             if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
                 raise RuntimeError(f"Live store agent pane is missing: {name}")
@@ -872,7 +872,7 @@ class StoreDemoEnvironment:
         )
         self._monkeymux_control = self._open_monkeymux_control()
         self._refresh_monkeymux_windows()
-        for window in AGENT_EXECUTABLES:
+        for window in self._agent_executables:
             if window == 'copilot':
                 continue
             response = self._monkeymux_request(

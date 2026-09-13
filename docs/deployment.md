@@ -351,15 +351,16 @@ Run the caption and scene-contract regression checks with `python3 -m unittest d
 
 Before capture, run `python3 scripts/generate_store_screenshots.py --check-environment`.
 Both generators require real Copilot CLI, Claude Code, Codex, OpenCode,
-Antigravity, Cursor Agent, Pi, Hermes, and OpenClaw executables on PATH.
+Antigravity, Cursor Agent, and Pi executables on PATH. Hermes and OpenClaw
+are optional: when absent, their panes are omitted without placeholders.
 Missing tools stop the run before temporary SSH sessions or simulator changes.
 Exited agent panes also fail capture; no shell or printed-transcript fallback
 is used. Configure the capture host beforehand, including any required logins
-and the OpenClaw gateway. The generators never install or update those tools.
+and the OpenClaw gateway if OpenClaw is installed. The generators never install or update those tools.
 
 The MonkeyMux screenshot scene shows the start of the live list on phones and
 the end on tablets. Videos scroll through both ends. OCR validation requires
-all nine agent labels across each platform's screenshots and within every
+all seven required agent labels across each platform's screenshots and within every
 video, including a standalone Pi label so Copilot cannot satisfy that check.
 
 Generated screenshot counts, dimensions, and OCR content can be validated locally on macOS with `python3 scripts/validate_store_screenshots.py` after installing Pillow.

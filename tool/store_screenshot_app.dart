@@ -143,8 +143,6 @@ const _requiredStoreAgentWindows = <String>{
   'antigravity',
   'cursor-agent',
   'pi',
-  'hermes',
-  'openclaw',
 };
 
 const _sceneNames = <String>[

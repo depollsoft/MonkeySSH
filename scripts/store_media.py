@@ -20,9 +20,11 @@ AGENT_EXECUTABLES = {
     'hermes': ('hermes', 'hermes-agent'),
     'openclaw': ('openclaw',),
 }
+OPTIONAL_AGENT_NAMES = frozenset({'hermes', 'openclaw'})
+REQUIRED_AGENT_NAMES = frozenset(AGENT_EXECUTABLES) - OPTIONAL_AGENT_NAMES
 AGENT_LABELS = (
     'Copilot CLI', 'Claude Code', 'Codex', 'OpenCode', 'Antigravity',
-    'Cursor Agent', 'Pi', 'Hermes', 'OpenClaw',
+    'Cursor Agent', 'Pi',
 )
 
 
@@ -32,7 +34,8 @@ def require_agent_executables() -> dict[str, str]:
     for name, aliases in AGENT_EXECUTABLES.items():
         executable = next((path for alias in aliases if (path := shutil.which(alias))), None)
         if executable is None:
-            missing.append('/'.join(aliases))
+            if name not in OPTIONAL_AGENT_NAMES:
+                missing.append('/'.join(aliases))
         else:
             resolved[name] = executable
     if missing:
