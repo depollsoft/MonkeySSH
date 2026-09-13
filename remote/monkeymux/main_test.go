@@ -8545,6 +8545,79 @@ func TestWindowMetadataTracksOscTitleAsPaneTitle(t *testing.T) {
 	}
 }
 
+func TestPiIdentityExtensionReportsProviderChanges(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required to exercise the Pi extension")
+	}
+	// Exercise the shipped extension, including an event whose model differs
+	// from ctx.model. Pi's model_select event is authoritative during a switch.
+	script := strings.Replace(piIdentityExtensionSource, "export default function", "function install", 1) + `
+const handlers = {};
+install({on: (event, handler) => { handlers[event] = handler; }});
+const ctx = {
+  sessionManager: {
+    getSessionId: () => "session-id",
+    getSessionFile: () => "/tmp/session.jsonl",
+  },
+  model: {provider: "openai-codex"},
+};
+handlers.session_start({}, ctx);
+handlers.model_select({model: {provider: "anthropic"}}, ctx);
+handlers.session_shutdown({}, ctx);
+`
+	output, err := exec.Command(node, "--input-type=module", "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("extension failed: %v: %s", err, output)
+	}
+	messages := strings.Split(string(output), "\x07")
+	if len(messages) != 4 || messages[3] != "" {
+		t.Fatalf("expected three complete OSC messages, got %q", output)
+	}
+	window := &muxWindow{command: "pi"}
+	for i, provider := range []string{"openai-codex", "anthropic", ""} {
+		window.observeTerminalMetadataLocked([]byte(messages[i] + "\x07"))
+		if window.agentModelProvider != provider || window.agentSessionID != "session-id" {
+			t.Fatalf("event %d: provider=%q session=%q", i, window.agentModelProvider, window.agentSessionID)
+		}
+	}
+}
+
+func TestPiProviderChangesBroadcastWithoutTitleChange(t *testing.T) {
+	server := newMuxServer("test")
+	control := &recordingConn{}
+	client := newControlClient(control)
+	window := &muxWindow{
+		id: "@1", name: "Pi", command: "pi", lastActivity: time.Now(),
+	}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.controls[client] = struct{}{}
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	for i, provider := range []string{"openai-codex", "anthropic", "custom-provider", "openai-codex", ""} {
+		payload := map[string]string{"id": "session-id", "file": path}
+		if provider != "" {
+			payload["provider"] = provider
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded := base64.RawURLEncoding.EncodeToString(data)
+		server.handleWindowOutput("@1", []byte("\x1b]1337;MonkeyMuxPi="+encoded+"\x07"))
+		want := provider
+		if provider == "custom-provider" {
+			want = ""
+		}
+		if got := server.snapshotLocked(window).AgentModelProvider; got != want {
+			t.Fatalf("provider %q: snapshot provider = %q, want %q", provider, got, want)
+		}
+		if got := strings.Count(control.String(), `"type":"window_updated"`); got != i+1 {
+			t.Fatalf("provider %q: broadcasts = %d, want %d", provider, got, i+1)
+		}
+	}
+}
+
 func TestWindowMetadataTracksExactPiIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "resumed.jsonl")
 	payload, err := json.Marshal(map[string]string{

@@ -622,6 +622,52 @@ void main() {
   });
 
   group('MonkeyMux agent metadata', () {
+    test(
+      'Pi provider updates survive enrichment and clear on old snapshots',
+      () {
+        const snapshot = {
+          'index': 0,
+          'id': '@1',
+          'name': 'Pi',
+          'active': true,
+          'currentCommand': 'pi',
+          'agentTool': 'pi',
+          'agentSessionId': 'session-id',
+          'agentSessionIdentityExact': true,
+        };
+        TmuxWindow parse(String? provider) =>
+            parseMonkeyMuxWindowSnapshotForTesting({
+              ...snapshot,
+              'agentModelProvider': ?provider,
+            })!;
+        final initial = parse(
+          'openai-codex',
+        ).copyWith(agentSessionTitle: 'Task');
+        expect(initial.agentModelProvider, 'openai-codex');
+        expect(
+          initial,
+          isNot(parse('anthropic').copyWith(agentSessionTitle: 'Task')),
+        );
+        var windows = [initial];
+        for (final provider in ['anthropic', null]) {
+          windows = applyTmuxWindowChangeEvent(
+            windows,
+            TmuxWindowSnapshotEvent(parse(provider)),
+          );
+          expect(windows.single.agentSessionTitle, 'Task');
+          expect(windows.single.agentModelProvider, provider);
+        }
+        expect(
+          parseMonkeyMuxWindowSnapshotForTesting({
+            ...snapshot,
+            'agentTool': 'codex',
+            'agentModelProvider': 'openai-codex',
+          })!.agentModelProvider,
+          isNull,
+        );
+      },
+    );
+
     for (final fullList in [false, true]) {
       test('Codex title survives repeated helper updates, list=$fullList', () {
         const sep = tmuxWindowFieldSeparator;

@@ -13,7 +13,11 @@ import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 
 /// Session identity, rather than only connection ID, prevents reconnect reuse.
-typedef AgentUsageRingRequest = ({SshSession session, AgentLaunchTool tool});
+typedef AgentUsageRingRequest = ({
+  SshSession session,
+  AgentLaunchTool tool,
+  String? modelProvider,
+});
 
 /// Clock used for reset boundaries and snapshot freshness.
 final agentUsageRingsClockProvider = Provider<DateTime Function()>(
@@ -33,7 +37,10 @@ final agentUsageRingsEnabledProvider = Provider<bool>((ref) {
 /// The icon subscribes only while its route, ticker, and app are active.
 final agentUsageRingsProvider = StreamProvider.autoDispose
     .family<AgentUsageRings?, AgentUsageRingRequest>((ref, request) {
-      if (!supportsAgentUsageRings(request.tool) ||
+      if (!supportsAgentUsageRings(
+            request.tool,
+            modelProvider: request.modelProvider,
+          ) ||
           !ref.watch(agentUsageRingsEnabledProvider) ||
           ref.watch(
                 activeSessionsProvider.select(
@@ -70,14 +77,25 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
         final token = ++expiryRevision;
         if (disposed || !foreground()) return;
         final time = now();
-        final rings = resolveAgentUsageRings(request.tool, usage, now: time);
+        final rings = resolveAgentUsageRings(
+          request.tool,
+          usage,
+          now: time,
+          modelProvider: request.modelProvider,
+        );
         controller.add(rings);
         if (rings == null || usage == null || usage.checkedAt == null) return;
         var deadline = usage.checkedAt!.add(
           agentUsageSnapshotMaxAge(request.tool),
         );
         for (final window in usage.windows) {
-          if (!isAgentUsageRingWindow(request.tool, window)) continue;
+          if (!isAgentUsageRingWindow(
+            request.tool,
+            window,
+            modelProvider: request.modelProvider,
+          )) {
+            continue;
+          }
           final reset = window.resetsAt;
           if (reset != null &&
               reset.isAfter(time) &&
@@ -130,7 +148,13 @@ final agentUsageRingsProvider = StreamProvider.autoDispose
         }
         if (!throttled) {
           for (final window in usage?.windows ?? <AgentUsageWindow>[]) {
-            if (!isAgentUsageRingWindow(request.tool, window)) continue;
+            if (!isAgentUsageRingWindow(
+              request.tool,
+              window,
+              modelProvider: request.modelProvider,
+            )) {
+              continue;
+            }
             final reset = window.resetsAt?.difference(now());
             if (reset != null && reset > Duration.zero && reset < delay) {
               delay = reset;

@@ -78,6 +78,7 @@ class DelayedPreference extends Preference {
 
 class Reader extends Fake implements AgentManagementService {
   int calls = 0;
+  final requestedTools = <AgentLaunchTool>[];
   DateTime now = DateTime.utc(2026, 9, 8);
   Completer<AgentUsage?>? pending;
   final pendingByTool = <AgentLaunchTool, Completer<AgentUsage?>>{};
@@ -92,6 +93,7 @@ class Reader extends Fake implements AgentManagementService {
     bool Function()? shouldContinue,
   }) async {
     calls++;
+    requestedTools.add(tool);
     if (pendingByTool[tool] case final pending?) return pending.future;
     if (pending != null) return pending!.future;
     return AgentUsage(
@@ -363,6 +365,75 @@ void main() {
     await tester.pumpAndSettle();
     return ProviderScope.containerOf(tester.element(find.byType(Scaffold)));
   }
+
+  testWidgets('Pi rings follow provider changes and hide while unknown', (
+    tester,
+  ) async {
+    final reader = Reader()
+      ..reportedWindows = const [
+        AgentUsageWindow(label: 'Anthropic · Weekly', usedPercent: 20),
+        AgentUsageWindow(label: 'OpenAI Codex · Weekly', usedPercent: 70),
+      ];
+    final session = Session();
+    final selected = ValueNotifier<String?>('anthropic');
+    addTearDown(selected.dispose);
+    await pumpIcon(
+      tester,
+      reader,
+      Billing(true),
+      Preference(true),
+      body: ValueListenableBuilder<String?>(
+        valueListenable: selected,
+        builder: (context, provider, child) => AgentUsageRingIcon(
+          session: session,
+          tool: AgentLaunchTool.pi,
+          modelProvider: provider,
+          child: const Icon(Icons.code),
+        ),
+      ),
+    );
+    expect(
+      tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+      80,
+    );
+    expect(
+      tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).agentLabel,
+      'Pi',
+    );
+    selected.value = 'openai-codex';
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+      30,
+    );
+    expect(reader.requestedTools, [AgentLaunchTool.pi, AgentLaunchTool.pi]);
+    selected.value = null;
+    await tester.pumpAndSettle();
+    expect(find.byType(SplitUsageRing), findsNothing);
+    final calls = reader.calls;
+    await tester.pump(const Duration(minutes: 10));
+    expect(reader.calls, calls);
+  });
+
+  testWidgets('Pi waits for a supported provider before reading quotas', (
+    tester,
+  ) async {
+    final reader = Reader();
+    await pumpIcon(
+      tester,
+      reader,
+      Billing(true),
+      Preference(true),
+      body: AgentUsageRingIcon(
+        session: Session(),
+        tool: AgentLaunchTool.pi,
+        modelProvider: 'custom',
+        child: const Icon(Icons.code),
+      ),
+    );
+    expect(reader.calls, 0);
+    expect(find.byType(SplitUsageRing), findsNothing);
+  });
 
   for (final pro in [false, true]) {
     testWidgets('no remote reads when ${pro ? 'disabled' : 'free'}', (

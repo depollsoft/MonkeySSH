@@ -19,6 +19,7 @@ import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
@@ -26,6 +27,7 @@ import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
+import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
@@ -59,6 +61,7 @@ import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart'
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
+import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
@@ -8148,6 +8151,214 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    testWidgets('terminal Pi handle follows reported provider changes', (
+      tester,
+    ) async {
+      final usageService = _MockAgentManagementService();
+      when(
+        () => usageService.readUsageForTool(
+          session,
+          AgentLaunchTool.pi,
+          shouldContinue: any(named: 'shouldContinue'),
+        ),
+      ).thenAnswer(
+        (_) async => AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: DateTime.now(),
+          windows: const [
+            AgentUsageWindow(label: 'Anthropic · Weekly', usedPercent: 20),
+            AgentUsageWindow(label: 'OpenAI Codex · Weekly', usedPercent: 17),
+          ],
+        ),
+      );
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+      addTearDown(events.close);
+      TmuxWindow piWindow(String? provider, {bool active = true}) => TmuxWindow(
+        index: 0,
+        id: '@1',
+        name: 'Pi',
+        isActive: active,
+        currentCommand: 'pi',
+        agentTool: AgentLaunchTool.pi,
+        agentModelProvider: provider,
+      );
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(
+        () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+      ).thenAnswer((_) async => true);
+      when(
+        () => monkeyMuxService.listWindows(session, 'work'),
+      ).thenAnswer((_) async => [piWindow('openai-codex')]);
+      when(
+        () => monkeyMuxService.watchWindowChanges(session, 'work'),
+      ).thenAnswer((_) => events.stream);
+      when(
+        () => tmuxService.prefetchInstalledAgentTools(session),
+      ).thenAnswer((_) async {});
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        agentManagementService: usageService,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        83,
+      );
+      events.add(TmuxWindowSnapshotEvent(piWindow('anthropic')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        80,
+      );
+      for (final provider in ['custom-provider', null]) {
+        events.add(TmuxWindowSnapshotEvent(piWindow(provider)));
+        await tester.pumpAndSettle();
+        expect(find.byType(SplitUsageRing), findsNothing);
+      }
+      // A known provider on a background pane must not supply the active pane.
+      events.add(
+        TmuxWindowListEvent([
+          piWindow('openai-codex', active: false),
+          const TmuxWindow(
+            index: 1,
+            id: '@2',
+            name: 'Pi',
+            isActive: true,
+            currentCommand: 'pi',
+            agentTool: AgentLaunchTool.pi,
+          ),
+        ]),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsNothing);
+    });
+
+    testWidgets('Pi handle follows live model-provider changes', (
+      tester,
+    ) async {
+      final usageService = _MockAgentManagementService();
+      when(
+        () => usageService.readUsageForTool(
+          session,
+          AgentLaunchTool.pi,
+          shouldContinue: any(named: 'shouldContinue'),
+        ),
+      ).thenAnswer(
+        (_) async => AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: DateTime.now(),
+          windows: const [
+            AgentUsageWindow(label: 'Anthropic · Weekly', usedPercent: 20),
+            AgentUsageWindow(label: 'OpenAI Codex · Weekly', usedPercent: 17),
+          ],
+        ),
+      );
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const bridgeId = '0123456789abcdef0123456789abcdef';
+      final key = fakeAcpKey(
+        hostId: host.id,
+        providerId: AcpBuiltinProviderIds.pi,
+        bridgeId: bridgeId,
+        acpSessionId: 'native-session',
+      );
+      AcpSelectConfigOption modelOption(String value) => AcpSelectConfigOption(
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: value,
+      );
+      final initial = fakeAcpSession(
+        key: key,
+        providerLabel: 'Pi',
+        configOptions: [modelOption('anthropic/claude')],
+      );
+      final acpManager = FakeAcpSessionManager(sessions: [initial]);
+      addTearDown(acpManager.dispose);
+      session.activeNativeAcpSessionKey = key;
+      addTearDown(() => session.activeNativeAcpSessionKey = null);
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(
+        () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+      ).thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: bridgeId,
+            nativeAcpProviderId: AcpBuiltinProviderIds.pi,
+          ),
+        ],
+      );
+      when(
+        () => monkeyMuxService.watchWindowChanges(session, 'work'),
+      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(
+        () => tmuxService.prefetchInstalledAgentTools(session),
+      ).thenAnswer((_) async {});
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        acpSessionManager: acpManager,
+        agentManagementService: usageService,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        80,
+      );
+      final icon = find.byType(AgentUsageRingIcon);
+      expect(icon, findsOneWidget);
+      expect(
+        tester.widget<AgentUsageRingIcon>(icon).modelProvider,
+        'anthropic',
+      );
+      acpManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(configOptions: [modelOption('openai-codex/gpt')]),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<AgentUsageRingIcon>(icon).modelProvider,
+        'openai-codex',
+      );
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        83,
+      );
+      acpManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(configOptions: [modelOption('unknown/model')]),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<AgentUsageRingIcon>(icon).modelProvider, isNull);
+      expect(find.byType(SplitUsageRing), findsNothing);
+    });
 
     testWidgets(
       'shows live native-session progress in its real MonkeyMux pane',

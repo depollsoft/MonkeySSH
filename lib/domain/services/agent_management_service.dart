@@ -948,8 +948,20 @@ class AgentManagementService {
         .where((item) => item.tool == tool)
         .firstOrNull;
     if (definition == null) return null;
-    final cooldown = _activeUsageCooldown(session, definition.id.substring(4));
-    if (cooldown != null) return cooldown;
+    final usageId = definition.id.substring(4);
+    final cooldown = _activeUsageCooldown(session, usageId);
+    if (cooldown != null) {
+      // A multi-provider response can contain usable quotas alongside a
+      // throttled account. Retain that same-session snapshot without probing;
+      // ring projection still enforces its original age and reset deadlines.
+      final snapshot = _usageCache[session.connectionId];
+      final usage = identical(snapshot?.session, session)
+          ? snapshot?.values[usageId]
+          : null;
+      return (usage?.isRateLimited ?? false)
+          ? usage!.withRetryAt(cooldown.retryAt!)
+          : cooldown;
+    }
     final cache = _usageRuntimeCache[session] ??= {};
     final revisions = _usageRuntimeRevisions[session] ??= {};
     final revision = revisions.putIfAbsent(tool, Object.new);

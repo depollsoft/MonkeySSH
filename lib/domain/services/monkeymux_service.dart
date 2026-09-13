@@ -2601,6 +2601,9 @@ TmuxWindow? _windowFromJson(Object? value) {
     agentTool: agentTool,
     hasUnsupportedAgentTool: unsupportedTool,
     activeAgentSessionId: agentSessionId,
+    agentModelProvider: agentTool == AgentLaunchTool.pi
+        ? _nonEmpty(value['agentModelProvider'] as String?)
+        : null,
     activeAgentSessionConfidence:
         agentSessionId != null && value['agentSessionIdentityExact'] == true
         ? AgentSessionConfidence.high

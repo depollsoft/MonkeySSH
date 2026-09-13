@@ -35,6 +35,7 @@ import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_runtime_info.dart';
+import '../../domain/models/agent_usage_rings.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/monetization.dart';
