@@ -27,6 +27,7 @@ import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
+import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
@@ -8154,6 +8155,23 @@ void main() {
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
     ) async {
+      final usageService = _MockAgentManagementService();
+      when(
+        () => usageService.readUsageForTool(
+          session,
+          AgentLaunchTool.pi,
+          shouldContinue: any(named: 'shouldContinue'),
+        ),
+      ).thenAnswer(
+        (_) async => AgentUsage(
+          status: AgentUsageStatus.available,
+          checkedAt: DateTime.now(),
+          windows: const [
+            AgentUsageWindow(label: 'Anthropic · Weekly', usedPercent: 20),
+            AgentUsageWindow(label: 'OpenAI Codex · Weekly', usedPercent: 17),
+          ],
+        ),
+      );
       final tmuxService = _MockTmuxService();
       final monkeyMuxService = _MockMonkeyMuxService();
       const bridgeId = '0123456789abcdef0123456789abcdef';
@@ -8163,8 +8181,16 @@ void main() {
         bridgeId: bridgeId,
         acpSessionId: 'native-session',
       );
-      final initial = fakeAcpSession(key: key, providerLabel: 'Pi').copyWith(
-        modelState: const AcpModelState(currentModelId: 'anthropic/claude'),
+      AcpSelectConfigOption modelOption(String value) => AcpSelectConfigOption(
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: value,
+      );
+      final initial = fakeAcpSession(
+        key: key,
+        providerLabel: 'Pi',
+        configOptions: [modelOption('anthropic/claude')],
       );
       final acpManager = FakeAcpSessionManager(sessions: [initial]);
       addTearDown(acpManager.dispose);
@@ -8201,8 +8227,14 @@ void main() {
         tmuxService: tmuxService,
         monkeyMuxService: monkeyMuxService,
         acpSessionManager: acpManager,
+        agentManagementService: usageService,
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(SplitUsageRing), findsOneWidget);
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        80,
+      );
       final icon = find.byType(AgentUsageRingIcon);
       expect(icon, findsOneWidget);
       expect(
@@ -8212,30 +8244,29 @@ void main() {
       acpManager.emit(
         AcpSessionManagerState(
           sessions: [
-            initial.copyWith(
-              modelState: const AcpModelState(
-                currentModelId: 'openai-codex/gpt',
-              ),
-            ),
+            initial.copyWith(configOptions: [modelOption('openai-codex/gpt')]),
           ],
         ),
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(
         tester.widget<AgentUsageRingIcon>(icon).modelProvider,
         'openai-codex',
       );
+      expect(
+        tester.widget<SplitUsageRing>(find.byType(SplitUsageRing)).rings.weekly,
+        83,
+      );
       acpManager.emit(
         AcpSessionManagerState(
           sessions: [
-            initial.copyWith(
-              modelState: const AcpModelState(currentModelId: 'unknown/model'),
-            ),
+            initial.copyWith(configOptions: [modelOption('unknown/model')]),
           ],
         ),
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(tester.widget<AgentUsageRingIcon>(icon).modelProvider, isNull);
+      expect(find.byType(SplitUsageRing), findsNothing);
     });
 
     testWidgets(
