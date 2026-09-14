@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../domain/models/acp_session_keys.dart';
 import '../domain/models/monetization.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/local_notification_service.dart';
@@ -100,6 +101,26 @@ final routerProvider = Provider<GoRouter>((ref) {
               ),
             );
           }
+          final providerId =
+              state.uri.queryParameters[acpAgentChatProviderQueryKey];
+          final bridgeId =
+              state.uri.queryParameters[acpAgentChatBridgeQueryKey];
+          final sessionId =
+              state.uri.queryParameters[acpAgentChatSessionQueryKey];
+          final initialNativeAcpSessionKey =
+              providerId != null &&
+                  providerId.isNotEmpty &&
+                  bridgeId != null &&
+                  bridgeId.isNotEmpty &&
+                  sessionId != null &&
+                  sessionId.isNotEmpty
+              ? AcpSessionKey.of(
+                  hostId: hostId,
+                  providerId: providerId,
+                  bridgeId: bridgeId,
+                  acpSessionId: sessionId,
+                )
+              : null;
           return _buildTerminalPage(
             state: state,
             child: TerminalScreen(
@@ -110,6 +131,7 @@ final routerProvider = Provider<GoRouter>((ref) {
                   initialTmuxSessionName,
                   initialTmuxWindowIndex,
                   initialTmuxWindowId,
+                  initialNativeAcpSessionKey,
                   state.uri.queryParameters['notificationTap'],
                   initiallyExpandTmuxWindows,
                   initiallyShowKeyboard,
@@ -118,6 +140,7 @@ final routerProvider = Provider<GoRouter>((ref) {
               ),
               hostId: hostId,
               connectionId: connectionId,
+              initialNativeAcpSessionKey: initialNativeAcpSessionKey,
               initialTmuxSessionName: initialTmuxSessionName,
               initialTmuxWindowIndex: initialTmuxWindowIndex,
               initialTmuxWindowId: initialTmuxWindowId,

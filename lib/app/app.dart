@@ -155,6 +155,7 @@ class _BackgroundLifecycleBridgeState
         open: (payload) => openAcpNotificationStack(
           router: ref.read(routerProvider),
           payload: payload,
+          notificationTapId: '${DateTime.now().microsecondsSinceEpoch}',
         ),
       );
 

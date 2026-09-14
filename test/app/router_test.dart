@@ -297,6 +297,30 @@ void main() {
       expect(collapsed.key, isNot(expanded.key));
     });
 
+    test(
+      'native notification route builds an embedded terminal target and refreshes each tap',
+      () {
+        final router = container.read(routerProvider);
+        final route = router.configuration.routes
+            .whereType<GoRoute>()
+            .singleWhere((route) => route.name == Routes.terminal);
+        TerminalScreen screen(String query) => _terminalScreenFor(
+          router: router,
+          route: route,
+          uri: Uri.parse(
+            '/terminal/7?p=builtin%3Api&b=bridge-1&s=session-1&$query',
+          ),
+        );
+        final first = screen('notificationTap=first');
+        final repeated = screen('notificationTap=second');
+        expect(first.initialNativeAcpSessionKey?.hostId, 7);
+        expect(first.initialNativeAcpSessionKey?.providerId, 'builtin:pi');
+        expect(first.initialNativeAcpSessionKey?.bridgeId, 'bridge-1');
+        expect(first.initialNativeAcpSessionKey?.acpSessionId, 'session-1');
+        expect(first.key, isNot(repeated.key));
+      },
+    );
+
     test('intentionally returns a new GoRouter instance when authState changes '
         'to reset protected back-stack history', () async {
       // Initialise the auth notifier and let it settle to notConfigured.
@@ -426,7 +450,7 @@ TerminalScreen _terminalScreenFor({
       name: Routes.terminal,
       path: '/terminal/:hostId',
       fullPath: '/terminal/:hostId',
-      pathParameters: const {'hostId': '1'},
+      pathParameters: {'hostId': uri.pathSegments.last},
       pageKey: const ValueKey<String>('/terminal/:hostId'),
       topRoute: route,
     ),

@@ -57,6 +57,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_theme_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
+import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
@@ -1657,6 +1658,8 @@ void main() {
 
     Future<void> pumpScreen(
       WidgetTester tester, {
+      AcpSessionKey? initialNativeAcpSessionKey,
+      bool resolveConnection = false,
       ThemeMode themeMode = ThemeMode.light,
       ActiveSessionsNotifier? activeSessions,
       TmuxService? tmuxService,
@@ -1713,7 +1716,8 @@ void main() {
             themeMode: themeMode,
             home: TerminalScreen(
               hostId: host.id,
-              connectionId: session.connectionId,
+              connectionId: resolveConnection ? null : session.connectionId,
+              initialNativeAcpSessionKey: initialNativeAcpSessionKey,
             ),
           ),
         ),
@@ -8242,6 +8246,170 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(SplitUsageRing), findsNothing);
     });
+
+    for (final scenario in ['live', 'detached', 'untracked', 'missing']) {
+      testWidgets(
+        'native notification selects its exact session and clears missing focus: $scenario',
+        (tester) async {
+          await tester.binding.setSurfaceSize(const Size(1100, 800));
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final tmuxService = _MockTmuxService();
+          final monkeyMuxService = _MockMonkeyMuxService();
+          final key = AcpSessionKey.of(
+            hostId: host.id,
+            providerId: AcpBuiltinProviderIds.pi,
+            bridgeId: 'notification-bridge',
+            acpSessionId: 'notification-session',
+          );
+          final siblingKey = AcpSessionKey.of(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: 'sibling-session',
+          );
+          final acpManager =
+              FakeAcpSessionManager(
+                  sessions: [
+                    fakeAcpSession(key: siblingKey, providerLabel: 'Pi'),
+                    if (scenario == 'live' || scenario == 'detached')
+                      fakeAcpSession(
+                        key: key,
+                        providerLabel: 'Pi',
+                        status: scenario == 'live'
+                            ? AcpConnectionStatus.ready
+                            : AcpConnectionStatus.detached,
+                      ),
+                  ],
+                )
+                ..reconnectSessionResult = AcpSessionLaunchStarted(key)
+                ..reconnectSessionState = fakeAcpSession(
+                  key: key,
+                  providerLabel: 'Pi',
+                )
+                ..remoteBridges = [
+                  MonkeyMuxAcpBridgeMetadata(
+                    id: key.bridgeId,
+                    providerId: key.providerId,
+                    sessionId: siblingKey.acpSessionId,
+                    cwd: '/home/dev/project',
+                    provider: 'Pi',
+                    commandHash: 'hash',
+                    state: MonkeyMuxAcpProviderState.running,
+                    clientCount: 0,
+                    pendingRequestCount: 0,
+                    inFlightTurnCount: 0,
+                    lastActivity: DateTime(2026),
+                    startedAt: DateTime(2026),
+                    nextSequence: 1,
+                  ),
+                ];
+          session
+            ..activeNativeAcpSessionKey = siblingKey
+            ..activeNativeAcpDisplayTitle = 'Previous chat'
+            ..activeNativeAcpPreview = 'Previous preview';
+          addTearDown(acpManager.dispose);
+          host = _buildHost(
+            id: host.id,
+            tmuxSessionName: 'work',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          );
+          session
+            ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+            ..remoteMuxSessionName = 'work';
+          var windows = <TmuxWindow>[
+            const TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+            if (scenario != 'missing')
+              TmuxWindow(
+                index: 2,
+                id: '@3',
+                name: 'Pi',
+                isActive: false,
+                nativeAcpBridgeId: key.bridgeId,
+                nativeAcpProviderId: key.providerId,
+              ),
+          ];
+          when(
+            () => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'),
+          ).thenAnswer((_) async => true);
+          when(
+            () => monkeyMuxService.listWindows(session, 'work'),
+          ).thenAnswer((_) async => windows);
+          when(
+            () => monkeyMuxService.watchWindowChanges(session, 'work'),
+          ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          when(
+            () => monkeyMuxService.selectWindow(
+              session,
+              'work',
+              any(),
+              windowId: any(named: 'windowId'),
+              extraFlags: any(named: 'extraFlags'),
+              clientImageSignatures: any(named: 'clientImageSignatures'),
+              suppressReplay: any(named: 'suppressReplay'),
+            ),
+          ).thenAnswer((invocation) async {
+            final index = invocation.positionalArguments[2] as int;
+            windows = windows
+                .map(
+                  (window) => window.copyWith(isActive: window.index == index),
+                )
+                .toList();
+          });
+          when(
+            () => tmuxService.prefetchInstalledAgentTools(session),
+          ).thenAnswer((_) async {});
+          await pumpScreen(
+            tester,
+            tmuxService: tmuxService,
+            monkeyMuxService: monkeyMuxService,
+            acpSessionManager: acpManager,
+            initialNativeAcpSessionKey: key,
+            resolveConnection: true,
+          );
+          await tester.pumpAndSettle();
+          if (scenario == 'missing') {
+            expect(find.byType(AgentChatScreen), findsNothing);
+            expect(
+              find.text('The native agent window is no longer available.'),
+              findsOneWidget,
+            );
+            expect(session.activeNativeAcpSessionKey, isNull);
+            expect(session.activeNativeAcpDisplayTitle, isNull);
+            expect(session.activeNativeAcpPreview, isNull);
+            expect(acpManager.reconnects, isEmpty);
+            await tester.pumpWidget(const SizedBox.shrink());
+            await pumpScreen(
+              tester,
+              tmuxService: tmuxService,
+              monkeyMuxService: monkeyMuxService,
+              acpSessionManager: acpManager,
+            );
+            await tester.pumpAndSettle();
+            expect(find.byType(AgentChatScreen), findsNothing);
+            expect(session.activeNativeAcpSessionKey, isNull);
+            return;
+          }
+          final chat = tester.widget<AgentChatScreen>(
+            find.byType(AgentChatScreen),
+          );
+          expect(chat.embedded, isTrue);
+          expect(chat.acpSessionId, key.acpSessionId);
+          expect(session.activeNativeAcpSessionKey, key);
+          expect(windows.singleWhere((window) => window.isActive).index, 2);
+          if (scenario == 'live') {
+            expect(acpManager.reconnects, isEmpty);
+          } else {
+            expect(acpManager.reconnects.single.acpSessionId, key.acpSessionId);
+          }
+          await tester.tap(find.byKey(const ValueKey('tmux-sidebar-window-0')));
+          await tester.pumpAndSettle();
+          expect(find.byType(AgentChatScreen), findsNothing);
+          expect(session.activeNativeAcpSessionKey, isNull);
+          expect(windows.singleWhere((window) => window.isActive).index, 0);
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      );
+    }
 
     testWidgets('Pi handle follows live model-provider changes', (
       tester,

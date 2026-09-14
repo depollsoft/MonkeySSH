@@ -515,15 +515,16 @@ String buildAgentChatLocation({
 
 /// Builds the safe navigation location for an ACP notification tap.
 ///
-/// The redacted payload carries the full set of opaque session identifiers, so
-/// the tap lands directly on the matching native chat.
-String buildAcpNotificationLocation(AcpNotificationPayload payload) =>
-    buildAgentChatLocation(
-      hostId: payload.hostId,
-      providerId: payload.providerId,
-      bridgeId: payload.bridgeId,
-      acpSessionId: payload.acpSessionId,
-    );
+/// The native session is selected inside its owning terminal, preserving the
+/// window and connection controls.
+String buildAcpNotificationLocation(AcpNotificationPayload payload) => Uri(
+  path: '/terminal/${payload.hostId}',
+  queryParameters: <String, String>{
+    acpAgentChatProviderQueryKey: payload.providerId,
+    acpAgentChatBridgeQueryKey: payload.bridgeId,
+    acpAgentChatSessionQueryKey: payload.acpSessionId,
+  },
+).toString();
 
 /// Service for showing local notifications inside the app.
 class LocalNotificationService {
