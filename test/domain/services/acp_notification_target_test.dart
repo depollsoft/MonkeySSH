@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -67,6 +69,44 @@ void main() {
       expect(result, 2);
     },
   );
+
+  test('starts all lookups before waiting for stale connections', () async {
+    final pending = <int, Completer<List<TmuxWindow>>>{};
+    final result = resolveAcpNotificationConnection(
+      target: target,
+      sessions: [connection(1), connection(2), connection(3)],
+      listWindows: (session, _) {
+        final completer = Completer<List<TmuxWindow>>();
+        pending[session.connectionId] = completer;
+        return completer.future;
+      },
+    );
+    expect(pending.keys, [1, 2, 3]);
+    pending[3]!.complete([window]);
+    pending[2]!.completeError(TimeoutException('Lookup timed out'));
+    pending[1]!.completeError(TimeoutException('Lookup timed out'));
+    expect(await result, 3);
+  });
+
+  test('keeps focused preference when another lookup finishes first', () async {
+    final pending = <int, Completer<List<TmuxWindow>>>{};
+    final result = resolveAcpNotificationConnection(
+      target: target,
+      sessions: [
+        connection(1),
+        connection(2)..activeNativeAcpSessionKey = target,
+      ],
+      listWindows: (session, _) {
+        final completer = Completer<List<TmuxWindow>>();
+        pending[session.connectionId] = completer;
+        return completer.future;
+      },
+    );
+    expect(pending.keys, [2, 1]);
+    pending[1]!.complete([window]);
+    pending[2]!.complete([window]);
+    expect(await result, 2);
+  });
 
   test('window membership takes precedence over stale saved focus', () async {
     final result = await resolveAcpNotificationConnection(

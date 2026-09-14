@@ -20,12 +20,14 @@ Future<int?> resolveAcpNotificationConnection({
           if (aFocused == bFocused) return 0;
           return aFocused ? -1 : 1;
         });
-  for (final session in candidates) {
+  // Start every lookup before awaiting results so stale connections share one
+  // watchdog interval. Consume in preference order, regardless of finish order.
+  final lookups = candidates.map((session) async {
     final workspace = session.remoteMuxSessionName;
     if (session.remoteMuxBackend != RemoteMuxBackend.monkeyMux ||
         workspace == null ||
         workspace.isEmpty) {
-      continue;
+      return null;
     }
     try {
       final windows = await listWindows(session, workspace);
@@ -46,6 +48,11 @@ Future<int?> resolveAcpNotificationConnection({
         },
       );
     }
+    return null;
+  }).toList();
+  for (final lookup in lookups) {
+    final connectionId = await lookup;
+    if (connectionId != null) return connectionId;
   }
   for (final session in candidates) {
     if (session.activeNativeAcpSessionKey == target) {
