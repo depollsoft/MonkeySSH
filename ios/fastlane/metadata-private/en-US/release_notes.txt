@@ -1,7 +1,8 @@
 What's new in this beta
 
-- Pro: Pi usage rings now follow the selected model provider in terminal panes and native chat, showing reported remaining allowances.
-- Pi keeps valid usage readings when another provider temporarily limits refreshes.
+- Pro: Pi usage rings follow the selected model provider in terminal panes and native chat, and preserve valid readings during refresh limits.
+- Agent notifications open the correct chat in its terminal workspace.
+- Fixed extra space below native chat after dismissing the keyboard.
 
 Update MonkeyMux and restart existing Pi terminal panes to enable the new rings.
 
