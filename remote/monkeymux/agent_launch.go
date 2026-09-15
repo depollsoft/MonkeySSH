@@ -147,11 +147,20 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 				"hooks": map[string]any{"SessionStart": []any{map[string]any{
 					"hooks": []any{map[string]any{"type": "command", "command": hookCommand, "timeout": 5}},
 				}}},
+				// MonkeySSH turns finger travel into wheel reports and measures
+				// how many rows one report moves, so the client owns the scroll
+				// distance. Claude Code ramping the speed during a fast scroll
+				// makes a quick drag overshoot by roughly triple.
+				"wheelScrollAccelerationEnabled": false,
 			})
 			if err != nil {
 				return launch, err
 			}
 			prefix = []string{"--settings", path}
+			// One row per report keeps touch tracking as fine as the client can
+			// calibrate. An explicit user speed still calibrates correctly, it
+			// just moves in coarser steps, so leave that choice alone.
+			launch.env = withDefaultAgentLaunchEnvironment(launch.env, "CLAUDE_CODE_SCROLL_SPEED", "1")
 		case "copilot", "cursor-agent":
 			plugin := "monkeymux-copilot-plugin"
 			manifest := "plugin.json"
@@ -207,6 +216,15 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 				plugins = append(plugins, plugin)
 			}
 			config["plugin"], _ = json.Marshal(plugins)
+			// Same reasoning as the Claude settings above: the client already
+			// converts finger travel into wheel reports, so TUI-side
+			// acceleration always overshoots a fast drag. Acceleration is
+			// forced off; the per-report speed only fills in a default so an
+			// explicit user choice survives.
+			config["scroll_acceleration"], _ = json.Marshal(map[string]any{"enabled": false})
+			if _, ok := config["scroll_speed"]; !ok {
+				config["scroll_speed"], _ = json.Marshal(1)
+			}
 			data, err := json.Marshal(config)
 			if err != nil {
 				return launch, err
@@ -348,6 +366,17 @@ func withAgentLaunchEnvironment(env []string, key, value string) []string {
 		}
 	}
 	return append(result, key+"="+value)
+}
+
+// withDefaultAgentLaunchEnvironment sets key only when the caller's
+// environment left it unset, so an explicit user value always wins.
+func withDefaultAgentLaunchEnvironment(env []string, key, value string) []string {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, key+"=") {
+			return env
+		}
+	}
+	return append(env, key+"="+value)
 }
 
 func resolveAgentLaunchPaneTTY() string {
