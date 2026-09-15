@@ -1483,7 +1483,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         : nativeSession == null
         ? window.displayTitle
         : acpSessionDisplayTitle(nativeSession);
-    final iconColor = agentWindowIdentityColor(
+    final identityColor = agentWindowIdentityColor(
       theme.colorScheme,
       isActive: isActive,
     );
@@ -1532,14 +1532,16 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                     : null,
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Center(
+              child: SizedBox.expand(
                 child: Stack(
                   clipBehavior: Clip.none,
                   alignment: Alignment.center,
                   children: [
                     AgentToolIcon(
                       tool: windowTool,
-                      color: iconColor,
+                      color: isActive
+                          ? theme.colorScheme.onPrimaryContainer
+                          : identityColor,
                       fallbackIcon: window.isNativeAcp
                           ? Icons.smart_toy_outlined
                           : Icons.terminal,
@@ -1552,12 +1554,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                           key: ValueKey(
                             'monkeymux-sidebar-native-${window.index}',
                           ),
-                          color: iconColor,
+                          color: identityColor,
                         ),
                       ),
                     Positioned(
-                      right: -9,
-                      bottom: -9,
+                      right: 3,
+                      bottom: 3,
                       child: _buildCollapsedSidebarWindowIndex(
                         theme,
                         window,
@@ -1566,8 +1568,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                     ),
                     if (window.hasAlert)
                       Positioned(
-                        right: -10,
-                        top: -10,
+                        right: 2,
+                        top: 2,
                         child: Icon(
                           Icons.notifications_active,
                           size: 14,
@@ -1576,9 +1578,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                       ),
                     if (progress != null)
                       Positioned(
-                        left: -7,
-                        right: 7,
-                        bottom: -11,
+                        left: 5,
+                        right: 19,
+                        bottom: 1,
                         child: MuxWindowProgressIndicator(
                           key: ValueKey(
                             'monkeymux-sidebar-progress-${window.index}',
@@ -1802,9 +1804,18 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                   : null,
             ),
             child: Stack(
+              fit: StackFit.expand,
               alignment: Alignment.center,
               children: [
-                AgentToolIcon(tool: agentTool, size: 22, color: identityColor),
+                Center(
+                  child: AgentToolIcon(
+                    tool: agentTool,
+                    size: 22,
+                    color: isActive
+                        ? theme.colorScheme.onPrimaryContainer
+                        : identityColor,
+                  ),
+                ),
                 Positioned(
                   left: 2,
                   top: 2,
@@ -1814,8 +1825,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                   ),
                 ),
                 Positioned(
-                  right: -9,
-                  bottom: -9,
+                  right: 3,
+                  bottom: 3,
                   child: DecoratedBox(
                     key: ValueKey('monkeymux-sidebar-acp-index-${key.value}'),
                     decoration: BoxDecoration(
@@ -1850,9 +1861,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                   ),
                 if (progress != null)
                   Positioned(
-                    left: -7,
-                    right: 7,
-                    bottom: -11,
+                    left: 5,
+                    right: 19,
+                    bottom: 1,
                     child: MuxWindowProgressIndicator(
                       key: ValueKey(
                         'monkeymux-sidebar-acp-progress-${key.value}',

@@ -1661,6 +1661,7 @@ void main() {
       AcpSessionKey? initialNativeAcpSessionKey,
       bool resolveConnection = false,
       ThemeMode themeMode = ThemeMode.light,
+      ThemeData? theme,
       ActiveSessionsNotifier? activeSessions,
       TmuxService? tmuxService,
       MonkeyMuxService? monkeyMuxService,
@@ -1711,8 +1712,8 @@ void main() {
               ),
           ],
           child: MaterialApp(
-            theme: ThemeData.light(),
-            darkTheme: ThemeData.dark(),
+            theme: theme ?? ThemeData.light(),
+            darkTheme: theme ?? ThemeData.dark(),
             themeMode: themeMode,
             home: TerminalScreen(
               hostId: host.id,
@@ -9407,6 +9408,194 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    for (final brightness in Brightness.values) {
+      for (final size in [const Size(1032, 1376), const Size(1376, 1032)]) {
+        for (final selected in [
+          'terminal',
+          'native window',
+          'native session',
+        ]) {
+          testWidgets(
+            'tablet sidebar icons and badges $brightness $size $selected',
+            (tester) async {
+              await tester.binding.setSurfaceSize(size);
+              addTearDown(() => tester.binding.setSurfaceSize(null));
+              final nativeKey = fakeAcpKey(
+                hostId: host.id,
+                bridgeId: 'native-window',
+                acpSessionId: 'window-session',
+                providerId: AcpBuiltinProviderIds.codex,
+              );
+              final orphanKey = fakeAcpKey(
+                hostId: host.id,
+                bridgeId: 'native-session',
+                acpSessionId: 'orphan-session',
+                providerId: AcpBuiltinProviderIds.codex,
+              );
+              final acpManager = FakeAcpSessionManager(
+                sessions: [
+                  fakeAcpSession(key: nativeKey, title: 'Native window'),
+                  fakeAcpSession(
+                    key: orphanKey,
+                    title: 'Native session',
+                    promptStatus: AcpPromptStatus.streaming,
+                  ),
+                ],
+              );
+              addTearDown(acpManager.dispose);
+              final tmuxService = _MockTmuxService();
+              final monkeyMuxService = _MockMonkeyMuxService();
+              host = _buildHost(
+                id: host.id,
+                tmuxSessionName: 'work',
+                remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              );
+              when(
+                () => tmuxService.prefetchInstalledAgentTools(session),
+              ).thenAnswer((_) async {});
+              when(
+                () => monkeyMuxService.hasForegroundClientOrThrow(
+                  session,
+                  'work',
+                ),
+              ).thenAnswer((_) async => true);
+              when(
+                () => monkeyMuxService.listWindows(session, 'work'),
+              ).thenAnswer(
+                (_) async => [
+                  const TmuxWindow(
+                    index: 0,
+                    name: 'Claude Code',
+                    isActive: true,
+                    agentTool: AgentLaunchTool.claudeCode,
+                  ),
+                  TmuxWindow(
+                    index: 1,
+                    name: 'Native window',
+                    isActive: false,
+                    nativeAcpBridgeId: nativeKey.bridgeId,
+                    nativeAcpProviderId: nativeKey.providerId,
+                  ),
+                ],
+              );
+              when(
+                () => monkeyMuxService.watchWindowChanges(session, 'work'),
+              ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+              // Terminal-derived themes can give primary and primaryContainer
+              // the same accent. Selected icons must use its foreground role.
+              final scheme =
+                  ColorScheme.fromSeed(
+                    seedColor: const Color(0xff14756c),
+                    brightness: brightness,
+                  ).copyWith(
+                    primary: const Color(0xff14756c),
+                    primaryContainer: const Color(0xff14756c),
+                    onPrimaryContainer: Colors.white,
+                  );
+              session.activeNativeAcpSessionKey = switch (selected) {
+                'native window' => nativeKey,
+                'native session' => orphanKey,
+                _ => null,
+              };
+              addTearDown(() => session.activeNativeAcpSessionKey = null);
+              await pumpScreen(
+                tester,
+                theme: ThemeData(colorScheme: scheme),
+                themeMode: brightness == Brightness.dark
+                    ? ThemeMode.dark
+                    : ThemeMode.light,
+                tmuxService: tmuxService,
+                monkeyMuxService: monkeyMuxService,
+                acpSessionManager: acpManager,
+              );
+              await tester.pump(const Duration(milliseconds: 100));
+              final buttons = [
+                find.byKey(const ValueKey('tmux-sidebar-window-0')),
+                find.byKey(const ValueKey('tmux-sidebar-window-1')),
+                find.byKey(
+                  ValueKey('monkeymux-sidebar-acp-${orphanKey.value}'),
+                ),
+              ];
+              final selectedIndex = [
+                'terminal',
+                'native window',
+                'native session',
+              ].indexOf(selected);
+              for (var index = 0; index < buttons.length; index++) {
+                final button = buttons[index];
+                final iconFinder = find.descendant(
+                  of: button,
+                  matching: find.byType(AgentToolIcon),
+                );
+                final icon = tester.widget<AgentToolIcon>(iconFinder);
+                final ink = tester.widget<Ink>(
+                  find.descendant(of: button, matching: find.byType(Ink)),
+                );
+                final background = (ink.decoration! as BoxDecoration).color!;
+                final luminances = [
+                  icon.color!.computeLuminance(),
+                  background.computeLuminance(),
+                ]..sort();
+                expect(
+                  (luminances.last + 0.05) / (luminances.first + 0.05),
+                  greaterThanOrEqualTo(3),
+                );
+                expect(
+                  icon.color,
+                  index == selectedIndex
+                      ? scheme.onPrimaryContainer
+                      : scheme.onSurfaceVariant,
+                );
+                final buttonRect = tester.getRect(button);
+                final number = find.byKey(
+                  index == 2
+                      ? ValueKey(
+                          'monkeymux-sidebar-acp-index-${orphanKey.value}',
+                        )
+                      : ValueKey('tmux-sidebar-window-index-$index'),
+                );
+                final numberRect = tester.getRect(number);
+                expect(buttonRect.intersect(numberRect), numberRect);
+                if (index > 0) {
+                  final badge = find.descendant(
+                    of: button,
+                    matching: find.byType(AcpNativeBadge),
+                  );
+                  final badgeRect = tester.getRect(badge);
+                  final iconRect = tester.getRect(iconFinder);
+                  expect(buttonRect.intersect(badgeRect), badgeRect);
+                  expect(badgeRect.center.dx, lessThan(iconRect.left));
+                  expect(badgeRect.center.dy, lessThan(iconRect.top));
+                  expect(badgeRect.overlaps(numberRect), isFalse);
+                }
+              }
+              final progressRect = tester.getRect(
+                find.byKey(
+                  ValueKey('monkeymux-sidebar-acp-progress-${orphanKey.value}'),
+                ),
+              );
+              final orphanRect = tester.getRect(buttons.last);
+              expect(orphanRect.intersect(progressRect), progressRect);
+              expect(
+                progressRect.overlaps(
+                  tester.getRect(
+                    find.byKey(
+                      ValueKey(
+                        'monkeymux-sidebar-acp-index-${orphanKey.value}',
+                      ),
+                    ),
+                  ),
+                ),
+                isFalse,
+              );
+              expect(tester.takeException(), isNull);
+            },
+            variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+          );
+        }
+      }
+    }
 
     testWidgets(
       'uses a collapsible tmux sidebar on wide terminal layouts',
