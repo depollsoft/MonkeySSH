@@ -186,8 +186,11 @@ func TestPrepareAgentLaunch(t *testing.T) {
 				t.Errorf("%s args = %q; want %q", tool, launch.args, want)
 			}
 			wantEnv := env
-			if tool == "opencode" {
+			switch tool {
+			case "opencode":
 				wantEnv = []string{"A=1", "OPENCODE_TUI_CONFIG=" + filepath.Join(directory, "monkeymux-opencode-tui.json")}
+			case "claude":
+				wantEnv = append(append([]string(nil), env...), "CLAUDE_CODE_SCROLL_SPEED=1")
 			}
 			if !reflect.DeepEqual(launch.env, wantEnv) || launch.replacedTUIConfig != (tool == "opencode") {
 				t.Errorf("%s environment = %q, replacement = %v", tool, launch.env, launch.replacedTUIConfig)
@@ -222,12 +225,12 @@ func TestAgentLaunchGeneratedFiles(t *testing.T) {
 	pluginURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(directory, "monkeymux-opencode-identity.mjs"))}).String()
 	urlJSON, _ := json.Marshal(pluginURL)
 	for relative, want := range map[string]string{
-		"monkeymux-claude-hooks.json":                        `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":` + commandJSON("claude") + `,"timeout":5}]}]}}`,
+		"monkeymux-claude-hooks.json":                        `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":` + commandJSON("claude") + `,"timeout":5}]}]},"wheelScrollAccelerationEnabled":false}`,
 		"monkeymux-copilot-plugin/plugin.json":               `{"name":"monkeymux-identity","version":"1.0.0"}`,
 		"monkeymux-copilot-plugin/hooks/hooks.json":          `{"hooks":{"sessionStart":[{"type":"command","bash":` + commandJSON("copilot") + `,"powershell":"exit 0","timeoutSec":5}]}}`,
 		"monkeymux-cursor-plugin/.cursor-plugin/plugin.json": `{"name":"monkeymux-identity","version":"1.0.0"}`,
 		"monkeymux-cursor-plugin/hooks/hooks.json":           `{"version":1,"hooks":{"sessionStart":[{"command":` + commandJSON("cursor-agent") + `,"timeout":5}]}}`,
-		"monkeymux-opencode-tui.json":                        `{"plugin":[` + string(urlJSON) + `]}`,
+		"monkeymux-opencode-tui.json":                        `{"plugin":[` + string(urlJSON) + `],"scroll_acceleration":{"enabled":false},"scroll_speed":1}`,
 	} {
 		data, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(relative)))
 		if err != nil {
@@ -420,7 +423,7 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	t.Setenv("MONKEYMUX_AGENT_PID", "stale")
 	t.Setenv("OPENCODE_TUI_CONFIG", "custom")
 	stub := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$$\" \"$MONKEYMUX_AGENT_PID\" \"$MONKEYMUX_PANE_TTY\" \"$OPENCODE_TUI_CONFIG\" \"$@\"\n" +
+		"printf '%s\\n' \"$$\" \"$MONKEYMUX_AGENT_PID\" \"$MONKEYMUX_PANE_TTY\" \"$OPENCODE_TUI_CONFIG\" \"${CLAUDE_CODE_SCROLL_SPEED-unset}\" \"$@\"\n" +
 		"cat\nexit 23\n"
 	for _, tool := range []string{"claude", "codex", "opencode", "copilot", "cursor-agent", "unknown"} {
 		if err := os.WriteFile(filepath.Join(bin, tool), []byte(stub), 0o700); err != nil {
@@ -465,6 +468,13 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 			} else if lines[3] != "custom" || stderr.Len() != 0 {
 				t.Fatalf("%s changed TUI config or wrote stderr: %q, %q", tool, output, stderr.String())
 			}
+			wantSpeed := "unset"
+			if tool == "claude" {
+				wantSpeed = "1"
+			}
+			if lines[4] != wantSpeed {
+				t.Fatalf("%s scroll speed = %q, want %q", tool, lines[4], wantSpeed)
+			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -476,16 +486,53 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeLaunchScrollSpeed(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{name: "absent", env: []string{"A=1"}, want: []string{"A=1", "CLAUDE_CODE_SCROLL_SPEED=1"}},
+		{name: "explicit", env: []string{"CLAUDE_CODE_SCROLL_SPEED=4", "A=1"}, want: []string{"CLAUDE_CODE_SCROLL_SPEED=4", "A=1"}},
+		{name: "explicitly empty", env: []string{"CLAUDE_CODE_SCROLL_SPEED="}, want: []string{"CLAUDE_CODE_SCROLL_SPEED="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launch, err := prepareAgentLaunch("claude", nil, tc.env, "/monkeymux")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(launch.env, tc.want) {
+				t.Fatalf("environment = %q, want %q", launch.env, tc.want)
+			}
+		})
+	}
+	// Other tools must not inherit the Claude-specific default.
+	for _, tool := range []string{"codex", "opencode", "copilot", "cursor-agent"} {
+		launch, err := prepareAgentLaunch(tool, nil, []string{"A=1"}, "/monkeymux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range launch.env {
+			if strings.HasPrefix(entry, "CLAUDE_CODE_SCROLL_SPEED=") {
+				t.Fatalf("%s environment = %q", tool, launch.env)
+			}
+		}
+	}
+}
+
 func TestPrepareOpenCodeTUIConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name, source string
 		set, merged  bool
+		wantSpeed    string
 	}{
-		{name: "unset"},
-		{name: "merged", set: true, merged: true, source: `{"theme":"custom","keybinds":{"leader":"ctrl+a"},"large":9007199254740993,"plugin":["user-plugin",["configured-plugin",{"enabled":true}]]}`},
-		{name: "unreadable", set: true},
-		{name: "array", set: true, source: `[]`},
-		{name: "null", set: true, source: `null`},
+		{name: "unset", wantSpeed: "1"},
+		{name: "merged", set: true, merged: true, wantSpeed: "1", source: `{"theme":"custom","keybinds":{"leader":"ctrl+a"},"large":9007199254740993,"plugin":["user-plugin",["configured-plugin",{"enabled":true}]]}`},
+		{name: "scrolling configured", set: true, merged: true, wantSpeed: "5", source: `{"scroll_speed":5,"scroll_acceleration":{"enabled":true},"plugin":["user-plugin",["configured-plugin",{"enabled":true}]]}`},
+		{name: "unreadable", set: true, wantSpeed: "1"},
+		{name: "array", set: true, wantSpeed: "1", source: `[]`},
+		{name: "null", set: true, wantSpeed: "1", source: `null`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -528,7 +575,8 @@ func TestPrepareOpenCodeTUIConfig(t *testing.T) {
 				var original map[string]json.RawMessage
 				_ = json.Unmarshal([]byte(tc.source), &original)
 				for key, value := range original {
-					if key != "plugin" && !bytes.Equal(config[key], value) {
+					// scroll_acceleration is deliberately overridden.
+					if key != "plugin" && key != "scroll_acceleration" && !bytes.Equal(config[key], value) {
 						t.Errorf("changed %s: got %s, want %s", key, config[key], value)
 					}
 				}
@@ -540,6 +588,12 @@ func TestPrepareOpenCodeTUIConfig(t *testing.T) {
 			}
 			if len(plugins) != wantCount {
 				t.Fatalf("plugin count = %d, want %d", len(plugins), wantCount)
+			}
+			if got := string(config["scroll_acceleration"]); got != `{"enabled":false}` {
+				t.Errorf("scroll_acceleration = %s; want {\"enabled\":false}", got)
+			}
+			if got := string(config["scroll_speed"]); got != tc.wantSpeed {
+				t.Errorf("scroll_speed = %s; want %s", got, tc.wantSpeed)
 			}
 			var pluginURL string
 			_ = json.Unmarshal(plugins[len(plugins)-1], &pluginURL)
