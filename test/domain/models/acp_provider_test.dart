@@ -313,11 +313,15 @@ void main() {
         '--prefer-offline',
         'agy-acp@0.5.2',
       ]);
-      expect(
-        acpPiProvider.executableProbe.candidateExecutableNames,
-        contains('pi-acp'),
-      );
-      expect(acpPiProvider.launchCommand.argv, ['pi-acp']);
+      expect(acpPiProvider.executableProbe.candidateExecutableNames, ['npx']);
+      expect(acpPiProvider.launchCommand.argv, [
+        'npx',
+        '--yes',
+        '--prefer-offline',
+        '--allow-remote=all',
+        'https://github.com/depollsoft/pi-acp/archive/8e7889c39ac550d36c72e15e17f7bf7338bbfaac.tar.gz',
+      ]);
+      expect(acpPiProvider.adapterFallbackCommand, acpPiProvider.launchCommand);
       expect(acpHermesProvider.launchCommand.argv, ['hermes', 'acp']);
       expect(
         acpHermesProvider.launchProfileSupport?.discoveryKind,
@@ -385,6 +389,23 @@ void main() {
           ),
         ),
         isTrue,
+      );
+      expect(
+        isApprovedAcpBuiltinLaunchOverride(
+          acpPiProvider,
+          AcpLaunchCommand(
+            executable: '/opt/homebrew/bin/npx',
+            arguments: acpPiProvider.launchCommand.arguments,
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        isApprovedAcpBuiltinLaunchOverride(
+          acpPiProvider,
+          AcpLaunchCommand(executable: '/opt/homebrew/bin/pi-acp'),
+        ),
+        isFalse,
       );
       expect(
         isApprovedAcpBuiltinLaunchOverride(

@@ -28,6 +28,7 @@ final class AcpToolPermissionPrompt extends AcpPermissionPrompt {
     required this.onSelect,
     required this.onCancel,
     this.contextLine,
+    this.isUserChoice = false,
   });
 
   @override
@@ -38,6 +39,9 @@ final class AcpToolPermissionPrompt extends AcpPermissionPrompt {
 
   /// A short safe tool/path context line.
   final String? contextLine;
+
+  /// Whether this request represents a direct user choice rather than access.
+  final bool isUserChoice;
 
   /// The exact options offered by the agent.
   final List<AcpPermissionOption> options;
@@ -93,14 +97,29 @@ AcpToolPermissionPrompt acpToolPromptFromSession(
   required Future<void> Function(String optionId) onSelect,
   required Future<void> Function() onCancel,
   String? toolTitle,
-}) => AcpToolPermissionPrompt(
-  stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
-  title: toolTitle == null ? 'Allow this tool action?' : 'Allow $toolTitle?',
-  contextLine: toolTitle ?? 'Tool ${pending.toolCallId}',
-  options: pending.options,
-  onSelect: onSelect,
-  onCancel: onCancel,
-);
+}) {
+  final resolvedTitle = toolTitle ?? pending.toolTitle;
+  final isPiUiRequest = pending.toolCallId.startsWith('pi-ui-');
+  final String title;
+  if (isPiUiRequest) {
+    title = resolvedTitle ?? 'Choose an option';
+  } else if (resolvedTitle == null) {
+    title = 'Allow this tool action?';
+  } else {
+    title = 'Allow $resolvedTitle?';
+  }
+  return AcpToolPermissionPrompt(
+    stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
+    title: title,
+    contextLine: isPiUiRequest
+        ? null
+        : resolvedTitle ?? 'Tool ${pending.toolCallId}',
+    isUserChoice: isPiUiRequest,
+    options: pending.options,
+    onSelect: onSelect,
+    onCancel: onCancel,
+  );
+}
 
 /// Renders pending [AcpPermissionPrompt]s as an anchored action surface.
 ///
@@ -211,7 +230,7 @@ class _PermissionCard extends StatelessWidget {
         Row(
           children: [
             Icon(
-              Icons.shield_outlined,
+              prompt.isUserChoice ? Icons.tune : Icons.shield_outlined,
               size: 20,
               color: theme.colorScheme.primary,
             ),
@@ -247,7 +266,7 @@ class _PermissionCard extends StatelessWidget {
               ),
             TextButton(
               onPressed: busy ? null : () => onResolve(prompt.onCancel),
-              child: const Text('Cancel request'),
+              child: Text(prompt.isUserChoice ? 'Cancel' : 'Cancel request'),
             ),
           ],
         ),

@@ -120,11 +120,11 @@ ACP capabilities, and failures. Capabilities are negotiated at runtime, so an
 empty cell is a test result—not an assumption. Authentication and model access
 are the only steps that may require provider credentials.
 
-| Remote OS | Copilot CLI (`copilot --acp --no-color --no-auto-update --log-level error`) | OpenCode (`opencode acp --log-level ERROR`) | Pi (`pi-acp`) | Expected differences to record |
+| Remote OS | Copilot CLI (`copilot --acp --no-color --no-auto-update --log-level error`) | OpenCode (`opencode acp --log-level ERROR`) | Pi (MonkeySSH-pinned `pi-acp` via `npx`) | Expected differences to record |
 | --- | --- | --- | --- | --- |
-| macOS | Initialize, login handoff, new/list/load/resume, text/image/resource, permission, cancel, reconnect | Initialize, `opencode auth login`, new/list/load/resume, text/image/resource, permission, cancel, reconnect | Detect installed `pi-acp`; test text/image/tool output, slash completion, queueing, cancel, and reconnect | Homebrew/npm PATH in SSH exec shells; provider-specific slash commands, modes/models, session titles, and permission wording |
-| Linux | Same flow; test package and npm installs | Same flow; test installer and npm installs | Same flow; verify standalone adapter installation and PATH | Distribution shell/PATH, sandbox/tool availability, notification behavior when the phone backgrounds |
-| Windows | Test native OpenSSH + PowerShell; repeat in WSL when used | Test native OpenSSH + PowerShell; repeat in WSL when used | Test native executable resolution and WSL separately | Native path/quoting and executable suffixes versus POSIX paths in WSL; some versions may advertise different load/resume, image, or embedded-resource capabilities |
+| macOS | Initialize, login handoff, new/list/load/resume, text/image/resource, permission, cancel, reconnect | Initialize, `opencode auth login`, new/list/load/resume, text/image/resource, permission, cancel, reconnect | Resolve `npx`; test text/image/tool output, extension slash commands such as `/wt create`, queueing, cancel, and reconnect | Homebrew/npm PATH in SSH exec shells; provider-specific slash commands, modes/models, session titles, and permission wording |
+| Linux | Same flow; test package and npm installs | Same flow; test installer and npm installs | Same flow; verify the pinned adapter fetches once and is reused from the npm cache | Distribution shell/PATH, sandbox/tool availability, notification behavior when the phone backgrounds |
+| Windows | Test native OpenSSH + PowerShell; repeat in WSL when used | Test native OpenSSH + PowerShell; repeat in WSL when used | Test Node/`npx` resolution and WSL separately | Native path/quoting and executable suffixes versus POSIX paths in WSL; some versions may advertise different load/resume, image, or embedded-resource capabilities |
 
 For every cell:
 
