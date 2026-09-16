@@ -234,9 +234,106 @@ void main() {
       expect(parseMuseSessionMetadata('{broken'), isNull);
     },
   );
+  for (final length in [0, 199, 200, 201, 500]) {
+    test('Muse log summary truncates $length characters safely', () {
+      final summary = 'x' * length;
+      final metadata = parseMuseSessionMetadata(
+        [
+          jsonEncode({
+            'payload_type': 'runtime.session.metadata',
+            'stream': {'id': id},
+            'payload': {
+              'record': {'workspace_root': '/work'},
+            },
+          }),
+          jsonEncode({
+            'payload_type': 'runtime.user_intent.accepted',
+            'payload': {
+              'refill_blocks': [
+                {'text': summary},
+              ],
+            },
+          }),
+        ].join('\n'),
+      )!;
+      if (length > 0) {
+        expect(metadata.summary, 'x' * (length > 200 ? 200 : length));
+      } else {
+        expect(metadata.summary, isNotEmpty);
+      }
+    });
+  }
+
   final powerShell = Platform.isWindows
       ? 'powershell.exe'
       : Platform.environment['MONKEYSSH_TEST_POWERSHELL'];
+
+  test(
+    'Muse prerequisite probe honors an executable override on POSIX',
+    () async {
+      final temp = await Directory.systemTemp.createTemp('muse probe ');
+      addTearDown(() => temp.delete(recursive: true));
+      final binary = File('${temp.path}/custom muse');
+      await binary.writeAsString('#!/bin/sh\nexit 99\n');
+      await Process.run('chmod', ['+x', binary.path]);
+      final command = buildMonkeyMuxAcpExecutableProbeCommand(const ['muse']);
+      for (final valid in [true, false]) {
+        final result = await Process.run(
+          '/bin/bash',
+          ['-c', command],
+          environment: {
+            'HOME': temp.path,
+            'SHELL': '/bin/bash',
+            'MUSE_CODE_EXECUTABLE': valid
+                ? binary.path
+                : '${temp.path}/missing',
+          },
+        );
+        expect(result.exitCode, 0);
+        final found = parseMonkeyMuxAcpExecutableProbeOutput(
+          result.stdout as String,
+          const ['muse'],
+          dependencyNames: const {'muse'},
+        );
+        expect(found, valid ? {'muse': binary.path} : isEmpty);
+      }
+    },
+    skip: Platform.isWindows ? 'Uses POSIX executable lookup' : false,
+  );
+
+  test(
+    'PowerShell Muse prerequisite probe honors an executable override',
+    () async {
+      final script = buildMonkeyMuxAcpWindowsExecutableProbeScript(const [
+        'muse',
+      ]).replaceFirst(powerShellProfilePathPreamble, '');
+      for (final valid in [true, false]) {
+        final result = await Process.run(
+          powerShell!,
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-EncodedCommand',
+            encodePowerShellCommand(script),
+          ],
+          environment: {
+            'MUSE_CODE_EXECUTABLE': valid
+                ? powerShell
+                : 'missing-muse-test-executable',
+          },
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        final found = parseMonkeyMuxAcpExecutableProbeOutput(
+          result.stdout as String,
+          const ['muse'],
+          dependencyNames: const {'muse'},
+        );
+        expect(found.containsKey('muse'), valid);
+      }
+    },
+    skip: powerShell == null ? 'Requires PowerShell' : false,
+  );
+
   for (final scenario in ['shim', 'native', 'override', 'invalid version']) {
     test(
       'Windows Muse chat resolves $scenario executable',

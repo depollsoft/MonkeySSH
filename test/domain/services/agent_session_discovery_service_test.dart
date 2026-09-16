@@ -2807,9 +2807,9 @@ branch refs/heads/main
       },
     );
 
-    for (final indexAvailable in [false, true]) {
+    for (final indexTitle in [null, '', 'Renamed session']) {
       test(
-        'Muse discovery reads fresh logs with index=$indexAvailable',
+        'Muse discovery reads fresh logs with indexTitle=$indexTitle',
         () async {
           final client = _MockSshClient();
           const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
@@ -2819,12 +2819,12 @@ branch refs/heads/main
             commands.add(command);
             if (command.contains('session-index.db')) {
               return _buildExecSession(
-                stdout: indexAvailable
+                stdout: indexTitle != null
                     ? jsonEncode([
                         {
                           'session_id': id,
                           'workspace_root': '/work/project',
-                          'title': 'Renamed session',
+                          'title': indexTitle,
                           'updated_at_us': 1700000000000000,
                         },
                       ])
@@ -2875,7 +2875,7 @@ branch refs/heads/main
           expect(result.sessions.single.sessionId, id);
           expect(
             result.sessions.single.summary,
-            indexAvailable ? 'Renamed session' : 'First prompt',
+            indexTitle == 'Renamed session' ? indexTitle : 'First prompt',
           );
           expect(
             discovery.buildResumeCommand(result.sessions.single),

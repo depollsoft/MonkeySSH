@@ -135,6 +135,8 @@ String buildMonkeyMuxAcpExecutableProbeCommand(Iterable<String> executables) {
   final inner =
       'for c in ${names.join(' ')}; do '
       r'p=$(command -v "$c" 2>/dev/null || true); '
+      r'if [ "$c" = muse ] && [ -n "${MUSE_CODE_EXECUTABLE:-}" ]; then '
+      r'p=$(command -v "$MUSE_CODE_EXECUTABLE" 2>/dev/null || true); fi; '
       r'case "$p" in /*) printf "%s'
       '$_acpExecutableProbeSeparator'
       r'%s\n" "$c" "$p";; esac; '
@@ -156,7 +158,9 @@ String buildMonkeyMuxAcpWindowsExecutableProbeScript(
     powerShellProfilePathPreamble,
     '\$__flNames=@($quotedNames);',
     r'foreach($__flName in $__flNames){',
-    r'$__flCmd=Get-Command -Name $__flName -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;',
+    r'$__flLookup=$__flName;',
+    r"if($__flName -eq 'muse' -and ![string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){$__flLookup=$env:MUSE_CODE_EXECUTABLE};",
+    r'$__flCmd=Get-Command -Name $__flLookup -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;',
     r'if($__flCmd -eq $null){continue};',
     r'$__flPath=$__flCmd.Path;',
     r'if([string]::IsNullOrWhiteSpace($__flPath)){$__flPath=$__flCmd.Source};',
@@ -169,10 +173,14 @@ String buildMonkeyMuxAcpWindowsExecutableProbeScript(
 }
 
 /// Parses executable-probe output into allowlisted absolute paths.
+///
+/// [dependencyNames] are presence checks, never adapter launch overrides. Their
+/// executable basenames may differ when the provider supports an explicit path.
 Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
   String output,
-  Iterable<String> requested,
-) {
+  Iterable<String> requested, {
+  Set<String> dependencyNames = const {},
+}) {
   final allowed = _validatedExecutableProbeNames(requested).toSet();
   final resolved = <String, String>{};
   for (final line in output.split(RegExp(r'[\r\n]+'))) {
@@ -186,7 +194,10 @@ Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
     }
     var basename = path.split('/').last.toLowerCase();
     basename = basename.replaceFirst(RegExp(r'\.(?:exe|cmd|bat|ps1|com)$'), '');
-    if (basename != fields.first.toLowerCase()) continue;
+    if (basename != fields.first.toLowerCase() &&
+        !dependencyNames.contains(fields.first)) {
+      continue;
+    }
     resolved[fields.first] = fields.last;
   }
   return Map.unmodifiable(resolved);

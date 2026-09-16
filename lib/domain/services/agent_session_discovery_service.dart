@@ -945,7 +945,10 @@ ToolSessionInfo? parseMuseSessionMetadata(String raw, {DateTime? modifiedAt}) {
       {
         'session_id': id,
         'workspace_root': cwd,
-        'title': summary?.substring(0, summary.length.clamp(0, 200)),
+        'title': summary?.substring(
+          0,
+          summary.length > 200 ? 200 : summary.length,
+        ),
         'updated_at_us': modifiedAt?.microsecondsSinceEpoch,
       },
     ]),
@@ -3270,7 +3273,10 @@ class AgentSessionDiscoveryService {
               toolName: 'Muse Code',
               sessionId: indexed.sessionId,
               workingDirectory: metadata.workingDirectory,
-              summary: indexed.summary,
+              summary:
+                  indexed.summary == _truncateSessionIdValue(indexed.sessionId)
+                  ? metadata.summary
+                  : indexed.summary,
               lastActive:
                   metadata.lastActive != null &&
                       (indexed.lastActive == null ||

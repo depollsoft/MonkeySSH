@@ -670,6 +670,24 @@ void main() {
     );
   });
 
+  test('only dependency paths can use a different executable basename', () {
+    const output =
+        'muse\u001f/tools/custom-muse\n'
+        'npx\u001f/tools/unapproved-adapter\n';
+    expect(
+      parseMonkeyMuxAcpExecutableProbeOutput(output, const ['muse', 'npx']),
+      isEmpty,
+    );
+    expect(
+      parseMonkeyMuxAcpExecutableProbeOutput(
+        output,
+        const ['muse', 'npx'],
+        dependencyNames: const {'muse'},
+      ),
+      {'muse': '/tools/custom-muse'},
+    );
+  });
+
   test('starts, lists, statuses, and stops bridges on POSIX', () async {
     final client = _MockSshClient();
     final commands = <String>[];

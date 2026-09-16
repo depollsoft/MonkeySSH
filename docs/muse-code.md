@@ -14,7 +14,9 @@ that directory in its remote PATH. WSL over SSH follows the Linux path.
 Terminal launches support additional arguments and YOLO mode. Resume uses
 `muse resume <session-id>`; continuing uses `muse resume --last`. MonkeyMux
 detects the actual versioned process and binds its root session log for window
-identity and helper-restart recovery. Nested worker logs are excluded.
+identity and helper-restart recovery. MonkeyMux 0.1.202 upgrades older helpers
+to include Muse support. Nested worker logs are excluded, and unchanged log
+metadata is cached between discovery polls.
 
 Recent sessions read bounded log heads, plus the local index on POSIX, under
 `${XDG_DATA_HOME:-$HOME/.local/share}/muse`. Log discovery also finds sessions
@@ -25,7 +27,8 @@ Native chat uses the separate community
 [`@bex-co/muse-code-acp` adapter](https://github.com/bex-co/muse-code-acp), with an
 on-demand fallback pinned to 0.6.0. Install the adapter from Agent Management to
 avoid the on-demand download. It requires Node.js 22 or newer and Muse installed
-separately. On Windows, MonkeySSH resolves the native executable selected by
+separately. MonkeySSH checks for Muse before offering the installed adapter or
+the npx fallback, honoring a configured `MUSE_CODE_EXECUTABLE` path. On Windows, MonkeySSH resolves the native executable selected by
 the official launcher for the adapter, preserving an explicit
 `MUSE_CODE_EXECUTABLE` override. This avoids passing `muse.cmd` to Node
 subprocess APIs that require an executable. `muse serve` speaks MSP, so it

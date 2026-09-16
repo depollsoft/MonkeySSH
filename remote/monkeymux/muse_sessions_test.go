@@ -82,3 +82,59 @@ func TestMuseSessionStoreAndExactBinding(t *testing.T) {
 		t.Fatalf("mismatched stream accepted: %+v", got)
 	}
 }
+
+func TestMuseMetadataCacheTracksChangesWithoutReopeningHistory(t *testing.T) {
+	root := t.TempDir()
+	cache := museSessionCache{}
+	reads := 0
+	read := func(path, id string) (agentSessionCandidate, bool) {
+		reads++
+		return readMuseSessionMetadata(path, id)
+	}
+	write := func(id, cwd string) string {
+		t.Helper()
+		path := filepath.Join(root, "2026", "09", "16", id, "session.jsonl")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(map[string]any{
+			"payload_type": "runtime.session.metadata", "stream": map[string]string{"id": id},
+			"payload": map[string]any{"record": map[string]string{"workspace_root": cwd}},
+		})
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	const id = "01a0ac67-804e-7f22-8d0d-9a4e2ea626c9"
+	const secondID = "01a0ac67-804e-7f22-8d0d-9a4e2ea626c0"
+	path := write(id, "/project")
+	for i := 0; i < 3; i++ {
+		if got := cache.read(root, read); len(got) != 1 || got[0].cwd != "/project" {
+			t.Fatalf("%+v", got)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("unchanged log read %d times", reads)
+	}
+	write(id, "/updated-project")
+	write(secondID, "/other")
+	if got := cache.read(root, read); len(got) != 2 || reads != 3 {
+		t.Fatalf("reads=%d candidates=%+v", reads, got)
+	}
+	if cache.entries[path].candidate.cwd != "/updated-project" {
+		t.Fatal("changed metadata not refreshed")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.read(root, read); len(got) != 1 || reads != 3 {
+		t.Fatalf("reads=%d candidates=%+v", reads, got)
+	}
+	if _, ok := cache.entries[path]; ok {
+		t.Fatal("deleted entry retained")
+	}
+	if got := cache.read(t.TempDir(), read); len(got) != 0 || len(cache.entries) != 0 {
+		t.Fatal("old root retained")
+	}
+}

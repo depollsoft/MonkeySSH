@@ -476,16 +476,20 @@ void main() {
         'does not change the probe', () {
       final mutableCandidates = ['agent'];
       final mutableVersionArgs = ['--version'];
+      final mutableRequirements = ['muse'];
       final probe = AcpExecutableProbe(
         candidateExecutableNames: mutableCandidates,
         versionArguments: mutableVersionArgs,
+        requiredExecutableNames: mutableRequirements,
       );
 
       mutableCandidates.add('other-agent');
       mutableVersionArgs.add('--extra');
+      mutableRequirements.add('other');
 
       expect(probe.candidateExecutableNames, ['agent']);
       expect(probe.versionArguments, ['--version']);
+      expect(probe.requiredExecutableNames, ['muse']);
     });
   });
 

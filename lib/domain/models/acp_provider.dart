@@ -281,17 +281,23 @@ class AcpLaunchCommand {
 class AcpExecutableProbe {
   /// Creates a new [AcpExecutableProbe].
   ///
-  /// [candidateExecutableNames] and [versionArguments] are defensively
+  /// [candidateExecutableNames], [versionArguments], and
+  /// [requiredExecutableNames] are defensively
   /// copied so later mutations to a caller-owned list can never change this
   /// probe after construction.
   AcpExecutableProbe({
     required List<String> candidateExecutableNames,
     List<String> versionArguments = const ['--version'],
+    List<String> requiredExecutableNames = const [],
   }) : candidateExecutableNames = List.unmodifiable(candidateExecutableNames),
-       versionArguments = List.unmodifiable(versionArguments);
+       versionArguments = List.unmodifiable(versionArguments),
+       requiredExecutableNames = List.unmodifiable(requiredExecutableNames);
 
   /// Executable names or aliases that may resolve to this provider on PATH.
   final List<String> candidateExecutableNames;
+
+  /// Commands needed by both the installed adapter and its fallback.
+  final List<String> requiredExecutableNames;
 
   /// Arguments used to probe the resolved executable's version.
   final List<String> versionArguments;
@@ -304,12 +310,17 @@ class AcpExecutableProbe {
             candidateExecutableNames,
             other.candidateExecutableNames,
           ) &&
-          _listEquality.equals(versionArguments, other.versionArguments);
+          _listEquality.equals(versionArguments, other.versionArguments) &&
+          _listEquality.equals(
+            requiredExecutableNames,
+            other.requiredExecutableNames,
+          );
 
   @override
   int get hashCode => Object.hash(
     _listEquality.hash(candidateExecutableNames),
     _listEquality.hash(versionArguments),
+    _listEquality.hash(requiredExecutableNames),
   );
 
   @override
@@ -745,6 +756,7 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
   launchCommand: AcpLaunchCommand(executable: 'muse-code-acp'),
   executableProbe: AcpExecutableProbe(
     candidateExecutableNames: const ['muse-code-acp'],
+    requiredExecutableNames: const ['muse'],
   ),
   terminalAuthCommand: AcpLaunchCommand(
     executable: 'muse',
