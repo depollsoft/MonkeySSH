@@ -181,22 +181,152 @@ func TestWheelGovernorEncodingsAndModifiers(t *testing.T) {
 }
 
 func TestWheelGovernorUnrecognizedReports(t *testing.T) {
+	// Complete reports that are not a governed wheel event, plus malformed SGR
+	// that will never complete into one. All pass through byte for byte and
+	// leave the governor untouched, including its carry buffer.
 	for _, data := range []string{
-		"\x1b", "\x1b[", "\x1b[<", "\x1b[<64;", "\x1b[<64;12;34",
-		"\x1b[M", "\x1b[M`", "\x1b[M`x",
 		"\x1b[M" + string([]byte{32 + 66, 27, '['}),
 		"\x1b[M" + string([]byte{32 + 67, 200, 255}),
 		"\x1b[M" + string([]byte{32, 40, 50}),
 		"\x1b[M" + string([]byte{32 + 32, 40, 50}),
 		"\x1b[<999999999999999999999999;1;2M", "\x1b[<64;;2M",
+		"\x1b[A", "\x1bOP",
 	} {
 		g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
 		if got := string(g.process([]byte(data), time.Unix(100, 0))); got != data {
 			t.Errorf("input=%q output=%q", data, got)
 		}
-		if g.owed != 0 || !g.last.IsZero() {
+		if g.owed != 0 || !g.last.IsZero() || len(g.carry) != 0 {
 			t.Errorf("non-wheel report changed state: %+v", g)
 		}
+	}
+}
+
+func TestWheelGovernorCarriesIncompletePrefix(t *testing.T) {
+	// A trailing run that could still become a wheel report is withheld, not
+	// emitted, so the event is not lost when its tail arrives next chunk.
+	for _, prefix := range []string{
+		"\x1b", "\x1b[", "\x1b[<", "\x1b[<64;", "\x1b[<64;12;34",
+		"\x1b[M", "\x1b[M`", "\x1b[M`x",
+	} {
+		g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+		if got := string(g.process([]byte("ab"+prefix), time.Unix(100, 0))); got != "ab" {
+			t.Errorf("prefix=%q output=%q, want leading bytes only", prefix, got)
+		}
+		if string(g.carry) != prefix {
+			t.Errorf("prefix=%q carry=%q, want held", prefix, g.carry)
+		}
+		if g.owed != 0 {
+			t.Errorf("prefix=%q accumulated debt: %d", prefix, g.owed)
+		}
+	}
+}
+
+func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
+	now := time.Unix(100, 0)
+	// One wheel-up split into two reads is reassembled and governed, not lost.
+	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	if got := string(g.process([]byte("\x1b[<64;12"), now)); got != "" {
+		t.Fatalf("held half output=%q, want empty", got)
+	}
+	if got := string(g.process([]byte(";34M"), now)); got != wheelUp {
+		t.Fatalf("completed output=%q, want one wheel report", got)
+	}
+	if g.owed != 0 {
+		t.Fatalf("owed=%d, want 0", g.owed)
+	}
+	// Split at the very first byte, and drive the TUI to confirm it moves
+	// exactly one row rather than leaving acceleration active for the event.
+	g.reset(wheelAccelerationProfiles["antigravity"])
+	tui := wheelTestTUI{}
+	tui.receive(t, g.process([]byte("\x1b"), now), now)
+	tui.receive(t, g.process([]byte("[<64;12;34M"), now), now)
+	if tui.rows != -1 || g.owed != 0 { // One wheel-up moves one row up.
+		t.Fatalf("rows=%d owed=%d, want -1 and 0", tui.rows, g.owed)
+	}
+}
+
+func TestWheelGovernorDropsReorderedDebt(t *testing.T) {
+	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	now := time.Unix(100, 0)
+	// A fast pair leaves one row owed for the flush.
+	g.process([]byte(wheelUp+wheelUp), now)
+	if g.owed == 0 {
+		t.Fatal("expected pending debt after a fast pair")
+	}
+	// A keystroke before the flush drops that debt so no wheel report is
+	// written after the keystroke.
+	if got := string(g.process([]byte("\r"), now.Add(10*time.Millisecond))); got != "\r" {
+		t.Fatalf("keystroke output=%q", got)
+	}
+	if g.owed != 0 {
+		t.Fatalf("owed=%d after keystroke, want 0", g.owed)
+	}
+	if got := string(g.drain(now.Add(time.Second))); got != "" {
+		t.Fatalf("flush wrote %q after keystroke, want nothing", got)
+	}
+}
+
+func TestWheelGovernorTakeOpaque(t *testing.T) {
+	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	now := time.Unix(100, 0)
+	g.process([]byte(wheelUp+wheelUp+"\x1b[<64;1"), now)
+	if g.owed == 0 || len(g.carry) == 0 {
+		t.Fatalf("setup: owed=%d carry=%q", g.owed, g.carry)
+	}
+	paste := "\x1b[200~" + wheelUp + "text\x1b[201~"
+	if got := string(g.takeOpaque([]byte(paste))); got != "\x1b[<64;1"+paste {
+		t.Fatalf("opaque output=%q", got)
+	}
+	if g.owed != 0 || len(g.carry) != 0 {
+		t.Fatalf("opaque left state: owed=%d carry=%q", g.owed, g.carry)
+	}
+}
+
+func TestWheelReportPrefixLen(t *testing.T) {
+	for _, c := range []struct {
+		data string
+		want int
+	}{
+		{"\x1b", 1}, {"\x1b[", 2}, {"\x1b[<", 3}, {"\x1b[<64;12", 8},
+		{"\x1b[M", 3}, {"\x1b[M`", 4}, {"\x1b[M`x", 5},
+		{"", 0}, {"\x1b[A", 0}, {"\x1bO", 0}, {"\x1b[2", 0},
+		{wheelUp, 0}, {"\x1b[M`xy", 0}, {"\x1b[<64;1;2m", 0},
+		{"\x1b[<" + strings.Repeat("9", 40), 0}, // Over the length bound.
+	} {
+		if got := wheelReportPrefixLen([]byte(c.data)); got != c.want {
+			t.Errorf("wheelReportPrefixLen(%q)=%d, want %d", c.data, got, c.want)
+		}
+	}
+}
+
+func TestWriteWindowWheelGovernorPasteOpaque(t *testing.T) {
+	clock := installWheelTestClock(t)
+	server, window, pty := newWheelTestWindow("agy", true)
+	if err := server.writeWindowData(window.id, []byte(strings.Repeat(wheelUp, 6)), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if window.wheelGovernor.owed == 0 || len(clock.timers) == 0 {
+		t.Fatal("setup expected pending debt and a scheduled flush")
+	}
+	pty.Reset()
+	paste := "\x1b[200~" + wheelUp + "hello\x1b[201~"
+	if err := server.writeWindowData(window.id, []byte(paste), true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := pty.String(); got != paste {
+		t.Fatalf("paste PTY=%q, want verbatim", got)
+	}
+	if window.wheelGovernor.owed != 0 {
+		t.Fatalf("owed=%d after paste, want 0", window.wheelGovernor.owed)
+	}
+	pty.Reset()
+	for _, tm := range clock.timers {
+		clock.now = tm.due
+		tm.action()
+	}
+	if got := pty.String(); got != "" {
+		t.Fatalf("a flush wrote %q after paste, want nothing", got)
 	}
 }
 
@@ -336,12 +466,13 @@ func TestWheelGovernorFlushInvalidation(t *testing.T) {
 				t.Fatalf("invalidated flush wrote %q", got[len(before):])
 			}
 			if change == "stale" {
-				if window.wheelGovernor.owed != -1 || len(clock.timers) != 2 {
-					t.Fatal("stale callback disturbed pending flush")
-				}
-				clock.timers[1].action()
-				if got := pty.String(); got != before+wheelUp {
-					t.Fatalf("current flush PTY=%q, want %q", got, before+wheelUp)
+				// A keystroke arriving before the flush drops the pending row,
+				// so no wheel report lands after it, and schedules no
+				// replacement; the earlier timer is left stale and, fired
+				// above, wrote nothing.
+				if window.wheelGovernor.owed != 0 || len(clock.timers) != 1 {
+					t.Fatalf("keystroke debt handling: owed=%d timers=%d",
+						window.wheelGovernor.owed, len(clock.timers))
 				}
 			}
 		})
@@ -400,14 +531,19 @@ func TestWheelGovernorFlushRearmsSynchronously(t *testing.T) {
 		profile: wheelAccelerationProfiles["antigravity"],
 		last:    clock.now, count: 121, owed: 11, template: []byte(wheelUp),
 	}
-	if err := server.writeWindowInput(window.id, []byte("x"), false); err != nil {
-		t.Fatal(err)
+	server.mu.Lock()
+	window.inputMu.Lock()
+	schedule := server.prepareWheelFlushLocked(window)
+	window.inputMu.Unlock()
+	server.mu.Unlock()
+	if schedule != nil {
+		schedule()
 	}
 	if flushes < 2 || window.wheelGovernor.owed != 0 {
 		t.Fatalf("flushes=%d owed=%d, want multiple flushes and zero debt", flushes, window.wheelGovernor.owed)
 	}
-	if !strings.HasPrefix(pty.String(), "x"+wheelDown) {
-		t.Fatalf("flush lost keystroke order or debt direction: %q", pty.String())
+	if !strings.HasPrefix(pty.String(), wheelDown) {
+		t.Fatalf("flush lost debt direction: %q", pty.String())
 	}
 }
 

@@ -11667,7 +11667,14 @@ func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste
 		window.wheelGovernor.reset(profile)
 	}
 	if !response {
-		data = window.wheelGovernor.process(data, wheelGovernorNow())
+		if bracketedPaste {
+			// A paste must reach the pty untouched; treat it as opaque so the
+			// governor neither rewrites wheel-shaped bytes in the payload nor
+			// lets a pending flush split it.
+			data = window.wheelGovernor.takeOpaque(data)
+		} else {
+			data = window.wheelGovernor.process(data, wheelGovernorNow())
+		}
 		scheduleFlush = s.prepareWheelFlushLocked(window)
 	}
 	s.mu.Unlock()

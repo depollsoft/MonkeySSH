@@ -38,6 +38,7 @@ type wheelGovernor struct {
 	count    int
 	owed     int
 	template []byte
+	carry    []byte
 	flushGen int
 }
 
@@ -90,10 +91,34 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 	if g.profile == nil {
 		return data
 	}
+	if len(g.carry) > 0 {
+		// A wheel report withheld mid-parse from the previous chunk; complete
+		// it with this chunk's bytes so a split report is still governed.
+		data = append(append([]byte(nil), g.carry...), data...)
+		g.carry = g.carry[:0]
+	}
 	output := make([]byte, 0, len(data))
+	// Tracks whether a non-wheel byte has been written while earlier wheel rows
+	// are still owed. Delivering those rows later, from the flush timer, would
+	// place them after input the user sent afterwards, so they are dropped
+	// instead. A fresh wheel report clears the flag, since its own debt is
+	// legitimately flushable until later non-wheel input arrives.
+	reorder := false
 	for offset := 0; offset < len(data); {
+		// Hold a trailing run that could still complete into a wheel report,
+		// rather than passing its prefix straight through and losing track of
+		// the event when the rest arrives in the next chunk.
+		if data[offset] == 0x1b {
+			if prefix := wheelReportPrefixLen(data[offset:]); prefix == len(data)-offset {
+				g.carry = append(g.carry[:0], data[offset:]...)
+				break
+			}
+		}
 		length, _, button := wheelReport(data[offset:])
 		if length == 0 {
+			if g.owed != 0 {
+				reorder = true
+			}
 			output = append(output, data[offset])
 			offset++
 			continue
@@ -101,9 +126,13 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 		report := data[offset : offset+length]
 		offset += length
 		if button < 0 {
+			if g.owed != 0 {
+				reorder = true
+			}
 			output = append(output, report...)
 			continue
 		}
+		reorder = false
 		if button&1 == 0 {
 			g.owed--
 		} else {
@@ -112,13 +141,72 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 		g.template = append(g.template[:0], report...)
 		output = append(output, g.drain(now)...)
 	}
+	if reorder && g.owed != 0 {
+		g.owed = 0
+	}
 	return output
+}
+
+// takeOpaque returns any withheld wheel-report prefix followed by data
+// unchanged, and abandons pending scroll debt. It is used for input that must
+// reach the pty byte for byte, such as a bracketed paste, so the governor
+// neither rewrites a payload that happens to contain wheel-shaped bytes nor
+// lets the flush timer inject a wheel report into it.
+func (g *wheelGovernor) takeOpaque(data []byte) []byte {
+	if g.profile == nil {
+		return data
+	}
+	g.owed = 0
+	if len(g.carry) == 0 {
+		return data
+	}
+	out := append(append([]byte(nil), g.carry...), data...)
+	g.carry = g.carry[:0]
+	return out
+}
+
+// wheelReportPrefixLen returns len(data) when the whole of data is a non-empty,
+// still-incomplete prefix of an SGR or X10 wheel report, and 0 otherwise. The
+// length bound keeps a malformed run from buffering without end.
+func wheelReportPrefixLen(data []byte) int {
+	const maxWheelReport = 32
+	if len(data) == 0 || len(data) > maxWheelReport || data[0] != 0x1b {
+		return 0
+	}
+	if len(data) == 1 { // ESC
+		return 1
+	}
+	if data[1] != '[' {
+		return 0
+	}
+	if len(data) == 2 { // ESC [
+		return 2
+	}
+	switch data[2] {
+	case 'M': // X10: ESC [ M then three coordinate bytes.
+		if len(data) < 6 {
+			return len(data)
+		}
+		return 0
+	case '<': // SGR: ESC [ < digits and semicolons, closed by M or m.
+		for i := 3; i < len(data); i++ {
+			if c := data[i]; c == 'M' || c == 'm' {
+				return 0 // A closed, hence complete, report.
+			} else if (c < '0' || c > '9') && c != ';' {
+				return 0 // Not a wheel-report body.
+			}
+		}
+		return len(data)
+	default:
+		return 0
+	}
 }
 
 // wheelReport recognizes whole SGR and six-byte X10 reports at the start of
 // data. Non-wheel reports return button -1 but still consume their full length,
 // so X10 coordinate bytes are never mistaken for the start of another report.
-// Incomplete reports consume the remaining bytes verbatim; there is no carry.
+// An incomplete trailing report is reported by wheelReportPrefixLen and held by
+// process; wheelReport itself just consumes the remaining bytes.
 func wheelReport(data []byte) (length, buttonOffset, button int) {
 	button = -1
 	if len(data) < 3 || data[0] != 0x1b || data[1] != '[' {
