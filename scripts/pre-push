@@ -10,8 +10,66 @@ cd "$REPO_ROOT"
 
 echo 'Running pre-push checks...'
 
-echo 'Running analyzer...'
-flutter analyze --fatal-warnings --fatal-infos --no-pub
+# Analyze only the Dart files actually being pushed, and skip the analyzer
+# entirely when the push carries none. A push often has no Dart changes at all
+# (a Go-only change under remote/monkeymux, a docs edit), and running a
+# whole-repo analysis for those is both slow and, in a fresh worktree that has
+# never had `flutter pub get`, guaranteed to fail: --no-pub leaves every
+# package import unresolved, so every Flutter symbol reads as undefined and the
+# analyzer reports tens of thousands of spurious errors. This mirrors the
+# pre-commit hook, which scopes its analysis to the staged Dart files. CI still
+# runs the full analysis and test suite.
+
+is_zero_sha() {
+    # A deleted or not-yet-created ref is reported as an all-zero object id
+    # (40 hex zeros for SHA-1, 64 for SHA-256).
+    case "$1" in
+        '' | *[!0]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Reads the ref update lines git feeds on stdin and prints, one per line, every
+# Dart file touched by the commits being pushed.
+collect_pushed_dart_files() {
+    local local_ref local_sha remote_ref remote_sha revs commit
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        [ -z "${local_ref:-}" ] && continue
+        if is_zero_sha "$local_sha"; then
+            continue # Branch deletion: nothing to analyze.
+        fi
+        if is_zero_sha "$remote_sha"; then
+            # New branch on the remote: the commits not yet on any remote ref.
+            revs=$(git rev-list "$local_sha" --not --remotes)
+        else
+            revs=$(git rev-list "$remote_sha..$local_sha")
+        fi
+        for commit in $revs; do
+            git diff-tree --no-commit-id --name-only -r \
+                --diff-filter=ACM "$commit" -- '*.dart'
+        done
+    done
+}
+
+dart_files=()
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    # analysis_options.yaml excludes third_party/**, where vendored upstream
+    # code keeps its own lint rules; honour that here too.
+    case "$file" in
+        third_party/*) continue ;;
+    esac
+    dart_files+=("$file")
+done < <(collect_pushed_dart_files | sort -u)
+
+if [ "${#dart_files[@]}" -eq 0 ]; then
+    echo 'No pushed Dart files; skipping analyzer.'
+    echo 'Pre-push checks passed!'
+    exit 0
+fi
+
+echo "Running analyzer on ${#dart_files[@]} pushed Dart file(s)..."
+flutter analyze --fatal-warnings --fatal-infos --no-pub -- "${dart_files[@]}"
 
 echo 'Skipping full test suite in pre-push; run targeted tests for changed behavior locally.'
 echo 'CI runs the full test suite.'
