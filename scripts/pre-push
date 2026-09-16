@@ -29,25 +29,34 @@ is_zero_sha() {
     esac
 }
 
+# The empty-tree object id, used as the diff base for a pushed branch whose
+# oldest new commit is a root commit (no parent to diff against).
+EMPTY_TREE=$(git hash-object -t tree /dev/null)
+
 # Reads the ref update lines git feeds on stdin and prints, one per line, every
-# Dart file touched by the commits being pushed.
+# Dart file that still exists at each pushed tip. Uses a net diff against the
+# push's base rather than a per-commit union, so a file added or edited in an
+# earlier commit and then deleted later in the same push is not analyzed: it no
+# longer exists at the tip and `flutter analyze` rejects a nonexistent path.
 collect_pushed_dart_files() {
-    local local_ref local_sha remote_ref remote_sha revs commit
+    local local_ref local_sha remote_ref remote_sha base oldest
     while read -r local_ref local_sha remote_ref remote_sha; do
         [ -z "${local_ref:-}" ] && continue
         if is_zero_sha "$local_sha"; then
             continue # Branch deletion: nothing to analyze.
         fi
         if is_zero_sha "$remote_sha"; then
-            # New branch on the remote: the commits not yet on any remote ref.
-            revs=$(git rev-list "$local_sha" --not --remotes)
+            # New branch on the remote: base the diff on the parent of the
+            # oldest commit not yet on any remote ref (the fork point), or the
+            # empty tree when that commit is a repository root.
+            oldest=$(git rev-list --reverse --topo-order "$local_sha" \
+                --not --remotes 2>/dev/null | head -n 1 || true)
+            [ -z "$oldest" ] && continue # Nothing new to push on this ref.
+            base=$(git rev-parse --verify --quiet "${oldest}^" || echo "$EMPTY_TREE")
         else
-            revs=$(git rev-list "$remote_sha..$local_sha")
+            base="$remote_sha"
         fi
-        for commit in $revs; do
-            git diff-tree --no-commit-id --name-only -r \
-                --diff-filter=ACM "$commit" -- '*.dart'
-        done
+        git diff --name-only --diff-filter=ACM "$base" "$local_sha" -- '*.dart'
     done
 }
 
