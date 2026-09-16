@@ -59,7 +59,11 @@ class AgentRuntimeDefinition {
     this.windowsInstallerUrl,
     this.selfUpdateArguments = const [],
     this.sharesCliInstallation = false,
+    this.supportsWindows = true,
   });
+
+  /// Whether the runtime and its required CLI support native Windows.
+  final bool supportsWindows;
 
   /// Stable runtime identifier.
   final String id;

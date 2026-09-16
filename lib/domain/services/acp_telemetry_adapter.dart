@@ -76,6 +76,7 @@ final class AcpTelemetryAdapter implements AcpTelemetrySink {
     if (providerId == AcpBuiltinProviderIds.antigravity) return 'antigravity';
     if (providerId == AcpBuiltinProviderIds.pi) return 'pi';
     if (providerId == AcpBuiltinProviderIds.grokBuild) return 'grok_build';
+    if (providerId == AcpBuiltinProviderIds.museCode) return 'muse_code';
     if (providerId == AcpBuiltinProviderIds.hermes) return 'hermes';
     if (providerId == AcpBuiltinProviderIds.openClaw) return 'openclaw';
     if (providerId.startsWith(acpCustomProviderReservedIdPrefix)) {

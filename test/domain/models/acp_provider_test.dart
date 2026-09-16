@@ -244,7 +244,7 @@ void main() {
 
   group('built-in providers', () {
     test('acpBuiltinProviders contains every verified adapter', () {
-      expect(acpBuiltinProviders, hasLength(10));
+      expect(acpBuiltinProviders, hasLength(11));
       expect(acpBuiltinProviders, contains(acpCopilotCliProvider));
       expect(acpBuiltinProviders, contains(acpClaudeAgentProvider));
       expect(acpBuiltinProviders, contains(acpCodexProvider));

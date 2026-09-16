@@ -47,7 +47,7 @@ type agentSessionBindingState struct {
 
 func fileBackedAgent(tool string) bool {
 	switch tool {
-	case "copilot", "claude", "codex", "opencode", "antigravity", "cursor-agent":
+	case "copilot", "claude", "codex", "opencode", "antigravity", "cursor-agent", "muse":
 		return true
 	}
 	return false
@@ -171,7 +171,7 @@ func buildForeignOwnershipSnapshot(tool, home string) *foreignOwnershipSnapshot 
 			add(filepath.Base(filepath.Dir(lock)), pidFromCopilotLockPath(lock))
 		}
 		return s
-	case "codex", "antigravity", "opencode", "cursor-agent":
+	case "codex", "antigravity", "opencode", "cursor-agent", "muse":
 	default:
 		return s
 	}
@@ -204,6 +204,8 @@ const foreignOwnershipAnySession = "*"
 func (s *foreignOwnershipSnapshot) sessionIDForPath(path string) string {
 	path = normalizedMetadataPath(path)
 	switch s.tool {
+	case "muse":
+		return museSessionIDFromPath(path)
 	case "codex":
 		return codexSessionIDFromRolloutFile(path)
 	case "antigravity":
@@ -336,7 +338,7 @@ func exactAgentSessionForProcess(tool, cwd string, process processInfo, processe
 		if pid == process.pid || agentToolFromCommandName(commandNameFromProcessFields(processes[pid].comm, processes[pid].args)) == "claude" {
 			watch.claudePIDs[pid] = true
 		}
-		if tool == "codex" || tool == "claude" || tool == "antigravity" {
+		if tool == "muse" || tool == "codex" || tool == "claude" || tool == "antigravity" {
 			openPaths = append(openPaths, processOpenFilePathsForMetadata(pid)...)
 		}
 	}
@@ -352,6 +354,8 @@ func readAgentSessionCandidates(tool string) []agentSessionCandidate {
 	}
 	var candidates []agentSessionCandidate
 	switch tool {
+	case "muse":
+		return readMuseSessionCandidates()
 	case "codex", "claude":
 		root, match, decode := filepath.Join(home, ".codex", "sessions"), isCodexRolloutPath, codexSessionIDFromRolloutFile
 		if tool == "claude" {
@@ -753,7 +757,7 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 		if pid == process.pid || agentToolFromCommandName(commandNameFromProcessFields(child.comm, child.args)) == "claude" {
 			claudePIDs[pid] = true
 		}
-		if tool == "codex" || tool == "antigravity" || (tool == "claude" && !exact) {
+		if tool == "muse" || tool == "codex" || tool == "antigravity" || (tool == "claude" && !exact) {
 			openPaths = append(openPaths, processOpenFilePathsForMetadata(pid)...)
 		}
 	}
@@ -831,6 +835,8 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 	for _, path := range openPaths {
 		id := ""
 		switch watch.tool {
+		case "muse":
+			id = museSessionIDFromPath(path)
 		case "codex":
 			id = codexSessionIDFromRolloutFile(path)
 		case "claude":
@@ -861,7 +867,7 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 				lockAmbiguous = true
 			}
 		}
-		if (watch.tool == "codex" || watch.tool == "claude") && candidate.path != "" && open[normalizedMetadataPath(candidate.path)] ||
+		if (watch.tool == "muse" || watch.tool == "codex" || watch.tool == "claude") && candidate.path != "" && open[normalizedMetadataPath(candidate.path)] ||
 			watch.tool == "antigravity" && ((candidate.ownershipPath != "" && open[normalizedMetadataPath(candidate.ownershipPath)]) || (candidate.path != "" && open[normalizedMetadataPath(candidate.path)])) {
 			direct[candidate.id] = candidate
 		}

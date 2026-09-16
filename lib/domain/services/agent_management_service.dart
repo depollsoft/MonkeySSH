@@ -111,6 +111,10 @@ while (true) {
     url: 'https://x.ai/cli/stable',
     pattern: r'^[0-9]+\.[0-9]+\.[0-9]+[-+0-9A-Za-z.]*',
   ),
+  AgentLaunchTool.museCode when definition.kind == AgentRuntimeKind.cli => (
+    url: 'https://api.meta.ai/muse-code/channels/muse-stable',
+    pattern: '"version"[[:space:]]*:[[:space:]]*"[^"]+"',
+  ),
   _ => null,
 };
 
@@ -252,6 +256,16 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     windowsInstallerUrl: 'https://x.ai/cli/install.ps1',
     selfUpdateArguments: ['update'],
   ),
+  AgentRuntimeDefinition(
+    id: 'cli:muse',
+    supportsWindows: false,
+    label: 'Muse Code',
+    kind: AgentRuntimeKind.cli,
+    tool: AgentLaunchTool.museCode,
+    executableNames: ['muse'],
+    posixInstallerUrl: 'https://dev.meta.ai/install.sh',
+    homebrewFormula: 'muse-code',
+  ),
 ];
 
 /// Supported built-in ACP adapters.
@@ -353,6 +367,16 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     windowsInstallerUrl: 'https://x.ai/cli/install.ps1',
     sharesCliInstallation: true,
   ),
+  AgentRuntimeDefinition(
+    id: 'acp:muse',
+    supportsWindows: false,
+    label: 'Muse Code ACP',
+    kind: AgentRuntimeKind.acpAdapter,
+    tool: AgentLaunchTool.museCode,
+    executableNames: ['muse-code-acp'],
+    registry: AgentPackageRegistry.npm,
+    packageName: '@bex-co/muse-code-acp',
+  ),
 ];
 
 /// ACP adapters that require an installation separate from their agent CLI.
@@ -371,6 +395,11 @@ final agentRuntimeDefinitions = List<AgentRuntimeDefinition>.unmodifiable([
 
 /// Extracts a normalized version from common CLI output.
 String? parseAgentVersion(String output) {
+  // Muse prints the marketing version first and its actual release in brackets.
+  final muse = RegExp(
+    r'Muse Code [^\r\n]*\((\d+\.\d+\.\d+-R\d+(?:\.\d+)?)\)',
+  ).firstMatch(output);
+  if (muse != null) return muse.group(1);
   final match = RegExp(
     r'(?<![A-Za-z0-9.])[vV]?(\d+(?:\.\d+){1,3}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)',
   ).firstMatch(output.replaceAll(RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), ''));
@@ -404,6 +433,11 @@ int compareAgentVersions(String left, String right) {
   if (a.pre == b.pre) return 0;
   if (a.pre == null) return 1;
   if (b.pre == null) return -1;
+  // Muse release revisions use R-prefixed integers, not lexical prereleases.
+  if (RegExp(r'^R\d+(?:\.\d+)?$').hasMatch(a.pre!) &&
+      RegExp(r'^R\d+(?:\.\d+)?$').hasMatch(b.pre!)) {
+    return compareAgentVersions(a.pre!.substring(1), b.pre!.substring(1));
+  }
   final aParts = a.pre!.split('.');
   final bParts = b.pre!.split('.');
   for (var index = 0; index < aParts.length && index < bParts.length; index++) {
@@ -463,6 +497,7 @@ String? buildAgentInstallCommand(
   String? detectionSource,
   String? executablePath,
 }) {
+  if (windows && !definition.supportsWindows) return null;
   if (repair && definition.id == 'cli:opencode' && executablePath != null) {
     if (windows) {
       return buildCompactWindowsPowerShellCommand(
@@ -474,6 +509,13 @@ String? buildAgentInstallCommand(
     }
     return '${_profilePrefix}node -e ${_shellQuote(_openCodeRepairScript)} '
         '${_shellQuote(executablePath)}';
+  }
+  // Muse's launcher owns updates. Force its documented synchronous update
+  // path against the resolved installation rather than installing a second copy.
+  if (update && definition.id == 'cli:muse' && detectionSource != 'Homebrew') {
+    if (windows || executablePath == null) return null;
+    return '${_profilePrefix}MUSE_SYNC_UPDATE=1 MUSE_NO_AUTO_UPDATE=0 '
+        '${_shellQuote(executablePath)} --version';
   }
   if (update && executablePath != null && definition.supportsSelfUpdate) {
     if (windows) {
@@ -745,6 +787,7 @@ class AgentManagementService {
         _resolveRuntimeInfo(
           definition,
           snapshots[definition.id] ?? const AgentProbeSnapshot(),
+          windows: session.remoteIsWindows,
         ),
     ]);
     var metadata = <String, AgentMetadataSnapshot>{};
@@ -772,6 +815,7 @@ class AgentManagementService {
         _resolveRuntimeInfo(
           definition,
           snapshots[definition.id] ?? const AgentProbeSnapshot(),
+          windows: session.remoteIsWindows,
           metadata: metadata[definition.id],
         ),
     ];
@@ -848,7 +892,12 @@ class AgentManagementService {
           // Registry failures must not erase a working executable's version.
         }
       }
-      return _resolveRuntimeInfo(definition, snapshot, metadata: metadata);
+      return _resolveRuntimeInfo(
+        definition,
+        snapshot,
+        metadata: metadata,
+        windows: session.remoteIsWindows,
+      );
     } on Object catch (error) {
       return AgentRuntimeInfo(
         definition: definition,
@@ -862,7 +911,16 @@ class AgentManagementService {
     AgentRuntimeDefinition definition,
     AgentProbeSnapshot snapshot, {
     AgentMetadataSnapshot? metadata,
+    bool windows = false,
   }) {
+    if (windows && !definition.supportsWindows) {
+      return AgentRuntimeInfo(
+        definition: definition,
+        status: AgentRuntimeStatus.unavailable,
+        message:
+            'Muse Code supports macOS and Linux hosts. Connect to WSL through SSH on Windows.',
+      );
+    }
     final path = snapshot.executablePath;
     var installed = parseAgentVersion(snapshot.versionOutput ?? '');
     if (path == null) {
@@ -898,6 +956,7 @@ class AgentManagementService {
         compareAgentVersions(installed, latest) < 0;
     final managed =
         definition.supportsSelfUpdate ||
+        definition.id == 'cli:muse' ||
         source == 'Homebrew' ||
         source == 'npm global' ||
         source == 'pipx';
@@ -1100,6 +1159,7 @@ class AgentManagementService {
         AgentLaunchTool.hermes => 'hermes',
         AgentLaunchTool.openclaw => 'openclaw',
         AgentLaunchTool.grokBuild => 'grok',
+        AgentLaunchTool.museCode => 'muse',
         null => null,
       };
       if (id != null && runtime.executablePath != null) {
@@ -1288,6 +1348,7 @@ class AgentManagementService {
         AgentLaunchTool.hermes => 'hermes',
         AgentLaunchTool.openclaw => 'openclaw',
         AgentLaunchTool.grokBuild => 'grok',
+        AgentLaunchTool.museCode => 'muse',
         null => null,
       };
       if (selected.containsKey(id)) {
@@ -1646,7 +1707,9 @@ String buildAgentBatchProbeCommand(
     final records = [
       for (final definition in definitions)
         _windowsRecordStart(definition) +
-            _buildWindowsProbeBody(definition) +
+            (definition.supportsWindows
+                ? _buildWindowsProbeBody(definition)
+                : '') +
             _windowsRecordEnd,
     ];
     return buildCompactWindowsPowerShellCommand(
@@ -1913,11 +1976,14 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
   final versionArguments = definition.versionArguments
       .map(_shellQuote)
       .join(' ');
+  final versionEnvironment = definition.tool == AgentLaunchTool.museCode
+      ? 'env MUSE_NO_AUTO_UPDATE=1 '
+      : '';
   final versionProbe = definition.kind == AgentRuntimeKind.cli
       ? '__fl_version_file=\$(mktemp "\u0024{TMPDIR:-/tmp}/monkeyssh-version.XXXXXX" 2>/dev/null || true); '
             'if [ -n "\$__fl_version_file" ]; then '
             'version_output=; '
-            'if __fl_agent_version "\$resolved" $versionArguments >"\$__fl_version_file" 2>&1; then '
+            'if __fl_agent_version $versionEnvironment"\$resolved" $versionArguments >"\$__fl_version_file" 2>&1; then '
             'version_output=\$(head -n 4 "\$__fl_version_file" | tr ${_shellQuote(r'\r\n')} ${_shellQuote('  ')}); '
             'elif grep -Eiq ${_shellQuote('postinstall (script )?(was )?not run|--ignore-scripts')} "\$__fl_version_file"; then '
             'printf ${_shellQuote('$_repairMarker\n')}; '

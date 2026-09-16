@@ -684,6 +684,7 @@ void main() {
         'hermes',
         'openclaw',
         'grok',
+        'muse',
       });
       expect(result['cli:pi']!.status, AgentUsageStatus.available);
       await service.readUsage(session, runtimes);
@@ -1341,13 +1342,19 @@ void main() {
   });
 
   test('registers every supported CLI and built-in ACP adapter', () {
-    expect(agentCliRuntimeDefinitions, hasLength(10));
-    expect(agentAcpRuntimeDefinitions, hasLength(10));
-    expect(agentStandaloneAcpRuntimeDefinitions, hasLength(4));
-    expect(agentRuntimeDefinitions, hasLength(14));
+    expect(agentCliRuntimeDefinitions, hasLength(11));
+    expect(agentAcpRuntimeDefinitions, hasLength(11));
+    expect(agentStandaloneAcpRuntimeDefinitions, hasLength(5));
+    expect(agentRuntimeDefinitions, hasLength(16));
     expect(
       agentStandaloneAcpRuntimeDefinitions.map((definition) => definition.id),
-      <String>['acp:claude', 'acp:codex', 'acp:antigravity', 'acp:pi'],
+      <String>[
+        'acp:claude',
+        'acp:codex',
+        'acp:antigravity',
+        'acp:pi',
+        'acp:muse',
+      ],
     );
     final antigravityAcp = agentStandaloneAcpRuntimeDefinitions.firstWhere(
       (definition) => definition.id == 'acp:antigravity',
@@ -1366,6 +1373,7 @@ void main() {
         'Hermes',
         'OpenClaw',
         'Grok Build',
+        'Muse Code',
       ]),
     );
   });
@@ -1519,6 +1527,10 @@ void main() {
           };
           expect(runtimes, hasLength(agentRuntimeDefinitions.length));
           for (final runtime in runtimes) {
+            if (windows && !runtime.definition.supportsWindows) {
+              expect(runtime.status, AgentRuntimeStatus.unavailable);
+              continue;
+            }
             expect(
               runtime.status,
               AgentRuntimeStatus.updateAvailable,
@@ -1824,6 +1836,10 @@ esac
           windows: true,
           update: false,
         );
+        if (!definition.supportsWindows) {
+          expect(windows, isNull);
+          continue;
+        }
         expect(
           decodeEncodedPowerShell(windows!),
           contains(
@@ -1893,7 +1909,12 @@ esac
         ('cli:openclaw', '/opt/tools/openclaw', ['update', '--yes']),
         ('cli:grok', '/opt/tools/grok', ['update']),
       ];
-      expect(cases, hasLength(agentCliRuntimeDefinitions.length));
+      expect(
+        cases,
+        hasLength(
+          agentCliRuntimeDefinitions.where((d) => d.supportsSelfUpdate).length,
+        ),
+      );
 
       for (final entry in cases) {
         final definition = agentCliRuntimeDefinitions.firstWhere(

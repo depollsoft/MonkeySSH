@@ -26,6 +26,7 @@ Map<String, AgentUsage> parseAgentUsageOutput(
         'hermes',
         'openclaw',
         'grok',
+        'muse',
       }.contains(id)) {
         continue;
       }

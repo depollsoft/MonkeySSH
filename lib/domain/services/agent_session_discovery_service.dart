@@ -905,6 +905,97 @@ List<ToolSessionInfo> parseHermesDbOutput(String output) {
   return sessions;
 }
 
+/// Reads only Muse's session metadata and first user intent from a bounded head.
+@visibleForTesting
+ToolSessionInfo? parseMuseSessionMetadata(String raw, {DateTime? modifiedAt}) {
+  String? id;
+  String? cwd;
+  String? summary;
+  for (final line in raw.split('\n')) {
+    final row = _tryDecodeJsonObject(line);
+    if (row == null) continue;
+    final payload = row['payload'];
+    if (payload is! Map) continue;
+    if (row['payload_type'] == 'runtime.session.metadata') {
+      final stream = row['stream'];
+      final record = payload['record'];
+      if (stream is Map &&
+          stream['id'] is String &&
+          record is Map &&
+          record['workspace_root'] is String) {
+        id = stream['id'] as String;
+        cwd = record['workspace_root'] as String;
+      }
+    } else if (summary == null &&
+        row['payload_type'] == 'runtime.user_intent.accepted') {
+      final blocks = payload['refill_blocks'];
+      if (blocks is List) {
+        summary = blocks
+            .whereType<Map>()
+            .map((b) => b['text'])
+            .whereType<String>()
+            .join(' ')
+            .trim();
+      }
+    }
+  }
+  if (id == null || cwd == null) return null;
+  final sessions = parseMuseSessionIndex(
+    jsonEncode([
+      {
+        'session_id': id,
+        'workspace_root': cwd,
+        'title': summary?.substring(0, summary.length.clamp(0, 200)),
+        'updated_at_us': modifiedAt?.microsecondsSinceEpoch,
+      },
+    ]),
+  );
+  return sessions.firstOrNull;
+}
+
+/// Parses Muse's JSON index rows without treating titles as delimiters.
+@visibleForTesting
+List<ToolSessionInfo> parseMuseSessionIndex(String output) {
+  if (output.trim().isEmpty) return const [];
+  final decoded = jsonDecode(output);
+  if (decoded is! List) return const [];
+  final sessions = <ToolSessionInfo>[];
+  for (final row in decoded) {
+    if (row is! Map) continue;
+    final id = row['session_id'];
+    final cwd = row['workspace_root'];
+    if (id is! String ||
+        !RegExp(
+          r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$',
+        ).hasMatch(id) ||
+        cwd is! String ||
+        cwd.trim().isEmpty) {
+      continue;
+    }
+    final title = row['title'];
+    final micros = row['updated_at_us'];
+    DateTime? updated;
+    if (micros is num && micros > 0 && micros <= 8640000000000000000) {
+      updated = DateTime.fromMicrosecondsSinceEpoch(
+        micros.toInt(),
+        isUtc: true,
+      );
+    }
+    sessions.add(
+      ToolSessionInfo(
+        toolName: 'Muse Code',
+        sessionId: id,
+        workingDirectory: cwd,
+        summary: title is String && title.trim().isNotEmpty
+            ? title.trim()
+            : _truncateSessionIdValue(id),
+        lastActive: updated,
+      ),
+    );
+  }
+  return sessions;
+}
+
 /// Parses Cursor Agent session metadata from a chat `meta.json` file.
 @visibleForTesting
 ({
@@ -1843,6 +1934,7 @@ class AgentSessionDiscoveryService {
           'Pi': _discoverPiSessions,
           'Hermes': _discoverHermesSessions,
           'Grok Build': _discoverGrokSessions,
+          'Muse Code': _discoverMuseSessions,
         };
     return [
       for (final name in toolName == null ? handlers.keys : [toolName])
@@ -3086,6 +3178,111 @@ class AgentSessionDiscoveryService {
             ),
           );
     return _nonEmptyLines(output).take(scanLimit).toList(growable: false);
+  }
+
+  // Muse owns the index. Read it without creating or modifying the database.
+  Future<_ToolDiscoveryResult> _discoverMuseSessions(
+    SshSession session,
+    String? workingDirectory,
+    List<String> relatedWorkingDirectories,
+    int max, {
+    bool previewOnly = false,
+  }) async {
+    if (session.remoteIsWindows) {
+      return const _ToolDiscoveryResult.success('Muse Code', []);
+    }
+    try {
+      final limit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final scope = buildSqlWorkingDirectoryScopeClause([
+        ?workingDirectory,
+        ...relatedWorkingDirectories,
+      ], columnName: 'workspace_root');
+      Future<String> query({bool scoped = true}) => _exec(
+        session,
+        r'sqlite3 -readonly -json "${XDG_DATA_HOME:-$HOME/.local/share}/muse/session-index.db" '
+        '${shellEscapePosix("SELECT session_id, workspace_root, title, updated_at_us FROM sessions "
+        "WHERE workspace_root IS NOT NULL "
+        "AND session_log_path NOT LIKE '%/subagent/%' "
+        "${scoped && scope != null ? 'AND ($scope) ' : ''}"
+        "ORDER BY updated_at_us DESC LIMIT $limit;")} 2>/dev/null',
+      );
+      var sessions = <ToolSessionInfo>[];
+      try {
+        sessions = [...parseMuseSessionIndex(await query())];
+      } on Object {
+        /* Fall back to durable logs. */
+      }
+      if (sessions.isEmpty && scope != null) {
+        try {
+          sessions = [...parseMuseSessionIndex(await query(scoped: false))];
+        } on Object {
+          /* Fall back to durable logs. */
+        }
+      }
+      // The index is created lazily by Muse's picker. Fresh headless sessions
+      // can have durable logs before any index exists or before it refreshes.
+      try {
+        final output = await _exec(
+          session,
+          posixListNewestFilesCommand(
+            r'find "${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions" '
+            '-mindepth 5 -maxdepth 5 -name session.jsonl -type f',
+            limit,
+          ),
+        );
+        final paths = _nonEmptyLines(output)
+            .toSet()
+            .take(_sessionMetadataReadLimit(max, previewOnly: previewOnly))
+            .toList();
+        final snapshots = await _readRemoteFileSnapshots(
+          session,
+          paths,
+          maxBytes: 64 * 1024,
+        );
+        for (final path in paths) {
+          final snapshot = snapshots[path];
+          if (snapshot == null) continue;
+          final metadata = parseMuseSessionMetadata(
+            snapshot.content,
+            modifiedAt: snapshot.modifiedAt,
+          );
+          if (metadata == null) continue;
+          final existing = sessions.indexWhere(
+            (s) => s.sessionId == metadata.sessionId,
+          );
+          if (existing < 0) {
+            sessions.add(metadata);
+          } else {
+            final indexed = sessions[existing];
+            sessions[existing] = ToolSessionInfo(
+              toolName: 'Muse Code',
+              sessionId: indexed.sessionId,
+              workingDirectory: metadata.workingDirectory,
+              summary: indexed.summary,
+              lastActive:
+                  metadata.lastActive != null &&
+                      (indexed.lastActive == null ||
+                          metadata.lastActive!.isAfter(indexed.lastActive!))
+                  ? metadata.lastActive
+                  : indexed.lastActive,
+            );
+          }
+        }
+      } on Object {
+        if (sessions.isEmpty) rethrow;
+      }
+      return _ToolDiscoveryResult.success(
+        'Muse Code',
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
+          max,
+        ),
+      );
+    } on Object {
+      return const _ToolDiscoveryResult.failure('Muse Code');
+    }
   }
 
   // ── Hermes ─────────────────────────────────────────────────────────────

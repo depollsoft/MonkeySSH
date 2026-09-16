@@ -19,8 +19,9 @@ AGENT_EXECUTABLES = {
     'pi': ('pi',),
     'hermes': ('hermes', 'hermes-agent'),
     'openclaw': ('openclaw',),
+    'muse': ('muse',),
 }
-OPTIONAL_AGENT_NAMES = frozenset({'hermes', 'openclaw'})
+OPTIONAL_AGENT_NAMES = frozenset({'hermes', 'openclaw', 'muse'})
 REQUIRED_AGENT_NAMES = frozenset(AGENT_EXECUTABLES) - OPTIONAL_AGENT_NAMES
 AGENT_LABELS = (
     'Copilot CLI', 'Claude Code', 'Codex', 'OpenCode', 'Antigravity',

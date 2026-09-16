@@ -71,6 +71,7 @@ void main() {
         AcpBuiltinProviderIds.antigravity: 'antigravity',
         AcpBuiltinProviderIds.pi: 'pi',
         AcpBuiltinProviderIds.grokBuild: 'grok_build',
+        AcpBuiltinProviderIds.museCode: 'muse_code',
       };
       for (final provider in expected.keys) {
         adapter.sessionOpened(providerCategory: provider, isReconnect: false);

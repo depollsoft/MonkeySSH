@@ -5,7 +5,7 @@ Choose the right view for each task:
 - Chat with supported agents in native windows with streaming replies, tool progress, plans, diffs, permission prompts, images, attachments, slash commands, and session history. Model and mode controls depend on the agent. Get notified when an agent finishes or needs permission.
 - Switch to the full terminal whenever you need direct CLI control, xterm-256color, inline images, gestures, modifier keys, function keys, macros, or IME-friendly typing.
 - Keep agent and shell work running in persistent MonkeyMux windows. Reconnect, switch windows, and share the same session with your desktop.
-- Launch Claude Code, Copilot CLI, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, and Grok Build, find recent project-scoped sessions, and save launch presets per host.
+- Launch Claude Code, Copilot CLI, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, Grok Build, and Muse Code, find recent project-scoped sessions, and save launch presets per host.
 - Manage agent CLIs and ACP adapters on a host with Agent Management. Check versions, install or repair supported packages, and update supported installations together. See account usage, remaining allowances, and reset times when available. A dot on the terminal menu flags available updates.
 - Browse, upload, download, create, and edit remote files over SFTP.
 - Generate or import Ed25519 and RSA keys, verify host keys, use jump hosts, and cancel slow connection attempts.

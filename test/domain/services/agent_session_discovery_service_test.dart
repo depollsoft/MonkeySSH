@@ -598,6 +598,7 @@ branch refs/heads/fix/session-resumption
         'Pi',
         'Hermes',
         'Grok Build',
+        'Muse Code',
       ];
       final sessions = <ToolSessionInfo>[
         for (final tool in tools) ...[
@@ -719,6 +720,7 @@ branch refs/heads/fix/session-resumption
         'Pi',
         'Hermes',
         'Grok Build',
+        'Muse Code',
       ]);
     });
 
@@ -739,6 +741,7 @@ branch refs/heads/fix/session-resumption
         'Pi',
         'Hermes',
         'Grok Build',
+        'Muse Code',
         'Custom Tool',
       ]);
     });
@@ -2803,6 +2806,94 @@ branch refs/heads/main
         expect(result.sessions.single.summary, 'Cursor session bfc1447e…');
       },
     );
+
+    for (final indexAvailable in [false, true]) {
+      test(
+        'Muse discovery reads fresh logs with index=$indexAvailable',
+        () async {
+          final client = _MockSshClient();
+          const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
+          const path = '/data/muse/sessions/2026/09/16/$id/session.jsonl';
+          final commands = <String>[];
+          _stubDiscoveryExec(client, (command) async {
+            commands.add(command);
+            if (command.contains('session-index.db')) {
+              return _buildExecSession(
+                stdout: indexAvailable
+                    ? jsonEncode([
+                        {
+                          'session_id': id,
+                          'workspace_root': '/work/project',
+                          'title': 'Renamed session',
+                          'updated_at_us': 1700000000000000,
+                        },
+                      ])
+                    : '',
+              );
+            }
+            if (command.contains('-mindepth 5 -maxdepth 5')) {
+              return _buildExecSession(stdout: path);
+            }
+            if (command.contains(path)) {
+              return _buildExecSession(
+                stdout: _remoteSnapshotLine(
+                  path,
+                  [
+                    jsonEncode({
+                      'retained_frame': 'session_permission_transaction',
+                    }),
+                    jsonEncode({
+                      'payload_type': 'runtime.session.metadata',
+                      'stream': {'id': id},
+                      'payload': {
+                        'record': {'workspace_root': '/work/project'},
+                      },
+                    }),
+                    jsonEncode({
+                      'payload_type': 'runtime.user_intent.accepted',
+                      'payload': {
+                        'refill_blocks': [
+                          {'text': 'First prompt'},
+                        ],
+                      },
+                    }),
+                  ].join('\n'),
+                ),
+              );
+            }
+            return _buildExecSession();
+          });
+          final discovery = AgentSessionDiscoveryService();
+          final result = await discovery
+              .discoverSessionsStream(
+                _buildDiscoverySession(client),
+                toolName: 'Muse Code',
+                workingDirectory: '/work/project',
+              )
+              .last;
+          expect(result.sessions, hasLength(1));
+          expect(result.sessions.single.sessionId, id);
+          expect(
+            result.sessions.single.summary,
+            indexAvailable ? 'Renamed session' : 'First prompt',
+          );
+          expect(
+            discovery.buildResumeCommand(result.sessions.single),
+            "cd '/work/project' && muse resume '$id'",
+          );
+          expect(
+            commands.any((c) => c.contains('sqlite3 -readonly -json')),
+            isTrue,
+          );
+          expect(
+            commands.any(
+              (c) => c.contains(r'${XDG_DATA_HOME:-$HOME/.local/share}'),
+            ),
+            isTrue,
+          );
+        },
+      );
+    }
 
     test('Grok Build discovery resolves resumable summary metadata', () async {
       final client = _MockSshClient();

@@ -26,6 +26,7 @@ Every supported agent has a reader:
 | Pi | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
 | Hermes | Its saved provider accounts and credential pool, deduplicated by credential. Includes Nous subscription, purchased-credit balances, and member spending caps when reported. |
 | OpenClaw | Installed CLI's `status --usage --json`. Preserves provider quotas, supported USD billing figures, resets, and individual provider failures. |
+| Muse Code | No verified account-quota API. Reports `notReported`; no estimated usage rings. |
 | Grok Build | Its signed-in account and the credits billing endpoint. Prefers current credit percentage and reset period; keeps on-demand spending and prepaid balances separate. |
 
 The OpenCode, Pi, and Hermes readers support Anthropic OAuth, OpenAI/Codex OAuth,

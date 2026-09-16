@@ -31,7 +31,10 @@ enum AgentLaunchTool {
   openclaw,
 
   /// xAI Grok Build CLI.
-  grokBuild;
+  grokBuild,
+
+  /// Meta Muse Code CLI.
+  museCode;
 
   /// Stable UI order for launch pickers and discovery provider rows.
   ///
@@ -48,6 +51,7 @@ enum AgentLaunchTool {
     hermes,
     openclaw,
     grokBuild,
+    museCode,
   ];
 }
 
@@ -65,6 +69,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.hermes => 'Hermes',
     AgentLaunchTool.openclaw => 'OpenClaw',
     AgentLaunchTool.grokBuild => 'Grok Build',
+    AgentLaunchTool.museCode => 'Muse Code',
   };
 
   /// Shell command used to launch this tool.
@@ -79,6 +84,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.hermes => 'hermes',
     AgentLaunchTool.openclaw => 'openclaw',
     AgentLaunchTool.grokBuild => 'grok',
+    AgentLaunchTool.museCode => 'muse',
   };
 
   /// Subcommand arguments required to open this tool's interactive terminal
@@ -107,6 +113,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.hermes => const ['hermes', 'hermes-agent'],
     AgentLaunchTool.openclaw => const ['openclaw'],
     AgentLaunchTool.grokBuild => const ['grok'],
+    AgentLaunchTool.museCode => const ['muse'],
   };
 
   /// Matching discovered-session provider name, if this tool supports recent
@@ -124,6 +131,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     // reliable working directory, so it cannot back the cwd-scoped picker.
     AgentLaunchTool.openclaw => null,
     AgentLaunchTool.grokBuild => 'Grok Build',
+    AgentLaunchTool.museCode => 'Muse Code',
   };
 
   /// Whether this tool exposes isolated launch profiles.
@@ -150,6 +158,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     // not a per-launch flag, so there is nothing safe to pass here.
     AgentLaunchTool.openclaw => const [],
     AgentLaunchTool.grokBuild => const ['--yolo'],
+    AgentLaunchTool.museCode => const ['--yolo'],
   };
 
   /// Environment variables that enable YOLO mode for this tool.
@@ -183,6 +192,10 @@ AgentLaunchTool? agentLaunchToolForCommandName(String? commandName) {
     return null;
   }
 
+  if (RegExp(r'^muse-bin-\d+\.\d+\.\d+-r\d+(?:\.\d+)?$').hasMatch(normalized)) {
+    return AgentLaunchTool.museCode;
+  }
+
   return switch (normalized) {
     'claude' ||
     'claude-code' ||
@@ -202,6 +215,7 @@ AgentLaunchTool? agentLaunchToolForCommandName(String? commandName) {
     'hermes' || 'hermes-agent' => AgentLaunchTool.hermes,
     'openclaw' => AgentLaunchTool.openclaw,
     'grok' => AgentLaunchTool.grokBuild,
+    'muse' || 'muse-code-acp' => AgentLaunchTool.museCode,
     _ => null,
   };
 }
@@ -553,6 +567,10 @@ List<String> _buildAgentResumeArguments(
 ) => switch (tool) {
   AgentLaunchTool.claudeCode => ['--resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.copilotCli => ['--resume', _quoteShellArgument(sessionId)],
+  AgentLaunchTool.museCode =>
+    sessionId == '_continue'
+        ? const ['resume', '--last']
+        : ['resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.codex => ['resume', _quoteShellArgument(sessionId)],
   AgentLaunchTool.antigravity =>
     sessionId == '_continue'
@@ -632,6 +650,17 @@ String? _normalizeAgentToolArguments({
       trimmedAdditionalArguments,
       [_hermesYoloPattern],
     ),
+    AgentLaunchTool.museCode => _stripArgumentPatterns(trimmedAdditionalArguments, [
+      _hermesYoloPattern,
+      _codexApprovalModeEqualsPattern,
+      _codexApprovalModeSeparatedPattern,
+      RegExp(
+        r'''(?<!\S)--(?:permission-profile|approval-judge|sandbox-network)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)''',
+      ),
+      RegExp(
+        r'(?<!\S)--(?:disable-approval|disable-sandbox|trust-workspace)(?=\s|$)',
+      ),
+    ]),
     AgentLaunchTool.grokBuild =>
       _stripArgumentPatterns(trimmedAdditionalArguments, [
         _grokYoloPattern,

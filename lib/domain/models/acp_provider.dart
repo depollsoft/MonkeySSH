@@ -56,6 +56,9 @@ abstract final class AcpBuiltinProviderIds {
   /// Pi's standalone ACP adapter.
   static const pi = '${acpCustomProviderReservedIdPrefix}pi-acp';
 
+  /// Community ACP adapter for Meta Muse Code.
+  static const museCode = '${acpCustomProviderReservedIdPrefix}muse-code';
+
   /// xAI Grok Build's official ACP stdio server.
   static const grokBuild = '${acpCustomProviderReservedIdPrefix}grok-build';
 
@@ -79,6 +82,7 @@ AgentLaunchTool? agentLaunchToolForBuiltinAcpProviderId(String providerId) =>
       AcpBuiltinProviderIds.hermes => AgentLaunchTool.hermes,
       AcpBuiltinProviderIds.openClaw => AgentLaunchTool.openclaw,
       AcpBuiltinProviderIds.grokBuild => AgentLaunchTool.grokBuild,
+      AcpBuiltinProviderIds.museCode => AgentLaunchTool.museCode,
       _ => null,
     };
 
@@ -734,6 +738,24 @@ final acpGrokBuildProvider = AcpBuiltinProvider(
   ),
 );
 
+/// Muse Code uses a separate community adapter; `muse serve` speaks MSP.
+final acpMuseCodeProvider = AcpBuiltinProvider(
+  id: AcpBuiltinProviderIds.museCode,
+  label: 'Muse Code',
+  launchCommand: AcpLaunchCommand(executable: 'muse-code-acp'),
+  executableProbe: AcpExecutableProbe(
+    candidateExecutableNames: const ['muse-code-acp'],
+  ),
+  terminalAuthCommand: AcpLaunchCommand(
+    executable: 'muse',
+    arguments: const ['login'],
+  ),
+  adapterFallbackCommand: AcpLaunchCommand(
+    executable: 'npx',
+    arguments: const ['--yes', '@bex-co/muse-code-acp@0.6.0'],
+  ),
+);
+
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.pi,
@@ -760,6 +782,7 @@ final acpBuiltinProviders = List<AcpBuiltinProvider>.unmodifiable([
   acpHermesProvider,
   acpOpenClawProvider,
   acpGrokBuildProvider,
+  acpMuseCodeProvider,
 ]);
 
 /// Approval record for a custom ACP provider's exact launch command.
