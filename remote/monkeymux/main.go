@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.200"
+	monkeyMuxVersion                  = "0.1.201"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -695,6 +695,7 @@ type muxServer struct {
 type muxWindow struct {
 	agentSessionWatch           *agentSessionWatch
 	inputMu                     sync.Mutex
+	wheelGovernor               wheelGovernor // guarded by s.mu; draining also requires inputMu
 	nativePaste                 nativeConsolePasteFilter
 	nativeResponse              nativeConsoleResponseFilter
 	id                          string
@@ -6681,6 +6682,7 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 
 func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.closed = true
+	window.wheelGovernor.reset(nil)
 	window.alert = false
 	window.releaseRedrawForwardingStateLocked()
 	window.clearKittyGraphicsPendingLocked()
@@ -10267,6 +10269,9 @@ func (w *muxWindow) foregroundProcessGroupLocked() int {
 		return 0
 	}
 	w.foregroundPid = pgrp
+	if w.mouseTrackingProcessID > 0 && w.mouseTrackingProcessID != pgrp {
+		w.wheelGovernor.reset(nil)
+	}
 	return pgrp
 }
 
@@ -11642,10 +11647,40 @@ func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste
 		s.mu.Unlock()
 		return fmt.Errorf("window %q not found", windowID)
 	}
-	win32InputMode := window.win32InputMode
 	s.mu.Unlock()
 	window.inputMu.Lock()
-	defer window.inputMu.Unlock()
+	var scheduleFlush func()
+	defer func() {
+		window.inputMu.Unlock()
+		if scheduleFlush != nil {
+			scheduleFlush()
+		}
+	}()
+	s.mu.Lock()
+	if s.windowByIDLocked(windowID) != window || window.closed {
+		s.mu.Unlock()
+		return fmt.Errorf("window %q not found", windowID)
+	}
+	win32InputMode := window.win32InputMode
+	profile := window.wheelAccelerationProfileLocked()
+	if window.wheelGovernor.profile != profile {
+		window.wheelGovernor.reset(profile)
+	}
+	if !response {
+		if bracketedPaste {
+			// A paste must reach the pty untouched; treat it as opaque so the
+			// governor neither rewrites wheel-shaped bytes in the payload nor
+			// lets a pending flush split it.
+			data = window.wheelGovernor.takeOpaque(data)
+		} else {
+			data = window.wheelGovernor.process(data, wheelGovernorNow())
+		}
+		scheduleFlush = s.prepareWheelFlushLocked(window)
+	}
+	s.mu.Unlock()
+	if len(data) == 0 {
+		return nil
+	}
 	// Native console readers receive encoded protocol bytes as typed keys.
 	// Query the console mode rather than inferring the reader from an app name.
 	// Ordinary keys need no probe: both reader types use the same encoding.
@@ -14842,6 +14877,7 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	}
 	if command != "" {
 		w.foregroundCommand = command
+		w.resetWheelGovernorIfInactiveLocked()
 	}
 	if w.agentSessionID == "" && sessionID != "" && s.allowAgentSessionFallbackLocked(w, tool, sessionID) {
 		w.agentSessionID = sessionID
@@ -15613,6 +15649,7 @@ func (w *muxWindow) setPrivateModeLocked(mode string, enabled bool) {
 		} else {
 			w.mouseTrackingProcessID = 0
 		}
+		w.resetWheelGovernorIfInactiveLocked()
 	}
 }
 
@@ -15848,6 +15885,7 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 			return nil
 		}
 		w.paneTitle = title
+		w.resetWheelGovernorIfInactiveLocked()
 	case "7":
 		path := pathFromOsc7(value)
 		if path != "" {
@@ -15858,6 +15896,7 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
 		w.applyAgentIdentityPayloadLocked(value)
+		w.resetWheelGovernorIfInactiveLocked()
 	}
 	queryKeys := themeQueryKeysFromOscPayload(payload)
 	if len(queryKeys) == 0 {
@@ -15927,6 +15966,7 @@ func (w *muxWindow) applyPiIdentityPayloadLocked(value string) {
 	w.agentSessionIdentityExact = true
 	w.agentTool = "pi"
 	w.agentToolConfirmed = true
+	w.resetWheelGovernorIfInactiveLocked()
 }
 
 func appendThemeQueryKeys(existing []string, keys []string) []string {
@@ -16169,6 +16209,7 @@ func (s *muxServer) close() {
 	for _, window := range windows {
 		codexWindows[window] = !window.closed && window.agentToolLocked() == "codex" && window.nativeAcpBridgeID == ""
 		window.closed = true
+		window.wheelGovernor.reset(nil)
 		window.releaseRedrawForwardingStateLocked()
 		window.clearKittyGraphicsPendingLocked()
 	}
