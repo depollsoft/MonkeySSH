@@ -3188,9 +3188,6 @@ class AgentSessionDiscoveryService {
     int max, {
     bool previewOnly = false,
   }) async {
-    if (session.remoteIsWindows) {
-      return const _ToolDiscoveryResult.success('Muse Code', []);
-    }
     try {
       final limit = _sessionScanLimit(max, previewOnly: previewOnly);
       final scope = buildSqlWorkingDirectoryScopeClause([
@@ -3208,11 +3205,13 @@ class AgentSessionDiscoveryService {
       );
       var sessions = <ToolSessionInfo>[];
       try {
-        sessions = [...parseMuseSessionIndex(await query())];
+        if (!session.remoteIsWindows) {
+          sessions = [...parseMuseSessionIndex(await query())];
+        }
       } on Object {
         /* Fall back to durable logs. */
       }
-      if (sessions.isEmpty && scope != null) {
+      if (!session.remoteIsWindows && sessions.isEmpty && scope != null) {
         try {
           sessions = [...parseMuseSessionIndex(await query(scoped: false))];
         } on Object {
@@ -3222,14 +3221,27 @@ class AgentSessionDiscoveryService {
       // The index is created lazily by Muse's picker. Fresh headless sessions
       // can have durable logs before any index exists or before it refreshes.
       try {
-        final output = await _exec(
-          session,
-          posixListNewestFilesCommand(
-            r'find "${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions" '
-            '-mindepth 5 -maxdepth 5 -name session.jsonl -type f',
-            limit,
-          ),
-        );
+        final output = session.remoteIsWindows
+            ? await _execWindowsPowerShell(
+                session,
+                windowsListNewestFilesScript(
+                  relativeRoot: '.local/share/muse/sessions',
+                  includeGlobs: const ['session.jsonl'],
+                  limit: limit,
+                  overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
+                  overrideRelativeRoot: 'muse/sessions',
+                  pathRegexFilter:
+                      r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
+                ),
+              )
+            : await _exec(
+                session,
+                posixListNewestFilesCommand(
+                  r'find "${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions" '
+                  '-mindepth 5 -maxdepth 5 -name session.jsonl -type f',
+                  limit,
+                ),
+              );
         final paths = _nonEmptyLines(output)
             .toSet()
             .take(_sessionMetadataReadLimit(max, previewOnly: previewOnly))
@@ -4659,6 +4671,7 @@ String posixListNewestFilesCommand(
 /// [posixListNewestFilesCommand]. When
 /// [pathLikeFilters] is non-empty only files whose forward-slash path matches at
 /// least one `-like` pattern are emitted (mirroring `find ... -path <pattern>`).
+/// [pathRegexFilter] optionally restricts full paths before sorting and limiting.
 /// [additionalRelativeRoots] and [rootEnvironmentVariables] let callers include
 /// `%LOCALAPPDATA%` / `%APPDATA%` layouts without duplicating script builders.
 /// When [overrideRootEnvironmentVariable] is non-empty on the remote, its
@@ -4671,6 +4684,7 @@ String windowsListNewestFilesScript({
   required int limit,
   List<String> additionalRelativeRoots = const <String>[],
   List<String> pathLikeFilters = const <String>[],
+  String? pathRegexFilter,
   List<String> rootEnvironmentVariables =
       _windowsUserProfileRootEnvironmentVariables,
   String? overrideRootEnvironmentVariable,
@@ -4731,6 +4745,11 @@ String windowsListNewestFilesScript({
             .join(' -or '),
       )
       ..write(')');
+  }
+  if (pathRegexFilter != null) {
+    body.write(
+      ' -and (\$__flFn -match ${powerShellSingleQuote(pathRegexFilter)})',
+    );
   }
   body
     ..write(')})};')

@@ -2895,6 +2895,72 @@ branch refs/heads/main
       );
     }
 
+    test('Muse Windows discovery reads root logs under XDG_DATA_HOME', () async {
+      final client = _MockSshClient();
+      when(
+        () => client.remoteVersion,
+      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
+      const path = 'C:/custom data/muse/sessions/2026/09/16/$id/session.jsonl';
+      final scripts = <String>[];
+      _stubDiscoveryExec(client, (command) async {
+        final script = decodeEncodedPowerShell(command);
+        scripts.add(script);
+        if (script.contains('Get-ChildItem')) {
+          return _buildExecSession(stdout: path);
+        }
+        if (script.contains(path)) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              path,
+              '${jsonEncode({
+                'payload_type': 'runtime.session.metadata',
+                'stream': {'id': id},
+                'payload': {
+                  'record': {'workspace_root': r'C:\work\project'},
+                },
+              })}\n${jsonEncode({
+                'payload_type': 'runtime.user_intent.accepted',
+                'payload': {
+                  'refill_blocks': [
+                    {'text': 'Resume Windows work'},
+                  ],
+                },
+              })}',
+            ),
+          );
+        }
+        return _buildExecSession();
+      });
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Muse Code',
+            workingDirectory: r'C:\work\project',
+          )
+          .last;
+      expect(result.sessions, hasLength(1), reason: scripts.join('\n'));
+      expect(result.sessions.single.sessionId, id);
+      expect(result.sessions.single.workingDirectory, r'C:\work\project');
+      final listing = scripts.singleWhere((s) => s.contains('Get-ChildItem'));
+      expect(listing, contains(r'$env:XDG_DATA_HOME'));
+      expect(listing, contains("'.local/share/muse/sessions'"));
+      const rootPattern =
+          r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$';
+      expect(
+        listing.indexOf(rootPattern),
+        lessThan(listing.indexOf('Select-Object -First')),
+      );
+      expect(RegExp(rootPattern).hasMatch(path), isTrue);
+      expect(
+        RegExp(rootPattern).hasMatch(
+          path.replaceFirst('/session.jsonl', '/subagent/worker/session.jsonl'),
+        ),
+        isFalse,
+      );
+      expect(scripts.join(), isNot(contains('sqlite3')));
+    });
+
     test('Grok Build discovery resolves resumable summary metadata', () async {
       final client = _MockSshClient();
       final commands = <String>[];

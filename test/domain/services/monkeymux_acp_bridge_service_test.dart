@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -408,6 +409,41 @@ void main() {
     expect(script, contains(r"$__flAcpArgs=@('--acp','a''b','x y')"));
     expect(script, contains(r'& $__flAcpExe @__flAcpArgs'));
   });
+
+  test(
+    'Muse Windows chat resolves the native binary without changing argv',
+    () {
+      final command = buildMonkeyMuxAcpProviderCommand(
+        const ['npx', '--yes', '@bex-co/muse-code-acp@0.6.0'],
+        isWindows: true,
+        providerId: AcpBuiltinProviderIds.museCode,
+      );
+      expect(command.length, lessThan(8192));
+      final script = decodeEncodedPowerShell(command);
+      expect(
+        script,
+        contains(
+          r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){',
+        ),
+      );
+      expect(script, contains("'.muse-version'"));
+      expect(script, contains(r'("muse-bin-"+$__flMuseVersion+".exe")'));
+      expect(script, contains(r'$env:MUSE_CODE_EXECUTABLE=$__flMuseBinary'));
+      expect(script, contains(r"$__flAcpExe='npx'"));
+      expect(
+        script,
+        contains(r"$__flAcpArgs=@('--yes','@bex-co/muse-code-acp@0.6.0')"),
+      );
+      expect(script, isNot(contains('MUSE_SYNC_UPDATE')));
+      final other = decodeEncodedPowerShell(
+        buildMonkeyMuxAcpProviderCommand(const [
+          'copilot',
+          '--acp',
+        ], isWindows: true),
+      );
+      expect(other, isNot(contains('MUSE_CODE_EXECUTABLE')));
+    },
+  );
 
   test('Cursor ACP leaves credential handling to Cursor', () {
     final cursor = buildMonkeyMuxAcpProviderCommand(const [

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -6,6 +7,10 @@ import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_acp_bridge_service.dart';
+import 'package:monkeyssh/domain/services/windows_remote_powershell.dart';
+
+import '../../helpers/powershell_test_helpers.dart';
 
 void main() {
   const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
@@ -48,6 +53,8 @@ void main() {
     () {
       for (final name in [
         'muse',
+        r'C:\Users\demo\AppData\Local\Programs\muse\muse.cmd',
+        'muse-bin-1.3.0-R3233.1.exe',
         '/home/u/.local/bin/muse-bin-1.3.0-R3233.1',
         'muse-code-acp',
       ]) {
@@ -118,8 +125,10 @@ void main() {
       contains('https://dev.meta.ai/install.sh'),
     );
     expect(
-      buildAgentInstallCommand(definition, windows: true, update: false),
-      isNull,
+      decodeEncodedPowerShell(
+        buildAgentInstallCommand(definition, windows: true, update: false)!,
+      ),
+      contains('https://dev.meta.ai/install.ps1'),
     );
     expect(
       buildAgentInstallCommand(
@@ -131,6 +140,29 @@ void main() {
       ),
       contains(
         "MUSE_SYNC_UPDATE=1 MUSE_NO_AUTO_UPDATE=0 '/opt/tools/muse' --version",
+      ),
+    );
+    final windowsProbe = decodeEncodedPowerShell(
+      buildAgentBatchProbeCommand([definition], windows: true),
+    );
+    expect(windowsProbe, contains(r"$env:MUSE_NO_AUTO_UPDATE=''''1'''';"));
+    expect(windowsProbe, contains(r'Programs\muse'));
+    final windowsUpdate = decodeEncodedPowerShell(
+      buildAgentInstallCommand(
+        definition,
+        windows: true,
+        update: true,
+        detectionSource: 'PATH',
+        executablePath:
+            r"C:\Users\O'Brien\AppData\Local\Programs\muse\muse.cmd",
+      )!,
+    );
+    expect(windowsUpdate, contains(r"$env:MUSE_SYNC_UPDATE='1'"));
+    expect(windowsUpdate, contains(r"$env:MUSE_NO_AUTO_UPDATE='0'"));
+    expect(
+      windowsUpdate,
+      contains(
+        r"& 'C:\Users\O''Brien\AppData\Local\Programs\muse\muse.cmd' --version",
       ),
     );
     expect(
@@ -201,5 +233,107 @@ void main() {
       expect(metadata.summary, 'Fix the parser');
       expect(parseMuseSessionMetadata('{broken'), isNull);
     },
+  );
+  final powerShell = Platform.isWindows
+      ? 'powershell.exe'
+      : Platform.environment['MONKEYSSH_TEST_POWERSHELL'];
+  for (final scenario in ['shim', 'native', 'override', 'invalid version']) {
+    test(
+      'Windows Muse chat resolves $scenario executable',
+      () async {
+        final temp = await Directory.systemTemp.createTemp('muse chat ');
+        addTearDown(() => temp.delete(recursive: true));
+        final nativePath = '${temp.path}/muse-bin-1.3.0-R3233.1.exe';
+        await File(nativePath).writeAsString('fixture');
+        await File('${temp.path}/.muse-version').writeAsString(
+          scenario == 'invalid version' ? '../invalid' : '1.3.0-R3233.1\n',
+        );
+        final provider = File('${temp.path}/adapter.ps1');
+        await provider.writeAsString(
+          r'[Console]::Write($env:MUSE_CODE_EXECUTABLE)',
+        );
+        final command = buildMonkeyMuxAcpProviderCommand(
+          [provider.path],
+          isWindows: true,
+          providerId: AcpBuiltinProviderIds.museCode,
+        );
+        final script = decodeEncodedPowerShell(
+          command,
+        ).replaceFirst(powerShellProfilePathPreamble, '');
+        final source = scenario == 'native'
+            ? nativePath
+            : '${temp.path}/muse.cmd';
+        final fixture =
+            'function Get-Command { [pscustomobject]@{Source=${powerShellSingleQuote(source)}} };'
+            '${scenario == 'override' ? r"$env:MUSE_CODE_EXECUTABLE='custom.exe';" : r"$env:MUSE_CODE_EXECUTABLE='';"}'
+            '$script';
+        final result = await Process.run(powerShell!, [
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          encodePowerShellCommand(fixture),
+        ]);
+        if (scenario == 'invalid version') {
+          expect(result.exitCode, isNot(0));
+          expect(
+            result.stderr,
+            contains('Muse native executable was not found'),
+          );
+        } else {
+          expect(result.exitCode, 0, reason: '${result.stderr}');
+          expect(
+            (result.stdout as String).replaceAll(r'\', '/'),
+            scenario == 'override'
+                ? 'custom.exe'
+                : nativePath.replaceAll(r'\', '/'),
+          );
+        }
+      },
+      skip: powerShell == null ? 'Requires PowerShell' : false,
+    );
+  }
+
+  test(
+    'PowerShell lists only root Muse logs before applying the limit',
+    () async {
+      final temp = await Directory.systemTemp.createTemp('muse sessions ');
+      addTearDown(() => temp.delete(recursive: true));
+      final rootLog = File(
+        '${temp.path}/muse/sessions/2026/09/16/$id/session.jsonl',
+      );
+      final nested = File(
+        '${rootLog.parent.path}/subagent/worker/session.jsonl',
+      );
+      await rootLog.parent.create(recursive: true);
+      await rootLog.writeAsString('{}');
+      await rootLog.setLastModified(DateTime.utc(2026, 9, 15));
+      await nested.parent.create(recursive: true);
+      await nested.writeAsString('{}');
+      final script = windowsListNewestFilesScript(
+        relativeRoot: '.local/share/muse/sessions',
+        includeGlobs: const ['session.jsonl'],
+        limit: 1,
+        overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
+        overrideRelativeRoot: 'muse/sessions',
+        pathRegexFilter:
+            r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
+      );
+      final result = await Process.run(
+        powerShell!,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          encodePowerShellCommand(script),
+        ],
+        environment: {'XDG_DATA_HOME': temp.path},
+      );
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      expect(
+        (result.stdout as String).trim().replaceAll(r'\', '/'),
+        rootLog.path.replaceAll(r'\', '/'),
+      );
+    },
+    skip: powerShell == null ? 'Requires PowerShell' : false,
   );
 }

@@ -50,10 +50,6 @@ void main() {
           windows: windows,
           update: false,
         );
-        if (windows && !definition.supportsWindows) {
-          expect(command, isNull);
-          continue;
-        }
         expect(
           command,
           isNotNull,

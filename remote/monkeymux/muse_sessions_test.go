@@ -10,7 +10,7 @@ import (
 
 func TestMuseCommandsAndIdentity(t *testing.T) {
 	const id = "01a0ac67-804e-7f22-8d0d-9a4e2ea626c9"
-	for _, command := range []string{"muse", "muse-bin-1.3.0-R3233.1", "muse-code-acp"} {
+	for _, command := range []string{"muse", "muse.cmd", "muse-bin-1.3.0-R3233.1", "muse-bin-1.3.0-R3233.1.exe", "muse-code-acp", "muse-code-acp.cmd"} {
 		if got := agentToolFromCommandName(command); got != "muse" {
 			t.Fatalf("%s: %q", command, got)
 		}

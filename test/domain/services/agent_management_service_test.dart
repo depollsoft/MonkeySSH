@@ -1527,10 +1527,6 @@ void main() {
           };
           expect(runtimes, hasLength(agentRuntimeDefinitions.length));
           for (final runtime in runtimes) {
-            if (windows && !runtime.definition.supportsWindows) {
-              expect(runtime.status, AgentRuntimeStatus.unavailable);
-              continue;
-            }
             expect(
               runtime.status,
               AgentRuntimeStatus.updateAvailable,
@@ -1836,10 +1832,6 @@ esac
           windows: true,
           update: false,
         );
-        if (!definition.supportsWindows) {
-          expect(windows, isNull);
-          continue;
-        }
         expect(
           decodeEncodedPowerShell(windows!),
           contains(

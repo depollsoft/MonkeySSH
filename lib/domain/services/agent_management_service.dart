@@ -258,12 +258,12 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
   ),
   AgentRuntimeDefinition(
     id: 'cli:muse',
-    supportsWindows: false,
     label: 'Muse Code',
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.museCode,
     executableNames: ['muse'],
     posixInstallerUrl: 'https://dev.meta.ai/install.sh',
+    windowsInstallerUrl: 'https://dev.meta.ai/install.ps1',
     homebrewFormula: 'muse-code',
   ),
 ];
@@ -369,7 +369,6 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
   ),
   AgentRuntimeDefinition(
     id: 'acp:muse',
-    supportsWindows: false,
     label: 'Muse Code ACP',
     kind: AgentRuntimeKind.acpAdapter,
     tool: AgentLaunchTool.museCode,
@@ -497,7 +496,6 @@ String? buildAgentInstallCommand(
   String? detectionSource,
   String? executablePath,
 }) {
-  if (windows && !definition.supportsWindows) return null;
   if (repair && definition.id == 'cli:opencode' && executablePath != null) {
     if (windows) {
       return buildCompactWindowsPowerShellCommand(
@@ -513,7 +511,16 @@ String? buildAgentInstallCommand(
   // Muse's launcher owns updates. Force its documented synchronous update
   // path against the resolved installation rather than installing a second copy.
   if (update && definition.id == 'cli:muse' && detectionSource != 'Homebrew') {
-    if (windows || executablePath == null) return null;
+    if (executablePath == null) return null;
+    if (windows) {
+      return buildCompactWindowsPowerShellCommand(
+        '$powerShellProfilePathPreamble'
+        r"$env:MUSE_SYNC_UPDATE='1';$env:MUSE_NO_AUTO_UPDATE='0';"
+        '& ${powerShellSingleQuote(executablePath)} --version; '
+        r'exit $LASTEXITCODE',
+        plainTextOutput: true,
+      );
+    }
     return '${_profilePrefix}MUSE_SYNC_UPDATE=1 MUSE_NO_AUTO_UPDATE=0 '
         '${_shellQuote(executablePath)} --version';
   }
@@ -787,7 +794,6 @@ class AgentManagementService {
         _resolveRuntimeInfo(
           definition,
           snapshots[definition.id] ?? const AgentProbeSnapshot(),
-          windows: session.remoteIsWindows,
         ),
     ]);
     var metadata = <String, AgentMetadataSnapshot>{};
@@ -815,7 +821,6 @@ class AgentManagementService {
         _resolveRuntimeInfo(
           definition,
           snapshots[definition.id] ?? const AgentProbeSnapshot(),
-          windows: session.remoteIsWindows,
           metadata: metadata[definition.id],
         ),
     ];
@@ -892,12 +897,7 @@ class AgentManagementService {
           // Registry failures must not erase a working executable's version.
         }
       }
-      return _resolveRuntimeInfo(
-        definition,
-        snapshot,
-        metadata: metadata,
-        windows: session.remoteIsWindows,
-      );
+      return _resolveRuntimeInfo(definition, snapshot, metadata: metadata);
     } on Object catch (error) {
       return AgentRuntimeInfo(
         definition: definition,
@@ -911,16 +911,7 @@ class AgentManagementService {
     AgentRuntimeDefinition definition,
     AgentProbeSnapshot snapshot, {
     AgentMetadataSnapshot? metadata,
-    bool windows = false,
   }) {
-    if (windows && !definition.supportsWindows) {
-      return AgentRuntimeInfo(
-        definition: definition,
-        status: AgentRuntimeStatus.unavailable,
-        message:
-            'Muse Code supports macOS and Linux hosts. Connect to WSL through SSH on Windows.',
-      );
-    }
     final path = snapshot.executablePath;
     var installed = parseAgentVersion(snapshot.versionOutput ?? '');
     if (path == null) {
@@ -1707,9 +1698,7 @@ String buildAgentBatchProbeCommand(
     final records = [
       for (final definition in definitions)
         _windowsRecordStart(definition) +
-            (definition.supportsWindows
-                ? _buildWindowsProbeBody(definition)
-                : '') +
+            _buildWindowsProbeBody(definition) +
             _windowsRecordEnd,
     ];
     return buildCompactWindowsPowerShellCommand(
@@ -1959,6 +1948,8 @@ String _buildWindowsProbeBody(AgentRuntimeDefinition definition) {
     if (definition.kind == AgentRuntimeKind.cli) ...[
       r'''$__flScript = '& ' + (ConvertTo-AgentLiteral $__flCommand.Source) + ' ' ''',
       '+ ${powerShellSingleQuote(definition.versionArguments.map(powerShellSingleQuote).join(' '))} + ${powerShellSingleQuote(r'; exit $LASTEXITCODE')};',
+      if (definition.tool == AgentLaunchTool.museCode)
+        r"$__flScript = '$env:MUSE_NO_AUTO_UPDATE=''1'';' + $__flScript;",
       r'$__flVersion = Invoke-AgentProbe $__flScript;',
       'if(\$__flVersion){[void]\$__flOut.AppendLine(${powerShellSingleQuote(_versionMarker)} + ((\$__flVersion -split "`r?`n" | Select-Object -First 4) -join " "))};',
     ] else if (definition.packageName != null &&

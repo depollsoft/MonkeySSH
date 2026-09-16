@@ -15163,7 +15163,7 @@ func agentToolFromCommandName(command string) string {
 		return "muse"
 	}
 	switch normalized {
-	case "muse", "muse-code-acp":
+	case "muse", "muse.cmd", "muse-code-acp", "muse-code-acp.cmd":
 		return "muse"
 	case "claude", "claude-code":
 		return "claude"
