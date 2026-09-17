@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.204"
+	monkeyMuxVersion                  = "0.1.205"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -14915,8 +14915,8 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 // reports. Only windows that currently have that mode enabled get
 // refreshed replies for previously observed color queries. Focus-aware TUIs
 // get a FocusIn nudge so they can re-query colors through the normal path.
-// Known agent TUIs also get the default background response they already
-// tolerate through the tmux refresh path.
+// Agent TUIs that tolerate unsolicited replies also get the default background
+// response used by the tmux refresh path.
 //
 // The contractually-correct live-query response path in
 // handleWindowOutput still answers OSC 10/11/4/17/19 queries the
@@ -14986,7 +14986,14 @@ func (w *muxWindow) themeHintModeReportLocked() bool {
 // (composer spew / Hermes). Win32 still strips these OSCs in
 // themeHintRefreshDataLocked because ConPTY delivers encoded OSC as keystrokes.
 func (w *muxWindow) agentThemeHintRefreshKeysLocked() []string {
-	if !w.focusModeActiveLocked() || w.agentToolLocked() == "" {
+	if !w.focusModeActiveLocked() {
+		return nil
+	}
+	switch w.agentToolLocked() {
+	case "", "muse":
+		// Muse enables focus reporting but treats unsolicited OSC 11 replies
+		// as typed input after startup. Keep the focus nudge and answer any
+		// real color queries through handleWindowOutput instead.
 		return nil
 	}
 	return []string{"11"}
