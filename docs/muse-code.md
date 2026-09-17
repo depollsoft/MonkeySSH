@@ -14,7 +14,7 @@ that directory in its remote PATH. WSL over SSH follows the Linux path.
 Terminal launches support additional arguments and YOLO mode. Resume uses
 `muse resume <session-id>`; continuing uses `muse resume --last`. MonkeyMux
 detects the actual versioned process and binds its root session log for window
-identity and helper-restart recovery. MonkeyMux 0.1.203 upgrades older helpers
+identity and helper-restart recovery. MonkeyMux 0.1.204 upgrades older helpers
 to include Muse support. Nested worker logs are excluded, and unchanged log
 metadata is cached between discovery polls.
 

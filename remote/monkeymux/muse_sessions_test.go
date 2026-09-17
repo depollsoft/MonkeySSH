@@ -88,12 +88,14 @@ func TestMuseSessionStoreAndExactBinding(t *testing.T) {
 			write(path, id)
 		}
 		for _, cachedCandidates := range [][]agentSessionCandidate{nil, candidates} {
-			watch := newAgentSessionWatch("muse", cwd, time.Now(), nil)
-			w := &muxWindow{agentTool: "muse", agentToolConfirmed: true, cwd: cwd, agentSessionWatch: watch}
-			s := &muxServer{windows: []*muxWindow{w}}
-			s.bindAgentSessionCandidatesLocked(w, watch, cachedCandidates, "", []string{path}, time.Now())
-			if w.agentSessionIdentityExact != valid || (valid && w.agentSessionID != id) {
-				t.Fatalf("valid=%v: identity=%q exact=%v", valid, w.agentSessionID, w.agentSessionIdentityExact)
+			for _, argsID := range []string{"", id, nestedID} {
+				watch := newAgentSessionWatch("muse", cwd, time.Now(), nil)
+				w := &muxWindow{agentTool: "muse", agentToolConfirmed: true, cwd: cwd, agentSessionWatch: watch}
+				s := &muxServer{windows: []*muxWindow{w}}
+				s.bindAgentSessionCandidatesLocked(w, watch, cachedCandidates, argsID, []string{path}, time.Now())
+				if w.agentSessionIdentityExact != valid || (valid && w.agentSessionID != id) {
+					t.Fatalf("valid=%v args=%q: identity=%q exact=%v", valid, argsID, w.agentSessionID, w.agentSessionIdentityExact)
+				}
 			}
 		}
 	}

@@ -907,8 +907,9 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 		direct[locked.id] = locked
 	}
 	// Resume arguments establish ownership before a lazy store file exists.
+	// A contradictory open Muse log must not fall back to argument-only binding.
 	// A wrapper-assigned ID still needs store confirmation.
-	if len(direct) == 0 && argsID != "" && !w.agentSessionAssigned && !w.agentSessionIdentityExact && !s.exactAgentSessionOwnerLocked(watch.tool, argsID, w) {
+	if len(direct) == 0 && argsID != "" && len(invalidMusePaths) == 0 && !w.agentSessionAssigned && !w.agentSessionIdentityExact && !s.exactAgentSessionOwnerLocked(watch.tool, argsID, w) {
 		direct[argsID] = argument
 	}
 	var chosen agentSessionCandidate
