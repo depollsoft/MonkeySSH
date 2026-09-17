@@ -1807,6 +1807,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     _moveTerminalCursorTo(delta.deleteCursorOffset);
 
     final deletedCount = delta.deletedCount;
+    if (deletedCount > 0 && delta.appendedText.isEmpty) {
+      // End framing even when the IME buffer reset is deferred on iOS.
+      _isFramingImeText = false;
+    }
 
     for (var i = 0; i < deletedCount; i++) {
       widget.terminal.keyInput(TerminalKey.backspace);

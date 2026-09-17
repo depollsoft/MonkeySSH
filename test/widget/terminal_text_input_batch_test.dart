@@ -274,6 +274,34 @@ void main() {
     );
   }
 
+  for (final composing in [false, true]) {
+    testWidgets(
+      'ends framing before deferred iOS deletion reset, composing: $composing',
+      (tester) async {
+        final harness = await pumpTerminalInputHarness(
+          tester,
+          initialTerminalOutput: '\x1b[?2004h',
+        );
+        tester.testTextInput.updateEditingValue(_editingValue('hello'));
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          _editingValue('hell', composing: composing),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(_editingValue('hell?'));
+        await tester.pump();
+
+        expect(harness.terminalOutput, [
+          '\x1b[200~hello\x1b[201~',
+          '\x7f',
+          '?',
+        ]);
+        await disposeTerminalInputHarness(tester, harness);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+  }
+
   testWidgets('preserves control characters in IME input', (tester) async {
     final harness = await pumpTerminalInputHarness(
       tester,
