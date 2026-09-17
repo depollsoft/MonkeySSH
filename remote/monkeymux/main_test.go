@@ -8060,27 +8060,6 @@ func TestActiveOutputStripsSplitLocallyAnsweredThemeQueryFromAttach(t *testing.T
 	}
 }
 
-func TestThemeHintRefreshDataSuppressesOscUnderWin32InputMode(t *testing.T) {
-	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
-
-	// A focus-aware agent window normally receives an unsolicited OSC 11 refresh.
-	baseline := &muxWindow{focusModeEnabled: true, agentTool: "codex"}
-	if got := baseline.themeHintRefreshDataLocked(hint); len(got) == 0 {
-		t.Fatalf("baseline themeHintRefreshDataLocked = %q, want an OSC push", got)
-	}
-
-	// Under win32-input-mode (Windows ConPTY) that OSC would be delivered to the
-	// app as literal typed characters, so it must be suppressed.
-	win32 := &muxWindow{
-		focusModeEnabled: true,
-		agentTool:        "codex",
-		win32InputMode:   true,
-	}
-	if got := win32.themeHintRefreshDataLocked(hint); len(got) != 0 {
-		t.Fatalf("win32 themeHintRefreshDataLocked = %q, want no OSC push", got)
-	}
-}
-
 func TestThemeHintRefreshDataKeepsModeReportUnderWin32InputMode(t *testing.T) {
 	hint := []byte("\x1b[?997;2n\x1b]11;rgb:1111/2222/3333\x1b\\")
 	// Any DEC 2031 window receives the CSI color-scheme mode report (safe to
@@ -11529,8 +11508,6 @@ func TestThemeHintVerifiesForegroundPidWithoutThrottle(t *testing.T) {
 		id:                         "@1",
 		foregroundCommand:          "unknown-tui",
 		foregroundPid:              42,
-		themeColorQueryPid:         42,
-		themeColorQueryKeys:        map[string]bool{"11": true},
 		lastProcessMetadataRefresh: time.Now(),
 		pty:                        wrapPty(t, inputWriter),
 	}
@@ -11554,8 +11531,7 @@ func TestThemeHintVerifiesForegroundPidWithoutThrottle(t *testing.T) {
 // "hermes spew on every resume" regression. Even when a TUI has
 // previously issued an OSC 11 query (and the daemon answered it via
 // the live-query path), sendThemeHint must NOT proactively re-push the
-// cached response on subsequent theme refreshes unless the foreground
-// tool is known to tolerate it. Many TUIs only handle the first response;
+// cached response on subsequent theme refreshes. Many TUIs only handle the first response;
 // later unsolicited pushes surface as literal "]11;rgb:..." text in their
 // input composer.
 func TestThemeHintDoesNotReSendObservedBackgroundReport(t *testing.T) {
@@ -11643,122 +11619,10 @@ func TestThemeHintAnswersFuturePaletteQuery(t *testing.T) {
 	}
 }
 
-func TestThemeHintRefreshesAgentToolsWithoutColorSchemeUpdatesMode(t *testing.T) {
-	const modeReport = "\x1b[?997;1n"
-	const foregroundReport = "\x1b]10;rgb:1111/2222/3333\x1b\\"
-	const backgroundReport = "\x1b]11;rgb:4444/5555/6666\x1b\\"
-	const paletteReport = "\x1b]4;0;rgb:aaaa/bbbb/cccc\x1b\\"
-	const whiteBackgroundReport = "\x1b]11;rgb:ffff/ffff/ffff\x1b\\"
-	for _, tt := range []struct {
-		name             string
-		command          string
-		hint             string
-		backgroundReport string
-		wantBackground   bool
-	}{
-		// Focus reporting is the opt-in for FocusOut/FocusIn (including
-		// unknown/future agents). Unsolicited OSC 11 stays limited to detected
-		// coding agents so generic focus-aware TUIs do not get composer spew.
-		{name: "copilot", command: "copilot", wantBackground: true},
-		{name: "cursor-agent", command: "cursor-agent", wantBackground: true},
-		{name: "claude", command: "claude", wantBackground: true},
-		{name: "opencode", command: "opencode", wantBackground: true},
-		{name: "antigravity", command: "antigravity", wantBackground: true},
-		{name: "agy", command: "agy", wantBackground: true},
-		{name: "codex", command: "codex", wantBackground: true},
-		{name: "unknown-tui", command: "unknown-tui", wantBackground: false},
-		// Gemini CLI support was dropped, so it is treated like any other TUI.
-		{name: "unsupported gemini", command: "gemini", wantBackground: false},
-		{name: "zsh", command: "zsh", wantBackground: false},
-		{name: "zsh background only", command: "zsh", hint: whiteBackgroundReport, backgroundReport: whiteBackgroundReport},
-		{name: "unknown-tui colors only", command: "unknown-tui", hint: foregroundReport + backgroundReport + paletteReport},
-		{name: "unknown-tui mode only", command: "unknown-tui", hint: modeReport},
-		{name: "zsh mode only", command: "zsh", hint: modeReport},
-		{name: "codex mode only", command: "codex", hint: modeReport},
-		{name: "claude mode only", command: "claude", hint: modeReport},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			window := &muxWindow{
-				id:                "@1",
-				foregroundCommand: tt.command,
-			}
-			window.observeTerminalModesLocked([]byte("\x1b[?1004h"))
-			if !window.themeHintFocusTransitionLocked() {
-				t.Fatalf("%s focus-aware window did not request focus transition", tt.command)
-			}
-			hint := tt.hint
-			if hint == "" {
-				hint = modeReport + foregroundReport + backgroundReport + paletteReport
-			}
-			backgroundReport := backgroundReport
-			if tt.backgroundReport != "" {
-				backgroundReport = tt.backgroundReport
-			}
-			want := ""
-			if tt.wantBackground {
-				want = backgroundReport
-			}
-			if got := string(window.themeHintRefreshDataLocked([]byte(hint))); got != want {
-				t.Fatalf("theme refresh = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
 func TestThemeHintFocusTransitionDefaultsToFocusReporting(t *testing.T) {
 	noFocus := &muxWindow{foregroundCommand: "unknown-tui"}
 	if noFocus.themeHintFocusTransitionLocked() {
 		t.Fatal("window without focus reporting requested focus transition")
-	}
-}
-
-func TestThemeHintSendsModeReportWhenColorSchemeUpdatesMode(t *testing.T) {
-	// DEC 2031 is the general opt-in: any TUI that enables it gets the mode
-	// report, including unknown future agents, without per-tool hardcoding.
-	// Unsolicited OSC 11 is still withheld unless the window is a known agent
-	// with focus mode or previously queried those colors under 2031.
-	for _, tt := range []struct {
-		name                string
-		command             string
-		enableFocus         bool
-		wantBackground      bool
-		wantFocusTransition bool
-	}{
-		{name: "unknown-tui", command: "unknown-tui"},
-		// 2031 + focus: mode report for everyone; agents also keep OSC 11, and
-		// focus transition comes from the 2031+focus capability clause (including Codex).
-		{name: "copilot", command: "copilot", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		{name: "cursor-agent", command: "cursor-agent", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		{name: "claude", command: "claude", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		{name: "opencode", command: "opencode", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		{name: "antigravity", command: "antigravity", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		{name: "codex-2031-focus", command: "codex", enableFocus: true, wantBackground: true, wantFocusTransition: true},
-		// 2031 without focus: mode report only (no agent OSC 11, no focus pair).
-		{name: "codex-2031-only", command: "codex"},
-		{name: "claude-2031-only", command: "claude"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			window := &muxWindow{
-				id:                "@1",
-				foregroundCommand: tt.command,
-			}
-			window.observeTerminalModesLocked([]byte("\x1b[?2031h"))
-			if tt.enableFocus {
-				window.observeTerminalModesLocked([]byte("\x1b[?1004h"))
-			}
-			const modeReport = "\x1b[?997;2n"
-			const backgroundReport = "\x1b]11;rgb:4444/5555/6666\x1b\\"
-			want := modeReport
-			if tt.wantBackground {
-				want += backgroundReport
-			}
-			if got := string(window.themeHintRefreshDataLocked([]byte(modeReport + backgroundReport))); got != want {
-				t.Fatalf("theme refresh = %q, want %q", got, want)
-			}
-			if got := window.themeHintFocusTransitionLocked(); got != tt.wantFocusTransition {
-				t.Fatalf("focus transition = %t, want %t", got, tt.wantFocusTransition)
-			}
-		})
 	}
 }
 
@@ -12889,8 +12753,8 @@ func TestThemeHintDeliversModeReportAndFocusPair(t *testing.T) {
 	const background = "\x1b]11;rgb:4444/5555/6666\x1b\\"
 	for _, test := range []struct{ name, modes, want string }{
 		{"DEC 2031", "\x1b[?2031h", mode},
-		{"focus pair", "\x1b[?1004h", background + "\x1b[O\x1b[I"},
-		{"DEC 2031 and focus pair", "\x1b[?2031h\x1b[?1004h", mode + background + "\x1b[O\x1b[I"},
+		{"focus pair", "\x1b[?1004h", "\x1b[O\x1b[I"},
+		{"DEC 2031 and focus pair", "\x1b[?2031h\x1b[?1004h", mode + "\x1b[O\x1b[I"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pty := &recordingPty{}

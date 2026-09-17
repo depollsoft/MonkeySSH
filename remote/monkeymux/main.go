@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.206"
+	monkeyMuxVersion                  = "0.1.207"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -757,8 +757,6 @@ type muxWindow struct {
 	focusModeProcessID                   int
 	mouseTrackingProcessID               int
 	themeRefreshModeProcessID            int
-	themeColorQueryPid                   int
-	themeColorQueryKeys                  map[string]bool
 	alert                                bool
 	closed                               bool
 	closing                              bool
@@ -14900,33 +14898,6 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	}
 }
 
-// themeHintRefreshKeysLocked returns the OSC theme-query keys the daemon
-// should re-answer when refreshing the cached theme hint.
-//
-// Do not infer safety from a previous OSC color query alone: many TUIs
-// query OSC 10/11 once at startup, react to the first response, and then
-// never expect another one. Any follow-up push (every reconnect, every
-// brightness change, every app-resume) surfaces as literal `]11;rgb:...`
-// text in their input composer (observed with Nous Hermes, Codex, and
-// Claude Code). Synthetic focus-out/focus-in transitions can cause the
-// same kind of prompt/composer pollution.
-//
-// DEC private mode 2031 opts into color-scheme status reports, not OSC replies.
-// Replaying observed color replies is limited to the legacy compatibility list
-// and still requires mode 2031. Focus-aware TUIs get a FocusIn nudge so they can
-// re-query colors through the normal path.
-//
-// The contractually-correct live-query response path in
-// handleWindowOutput still answers OSC 10/11/4/17/19 queries the
-// foreground process actually emits. Other focus-aware programs can re-query
-// after the FocusIn nudge instead of receiving unsolicited OSC bytes.
-func (w *muxWindow) themeHintRefreshKeysLocked() []string {
-	if !w.legacyThemeColorReportsAllowedLocked() || !w.themeRefreshModeActiveLocked() {
-		return nil
-	}
-	return w.activeThemeColorQueryKeysLocked()
-}
-
 // themeHintFocusTransitionLocked reports whether theme refresh should send a
 // synthetic FocusOut/FocusIn pair.
 //
@@ -14937,27 +14908,14 @@ func (w *muxWindow) themeHintFocusTransitionLocked() bool {
 	return w.focusModeActiveLocked()
 }
 
+// Theme refresh proactively notifies subscribers and nudges focus-aware apps.
+// OSC color replies only answer live queries in handleWindowOutput: replaying
+// an old reply can insert it into an app's prompt. Agent identity is irrelevant.
 func (w *muxWindow) themeHintRefreshDataLocked(themeHint []byte) []byte {
-	var themeHintData []byte
-	// On Windows ConPTY (win32-input-mode) an OSC color report written into the
-	// window pty is re-encoded as win32-input-mode key events, which conhost
-	// then delivers to the foreground app as a run of typed characters. Apps
-	// that read console input records instead of a VT stream (e.g. Codex) render
-	// that as literal `]11;rgb:...` text in their composer. Unsolicited refresh
-	// pushes have no matching read on the app side, so skip the OSC reports
-	// there; the live query-response path in handleWindowOutput still answers
-	// OSC color queries the app actually makes, and focus-aware apps still get a
-	// FocusIn nudge to re-query through that safe path.
-	if !w.win32InputMode {
-		var refreshKeys []string
-		refreshKeys = appendThemeQueryKeys(refreshKeys, w.themeHintRefreshKeysLocked())
-		refreshKeys = appendThemeQueryKeys(refreshKeys, w.agentThemeHintRefreshKeysLocked())
-		themeHintData = themeHintResponsesForKeys(themeHint, refreshKeys)
-	}
 	if w.themeHintModeReportLocked() {
-		themeHintData = append(terminalThemeModeReportFromHint(themeHint), themeHintData...)
+		return terminalThemeModeReportFromHint(themeHint)
 	}
-	return themeHintData
+	return nil
 }
 
 // themeHintModeReportLocked reports whether this window should receive the DEC
@@ -14975,30 +14933,6 @@ func (w *muxWindow) themeHintModeReportLocked() bool {
 	return w.themeRefreshModeActiveLocked()
 }
 
-// agentThemeHintRefreshKeysLocked preserves the legacy OSC 11 refresh for the
-// agents that received it before Muse support. Agent detection alone must not
-// enable unsolicited replies: new agents may treat them as typed input.
-//
-// Keep this compatibility list separate from agent registration. New agents
-// use live color queries and explicit theme-update opt-in; focus reporting only
-// requests focus events. Adding an entry here requires checking how that agent
-// consumes unsolicited replies. Win32 suppresses these OSCs separately.
-func (w *muxWindow) agentThemeHintRefreshKeysLocked() []string {
-	if !w.focusModeActiveLocked() || !w.legacyThemeColorReportsAllowedLocked() {
-		return nil
-	}
-	return []string{"11"}
-}
-
-func (w *muxWindow) legacyThemeColorReportsAllowedLocked() bool {
-	switch w.agentToolLocked() {
-	case "claude", "copilot", "codex", "opencode", "antigravity", "cursor-agent", "pi":
-		return true
-	default:
-		return false
-	}
-}
-
 func (w *muxWindow) themeRefreshModeActiveLocked() bool {
 	if w == nil || !w.privateModes["2031"] {
 		return false
@@ -15007,22 +14941,6 @@ func (w *muxWindow) themeRefreshModeActiveLocked() bool {
 	return w.themeRefreshModeProcessID <= 0 ||
 		activePid <= 0 ||
 		w.themeRefreshModeProcessID == activePid
-}
-
-func (w *muxWindow) activeThemeColorQueryKeysLocked() []string {
-	activePid := w.activeForegroundPidLocked()
-	if w.themeColorQueryPid <= 0 ||
-		activePid <= 0 ||
-		w.themeColorQueryPid != activePid ||
-		len(w.themeColorQueryKeys) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(w.themeColorQueryKeys))
-	for key := range w.themeColorQueryKeys {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func (w *muxWindow) activeForegroundPidLocked() int {
@@ -15946,16 +15864,6 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 	queryPid := w.activeForegroundPidLocked()
 	if queryPid <= 0 {
 		return nil
-	}
-	if w.themeColorQueryPid != queryPid {
-		w.themeColorQueryKeys = nil
-	}
-	w.themeColorQueryPid = queryPid
-	if w.themeColorQueryKeys == nil {
-		w.themeColorQueryKeys = map[string]bool{}
-	}
-	for _, key := range queryKeys {
-		w.themeColorQueryKeys[key] = true
 	}
 	return queryKeys
 }

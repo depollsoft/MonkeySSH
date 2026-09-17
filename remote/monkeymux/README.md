@@ -204,14 +204,18 @@ server process. This keeps app-side probes on the MonkeyMux backchannel and
 uses the environment inherited by the foreground `attach` shell instead of
 opening unrelated SSH exec sessions.
 
-Theme/focus refresh requests are backchannel hints. MonkeyMux forwards focus
-transitions only to foreground programs that enabled focus reporting. Detecting
-a new agent does not opt it into unsolicited color replies. Live color queries
-are still answered, and programs can explicitly enable theme updates with DEC
-mode 2031. That opt-in sends a color-scheme status notification, not unsolicited
-OSC color replies. A separate compatibility list preserves OSC refreshes for
-existing agents; new agent integrations should not extend that list without
-verifying their input handling. Shell windows receive no palette reports.
+Theme/focus refresh requests are backchannel hints. On a theme change MonkeyMux
+proactively sends a color-scheme status notification to programs that enabled
+DEC mode 2031 and a focus transition to programs that enabled focus reporting.
+Any resulting color queries receive the new palette immediately. These rules
+are the same for every program, with no agent-name list. OSC color replies are
+never replayed merely because a program asked for them earlier.
+
+The terminal's default and indexed colors update directly in MonkeySSH. A
+program that caches explicit RGB colors must respond to a notification or
+re-query the palette to update its own theme; focus reporting alone does not
+promise that behavior. MonkeyMux cannot safely force an uncooperative program
+to change its internal theme by injecting color replies into its input.
 
 Live terminal identity, status, and color queries are sent to one primary
 terminal only. Ordinary output and notifications still reach every attached
