@@ -783,6 +783,8 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
           );
 
     if (handled) {
+      // Hardware Enter and control keys bypass the IME commit/reset path.
+      _isFramingImeText = false;
       _notifyUserInput();
       _trackHandledHardwareCursorKey(
         key,

@@ -124,7 +124,7 @@ void main() {
     }
   }
 
-  for (final reset in ['Return', 'external key', 'connection']) {
+  for (final reset in ['Return', 'toolbar key', 'connection']) {
     testWidgets('restores standalone shortcuts after $reset resets a batch', (
       tester,
     ) async {
@@ -139,7 +139,7 @@ void main() {
           (tester.state(find.byType(TerminalTextInputHandler))
                   as TextInputClient)
               .performAction(TextInputAction.newline);
-        case 'external key':
+        case 'toolbar key':
           harness.controller.clearImeBuffer();
         case 'connection':
           harness.focusNode.unfocus();
@@ -154,6 +154,58 @@ void main() {
       expect(harness.terminalOutput, ['?']);
       await disposeTerminalInputHarness(tester, harness);
     });
+  }
+
+  for (final input in [
+    (key: LogicalKeyboardKey.enter, modifier: null, output: '\r'),
+    (
+      key: LogicalKeyboardKey.enter,
+      modifier: LogicalKeyboardKey.shiftLeft,
+      output: '\n',
+    ),
+    (
+      key: LogicalKeyboardKey.enter,
+      modifier: LogicalKeyboardKey.altLeft,
+      output: '\x1b\r',
+    ),
+    (
+      key: LogicalKeyboardKey.keyC,
+      modifier: LogicalKeyboardKey.controlLeft,
+      output: '\x03',
+    ),
+    (key: LogicalKeyboardKey.escape, modifier: null, output: '\x1b'),
+  ]) {
+    testWidgets(
+      'restores standalone input after hardware ${input.modifier?.keyLabel ?? ''}'
+      ' ${input.key.keyLabel}',
+      (tester) async {
+        final harness = await pumpTerminalInputHarness(
+          tester,
+          initialTerminalOutput: '\x1b[?2004h',
+        );
+        tester.testTextInput.updateEditingValue(_editingValue('hello'));
+        await tester.pump();
+        final modifier = input.modifier;
+        if (modifier != null) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyEvent(input.key);
+        if (modifier != null) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pump();
+        // Hardware keys do not replace the platform's editing buffer.
+        tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+        await tester.pump();
+
+        expect(harness.terminalOutput, [
+          '\x1b[200~hello\x1b[201~',
+          input.output,
+          '?',
+        ]);
+        await disposeTerminalInputHarness(tester, harness);
+      },
+    );
   }
 
   testWidgets('preserves control characters in IME input', (tester) async {
