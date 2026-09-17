@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.208"
+	monkeyMuxVersion                  = "0.1.209"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -10062,7 +10062,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		primaryNeedsFailover || window.redrawForwardingPrimaryNeedsFailover
 	// Inspect the complete redraw before bounding it: its initial clear may
 	// be outside the retained tail of a long transcript repaint.
-	clearsScreen := terminalOutputClearsScreen(secondaryBuffered)
+	replacesScreen := terminalOutputReplacesScreen(secondaryBuffered)
 	// A long normal-buffer agent such as Pi can repaint its entire transcript
 	// on SIGWINCH. The reset replay already establishes a clean terminal frame,
 	// so retain only a parser-safe tail of that redraw instead of sending many
@@ -10078,7 +10078,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// come and corrupt the client, so leave those redraws to forward normally.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
 	if window.terminalOutputIsGroundLocked() &&
-		(!visibleRedraw || !clearsScreen) {
+		(!visibleRedraw || !replacesScreen) {
 		// Some TUIs coalesce the temporary and restored SIGWINCH notifications
 		// and emit either nothing or an incremental update. The normal
 		// foreground replay clears the client, so the update needs its base
@@ -12321,11 +12321,11 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 	return bell
 }
 
-// terminalOutputClearsScreen identifies redraws that replace the previous
+// terminalOutputReplacesScreen identifies redraws that replace the previous
 // screen. A cursor move, line erase, or scrollback-only erase is not enough:
 // incremental renderers still depend on cells outside that update. Parse in
 // terminal ground state so strings and UTF-8 cannot masquerade as controls.
-func terminalOutputClearsScreen(data []byte) bool {
+func terminalOutputReplacesScreen(data []byte) bool {
 	parser := terminalOutputParserSnapshot{}
 	for index := 0; index < len(data); {
 		if parser.isGround() {
@@ -12337,6 +12337,16 @@ func terminalOutputClearsScreen(data []byte) bool {
 				// an unconditional screen erase; ED 3 erases scrollback.
 				if final == 'J' && params == "2" {
 					return true
+				}
+				// Alternate-screen mode changes select a different buffer even
+				// without an erase. The old buffer is not a base for its output.
+				if (final == 'h' || final == 'l') && strings.HasPrefix(params, "?") {
+					for _, mode := range strings.Split(params[1:], ";") {
+						switch mode {
+						case "47", "1047", "1049":
+							return true
+						}
+					}
 				}
 				parser.observe(data[index:end])
 				index = end

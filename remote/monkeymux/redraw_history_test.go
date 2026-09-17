@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestTerminalOutputClearsScreen(t *testing.T) {
+func TestTerminalOutputReplacesScreen(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		data  string
@@ -20,6 +20,20 @@ func TestTerminalOutputClearsScreen(t *testing.T) {
 		{"default home", "\x1b[;H\x1b[J", false},
 		{"styled home", "\x1b[H\x1b[32m\x1b[J", false},
 		{"C1 clear", "\x9b2J", true},
+		{"enter alternate screen", "\x1b[?1049h", true},
+		{"leave alternate screen", "\x1b[?1049l", true},
+		{"enter alternate 1047", "\x1b[?1047h", true},
+		{"leave alternate 1047", "\x1b[?1047l", true},
+		{"enter alternate 47", "\x1b[?47h", true},
+		{"leave alternate 47", "\x1b[?47l", true},
+		{"combined private modes", "\x1b[?25;1049;2004h", true},
+		{"C1 alternate screen", "\x9b?1047l", true},
+		{"save cursor only", "\x1b[?1048h", false},
+		{"non-private mode", "\x1b[1049h", false},
+		{"alternate mode query", "\x1b[?1049$p", false},
+		{"OSC alternate payload", "\x1b]0;\x1b[?1049h\x07", false},
+		{"DCS alternate payload", "\x1bP\x1b[?1047l\x1b\\", false},
+		{"UTF-8 alternate payload", "\xc2\x9b?1049h", false},
 		{"spinner", "\r\x1b[2KWorking 13s", false},
 		{"scrollback only", "\x1b[3J", false},
 		{"erase below", "\x1b[J", false},
@@ -36,10 +50,41 @@ func TestTerminalOutputClearsScreen(t *testing.T) {
 		{"clear after OSC", "\x1b]0;title\x07\x1b[2J", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := terminalOutputClearsScreen([]byte(tt.data)); got != tt.clear {
-				t.Fatalf("terminalOutputClearsScreen(%q) = %v, want %v", tt.data, got, tt.clear)
+			if got := terminalOutputReplacesScreen([]byte(tt.data)); got != tt.clear {
+				t.Fatalf("terminalOutputReplacesScreen(%q) = %v, want %v", tt.data, got, tt.clear)
 			}
 		})
+	}
+}
+
+func TestRedrawDoesNotReplayPreviousBufferAcrossAlternateScreenSwitch(t *testing.T) {
+	for _, mode := range []string{"47", "1047", "1049", "25;1049;2004"} {
+		for _, action := range []string{"h", "l"} {
+			t.Run(mode+action, func(t *testing.T) {
+				server := newMuxServerWithSize("test", 80, 24)
+				window := &muxWindow{
+					id:                              "@1",
+					redrawForwardingPaused:          true,
+					redrawForwardingGeneration:      1,
+					redrawForwardingFallbackHistory: []byte("previous buffer content"),
+				}
+				if action == "l" {
+					window.privateModes = map[string]bool{"1049": true}
+				}
+				server.windows = []*muxWindow{window}
+				server.activeID = window.id
+				primary, secondary := &recordingConn{}, &recordingConn{}
+				registerTestAttachClient(t, server, secondary, "secondary", 80, 24)
+				registerTestAttachClient(t, server, primary, "primary", 80, 24)
+				window.redrawForwardingPrimaryConn = primary
+				const query = "\x1b[>q"
+				frame := "\x1b[?" + mode + action + "\x1b[Hnew buffer prompt"
+				server.handleWindowOutput(window.id, []byte(frame+query))
+				server.resumePausedAttachForwarding(window.id, 1)
+				waitForRecordedOutput(t, primary, terminalSynchronizedOutputBegin+frame+query+terminalSynchronizedOutputEnd)
+				waitForRecordedOutput(t, secondary, terminalSynchronizedOutputBegin+frame+terminalSynchronizedOutputEnd)
+			})
+		}
 	}
 }
 
