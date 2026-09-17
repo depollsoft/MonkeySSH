@@ -830,6 +830,7 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 		open[normalizedMetadataPath(path)] = true
 	}
 	eligible, direct, registries := map[string]agentSessionCandidate{}, map[string]agentSessionCandidate{}, map[string]agentSessionCandidate{}
+	invalidMusePaths := map[string]bool{}
 	// An open path is exact even if it lives outside the default home or was
 	// unlinked after opening. Decode it with the same readers as store entries.
 	for _, path := range openPaths {
@@ -837,6 +838,12 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 		switch watch.tool {
 		case "muse":
 			id = museSessionIDFromPath(path)
+			if id != "" {
+				if _, valid := readMuseSessionMetadata(path, id); !valid {
+					invalidMusePaths[normalizedMetadataPath(path)] = true
+					id = ""
+				}
+			}
 		case "codex":
 			id = codexSessionIDFromRolloutFile(path)
 		case "claude":
@@ -850,6 +857,9 @@ func (s *muxServer) bindAgentSessionCandidatesLocked(w *muxWindow, watch *agentS
 	lockAmbiguous := false
 	argument := agentSessionCandidate{id: argsID}
 	for _, candidate := range candidates {
+		if watch.tool == "muse" && invalidMusePaths[normalizedMetadataPath(candidate.path)] {
+			continue // A cached entry cannot override a failed live metadata check.
+		}
 		if candidate.id == "" || s.exactAgentSessionOwnerLocked(watch.tool, candidate.id, w) {
 			continue
 		}

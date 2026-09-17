@@ -81,6 +81,23 @@ func TestMuseSessionStoreAndExactBinding(t *testing.T) {
 	if got := readMuseSessionCandidates(); len(got) != 0 {
 		t.Fatalf("mismatched stream accepted: %+v", got)
 	}
+	// A direct process-open-file signal must validate the same metadata even
+	// when no candidate-store entry exists (for example during helper recovery).
+	for _, valid := range []bool{false, true} {
+		if valid {
+			write(path, id)
+		}
+		for _, cachedCandidates := range [][]agentSessionCandidate{nil, candidates} {
+			watch := newAgentSessionWatch("muse", cwd, time.Now(), nil)
+			w := &muxWindow{agentTool: "muse", agentToolConfirmed: true, cwd: cwd, agentSessionWatch: watch}
+			s := &muxServer{windows: []*muxWindow{w}}
+			s.bindAgentSessionCandidatesLocked(w, watch, cachedCandidates, "", []string{path}, time.Now())
+			if w.agentSessionIdentityExact != valid || (valid && w.agentSessionID != id) {
+				t.Fatalf("valid=%v: identity=%q exact=%v", valid, w.agentSessionID, w.agentSessionIdentityExact)
+			}
+		}
+	}
+
 }
 
 func TestMuseMetadataCacheTracksChangesWithoutReopeningHistory(t *testing.T) {

@@ -277,16 +277,21 @@ void main() {
       await binary.writeAsString('#!/bin/sh\nexit 99\n');
       await Process.run('chmod', ['+x', binary.path]);
       final command = buildMonkeyMuxAcpExecutableProbeCommand(const ['muse']);
-      for (final valid in [true, false]) {
+      for (final override in [
+        binary.path,
+        '${temp.path}/missing',
+        'bash',
+        temp.path,
+        '   ',
+      ]) {
+        final valid = override == binary.path;
         final result = await Process.run(
           '/bin/bash',
           ['-c', command],
           environment: {
             'HOME': temp.path,
             'SHELL': '/bin/bash',
-            'MUSE_CODE_EXECUTABLE': valid
-                ? binary.path
-                : '${temp.path}/missing',
+            'MUSE_CODE_EXECUTABLE': override,
           },
         );
         expect(result.exitCode, 0);
@@ -307,7 +312,18 @@ void main() {
       final script = buildMonkeyMuxAcpWindowsExecutableProbeScript(const [
         'muse',
       ]).replaceFirst(powerShellProfilePathPreamble, '');
-      for (final valid in [true, false]) {
+      final temp = await Directory.systemTemp.createTemp('muse windows probe ');
+      addTearDown(() => temp.delete(recursive: true));
+      final binary = File('${temp.path}/custom muse.exe');
+      await binary.writeAsString('fixture');
+      for (final override in [
+        binary.path,
+        '${temp.path}/missing',
+        'powershell.exe',
+        temp.path,
+        '   ',
+      ]) {
+        final valid = override == binary.path;
         final result = await Process.run(
           powerShell!,
           [
@@ -316,11 +332,7 @@ void main() {
             '-EncodedCommand',
             encodePowerShellCommand(script),
           ],
-          environment: {
-            'MUSE_CODE_EXECUTABLE': valid
-                ? powerShell
-                : 'missing-muse-test-executable',
-          },
+          environment: {'MUSE_CODE_EXECUTABLE': override},
         );
         expect(result.exitCode, 0, reason: '${result.stderr}');
         final found = parseMonkeyMuxAcpExecutableProbeOutput(

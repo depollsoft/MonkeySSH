@@ -136,7 +136,8 @@ String buildMonkeyMuxAcpExecutableProbeCommand(Iterable<String> executables) {
       'for c in ${names.join(' ')}; do '
       r'p=$(command -v "$c" 2>/dev/null || true); '
       r'if [ "$c" = muse ] && [ -n "${MUSE_CODE_EXECUTABLE:-}" ]; then '
-      r'p=$(command -v "$MUSE_CODE_EXECUTABLE" 2>/dev/null || true); fi; '
+      r'p=; if [ -f "$MUSE_CODE_EXECUTABLE" ] && [ -x "$MUSE_CODE_EXECUTABLE" ]; then '
+      r'p=$MUSE_CODE_EXECUTABLE; fi; fi; '
       r'case "$p" in /*) printf "%s'
       '$_acpExecutableProbeSeparator'
       r'%s\n" "$c" "$p";; esac; '
@@ -158,12 +159,15 @@ String buildMonkeyMuxAcpWindowsExecutableProbeScript(
     powerShellProfilePathPreamble,
     '\$__flNames=@($quotedNames);',
     r'foreach($__flName in $__flNames){',
-    r'$__flLookup=$__flName;',
-    r"if($__flName -eq 'muse' -and ![string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){$__flLookup=$env:MUSE_CODE_EXECUTABLE};",
-    r'$__flCmd=Get-Command -Name $__flLookup -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;',
+    r"if($__flName -eq 'muse' -and ![string]::IsNullOrEmpty($env:MUSE_CODE_EXECUTABLE)){",
+    r'if(!(Test-Path -LiteralPath $env:MUSE_CODE_EXECUTABLE -PathType Leaf)){continue};',
+    r'$__flPath=$env:MUSE_CODE_EXECUTABLE;',
+    '}else{',
+    r'$__flCmd=Get-Command -Name $__flName -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;',
     r'if($__flCmd -eq $null){continue};',
     r'$__flPath=$__flCmd.Path;',
     r'if([string]::IsNullOrWhiteSpace($__flPath)){$__flPath=$__flCmd.Source};',
+    '}',
     r'if([string]::IsNullOrWhiteSpace($__flPath)){continue};',
     r"$__flPath=$__flPath -replace '\\','/';",
     '[void]\$__flOut.Append(\$__flName).Append($separator).Append(\$__flPath).Append("`n");',
