@@ -56,6 +56,9 @@ abstract final class AcpBuiltinProviderIds {
   /// Pi's standalone ACP adapter.
   static const pi = '${acpCustomProviderReservedIdPrefix}pi-acp';
 
+  /// Community ACP adapter for Meta Muse Code.
+  static const museCode = '${acpCustomProviderReservedIdPrefix}muse-code';
+
   /// xAI Grok Build's official ACP stdio server.
   static const grokBuild = '${acpCustomProviderReservedIdPrefix}grok-build';
 
@@ -79,6 +82,7 @@ AgentLaunchTool? agentLaunchToolForBuiltinAcpProviderId(String providerId) =>
       AcpBuiltinProviderIds.hermes => AgentLaunchTool.hermes,
       AcpBuiltinProviderIds.openClaw => AgentLaunchTool.openclaw,
       AcpBuiltinProviderIds.grokBuild => AgentLaunchTool.grokBuild,
+      AcpBuiltinProviderIds.museCode => AgentLaunchTool.museCode,
       _ => null,
     };
 
@@ -277,17 +281,23 @@ class AcpLaunchCommand {
 class AcpExecutableProbe {
   /// Creates a new [AcpExecutableProbe].
   ///
-  /// [candidateExecutableNames] and [versionArguments] are defensively
+  /// [candidateExecutableNames], [versionArguments], and
+  /// [requiredExecutableNames] are defensively
   /// copied so later mutations to a caller-owned list can never change this
   /// probe after construction.
   AcpExecutableProbe({
     required List<String> candidateExecutableNames,
     List<String> versionArguments = const ['--version'],
+    List<String> requiredExecutableNames = const [],
   }) : candidateExecutableNames = List.unmodifiable(candidateExecutableNames),
-       versionArguments = List.unmodifiable(versionArguments);
+       versionArguments = List.unmodifiable(versionArguments),
+       requiredExecutableNames = List.unmodifiable(requiredExecutableNames);
 
   /// Executable names or aliases that may resolve to this provider on PATH.
   final List<String> candidateExecutableNames;
+
+  /// Commands needed by both the installed adapter and its fallback.
+  final List<String> requiredExecutableNames;
 
   /// Arguments used to probe the resolved executable's version.
   final List<String> versionArguments;
@@ -300,12 +310,17 @@ class AcpExecutableProbe {
             candidateExecutableNames,
             other.candidateExecutableNames,
           ) &&
-          _listEquality.equals(versionArguments, other.versionArguments);
+          _listEquality.equals(versionArguments, other.versionArguments) &&
+          _listEquality.equals(
+            requiredExecutableNames,
+            other.requiredExecutableNames,
+          );
 
   @override
   int get hashCode => Object.hash(
     _listEquality.hash(candidateExecutableNames),
     _listEquality.hash(versionArguments),
+    _listEquality.hash(requiredExecutableNames),
   );
 
   @override
@@ -734,6 +749,25 @@ final acpGrokBuildProvider = AcpBuiltinProvider(
   ),
 );
 
+/// Muse Code uses a separate community adapter; `muse serve` speaks MSP.
+final acpMuseCodeProvider = AcpBuiltinProvider(
+  id: AcpBuiltinProviderIds.museCode,
+  label: 'Muse Code',
+  launchCommand: AcpLaunchCommand(executable: 'muse-code-acp'),
+  executableProbe: AcpExecutableProbe(
+    candidateExecutableNames: const ['muse-code-acp'],
+    requiredExecutableNames: const ['muse'],
+  ),
+  terminalAuthCommand: AcpLaunchCommand(
+    executable: 'muse',
+    arguments: const ['login'],
+  ),
+  adapterFallbackCommand: AcpLaunchCommand(
+    executable: 'npx',
+    arguments: const ['--yes', '@bex-co/muse-code-acp@0.6.0'],
+  ),
+);
+
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.pi,
@@ -760,6 +794,7 @@ final acpBuiltinProviders = List<AcpBuiltinProvider>.unmodifiable([
   acpHermesProvider,
   acpOpenClawProvider,
   acpGrokBuildProvider,
+  acpMuseCodeProvider,
 ]);
 
 /// Approval record for a custom ACP provider's exact launch command.

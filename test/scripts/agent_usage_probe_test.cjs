@@ -472,3 +472,8 @@ test('OpenCode matches inline auth precedence, BOM files, and credential read fa
     fs.rmSync(dir, {recursive: true, force: true});
   }
 });
+
+test('Muse does not invent account quotas or launch an interactive process', async () => {
+  const {probe} = require('../../assets/scripts/agent_usage_probe.cjs');
+  assert.deepEqual(await probe('muse', '/does/not/exist'), {status: 'notReported', windows: [], notices: []});
+});

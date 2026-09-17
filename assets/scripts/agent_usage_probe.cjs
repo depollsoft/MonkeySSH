@@ -557,6 +557,7 @@ async function probe(id, executable) {
       ['app-server'], 'account/rateLimits/read', false, true));
     else if (id === 'copilot') result = copilotUsage(await rpc(executable,
       ['--headless', '--stdio', '--no-auto-update', '--log-level', 'none'], 'account.getQuota', true, false));
+    else if (id === 'muse') result = {status: 'notReported', windows: [], notices: []};
     else if (id === 'grok') result = await grok();
     else if (id === 'cursor') result = await cursor();
     else if (id === 'antigravity') result = await antigravity();

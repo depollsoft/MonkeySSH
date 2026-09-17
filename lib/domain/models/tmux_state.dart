@@ -990,6 +990,7 @@ Set<String> _agentTitleAliases(AgentLaunchTool tool) => switch (tool) {
   AgentLaunchTool.hermes => const {'hermes', 'hermes agent'},
   AgentLaunchTool.openclaw => const {'openclaw', 'openclaw tui'},
   AgentLaunchTool.grokBuild => const {'grok', 'grok build'},
+  AgentLaunchTool.museCode => const {'muse', 'muse code'},
 };
 
 AgentLaunchTool? _agentToolFromTerminalTitle(String? value) {
@@ -1112,7 +1113,8 @@ String? agentSessionIdFromLaunchCommand(
   final patterns = switch (tool) {
     AgentLaunchTool.claudeCode => [_agentResumeFlagPattern],
     AgentLaunchTool.copilotCli => [_agentResumeFlagPattern],
-    AgentLaunchTool.codex => [_agentResumeCommandPattern],
+    AgentLaunchTool.codex ||
+    AgentLaunchTool.museCode => [_agentResumeCommandPattern],
     AgentLaunchTool.openCode => [_agentSessionFlagPattern],
     AgentLaunchTool.antigravity => [_agentConversationFlagPattern],
     AgentLaunchTool.cursorAgent => [_agentResumeFlagPattern],
@@ -1136,7 +1138,9 @@ String? agentSessionIdFromLaunchCommand(
     if (match == null) continue;
     for (var index = 1; index <= match.groupCount; index++) {
       final value = match.group(index)?.trim();
-      if (value != null && value.isNotEmpty) return value;
+      if (value != null && value.isNotEmpty && !value.startsWith('-')) {
+        return value;
+      }
     }
   }
   return null;

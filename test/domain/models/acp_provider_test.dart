@@ -244,7 +244,7 @@ void main() {
 
   group('built-in providers', () {
     test('acpBuiltinProviders contains every verified adapter', () {
-      expect(acpBuiltinProviders, hasLength(10));
+      expect(acpBuiltinProviders, hasLength(11));
       expect(acpBuiltinProviders, contains(acpCopilotCliProvider));
       expect(acpBuiltinProviders, contains(acpClaudeAgentProvider));
       expect(acpBuiltinProviders, contains(acpCodexProvider));
@@ -476,16 +476,20 @@ void main() {
         'does not change the probe', () {
       final mutableCandidates = ['agent'];
       final mutableVersionArgs = ['--version'];
+      final mutableRequirements = ['muse'];
       final probe = AcpExecutableProbe(
         candidateExecutableNames: mutableCandidates,
         versionArguments: mutableVersionArgs,
+        requiredExecutableNames: mutableRequirements,
       );
 
       mutableCandidates.add('other-agent');
       mutableVersionArgs.add('--extra');
+      mutableRequirements.add('other');
 
       expect(probe.candidateExecutableNames, ['agent']);
       expect(probe.versionArguments, ['--version']);
+      expect(probe.requiredExecutableNames, ['muse']);
     });
   });
 

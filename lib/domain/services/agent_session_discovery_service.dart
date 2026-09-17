@@ -905,6 +905,100 @@ List<ToolSessionInfo> parseHermesDbOutput(String output) {
   return sessions;
 }
 
+/// Reads only Muse's session metadata and first user intent from a bounded head.
+@visibleForTesting
+ToolSessionInfo? parseMuseSessionMetadata(String raw, {DateTime? modifiedAt}) {
+  String? id;
+  String? cwd;
+  String? summary;
+  for (final line in raw.split('\n')) {
+    final row = _tryDecodeJsonObject(line);
+    if (row == null) continue;
+    final payload = row['payload'];
+    if (payload is! Map) continue;
+    if (row['payload_type'] == 'runtime.session.metadata') {
+      final stream = row['stream'];
+      final record = payload['record'];
+      if (stream is Map &&
+          stream['id'] is String &&
+          record is Map &&
+          record['workspace_root'] is String) {
+        id = stream['id'] as String;
+        cwd = record['workspace_root'] as String;
+      }
+    } else if (summary == null &&
+        row['payload_type'] == 'runtime.user_intent.accepted') {
+      final blocks = payload['refill_blocks'];
+      if (blocks is List) {
+        summary = blocks
+            .whereType<Map>()
+            .map((b) => b['text'])
+            .whereType<String>()
+            .join(' ')
+            .trim();
+      }
+    }
+  }
+  if (id == null || cwd == null) return null;
+  final sessions = parseMuseSessionIndex(
+    jsonEncode([
+      {
+        'session_id': id,
+        'workspace_root': cwd,
+        'title': summary?.substring(
+          0,
+          summary.length > 200 ? 200 : summary.length,
+        ),
+        'updated_at_us': modifiedAt?.microsecondsSinceEpoch,
+      },
+    ]),
+  );
+  return sessions.firstOrNull;
+}
+
+/// Parses Muse's JSON index rows without treating titles as delimiters.
+@visibleForTesting
+List<ToolSessionInfo> parseMuseSessionIndex(String output) {
+  if (output.trim().isEmpty) return const [];
+  final decoded = jsonDecode(output);
+  if (decoded is! List) return const [];
+  final sessions = <ToolSessionInfo>[];
+  for (final row in decoded) {
+    if (row is! Map) continue;
+    final id = row['session_id'];
+    final cwd = row['workspace_root'];
+    if (id is! String ||
+        !RegExp(
+          r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$',
+        ).hasMatch(id) ||
+        cwd is! String ||
+        cwd.trim().isEmpty) {
+      continue;
+    }
+    final title = row['title'];
+    final micros = row['updated_at_us'];
+    DateTime? updated;
+    if (micros is num && micros > 0 && micros <= 8640000000000000000) {
+      updated = DateTime.fromMicrosecondsSinceEpoch(
+        micros.toInt(),
+        isUtc: true,
+      );
+    }
+    sessions.add(
+      ToolSessionInfo(
+        toolName: 'Muse Code',
+        sessionId: id,
+        workingDirectory: cwd,
+        summary: title is String && title.trim().isNotEmpty
+            ? title.trim()
+            : _truncateSessionIdValue(id),
+        lastActive: updated,
+      ),
+    );
+  }
+  return sessions;
+}
+
 /// Parses Cursor Agent session metadata from a chat `meta.json` file.
 @visibleForTesting
 ({
@@ -1843,6 +1937,7 @@ class AgentSessionDiscoveryService {
           'Pi': _discoverPiSessions,
           'Hermes': _discoverHermesSessions,
           'Grok Build': _discoverGrokSessions,
+          'Muse Code': _discoverMuseSessions,
         };
     return [
       for (final name in toolName == null ? handlers.keys : [toolName])
@@ -3086,6 +3181,132 @@ class AgentSessionDiscoveryService {
             ),
           );
     return _nonEmptyLines(output).take(scanLimit).toList(growable: false);
+  }
+
+  // Muse owns the index. Read it without creating or modifying the database.
+  Future<_ToolDiscoveryResult> _discoverMuseSessions(
+    SshSession session,
+    String? workingDirectory,
+    List<String> relatedWorkingDirectories,
+    int max, {
+    bool previewOnly = false,
+  }) async {
+    try {
+      final limit = _sessionScanLimit(max, previewOnly: previewOnly);
+      final scope = buildSqlWorkingDirectoryScopeClause([
+        ?workingDirectory,
+        ...relatedWorkingDirectories,
+      ], columnName: 'workspace_root');
+      Future<String> query({bool scoped = true}) => _exec(
+        session,
+        r'sqlite3 -readonly -json "${XDG_DATA_HOME:-$HOME/.local/share}/muse/session-index.db" '
+        '${shellEscapePosix("SELECT session_id, workspace_root, title, updated_at_us FROM sessions "
+        "WHERE workspace_root IS NOT NULL "
+        "AND session_log_path NOT LIKE '%/subagent/%' "
+        "${scoped && scope != null ? 'AND ($scope) ' : ''}"
+        "ORDER BY updated_at_us DESC LIMIT $limit;")} 2>/dev/null',
+      );
+      var sessions = <ToolSessionInfo>[];
+      try {
+        if (!session.remoteIsWindows) {
+          sessions = [...parseMuseSessionIndex(await query())];
+        }
+      } on Object {
+        /* Fall back to durable logs. */
+      }
+      if (!session.remoteIsWindows && sessions.isEmpty && scope != null) {
+        try {
+          sessions = [...parseMuseSessionIndex(await query(scoped: false))];
+        } on Object {
+          /* Fall back to durable logs. */
+        }
+      }
+      // The index is created lazily by Muse's picker. Fresh headless sessions
+      // can have durable logs before any index exists or before it refreshes.
+      try {
+        final output = session.remoteIsWindows
+            ? await _execWindowsPowerShell(
+                session,
+                windowsListNewestFilesScript(
+                  relativeRoot: '.local/share/muse/sessions',
+                  maxDepth: 4,
+                  includeGlobs: const ['session.jsonl'],
+                  limit: limit,
+                  overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
+                  overrideRelativeRoot: 'muse/sessions',
+                  pathRegexFilter:
+                      r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
+                ),
+              )
+            : await _exec(
+                session,
+                posixListNewestFilesCommand(
+                  r'find "${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions" '
+                  '-mindepth 5 -maxdepth 5 -name session.jsonl -type f',
+                  limit,
+                ),
+              );
+        final paths = _nonEmptyLines(output)
+            .toSet()
+            .take(_sessionMetadataReadLimit(max, previewOnly: previewOnly))
+            .toList();
+        final snapshots = await _readRemoteFileSnapshots(
+          session,
+          paths,
+          maxBytes: 64 * 1024,
+        );
+        for (final path in paths) {
+          final snapshot = snapshots[path];
+          if (snapshot == null) continue;
+          final metadata = parseMuseSessionMetadata(
+            snapshot.content,
+            modifiedAt: snapshot.modifiedAt,
+          );
+          final pathParts = path.replaceAll(r'\', '/').split('/');
+          final directoryId = pathParts.length >= 2
+              ? pathParts[pathParts.length - 2]
+              : null;
+          // A copied log must not add or overwrite the identity of its source.
+          if (metadata == null || metadata.sessionId != directoryId) continue;
+          final existing = sessions.indexWhere(
+            (s) => s.sessionId == metadata.sessionId,
+          );
+          if (existing < 0) {
+            sessions.add(metadata);
+          } else {
+            final indexed = sessions[existing];
+            sessions[existing] = ToolSessionInfo(
+              toolName: 'Muse Code',
+              sessionId: indexed.sessionId,
+              workingDirectory: metadata.workingDirectory,
+              summary:
+                  indexed.summary == _truncateSessionIdValue(indexed.sessionId)
+                  ? metadata.summary
+                  : indexed.summary,
+              lastActive:
+                  metadata.lastActive != null &&
+                      (indexed.lastActive == null ||
+                          metadata.lastActive!.isAfter(indexed.lastActive!))
+                  ? metadata.lastActive
+                  : indexed.lastActive,
+            );
+          }
+        }
+      } on Object {
+        if (sessions.isEmpty) rethrow;
+      }
+      return _ToolDiscoveryResult.success(
+        'Muse Code',
+        _scopeSessions(
+          sessions,
+          workingDirectory,
+          relatedWorkingDirectories,
+          max,
+        ),
+      );
+    } on Object {
+      return const _ToolDiscoveryResult.failure('Muse Code');
+    }
   }
 
   // ── Hermes ─────────────────────────────────────────────────────────────
@@ -4462,6 +4683,8 @@ String posixListNewestFilesCommand(
 /// [posixListNewestFilesCommand]. When
 /// [pathLikeFilters] is non-empty only files whose forward-slash path matches at
 /// least one `-like` pattern are emitted (mirroring `find ... -path <pattern>`).
+/// [pathRegexFilter] optionally restricts full paths before sorting and limiting.
+/// [maxDepth] bounds traversal itself, excluding deeper worker/artifact trees.
 /// [additionalRelativeRoots] and [rootEnvironmentVariables] let callers include
 /// `%LOCALAPPDATA%` / `%APPDATA%` layouts without duplicating script builders.
 /// When [overrideRootEnvironmentVariable] is non-empty on the remote, its
@@ -4474,6 +4697,8 @@ String windowsListNewestFilesScript({
   required int limit,
   List<String> additionalRelativeRoots = const <String>[],
   List<String> pathLikeFilters = const <String>[],
+  String? pathRegexFilter,
+  int? maxDepth,
   List<String> rootEnvironmentVariables =
       _windowsUserProfileRootEnvironmentVariables,
   String? overrideRootEnvironmentVariable,
@@ -4516,6 +4741,7 @@ String windowsListNewestFilesScript({
     ..write(
       r'$__flItems+=@(Get-ChildItem -LiteralPath $__flRoot -Recurse -File ',
     )
+    ..write(maxDepth == null ? '' : '-Depth $maxDepth ')
     ..write(
       r'2>$null|Where-Object {$__flN=$_.Name;$__flFn=($_.FullName -replace ',
     )
@@ -4534,6 +4760,11 @@ String windowsListNewestFilesScript({
             .join(' -or '),
       )
       ..write(')');
+  }
+  if (pathRegexFilter != null) {
+    body.write(
+      ' -and (\$__flFn -match ${powerShellSingleQuote(pathRegexFilter)})',
+    );
   }
   body
     ..write(')})};')

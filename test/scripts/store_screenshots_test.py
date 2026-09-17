@@ -29,7 +29,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
 
     def test_missing_optional_agents_are_omitted_without_placeholder_panes(self):
         def which(name):
-            return None if name in {'hermes', 'hermes-agent', 'openclaw'} else '/bin/' + name
+            return None if name in {'hermes', 'hermes-agent', 'openclaw', 'muse'} else '/bin/' + name
         with patch.object(store_media.shutil, 'which', side_effect=which):
             found = store_media.require_agent_executables()
         self.assertEqual(set(found), store_media.REQUIRED_AGENT_NAMES)
@@ -48,7 +48,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
             found = store_media.require_agent_executables()
         self.assertEqual(found['antigravity'], '/tools/antigravity-cli')
         self.assertEqual(found['hermes'], '/tools/hermes-agent')
-        self.assertEqual(len(found), 9)
+        self.assertEqual(len(found), 10)
 
     def test_failed_agent_does_not_fall_back_to_an_interactive_shell(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -69,7 +69,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
                    for index, name in enumerate(store_media.AGENT_EXECUTABLES)]
         with patch.object(demo, '_monkeymux_request', return_value={'windows': windows[:-1]}), \
              patch.object(capture.os, 'kill'):
-            with self.assertRaisesRegex(RuntimeError, 'missing: openclaw'):
+            with self.assertRaisesRegex(RuntimeError, 'missing: muse'):
                 demo._require_live_agent_windows()
         with patch.object(demo, '_monkeymux_request', return_value={'windows': windows}), \
              patch.object(capture.os, 'kill', side_effect=ProcessLookupError):

@@ -38,7 +38,7 @@ Future<String?> _findFixtureBash() async {
 
 void main() {
   final fixtureBash = _findFixtureBash();
-  test('every supported runtime has an installer on both platforms', () {
+  test('every supported runtime has an installer on supported platforms', () {
     for (final definition in [
       ...agentCliRuntimeDefinitions,
       ...agentAcpRuntimeDefinitions,

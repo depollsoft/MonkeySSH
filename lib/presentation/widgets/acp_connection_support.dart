@@ -65,6 +65,7 @@ class _AcpExecutableProbeCache {
 Set<String> _allBuiltinAcpExecutableNames() => <String>{
   for (final provider in acpBuiltinProviders) ...[
     ...provider.executableProbe.candidateExecutableNames,
+    ...provider.executableProbe.requiredExecutableNames,
     if (provider.adapterFallbackCommand case final fallback?)
       fallback.executable,
   ],
@@ -104,7 +105,14 @@ Future<Map<String, String>> _loadAcpRemoteExecutables(
       shell.stderr.drain<void>().ignore();
       final output = await utf8.decodeStream(shell.stdout);
       await shell.done;
-      return parseMonkeyMuxAcpExecutableProbeOutput(output, requested);
+      return parseMonkeyMuxAcpExecutableProbeOutput(
+        output,
+        requested,
+        dependencyNames: {
+          for (final provider in acpBuiltinProviders)
+            ...provider.executableProbe.requiredExecutableNames,
+        },
+      );
     } finally {
       shell?.close();
     }
@@ -160,6 +168,27 @@ resolveAcpRemoteProviderLaunch({
   final found = await _loadAcpRemoteExecutables(session);
 
   if (!context.mounted) return null;
+  final missing = provider.executableProbe.requiredExecutableNames
+      .where((name) => !found.containsKey(name))
+      .toList();
+  if (missing.isNotEmpty) {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${provider.label} unavailable'),
+        content: Text(
+          'Install ${missing.join(', ')} on this host before starting ${provider.label} native chat.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    return null;
+  }
   for (final candidate in provider.executableProbe.candidateExecutableNames) {
     final executable = found[candidate];
     if (executable != null) {

@@ -163,7 +163,8 @@ void main() {
             '/b/pi\n'
             '/b/hermes\n'
             '/b/openclaw\n'
-            '/b/grok\n',
+            '/b/grok\n'
+            '/b/muse\n',
         AgentLaunchTool.values.toSet(),
       ),
       (

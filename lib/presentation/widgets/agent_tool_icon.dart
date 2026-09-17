@@ -120,6 +120,7 @@ final Map<AgentLaunchTool, String> _svgByTool = <AgentLaunchTool, String>{
   // Hermes ships the Nous Research portrait as its mark; it is reproduced
   // verbatim from the lobehub icon set rather than redrawn.
   AgentLaunchTool.hermes: hermesAgentMarkSvg,
+  AgentLaunchTool.museCode: museCodeMarkSvg,
   // OpenClaw's own monochrome menu-bar mark: a silhouette with knocked-out
   // eyes, so the icon still reads as its mascot when tinted to one colour.
   AgentLaunchTool.openclaw:

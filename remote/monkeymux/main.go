@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.201"
+	monkeyMuxVersion                  = "0.1.204"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -462,6 +462,9 @@ var (
 		},
 		"copilot": {
 			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
+		},
+		"muse": {
+			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"-][^"]*)"|'([^'-][^']*)'|([^-\s]\S*))`),
 		},
 		"codex": {
 			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))`),
@@ -3197,6 +3200,7 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 	processDiscoveredSessions := map[string]map[int]string{}
 	if len(processes) > 0 {
 		processDiscoveredSessions = map[string]map[int]string{
+			"muse":     discoverRestoreAgentSessionIDs("muse", processes, panePids, restore, paneWorkingDirectories),
 			"copilot":  discoverCopilotSessionIDs(processes, panePids),
 			"codex":    discoverRestoreAgentSessionIDs("codex", processes, panePids, restore, paneWorkingDirectories),
 			"opencode": discoverRestoreAgentSessionIDs("opencode", processes, panePids, restore, paneWorkingDirectories),
@@ -3224,7 +3228,7 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 			discoveredSessionID = antigravitySessions[i]
 		case "cursor-agent":
 			discoveredSessionID = cursorSessions[i]
-		case "claude", "codex", "opencode":
+		case "claude", "codex", "opencode", "muse":
 			// Discovery already considered argv and reserved its IDs. Retrying
 			// argv here could restore a duplicate identity it deliberately skipped.
 		default:
@@ -4993,6 +4997,17 @@ func discoverRestoreAgentSessionIDs(
 ) map[int]string {
 	var recentSessions func(string) []recentAgentSession
 	switch tool {
+	case "muse":
+		entries := readMuseSessionCandidates()
+		recentSessions = func(directory string) []recentAgentSession {
+			var sessions []recentAgentSession
+			for _, entry := range entries {
+				if entry.cwd == normalizedMetadataPath(directory) {
+					sessions = append(sessions, recentAgentSession{entry.id, entry.created})
+				}
+			}
+			return sessions
+		}
 	case "codex":
 		recentSessions = codexRecentSessionsForWorkingDirectory
 	case "claude":
@@ -15144,7 +15159,12 @@ func agentToolFromCommandName(command string) string {
 		return tool
 	}
 	normalized := strings.ToLower(cleanProcessCommandName(command))
+	if museBinaryNamePattern.MatchString(normalized) {
+		return "muse"
+	}
 	switch normalized {
+	case "muse", "muse.cmd", "muse-code-acp", "muse-code-acp.cmd":
+		return "muse"
 	case "claude", "claude-code":
 		return "claude"
 	case "copilot", "github-copilot":
@@ -15191,6 +15211,7 @@ var agentCommands = map[string]struct {
 	resumeArgument   string
 	supportsContinue bool
 }{
+	"muse":         {"muse", "--yolo", "resume", true},
 	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
 	"copilot":      {"copilot", "--yolo", "--resume", false},
 	"codex":        {"codex", "--yolo", "resume", false},
@@ -15262,6 +15283,9 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 		return ""
 	}
 	descriptor := agentCommands[tool]
+	if sessionID == "_continue" && tool == "muse" {
+		return launch + " resume --last"
+	}
 	if sessionID == "_continue" && descriptor.supportsContinue {
 		return launch + " --continue"
 	}
@@ -15298,6 +15322,8 @@ func agentToolFromTerminalTitle(title string) string {
 	normalized := strings.ToLower(strings.Join(strings.Fields(title), " "))
 	normalized = strings.Trim(normalized, "·-: ")
 	switch {
+	case normalized == "muse" || normalized == "muse code" || strings.HasPrefix(normalized, "muse code "):
+		return "muse"
 	case normalized == "claude" || normalized == "claude code" ||
 		strings.HasPrefix(normalized, "claude code "):
 		return "claude"

@@ -18,7 +18,7 @@ MonkeySSH is built for the way people work with remote development environments 
 
 ## Built for agentic coding
 
-MonkeySSH supports Claude Code, Copilot CLI, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, and Grok Build. Each one can open as a terminal window or as a native chat. Available chat controls depend on the agent's ACP adapter.
+MonkeySSH supports Claude Code, Copilot CLI, Codex, OpenCode, Antigravity, Cursor Agent, Pi, Hermes, OpenClaw, Grok Build, and Muse Code. Each one can open as a terminal window or as a native chat. Available chat controls depend on the agent's ACP adapter. [Muse Code setup and support](docs/muse-code.md).
 
 - **Native agent windows** run the agent through the Agent Client Protocol (ACP) over SSH and a persistent MonkeyMux bridge, so a conversation keeps running while the phone sleeps or the connection drops. Prompts, tool calls, plans, diffs, permission requests, images, and attachments from your photos, files, or the remote host over SFTP all render natively. Sessions can be resumed, forked, stopped, or deleted, and background completions and permission requests raise notifications.
 - **Agent window mode** decides whether a launch opens native chat, a terminal window, or asks each time.

@@ -33,7 +33,7 @@ var agentIdentityOpenCodePattern = regexp.MustCompile(`^ses_[A-Za-z0-9]+$`)
 
 func agentSessionIDValid(tool, id string) bool {
 	switch tool {
-	case "claude", "codex", "copilot", "cursor-agent", "antigravity":
+	case "claude", "codex", "copilot", "cursor-agent", "antigravity", "muse":
 		return agentIdentityUUIDPattern.MatchString(id)
 	case "opencode":
 		return len(id) <= 64 && agentIdentityOpenCodePattern.MatchString(id)

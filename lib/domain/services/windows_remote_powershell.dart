@@ -156,6 +156,9 @@ const String powerShellProfilePathPreamble =
     r'if (![string]::IsNullOrWhiteSpace($__flEntry)) { '
     r'$__flEntry=[Environment]::ExpandEnvironmentVariables($__flEntry); '
     r"if (($env:Path -split ';') -notcontains $__flEntry) {$env:Path+=';'+$__flEntry} } }; "
+    r'if (![string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '
+    r"$__flMuseBin=Join-Path $env:LOCALAPPDATA 'Programs\muse'; "
+    r"if (($env:Path -split ';') -notcontains $__flMuseBin) {$env:Path+=';'+$__flMuseBin} }; "
     r'$__flProfilePaths = @($PROFILE.AllUsersAllHosts, '
     r'$PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, '
     r'$PROFILE.CurrentUserCurrentHost) | Where-Object { $_ } | '

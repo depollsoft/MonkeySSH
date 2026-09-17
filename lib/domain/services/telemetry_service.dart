@@ -194,6 +194,7 @@ class TelemetryService {
     'antigravity',
     'pi',
     'grok_build',
+    'muse_code',
     'hermes',
     'openclaw',
     'custom',
