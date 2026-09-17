@@ -4710,7 +4710,7 @@ func TestSelectWindowUsesForegroundRedrawReplayForAgentWindows(t *testing.T) {
 		t.Fatalf("foreground redraw replay was written before redraw settled: %q", got)
 	}
 
-	server.handleWindowOutput("@2", []byte("settled tui screen"))
+	server.handleWindowOutput("@2", []byte("\x1b[H\x1b[2Jsettled tui screen"))
 	waitForTestAttachWrites(t, server)
 	if got := attach.String(); got != "" {
 		t.Fatalf("foreground redraw output was forwarded before replay settled: %q", got)
@@ -4723,7 +4723,7 @@ func TestSelectWindowUsesForegroundRedrawReplayForAgentWindows(t *testing.T) {
 
 	want := synchronizedTerminalOutputAfterPrefixForTest(
 		wantReplay,
-		"settled tui screen",
+		"\x1b[H\x1b[2Jsettled tui screen",
 	)
 	waitForRecordedOutput(t, attach, want)
 	if strings.Contains(attach.String(), "stale tui screen") {
@@ -6238,6 +6238,7 @@ func TestRedrawResizeBoundsLongPiTranscriptRepaint(t *testing.T) {
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
 	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
+	window.appendHistoryLocked([]byte("pre-resize frame"))
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
@@ -6246,7 +6247,7 @@ func TestRedrawResizeBoundsLongPiTranscriptRepaint(t *testing.T) {
 	server.mu.Unlock()
 
 	oldLine := append(
-		[]byte("UNIQUE_TRANSCRIPT_HEAD\r\n"),
+		[]byte("\x1b[H\x1b[2JUNIQUE_TRANSCRIPT_HEAD\r\n"),
 		bytes.Repeat([]byte("old transcript line that is superseded\r\n"), 20000)...,
 	)
 	server.handleWindowOutput("@1", oldLine)
@@ -6260,6 +6261,9 @@ func TestRedrawResizeBoundsLongPiTranscriptRepaint(t *testing.T) {
 	}
 	if strings.Contains(got, "UNIQUE_TRANSCRIPT_HEAD") {
 		t.Fatalf("bounded redraw retained the superseded transcript head")
+	}
+	if strings.Contains(got, "pre-resize frame") {
+		t.Fatal("full redraw unnecessarily replayed the previous frame")
 	}
 	max := foregroundRedrawBufferLimitBytes + len("terminal reset") + 128
 	if len(got) > max {
@@ -6389,11 +6393,11 @@ func TestRedrawResizeDropsSupersededBufferedAttachOutput(t *testing.T) {
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 41)
 	generation := window.redrawForwardingGeneration
 	server.mu.Unlock()
-	server.handleWindowOutput("@1", []byte("new settled layout"))
+	server.handleWindowOutput("@1", []byte("\x1b[H\x1b[2Jnew settled layout"))
 
 	server.resumePausedAttachForwarding("@1", generation)
 
-	want := synchronizedTerminalOutputForTest("new settled layout")
+	want := synchronizedTerminalOutputForTest("\x1b[H\x1b[2Jnew settled layout")
 	waitForRecordedOutput(t, conn, want)
 }
 
@@ -6466,7 +6470,7 @@ func TestRedrawResizePreservesPendingReplay(t *testing.T) {
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 41)
 	generation := window.redrawForwardingGeneration
 	server.mu.Unlock()
-	server.handleWindowOutput("@2", []byte("settled redraw"))
+	server.handleWindowOutput("@2", []byte("\x1b[H\x1b[2Jsettled redraw"))
 
 	server.resumePausedAttachForwarding("@2", generation)
 
@@ -6474,7 +6478,7 @@ func TestRedrawResizePreservesPendingReplay(t *testing.T) {
 		replayPostHistorySuffixForTest(true)
 	want := synchronizedTerminalOutputAfterPrefixForTest(
 		wantReplay,
-		"settled redraw",
+		"\x1b[H\x1b[2Jsettled redraw",
 	)
 	waitForRecordedOutput(t, conn, want)
 	if strings.Contains(conn.String(), "stale tui screen") ||

@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.207"
+	monkeyMuxVersion                  = "0.1.208"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -10060,6 +10060,9 @@ func (s *muxServer) resumePausedAttachForwarding(
 	}
 	primaryNeedsFailover =
 		primaryNeedsFailover || window.redrawForwardingPrimaryNeedsFailover
+	// Inspect the complete redraw before bounding it: its initial clear may
+	// be outside the retained tail of a long transcript repaint.
+	clearsScreen := terminalOutputClearsScreen(secondaryBuffered)
 	// A long normal-buffer agent such as Pi can repaint its entire transcript
 	// on SIGWINCH. The reset replay already establishes a clean terminal frame,
 	// so retain only a parser-safe tail of that redraw instead of sending many
@@ -10073,14 +10076,14 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// safe once that redraw has ended on a sequence boundary. Resuming mid
 	// escape sequence would drop the head of a sequence whose tail is still to
 	// come and corrupt the client, so leave those redraws to forward normally.
-	if !terminalOutputHasVisibleContent(secondaryBuffered) &&
-		window.terminalOutputIsGroundLocked() {
+	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
+	if window.terminalOutputIsGroundLocked() &&
+		(!visibleRedraw || !clearsScreen) {
 		// Some TUIs coalesce the temporary and restored SIGWINCH notifications
-		// and emit no redraw at all. Sending the normal foreground replay in
-		// that case would only clear the client, leaving it blank until future
-		// output. Fall back to the retained screen history and paint it inside
-		// one synchronized transaction so the user sees the last complete frame
-		// rather than an empty viewport.
+		// and emit either nothing or an incremental update. The normal
+		// foreground replay clears the client, so the update needs its base
+		// frame restored first. Paint the retained history and any delta inside
+		// one synchronized transaction so the user sees a complete frame.
 		fallbackReplay := s.foregroundHistoryFallbackReplayLocked(
 			window,
 			window.redrawForwardingFallbackHistory,
@@ -10092,16 +10095,27 @@ func (s *muxServer) resumePausedAttachForwarding(
 		if terminalOutputHasVisibleContent(
 			window.redrawForwardingFallbackHistory,
 		) && len(fallbackReplay) > 0 {
-			replay = nil
-			buffered = append(
-				append([]byte(nil), fallbackReplay...),
-				queryData...,
-			)
-			failoverBuffered = append(
-				append([]byte(nil), fallbackReplay...),
-				queryData...,
-			)
-			secondaryBuffered = append([]byte(nil), fallbackReplay...)
+			if visibleRedraw {
+				// A normal TUI update (for example a spinner tick) can arrive
+				// while the child coalesces both resize notifications. It relies
+				// on the pre-resize frame. Restore that frame before applying the
+				// delta instead of accepting any visible text as a full repaint.
+				replay = nil
+				buffered = append(append([]byte(nil), fallbackReplay...), buffered...)
+				failoverBuffered = append(append([]byte(nil), fallbackReplay...), failoverBuffered...)
+				secondaryBuffered = append(append([]byte(nil), fallbackReplay...), secondaryBuffered...)
+			} else {
+				replay = nil
+				buffered = append(
+					append([]byte(nil), fallbackReplay...),
+					queryData...,
+				)
+				failoverBuffered = append(
+					append([]byte(nil), fallbackReplay...),
+					queryData...,
+				)
+				secondaryBuffered = append([]byte(nil), fallbackReplay...)
+			}
 		}
 	}
 	window.releaseRedrawForwardingStateLocked()
@@ -12305,6 +12319,34 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 		}
 	}
 	return bell
+}
+
+// terminalOutputClearsScreen identifies redraws that replace the previous
+// screen. A cursor move, line erase, or scrollback-only erase is not enough:
+// incremental renderers still depend on cells outside that update. Parse in
+// terminal ground state so strings and UTF-8 cannot masquerade as controls.
+func terminalOutputClearsScreen(data []byte) bool {
+	parser := terminalOutputParserSnapshot{}
+	for index := 0; index < len(data); {
+		if parser.isGround() {
+			if bytes.HasPrefix(data[index:], []byte("\x1bc")) {
+				return true
+			}
+			if end, params, final, ok := controlSequenceAt(data, index); ok {
+				// ED 0/1 depend on the cursor and origin mode. Only ED 2 is
+				// an unconditional screen erase; ED 3 erases scrollback.
+				if final == 'J' && params == "2" {
+					return true
+				}
+				parser.observe(data[index:end])
+				index = end
+				continue
+			}
+		}
+		parser.observe(data[index : index+1])
+		index++
+	}
+	return false
 }
 
 func terminalOutputHasVisibleContent(data []byte) bool {
