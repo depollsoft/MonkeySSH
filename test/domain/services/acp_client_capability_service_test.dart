@@ -1852,13 +1852,20 @@ final class _ModePreservingFile implements SftpFile {
   }
 
   @override
-  Future<void> writeBytes(Uint8List data, {int offset = 0}) async {}
+  Future<void> writeBytes(
+    Uint8List data, {
+    int offset = 0,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+  }) async {}
 
   @override
   SftpFileWriter write(
     Stream<Uint8List> data, {
     int offset = 0,
     void Function(int bytesWritten)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
   }) => SftpFileWriter(this, data, offset, onProgress);
 
   @override

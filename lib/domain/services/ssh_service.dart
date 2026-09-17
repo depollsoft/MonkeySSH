@@ -447,10 +447,9 @@ class _TerminalOutputCursorTracker {
     required int? cursorRow,
     required int? marginTop,
     required int? marginBottom,
-    required bool originMode,
+    required this._originMode,
   }) : _columns = columns != null && columns > 0 ? columns : null,
-       _rows = rows != null && rows > 0 ? rows : null,
-       _originMode = originMode {
+       _rows = rows != null && rows > 0 ? rows : null {
     final validRows = _rows;
     final validColumns = _columns;
     if (validRows == null ||
@@ -7151,12 +7150,10 @@ class _AppReviewDemoSftpClient implements SftpClient {
 
 class _AppReviewDemoSftpFile implements SftpFile {
   _AppReviewDemoSftpFile({
-    required SftpFileAttrs attrs,
-    required Uint8List Function() readContent,
-    required void Function(Uint8List value) writeContent,
-  }) : _attrs = attrs,
-       _readContent = readContent,
-       _writeContent = writeContent;
+    required this._attrs,
+    required this._readContent,
+    required this._writeContent,
+  });
 
   final Uint8List Function() _readContent;
   final void Function(Uint8List value) _writeContent;
@@ -7253,21 +7250,36 @@ class _AppReviewDemoSftpFile implements SftpFile {
     Stream<Uint8List> stream, {
     int offset = 0,
     void Function(int total)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
   }) {
     _ensureOpen();
     if (offset < 0) {
       // ignore: only_throw_errors
       throw SftpError('Write offset must not be negative');
     }
+    if (chunkSize <= 0 || maxPendingRequests <= 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write chunk size and request count must be positive');
+    }
     return _AppReviewDemoSftpFileWriter(this, stream, offset, onProgress);
   }
 
   @override
-  Future<void> writeBytes(Uint8List data, {int offset = 0}) async {
+  Future<void> writeBytes(
+    Uint8List data, {
+    int offset = 0,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+  }) async {
     _ensureOpen();
     if (offset < 0) {
       // ignore: only_throw_errors
       throw SftpError('Write offset must not be negative');
+    }
+    if (chunkSize <= 0 || maxPendingRequests <= 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write chunk size and request count must be positive');
     }
     final previousBytes = _readContent();
     final requiredLength = offset + data.length;
@@ -7314,27 +7326,18 @@ class _AppReviewDemoSftpFile implements SftpFile {
   }
 
   @override
-  Future<int> downloadToRandomAccess(
-    RandomAccessFile destination, {
-    int? length,
-    int offset = 0,
-    void Function(int bytesRead)? onProgress,
-    int chunkSize = 16 * 1024,
-    int maxPendingRequests = 64,
-  }) async {
-    var total = 0;
-    await for (final chunk in read(
-      length: length,
-      offset: offset,
-      chunkSize: chunkSize,
-      maxPendingRequests: maxPendingRequests,
-    )) {
-      await destination.setPosition(offset + total);
-      await destination.writeFrom(chunk);
-      total += chunk.length;
-      onProgress?.call(total);
+  Future<Uint8List?> readChunk(int length, [int offset = 0]) async {
+    _ensureOpen();
+    if (offset < 0 || length < 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Read offset and length must not be negative');
     }
-    return total;
+    final bytes = _readContent();
+    if (offset >= bytes.length) {
+      return null;
+    }
+    final end = math.min(offset + length, bytes.length);
+    return Uint8List.sublistView(bytes, offset, end);
   }
 }
 

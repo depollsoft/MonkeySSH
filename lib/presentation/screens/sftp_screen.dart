@@ -135,7 +135,7 @@ Future<int?> _selectedUploadSizeBytes(List<PlatformFile> files) async {
   try {
     for (final file in files) {
       final size = await file.length();
-      if (size < 0) {
+      if (size == null || size < 0) {
         return null;
       }
       total += size;

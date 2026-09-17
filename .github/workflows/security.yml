@@ -371,7 +371,7 @@ jobs:
 
       - name: Upload Gitleaks SARIF artifact
         if: always() && hashFiles('gitleaks.sarif') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           name: gitleaks-results-${{ github.run_id }}
@@ -409,7 +409,7 @@ jobs:
       - name: Run OSV scanner
         id: osv-scan
         continue-on-error: true
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
         with:
           scan-args: |-
             --recursive
@@ -426,7 +426,7 @@ jobs:
 
       - name: Upload OSV SARIF artifact
         if: always() && hashFiles('results.sarif') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           name: osv-results-${{ github.run_id }}

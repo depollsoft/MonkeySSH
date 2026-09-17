@@ -5482,7 +5482,7 @@ class $$SshKeysTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SshKeysTable, SshKey>(table),
                   $$SshKeysTableReferences(db, table, e),
                 ),
               )
@@ -5881,8 +5881,10 @@ class $$GroupsTableTableManager
               ),
           withReferenceMapper: (p0) => p0
               .map(
-                (e) =>
-                    (e.readTable(table), $$GroupsTableReferences(db, table, e)),
+                (e) => (
+                  e.readTable<$GroupsTable, Group>(table),
+                  $$GroupsTableReferences(db, table, e),
+                ),
               )
               .toList(),
           prefetchHooksCallback: ({parentId = false, hostsRefs = false}) {
@@ -6280,7 +6282,7 @@ class $$SnippetFoldersTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SnippetFoldersTable, SnippetFolder>(table),
                   $$SnippetFoldersTableReferences(db, table, e),
                 ),
               )
@@ -6783,7 +6785,7 @@ class $$SnippetsTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SnippetsTable, Snippet>(table),
                   $$SnippetsTableReferences(db, table, e),
                 ),
               )
@@ -7910,8 +7912,10 @@ class $$HostsTableTableManager
               ),
           withReferenceMapper: (p0) => p0
               .map(
-                (e) =>
-                    (e.readTable(table), $$HostsTableReferences(db, table, e)),
+                (e) => (
+                  e.readTable<$HostsTable, Host>(table),
+                  $$HostsTableReferences(db, table, e),
+                ),
               )
               .toList(),
           prefetchHooksCallback:
@@ -8397,7 +8401,7 @@ class $$PortForwardsTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$PortForwardsTable, PortForward>(table),
                   $$PortForwardsTableReferences(db, table, e),
                 ),
               )
@@ -8690,7 +8694,16 @@ class $$KnownHostsTableTableManager
                 lastSeen: lastSeen,
               ),
           withReferenceMapper: (p0) => p0
-              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .map(
+                (e) => (
+                  e.readTable<$KnownHostsTable, KnownHost>(table),
+                  BaseReferences<_$AppDatabase, $KnownHostsTable, KnownHost>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
               .toList(),
           prefetchHooksCallback: null,
         ),
@@ -8823,7 +8836,16 @@ class $$SettingsTableTableManager
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
-              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .map(
+                (e) => (
+                  e.readTable<$SettingsTable, Setting>(table),
+                  BaseReferences<_$AppDatabase, $SettingsTable, Setting>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
               .toList(),
           prefetchHooksCallback: null,
         ),

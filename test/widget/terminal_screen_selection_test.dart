@@ -22,7 +22,10 @@ final class _StreamOnlyFile extends PlatformFile {
   final Stream<Uint8List> stream;
 
   @override
-  Future<int> length() async => 2;
+  int? lengthSync() => 2;
+
+  @override
+  Future<int?> length() async => 2;
 
   @override
   XFile get xFile => throw StateError('Must stream');

@@ -52,8 +52,10 @@ final class AppPlatformFile extends PlatformFile {
   XFile get xFile => _xFile;
 
   @override
-  Future<int> length() async =>
-      _knownLength ?? _bytes?.lengthInBytes ?? _xFile.length();
+  int? lengthSync() => _knownLength ?? _bytes?.lengthInBytes;
+
+  @override
+  Future<int?> length() async => lengthSync() ?? _xFile.length();
 
   @override
   Future<Uint8List> readAsBytes() async =>
