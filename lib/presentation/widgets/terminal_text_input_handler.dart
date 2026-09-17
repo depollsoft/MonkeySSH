@@ -484,6 +484,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   String? _pendingDeleteResetDeletedSuffixText;
   bool _isInputConnectionShown = false;
   String _lastSentText = '';
+  bool _isFramingImeText = false;
   int _lastSentCursorOffset = 0;
   int _iosBackspaceRunwayLength = 0;
   ({bool ctrl, bool alt, bool shift})? _pendingComposingEnterModifiers;
@@ -782,6 +783,8 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
           );
 
     if (handled) {
+      // Hardware Enter and control keys bypass the IME commit/reset path.
+      _isFramingImeText = false;
       _notifyUserInput();
       _trackHandledHardwareCursorKey(
         key,
@@ -1017,6 +1020,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     final activeBackspace = _activeAndroidImeBackspace;
     if (type == TerminalKeyEventType.repeat && activeBackspace != null) {
       if (activeBackspace.raw) {
+        _isFramingImeText = false;
         _notifyUserInput();
         widget.terminal.textInput('\x7f');
         _pendingAndroidHardwareBackspaces++;
@@ -1058,6 +1062,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
             toolbarModifiers.alt ||
             toolbarModifiers.shift);
     if (!hasToolbarModifier) {
+      _isFramingImeText = false;
       _activeAndroidImeBackspace = (
         raw: true,
         ctrl: false,
@@ -1218,6 +1223,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         !hardwareKeyboard.isAltPressed &&
         (hardwareKeyboard.isControlPressed || hardwareKeyboard.isMetaPressed);
     if (isPasteShortcut) {
+      _isFramingImeText = false;
       _stopHardwareKeyRepeat();
       if (event is KeyDownEvent) {
         unawaited(Future<void>.sync(widget.onPasteText!));
@@ -1551,6 +1557,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   }
 
   void _resetConnectionEditingState() {
+    _isFramingImeText = false;
     _invalidatePendingEditingUpdates();
     _sawImeComposition = false;
     _lastProcessedUserSelectionWasValid = false;
@@ -1800,6 +1807,10 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     _moveTerminalCursorTo(delta.deleteCursorOffset);
 
     final deletedCount = delta.deletedCount;
+    if (deletedCount > 0 && delta.appendedText.isEmpty) {
+      // End framing even when the IME buffer reset is deferred on iOS.
+      _isFramingImeText = false;
+    }
 
     for (var i = 0; i < deletedCount; i++) {
       widget.terminal.keyInput(TerminalKey.backspace);
@@ -1895,7 +1906,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     final input = _applyTerminalTextInputModifiers(text);
     if (widget.terminal.bracketedPasteMode &&
         input == text &&
-        (beforeEnter || text.runes.length > 1) &&
+        (_isFramingImeText || beforeEnter || text.runes.length > 1) &&
         !_terminalTextControlPattern.hasMatch(text)) {
       // IMEs commit whole words at once. Without explicit batch boundaries,
       // prompt TUIs such as Codex infer a paste from the rapid characters and
@@ -1903,8 +1914,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       // the batch, and keep shortcuts/control input on the key input path.
       // Even a single character can be held by the TUI's paste detector when
       // an IME commits it together with Return.
+      // Keep framing later commits too: a separately typed question mark
+      // after a swiped word can restart paste detection before Return.
+      _isFramingImeText = true;
       widget.terminal.paste(text);
     } else {
+      _isFramingImeText = false;
       widget.terminal.textInput(input);
     }
   }
@@ -1912,6 +1927,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   void _sendTerminalEnterFromTextInput({
     ({bool ctrl, bool alt, bool shift})? modifiers,
   }) {
+    _isFramingImeText = false;
     final effectiveModifiers =
         modifiers ?? widget.resolveTerminalKeyModifiers?.call();
     sendTerminalEnterInput(
@@ -1931,6 +1947,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     bool clearPendingDeleteResetBaseline = true,
     bool armIosBackspaceRunway = false,
   }) {
+    _isFramingImeText = false;
     _cancelDeferredTrailingBackspaceImeClear();
     _lastSentText = '';
     _lastSentCursorOffset = 0;
