@@ -19,6 +19,7 @@ func TestMuseWindowSwitchThemeRefreshDoesNotInjectColorReplies(t *testing.T) {
 			window.observeTerminalModesLocked([]byte("\x1b[?1004h"))
 
 			const background = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
+			const lightBackground = "\x1b]11;rgb:ffff/ffff/ffff\x1b\\"
 			server.themeHint = []byte(background)
 			// Muse queries colors at startup. Answering that query must not opt
 			// it into unsolicited replies after later window switches.
@@ -30,7 +31,7 @@ func TestMuseWindowSwitchThemeRefreshDoesNotInjectColorReplies(t *testing.T) {
 				t.Fatalf("startup reply = %q, want %q", got, background)
 			}
 
-			for range 3 {
+			for _, theme := range []string{background, lightBackground, lightBackground} {
 				if err := server.selectWindow("@2"); err != nil {
 					t.Fatal(err)
 				}
@@ -38,7 +39,7 @@ func TestMuseWindowSwitchThemeRefreshDoesNotInjectColorReplies(t *testing.T) {
 					t.Fatal(err)
 				}
 				// The app refreshes the theme after an active-window change.
-				if !server.sendThemeHint(background) {
+				if !server.sendThemeHint(theme) {
 					t.Fatal("focus-aware Muse did not receive a focus refresh")
 				}
 				got = readPipeUntil(t, inputReader, func(output string) bool {
@@ -52,10 +53,10 @@ func TestMuseWindowSwitchThemeRefreshDoesNotInjectColorReplies(t *testing.T) {
 			// A real re-query must still receive the current background color.
 			server.handleWindowOutput(window.id, []byte("\x1b]11;?\x1b\\"))
 			got = readPipeUntil(t, inputReader, func(output string) bool {
-				return strings.Contains(output, background)
+				return strings.Contains(output, lightBackground)
 			})
-			if got != background {
-				t.Fatalf("live reply = %q, want %q", got, background)
+			if got != lightBackground {
+				t.Fatalf("live reply = %q, want updated color %q", got, lightBackground)
 			}
 		})
 	}

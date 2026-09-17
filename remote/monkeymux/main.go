@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.205"
+	monkeyMuxVersion                  = "0.1.206"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -14911,19 +14911,17 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 // Claude Code). Synthetic focus-out/focus-in transitions can cause the
 // same kind of prompt/composer pollution.
 //
-// DEC private mode 2031 is the opt-in signal for color-scheme update
-// reports. Only windows that currently have that mode enabled get
-// refreshed replies for previously observed color queries. Focus-aware TUIs
-// get a FocusIn nudge so they can re-query colors through the normal path.
-// Agent TUIs that tolerate unsolicited replies also get the default background
-// response used by the tmux refresh path.
+// DEC private mode 2031 opts into color-scheme status reports, not OSC replies.
+// Replaying observed color replies is limited to the legacy compatibility list
+// and still requires mode 2031. Focus-aware TUIs get a FocusIn nudge so they can
+// re-query colors through the normal path.
 //
 // The contractually-correct live-query response path in
 // handleWindowOutput still answers OSC 10/11/4/17/19 queries the
 // foreground process actually emits. Other focus-aware programs can re-query
 // after the FocusIn nudge instead of receiving unsolicited OSC bytes.
 func (w *muxWindow) themeHintRefreshKeysLocked() []string {
-	if !w.themeRefreshModeActiveLocked() {
+	if !w.legacyThemeColorReportsAllowedLocked() || !w.themeRefreshModeActiveLocked() {
 		return nil
 	}
 	return w.activeThemeColorQueryKeysLocked()
@@ -14977,26 +14975,28 @@ func (w *muxWindow) themeHintModeReportLocked() bool {
 	return w.themeRefreshModeActiveLocked()
 }
 
-// agentThemeHintRefreshKeysLocked returns unsolicited OSC color keys used on the
-// tmux-era agent refresh path.
+// agentThemeHintRefreshKeysLocked preserves the legacy OSC 11 refresh for the
+// agents that received it before Muse support. Agent detection alone must not
+// enable unsolicited replies: new agents may treat them as typed input.
 //
-// Kept narrower than focus transitions: only windows detected as a coding agent
-// get a proactive OSC 11 push. Unknown focus-aware TUIs still get FocusOut/In
-// (so undetected agents can re-query) but must not receive unsolicited OSC
-// (composer spew / Hermes). Win32 still strips these OSCs in
-// themeHintRefreshDataLocked because ConPTY delivers encoded OSC as keystrokes.
+// Keep this compatibility list separate from agent registration. New agents
+// use live color queries and explicit theme-update opt-in; focus reporting only
+// requests focus events. Adding an entry here requires checking how that agent
+// consumes unsolicited replies. Win32 suppresses these OSCs separately.
 func (w *muxWindow) agentThemeHintRefreshKeysLocked() []string {
-	if !w.focusModeActiveLocked() {
-		return nil
-	}
-	switch w.agentToolLocked() {
-	case "", "muse":
-		// Muse enables focus reporting but treats unsolicited OSC 11 replies
-		// as typed input after startup. Keep the focus nudge and answer any
-		// real color queries through handleWindowOutput instead.
+	if !w.focusModeActiveLocked() || !w.legacyThemeColorReportsAllowedLocked() {
 		return nil
 	}
 	return []string{"11"}
+}
+
+func (w *muxWindow) legacyThemeColorReportsAllowedLocked() bool {
+	switch w.agentToolLocked() {
+	case "claude", "copilot", "codex", "opencode", "antigravity", "cursor-agent", "pi":
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *muxWindow) themeRefreshModeActiveLocked() bool {
