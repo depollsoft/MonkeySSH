@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
@@ -236,43 +235,43 @@ void main() {
   }
 
   for (final repeat in [false, true]) {
-    testWidgets('ends framing on raw Android Backspace, repeat: $repeat', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final harness = await pumpTerminalInputHarness(
-        tester,
-        initialTerminalOutput: '\x1b[?2004h',
-      );
-      tester.testTextInput.updateEditingValue(_editingValue('hello'));
-      await tester.pump();
-      harness.controller.debugHandleAndroidImeKey(
-        TerminalKey.backspace,
-        TerminalKeyEventType.press,
-      );
-      if (repeat) {
+    testWidgets(
+      'ends framing on raw Android Backspace, repeat: $repeat',
+      (tester) async {
+        final harness = await pumpTerminalInputHarness(
+          tester,
+          initialTerminalOutput: '\x1b[?2004h',
+        );
+        tester.testTextInput.updateEditingValue(_editingValue('hello'));
+        await tester.pump();
         harness.controller.debugHandleAndroidImeKey(
           TerminalKey.backspace,
-          TerminalKeyEventType.repeat,
+          TerminalKeyEventType.press,
         );
-      }
-      harness.controller.debugHandleAndroidImeKey(
-        TerminalKey.backspace,
-        TerminalKeyEventType.release,
-      );
-      // Some IMEs never send the editing-value deletion after raw Backspace.
-      tester.testTextInput.updateEditingValue(_editingValue('hello?'));
-      await tester.pump();
+        if (repeat) {
+          harness.controller.debugHandleAndroidImeKey(
+            TerminalKey.backspace,
+            TerminalKeyEventType.repeat,
+          );
+        }
+        harness.controller.debugHandleAndroidImeKey(
+          TerminalKey.backspace,
+          TerminalKeyEventType.release,
+        );
+        // Some IMEs never send the editing-value deletion after raw Backspace.
+        tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+        await tester.pump();
 
-      expect(harness.terminalOutput, [
-        '\x1b[200~hello\x1b[201~',
-        '\x7f',
-        if (repeat) '\x7f',
-        '?',
-      ]);
-      await disposeTerminalInputHarness(tester, harness);
-    });
+        expect(harness.terminalOutput, [
+          '\x1b[200~hello\x1b[201~',
+          '\x7f',
+          if (repeat) '\x7f',
+          '?',
+        ]);
+        await disposeTerminalInputHarness(tester, harness);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
   }
 
   testWidgets('preserves control characters in IME input', (tester) async {
