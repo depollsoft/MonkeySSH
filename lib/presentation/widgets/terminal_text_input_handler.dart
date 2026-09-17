@@ -1020,6 +1020,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     final activeBackspace = _activeAndroidImeBackspace;
     if (type == TerminalKeyEventType.repeat && activeBackspace != null) {
       if (activeBackspace.raw) {
+        _isFramingImeText = false;
         _notifyUserInput();
         widget.terminal.textInput('\x7f');
         _pendingAndroidHardwareBackspaces++;
@@ -1061,6 +1062,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
             toolbarModifiers.alt ||
             toolbarModifiers.shift);
     if (!hasToolbarModifier) {
+      _isFramingImeText = false;
       _activeAndroidImeBackspace = (
         raw: true,
         ctrl: false,
@@ -1221,6 +1223,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         !hardwareKeyboard.isAltPressed &&
         (hardwareKeyboard.isControlPressed || hardwareKeyboard.isMetaPressed);
     if (isPasteShortcut) {
+      _isFramingImeText = false;
       _stopHardwareKeyRepeat();
       if (event is KeyDownEvent) {
         unawaited(Future<void>.sync(widget.onPasteText!));

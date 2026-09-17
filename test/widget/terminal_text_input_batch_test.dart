@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
+import 'package:xterm/xterm.dart';
 
 import '../helpers/terminal_input_harness.dart';
 
@@ -206,6 +208,71 @@ void main() {
         await disposeTerminalInputHarness(tester, harness);
       },
     );
+  }
+
+  for (final modifier in [
+    LogicalKeyboardKey.controlLeft,
+    LogicalKeyboardKey.metaLeft,
+  ]) {
+    testWidgets('ends framing on ${modifier.keyLabel}+V', (tester) async {
+      var pasteCount = 0;
+      final harness = await pumpTerminalInputHarness(
+        tester,
+        initialTerminalOutput: '\x1b[?2004h',
+        onPasteText: () => pasteCount++,
+      );
+      tester.testTextInput.updateEditingValue(_editingValue('hello'));
+      await tester.pump();
+      await tester.sendKeyDownEvent(modifier);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(modifier);
+      tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+      await tester.pump();
+
+      expect(pasteCount, 1);
+      expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '?']);
+      await disposeTerminalInputHarness(tester, harness);
+    });
+  }
+
+  for (final repeat in [false, true]) {
+    testWidgets('ends framing on raw Android Backspace, repeat: $repeat', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final harness = await pumpTerminalInputHarness(
+        tester,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+      tester.testTextInput.updateEditingValue(_editingValue('hello'));
+      await tester.pump();
+      harness.controller.debugHandleAndroidImeKey(
+        TerminalKey.backspace,
+        TerminalKeyEventType.press,
+      );
+      if (repeat) {
+        harness.controller.debugHandleAndroidImeKey(
+          TerminalKey.backspace,
+          TerminalKeyEventType.repeat,
+        );
+      }
+      harness.controller.debugHandleAndroidImeKey(
+        TerminalKey.backspace,
+        TerminalKeyEventType.release,
+      );
+      // Some IMEs never send the editing-value deletion after raw Backspace.
+      tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+      await tester.pump();
+
+      expect(harness.terminalOutput, [
+        '\x1b[200~hello\x1b[201~',
+        '\x7f',
+        if (repeat) '\x7f',
+        '?',
+      ]);
+      await disposeTerminalInputHarness(tester, harness);
+    });
   }
 
   testWidgets('preserves control characters in IME input', (tester) async {

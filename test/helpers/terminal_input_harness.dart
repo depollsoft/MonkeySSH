@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
@@ -22,6 +24,7 @@ Future<TerminalInputHarness> pumpTerminalInputHarness(
   bool tapToShowKeyboard = true,
   bool sensitiveInput = false,
   bool manageFocus = true,
+  FutureOr<void> Function()? onPasteText,
   TerminalTextInputReviewCallback? onReviewInsertedText,
   String Function()? resolveTextBeforeCursor,
   TerminalKeyModifierResolver? resolveTerminalKeyModifiers,
@@ -48,6 +51,7 @@ Future<TerminalInputHarness> pumpTerminalInputHarness(
     tapToShowKeyboard: tapToShowKeyboard,
     sensitiveInput: sensitiveInput,
     manageFocus: manageFocus,
+    onPasteText: onPasteText,
     onReviewInsertedText: onReviewInsertedText,
     resolveTextBeforeCursor: resolveTextBeforeCursor,
     resolveTerminalKeyModifiers: resolveTerminalKeyModifiers,
