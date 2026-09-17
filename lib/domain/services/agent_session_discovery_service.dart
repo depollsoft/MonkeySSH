@@ -3229,6 +3229,7 @@ class AgentSessionDiscoveryService {
                 session,
                 windowsListNewestFilesScript(
                   relativeRoot: '.local/share/muse/sessions',
+                  maxDepth: 4,
                   includeGlobs: const ['session.jsonl'],
                   limit: limit,
                   overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
@@ -4683,6 +4684,7 @@ String posixListNewestFilesCommand(
 /// [pathLikeFilters] is non-empty only files whose forward-slash path matches at
 /// least one `-like` pattern are emitted (mirroring `find ... -path <pattern>`).
 /// [pathRegexFilter] optionally restricts full paths before sorting and limiting.
+/// [maxDepth] bounds traversal itself, excluding deeper worker/artifact trees.
 /// [additionalRelativeRoots] and [rootEnvironmentVariables] let callers include
 /// `%LOCALAPPDATA%` / `%APPDATA%` layouts without duplicating script builders.
 /// When [overrideRootEnvironmentVariable] is non-empty on the remote, its
@@ -4696,6 +4698,7 @@ String windowsListNewestFilesScript({
   List<String> additionalRelativeRoots = const <String>[],
   List<String> pathLikeFilters = const <String>[],
   String? pathRegexFilter,
+  int? maxDepth,
   List<String> rootEnvironmentVariables =
       _windowsUserProfileRootEnvironmentVariables,
   String? overrideRootEnvironmentVariable,
@@ -4738,6 +4741,7 @@ String windowsListNewestFilesScript({
     ..write(
       r'$__flItems+=@(Get-ChildItem -LiteralPath $__flRoot -Recurse -File ',
     )
+    ..write(maxDepth == null ? '' : '-Depth $maxDepth ')
     ..write(
       r'2>$null|Where-Object {$__flN=$_.Name;$__flFn=($_.FullName -replace ',
     )

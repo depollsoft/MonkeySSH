@@ -403,7 +403,7 @@ void main() {
   }
 
   test(
-    'PowerShell lists only root Muse logs before applying the limit',
+    'PowerShell bounds Muse traversal before filtering and limiting',
     () async {
       final temp = await Directory.systemTemp.createTemp('muse sessions ');
       addTearDown(() => temp.delete(recursive: true));
@@ -420,12 +420,12 @@ void main() {
       await nested.writeAsString('{}');
       final script = windowsListNewestFilesScript(
         relativeRoot: '.local/share/muse/sessions',
+        maxDepth: 4,
         includeGlobs: const ['session.jsonl'],
         limit: 1,
         overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
         overrideRelativeRoot: 'muse/sessions',
-        pathRegexFilter:
-            r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
+        // No path regex: the depth bound alone must exclude nested logs.
       );
       final result = await Process.run(
         powerShell!,

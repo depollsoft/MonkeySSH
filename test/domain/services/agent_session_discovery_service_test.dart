@@ -3038,6 +3038,7 @@ branch refs/heads/main
       expect(result.sessions.single.workingDirectory, r'C:\work\project');
       final listing = scripts.singleWhere((s) => s.contains('Get-ChildItem'));
       expect(listing, contains(r'$env:XDG_DATA_HOME'));
+      expect(listing, contains('-Recurse -File -Depth 4 '));
       expect(listing, contains("'.local/share/muse/sessions'"));
       const rootPattern =
           r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$';
