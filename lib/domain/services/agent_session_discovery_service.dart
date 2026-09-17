@@ -3261,7 +3261,12 @@ class AgentSessionDiscoveryService {
             snapshot.content,
             modifiedAt: snapshot.modifiedAt,
           );
-          if (metadata == null) continue;
+          final pathParts = path.replaceAll(r'\', '/').split('/');
+          final directoryId = pathParts.length >= 2
+              ? pathParts[pathParts.length - 2]
+              : null;
+          // A copied log must not add or overwrite the identity of its source.
+          if (metadata == null || metadata.sessionId != directoryId) continue;
           final existing = sessions.indexWhere(
             (s) => s.sessionId == metadata.sessionId,
           );

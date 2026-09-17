@@ -2895,6 +2895,100 @@ branch refs/heads/main
       );
     }
 
+    for (final windows in [false, true]) {
+      for (final indexed in [false, true]) {
+        if (windows && indexed) {
+          continue; // Windows reads durable logs directly.
+        }
+        test(
+          'Muse rejects copied log identities: windows=$windows indexed=$indexed',
+          () async {
+            final client = _MockSshClient();
+            if (windows) {
+              when(
+                () => client.remoteVersion,
+              ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+            }
+            const originalId = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
+            const copiedId = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c0';
+            final path = windows
+                ? 'C:/data/muse/sessions/2026/09/16/$copiedId/session.jsonl'
+                : '/data/muse/sessions/2026/09/16/$copiedId/session.jsonl';
+            _stubDiscoveryExec(client, (command) async {
+              final script = windows
+                  ? decodeEncodedPowerShell(command)
+                  : command;
+              if (script.contains('session-index.db')) {
+                return _buildExecSession(
+                  stdout: indexed
+                      ? jsonEncode([
+                          {
+                            'session_id': originalId,
+                            'workspace_root': '/original/project',
+                            'title': 'Original session',
+                            'updated_at_us': 1700000000000000,
+                          },
+                        ])
+                      : '',
+                );
+              }
+              if (script.contains('Get-ChildItem') ||
+                  script.contains('-mindepth 5 -maxdepth 5')) {
+                return _buildExecSession(stdout: path);
+              }
+              if (script.contains(path)) {
+                return _buildExecSession(
+                  stdout: _remoteSnapshotLine(
+                    path,
+                    [
+                      jsonEncode({
+                        'payload_type': 'runtime.session.metadata',
+                        'stream': {'id': originalId},
+                        'payload': {
+                          'record': {'workspace_root': '/copied/project'},
+                        },
+                      }),
+                      jsonEncode({
+                        'payload_type': 'runtime.user_intent.accepted',
+                        'payload': {
+                          'refill_blocks': [
+                            {'text': 'Copied prompt'},
+                          ],
+                        },
+                      }),
+                    ].join('\n'),
+                  ),
+                );
+              }
+              return _buildExecSession();
+            });
+            final discovery = AgentSessionDiscoveryService();
+            final result = await discovery
+                .discoverSessionsStream(
+                  _buildDiscoverySession(client),
+                  toolName: 'Muse Code',
+                )
+                .last;
+            if (indexed) {
+              expect(result.sessions, hasLength(1));
+              expect(result.sessions.single.sessionId, originalId);
+              expect(
+                result.sessions.single.workingDirectory,
+                '/original/project',
+              );
+              expect(result.sessions.single.summary, 'Original session');
+              expect(
+                discovery.buildResumeCommand(result.sessions.single),
+                "cd '/original/project' && muse resume '$originalId'",
+              );
+            } else {
+              expect(result.sessions, isEmpty);
+            }
+          },
+        );
+      }
+    }
+
     test('Muse Windows discovery reads root logs under XDG_DATA_HOME', () async {
       final client = _MockSshClient();
       when(

@@ -110,7 +110,7 @@ func TestMuseMetadataCacheTracksChangesWithoutReopeningHistory(t *testing.T) {
 	const secondID = "01a0ac67-804e-7f22-8d0d-9a4e2ea626c0"
 	path := write(id, "/project")
 	for i := 0; i < 3; i++ {
-		if got := cache.read(root, read); len(got) != 1 || got[0].cwd != "/project" {
+		if got := cache.read(root, read); len(got) != 1 || got[0].cwd != normalizedMetadataPath("/project") {
 			t.Fatalf("%+v", got)
 		}
 	}
@@ -122,7 +122,7 @@ func TestMuseMetadataCacheTracksChangesWithoutReopeningHistory(t *testing.T) {
 	if got := cache.read(root, read); len(got) != 2 || reads != 3 {
 		t.Fatalf("reads=%d candidates=%+v", reads, got)
 	}
-	if cache.entries[path].candidate.cwd != "/updated-project" {
+	if cache.entries[path].candidate.cwd != normalizedMetadataPath("/updated-project") {
 		t.Fatal("changed metadata not refreshed")
 	}
 	if err := os.Remove(path); err != nil {
