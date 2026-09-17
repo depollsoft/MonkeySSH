@@ -81,6 +81,81 @@ void main() {
     await disposeTerminalInputHarness(tester, harness);
   });
 
+  for (final suffix in ['?', '!', '.', 'x', ' ']) {
+    for (final actionOnly in [false, true]) {
+      testWidgets(
+        'frames separately committed $suffix after swipe before Return, '
+        'action only: $actionOnly',
+        (tester) async {
+          final harness = await pumpTerminalInputHarness(
+            tester,
+            initialTerminalOutput: '\x1b[?2004h',
+          );
+          tester.testTextInput.updateEditingValue(
+            _editingValue('hello', composing: true),
+          );
+          await tester.pump();
+          expect(harness.terminalOutput, isEmpty);
+          tester.testTextInput.updateEditingValue(_editingValue('hello'));
+          await tester.pump();
+          tester.testTextInput.updateEditingValue(
+            _editingValue('hello$suffix'),
+          );
+          await tester.pump();
+          if (!actionOnly) {
+            tester.testTextInput.updateEditingValue(
+              _editingValue('hello$suffix\n'),
+            );
+            await tester.pump();
+          }
+          (tester.state(find.byType(TerminalTextInputHandler))
+                  as TextInputClient)
+              .performAction(TextInputAction.newline);
+          await tester.pump();
+
+          expect(harness.terminalOutput, [
+            '\x1b[200~hello\x1b[201~',
+            '\x1b[200~$suffix\x1b[201~',
+            '\r',
+          ]);
+          await disposeTerminalInputHarness(tester, harness);
+        },
+      );
+    }
+  }
+
+  for (final reset in ['Return', 'external key', 'connection']) {
+    testWidgets('restores standalone shortcuts after $reset resets a batch', (
+      tester,
+    ) async {
+      final harness = await pumpTerminalInputHarness(
+        tester,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+      tester.testTextInput.updateEditingValue(_editingValue('hello'));
+      await tester.pump();
+      switch (reset) {
+        case 'Return':
+          (tester.state(find.byType(TerminalTextInputHandler))
+                  as TextInputClient)
+              .performAction(TextInputAction.newline);
+        case 'external key':
+          harness.controller.clearImeBuffer();
+        case 'connection':
+          harness.focusNode.unfocus();
+          await tester.pump();
+          harness.focusNode.requestFocus();
+      }
+      await tester.pump();
+      harness.terminalOutput.clear();
+      tester.testTextInput.updateEditingValue(_editingValue('?'));
+      await tester.pump();
+
+      expect(harness.terminalOutput, ['?']);
+      await disposeTerminalInputHarness(tester, harness);
+    });
+  }
+
   testWidgets('preserves control characters in IME input', (tester) async {
     final harness = await pumpTerminalInputHarness(
       tester,
@@ -111,15 +186,38 @@ void main() {
   });
 
   testWidgets('keeps modified text out of bracketed paste', (tester) async {
+    var alt = false;
     final harness = await pumpTerminalInputHarness(
       tester,
       initialTerminalOutput: '\x1b[?2004h',
-      applyTerminalTextInputModifiers: (text) => '\x1b$text',
+      applyTerminalTextInputModifiers: (text) => alt ? '\x1b$text' : text,
     );
     tester.testTextInput.updateEditingValue(_editingValue('hello'));
     await tester.pump();
+    alt = true;
+    tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+    await tester.pump();
 
-    expect(harness.terminalOutput, ['\x1bhello']);
+    expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '\x1b?']);
+    await disposeTerminalInputHarness(tester, harness);
+  });
+
+  testWidgets('stops framing when the application disables bracketed paste', (
+    tester,
+  ) async {
+    final harness = await pumpTerminalInputHarness(
+      tester,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+    tester.testTextInput.updateEditingValue(_editingValue('hello'));
+    await tester.pump();
+    harness.terminal.write('\x1b[?2004l');
+    tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+    await tester.pump();
+    tester.testTextInput.updateEditingValue(_editingValue('hello?\n'));
+    await tester.pump();
+
+    expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '?', '\r']);
     await disposeTerminalInputHarness(tester, harness);
   });
 
@@ -134,10 +232,18 @@ void main() {
           (ctrl: false, alt: false, shift: shift),
       consumeTerminalKeyModifiers: () => shift = false,
     );
-    tester.testTextInput.updateEditingValue(_editingValue('hello\n'));
+    tester.testTextInput.updateEditingValue(_editingValue('hello'));
+    await tester.pump();
+    tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+    await tester.pump();
+    tester.testTextInput.updateEditingValue(_editingValue('hello?\n'));
     await tester.pump();
 
-    expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '\x1b[13;2u']);
+    expect(harness.terminalOutput, [
+      '\x1b[200~hello\x1b[201~',
+      '\x1b[200~?\x1b[201~',
+      '\x1b[13;2u',
+    ]);
     expect(shift, isFalse);
     await disposeTerminalInputHarness(tester, harness);
   });
