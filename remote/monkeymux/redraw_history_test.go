@@ -50,7 +50,7 @@ func TestTerminalOutputReplacesScreen(t *testing.T) {
 		{"clear after OSC", "\x1b]0;title\x07\x1b[2J", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := terminalOutputReplacesScreen([]byte(tt.data)); got != tt.clear {
+			if got := terminalOutputReplacesScreen([]byte(tt.data), terminalOutputParserSnapshot{}); got != tt.clear {
 				t.Fatalf("terminalOutputReplacesScreen(%q) = %v, want %v", tt.data, got, tt.clear)
 			}
 		})
@@ -85,6 +85,57 @@ func TestRedrawDoesNotReplayPreviousBufferAcrossAlternateScreenSwitch(t *testing
 				waitForRecordedOutput(t, secondary, terminalSynchronizedOutputBegin+frame+terminalSynchronizedOutputEnd)
 			})
 		}
+	}
+}
+
+func TestRedrawPreservesParserStateAcrossPause(t *testing.T) {
+	for _, tt := range []struct{ name, prefix, continuation string }{
+		{"OSC", "\x1b]0;", "\x1b[2J\x07"},
+		{"DCS", "\x1bPpayload", "\x1b[2J\x1b\\"},
+		{"APC", "\x1b_payload", "\x1b[?1049h\x1b\\"},
+		{"UTF-8", "\xc2", "\x9b2J"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := terminalOutputParserSnapshot{}
+			parser.observe([]byte(tt.prefix))
+			if terminalOutputReplacesScreen([]byte(tt.continuation), parser) {
+				t.Fatal("continuation was treated as a screen replacement")
+			}
+			if !terminalOutputReplacesScreen([]byte(tt.continuation+"\x1b[2J"), parser) {
+				t.Fatal("real erase after the continuation was missed")
+			}
+			server := newMuxServerWithSize("test", 80, 24)
+			window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": true}}
+			server.windows = []*muxWindow{window}
+			server.activeID = window.id
+			primary, secondary := &recordingConn{}, &recordingConn{}
+			registerTestAttachClient(t, server, secondary, "secondary", 80, 24)
+			registerTestAttachClient(t, server, primary, "primary", 80, 24)
+			server.handleWindowOutput(window.id, []byte("base frame"+tt.prefix))
+			waitForTestAttachWrites(t, server)
+			primary.Reset()
+			secondary.Reset()
+			server.mu.Lock()
+			server.pauseAttachForwardingForRedrawLocked(window, 80, 24)
+			generation := window.redrawForwardingGeneration
+			start := window.redrawForwardingStartParser
+			server.mu.Unlock()
+			if start.isGround() {
+				t.Fatal("pause forgot the partial sequence")
+			}
+			server.handleWindowOutput(window.id, []byte(tt.continuation+"spinner update"))
+			server.resumePausedAttachForwarding(window.id, generation)
+			waitForTestAttachWrites(t, server)
+			for _, conn := range []*recordingConn{primary, secondary} {
+				got := conn.String()
+				if !strings.Contains(got, "base frame") || !strings.Contains(got, "spinner update") {
+					t.Fatalf("lost base or update across partial sequence: %q", got)
+				}
+				if !strings.Contains(got, tt.prefix+tt.continuation) {
+					t.Fatalf("replay split the retained sequence: %q", got)
+				}
+			}
+		})
 	}
 }
 

@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.209"
+	monkeyMuxVersion                  = "0.1.210"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -767,6 +767,7 @@ type muxWindow struct {
 	redrawForwardingBuffer               []byte
 	redrawForwardingFailoverBuffer       []byte
 	redrawForwardingSecondaryBuffer      []byte
+	redrawForwardingStartParser          terminalOutputParserSnapshot
 	redrawForwardingQueryBuffer          []byte
 	redrawForwardingPrimaryConn          net.Conn
 	redrawForwardingPrimaryNeedsFailover bool
@@ -9934,6 +9935,11 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 		preservedQueries...,
 	)
 	window.redrawForwardingSecondaryBuffer = nil
+	window.redrawForwardingStartParser = terminalOutputParserSnapshot{
+		state:         window.terminalOutputState,
+		bytes:         window.terminalOutputBytes,
+		utf8Remaining: window.terminalOutputUtf8Remaining,
+	}
 	window.redrawForwardingQueryBuffer = append(
 		window.redrawForwardingQueryBuffer[:0],
 		preservedQueries...,
@@ -10062,7 +10068,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		primaryNeedsFailover || window.redrawForwardingPrimaryNeedsFailover
 	// Inspect the complete redraw before bounding it: its initial clear may
 	// be outside the retained tail of a long transcript repaint.
-	replacesScreen := terminalOutputReplacesScreen(secondaryBuffered)
+	replacesScreen := terminalOutputReplacesScreen(secondaryBuffered, window.redrawForwardingStartParser)
 	// A long normal-buffer agent such as Pi can repaint its entire transcript
 	// on SIGWINCH. The reset replay already establishes a clean terminal frame,
 	// so retain only a parser-safe tail of that redraw instead of sending many
@@ -10101,9 +10107,22 @@ func (s *muxServer) resumePausedAttachForwarding(
 				// on the pre-resize frame. Restore that frame before applying the
 				// delta instead of accepting any visible text as a full repaint.
 				replay = nil
-				buffered = append(append([]byte(nil), fallbackReplay...), buffered...)
-				failoverBuffered = append(append([]byte(nil), fallbackReplay...), failoverBuffered...)
-				secondaryBuffered = append(append([]byte(nil), fallbackReplay...), secondaryBuffered...)
+				if window.redrawForwardingStartParser.isGround() {
+					buffered = append(append([]byte(nil), fallbackReplay...), buffered...)
+					failoverBuffered = append(append([]byte(nil), fallbackReplay...), failoverBuffered...)
+					secondaryBuffered = append(append([]byte(nil), fallbackReplay...), secondaryBuffered...)
+				} else {
+					// Finish the sequence that began in the retained history before
+					// appending replay's parser reset. Otherwise its continuation can
+					// become text or a control command in the restored frame.
+					withContinuation := func(data []byte) []byte {
+						history := append(append([]byte(nil), window.redrawForwardingFallbackHistory...), data...)
+						return s.foregroundHistoryFallbackReplayLocked(window, history)
+					}
+					buffered = withContinuation(buffered)
+					failoverBuffered = withContinuation(failoverBuffered)
+					secondaryBuffered = withContinuation(secondaryBuffered)
+				}
 			} else {
 				replay = nil
 				buffered = append(
@@ -10375,6 +10394,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingBuffer = nil
 	w.redrawForwardingFailoverBuffer = nil
 	w.redrawForwardingSecondaryBuffer = nil
+	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
@@ -12325,8 +12345,7 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 // screen. A cursor move, line erase, or scrollback-only erase is not enough:
 // incremental renderers still depend on cells outside that update. Parse in
 // terminal ground state so strings and UTF-8 cannot masquerade as controls.
-func terminalOutputReplacesScreen(data []byte) bool {
-	parser := terminalOutputParserSnapshot{}
+func terminalOutputReplacesScreen(data []byte, parser terminalOutputParserSnapshot) bool {
 	for index := 0; index < len(data); {
 		if parser.isGround() {
 			if bytes.HasPrefix(data[index:], []byte("\x1bc")) {
