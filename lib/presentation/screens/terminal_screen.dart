@@ -3761,6 +3761,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// The terminal-content generation that [_terminalPathSnapshotCache] and
   /// [_terminalPathAnalysisCache] were last populated for.
   int _terminalPathSnapshotCacheGeneration = -1;
+  (Buffer, int, int, int)? _terminalPathSnapshotCacheGeometry;
 
   /// Cache of [_TerminalPathSnapshotAnalysis] keyed by snapshot text. The
   /// regex-heavy analysis is deterministic on the snapshot text, so it can be
@@ -14897,7 +14898,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     TerminalThemeData theme, {
     required bool isDark,
   }) async {
-    if (_host == null) return;
+    // The messenger can keep this snackbar alive after the terminal is closed.
+    if (!mounted) return;
+    final host = _host;
+    if (host == null) return;
     final hasAccess = await requireMonetizationFeatureAccess(
       context: context,
       ref: ref,
@@ -14912,8 +14916,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final hostRepo = ref.read(hostRepositoryProvider);
     final updatedHost = isDark
-        ? _host!.copyWith(terminalThemeDarkId: drift.Value(theme.id))
-        : _host!.copyWith(terminalThemeLightId: drift.Value(theme.id));
+        ? host.copyWith(terminalThemeDarkId: drift.Value(theme.id))
+        : host.copyWith(terminalThemeLightId: drift.Value(theme.id));
 
     await hostRepo.updateFields(
       updatedHost.id,
@@ -14921,13 +14925,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ? HostsCompanion(terminalThemeDarkId: drift.Value(theme.id))
           : HostsCompanion(terminalThemeLightId: drift.Value(theme.id)),
     );
+    if (!mounted) return;
     _host = updatedHost;
-
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Theme saved to ${_host!.label}')));
-    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Theme saved to ${updatedHost.label}')),
+    );
   }
 
   Widget _buildConnectionIssueOverlay({
@@ -15933,9 +15935,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (rowIndex < 0 || rowIndex >= linkSnapshot.columnOffsets.length) {
         continue;
       }
+      final rowColumnOffsets = linkSnapshot.columnOffsets[rowIndex];
+      if (column >= rowColumnOffsets.length) {
+        continue;
+      }
       final textOffset =
-          linkSnapshot.rowStarts[rowIndex] +
-          linkSnapshot.columnOffsets[rowIndex][column];
+          linkSnapshot.rowStarts[rowIndex] + rowColumnOffsets[column];
       final detectedLink = detectTerminalLinkAtTextOffset(
         linkSnapshot.text,
         textOffset,
@@ -16073,9 +16078,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       cacheKey--;
     }
 
-    // Invalidate snapshot and analysis caches when content has changed.
-    if (_terminalPathSnapshotCacheGeneration != _terminalContentGeneration) {
+    // Local resizes reflow the buffer without notifying content listeners.
+    // Include geometry so hit tests cannot reuse offsets from the old grid.
+    final geometry = (
+      buffer,
+      buffer.viewWidth,
+      buffer.viewHeight,
+      buffer.height,
+    );
+    if (_terminalPathSnapshotCacheGeneration != _terminalContentGeneration ||
+        _terminalPathSnapshotCacheGeometry != geometry) {
       _terminalPathSnapshotCacheGeneration = _terminalContentGeneration;
+      _terminalPathSnapshotCacheGeometry = geometry;
       _terminalPathSnapshotCache.clear();
       _terminalPathAnalysisCache.clear();
     }

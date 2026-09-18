@@ -184,8 +184,12 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
           ),
           textInputAction: TextInputAction.next,
           validator: (value) {
-            if (value == null || value.isEmpty) {
+            final name = value?.trim() ?? '';
+            if (name.isEmpty) {
               return 'Please enter a name';
+            }
+            if (name.length > 255) {
+              return 'Name must be 255 characters or fewer';
             }
             return null;
           },
@@ -458,8 +462,12 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
           ),
           textInputAction: TextInputAction.next,
           validator: (value) {
-            if (value == null || value.isEmpty) {
+            final name = value?.trim() ?? '';
+            if (name.isEmpty) {
               return 'Please enter a name';
+            }
+            if (name.length > 255) {
+              return 'Name must be 255 characters or fewer';
             }
             return null;
           },
@@ -543,7 +551,7 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
           : _passphraseController.text;
 
       final result = await keyService.importKey(
-        name: _nameController.text,
+        name: _nameController.text.trim(),
         privateKeyPem: _privateKeyController.text,
         passphrase: passphrase,
       );

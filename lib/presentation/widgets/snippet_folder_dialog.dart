@@ -41,8 +41,12 @@ class _CreateSnippetFolderDialogState
         textInputAction: TextInputAction.done,
         onFieldSubmitted: (_) => _submit(),
         validator: (value) {
-          if (value == null || value.trim().isEmpty) {
+          final name = value?.trim() ?? '';
+          if (name.isEmpty) {
             return 'Please enter a folder name';
+          }
+          if (name.length > 255) {
+            return 'Name must be 255 characters or fewer';
           }
           return null;
         },
