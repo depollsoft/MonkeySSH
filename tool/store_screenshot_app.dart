@@ -161,18 +161,14 @@ final _targets = <String, _ScreenshotTarget>{
     platform: TargetPlatform.iOS,
     pathsByScene: [
       for (var index = 1; index <= _sceneNames.length; index += 1)
-        [
-          'ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_iphone_6_9.png',
-        ],
+        ['ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_iphone_6_9.png'],
     ],
   ),
   'ios_ipad': _ScreenshotTarget(
     platform: TargetPlatform.iOS,
     pathsByScene: [
       for (var index = 1; index <= _sceneNames.length; index += 1)
-        [
-          'ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_ipad_13.png',
-        ],
+        ['ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_ipad_13.png'],
     ],
   ),
   'android_phone': _ScreenshotTarget(
@@ -509,8 +505,7 @@ Future<int> _seedDatabase(
     (
       name: 'List agent windows',
       command: 'monkeymux control --json $muxSessionName',
-      description:
-          'Inspect active Copilot, Claude, Codex, OpenCode, and Antigravity windows.',
+      description: 'Inspect active Copilot, Claude, Codex, OpenCode, and Antigravity windows.',
       autoExecute: false,
       usageCount: 7,
     ),

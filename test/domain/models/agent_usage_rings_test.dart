@@ -223,21 +223,18 @@ void main() {
     });
   });
 
-  test(
-    'reported Codex weekly 77 percent is not inverted or replaced by scoped 100 percent',
-    () {
-      final usage = parseAgentUsageOutput(
-        '__monkeyssh_usage__={"id":"codex","status":"available","windows":[ '
-        '{"label":"Weekly","usedPercent":23}, '
-        '{"label":"codex_bengalfox · 5 hours","usedPercent":0}, '
-        '{"label":"codex_bengalfox · Weekly","usedPercent":0}]}',
-        checkedAt: now,
-      )['codex']!;
-      final rings = project(usage, tool: AgentLaunchTool.codex)!;
-      expect(rings.weekly, 77);
-      expect(rings.shortTerm, isNull);
-    },
-  );
+  test('reported Codex weekly 77 percent is not inverted or replaced by scoped 100 percent', () {
+    final usage = parseAgentUsageOutput(
+      '__monkeyssh_usage__={"id":"codex","status":"available","windows":[ '
+      '{"label":"Weekly","usedPercent":23}, '
+      '{"label":"codex_bengalfox · 5 hours","usedPercent":0}, '
+      '{"label":"codex_bengalfox · Weekly","usedPercent":0}]}',
+      checkedAt: now,
+    )['codex']!;
+    final rings = project(usage, tool: AgentLaunchTool.codex)!;
+    expect(rings.weekly, 77);
+    expect(rings.shortTerm, isNull);
+  });
 
   test('reported usage drains from full to empty rather than filling up', () {
     for (final used in [0.0, 23.0, 75.0, 100.0]) {
@@ -248,21 +245,27 @@ void main() {
     }
   });
 
-  test(
-    'Grok included credits get a meter, paid spending and prepaid balances do not',
-    () {
-      final rings = project(
+  test('Grok included credits get a meter, paid spending and prepaid balances do not', () {
+    final rings = project(
+      snapshot(const [
+        AgentUsageWindow(
+          label: 'Included credits',
+          usedPercent: 0,
+          unit: 'USD',
+        ),
+        AgentUsageWindow(
+          label: 'On-demand spending',
+          usedPercent: 80,
+          unit: 'USD',
+        ),
+        AgentUsageWindow(label: 'Prepaid balance', remaining: 25, unit: 'USD'),
+      ]),
+      tool: AgentLaunchTool.grokBuild,
+    )!;
+    expect(rings.segments, [(label: 'Included credits', remaining: 100.0)]);
+    expect(
+      project(
         snapshot(const [
-          AgentUsageWindow(
-            label: 'Included credits',
-            usedPercent: 0,
-            unit: 'USD',
-          ),
-          AgentUsageWindow(
-            label: 'On-demand spending',
-            usedPercent: 80,
-            unit: 'USD',
-          ),
           AgentUsageWindow(
             label: 'Prepaid balance',
             remaining: 25,
@@ -270,51 +273,35 @@ void main() {
           ),
         ]),
         tool: AgentLaunchTool.grokBuild,
-      )!;
-      expect(rings.segments, [(label: 'Included credits', remaining: 100.0)]);
-      expect(
-        project(
-          snapshot(const [
-            AgentUsageWindow(
-              label: 'Prepaid balance',
-              remaining: 25,
-              unit: 'USD',
-            ),
-          ]),
-          tool: AgentLaunchTool.grokBuild,
-        ),
-        isNull,
-      );
-      final partlyUsed = project(
-        snapshot(const [
-          AgentUsageWindow(label: 'Included credits', usedPercent: 25),
-        ]),
-        tool: AgentLaunchTool.grokBuild,
-      )!;
-      expect(partlyUsed.segments.single.remaining, 75);
-    },
-  );
+      ),
+      isNull,
+    );
+    final partlyUsed = project(
+      snapshot(const [
+        AgentUsageWindow(label: 'Included credits', usedPercent: 25),
+      ]),
+      tool: AgentLaunchTool.grokBuild,
+    )!;
+    expect(partlyUsed.segments.single.remaining, 75);
+  });
 
-  test(
-    'Antigravity reports its numerical groups in stable order without guessing an active model',
-    () {
-      const windows = [
-        AgentUsageWindow(label: 'Thinking · Pro', usedPercent: 25),
-        AgentUsageWindow(label: 'Fast · Basic', usedPercent: 0),
-        AgentUsageWindow(label: 'Unknown group', remaining: 15),
-      ];
-      final a = project(snapshot(windows), tool: AgentLaunchTool.antigravity)!;
-      final b = project(
-        snapshot(windows.reversed.toList()),
-        tool: AgentLaunchTool.antigravity,
-      )!;
-      expect(a.segments, [
-        (label: 'Fast · Basic', remaining: 100.0),
-        (label: 'Thinking · Pro', remaining: 75.0),
-      ]);
-      expect(b.segments, a.segments);
-    },
-  );
+  test('Antigravity reports its numerical groups in stable order without guessing an active model', () {
+    const windows = [
+      AgentUsageWindow(label: 'Thinking · Pro', usedPercent: 25),
+      AgentUsageWindow(label: 'Fast · Basic', usedPercent: 0),
+      AgentUsageWindow(label: 'Unknown group', remaining: 15),
+    ];
+    final a = project(snapshot(windows), tool: AgentLaunchTool.antigravity)!;
+    final b = project(
+      snapshot(windows.reversed.toList()),
+      tool: AgentLaunchTool.antigravity,
+    )!;
+    expect(a.segments, [
+      (label: 'Fast · Basic', remaining: 100.0),
+      (label: 'Thinking · Pro', remaining: 75.0),
+    ]);
+    expect(b.segments, a.segments);
+  });
 
   test(
     'Antigravity omits duplicate, expired, and unlimited group percentages',
@@ -390,19 +377,16 @@ void main() {
       isNull,
     );
   });
-  test(
-    'multi-provider agents remain unknown rather than selecting a saved account',
-    () {
-      final usage = snapshot(const [
-        AgentUsageWindow(label: 'Weekly', usedPercent: 25),
-      ]);
-      for (final tool in AgentLaunchTool.values.where(
-        (tool) => !supportsAgentUsageRings(tool),
-      )) {
-        expect(project(usage, tool: tool), isNull);
-      }
-    },
-  );
+  test('multi-provider agents remain unknown rather than selecting a saved account', () {
+    final usage = snapshot(const [
+      AgentUsageWindow(label: 'Weekly', usedPercent: 25),
+    ]);
+    for (final tool in AgentLaunchTool.values.where(
+      (tool) => !supportsAgentUsageRings(tool),
+    )) {
+      expect(project(usage, tool: tool), isNull);
+    }
+  });
   test('zero and overage are empty, missing and unlimited are absent', () {
     final rings = project(
       snapshot(const [

@@ -547,10 +547,11 @@ if(!$__flResolved){$__flResolved='cmd'}
   }
 
   /// Close only the interactive shell channel while keeping the SSH client.
-  Future<void> closeShell({bool waitForStreams = true}) => _shellClosing ??=
-      _closeShell(waitForStreams: waitForStreams).whenComplete(() {
-        _shellClosing = null;
-      });
+  Future<void> closeShell({bool waitForStreams = true}) =>
+      _shellClosing ??= _closeShell(waitForStreams: waitForStreams)
+          .whenComplete(() {
+            _shellClosing = null;
+          });
 
   Future<void> _closeShell({required bool waitForStreams}) async {
     _shellGeneration += 1;

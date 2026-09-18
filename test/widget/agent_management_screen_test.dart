@@ -38,9 +38,8 @@ void main() {
     );
     billing = _MockMonetizationService();
     when(() => billing.currentState).thenAnswer((_) => access);
-    when(
-      () => billing.canUseFeature(MonetizationFeature.agentManagement),
-    ).thenAnswer((_) async => access.isProUnlocked);
+    when(() => billing.canUseFeature(MonetizationFeature.agentManagement))
+        .thenAnswer((_) async => access.isProUnlocked);
     service = _MockAgentManagementService();
 
     session = _MockSshSession();
@@ -195,9 +194,8 @@ void main() {
   ) async {
     final semantics = tester.ensureSemantics();
     final pending = Completer<Map<String, AgentUsage>>();
-    when(
-      () => service.readUsage(session, any()),
-    ).thenAnswer((_) => pending.future);
+    when(() => service.readUsage(session, any()))
+        .thenAnswer((_) => pending.future);
     await pumpScreen(tester);
     expect(find.text('Checking usage…'), findsWidgets);
     final announcement = find.byKey(const ValueKey('agent-usage-announcement'));
@@ -283,9 +281,8 @@ void main() {
         ),
     ];
     final pending = Completer<Map<String, AgentUsage>>();
-    when(
-      () => service.readUsage(session, any()),
-    ).thenAnswer((_) => pending.future);
+    when(() => service.readUsage(session, any()))
+        .thenAnswer((_) => pending.future);
     await pumpScreen(tester);
     final announcement = find.byKey(const ValueKey('agent-usage-announcement'));
     expect(
@@ -756,9 +753,8 @@ void main() {
       (tester) async {
         final acp = runtimes[2];
         final probe = Completer<AgentRuntimeInfo>();
-        when(
-          () => service.inspect(session, acp.definition),
-        ).thenAnswer((_) => probe.future);
+        when(() => service.inspect(session, acp.definition))
+            .thenAnswer((_) => probe.future);
         await pumpScreen(tester);
         clearInteractions(service);
         final recheck = find.byKey(const ValueKey('agent-recheck-acp:claude'));

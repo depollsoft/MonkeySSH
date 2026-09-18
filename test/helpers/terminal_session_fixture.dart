@@ -84,15 +84,12 @@ class TerminalSessionFixture {
     }
 
     when(() => hostRepository.getById(host.id)).thenAnswer((_) async => host);
-    when(
-      () => sshClient.shell(pty: any(named: 'pty')),
-    ).thenAnswer((_) async => shellChannel);
-    when(
-      () => shellChannel.stdout,
-    ).thenAnswer((_) => stdout ?? shellStdoutController!.stream);
-    when(
-      () => shellChannel.stderr,
-    ).thenAnswer((_) => const Stream<Uint8List>.empty());
+    when(() => sshClient.shell(pty: any(named: 'pty')))
+        .thenAnswer((_) async => shellChannel);
+    when(() => shellChannel.stdout)
+        .thenAnswer((_) => stdout ?? shellStdoutController!.stream);
+    when(() => shellChannel.stderr)
+        .thenAnswer((_) => const Stream<Uint8List>.empty());
     when(() => shellChannel.done).thenAnswer((_) => shellDoneCompleter.future);
     when(() => shellChannel.write(any())).thenReturn(null);
 

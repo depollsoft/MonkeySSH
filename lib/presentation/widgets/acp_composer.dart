@@ -13,8 +13,9 @@ import 'acp_slash_command_picker.dart';
 import 'terminal_menu_style.dart';
 
 /// Opens an attachment picker and returns the selected candidates.
-typedef AcpAttachmentPick =
-    Future<List<AcpAttachmentCandidate>> Function(BuildContext context);
+typedef AcpAttachmentPick = Future<List<AcpAttachmentCandidate>> Function(
+  BuildContext context,
+);
 
 /// The injectable attachment-picker entry points offered by the add menu.
 ///

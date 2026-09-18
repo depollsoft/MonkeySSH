@@ -57,9 +57,8 @@ void main() {
       FlutterError.onError = reportedErrors.add;
       addTearDown(() => FlutterError.onError = originalOnError);
 
-      when(
-        () => authService.isAuthEnabled(),
-      ).thenThrow(Exception('storage unavailable'));
+      when(() => authService.isAuthEnabled())
+          .thenThrow(Exception('storage unavailable'));
 
       expect(container.read(authStateProvider), AuthState.unknown);
 

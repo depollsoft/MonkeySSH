@@ -31,29 +31,27 @@ void main() {
                   : 'SSH-2.0-OpenSSH_9.6',
             );
             final prefix = windows ? 'C:/tools' : '/opt/tools';
-            when(
-              () => client.execute(any(), pty: any(named: 'pty')),
-            ).thenAnswer((_) async {
-              final channel = _MockExecChannel();
-              final output = [
-                'npx\u001f$prefix/npx',
-                if (installedAdapter)
-                  'muse-code-acp\u001f$prefix/muse-code-acp',
-                if (installedMuse) 'muse\u001f$prefix/muse',
-              ].join('\n');
-              when(() => channel.stdout).thenAnswer(
-                (_) => Stream<Uint8List>.value(
-                  Uint8List.fromList(utf8.encode(output)),
-                ),
-              );
-              when(
-                () => channel.stderr,
-              ).thenAnswer((_) => const Stream<Uint8List>.empty());
-              when(() => channel.done).thenAnswer((_) async {});
-              when(() => channel.exitCode).thenReturn(0);
-              when(channel.close).thenReturn(null);
-              return channel;
-            });
+            when(() => client.execute(any(), pty: any(named: 'pty')))
+                .thenAnswer((_) async {
+                  final channel = _MockExecChannel();
+                  final output = [
+                    'npx\u001f$prefix/npx',
+                    if (installedAdapter)
+                      'muse-code-acp\u001f$prefix/muse-code-acp',
+                    if (installedMuse) 'muse\u001f$prefix/muse',
+                  ].join('\n');
+                  when(() => channel.stdout).thenAnswer(
+                    (_) => Stream<Uint8List>.value(
+                      Uint8List.fromList(utf8.encode(output)),
+                    ),
+                  );
+                  when(() => channel.stderr)
+                      .thenAnswer((_) => const Stream<Uint8List>.empty());
+                  when(() => channel.done).thenAnswer((_) async {});
+                  when(() => channel.exitCode).thenReturn(0);
+                  when(channel.close).thenReturn(null);
+                  return channel;
+                });
             final session = SshSession(
               connectionId: 1,
               hostId: 1,
@@ -134,9 +132,8 @@ void main() {
       when(() => channel.stdout).thenAnswer(
         (_) => Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(output))),
       );
-      when(
-        () => channel.stderr,
-      ).thenAnswer((_) => const Stream<Uint8List>.empty());
+      when(() => channel.stderr)
+          .thenAnswer((_) => const Stream<Uint8List>.empty());
       when(() => channel.done).thenAnswer((_) async {});
       when(() => channel.exitCode).thenReturn(0);
       when(channel.close).thenReturn(null);

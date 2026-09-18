@@ -470,9 +470,8 @@ class AppDatabase extends _$AppDatabase {
     required String tableName,
     required String columnName,
   }) async {
-    final rows = await customSelect(
-      'SELECT id FROM $tableName ORDER BY id',
-    ).get();
+    final rows = await customSelect('SELECT id FROM $tableName ORDER BY id')
+        .get();
     for (var index = 0; index < rows.length; index += 1) {
       await customStatement(
         'UPDATE $tableName SET $columnName = ? WHERE id = ?',
@@ -514,8 +513,10 @@ const _appleDatabaseFileProtectionChannel = MethodChannel(
 );
 
 /// Applies the Apple database storage policy to a database directory and file.
-typedef AppleDatabaseFilePolicyApplier =
-    Future<void> Function(Directory databaseDirectory, File databaseFile);
+typedef AppleDatabaseFilePolicyApplier = Future<void> Function(
+  Directory databaseDirectory,
+  File databaseFile,
+);
 
 Future<void> _noOpAppleDatabaseFilePolicy(
   Directory databaseDirectory,

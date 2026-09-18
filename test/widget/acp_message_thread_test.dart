@@ -927,9 +927,10 @@ void main() {
     expect(find.text('main.dart'), findsOneWidget);
     final promptTextFinder = find.widgetWithText(SelectableText, 'first');
     final promptText = tester.widget<SelectableText>(promptTextFinder);
-    final bodyFamily = Theme.of(
-      tester.element(promptTextFinder),
-    ).textTheme.bodyMedium?.fontFamily;
+    final bodyFamily = Theme.of(tester.element(promptTextFinder))
+        .textTheme
+        .bodyMedium
+        ?.fontFamily;
     expect(promptText.style?.fontFamily, bodyFamily);
     expect(
       promptText.style?.fontFamily,

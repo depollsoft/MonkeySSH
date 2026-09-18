@@ -22,7 +22,10 @@ final class _StreamOnlyFile extends PlatformFile {
   final Stream<Uint8List> stream;
 
   @override
-  Future<int> length() async => 2;
+  int? lengthSync() => 2;
+
+  @override
+  Future<int?> length() async => 2;
 
   @override
   XFile get xFile => throw StateError('Must stream');
@@ -1683,27 +1686,30 @@ void main() {
       );
     });
 
-    test('ignores separate view metadata rows after wrapped worktree paths', () {
-      const text =
-          'Read terminal_screen.dart\n'
-          '~/Code/flutty.worktrees/session-resumption-all-provide\n'
-          'rs/lib/presentation/screens/terminal_screen.dart\n'
-          '└ L330:390 (61 lines read)';
-      final detectedPath = detectTerminalFilePathAtTextOffset(
-        text,
-        text.indexOf('session-resumption'),
-      );
+    test(
+      'ignores separate view metadata rows after wrapped worktree paths',
+      () {
+        const text =
+            'Read terminal_screen.dart\n'
+            '~/Code/flutty.worktrees/session-resumption-all-provide\n'
+            'rs/lib/presentation/screens/terminal_screen.dart\n'
+            '└ L330:390 (61 lines read)';
+        final detectedPath = detectTerminalFilePathAtTextOffset(
+          text,
+          text.indexOf('session-resumption'),
+        );
 
-      expect(detectedPath, isNotNull);
-      expect(
-        detectedPath!.path,
-        '~/Code/flutty.worktrees/session-resumption-all-providers/lib/presentation/screens/terminal_screen.dart',
-      );
-      expect(
-        detectTerminalFilePathAtTextOffset(text, text.indexOf('L330')),
-        isNull,
-      );
-    });
+        expect(detectedPath, isNotNull);
+        expect(
+          detectedPath!.path,
+          '~/Code/flutty.worktrees/session-resumption-all-providers/lib/presentation/screens/terminal_screen.dart',
+        );
+        expect(
+          detectTerminalFilePathAtTextOffset(text, text.indexOf('L330')),
+          isNull,
+        );
+      },
+    );
 
     test('detects prompt-style explicit paths after ordinary prose rows', () {
       const text =
@@ -1795,8 +1801,7 @@ void main() {
           rowText: rowText,
           rowStartOffset: snapshotText.indexOf(rowText),
           rowColumnOffsets: List<int>.generate(rowText.length + 1, (i) => i),
-          path:
-              '/Users/depoll/.copilot/session-state/67459a12-f8a8-405a-a838-2fc3a30dadd4/plan.md',
+          path: '/Users/depoll/.copilot/session-state/67459a12-f8a8-405a-a838-2fc3a30dadd4/plan.md',
         ),
         (
           text: '9a12-f8a8-405a-a838-2fc3a30dadd4/plan.md',
@@ -1818,8 +1823,7 @@ void main() {
           rowText: rowText,
           rowStartOffset: snapshotText.indexOf(rowText),
           rowColumnOffsets: List<int>.generate(rowText.length + 1, (i) => i),
-          path:
-              '~/Code/flutty.worktrees/fix-local-path-link-separators/lib/presentation/screens/terminal_screen.dart',
+          path: '~/Code/flutty.worktrees/fix-local-path-link-separators/lib/presentation/screens/terminal_screen.dart',
         ),
         (
           text: 'rators/lib/presentation/screens/terminal_screen.dart',
@@ -1842,8 +1846,7 @@ void main() {
             rowText: rowText,
             rowStartOffset: snapshotText.indexOf(rowText),
             rowColumnOffsets: List<int>.generate(rowText.length + 1, (i) => i),
-            path:
-                '~/Code/flutty.worktrees/fix-sftp-local-path-links/lib/presentation/screens/terminal_screen.dart',
+            path: '~/Code/flutty.worktrees/fix-sftp-local-path-links/lib/presentation/screens/terminal_screen.dart',
           ),
           (
             text: 's/lib/presentation/screens/terminal_screen.dart',
@@ -1866,8 +1869,7 @@ void main() {
           rowText: rowText,
           rowStartOffset: snapshotText.lastIndexOf(rowText),
           rowColumnOffsets: List<int>.generate(rowText.length + 1, (i) => i),
-          path:
-              '~/Code/flutty.worktrees/fix-swipe-keyboard-typing/lib/presentation/widgets/terminal_text_input_handler.dart',
+          path: '~/Code/flutty.worktrees/fix-swipe-keyboard-typing/lib/presentation/widgets/terminal_text_input_handler.dart',
         ),
         (text: 't', startColumn: 0, endColumn: 0),
       );
@@ -1885,8 +1887,7 @@ void main() {
           rowText: rowText,
           rowStartOffset: snapshotText.lastIndexOf(rowText),
           rowColumnOffsets: List<int>.generate(rowText.length + 1, (i) => i),
-          path:
-              '~/Code/flutty.worktrees/fix-swipe-keyboard-typing/lib/presentation/widgets/terminal_text_input_handler.dart',
+          path: '~/Code/flutty.worktrees/fix-swipe-keyboard-typing/lib/presentation/widgets/terminal_text_input_handler.dart',
         ),
         (text: 't', startColumn: 2, endColumn: 2),
       );

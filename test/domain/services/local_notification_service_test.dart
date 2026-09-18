@@ -246,22 +246,25 @@ void main() {
     });
   });
 
-  test('buildTmuxAlertTerminalLocation targets the source connection window', () {
-    final location = buildTmuxAlertTerminalLocation(
-      const TmuxAlertNotificationPayload(
-        hostId: 12,
-        connectionId: 34,
-        tmuxSessionName: 'project main',
-        windowIndex: 5,
-        windowId: '@9',
-      ),
-    );
+  test(
+    'buildTmuxAlertTerminalLocation targets the source connection window',
+    () {
+      final location = buildTmuxAlertTerminalLocation(
+        const TmuxAlertNotificationPayload(
+          hostId: 12,
+          connectionId: 34,
+          tmuxSessionName: 'project main',
+          windowIndex: 5,
+          windowId: '@9',
+        ),
+      );
 
-    expect(
-      location,
-      '/terminal/12?connectionId=34&tmuxSession=project+main&tmuxWindow=5&tmuxWindowId=%409',
-    );
-  });
+      expect(
+        location,
+        '/terminal/12?connectionId=34&tmuxSession=project+main&tmuxWindow=5&tmuxWindowId=%409',
+      );
+    },
+  );
 
   group('TerminalNotificationPayload', () {
     test('round-trips terminal notification routing fields', () {

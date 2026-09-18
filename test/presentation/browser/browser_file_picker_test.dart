@@ -49,9 +49,8 @@ void main() {
     test('falls back to any file for wildcard and unknown MIME types', () {
       expect(resolveBrowserFilePickerFilter(const ['*/*']).type, FileType.any);
       expect(
-        resolveBrowserFilePickerFilter(const [
-          'application/x-project-specific',
-        ]).type,
+        resolveBrowserFilePickerFilter(const ['application/x-project-specific'])
+            .type,
         FileType.any,
       );
     });

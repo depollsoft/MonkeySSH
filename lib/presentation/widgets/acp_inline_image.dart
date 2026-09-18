@@ -657,9 +657,8 @@ class _AcpInlineImageState extends State<AcpInlineImage> {
                 label,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: foreground),
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: foreground),
               ),
             ),
           ],

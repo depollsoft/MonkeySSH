@@ -163,9 +163,8 @@ void main() {
           client: _MockSshClient(),
         );
         when(hostRepository.getAll).thenAnswer((_) async => [_host()]);
-        when(
-          () => portForwardRepository.insert(any()),
-        ).thenAnswer((_) async => 11);
+        when(() => portForwardRepository.insert(any()))
+            .thenAnswer((_) async => 11);
         final router = GoRouter(
           routes: [
             GoRoute(
@@ -240,9 +239,7 @@ void main() {
         expect(session.starts, [11]);
         expect(
           find.text(
-            startSucceeds
-                ? 'Port forward added and started'
-                : 'Port forward saved, but it couldn’t start. Check the configured ports.',
+            startSucceeds ? 'Port forward added and started' : 'Port forward saved, but it couldn’t start. Check the configured ports.',
           ),
           findsOneWidget,
         );

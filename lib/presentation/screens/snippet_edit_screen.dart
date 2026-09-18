@@ -316,9 +316,8 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
         _selectedFolderId = folderId;
         _folderDropdownRevision += 1;
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Created folder "$name"')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Created folder "$name"')));
     } on Exception catch (e) {
       FlutterError.reportError(
         FlutterErrorDetails(

@@ -183,9 +183,8 @@ void main() {
       final hostRepository = _MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
       final monetizationService = _MockMonetizationService();
-      when(
-        () => monetizationService.currentState,
-      ).thenReturn(_freeMonetizationState);
+      when(() => monetizationService.currentState)
+          .thenReturn(_freeMonetizationState);
 
       SshConnectionResult? result;
       await tester.pumpWidget(
@@ -241,9 +240,8 @@ void main() {
         final hostRepository = _MockHostRepository();
         when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
         final monetizationService = _MockMonetizationService();
-        when(
-          () => monetizationService.currentState,
-        ).thenReturn(_freeMonetizationState);
+        when(() => monetizationService.currentState)
+            .thenReturn(_freeMonetizationState);
 
         SshConnectionResult? result;
         await tester.pumpWidget(
@@ -309,9 +307,8 @@ void main() {
       final hostRepository = _MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
       final monetizationService = _MockMonetizationService();
-      when(
-        () => monetizationService.currentState,
-      ).thenReturn(_freeMonetizationState);
+      when(() => monetizationService.currentState)
+          .thenReturn(_freeMonetizationState);
 
       SshConnectionResult? result;
       await tester.pumpWidget(

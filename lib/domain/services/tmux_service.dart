@@ -2723,9 +2723,8 @@ const _profileFreeTmuxSubcommands = <String>{
 ///    PATH for the process they start.
 @visibleForTesting
 bool tmuxCommandNeedsLoginProfile(String command) {
-  final match = RegExp(
-    r'^(?:\S*/)?tmux(?:\s+-u)?\s+([a-z][a-z-]*)',
-  ).firstMatch(command.trimLeft());
+  final match = RegExp(r'^(?:\S*/)?tmux(?:\s+-u)?\s+([a-z][a-z-]*)')
+      .firstMatch(command.trimLeft());
   if (match == null) {
     return true;
   }

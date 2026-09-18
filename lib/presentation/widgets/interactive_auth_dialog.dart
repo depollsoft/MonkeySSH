@@ -52,9 +52,8 @@ class _InteractiveAuthDialogState extends State<_InteractiveAuthDialog> {
   }
 
   void _submit() {
-    Navigator.of(
-      context,
-    ).pop(_controllers.map((c) => c.text).toList(growable: false));
+    Navigator.of(context)
+        .pop(_controllers.map((c) => c.text).toList(growable: false));
   }
 
   void _cancel() => Navigator.of(context).pop();

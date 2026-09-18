@@ -526,9 +526,8 @@ nested:
 
   test('decodes JSON-string tool payloads before formatting', () {
     expect(
-      formatAcpToolPayload(
-        '{"query":"status: open","limit":5,"hidden":false}',
-      ).text,
+      formatAcpToolPayload('{"query":"status: open","limit":5,"hidden":false}')
+          .text,
       '''
 query: "status: open"
 limit: 5

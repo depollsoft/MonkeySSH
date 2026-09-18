@@ -6,9 +6,8 @@ import 'dart:io';
 /// `FromBase64String('...')` form. Commands without an encoded script are
 /// returned unchanged.
 String decodeEncodedPowerShell(String command) {
-  final compressed = RegExp(
-    r"FromBase64String\('([^']+)'\)",
-  ).firstMatch(command);
+  final compressed = RegExp(r"FromBase64String\('([^']+)'\)")
+      .firstMatch(command);
   if (compressed != null) {
     return utf8.decode(gzip.decode(base64.decode(compressed[1]!)));
   }

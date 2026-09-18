@@ -336,8 +336,7 @@ class AppReviewDemoService {
       SshKeysCompanion.insert(
         name: _keyName,
         keyType: 'ed25519',
-        publicKey:
-            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAppReviewOnlyNotARealKey monkeyssh-app-review-demo',
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAppReviewOnlyNotARealKey monkeyssh-app-review-demo',
         privateKey: _demoPrivateKey,
         fingerprint: const Value('SHA256:MonkeySSHAppReviewDemoOnly'),
       ),

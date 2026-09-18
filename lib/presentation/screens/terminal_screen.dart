@@ -240,9 +240,8 @@ String? formatTerminalConnectionIdentity({
   final normalizedWindowTitle = windowTitle.toLowerCase();
   var matchingTitleCount = 0;
   for (final candidate in windows) {
-    final candidateTitle = _tmuxAlertNotificationLabel(
-      candidate.displayTitle,
-    ).toLowerCase();
+    final candidateTitle = _tmuxAlertNotificationLabel(candidate.displayTitle)
+        .toLowerCase();
     if (candidateTitle != normalizedWindowTitle) {
       continue;
     }
@@ -848,9 +847,8 @@ bool shouldAcceptShellCompletionSuggestion({
       );
       return currentInvocation.commandName == originalInvocation.commandName &&
           currentPatternPrefix == originalPatternPrefix &&
-          normalizeShellCompletionToken(
-            suggestion.replacement,
-          ).startsWith(currentInvocation.token);
+          normalizeShellCompletionToken(suggestion.replacement)
+              .startsWith(currentInvocation.token);
     }
     if (currentInvocation.cursorOffset < suggestion.replacementStart) {
       return false;
@@ -884,9 +882,8 @@ bool shouldAcceptShellCompletionSuggestion({
     return false;
   }
 
-  return normalizeShellCompletionToken(
-    suggestion.replacement,
-  ).startsWith(currentInvocation.token);
+  return normalizeShellCompletionToken(suggestion.replacement)
+      .startsWith(currentInvocation.token);
 }
 
 /// Filters visible shell completion suggestions against the current command.
@@ -1276,9 +1273,8 @@ int? _compareMonkeyMuxVersions(String? left, String? right) {
 }
 
 (int, int, int)? _parseMonkeyMuxVersion(String? value) {
-  final match = RegExp(
-    r'^(\d+)\.(\d+)\.(\d+)$',
-  ).firstMatch(value?.trim() ?? '');
+  final match = RegExp(r'^(\d+)\.(\d+)\.(\d+)$')
+      .firstMatch(value?.trim() ?? '');
   if (match == null) {
     return null;
   }
@@ -4183,9 +4179,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return null;
     }
     final anchorRenderObject = anchorContext.findRenderObject();
-    final overlayRenderObject = Navigator.of(
-      context,
-    ).overlay?.context.findRenderObject();
+    final overlayRenderObject = Navigator.of(context).overlay?.context
+        .findRenderObject();
     if (anchorRenderObject is! RenderBox ||
         overlayRenderObject is! RenderBox ||
         !anchorRenderObject.attached ||
@@ -5646,9 +5641,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final refreshGeneration = ++_muxPaneContextRefreshGeneration;
     unawaited(
       Future<TmuxPaneContext?>.sync(
-            () => _activeTerminalConnectionBackend(
-              session,
-            ).currentPaneContext(priority: SshExecPriority.low),
+            () =>
+                _activeTerminalConnectionBackend(session)
+                    .currentPaneContext(priority: SshExecPriority.low),
           )
           .then((context) {
             if (!mounted ||
@@ -12424,9 +12419,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         case AcpSessionLaunchFailed(:final error):
           final restored = await restoreTerminalAfterFailedHandoff();
           if (!mounted || !restored) return;
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(error.message)));
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(error.message)));
         case AcpSessionLaunchBlocked():
           await restoreTerminalAfterFailedHandoff();
       }
@@ -12646,9 +12640,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         'Native agent action failed. Check the session and try again.',
       _ => 'tmux action failed. Check the session and try again.',
     };
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _handleMuxSessionEnded(
@@ -12993,9 +12986,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           windowId: windowId,
         );
     try {
-      await _activeTerminalConnectionBackend(
-        session,
-      ).killWindow(windowIndex, windowId: windowId);
+      await _activeTerminalConnectionBackend(session)
+          .killWindow(windowIndex, windowId: windowId);
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
         rethrow;
@@ -13850,30 +13842,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         (
           icon: Icons.aspect_ratio,
           label: 'Alt buffer',
-          tooltip:
-              'A full-screen terminal app is using the alternate screen buffer.',
+          tooltip: 'A full-screen terminal app is using the alternate screen buffer.',
         ),
       if (_describeMouseMode(_terminal.mouseMode, _terminal.mouseReportMode)
           case final mouseModeLabel? when mouseModeLabel.isNotEmpty)
         (
           icon: Icons.mouse_outlined,
           label: mouseModeLabel,
-          tooltip:
-              'Terminal apps like tmux are actively receiving mouse input events.',
+          tooltip: 'Terminal apps like tmux are actively receiving mouse input events.',
         ),
       if (_terminal.reportFocusMode)
         (
           icon: Icons.center_focus_strong,
           label: 'Focus reports',
-          tooltip:
-              'The terminal is reporting focus gained and lost events to the shell.',
+          tooltip: 'The terminal is reporting focus gained and lost events to the shell.',
         ),
       if (_terminal.bracketedPasteMode)
         (
           icon: Icons.content_paste,
           label: 'Bracketed paste',
-          tooltip:
-              'Paste operations are wrapped so terminal apps can handle them safely.',
+          tooltip: 'Paste operations are wrapped so terminal apps can handle them safely.',
         ),
     ];
 
@@ -16957,9 +16945,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _openTerminalLink(String link) async {
@@ -17325,9 +17312,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Copied')));
   }
 
   String? _currentTerminalSelectionText() {
@@ -17396,9 +17382,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _copyWorkingDirectory() async {
@@ -17534,16 +17519,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return null;
     }
 
-    final future = _openTerminalPathVerificationSftp(session).then<SftpClient?>(
-      (sftp) {
-        if (!identical(_terminalPathVerificationSession, session)) {
-          return null;
-        }
-        _terminalPathVerificationBackoffUntil = null;
-        _terminalPathVerificationSftp = sftp;
-        return sftp;
-      },
-    );
+    final future = _openTerminalPathVerificationSftp(session)
+        .then<SftpClient?>((sftp) {
+          if (!identical(_terminalPathVerificationSession, session)) {
+            return null;
+          }
+          _terminalPathVerificationBackoffUntil = null;
+          _terminalPathVerificationSftp = sftp;
+          return sftp;
+        });
     _terminalPathVerificationSftpFuture = future;
     try {
       return await future;
@@ -18743,9 +18727,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       confirmLabel: 'Upload and paste',
       details: [
         for (var index = 0; index < clipboardFiles.length; index++)
-          clipboardFiles[index].startsWith('content://')
-              ? 'Clipboard file ${index + 1}'
-              : path.basename(clipboardFiles[index]),
+          if (clipboardFiles[index].startsWith('content://'))
+            'Clipboard file ${index + 1}'
+          else
+            path.basename(clipboardFiles[index]),
       ],
     );
     if (!shouldUpload) {
@@ -19004,8 +18989,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     final shouldInsert = await _confirmCommandInsertion(
       title: 'Review keyboard paste',
-      message:
-          'This text inserted from your keyboard could execute multiple or reshaped commands.',
+      message: 'This text inserted from your keyboard could execute multiple or reshaped commands.',
       confirmLabel: 'Insert anyway',
       review: review,
     );
@@ -19028,8 +19012,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         bracketedPasteModeEnabled: false,
       ),
       title: 'Review keyboard paste',
-      messageBuilder: (_) =>
-          'This text inserted from your keyboard could execute multiple or reshaped commands.',
+      messageBuilder: (_) => 'This text inserted from your keyboard could execute multiple or reshaped commands.',
       confirmLabel: 'Insert anyway',
     );
   }
@@ -19342,8 +19325,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         title: const Text('Review imported auto-connect command'),
         content: _buildCommandReviewContent(
           review: review,
-          message:
-              'Imported auto-connect commands never run silently. Review this one before letting it execute.',
+          message: 'Imported auto-connect commands never run silently. Review this one before letting it execute.',
         ),
         actions: [
           TextButton(

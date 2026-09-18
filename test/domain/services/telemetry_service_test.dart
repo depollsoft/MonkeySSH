@@ -204,9 +204,8 @@ void main() {
           'Exception: [redacted]',
         );
         expect(
-          SanitizedTelemetryError.from(
-            Exception('secret\nPermission denied'),
-          ).reason,
+          SanitizedTelemetryError.from(Exception('secret\nPermission denied'))
+              .reason,
           'Exception: [redacted]',
         );
         expect(
@@ -251,18 +250,21 @@ void main() {
       expect(reporter.recordedErrors, hasLength(3));
     });
 
-    test('top app frame ignores filesystem paths and reporter frames', () async {
-      await service.recordError(
-        StateError('bug'),
-        StackTrace.fromString(
-          '#0 privateFunction (file:///home/alice/private.dart:1:2)\n'
-          '#1 TelemetryService.recordError (package:monkeyssh/domain/services/telemetry_service.dart:1:2)\n'
-          '#2 installTelemetryErrorHandlers.<anonymous closure> (package:monkeyssh/main.dart:1:2)',
-        ),
-        fatal: true,
-      );
-      expect(reporter.recordedErrors.single.keys['top_app_frame'], 'unknown');
-    });
+    test(
+      'top app frame ignores filesystem paths and reporter frames',
+      () async {
+        await service.recordError(
+          StateError('bug'),
+          StackTrace.fromString(
+            '#0 privateFunction (file:///home/alice/private.dart:1:2)\n'
+            '#1 TelemetryService.recordError (package:monkeyssh/domain/services/telemetry_service.dart:1:2)\n'
+            '#2 installTelemetryErrorHandlers.<anonymous closure> (package:monkeyssh/main.dart:1:2)',
+          ),
+          fatal: true,
+        );
+        expect(reporter.recordedErrors.single.keys['top_app_frame'], 'unknown');
+      },
+    );
 
     test('metadata failure does not prevent submitting the report', () async {
       final failingReporter = _FailingMetadataCrashReporter();
@@ -928,9 +930,8 @@ void main() {
       () async {
         final db = AppDatabase.forTesting(NativeDatabase.memory());
         addTearDown(db.close);
-        await SettingsService(
-          db,
-        ).setBool(SettingKeys.telemetryCollection, value: true);
+        await SettingsService(db)
+            .setBool(SettingKeys.telemetryCollection, value: true);
         final settings = _DelayedTelemetryWriteSettingsService(
           db,
           delayedValue: false,

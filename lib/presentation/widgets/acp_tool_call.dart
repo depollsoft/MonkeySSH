@@ -295,9 +295,8 @@ class _StatusBadge extends StatelessWidget {
       const SizedBox(width: 2),
       Text(
         label,
-        style: AcpChatTypography.monoStyleOf(
-          context,
-        ).copyWith(fontSize: 11, color: color),
+        style: AcpChatTypography.monoStyleOf(context)
+            .copyWith(fontSize: 11, color: color),
       ),
     ],
   );
@@ -395,9 +394,8 @@ class _RichToolResult extends StatelessWidget {
       children: [
         Text(
           'result',
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+          style: Theme.of(context).textTheme.labelSmall
+              ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: 2),
         AcpMarkdown(

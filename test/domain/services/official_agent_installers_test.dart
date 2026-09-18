@@ -6,9 +6,8 @@ import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/windows_remote_powershell.dart';
 
 String _decodeInstaller(String command) {
-  final payload = RegExp(
-    r"FromBase64String\('([^']+)'\)",
-  ).firstMatch(command)![1]!;
+  final payload = RegExp(r"FromBase64String\('([^']+)'\)")
+      .firstMatch(command)![1]!;
   return utf8.decode(gzip.decode(base64.decode(payload)));
 }
 
@@ -165,9 +164,8 @@ curl() {
                 ? isNot(contains('installer-output'))
                 : contains('installer-output'),
           );
-          final path = RegExp(
-            r'DOWNLOAD_PATH=([^\r\n]+)',
-          ).firstMatch(result.stdout as String)![1]!;
+          final path = RegExp(r'DOWNLOAD_PATH=([^\r\n]+)')
+              .firstMatch(result.stdout as String)![1]!;
           expect(File(path).existsSync(), isFalse);
         },
       );

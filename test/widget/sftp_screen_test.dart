@@ -13,9 +13,8 @@ Widget _buildRemoteEditorWithKeyboardInset({
     builder: (context) => ValueListenableBuilder<double>(
       valueListenable: keyboardInset,
       builder: (context, inset, _) => MediaQuery(
-        data: MediaQuery.of(
-          context,
-        ).copyWith(viewInsets: EdgeInsets.only(bottom: inset)),
+        data: MediaQuery.of(context)
+            .copyWith(viewInsets: EdgeInsets.only(bottom: inset)),
         child: buildRemoteTextEditorScreenForTesting(
           onSave: (_) async {},
           fileName: 'notes.txt',

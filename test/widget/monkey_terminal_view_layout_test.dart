@@ -475,42 +475,39 @@ void main() {
       );
     });
 
-    test(
-      'coalesces consecutive same-style cells into one run paragraph',
-      () async {
-        final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
-        final painter = MonkeyTerminalPainter(
-          theme: theme,
-          textStyle: const TerminalStyle(fontSize: 20),
-          textScaler: TextScaler.noScaling,
-        );
-        // Four distinct glyphs sharing one style: batching must cache a single
-        // 4-glyph run paragraph, not one paragraph per cell. (Without coalescing
-        // these would be four separate length-1 runs, i.e. four cache entries.)
-        final terminal = Terminal()
-          ..resize(8, 1)
-          ..write('\x1b[37mABCD');
-        expect(
-          painter.runParagraphCacheLength,
-          0,
-          reason: 'a fresh painter has cached no runs yet',
-        );
+    test('coalesces consecutive same-style cells into one run paragraph', () async {
+      final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
+      final painter = MonkeyTerminalPainter(
+        theme: theme,
+        textStyle: const TerminalStyle(fontSize: 20),
+        textScaler: TextScaler.noScaling,
+      );
+      // Four distinct glyphs sharing one style: batching must cache a single
+      // 4-glyph run paragraph, not one paragraph per cell. (Without coalescing
+      // these would be four separate length-1 runs, i.e. four cache entries.)
+      final terminal = Terminal()
+        ..resize(8, 1)
+        ..write('\x1b[37mABCD');
+      expect(
+        painter.runParagraphCacheLength,
+        0,
+        reason: 'a fresh painter has cached no runs yet',
+      );
 
-        final recorder = ui.PictureRecorder();
-        painter.paintLineForegrounds(
-          Canvas(recorder),
-          Offset.zero,
-          terminal.buffer.lines[0],
-        );
-        recorder.endRecording();
+      final recorder = ui.PictureRecorder();
+      painter.paintLineForegrounds(
+        Canvas(recorder),
+        Offset.zero,
+        terminal.buffer.lines[0],
+      );
+      recorder.endRecording();
 
-        expect(
-          painter.runParagraphCacheLength,
-          1,
-          reason: 'four same-style cells coalesce into one run paragraph',
-        );
-      },
-    );
+      expect(
+        painter.runParagraphCacheLength,
+        1,
+        reason: 'four same-style cells coalesce into one run paragraph',
+      );
+    });
 
     test('style-run batching falls back to per-cell for combining marks, '
         'complex scripts, and emoji', () async {
@@ -572,87 +569,82 @@ void main() {
       );
     });
 
-    test(
-      'box-drawing stays per-cell so TUI borders keep the monospace grid',
-      () async {
-        final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
-        final painter = MonkeyTerminalPainter(
-          theme: theme,
-          textStyle: const TerminalStyle(fontSize: 20),
-          textScaler: TextScaler.noScaling,
-        );
-        // Rounded Codex-style frame: corners + a long horizontal rule. Platform
-        // monospace faces often fall back for U+2500–U+257F; coalescing them into
-        // one paragraph drifts the right border off the verticals.
-        const columns = 40;
-        final top =
-            '\x1b[37m\u256d${'\u2500' * (columns - 2)}\u256e'; // ╭──…──╮
-        final mid = '\x1b[37m\u2502${' ' * (columns - 2)}\u2502'; // │      │
-        final terminal = Terminal()
-          ..resize(columns, 2)
-          ..write('$top\r\n$mid');
-        final topLine = terminal.buffer.lines[0];
-        final midLine = terminal.buffer.lines[1];
+    test('box-drawing stays per-cell so TUI borders keep the monospace grid', () async {
+      final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
+      final painter = MonkeyTerminalPainter(
+        theme: theme,
+        textStyle: const TerminalStyle(fontSize: 20),
+        textScaler: TextScaler.noScaling,
+      );
+      // Rounded Codex-style frame: corners + a long horizontal rule. Platform
+      // monospace faces often fall back for U+2500–U+257F; coalescing them into
+      // one paragraph drifts the right border off the verticals.
+      const columns = 40;
+      final top = '\x1b[37m\u256d${'\u2500' * (columns - 2)}\u256e'; // ╭──…──╮
+      final mid = '\x1b[37m\u2502${' ' * (columns - 2)}\u2502'; // │      │
+      final terminal = Terminal()
+        ..resize(columns, 2)
+        ..write('$top\r\n$mid');
+      final topLine = terminal.buffer.lines[0];
+      final midLine = terminal.buffer.lines[1];
 
-        final width = (painter.cellSize.width * columns).ceil();
-        final height = (painter.cellSize.height * 2).ceil();
+      final width = (painter.cellSize.width * columns).ceil();
+      final height = (painter.cellSize.height * 2).ceil();
 
-        Future<ByteData> render(void Function(Canvas) paint) async {
-          final recorder = ui.PictureRecorder();
-          final canvas = Canvas(recorder)
-            ..drawRect(
-              Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
-              Paint()..color = theme.background,
-            );
-          paint(canvas);
-          final image = await recorder.endRecording().toImage(width, height);
-          return (await image.toByteData())!;
-        }
+      Future<ByteData> render(void Function(Canvas) paint) async {
+        final recorder = ui.PictureRecorder();
+        final canvas = Canvas(recorder)
+          ..drawRect(
+            Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+            Paint()..color = theme.background,
+          );
+        paint(canvas);
+        final image = await recorder.endRecording().toImage(width, height);
+        return (await image.toByteData())!;
+      }
 
-        final reference = await render((canvas) {
-          final cellData = CellData.empty();
-          final cellWidth = painter.cellSize.width;
-          final cellHeight = painter.cellSize.height;
-          for (final entry in [
-            (line: topLine, y: 0.0),
-            (line: midLine, y: cellHeight),
-          ]) {
-            for (var i = 0; i < entry.line.length; i++) {
-              entry.line.getCellData(i, cellData);
-              painter.paintCellForeground(
-                canvas,
-                Offset(i * cellWidth, entry.y),
-                cellData,
-              );
-            }
-          }
-        });
-
-        expect(painter.runParagraphCacheLength, 0);
-
-        final batched = await render((canvas) {
-          painter
-            ..paintLineForegrounds(canvas, Offset.zero, topLine)
-            ..paintLineForegrounds(
+      final reference = await render((canvas) {
+        final cellData = CellData.empty();
+        final cellWidth = painter.cellSize.width;
+        final cellHeight = painter.cellSize.height;
+        for (final entry in [
+          (line: topLine, y: 0.0),
+          (line: midLine, y: cellHeight),
+        ]) {
+          for (var i = 0; i < entry.line.length; i++) {
+            entry.line.getCellData(i, cellData);
+            painter.paintCellForeground(
               canvas,
-              Offset(0, painter.cellSize.height),
-              midLine,
+              Offset(i * cellWidth, entry.y),
+              cellData,
             );
-        });
+          }
+        }
+      });
 
-        expect(
-          painter.runParagraphCacheLength,
-          0,
-          reason: 'box-drawing must not coalesce into style-run paragraphs',
-        );
-        expect(
-          batched.buffer.asUint8List(),
-          reference.buffer.asUint8List(),
-          reason:
-              'box-drawing borders must stay pixel-identical to the per-cell path',
-        );
-      },
-    );
+      expect(painter.runParagraphCacheLength, 0);
+
+      final batched = await render((canvas) {
+        painter
+          ..paintLineForegrounds(canvas, Offset.zero, topLine)
+          ..paintLineForegrounds(
+            canvas,
+            Offset(0, painter.cellSize.height),
+            midLine,
+          );
+      });
+
+      expect(
+        painter.runParagraphCacheLength,
+        0,
+        reason: 'box-drawing must not coalesce into style-run paragraphs',
+      );
+      expect(
+        batched.buffer.asUint8List(),
+        reference.buffer.asUint8List(),
+        reason: 'box-drawing borders must stay pixel-identical to the per-cell path',
+      );
+    });
 
     test('colored underline (SGR 58) tints the underline', () async {
       final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();

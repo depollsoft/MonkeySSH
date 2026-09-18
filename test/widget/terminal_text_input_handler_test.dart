@@ -524,8 +524,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
 
   return [
     (
-      name:
-          'flutter EditableText preserves composing range when a collapsed caret moves within it',
+      name: 'flutter EditableText preserves composing range when a collapsed caret moves within it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -538,8 +537,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
       terminalEchoes: null,
     ),
     (
-      name:
-          'flutter EditableText clears composing range when a collapsed caret moves before it',
+      name: 'flutter EditableText clears composing range when a collapsed caret moves before it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -551,8 +549,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
       terminalEchoes: null,
     ),
     (
-      name:
-          'flutter EditableText clears composing range when a collapsed caret moves after it',
+      name: 'flutter EditableText clears composing range when a collapsed caret moves after it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -564,8 +561,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
       terminalEchoes: null,
     ),
     (
-      name:
-          'flutter EditableText clears composing range when a selection moves before it',
+      name: 'flutter EditableText clears composing range when a selection moves before it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -577,8 +573,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
       terminalEchoes: null,
     ),
     (
-      name:
-          'flutter EditableText preserves composing range when a selection stays within it',
+      name: 'flutter EditableText preserves composing range when a selection stays within it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -591,8 +586,7 @@ List<_MatrixScenario> _buildFlutterComposingParityScenarios() {
       terminalEchoes: null,
     ),
     (
-      name:
-          'flutter EditableText clears composing range when a selection moves after it',
+      name: 'flutter EditableText clears composing range when a selection moves after it',
       sequence: const [
         baseValue,
         TextEditingValue(
@@ -864,9 +858,8 @@ String _terminalKeyOutput(
   bool ctrl = false,
 }) {
   final output = <String>[];
-  Terminal(
-    onOutput: output.add,
-  ).keyInput(key, shift: shift, alt: alt, ctrl: ctrl);
+  Terminal(onOutput: output.add)
+      .keyInput(key, shift: shift, alt: alt, ctrl: ctrl);
   return output.join();
 }
 
@@ -1732,9 +1725,9 @@ void main() {
           _terminalKeyOutput(TerminalKey.backspace),
         );
         expect(
-          (tester.state(find.byType(TerminalTextInputHandler))
-                  as TextInputClient)
-              .currentTextEditingValue,
+          (tester.state(
+            find.byType(TerminalTextInputHandler),
+          ) as TextInputClient).currentTextEditingValue,
           const TextEditingValue(
             text: _deleteDetectionMarker,
             selection: TextSelection.collapsed(offset: 2),
@@ -1782,8 +1775,9 @@ void main() {
         (text: '', cursorOffset: 0),
       );
       expect(
-        (tester.state(find.byType(TerminalTextInputHandler)) as TextInputClient)
-            .currentTextEditingValue,
+        (tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient).currentTextEditingValue,
         const TextEditingValue(
           text: _deleteDetectionMarker,
           selection: TextSelection.collapsed(offset: 2),
@@ -2181,8 +2175,7 @@ void main() {
 
     for (final testCase in [
       (
-        name:
-            'keeps the cursor aligned when a replacement is followed by a later move and backspace elsewhere',
+        name: 'keeps the cursor aligned when a replacement is followed by a later move and backspace elsewhere',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2207,8 +2200,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when a replacement is followed by a later replacement elsewhere',
+        name: 'keeps the cursor aligned when a replacement is followed by a later replacement elsewhere',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2238,8 +2230,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when replacement selection is followed by immediate backspace',
+        name: 'keeps the cursor aligned when replacement selection is followed by immediate backspace',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2267,8 +2258,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when a replacement selection includes a trailing space before backspace',
+        name: 'keeps the cursor aligned when a replacement selection includes a trailing space before backspace',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2291,8 +2281,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when deleting and then reinserting a replacement separator',
+        name: 'keeps the cursor aligned when deleting and then reinserting a replacement separator',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2316,8 +2305,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when whitespace-cluster replacement collapses two spaces before backspace',
+        name: 'keeps the cursor aligned when whitespace-cluster replacement collapses two spaces before backspace',
         initialEditingValue: _editingValue(
           'foo  bar',
           selectionOffset: 'foo  bar'.length,
@@ -2337,8 +2325,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned across repeated non-collapsed replacements before backspace',
+        name: 'keeps the cursor aligned across repeated non-collapsed replacements before backspace',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2378,8 +2365,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned across repeated-word non-collapsed replacements before backspace',
+        name: 'keeps the cursor aligned across repeated-word non-collapsed replacements before backspace',
         initialEditingValue: _editingValue(
           'bar bar bar',
           selectionOffset: 'bar bar bar'.length,
@@ -2416,8 +2402,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when editing inside a triple-space cluster after an internal move',
+        name: 'keeps the cursor aligned when editing inside a triple-space cluster after an internal move',
         initialEditingValue: _editingValue(
           'foo   bar',
           selectionOffset: 'foo   bar'.length,
@@ -2433,8 +2418,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned after replacing a repeated word and then backspacing a later repeated match',
+        name: 'keeps the cursor aligned after replacing a repeated word and then backspacing a later repeated match',
         initialEditingValue: _editingValue(
           'bar bar bar',
           selectionOffset: 'bar bar bar'.length,
@@ -2470,8 +2454,7 @@ void main() {
             '${List.filled(3, _terminalKeyOutput(TerminalKey.arrowLeft)).join()}X',
       ),
       (
-        name:
-            'inserts at the beginning of the line without rewriting the existing text',
+        name: 'inserts at the beginning of the line without rewriting the existing text',
         initialEditingValue: _editingValue(
           'hello',
           selectionOffset: 'hello'.length,
@@ -2502,8 +2485,7 @@ void main() {
             _terminalKeyOutput(TerminalKey.backspace),
       ),
       (
-        name:
-            'inserts an identical character at a moved caret without rewriting the unchanged suffix',
+        name: 'inserts an identical character at a moved caret without rewriting the unchanged suffix',
         initialEditingValue: _editingValue(
           'aaaa',
           selectionOffset: 'aaaa'.length,
@@ -2518,8 +2500,7 @@ void main() {
             '${List.filled(3, _terminalKeyOutput(TerminalKey.arrowLeft)).join()}a',
       ),
       (
-        name:
-            'moves and inserts around an emoji using grapheme-aware cursor offsets',
+        name: 'moves and inserts around an emoji using grapheme-aware cursor offsets',
         initialEditingValue: _editingValue(
           'a🎉b',
           selectionOffset: 'a🎉b'.length,
@@ -2534,8 +2515,7 @@ void main() {
             '${List.filled(2, _terminalKeyOutput(TerminalKey.arrowLeft)).join()}X',
       ),
       (
-        name:
-            'deletes an identical character at a moved caret without rewriting the unchanged suffix',
+        name: 'deletes an identical character at a moved caret without rewriting the unchanged suffix',
         initialEditingValue: _editingValue(
           'aaaaa',
           selectionOffset: 'aaaaa'.length,
@@ -2551,8 +2531,7 @@ void main() {
             '${_terminalKeyOutput(TerminalKey.backspace)}',
       ),
       (
-        name:
-            'keeps the cursor aligned when inserting and then backspacing at a space boundary',
+        name: 'keeps the cursor aligned when inserting and then backspacing at a space boundary',
         initialEditingValue: _editingValue(
           'foo bar',
           selectionOffset: 'foo bar'.length,
@@ -2569,8 +2548,7 @@ void main() {
             'X${_terminalKeyOutput(TerminalKey.backspace)}',
       ),
       (
-        name:
-            'keeps the cursor aligned when inserting and then backspacing between repeated spaces',
+        name: 'keeps the cursor aligned when inserting and then backspacing between repeated spaces',
         initialEditingValue: _editingValue(
           'foo  bar',
           selectionOffset: 'foo  bar'.length,
@@ -2587,8 +2565,7 @@ void main() {
             'X${_terminalKeyOutput(TerminalKey.backspace)}',
       ),
       (
-        name:
-            'replaces punctuation at a moved caret without rewriting the trailing word',
+        name: 'replaces punctuation at a moved caret without rewriting the trailing word',
         initialEditingValue: _editingValue(
           'hello, world',
           selectionOffset: 'hello, world'.length,
@@ -2607,8 +2584,7 @@ void main() {
             '${_terminalKeyOutput(TerminalKey.backspace)};',
       ),
       (
-        name:
-            'keeps the cursor aligned when replacing punctuation and double-space clusters before backspace',
+        name: 'keeps the cursor aligned when replacing punctuation and double-space clusters before backspace',
         initialEditingValue: _editingValue(
           'hello,  world',
           selectionOffset: 'hello,  world'.length,
@@ -2631,8 +2607,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'replaces the middle repeated word without touching the trailing match',
+        name: 'replaces the middle repeated word without touching the trailing match',
         initialEditingValue: _editingValue(
           'go go go',
           selectionOffset: 'go go go'.length,
@@ -2651,8 +2626,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned after replacing a repeated word and then backspacing',
+        name: 'keeps the cursor aligned after replacing a repeated word and then backspacing',
         initialEditingValue: _editingValue(
           'go go go',
           selectionOffset: 'go go go'.length,
@@ -2674,8 +2648,7 @@ void main() {
             'ne${_terminalKeyOutput(TerminalKey.backspace)}',
       ),
       (
-        name:
-            'keeps the cursor aligned when a repeated-word replacement commits from composition before backspace',
+        name: 'keeps the cursor aligned when a repeated-word replacement commits from composition before backspace',
         initialEditingValue: _editingValue(
           'go go go',
           selectionOffset: 'go go go'.length,
@@ -2702,8 +2675,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when composition moves away before collapsing and a later backspace follows',
+        name: 'keeps the cursor aligned when composition moves away before collapsing and a later backspace follows',
         initialEditingValue: _editingValue(
           'echo teh world',
           selectionOffset: 'echo teh world'.length,
@@ -2740,8 +2712,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned when an autocorrected word is punctuated and then backspaced',
+        name: 'keeps the cursor aligned when an autocorrected word is punctuated and then backspaced',
         initialEditingValue: _editingValue(
           'hi teh world',
           selectionOffset: 'hi teh world'.length,
@@ -2765,8 +2736,7 @@ void main() {
         expectedOutput: null,
       ),
       (
-        name:
-            'keeps the cursor aligned across repeated backspaces after an autocorrected repeated token',
+        name: 'keeps the cursor aligned across repeated backspaces after an autocorrected repeated token',
         initialEditingValue: _editingValue(
           'go teh go',
           selectionOffset: 'go teh go'.length,
@@ -3062,9 +3032,9 @@ void main() {
         );
         final terminalOutput = harness.terminalOutput..clear();
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         Future<void> performNewlineAction() async {
           client.performAction(TextInputAction.newline);
           await tester.pump();
@@ -6024,9 +5994,9 @@ void main() {
 
         expect(terminalTextFromEvents(terminalOutput), suspiciousUserText);
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         expect(
           client.currentTextEditingValue,
           const TextEditingValue(
@@ -6064,9 +6034,9 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      final client =
-          tester.state(find.byType(TerminalTextInputHandler))
-              as TextInputClient;
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
       expect(terminalOutput, isEmpty);
       expect(client.currentTextEditingValue?.text, _deleteDetectionMarker);
 
@@ -6170,9 +6140,9 @@ void main() {
 
         expect(terminalOutput.join(), 'ls');
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         expect(
           client.currentTextEditingValue?.text,
           '${_deleteDetectionMarker}ls',
@@ -6710,8 +6680,7 @@ void main() {
         terminalEchoes: 1,
       ),
       (
-        name:
-            'matches earlier-word replacement after partially deleting newer text',
+        name: 'matches earlier-word replacement after partially deleting newer text',
         sequence: const [
           TextEditingValue(
             text: 'teh world ',
@@ -7399,8 +7368,7 @@ void main() {
 
     for (final testCase in [
       (
-        name:
-            'preserves a new separator when a trailing-backspace reset is followed by a same-initial unrelated committed word',
+        name: 'preserves a new separator when a trailing-backspace reset is followed by a same-initial unrelated committed word',
         initialEditingValue: _editingValue('shell', selectionOffset: 5),
         shortenedEditingValue: _editingValue('shel', selectionOffset: 4),
         continuation: _editingValue(' story ', selectionOffset: 7),
@@ -7409,8 +7377,7 @@ void main() {
         expectedEditingValue: null,
       ),
       (
-        name:
-            'preserves the deleted suffix when a trailing-backspace reset resumes the same word and continues into the next word',
+        name: 'preserves the deleted suffix when a trailing-backspace reset resumes the same word and continues into the next word',
         initialEditingValue: _editingValue('things', selectionOffset: 6),
         shortenedEditingValue: _editingValue('thin', selectionOffset: 4),
         continuation: _editingValue(' gs are ', selectionOffset: 8),
@@ -7419,8 +7386,7 @@ void main() {
         expectedEditingValue: null,
       ),
       (
-        name:
-            'keeps the shortened prefix when later delete-reset words only share letters with the deleted suggestion',
+        name: 'keeps the shortened prefix when later delete-reset words only share letters with the deleted suggestion',
         initialEditingValue: _editingValue(
           'what do we thinking',
           selectionOffset: 'what do we thinking'.length,
@@ -7444,8 +7410,7 @@ void main() {
         expectedEditingValue: null,
       ),
       (
-        name:
-            'drops a stale one-letter delete-reset fragment before the next word',
+        name: 'drops a stale one-letter delete-reset fragment before the next word',
         initialEditingValue: _editingValue(
           'what do we thinking',
           selectionOffset: 'what do we thinking'.length,

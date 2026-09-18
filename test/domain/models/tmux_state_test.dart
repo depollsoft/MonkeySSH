@@ -327,8 +327,7 @@ void main() {
         isActive: false,
         currentCommand: 'node',
         currentPath: '/Users/depoll/Code/flutty',
-        paneTitle:
-            '◇  Ready (flutty)                                                               ',
+        paneTitle: '◇  Ready (flutty)                                                               ',
       );
 
       expect(window.displayTitle, 'Cursor Agent · flutty');

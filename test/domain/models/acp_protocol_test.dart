@@ -345,20 +345,18 @@ void main() {
   });
 
   test('bounds provider plan entry count and content', () {
-    final update =
-        AcpSessionUpdate.fromJson({
-              'sessionUpdate': 'plan',
-              'entries': [
-                for (var index = 0; index < acpMaxPlanEntries; index++)
-                  {
-                    'content': 'x' * (acpMaxPlanEntryCharacters + 10),
-                    'priority': 'medium',
-                    'status': 'pending',
-                  },
-                _UnreadableMap(),
-              ],
-            })
-            as AcpPlanUpdate;
+    final update = AcpSessionUpdate.fromJson({
+      'sessionUpdate': 'plan',
+      'entries': [
+        for (var index = 0; index < acpMaxPlanEntries; index++)
+          {
+            'content': 'x' * (acpMaxPlanEntryCharacters + 10),
+            'priority': 'medium',
+            'status': 'pending',
+          },
+        _UnreadableMap(),
+      ],
+    }) as AcpPlanUpdate;
 
     expect(update.entries, hasLength(acpMaxPlanEntries));
     expect(update.entries.first.content, hasLength(acpMaxPlanEntryCharacters));

@@ -38,7 +38,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: swiftpm
       if: inputs.phase == 'swiftpm' && inputs.restore-swiftpm == 'true'
       with:
@@ -66,7 +66,7 @@ runs:
     - name: Restore resolved Swift packages
       id: workspace
       if: inputs.phase == 'build'
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           build/${{ inputs.platform }}/SourcePackages/checkouts
@@ -78,7 +78,7 @@ runs:
     - name: Restore Apple compilation cache
       id: compilation
       if: inputs.phase == 'build'
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/Library/Caches/monkeyssh-xcode
         key: ${{ inputs.platform }}-compile-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}

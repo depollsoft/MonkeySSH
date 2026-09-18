@@ -138,9 +138,8 @@ void main() {
           } else {
             verify(channel.channel.destroy).called(1);
           }
-          verify(
-            () => harness.client.execute(any(), pty: any(named: 'pty')),
-          ).called(1);
+          verify(() => harness.client.execute(any(), pty: any(named: 'pty')))
+              .called(1);
           stdout.close().ignore();
         },
       );
@@ -168,24 +167,23 @@ void main() {
         }
         return Future<SftpClient>.value(sftp);
       });
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        final command = invocation.positionalArguments.single as String;
-        if (acceptedConfirmations.isNotEmpty &&
-            !supersededProbeReachedShaCheck.isCompleted &&
-            (command.contains('sha256sum') ||
-                command.contains('shasum -a 256'))) {
-          supersededProbeReachedShaCheck.complete();
-        }
-        return _execSession(
-          _outputForCommand(
-            command,
-            expectedSha: harness.digest,
-            remoteFileService: harness.remote,
-          ),
-        );
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            if (acceptedConfirmations.isNotEmpty &&
+                !supersededProbeReachedShaCheck.isCompleted &&
+                (command.contains('sha256sum') ||
+                    command.contains('shasum -a 256'))) {
+              supersededProbeReachedShaCheck.complete();
+            }
+            return _execSession(
+              _outputForCommand(
+                command,
+                expectedSha: harness.digest,
+                remoteFileService: harness.remote,
+              ),
+            );
+          });
 
       final probeOnlyInstall = installer.ensureInstalled(session);
       MonkeyMuxInstallation? probeOnlyInstallation;
@@ -262,23 +260,22 @@ void main() {
       final sftp = harness.sftp;
       final remoteFileService = harness.remote;
       final commands = harness.commands;
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        final command = invocation.positionalArguments.single as String;
-        commands.add(command);
-        if (scenario.launcherFails &&
-            command.contains('.local/bin/monkeymux')) {
-          throw StateError('launcher directory is read-only');
-        }
-        return _execSession(
-          _outputForCommand(
-            command,
-            expectedSha: harness.digest,
-            remoteFileService: remoteFileService,
-          ),
-        );
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            commands.add(command);
+            if (scenario.launcherFails &&
+                command.contains('.local/bin/monkeymux')) {
+              throw StateError('launcher directory is read-only');
+            }
+            return _execSession(
+              _outputForCommand(
+                command,
+                expectedSha: harness.digest,
+                remoteFileService: remoteFileService,
+              ),
+            );
+          });
 
       if (scenario.corrupt) {
         await expectLater(
@@ -469,19 +466,18 @@ void main() {
           homeDirectory: '/${home.replaceAll(r'\', '/')}',
         )..uploaded = true,
       );
-      when(
-        () => harness.client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((invocation) async {
-        final command = invocation.positionalArguments.single as String;
-        harness.commands.add(command);
-        return _execSession(
-          _windowsOutputForCommand(
-            command,
-            expectedSha: harness.digest,
-            remoteFileService: harness.remote,
-          ),
-        );
-      });
+      when(() => harness.client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            harness.commands.add(command);
+            return _execSession(
+              _windowsOutputForCommand(
+                command,
+                expectedSha: harness.digest,
+                remoteFileService: harness.remote,
+              ),
+            );
+          });
       final root = '$home/.monkeyssh/bin/monkeymux';
       final current = File(
         '$root/9.9.9/windows-amd64/${harness.digest}/monkeymux.exe',
@@ -570,27 +566,25 @@ void main() {
           );
         }
       });
-      when(() => harness.sftp.rename(any(), any())).thenAnswer((
-        invocation,
-      ) async {
-        final destination = invocation.positionalArguments[1] as String;
-        expect(destination, target);
-        expect(files.contains(destination), isFalse);
-        files.add(destination);
-      });
-      when(
-        () => harness.client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((invocation) async {
-        final command = invocation.positionalArguments.single as String;
-        harness.commands.add(command);
-        return _execSession(
-          _windowsOutputForCommand(
-            command,
-            expectedSha: harness.digest,
-            remoteFileService: harness.remote,
-          ),
-        );
-      });
+      when(() => harness.sftp.rename(any(), any()))
+          .thenAnswer((invocation) async {
+            final destination = invocation.positionalArguments[1] as String;
+            expect(destination, target);
+            expect(files.contains(destination), isFalse);
+            files.add(destination);
+          });
+      when(() => harness.client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            harness.commands.add(command);
+            return _execSession(
+              _windowsOutputForCommand(
+                command,
+                expectedSha: harness.digest,
+                remoteFileService: harness.remote,
+              ),
+            );
+          });
 
       final installed = await harness.installer.ensureInstalled(
         harness.session,
@@ -738,25 +732,24 @@ void main() {
             invocation.positionalArguments[1] as String,
           ));
         });
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) async {
-          final command = invocation.positionalArguments.single as String;
-          commands.add(command);
-          if (command.contains('certutil') &&
-              remoteFileService.uploaded &&
-              (failure == 'checksum' ||
-                  (failure == 'final-checksum' && renames.isNotEmpty))) {
-            return _execSession('bad checksum');
-          }
-          return _execSession(
-            _windowsOutputForCommand(
-              command,
-              expectedSha: expectedSha,
-              remoteFileService: remoteFileService,
-            ),
-          );
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              final command = invocation.positionalArguments.single as String;
+              commands.add(command);
+              if (command.contains('certutil') &&
+                  remoteFileService.uploaded &&
+                  (failure == 'checksum' ||
+                      (failure == 'final-checksum' && renames.isNotEmpty))) {
+                return _execSession('bad checksum');
+              }
+              return _execSession(
+                _windowsOutputForCommand(
+                  command,
+                  expectedSha: expectedSha,
+                  remoteFileService: remoteFileService,
+                ),
+              );
+            });
         final install = installer.ensureInstalled(
           session,
           confirmInstall: (_) async => true,
@@ -774,9 +767,8 @@ void main() {
           expect(remoteFileService.uploadedBytes, assetBytes);
           expect(renames, hasLength(failure == 'final-checksum' ? 1 : 0));
           if (failure != 'final-checksum') {
-            verify(
-              () => sftp.remove(remoteFileService.uploadedPath!),
-            ).called(1);
+            verify(() => sftp.remove(remoteFileService.uploadedPath!))
+                .called(1);
           }
           if (failure == 'checksum') {
             verifyNever(
@@ -878,29 +870,27 @@ class _InstallHarness {
       assetBundle: bundle,
     );
     if (windows) {
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
     }
     addTearDown(dispose);
     when(sftp.close).thenAnswer((_) async {});
     when(() => sftp.remove(any())).thenAnswer((_) async {});
     when(client.sftp).thenAnswer((_) async => sftp);
-    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-      invocation,
-    ) async {
-      final command = invocation.positionalArguments.single as String;
-      commands.add(command);
-      return _execSession(
-        command.contains('mv -f') && finalize != null
-            ? await finalize!(command)
-            : _outputForCommand(
-                command,
-                expectedSha: digest,
-                remoteFileService: this.remote,
-              ),
-      );
-    });
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((invocation) async {
+          final command = invocation.positionalArguments.single as String;
+          commands.add(command);
+          return _execSession(
+            command.contains('mv -f') && finalize != null
+                ? await finalize!(command)
+                : _outputForCommand(
+                    command,
+                    expectedSha: digest,
+                    remoteFileService: this.remote,
+                  ),
+          );
+        });
     session = SshSession(
       connectionId: _nextConnectionId++,
       hostId: 1,

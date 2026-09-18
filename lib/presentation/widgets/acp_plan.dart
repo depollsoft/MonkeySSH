@@ -65,9 +65,8 @@ class AcpPlanView extends StatelessWidget {
                   ),
                   Text(
                     '$completed/$total',
-                    style: AcpChatTypography.monoStyleOf(
-                      context,
-                    ).copyWith(fontSize: 12, color: scheme.onSurfaceVariant),
+                    style: AcpChatTypography.monoStyleOf(context)
+                        .copyWith(fontSize: 12, color: scheme.onSurfaceVariant),
                   ),
                 ],
               ),

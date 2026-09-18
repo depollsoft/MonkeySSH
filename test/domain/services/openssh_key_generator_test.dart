@@ -152,32 +152,24 @@ void main() {
   });
 
   group('OpenSSH interop (real ssh-keygen)', () {
-    test(
-      'ssh-keygen accepts an unencrypted Ed25519 key',
-      () async {
-        final pem = (await generateOpenSshKey(
-          keyType: SshKeyType.ed25519,
-          comment: 'unit@test',
-        )).privateKeyPem;
-        final publicKey = await _sshKeygenPublicKey(pem, '');
-        expect(publicKey, startsWith('ssh-ed25519 '));
-      },
-      skip: sshKeygen ? false : 'ssh-keygen not available',
-    );
+    test('ssh-keygen accepts an unencrypted Ed25519 key', () async {
+      final pem = (await generateOpenSshKey(
+        keyType: SshKeyType.ed25519,
+        comment: 'unit@test',
+      )).privateKeyPem;
+      final publicKey = await _sshKeygenPublicKey(pem, '');
+      expect(publicKey, startsWith('ssh-ed25519 '));
+    }, skip: sshKeygen ? false : 'ssh-keygen not available');
 
-    test(
-      'ssh-keygen accepts a passphrase-encrypted RSA key',
-      () async {
-        const passphrase = 'interop-secret';
-        final pem = (await generateOpenSshKey(
-          keyType: SshKeyType.rsa2048,
-          comment: 'unit@test',
-          passphrase: passphrase,
-        )).privateKeyPem;
-        final publicKey = await _sshKeygenPublicKey(pem, passphrase);
-        expect(publicKey, startsWith('ssh-rsa '));
-      },
-      skip: sshKeygen ? false : 'ssh-keygen not available',
-    );
+    test('ssh-keygen accepts a passphrase-encrypted RSA key', () async {
+      const passphrase = 'interop-secret';
+      final pem = (await generateOpenSshKey(
+        keyType: SshKeyType.rsa2048,
+        comment: 'unit@test',
+        passphrase: passphrase,
+      )).privateKeyPem;
+      final publicKey = await _sshKeygenPublicKey(pem, passphrase);
+      expect(publicKey, startsWith('ssh-rsa '));
+    }, skip: sshKeygen ? false : 'ssh-keygen not available');
   });
 }

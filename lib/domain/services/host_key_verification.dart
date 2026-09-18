@@ -19,8 +19,9 @@ enum HostKeyTrustDecision {
 }
 
 /// Callback used to collect a host-key trust decision from the UI.
-typedef HostKeyPromptHandler =
-    Future<HostKeyTrustDecision> Function(HostKeyVerificationRequest request);
+typedef HostKeyPromptHandler = Future<HostKeyTrustDecision> Function(
+  HostKeyVerificationRequest request,
+);
 
 /// An SSH host key presented during connection setup.
 class VerifiedHostKey {

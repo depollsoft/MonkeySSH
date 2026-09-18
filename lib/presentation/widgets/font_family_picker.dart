@@ -53,9 +53,8 @@ Future<String?> showFontPickerDialog({
                 padding: const EdgeInsets.all(12),
                 margin: const EdgeInsets.only(bottom: 12),
                 decoration: BoxDecoration(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer.withAlpha(50),
+                  color: Theme.of(context).colorScheme.primaryContainer
+                      .withAlpha(50),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
                     color: Theme.of(context).colorScheme.primary.withAlpha(100),

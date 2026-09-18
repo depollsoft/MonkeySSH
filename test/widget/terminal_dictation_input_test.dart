@@ -43,9 +43,9 @@ void main() {
         await tester.pump();
         expect(harness.terminalOutput.join(), phrase);
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         expect(
           client.currentTextEditingValue,
           _dictationValue('$_marker$phrase'),
@@ -68,69 +68,63 @@ void main() {
     );
   }
 
-  testWidgets(
-    'replaces dictated text when the IME replaces the whole buffer',
-    (tester) async {
-      final harness = await pumpTerminalInputHarness(tester);
-      for (final phrase in [
-        'Explain the coat.',
-        'Explain the code.',
-        'Explain the code. 🐒',
-      ]) {
-        tester.testTextInput.updateEditingValue(_dictationValue(phrase));
-        await tester.pump();
-        expect(terminalStateFromEvents(harness.terminalOutput), (
-          text: phrase,
-          cursorOffset: phrase.characters.length,
-        ));
-      }
-
-      await disposeTerminalInputHarness(tester, harness);
-    },
-    variant: _mobilePlatforms,
-  );
-
-  testWidgets(
-    'Enter commits dictation that replaced the delete markers',
-    (tester) async {
-      final harness = await pumpTerminalInputHarness(tester);
-      const phrase = 'Explain this code';
-      tester.testTextInput.updateEditingValue(
-        _dictationValue(phrase, composing: true),
-      );
+  testWidgets('replaces dictated text when the IME replaces the whole buffer', (
+    tester,
+  ) async {
+    final harness = await pumpTerminalInputHarness(tester);
+    for (final phrase in [
+      'Explain the coat.',
+      'Explain the code.',
+      'Explain the code. 🐒',
+    ]) {
+      tester.testTextInput.updateEditingValue(_dictationValue(phrase));
       await tester.pump();
+      expect(terminalStateFromEvents(harness.terminalOutput), (
+        text: phrase,
+        cursorOffset: phrase.characters.length,
+      ));
+    }
 
-      await tester.testTextInput.receiveAction(TextInputAction.newline);
-      await tester.pump();
-      expect(harness.terminalOutput.join(), '$phrase\r');
+    await disposeTerminalInputHarness(tester, harness);
+  }, variant: _mobilePlatforms);
 
-      await disposeTerminalInputHarness(tester, harness);
-    },
-    variant: _mobilePlatforms,
-  );
+  testWidgets('Enter commits dictation that replaced the delete markers', (
+    tester,
+  ) async {
+    final harness = await pumpTerminalInputHarness(tester);
+    const phrase = 'Explain this code';
+    tester.testTextInput.updateEditingValue(
+      _dictationValue(phrase, composing: true),
+    );
+    await tester.pump();
 
-  testWidgets(
-    'reviews a marker-free dictation commit before sending it',
-    (tester) async {
-      var reviewCount = 0;
-      const command = r'echo $(id)';
-      final harness = await pumpTerminalInputHarness(
-        tester,
-        onReviewInsertedText: (review) async {
-          reviewCount++;
-          expect(review.command, command);
-          return false;
-        },
-      );
-      tester.testTextInput.updateEditingValue(_dictationValue(command));
-      await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.newline);
+    await tester.pump();
+    expect(harness.terminalOutput.join(), '$phrase\r');
 
-      expect(reviewCount, 1);
-      expect(harness.terminalOutput, isEmpty);
-      await disposeTerminalInputHarness(tester, harness);
-    },
-    variant: _mobilePlatforms,
-  );
+    await disposeTerminalInputHarness(tester, harness);
+  }, variant: _mobilePlatforms);
+
+  testWidgets('reviews a marker-free dictation commit before sending it', (
+    tester,
+  ) async {
+    var reviewCount = 0;
+    const command = r'echo $(id)';
+    final harness = await pumpTerminalInputHarness(
+      tester,
+      onReviewInsertedText: (review) async {
+        reviewCount++;
+        expect(review.command, command);
+        return false;
+      },
+    );
+    tester.testTextInput.updateEditingValue(_dictationValue(command));
+    await tester.pump();
+
+    expect(reviewCount, 1);
+    expect(harness.terminalOutput, isEmpty);
+    await disposeTerminalInputHarness(tester, harness);
+  }, variant: _mobilePlatforms);
 
   for (final preservesBackspaceBuffer in [false, true]) {
     testWidgets(
@@ -142,9 +136,9 @@ void main() {
         tester.testTextInput.updateEditingValue(_dictationValue(_marker));
         await tester.pump();
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         final backspaceBuffer = client.currentTextEditingValue!.text;
         expect(
           backspaceBuffer.length,

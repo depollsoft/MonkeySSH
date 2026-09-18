@@ -125,9 +125,8 @@ Future<void> _sharePayloadViaNativeSheet({
     }
 
     if (result.status == ShareResultStatus.dismissed) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Share cancelled')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Share cancelled')));
     }
   } on Object catch (error, stackTrace) {
     FlutterError.reportError(
@@ -245,16 +244,13 @@ Future<String?> pickTransferPayloadFromFile(BuildContext context) async {
     }
     return utf8.decode(bytes.takeBytes());
   } on FormatException {
-    message =
-        'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.';
+    message = 'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.';
   } on Exception {
-    message =
-        'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.';
+    message = 'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.';
   }
   if (context.mounted) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
   return null;
 }

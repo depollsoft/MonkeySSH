@@ -98,13 +98,11 @@ while (true) {
     pattern: r'https://downloads\.cursor\.com/lab/[0-9][0-9A-Za-z.+-]*',
   ),
   AgentLaunchTool.antigravity when definition.kind == AgentRuntimeKind.cli => (
-    url:
-        'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/',
+    url: 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/',
     pattern: '"version"[[:space:]]*:[[:space:]]*"[^"]+"',
   ),
   AgentLaunchTool.hermes => (
-    url:
-        'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
+    url: 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
     pattern: '__version__[[:space:]]*=[[:space:]]*"[^"]+"',
   ),
   AgentLaunchTool.grokBuild => (
@@ -395,9 +393,8 @@ final agentRuntimeDefinitions = List<AgentRuntimeDefinition>.unmodifiable([
 /// Extracts a normalized version from common CLI output.
 String? parseAgentVersion(String output) {
   // Muse prints the marketing version first and its actual release in brackets.
-  final muse = RegExp(
-    r'Muse Code [^\r\n]*\((\d+\.\d+\.\d+-R\d+(?:\.\d+)?)\)',
-  ).firstMatch(output);
+  final muse = RegExp(r'Muse Code [^\r\n]*\((\d+\.\d+\.\d+-R\d+(?:\.\d+)?)\)')
+      .firstMatch(output);
   if (muse != null) return muse.group(1);
   final match = RegExp(
     r'(?<![A-Za-z0-9.])[vV]?(\d+(?:\.\d+){1,3}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)',
@@ -930,8 +927,7 @@ class AgentManagementService {
         executablePath: path,
         detectionSource: _detectionSourceFromPath(path),
         managedByPackageManager: definition.supportsManagedInstall,
-        message:
-            'Required setup scripts did not run. Repair the installation before launching this agent.',
+        message: 'Required setup scripts did not run. Repair the installation before launching this agent.',
       );
     }
     var source = metadata?.detectionSource;
@@ -1376,8 +1372,7 @@ class AgentManagementService {
     if (command == null) {
       return const AgentRuntimeActionResult(
         succeeded: false,
-        output:
-            'No safe automatic installer is available for this tool. Use its official installation instructions, then tap Re-check.',
+        output: 'No safe automatic installer is available for this tool. Use its official installation instructions, then tap Re-check.',
       );
     }
     final repairing = current?.status == AgentRuntimeStatus.needsRepair;

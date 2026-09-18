@@ -1100,9 +1100,8 @@ int _compareCatalogOfferCandidates(
   _CatalogOfferCandidate left,
   _CatalogOfferCandidate right,
 ) {
-  final billingComparison = _billingPeriodSortOrder(
-    left.offer.billingPeriod,
-  ).compareTo(_billingPeriodSortOrder(right.offer.billingPeriod));
+  final billingComparison = _billingPeriodSortOrder(left.offer.billingPeriod)
+      .compareTo(_billingPeriodSortOrder(right.offer.billingPeriod));
   if (billingComparison != 0) {
     return billingComparison;
   }
@@ -1310,9 +1309,8 @@ String? _formatStoreKitDuration(
 }
 
 String? _formatIsoDuration(String isoDuration, {required int repeatCount}) {
-  final match = RegExp(
-    r'^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?$',
-  ).firstMatch(isoDuration.toUpperCase());
+  final match = RegExp(r'^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?$')
+      .firstMatch(isoDuration.toUpperCase());
   if (match == null) {
     return null;
   }
@@ -1339,9 +1337,9 @@ String _extractCurrencySymbol(
   String formattedPrice,
   String fallbackCurrencyCode,
 ) {
-  final currencySymbol = RegExp(
-    r'^[^\d ]+|[^\d ]+$',
-  ).firstMatch(formattedPrice)?.group(0);
+  final currencySymbol = RegExp(r'^[^\d ]+|[^\d ]+$')
+      .firstMatch(formattedPrice)
+      ?.group(0);
   if (currencySymbol == null || currencySymbol.isEmpty) {
     return fallbackCurrencyCode;
   }

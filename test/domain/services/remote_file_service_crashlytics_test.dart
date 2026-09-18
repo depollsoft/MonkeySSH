@@ -25,14 +25,12 @@ void main() {
   setUp(() {
     sftp = _MockSftpClient();
     file = _MockSftpFile();
-    when(
-      () => sftp.open('/upload', mode: any(named: 'mode')),
-    ).thenAnswer((_) async => file);
+    when(() => sftp.open('/upload', mode: any(named: 'mode')))
+        .thenAnswer((_) async => file);
     when(file.close).thenAnswer((_) async {});
     when(() => sftp.setStat('/upload', any())).thenAnswer((_) async {});
-    when(
-      () => file.writeBytes(any(), offset: any(named: 'offset')),
-    ).thenAnswer((_) async {});
+    when(() => file.writeBytes(any(), offset: any(named: 'offset')))
+        .thenAnswer((_) async {});
     // Exercise the actual upstream writer if uploadStream regresses to .write.
     when(() => file.write(any())).thenAnswer(
       (call) => SftpFileWriter(
@@ -94,12 +92,10 @@ void main() {
 
   test('preserves the write failure when close also fails', () async {
     final failure = StateError('write failed');
-    when(
-      () => file.writeBytes(any(), offset: any(named: 'offset')),
-    ).thenAnswer((_) => Future<void>.error(failure));
-    when(
-      file.close,
-    ).thenAnswer((_) => Future<void>.error(SSHStateError('closed')));
+    when(() => file.writeBytes(any(), offset: any(named: 'offset')))
+        .thenAnswer((_) => Future<void>.error(failure));
+    when(file.close)
+        .thenAnswer((_) => Future<void>.error(SSHStateError('closed')));
     await expectLater(
       service.uploadBytes(
         sftp: sftp,
@@ -117,9 +113,8 @@ void main() {
       if (stage == 'close') {
         when(file.close).thenAnswer((_) => Future<void>.error(failure));
       } else {
-        when(
-          () => sftp.setStat('/upload', any()),
-        ).thenAnswer((_) => Future<void>.error(failure));
+        when(() => sftp.setStat('/upload', any()))
+            .thenAnswer((_) => Future<void>.error(failure));
       }
       await expectLater(
         service.uploadBytes(
@@ -147,9 +142,8 @@ void main() {
       },
     );
     when(file.close).thenAnswer((_) async => calls.add('close'));
-    when(
-      () => sftp.setStat('/upload', any()),
-    ).thenAnswer((_) async => calls.add('chmod'));
+    when(() => sftp.setStat('/upload', any()))
+        .thenAnswer((_) async => calls.add('chmod'));
     final upload = service.uploadStream(
       sftp: sftp,
       remotePath: '/upload',

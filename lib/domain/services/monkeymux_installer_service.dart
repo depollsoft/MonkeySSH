@@ -164,8 +164,9 @@ class MonkeyMuxInstallRequest {
 }
 
 /// Confirms whether MonkeyMux may install its helper on the connected host.
-typedef MonkeyMuxInstallConfirmation =
-    Future<bool> Function(MonkeyMuxInstallRequest request);
+typedef MonkeyMuxInstallConfirmation = Future<bool> Function(
+  MonkeyMuxInstallRequest request,
+);
 
 /// Error thrown when MonkeyMux cannot be installed or used.
 class MonkeyMuxInstallException implements Exception {
@@ -650,9 +651,8 @@ class MonkeyMuxInstallerService {
           'Could not install the MonkeyMux command launcher.',
         );
       }
-      final cleanup = RegExp(
-        r'MONKEYMUX_CLEANUP:(\d+):(\d+)',
-      ).firstMatch(output);
+      final cleanup = RegExp(r'MONKEYMUX_CLEANUP:(\d+):(\d+)')
+          .firstMatch(output);
       if (cleanup != null) {
         DiagnosticsLogService.instance.info(
           'monkeymux.install',

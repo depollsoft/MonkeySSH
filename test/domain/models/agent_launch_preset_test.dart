@@ -371,8 +371,7 @@ void main() {
       () {
         const preset = AgentLaunchPreset(
           tool: AgentLaunchTool.codex,
-          additionalArguments:
-              '--ask-for-approval on-request --sandbox workspace-write --model gpt-5.4',
+          additionalArguments: '--ask-for-approval on-request --sandbox workspace-write --model gpt-5.4',
         );
 
         expect(

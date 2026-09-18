@@ -33,9 +33,8 @@ class AcpUsageView extends StatelessWidget {
     }
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final labelStyle = AcpChatTypography.monoStyleOf(
-      context,
-    ).copyWith(fontSize: 11, color: scheme.onSurfaceVariant);
+    final labelStyle = AcpChatTypography.monoStyleOf(context)
+        .copyWith(fontSize: 11, color: scheme.onSurfaceVariant);
 
     final stats = <String>[];
     if (usage.inputTokens != null) {

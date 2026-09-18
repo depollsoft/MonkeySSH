@@ -314,33 +314,30 @@ void main() {
   });
 
   group('Cache correctness – KeyRepository', () {
-    test(
-      'repeated getAll calls return correct decrypted private key and passphrase',
-      () async {
-        final db = AppDatabase.forTesting(NativeDatabase.memory());
-        final enc = SecretEncryptionService.forTesting();
-        final repo = KeyRepository(db, enc);
-        addTearDown(db.close);
+    test('repeated getAll calls return correct decrypted private key and passphrase', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      final enc = SecretEncryptionService.forTesting();
+      final repo = KeyRepository(db, enc);
+      addTearDown(db.close);
 
-        const privateKey = 'encrypted-key-payload';
-        const passphrase = 'key-passphrase';
-        await repo.insert(
-          SshKeysCompanion.insert(
-            name: 'Test Key',
-            keyType: 'ed25519',
-            publicKey: 'ssh-ed25519 AAAA',
-            privateKey: privateKey,
-            passphrase: const Value(passphrase),
-          ),
-        );
+      const privateKey = 'encrypted-key-payload';
+      const passphrase = 'key-passphrase';
+      await repo.insert(
+        SshKeysCompanion.insert(
+          name: 'Test Key',
+          keyType: 'ed25519',
+          publicKey: 'ssh-ed25519 AAAA',
+          privateKey: privateKey,
+          passphrase: const Value(passphrase),
+        ),
+      );
 
-        for (var i = 0; i < 3; i++) {
-          final keys = await repo.getAll();
-          expect(keys.first.privateKey, privateKey);
-          expect(keys.first.passphrase, passphrase);
-        }
-      },
-    );
+      for (var i = 0; i < 3; i++) {
+        final keys = await repo.getAll();
+        expect(keys.first.privateKey, privateKey);
+        expect(keys.first.passphrase, passphrase);
+      }
+    });
 
     test('cache does not serve stale private key after replacement', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());

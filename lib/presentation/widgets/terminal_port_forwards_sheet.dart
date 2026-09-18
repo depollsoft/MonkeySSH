@@ -73,9 +73,8 @@ class _TerminalPortForwardsSheetState
     final portForwards = ref.watch(portForwardsForHostProvider(widget.hostId));
     final activeSessionStates = ref.watch(activeSessionsProvider);
     final autoForwardPorts = ref.watch(
-      hostByIdProvider(
-        widget.hostId,
-      ).select((host) => host.asData?.value?.autoForwardPorts),
+      hostByIdProvider(widget.hostId)
+          .select((host) => host.asData?.value?.autoForwardPorts),
     );
     final isConnected =
         activeSessionStates[widget.connectionId] ==
@@ -628,8 +627,7 @@ class _TerminalPortForwardsSheetState
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 }

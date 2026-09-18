@@ -13,7 +13,7 @@ The font files are unchanged apart from their filenames.
 
 Flutter registers these files as `Inter` and `JetBrains Mono` in `pubspec.yaml`.
 The app uses these bundled families without a Google Fonts runtime download.
-The Flutter 3.44.8 SDK used locally and in CI maps `TextStyle.fontWeight` to
+The Flutter 3.47.4 SDK used locally and in CI maps `TextStyle.fontWeight` to
 the variable `wght` axis automatically, a behavior introduced in Flutter 3.41.
 No explicit weight variation is needed, including when callers change weight
 with `copyWith`. Inter keeps its default optical sizing.

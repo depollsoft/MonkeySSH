@@ -52,9 +52,8 @@ class TerminalScreenMuxFixture {
   void dispose() => unawaited(windowEvents.close());
 
   void stubPrefetch() {
-    when(
-      () => tmuxService.prefetchInstalledAgentTools(session),
-    ).thenAnswer((_) async {});
+    when(() => tmuxService.prefetchInstalledAgentTools(session))
+        .thenAnswer((_) async {});
   }
 
   void stubForegroundClient() {

@@ -238,9 +238,9 @@ void main() {
           (text: 'echo the world', cursorOffset: 'echo '.length),
         );
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         expect(
           client.currentTextEditingValue,
           const TextEditingValue(

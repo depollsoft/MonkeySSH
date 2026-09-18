@@ -85,15 +85,12 @@ const _proMonetizationState = MonetizationState(
 MonetizationService _buildProMonetizationService() {
   final service = _MockMonetizationService();
   when(() => service.currentState).thenReturn(_proMonetizationState);
-  when(
-    () => service.states,
-  ).thenAnswer((_) => Stream.value(_proMonetizationState));
-  when(
-    () => service.canUseFeature(MonetizationFeature.autoConnectAutomation),
-  ).thenAnswer((_) async => true);
-  when(
-    () => service.canUseFeature(MonetizationFeature.agentLaunchPresets),
-  ).thenAnswer((_) async => true);
+  when(() => service.states)
+      .thenAnswer((_) => Stream.value(_proMonetizationState));
+  when(() => service.canUseFeature(MonetizationFeature.autoConnectAutomation))
+      .thenAnswer((_) async => true);
+  when(() => service.canUseFeature(MonetizationFeature.agentLaunchPresets))
+      .thenAnswer((_) async => true);
   // ignore: unnecessary_lambdas
   when(() => service.initialize()).thenAnswer((_) => Future<void>.value());
   return service;
@@ -143,12 +140,10 @@ Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
     unreadablePassword: unreadablePassword,
   );
   final presetService = _MockAgentLaunchPresetService();
-  when(
-    () => presetService.getPresetForHost(any()),
-  ).thenAnswer((_) async => null);
-  when(
-    () => presetService.setPresetForHost(any(), any()),
-  ).thenAnswer((_) async {});
+  when(() => presetService.getPresetForHost(any()))
+      .thenAnswer((_) async => null);
+  when(() => presetService.setPresetForHost(any(), any()))
+      .thenAnswer((_) async {});
   when(() => presetService.deletePresetForHost(any())).thenAnswer((_) async {});
 
   await fixture.setSurfaceSize(tester);
@@ -923,15 +918,12 @@ void main() {
           tmuxSessionName: 'agent-session',
           tmuxExtraFlags: '-x 160 -y 48',
         );
-        when(
-          () => presetService.getPresetForHost(1),
-        ).thenAnswer((_) async => preset);
-        when(
-          () => presetService.setPresetForHost(1, any()),
-        ).thenAnswer((_) async {});
-        when(
-          () => presetService.deletePresetForHost(1),
-        ).thenAnswer((_) async {});
+        when(() => presetService.getPresetForHost(1))
+            .thenAnswer((_) async => preset);
+        when(() => presetService.setPresetForHost(1, any()))
+            .thenAnswer((_) async {});
+        when(() => presetService.deletePresetForHost(1))
+            .thenAnswer((_) async {});
 
         await fixture.pump(
           tester,
@@ -993,9 +985,9 @@ void main() {
           contains(r'\; set status off'),
         );
         final savedPreset =
-            verify(
-                  () => presetService.setPresetForHost(1, captureAny()),
-                ).captured.single
+            verify(() => presetService.setPresetForHost(1, captureAny()))
+                    .captured
+                    .single
                 as AgentLaunchPreset;
         expect(savedPreset.tmuxDisableStatusBar, isTrue);
         expect(savedPreset.tmuxSessionName, 'agent-session');
@@ -1066,15 +1058,12 @@ void main() {
 
         final presetService = _MockAgentLaunchPresetService();
         const preset = AgentLaunchPreset(tool: AgentLaunchTool.codex);
-        when(
-          () => presetService.getPresetForHost(1),
-        ).thenAnswer((_) async => preset);
-        when(
-          () => presetService.setPresetForHost(1, any()),
-        ).thenAnswer((_) async {});
-        when(
-          () => presetService.deletePresetForHost(1),
-        ).thenAnswer((_) async {});
+        when(() => presetService.getPresetForHost(1))
+            .thenAnswer((_) async => preset);
+        when(() => presetService.setPresetForHost(1, any()))
+            .thenAnswer((_) async {});
+        when(() => presetService.deletePresetForHost(1))
+            .thenAnswer((_) async {});
 
         await fixture.pump(
           tester,
@@ -1142,12 +1131,10 @@ void main() {
         tool: AgentLaunchTool.codex,
         tmuxSessionName: 'agent-session',
       );
-      when(
-        () => presetService.getPresetForHost(1),
-      ).thenAnswer((_) async => preset);
-      when(
-        () => presetService.setPresetForHost(1, any()),
-      ).thenAnswer((_) async {});
+      when(() => presetService.getPresetForHost(1))
+          .thenAnswer((_) async => preset);
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
       when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
 
       await fixture.pump(
@@ -1210,15 +1197,12 @@ void main() {
           tmuxSessionName: 'agent-session',
           tmuxDisableStatusBar: true,
         );
-        when(
-          () => presetService.getPresetForHost(1),
-        ).thenAnswer((_) async => preset);
-        when(
-          () => presetService.setPresetForHost(1, any()),
-        ).thenAnswer((_) async {});
-        when(
-          () => presetService.deletePresetForHost(1),
-        ).thenAnswer((_) async {});
+        when(() => presetService.getPresetForHost(1))
+            .thenAnswer((_) async => preset);
+        when(() => presetService.setPresetForHost(1, any()))
+            .thenAnswer((_) async {});
+        when(() => presetService.deletePresetForHost(1))
+            .thenAnswer((_) async {});
 
         await fixture.pump(
           tester,
@@ -1250,9 +1234,9 @@ void main() {
           contains(r'\; set status off'),
         );
         final savedPreset =
-            verify(
-                  () => presetService.setPresetForHost(1, captureAny()),
-                ).captured.single
+            verify(() => presetService.setPresetForHost(1, captureAny()))
+                    .captured
+                    .single
                 as AgentLaunchPreset;
         expect(savedPreset.tmuxDisableStatusBar, isTrue);
         verifyNever(() => presetService.deletePresetForHost(1));
@@ -1406,90 +1390,91 @@ void main() {
       expect(commandField.readOnly, isTrue);
     });
 
-    testWidgets('selects a host font and saves reset font and theme overrides', (
-      tester,
-    ) async {
-      final fixture = HostEditFixture(
-        host: _testHost(
-          id: 1,
-          label: 'Themed Host',
-          autoConnectRequiresConfirmation: false,
-          terminalThemeLightId: 'iterm2-monokai-pro',
-          terminalThemeDarkId: 'iterm2-dracula',
-          terminalFontFamily: 'monospace',
-        ),
-      );
-      await fixture.setSurfaceSize(tester);
-      final hostRepository = fixture.hostRepository;
-      await fixture.pump(tester);
+    testWidgets(
+      'selects a host font and saves reset font and theme overrides',
+      (tester) async {
+        final fixture = HostEditFixture(
+          host: _testHost(
+            id: 1,
+            label: 'Themed Host',
+            autoConnectRequiresConfirmation: false,
+            terminalThemeLightId: 'iterm2-monokai-pro',
+            terminalThemeDarkId: 'iterm2-dracula',
+            terminalFontFamily: 'monospace',
+          ),
+        );
+        await fixture.setSurfaceSize(tester);
+        final hostRepository = fixture.hostRepository;
+        await fixture.pump(tester);
 
-      // Expand Advanced tile
-      final advancedTile = find.byKey(const Key('host-advanced-tile'));
-      await tester.scrollUntilVisible(
-        advancedTile,
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(advancedTile);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+        // Expand Advanced tile
+        final advancedTile = find.byKey(const Key('host-advanced-tile'));
+        await tester.scrollUntilVisible(
+          advancedTile,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.tap(advancedTile);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
-      // Scroll to the theme section
-      await tester.scrollUntilVisible(
-        find.text('terminal theme'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
+        // Scroll to the theme section
+        await tester.scrollUntilVisible(
+          find.text('terminal theme'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
 
-      // Verify monokai and dracula names are displayed
-      expect(find.text('Monokai Pro'), findsOneWidget);
-      expect(find.text('Dracula'), findsOneWidget);
+        // Verify monokai and dracula names are displayed
+        expect(find.text('Monokai Pro'), findsOneWidget);
+        expect(find.text('Dracula'), findsOneWidget);
 
-      // Find the clear buttons and tap them. Since both tiles show a clear button,
-      // we can find by Icon(Icons.clear). Let's verify we have 2 clear icons.
-      final clearButtons = find.byIcon(Icons.clear);
-      expect(clearButtons, findsNWidgets(3));
+        // Find the clear buttons and tap them. Since both tiles show a clear button,
+        // we can find by Icon(Icons.clear). Let's verify we have 2 clear icons.
+        final clearButtons = find.byIcon(Icons.clear);
+        expect(clearButtons, findsNWidgets(3));
 
-      // Tap the first one (Light theme clear button)
-      await tester.tap(clearButtons.first);
-      await tester.pump();
+        // Tap the first one (Light theme clear button)
+        await tester.tap(clearButtons.first);
+        await tester.pump();
 
-      // Verify light theme has been reset to "Use default"
-      expect(find.text('Monokai Pro'), findsNothing);
-      expect(find.text('Dracula'), findsOneWidget);
+        // Verify light theme has been reset to "Use default"
+        expect(find.text('Monokai Pro'), findsNothing);
+        expect(find.text('Dracula'), findsOneWidget);
 
-      // Tap the remaining clear button
-      await tester.tap(find.byIcon(Icons.clear).first);
-      await tester.pump();
+        // Tap the remaining clear button
+        await tester.tap(find.byIcon(Icons.clear).first);
+        await tester.pump();
 
-      // Verify both are cleared
-      expect(find.text('Dracula'), findsNothing);
-      expect(find.text('Monokai Pro'), findsNothing);
+        // Verify both are cleared
+        expect(find.text('Dracula'), findsNothing);
+        expect(find.text('Monokai Pro'), findsNothing);
 
-      await tester.scrollUntilVisible(
-        find.text('Terminal Font'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(find.text('Terminal Font'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.text('JetBrains Mono'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('JetBrains Mono'), findsOneWidget);
-      await tester.tap(find.byTooltip('Reset to default'));
-      await tester.pump();
-      expect(find.text('JetBrains Mono'), findsNothing);
+        await tester.scrollUntilVisible(
+          find.text('Terminal Font'),
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.tap(find.text('Terminal Font'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('JetBrains Mono'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('JetBrains Mono'), findsOneWidget);
+        await tester.tap(find.byTooltip('Reset to default'));
+        await tester.pump();
+        expect(find.text('JetBrains Mono'), findsNothing);
 
-      // Tap save
-      await _tapBottomSave(tester);
+        // Tap save
+        await _tapBottomSave(tester);
 
-      // Verify database repositories received updated host with null themes
-      expect(hostRepository.updatedHost, isNotNull);
-      expect(hostRepository.updatedHost!.terminalThemeLightId, isNull);
-      expect(hostRepository.updatedHost!.terminalThemeDarkId, isNull);
-      expect(hostRepository.updatedHost!.terminalFontFamily, isNull);
-    });
+        // Verify database repositories received updated host with null themes
+        expect(hostRepository.updatedHost, isNotNull);
+        expect(hostRepository.updatedHost!.terminalThemeLightId, isNull);
+        expect(hostRepository.updatedHost!.terminalThemeDarkId, isNull);
+        expect(hostRepository.updatedHost!.terminalFontFamily, isNull);
+      },
+    );
   });
 }

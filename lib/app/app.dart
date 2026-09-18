@@ -166,8 +166,7 @@ class _BackgroundLifecycleBridgeState
     _startTmuxAlertNotificationRouting();
     _runLifecycleSync(
       _initializeTmuxAlertNotificationRouting,
-      errorContext:
-          'while initializing tmux alert notification routing during app startup',
+      errorContext: 'while initializing tmux alert notification routing during app startup',
       defer: true,
     );
     if (supportsHomeScreenShortcutActions) {
@@ -301,15 +300,13 @@ class _BackgroundLifecycleBridgeState
     final preferencesService = ref.read(
       homeScreenShortcutPreferencesServiceProvider,
     );
-    _pinnedHomeScreenShortcutHostsSubscription = preferencesService
-        .watchPinnedHostIds()
-        .listen((hostIds) {
+    _pinnedHomeScreenShortcutHostsSubscription =
+        preferencesService.watchPinnedHostIds().listen((hostIds) {
           _latestPinnedHomeScreenShortcutHostIds = hostIds;
           _hasLoadedPinnedHomeScreenShortcutHostIds = true;
           _runLifecycleSync(
             _syncHomeScreenShortcuts,
-            errorContext:
-                'while syncing home-screen shortcuts after pinned hosts changed',
+            errorContext: 'while syncing home-screen shortcuts after pinned hosts changed',
           );
         });
   }

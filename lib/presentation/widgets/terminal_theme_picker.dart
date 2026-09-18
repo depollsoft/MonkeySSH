@@ -382,8 +382,7 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
             if (remoteSchemes.isEmpty) {
               return const _LiveThemeMessage(
                 icon: Icons.check_circle_outline,
-                message:
-                    'No additional live themes found. Matching built-ins are shown above.',
+                message: 'No additional live themes found. Matching built-ins are shown above.',
               );
             }
             return _LiveThemePreviewGrid(
@@ -543,9 +542,8 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
       ref
         ..invalidate(allTerminalThemesProvider)
         ..invalidate(customTerminalThemesProvider);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Deleted "${theme.name}"')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Deleted "${theme.name}"')));
     } on Object catch (error) {
       if (!mounted) {
         return;
@@ -818,9 +816,8 @@ class _LiveThemePreviewError extends StatelessWidget {
           Text(
             'Preview unavailable',
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-            ),
+            style: Theme.of(context).textTheme.labelSmall
+                ?.copyWith(color: colorScheme.onSurfaceVariant),
           ),
         ],
       ),
@@ -873,9 +870,8 @@ class _LiveThemePreviewShell extends StatelessWidget {
                     Expanded(
                       child: Text(
                         name,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w500,
-                        ),
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(fontWeight: FontWeight.w500),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -922,9 +918,8 @@ class _LiveThemeMessage extends StatelessWidget {
             Expanded(
               child: Text(
                 message,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
+                style: Theme.of(context).textTheme.bodyMedium
+                    ?.copyWith(color: colorScheme.onSurfaceVariant),
               ),
             ),
           ],
@@ -1309,9 +1304,8 @@ class _ThemePreviewActionBar extends StatelessWidget {
                       ? 'Tap a theme to preview it on this terminal.'
                       : 'Previewing $themeName',
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                  style: Theme.of(context).textTheme.bodyMedium
+                      ?.copyWith(color: colorScheme.onSurfaceVariant),
                 ),
               ),
               const SizedBox(width: 12),

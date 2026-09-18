@@ -90,7 +90,7 @@ void main() {
     },
   );
 
-  test('demo file supports sink and random-access downloads', () async {
+  test('demo file supports sink downloads', () async {
     final file = await openDemoFile();
     addTearDown(file.close);
     await file.writeBytes(Uint8List.fromList([1, 2, 3, 4]));
@@ -107,14 +107,6 @@ void main() {
       2,
     );
     expect(await bytes, [2, 3]);
-
-    final directory = await Directory.systemTemp.createTemp('demo-sftp-');
-    addTearDown(() => directory.delete(recursive: true));
-    final localFile = File('${directory.path}/download.bin');
-    final handle = await localFile.open(mode: FileMode.write);
-    expect(await file.downloadToRandomAccess(handle, offset: 1, length: 2), 2);
-    await handle.close();
-    expect(await localFile.readAsBytes(), [0, 2, 3]);
   });
 
   test('closed demo file members fail with SftpError', () async {
@@ -244,9 +236,8 @@ void main() {
     expect(utf8.decode(await uploadedFile.readBytes()), uploadedText);
     await uploadedFile.close();
     expect(
-      (await sftp.listdir(
-        '/home/reviewer/work/monkeyssh-demo',
-      )).map((file) => file.filename),
+      (await sftp.listdir('/home/reviewer/work/monkeyssh-demo'))
+          .map((file) => file.filename),
       contains('upload.txt'),
     );
 

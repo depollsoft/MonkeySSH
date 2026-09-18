@@ -267,9 +267,8 @@ class _DeviceDebugSheetState extends State<_DeviceDebugSheet>
   Future<void> _copyRemoteAddress(String address) async {
     await Clipboard.setData(ClipboardData(text: address));
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('ADB serial copied')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('ADB serial copied')));
     }
   }
 }
@@ -367,9 +366,8 @@ class _DeviceDebugStatus extends StatelessWidget {
             Expanded(
               child: Text(
                 state.message,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurface),
+                style: Theme.of(context).textTheme.bodyMedium
+                    ?.copyWith(color: colorScheme.onSurface),
               ),
             ),
           ],

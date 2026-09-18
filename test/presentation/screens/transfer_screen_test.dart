@@ -30,6 +30,7 @@ class _TransferFilePicker extends FilePickerPlatform {
     Function(FilePickerStatus)? onFileLoading,
     int compressionQuality = 0,
     AndroidOptions androidOptions = const AndroidOptions(),
+    DarwinOptions darwinOptions = const DarwinOptions(),
     WindowsOptions windowsOptions = const WindowsOptions(),
     LinuxOptions linuxOptions = const LinuxOptions(),
     WebOptions webOptions = const WebOptions(),
@@ -161,11 +162,9 @@ void main() {
         await tester.pump();
         expect(
           find.text(switch (failure) {
-            'utf8' =>
-              'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.',
+            'utf8' => 'That isn’t a valid MonkeySSH transfer file. Export it again from MonkeySSH.',
             'oversize' => 'Transfer file is too large',
-            _ =>
-              'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
+            _ => 'Couldn’t read that file. Pick a .monkeysshx file exported from MonkeySSH.',
           }),
           findsOneWidget,
         );
@@ -301,9 +300,8 @@ void main() {
     'fails closed when the app re-locks during biometric transfer auth',
     (tester) async {
       when(() => authService.isAuthEnabled()).thenAnswer((_) async => true);
-      when(
-        () => authService.getAuthMethod(),
-      ).thenAnswer((_) async => AuthMethod.biometric);
+      when(() => authService.getAuthMethod())
+          .thenAnswer((_) async => AuthMethod.biometric);
       when(
         () => authService.authenticateWithBiometrics(
           reason: any(named: 'reason'),

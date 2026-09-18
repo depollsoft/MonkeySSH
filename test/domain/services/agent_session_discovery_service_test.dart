@@ -166,21 +166,19 @@ void main() {
       final opening = Completer<SSHSession>();
       final client = _MockSshClient();
       if (kind == 'windows') {
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       }
       var calls = 0;
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) {
-        calls++;
-        final command = invocation.positionalArguments.single as String;
-        if (kind != 'acp' || command.contains('copilot --acp')) {
-          return opening.future;
-        }
-        return Future.value(_buildExecSession());
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) {
+            calls++;
+            final command = invocation.positionalArguments.single as String;
+            if (kind != 'acp' || command.contains('copilot --acp')) {
+              return opening.future;
+            }
+            return Future.value(_buildExecSession());
+          });
       final session = _buildDiscoverySession(client);
       final toolName = kind == 'acp' ? 'Copilot CLI' : 'Claude Code';
       final result = AgentSessionDiscoveryService()
@@ -452,8 +450,7 @@ branch refs/heads/fix/session-resumption
     test('falls back from Copilot state paths to the terminal cwd', () {
       expect(
         resolveAgentSessionScopeWorkingDirectory(
-          activeWorkingDirectory:
-              '/Users/depoll/.copilot/session-state/970e4099-a97c-456a-a6c2-408095060f72',
+          activeWorkingDirectory: '/Users/depoll/.copilot/session-state/970e4099-a97c-456a-a6c2-408095060f72',
           sessionWorkingDirectory: Uri.parse(
             'file:///Users/depoll/Code/flutty',
           ),
@@ -834,24 +831,21 @@ branch refs/heads/fix/session-resumption
       },
     );
 
-    test(
-      'drops directory fallback when the active working directory already matches',
-      () {
-        const info = ToolSessionInfo(
-          toolName: 'Claude Code',
-          sessionId: 'abcdef',
-          workingDirectory: '/Users/depoll/Code/flutty',
-        );
+    test('drops directory fallback when the active working directory already matches', () {
+      const info = ToolSessionInfo(
+        toolName: 'Claude Code',
+        sessionId: 'abcdef',
+        workingDirectory: '/Users/depoll/Code/flutty',
+      );
 
-        expect(
-          normalizeDiscoveredSessionInfo(
-            info,
-            activeWorkingDirectory: '/Users/depoll/Code/flutty',
-          ),
-          isNull,
-        );
-      },
-    );
+      expect(
+        normalizeDiscoveredSessionInfo(
+          info,
+          activeWorkingDirectory: '/Users/depoll/Code/flutty',
+        ),
+        isNull,
+      );
+    });
   });
 
   group('buildResumeCommand', () {
@@ -1525,9 +1519,8 @@ cwd: /tmp/demo
   group('discoverSessionsStream caching', () {
     test('discovers sessions via PowerShell on Windows remotes', () async {
       final client = _MockSshClient();
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
       final issuedScripts = <String>[];
       _stubDiscoveryExec(client, (command) async {
@@ -1591,9 +1584,8 @@ cwd: /tmp/demo
       expect(finalOnly.sessions.single.sessionId, 'abc');
 
       // Every issued command is a PowerShell EncodedCommand, never POSIX.
-      final commands = verify(
-        () => client.execute(captureAny()),
-      ).captured.cast<String>();
+      final commands = verify(() => client.execute(captureAny())).captured
+          .cast<String>();
       expect(commands, isNotEmpty);
       expect(
         commands.every((command) => command.contains('-EncodedCommand ')),
@@ -1614,9 +1606,8 @@ cwd: /tmp/demo
       'OpenCode discovery reads Windows JSON storage without sqlite3',
       () async {
         final client = _MockSshClient();
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
         const storagePath =
             'C:/Users/demo/.local/share/opencode/storage/session/project/'
@@ -1669,9 +1660,8 @@ cwd: /tmp/demo
 
     test('Antigravity discovery reads Windows JSON sessions', () async {
       final client = _MockSshClient();
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
       const antigravityPath = 'C:/Users/demo/.antigravity/sessions/ag-123.json';
       final sessionJson = jsonEncode({
@@ -1836,77 +1826,71 @@ branch refs/heads/main
       },
     );
 
-    test(
-      'ACP discovery preserves sessions and stops repeated cursors per directory',
-      () async {
-        final client = _MockSshClient();
-        final commands = <String>[];
-        final requestedCwds = <String?>[];
-        _stubDiscoveryExec(client, (command) async {
-          commands.add(command);
-          if (command.contains('worktree list --porcelain')) {
-            return _buildExecSession(
-              stdout: '''
+    test('ACP discovery preserves sessions and stops repeated cursors per directory', () async {
+      final client = _MockSshClient();
+      final commands = <String>[];
+      final requestedCwds = <String?>[];
+      _stubDiscoveryExec(client, (command) async {
+        commands.add(command);
+        if (command.contains('worktree list --porcelain')) {
+          return _buildExecSession(
+            stdout: '''
 root=/Users/depoll/Code/flutty
 worktree /Users/depoll/Code/flutty
 worktree /Users/depoll/Code/flutty.worktrees/feature
 HEAD afdab6c
 branch refs/heads/main
 ''',
-            );
-          }
-          if (command.contains('copilot --acp')) {
-            return _buildAcpSessionListExecSession(
-              sessions: const [
-                {
-                  'sessionId': '12345678-1234-1234-1234-1234567890ab',
-                  'cwd': '/Users/depoll/Code/flutty',
-                  'title': 'Preserve partial ACP discovery',
-                  'updatedAt': '2026-05-04T05:48:19.955Z',
-                },
-              ],
-              repeatedCursor: true,
-              requestedCwds: requestedCwds,
-            );
-          }
-          return _buildExecSession();
-        });
+          );
+        }
+        if (command.contains('copilot --acp')) {
+          return _buildAcpSessionListExecSession(
+            sessions: const [
+              {
+                'sessionId': '12345678-1234-1234-1234-1234567890ab',
+                'cwd': '/Users/depoll/Code/flutty',
+                'title': 'Preserve partial ACP discovery',
+                'updatedAt': '2026-05-04T05:48:19.955Z',
+              },
+            ],
+            repeatedCursor: true,
+            requestedCwds: requestedCwds,
+          );
+        }
+        return _buildExecSession();
+      });
 
-        final discovery = AgentSessionDiscoveryService();
-        final result = await discovery
-            .discoverSessionsStream(
-              _buildDiscoverySession(client),
-              workingDirectory: '/Users/depoll/Code/flutty',
-              toolName: 'Copilot CLI',
-            )
-            .last;
+      final discovery = AgentSessionDiscoveryService();
+      final result = await discovery
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Copilot CLI',
+          )
+          .last;
 
-        expect(result.sessions, hasLength(1));
-        expect(result.failedTools, isEmpty);
-        expect(requestedCwds, [
-          '/Users/depoll/Code/flutty',
-          '/Users/depoll/Code/flutty',
-          '/Users/depoll/Code/flutty.worktrees/feature',
-          '/Users/depoll/Code/flutty.worktrees/feature',
-        ]);
-        expect(
-          result.sessions.single.workingDirectory,
-          '/Users/depoll/Code/flutty',
-        );
-        expect(
-          result.sessions.single.lastActive,
-          DateTime.parse('2026-05-04T05:48:19.955Z'),
-        );
-        expect(
-          result.sessions.single.summary,
-          'Preserve partial ACP discovery',
-        );
-        expect(
-          commands.where((command) => command.contains('workspace.yaml')),
-          isEmpty,
-        );
-      },
-    );
+      expect(result.sessions, hasLength(1));
+      expect(result.failedTools, isEmpty);
+      expect(requestedCwds, [
+        '/Users/depoll/Code/flutty',
+        '/Users/depoll/Code/flutty',
+        '/Users/depoll/Code/flutty.worktrees/feature',
+        '/Users/depoll/Code/flutty.worktrees/feature',
+      ]);
+      expect(
+        result.sessions.single.workingDirectory,
+        '/Users/depoll/Code/flutty',
+      );
+      expect(
+        result.sessions.single.lastActive,
+        DateTime.parse('2026-05-04T05:48:19.955Z'),
+      );
+      expect(result.sessions.single.summary, 'Preserve partial ACP discovery');
+      expect(
+        commands.where((command) => command.contains('workspace.yaml')),
+        isEmpty,
+      );
+    });
 
     test('OpenCode discovery uses ACP session/list when available', () async {
       final client = _MockSshClient();
@@ -1969,9 +1953,8 @@ branch refs/heads/main
           '${windows ? 'Windows' : 'POSIX'}', () async {
         final client = _MockSshClient();
         if (windows) {
-          when(
-            () => client.remoteVersion,
-          ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+          when(() => client.remoteVersion)
+              .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         }
         final home = windows ? 'C:/Users/demo' : '/Users/demo';
         final cwd = windows ? r'C:\audit\My Project' : '/audit/My Project';
@@ -2130,9 +2113,8 @@ branch refs/heads/main
             final scanLimit = previewOnly ? 24 : 60;
             final client = _MockSshClient();
             if (windows) {
-              when(
-                () => client.remoteVersion,
-              ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+              when(() => client.remoteVersion)
+                  .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
             }
             final home = windows ? 'C:/Users/demo' : '/Users/demo';
             final jsonPaths = List.generate(
@@ -2246,8 +2228,7 @@ branch refs/heads/main
           }
           if (command.contains('~/.local/share/opencode/opencode.db')) {
             return _buildExecSession(
-              stdout:
-                  'session-1\x1fOpenCode fast path\x1f/Users/depoll/Code/flutty\x1f1770000000\n',
+              stdout: 'session-1\x1fOpenCode fast path\x1f/Users/depoll/Code/flutty\x1f1770000000\n',
             );
           }
           return _buildExecSession();
@@ -2416,59 +2397,56 @@ branch refs/heads/main
       verifyNever(() => client.execute(any()));
     });
 
-    test(
-      'all-provider stream emits lightweight previews before final aggregate',
-      () async {
-        final client = _MockSshClient();
-        final commands = <String>[];
-        _stubDiscoveryExec(client, (command) async {
-          commands.add(command);
-          if (command.contains('~/.local/share/opencode/opencode.db')) {
-            return _buildExecSession(
-              stdout: List<String>.generate(
-                4,
-                (index) =>
-                    'session-$index\x1fOpenCode $index\x1f/Users/demo/project\x1f${1770000000 - index}',
-              ).join('\n'),
-            );
-          }
-          return _buildExecSession();
-        });
+    test('all-provider stream emits lightweight previews before final aggregate', () async {
+      final client = _MockSshClient();
+      final commands = <String>[];
+      _stubDiscoveryExec(client, (command) async {
+        commands.add(command);
+        if (command.contains('~/.local/share/opencode/opencode.db')) {
+          return _buildExecSession(
+            stdout: List<String>.generate(
+              4,
+              (index) =>
+                  'session-$index\x1fOpenCode $index\x1f/Users/demo/project\x1f${1770000000 - index}',
+            ).join('\n'),
+          );
+        }
+        return _buildExecSession();
+      });
 
-        final discovery = AgentSessionDiscoveryService();
-        final session = _buildDiscoverySession(client);
+      final discovery = AgentSessionDiscoveryService();
+      final session = _buildDiscoverySession(client);
 
-        final results = await discovery
-            .discoverSessionsStream(session, maxPerTool: 2)
-            .toList();
+      final results = await discovery
+          .discoverSessionsStream(session, maxPerTool: 2)
+          .toList();
 
-        expect(results, hasLength(greaterThan(1)));
-        expect(
-          results.take(results.length - 1),
-          everyElement(
-            isA<DiscoveredSessionsResult>()
-                .having(
-                  (result) => result.attemptedTools,
-                  'attemptedTools',
-                  hasLength(1),
-                )
-                .having(
-                  (result) => result.sessions,
-                  'sessions',
-                  hasLength(lessThanOrEqualTo(1)),
-                ),
-          ),
-        );
-        expect(results.last.attemptedTools, contains('OpenCode'));
-        expect(results.last.sessions.map((session) => session.sessionId), [
-          'session-0',
-        ]);
-        expect(
-          commands.where((command) => command.contains('LIMIT 12;')),
-          isNotEmpty,
-        );
-      },
-    );
+      expect(results, hasLength(greaterThan(1)));
+      expect(
+        results.take(results.length - 1),
+        everyElement(
+          isA<DiscoveredSessionsResult>()
+              .having(
+                (result) => result.attemptedTools,
+                'attemptedTools',
+                hasLength(1),
+              )
+              .having(
+                (result) => result.sessions,
+                'sessions',
+                hasLength(lessThanOrEqualTo(1)),
+              ),
+        ),
+      );
+      expect(results.last.attemptedTools, contains('OpenCode'));
+      expect(results.last.sessions.map((session) => session.sessionId), [
+        'session-0',
+      ]);
+      expect(
+        commands.where((command) => command.contains('LIMIT 12;')),
+        isNotEmpty,
+      );
+    });
 
     test('parses large remote snapshots off the UI isolate', () async {
       final client = _MockSshClient();
@@ -2905,9 +2883,8 @@ branch refs/heads/main
           () async {
             final client = _MockSshClient();
             if (windows) {
-              when(
-                () => client.remoteVersion,
-              ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+              when(() => client.remoteVersion)
+                  .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
             }
             const originalId = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
             const copiedId = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c0';
@@ -2991,9 +2968,8 @@ branch refs/heads/main
 
     test('Muse Windows discovery reads root logs under XDG_DATA_HOME', () async {
       final client = _MockSshClient();
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
       const path = 'C:/custom data/muse/sessions/2026/09/16/$id/session.jsonl';
       final scripts = <String>[];
@@ -3135,9 +3111,8 @@ HEAD b
       'Grok Build Windows discovery lets GROK_HOME override default',
       () async {
         final client = _MockSshClient();
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
         const summaryPath =
             'C:/grok-home/sessions/C%3A%5Cwork%5Crepo/win-session/summary.json';
@@ -3452,8 +3427,7 @@ HEAD b
         commands.add(command);
         if (command.contains('opencode session list --format json')) {
           return _buildExecSession(
-            stdout:
-                '[{"id":"session-1","title":"OpenCode only","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
+            stdout: '[{"id":"session-1","title":"OpenCode only","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
           );
         }
         if (command.contains('find ~/.codex/sessions')) {
@@ -3484,32 +3458,34 @@ HEAD b
       );
     });
 
-    test('prefetchSessions warms the cache for the next visible load', () async {
-      final client = _MockSshClient();
-      final commands = <String>[];
-      _stubDiscoveryExec(client, (command) async {
-        commands.add(command);
-        if (command.contains('opencode session list --format json')) {
-          return _buildExecSession(
-            stdout:
-                '[{"id":"session-1","title":"Prefetched result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
-          );
-        }
-        return _buildExecSession();
-      });
+    test(
+      'prefetchSessions warms the cache for the next visible load',
+      () async {
+        final client = _MockSshClient();
+        final commands = <String>[];
+        _stubDiscoveryExec(client, (command) async {
+          commands.add(command);
+          if (command.contains('opencode session list --format json')) {
+            return _buildExecSession(
+              stdout: '[{"id":"session-1","title":"Prefetched result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
+            );
+          }
+          return _buildExecSession();
+        });
 
-      final discovery = AgentSessionDiscoveryService();
-      final session = _buildDiscoverySession(client);
+        final discovery = AgentSessionDiscoveryService();
+        final session = _buildDiscoverySession(client);
 
-      await discovery.prefetchSessions(session, maxPerTool: 6);
-      final commandCountAfterPrefetch = commands.length;
-      final result = await discovery.discoverSessionsStream(session).first;
+        await discovery.prefetchSessions(session, maxPerTool: 6);
+        final commandCountAfterPrefetch = commands.length;
+        final result = await discovery.discoverSessionsStream(session).first;
 
-      expect(result.sessions.map((session) => session.sessionId), [
-        'session-1',
-      ]);
-      expect(commands.length, commandCountAfterPrefetch);
-    });
+        expect(result.sessions.map((session) => session.sessionId), [
+          'session-1',
+        ]);
+        expect(commands.length, commandCountAfterPrefetch);
+      },
+    );
 
     test('reuses fresh results for repeated loads in the same scope', () async {
       final client = _MockSshClient();
@@ -3518,8 +3494,7 @@ HEAD b
         commands.add(command);
         if (command.contains('opencode session list --format json')) {
           return _buildExecSession(
-            stdout:
-                '[{"id":"session-1","title":"Cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
+            stdout: '[{"id":"session-1","title":"Cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
           );
         }
         return _buildExecSession();
@@ -3581,23 +3556,22 @@ HEAD b
         final commandCounts = [0, 0];
         final worktreeCounts = [0, 0];
         for (var index = 0; index < clients.length; index++) {
-          when(() => clients[index].execute(any())).thenAnswer((
-            invocation,
-          ) async {
-            commandCounts[index]++;
-            final command = invocation.positionalArguments.first as String;
-            if (command.contains('worktree list --porcelain')) {
-              worktreeCounts[index]++;
-              if (!probeStarted[index].isCompleted) {
-                probeStarted[index].complete();
-                await finishProbes.future;
-              }
-              return _buildExecSession(
-                stdout: 'root=/project\nworktree /project\n',
-              );
-            }
-            return _buildExecSession();
-          });
+          when(() => clients[index].execute(any()))
+              .thenAnswer((invocation) async {
+                commandCounts[index]++;
+                final command = invocation.positionalArguments.first as String;
+                if (command.contains('worktree list --porcelain')) {
+                  worktreeCounts[index]++;
+                  if (!probeStarted[index].isCompleted) {
+                    probeStarted[index].complete();
+                    await finishProbes.future;
+                  }
+                  return _buildExecSession(
+                    stdout: 'root=/project\nworktree /project\n',
+                  );
+                }
+                return _buildExecSession();
+              });
         }
         final sessions = [
           _buildDiscoverySession(clients[0]),
@@ -3717,8 +3691,7 @@ branch refs/heads/main
           }
           if (command.contains('opencode session list --format json')) {
             return _buildExecSession(
-              stdout:
-                  '[{"id":"session-1","title":"Scoped cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
+              stdout: '[{"id":"session-1","title":"Scoped cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
             );
           }
           return _buildExecSession();

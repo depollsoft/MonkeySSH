@@ -387,9 +387,9 @@ else:
       await transport.reconnect();
       final permission = await replayedPermission;
       expect(
-        AcpPermissionRequest.fromJson(
-          AcpJson.object(permission.params)!,
-        ).options.map((option) => option.id),
+        AcpPermissionRequest.fromJson(AcpJson.object(permission.params)!)
+            .options
+            .map((option) => option.id),
         ['allow-once', 'allow-always', 'reject-once', 'reject-always'],
       );
       await permission.respond({

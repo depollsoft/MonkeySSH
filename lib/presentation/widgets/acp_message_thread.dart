@@ -163,9 +163,8 @@ List<_AcpThreadChild> _buildThreadChildren(
         )) {
       final segments = _userPromptSegments[entry] ??= <List<AcpPromptPart>>[
         for (final part in parts)
-          if (part case AcpTextPart(
-            :final text,
-          ) when text.length > kAcpTextVirtualChunkChars)
+          if (part case AcpTextPart(:final text)
+              when text.length > kAcpTextVirtualChunkChars)
             for (final chunk in splitAcpTextForVirtualization(text))
               <AcpPromptPart>[AcpTextPart(chunk)]
           else
@@ -184,9 +183,8 @@ List<_AcpThreadChild> _buildThreadChildren(
       }
       continue;
     }
-    if (entry case AcpAssistantMessageEntry(
-      :final markdown,
-    ) when markdown.length > kAcpMarkdownVirtualChunkChars) {
+    if (entry case AcpAssistantMessageEntry(:final markdown)
+        when markdown.length > kAcpMarkdownVirtualChunkChars) {
       final chunks = _assistantMarkdownChunks[entry] ??=
           splitAcpMarkdownForVirtualization(markdown);
       for (var partIndex = 0; partIndex < chunks.length; partIndex++) {

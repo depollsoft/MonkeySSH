@@ -5,9 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   group('Wi-Fi SSID platform configuration', () {
     test('android declares Wi-Fi SSID permissions', () {
-      final manifest = File(
-        'android/app/src/main/AndroidManifest.xml',
-      ).readAsStringSync();
+      final manifest = File('android/app/src/main/AndroidManifest.xml')
+          .readAsStringSync();
 
       expect(manifest, contains('android.permission.ACCESS_WIFI_STATE'));
       expect(manifest, contains('android.permission.ACCESS_COARSE_LOCATION'));
@@ -15,9 +14,8 @@ void main() {
     });
 
     test('ios enables Wi-Fi SSID entitlement and location prompt', () {
-      final entitlements = File(
-        'ios/Runner/Runner.entitlements',
-      ).readAsStringSync();
+      final entitlements = File('ios/Runner/Runner.entitlements')
+          .readAsStringSync();
       final infoPlist = File('ios/Runner/Info.plist').readAsStringSync();
 
       expect(

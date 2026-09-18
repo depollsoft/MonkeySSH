@@ -240,9 +240,8 @@ void main() {
   ) async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
-    await SettingsService(
-      db,
-    ).setBool(SettingKeys.confirmMuxWindowClose, value: false);
+    await SettingsService(db)
+        .setBool(SettingKeys.confirmMuxWindowClose, value: false);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -377,9 +376,8 @@ void main() {
               final icon = tester.widget<AgentToolIcon>(
                 find.byType(AgentToolIcon),
               );
-              final scheme = Theme.of(
-                tester.element(find.byType(MuxWindowRow)),
-              ).colorScheme;
+              final scheme = Theme.of(tester.element(find.byType(MuxWindowRow)))
+                  .colorScheme;
               expect(
                 icon.tool,
                 identity == 'terminal'
@@ -717,12 +715,10 @@ void main() {
       presetService = _MockAgentLaunchPresetService();
       discoveryService = _MockAgentSessionDiscoveryService();
       session = _navigatorSession();
-      when(
-        () => presetService.getPresetForHost(session.hostId),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.watchWindowChanges(session, any()),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => presetService.getPresetForHost(session.hostId))
+          .thenAnswer((_) async => null);
+      when(() => tmuxService.watchWindowChanges(session, any()))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
     });
 
     for (final delayedMethod in ['requestPermissions', 'show']) {
@@ -793,15 +789,12 @@ void main() {
               isActive: false,
               flags: '!',
             );
-            when(
-              () => tmuxService.listWindows(session, 'main'),
-            ).thenAnswer((_) async => [shell]);
-            when(
-              () => tmuxService.watchWindowChanges(session, 'main'),
-            ).thenAnswer((_) => events.stream);
-            when(
-              () => tmuxService.prefetchInstalledAgentTools(session),
-            ).thenAnswer((_) async {});
+            when(() => tmuxService.listWindows(session, 'main'))
+                .thenAnswer((_) async => [shell]);
+            when(() => tmuxService.watchWindowChanges(session, 'main'))
+                .thenAnswer((_) => events.stream);
+            when(() => tmuxService.prefetchInstalledAgentTools(session))
+                .thenAnswer((_) async {});
             final mux = tmuxService;
             await tester.pumpWidget(
               ProviderScope(
@@ -957,9 +950,8 @@ void main() {
     testWidgets('shows MonkeyMux terminal shortcuts', (tester) async {
       const sessionName = 'main';
 
-      when(
-        () => tmuxService.listWindows(session, sessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, sessionName))
+          .thenAnswer((_) async => windows);
 
       await pumpNavigatorHost(
         tester,
@@ -1003,13 +995,11 @@ void main() {
 
       const tmuxSessionName = 'main';
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => {AgentLaunchTool.claudeCode});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => {AgentLaunchTool.claudeCode});
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => windows);
       when(
         () => discoveryService.discoverSessionsStream(
           session,
@@ -1048,13 +1038,11 @@ void main() {
     ) async {
       const tmuxSessionName = 'main';
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => windows);
       when(
         () => discoveryService.discoverSessionsStream(
           session,
@@ -1166,9 +1154,8 @@ void main() {
           () => tmuxService.detectInstalledAgentTools(session),
         ).thenAnswer((_) async => const <AgentLaunchTool>{AgentLaunchTool.pi});
 
-        when(
-          () => tmuxService.listWindows(session, tmuxSessionName),
-        ).thenAnswer((_) async => piWindows);
+        when(() => tmuxService.listWindows(session, tmuxSessionName))
+            .thenAnswer((_) async => piWindows);
         when(
           () => discoveryService.discoverSessionsStream(
             session,
@@ -1229,13 +1216,11 @@ void main() {
       );
       TmuxNavigatorAction? selectedAction;
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => windows);
       when(
         () => discoveryService.discoverSessionsStream(
           session,
@@ -1315,15 +1300,12 @@ void main() {
           addTearDown(events.close);
           final pending = Completer<List<TmuxWindow>>();
 
-          when(
-            () => tmuxService.detectInstalledAgentTools(session),
-          ).thenAnswer((_) async => const <AgentLaunchTool>{});
-          when(
-            () => tmuxService.watchWindowChanges(session, 'main'),
-          ).thenAnswer((_) => events.stream);
-          when(
-            () => tmuxService.listWindows(session, 'main'),
-          ).thenAnswer((_) => pending.future);
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(() => tmuxService.watchWindowChanges(session, 'main'))
+              .thenAnswer((_) => events.stream);
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) => pending.future);
           when(
             () => discoveryService.discoverSessionsStream(
               session,
@@ -1374,18 +1356,16 @@ void main() {
       const tmuxSessionName = 'main';
       var listWindowsCallCount = 0;
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
-      when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer((
-        _,
-      ) {
-        if (listWindowsCallCount++ == 0) {
-          return Future<List<TmuxWindow>>.value(const <TmuxWindow>[]);
-        }
-        return Future<List<TmuxWindow>>.value(windows);
-      });
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) {
+            if (listWindowsCallCount++ == 0) {
+              return Future<List<TmuxWindow>>.value(const <TmuxWindow>[]);
+            }
+            return Future<List<TmuxWindow>>.value(windows);
+          });
       when(
         () => discoveryService.discoverSessionsStream(
           session,
@@ -1417,9 +1397,8 @@ void main() {
     ) async {
       const tmuxSessionName = 'main';
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer(
         (_) => Future<List<TmuxWindow>>.error(
@@ -1452,13 +1431,11 @@ void main() {
     ) async {
       const tmuxSessionName = 'main';
 
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => const <TmuxWindow>[]);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => const <TmuxWindow>[]);
       when(
         () => discoveryService.discoverSessionsStream(
           session,
@@ -1653,9 +1630,8 @@ void main() {
 
       expect(result, isA<TmuxNewAcpSessionAction>());
       expect(
-        await SettingsService(
-          database,
-        ).getString(SettingKeys.agentWindowModePreference),
+        await SettingsService(database)
+            .getString(SettingKeys.agentWindowModePreference),
         'native',
       );
     });
@@ -1819,9 +1795,8 @@ void main() {
       const tmuxSessionName = 'main';
       TmuxNavigatorAction? selected;
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => windows);
       when(() => tmuxService.detectInstalledAgentTools(session)).thenAnswer(
         (_) async => const <AgentLaunchTool>{AgentLaunchTool.copilotCli},
       );
@@ -1853,9 +1828,8 @@ void main() {
     ) async {
       TmuxNavigatorAction? selected;
 
-      when(
-        () => tmuxService.listWindows(session, 'main'),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, 'main'))
+          .thenAnswer((_) async => windows);
 
       await pumpNavigatorHost(
         tester,
@@ -1943,9 +1917,8 @@ void main() {
       );
       TmuxNavigatorAction? selected;
 
-      when(
-        () => tmuxService.listWindows(session, tmuxSessionName),
-      ).thenAnswer((_) async => windows);
+      when(() => tmuxService.listWindows(session, tmuxSessionName))
+          .thenAnswer((_) async => windows);
 
       await pumpNavigatorHost(
         tester,
@@ -2080,12 +2053,10 @@ void main() {
         ];
         TmuxNavigatorAction? selected;
 
-        when(
-          () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-        ).thenAnswer((_) => windowEvents.stream);
-        when(
-          () => tmuxService.listWindows(session, tmuxSessionName),
-        ).thenAnswer((_) async => windows);
+        when(() => tmuxService.watchWindowChanges(session, tmuxSessionName))
+            .thenAnswer((_) => windowEvents.stream);
+        when(() => tmuxService.listWindows(session, tmuxSessionName))
+            .thenAnswer((_) async => windows);
 
         await pumpNavigatorHost(
           tester,

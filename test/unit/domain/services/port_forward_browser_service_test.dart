@@ -445,18 +445,16 @@ void main() {
   group('normalizePortForwardBrowserUri', () {
     test('maps wildcard URL hosts to loopback', () {
       expect(
-        normalizePortForwardBrowserUri(
-          Uri.parse('http://0.0.0.0:3000/path'),
-        ).toString(),
+        normalizePortForwardBrowserUri(Uri.parse('http://0.0.0.0:3000/path'))
+            .toString(),
         'http://127.0.0.1:3000/path',
       );
     });
 
     test('preserves IPv4 loopback URL hosts', () {
       expect(
-        normalizePortForwardBrowserUri(
-          Uri.parse('http://127.0.0.5:3000/path'),
-        ).toString(),
+        normalizePortForwardBrowserUri(Uri.parse('http://127.0.0.5:3000/path'))
+            .toString(),
         'http://127.0.0.5:3000/path',
       );
     });

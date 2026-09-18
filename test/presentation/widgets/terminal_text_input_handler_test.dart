@@ -29,9 +29,9 @@ void main() {
       controller.resetImeCompletions();
       await tester.pump();
 
-      final client =
-          tester.state(find.byType(TerminalTextInputHandler))
-              as TextInputClient;
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
       expect(
         client.currentTextEditingValue,
         const TextEditingValue(
@@ -89,9 +89,9 @@ void main() {
         (text: 'hello world', cursorOffset: 'hello '.length),
       );
 
-      final client =
-          tester.state(find.byType(TerminalTextInputHandler))
-              as TextInputClient;
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
       expect(
         client.currentTextEditingValue,
         const TextEditingValue(
@@ -154,9 +154,9 @@ void main() {
           (text: 'hello worl', cursorOffset: 'hello worl'.length),
         );
 
-        final client =
-            tester.state(find.byType(TerminalTextInputHandler))
-                as TextInputClient;
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
         expect(
           client.currentTextEditingValue,
           const TextEditingValue(

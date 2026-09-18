@@ -1373,61 +1373,58 @@ void main() {
       expect(transport.responseFor('create-2')['result'], isNotNull);
     });
 
-    test(
-      'creates concurrent terminals, truncates output, waits, kills, and releases',
-      () async {
-        transport.sendRequest('create-1', 'terminal/create', {
-          'sessionId': 'session-1',
-          'command': 'echo',
-          'args': ['hello'],
-          'cwd': '/workspace',
-          'outputByteLimit': 8,
-        });
-        await _settle();
-        final terminalId =
-            (transport.responseFor('create-1')['result']! as Map)['terminalId']
-                as String;
-        final process = terminals.processes.single
-          ..addOutput(utf8.encode('1234'), utf8.encode('56789'));
-        await _settle();
+    test('creates concurrent terminals, truncates output, waits, kills, and releases', () async {
+      transport.sendRequest('create-1', 'terminal/create', {
+        'sessionId': 'session-1',
+        'command': 'echo',
+        'args': ['hello'],
+        'cwd': '/workspace',
+        'outputByteLimit': 8,
+      });
+      await _settle();
+      final terminalId =
+          (transport.responseFor('create-1')['result']! as Map)['terminalId']
+              as String;
+      final process = terminals.processes.single
+        ..addOutput(utf8.encode('1234'), utf8.encode('56789'));
+      await _settle();
 
-        transport.sendRequest('output-1', 'terminal/output', {
-          'sessionId': 'session-1',
-          'terminalId': terminalId,
-        });
-        await _settle();
-        final output = transport.responseFor('output-1')['result']! as Map;
-        expect(output['output'], '23456789');
-        expect(output['truncated'], isTrue);
+      transport.sendRequest('output-1', 'terminal/output', {
+        'sessionId': 'session-1',
+        'terminalId': terminalId,
+      });
+      await _settle();
+      final output = transport.responseFor('output-1')['result']! as Map;
+      expect(output['output'], '23456789');
+      expect(output['truncated'], isTrue);
 
-        process.exit(const AcpTerminalExitStatus(exitCode: 7));
-        transport.sendRequest('wait-1', 'terminal/wait_for_exit', {
-          'sessionId': 'session-1',
-          'terminalId': terminalId,
-        });
-        await _settle();
-        expect(transport.responseFor('wait-1')['result'], {
-          'exitCode': 7,
-          'signal': null,
-        });
+      process.exit(const AcpTerminalExitStatus(exitCode: 7));
+      transport.sendRequest('wait-1', 'terminal/wait_for_exit', {
+        'sessionId': 'session-1',
+        'terminalId': terminalId,
+      });
+      await _settle();
+      expect(transport.responseFor('wait-1')['result'], {
+        'exitCode': 7,
+        'signal': null,
+      });
 
-        transport.sendRequest('release-1', 'terminal/release', {
-          'sessionId': 'session-1',
-          'terminalId': terminalId,
-        });
-        await _settle();
-        expect(transport.responseFor('release-1')['result'], isNull);
-        transport.sendRequest('output-released', 'terminal/output', {
-          'sessionId': 'session-1',
-          'terminalId': terminalId,
-        });
-        await _settle();
-        expect(
-          (transport.responseFor('output-released')['error']! as Map)['code'],
-          -32000,
-        );
-      },
-    );
+      transport.sendRequest('release-1', 'terminal/release', {
+        'sessionId': 'session-1',
+        'terminalId': terminalId,
+      });
+      await _settle();
+      expect(transport.responseFor('release-1')['result'], isNull);
+      transport.sendRequest('output-released', 'terminal/output', {
+        'sessionId': 'session-1',
+        'terminalId': terminalId,
+      });
+      await _settle();
+      expect(
+        (transport.responseFor('output-released')['error']! as Map)['code'],
+        -32000,
+      );
+    });
 
     test(
       'retains a valid UTF-8 suffix across truncation and split chunks',
@@ -1557,20 +1554,17 @@ void main() {
     );
   });
 
-  test(
-    'quotes Windows terminal commands without leaking raw values to diagnostics',
-    () {
-      final command = buildAcpRemoteTerminalCommand(
-        command: r'C:\tool with spaces.exe',
-        arguments: const ['a b'],
-        environment: const {'TOKEN': 'secret'},
-        cwd: '/C:/workspace',
-        windows: true,
-      );
-      expect(command, startsWith('powershell -NoProfile'));
-      expect(command, isNot(contains('secret')));
-    },
-  );
+  test('quotes Windows terminal commands without leaking raw values to diagnostics', () {
+    final command = buildAcpRemoteTerminalCommand(
+      command: r'C:\tool with spaces.exe',
+      arguments: const ['a b'],
+      environment: const {'TOKEN': 'secret'},
+      cwd: '/C:/workspace',
+      windows: true,
+    );
+    expect(command, startsWith('powershell -NoProfile'));
+    expect(command, isNot(contains('secret')));
+  });
 
   test('diagnostics retain only safe ACP request metadata', () async {
     final transport = _ServerTransport();
@@ -1852,13 +1846,20 @@ final class _ModePreservingFile implements SftpFile {
   }
 
   @override
-  Future<void> writeBytes(Uint8List data, {int offset = 0}) async {}
+  Future<void> writeBytes(
+    Uint8List data, {
+    int offset = 0,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+  }) async {}
 
   @override
   SftpFileWriter write(
     Stream<Uint8List> data, {
     int offset = 0,
     void Function(int bytesWritten)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
   }) => SftpFileWriter(this, data, offset, onProgress);
 
   @override

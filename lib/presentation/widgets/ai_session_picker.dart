@@ -148,16 +148,20 @@ class AiSessionProviderTile extends StatelessWidget {
 }
 
 /// Loader callback used by [AiSessionPickerDialog].
-typedef AiSessionLoader =
-    Stream<DiscoveredSessionsResult> Function(int maxSessions);
+typedef AiSessionLoader = Stream<DiscoveredSessionsResult> Function(
+  int maxSessions,
+);
 
 /// Loader callback used by [AiSessionProviderList].
-typedef AiSessionProviderLoader =
-    Stream<DiscoveredSessionsResult> Function(int maxSessions);
+typedef AiSessionProviderLoader = Stream<DiscoveredSessionsResult> Function(
+  int maxSessions,
+);
 
 /// Builder callback used by [AiSessionProviderList].
-typedef AiSessionProviderEntryBuilder =
-    Widget Function(BuildContext context, AiSessionProviderEntry provider);
+typedef AiSessionProviderEntryBuilder = Widget Function(
+  BuildContext context,
+  AiSessionProviderEntry provider,
+);
 
 /// Stable provider rows that live-update as each provider finishes loading.
 class AiSessionProviderList extends StatefulWidget {

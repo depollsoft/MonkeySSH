@@ -222,9 +222,8 @@ class PortForwardsScreen extends ConsumerWidget {
 
   void _showPortForwardMessage(BuildContext context, String message) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _deletePortForward(

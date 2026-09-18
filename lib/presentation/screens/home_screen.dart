@@ -1649,9 +1649,8 @@ class _HostRow extends ConsumerWidget {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.message)));
     } on Exception catch (error) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -1706,9 +1705,8 @@ class _HostRow extends ConsumerWidget {
   Future<void> _duplicateHost(BuildContext context, WidgetRef ref) async {
     await ref.read(duplicateHostCommandProvider).execute(host);
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Host duplicated')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Host duplicated')));
     }
   }
 }
@@ -2132,9 +2130,8 @@ class _KeyRow extends ConsumerWidget {
 
   void _copyPublicKey(BuildContext context) {
     Clipboard.setData(ClipboardData(text: sshKey.publicKey));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Public key copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Public key copied')));
   }
 
   Future<void> _exportEncryptedFile(BuildContext context, WidgetRef ref) async {
@@ -2199,9 +2196,8 @@ class _KeyRow extends ConsumerWidget {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.message)));
     } on Exception catch (error) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -2406,9 +2402,8 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
         _selectedFolderId = folderId;
         _showsUnfiledSnippets = false;
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Created folder "$name"')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Created folder "$name"')));
     } on Exception catch (e) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -2962,9 +2957,8 @@ class _SnippetRow extends ConsumerWidget {
     if ((confirmed ?? false) && context.mounted) {
       await ref.read(snippetRepositoryProvider).delete(snippet.id);
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Deleted "${snippet.name}"')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Deleted "${snippet.name}"')));
       }
     }
   }
@@ -3079,9 +3073,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     if (_restoredUiState) return;
     _restoredUiState = true;
 
-    final storedState = PageStorage.maybeOf(
-      context,
-    )?.readState(context, identifier: _pageStorageIdentifier);
+    final storedState = PageStorage.maybeOf(context)
+        ?.readState(context, identifier: _pageStorageIdentifier);
     if (storedState is! Map<Object?, Object?>) return;
 
     _expanded = storedState['expanded'] as bool? ?? _expanded;

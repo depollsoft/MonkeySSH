@@ -5176,28 +5176,26 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   ];
 }
 
-typedef $$SshKeysTableCreateCompanionBuilder =
-    SshKeysCompanion Function({
-      Value<int> id,
-      required String name,
-      required String keyType,
-      required String publicKey,
-      required String privateKey,
-      Value<String?> passphrase,
-      Value<String?> fingerprint,
-      Value<DateTime> createdAt,
-    });
-typedef $$SshKeysTableUpdateCompanionBuilder =
-    SshKeysCompanion Function({
-      Value<int> id,
-      Value<String> name,
-      Value<String> keyType,
-      Value<String> publicKey,
-      Value<String> privateKey,
-      Value<String?> passphrase,
-      Value<String?> fingerprint,
-      Value<DateTime> createdAt,
-    });
+typedef $$SshKeysTableCreateCompanionBuilder = SshKeysCompanion Function({
+  Value<int> id,
+  required String name,
+  required String keyType,
+  required String publicKey,
+  required String privateKey,
+  Value<String?> passphrase,
+  Value<String?> fingerprint,
+  Value<DateTime> createdAt,
+});
+typedef $$SshKeysTableUpdateCompanionBuilder = SshKeysCompanion Function({
+  Value<int> id,
+  Value<String> name,
+  Value<String> keyType,
+  Value<String> publicKey,
+  Value<String> privateKey,
+  Value<String?> passphrase,
+  Value<String?> fingerprint,
+  Value<DateTime> createdAt,
+});
 
 final class $$SshKeysTableReferences
     extends BaseReferences<_$AppDatabase, $SshKeysTable, SshKey> {
@@ -5482,7 +5480,7 @@ class $$SshKeysTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SshKeysTable, SshKey>(table),
                   $$SshKeysTableReferences(db, table, e),
                 ),
               )
@@ -5528,26 +5526,24 @@ typedef $$SshKeysTableProcessedTableManager =
       SshKey,
       PrefetchHooks Function({bool hostsRefs})
     >;
-typedef $$GroupsTableCreateCompanionBuilder =
-    GroupsCompanion Function({
-      Value<int> id,
-      required String name,
-      Value<int?> parentId,
-      Value<int> sortOrder,
-      Value<String?> color,
-      Value<String?> icon,
-      Value<DateTime> createdAt,
-    });
-typedef $$GroupsTableUpdateCompanionBuilder =
-    GroupsCompanion Function({
-      Value<int> id,
-      Value<String> name,
-      Value<int?> parentId,
-      Value<int> sortOrder,
-      Value<String?> color,
-      Value<String?> icon,
-      Value<DateTime> createdAt,
-    });
+typedef $$GroupsTableCreateCompanionBuilder = GroupsCompanion Function({
+  Value<int> id,
+  required String name,
+  Value<int?> parentId,
+  Value<int> sortOrder,
+  Value<String?> color,
+  Value<String?> icon,
+  Value<DateTime> createdAt,
+});
+typedef $$GroupsTableUpdateCompanionBuilder = GroupsCompanion Function({
+  Value<int> id,
+  Value<String> name,
+  Value<int?> parentId,
+  Value<int> sortOrder,
+  Value<String?> color,
+  Value<String?> icon,
+  Value<DateTime> createdAt,
+});
 
 final class $$GroupsTableReferences
     extends BaseReferences<_$AppDatabase, $GroupsTable, Group> {
@@ -5881,8 +5877,10 @@ class $$GroupsTableTableManager
               ),
           withReferenceMapper: (p0) => p0
               .map(
-                (e) =>
-                    (e.readTable(table), $$GroupsTableReferences(db, table, e)),
+                (e) => (
+                  e.readTable<$GroupsTable, Group>(table),
+                  $$GroupsTableReferences(db, table, e),
+                ),
               )
               .toList(),
           prefetchHooksCallback: ({parentId = false, hostsRefs = false}) {
@@ -5906,17 +5904,16 @@ class $$GroupsTableTableManager
                     >
                   >(state) {
                     if (parentId) {
-                      state =
-                          state.withJoin(
-                                currentTable: table,
-                                currentColumn: table.parentId,
-                                referencedTable: $$GroupsTableReferences
-                                    ._parentIdTable(db),
-                                referencedColumn: $$GroupsTableReferences
-                                    ._parentIdTable(db)
-                                    .id,
-                              )
-                              as T;
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.parentId,
+                        referencedTable: $$GroupsTableReferences._parentIdTable(
+                          db,
+                        ),
+                        referencedColumn: $$GroupsTableReferences
+                            ._parentIdTable(db)
+                            .id,
+                      ) as T;
                     }
 
                     return state;
@@ -6280,7 +6277,7 @@ class $$SnippetFoldersTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SnippetFoldersTable, SnippetFolder>(table),
                   $$SnippetFoldersTableReferences(db, table, e),
                 ),
               )
@@ -6306,18 +6303,15 @@ class $$SnippetFoldersTableTableManager
                     >
                   >(state) {
                     if (parentId) {
-                      state =
-                          state.withJoin(
-                                currentTable: table,
-                                currentColumn: table.parentId,
-                                referencedTable: $$SnippetFoldersTableReferences
-                                    ._parentIdTable(db),
-                                referencedColumn:
-                                    $$SnippetFoldersTableReferences
-                                        ._parentIdTable(db)
-                                        .id,
-                              )
-                              as T;
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.parentId,
+                        referencedTable: $$SnippetFoldersTableReferences
+                            ._parentIdTable(db),
+                        referencedColumn: $$SnippetFoldersTableReferences
+                            ._parentIdTable(db)
+                            .id,
+                      ) as T;
                     }
 
                     return state;
@@ -6365,32 +6359,30 @@ typedef $$SnippetFoldersTableProcessedTableManager =
       SnippetFolder,
       PrefetchHooks Function({bool parentId, bool snippetsRefs})
     >;
-typedef $$SnippetsTableCreateCompanionBuilder =
-    SnippetsCompanion Function({
-      Value<int> id,
-      required String name,
-      required String command,
-      Value<String?> description,
-      Value<int?> folderId,
-      Value<bool> autoExecute,
-      Value<DateTime> createdAt,
-      Value<DateTime?> lastUsedAt,
-      Value<int> usageCount,
-      Value<int> sortOrder,
-    });
-typedef $$SnippetsTableUpdateCompanionBuilder =
-    SnippetsCompanion Function({
-      Value<int> id,
-      Value<String> name,
-      Value<String> command,
-      Value<String?> description,
-      Value<int?> folderId,
-      Value<bool> autoExecute,
-      Value<DateTime> createdAt,
-      Value<DateTime?> lastUsedAt,
-      Value<int> usageCount,
-      Value<int> sortOrder,
-    });
+typedef $$SnippetsTableCreateCompanionBuilder = SnippetsCompanion Function({
+  Value<int> id,
+  required String name,
+  required String command,
+  Value<String?> description,
+  Value<int?> folderId,
+  Value<bool> autoExecute,
+  Value<DateTime> createdAt,
+  Value<DateTime?> lastUsedAt,
+  Value<int> usageCount,
+  Value<int> sortOrder,
+});
+typedef $$SnippetsTableUpdateCompanionBuilder = SnippetsCompanion Function({
+  Value<int> id,
+  Value<String> name,
+  Value<String> command,
+  Value<String?> description,
+  Value<int?> folderId,
+  Value<bool> autoExecute,
+  Value<DateTime> createdAt,
+  Value<DateTime?> lastUsedAt,
+  Value<int> usageCount,
+  Value<int> sortOrder,
+});
 
 final class $$SnippetsTableReferences
     extends BaseReferences<_$AppDatabase, $SnippetsTable, Snippet> {
@@ -6783,7 +6775,7 @@ class $$SnippetsTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$SnippetsTable, Snippet>(table),
                   $$SnippetsTableReferences(db, table, e),
                 ),
               )
@@ -6809,17 +6801,15 @@ class $$SnippetsTableTableManager
                     >
                   >(state) {
                     if (folderId) {
-                      state =
-                          state.withJoin(
-                                currentTable: table,
-                                currentColumn: table.folderId,
-                                referencedTable: $$SnippetsTableReferences
-                                    ._folderIdTable(db),
-                                referencedColumn: $$SnippetsTableReferences
-                                    ._folderIdTable(db)
-                                    .id,
-                              )
-                              as T;
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.folderId,
+                        referencedTable: $$SnippetsTableReferences
+                            ._folderIdTable(db),
+                        referencedColumn: $$SnippetsTableReferences
+                            ._folderIdTable(db)
+                            .id,
+                      ) as T;
                     }
 
                     return state;
@@ -6861,72 +6851,70 @@ typedef $$SnippetsTableProcessedTableManager =
       Snippet,
       PrefetchHooks Function({bool folderId, bool hostsRefs})
     >;
-typedef $$HostsTableCreateCompanionBuilder =
-    HostsCompanion Function({
-      Value<int> id,
-      required String label,
-      required String hostname,
-      Value<int> port,
-      required String username,
-      Value<String?> password,
-      Value<int?> keyId,
-      Value<int?> groupId,
-      Value<int?> jumpHostId,
-      Value<String?> skipJumpHostOnSsids,
-      Value<bool> isFavorite,
-      Value<String?> color,
-      Value<String?> notes,
-      Value<String?> tags,
-      Value<DateTime> createdAt,
-      Value<DateTime> updatedAt,
-      Value<DateTime?> lastConnectedAt,
-      Value<String?> terminalThemeLightId,
-      Value<String?> terminalThemeDarkId,
-      Value<String?> terminalFontFamily,
-      Value<String?> autoConnectCommand,
-      Value<int?> autoConnectSnippetId,
-      Value<bool> autoConnectRequiresConfirmation,
-      Value<String?> tmuxSessionName,
-      Value<String?> tmuxWorkingDirectory,
-      Value<String?> tmuxExtraFlags,
-      Value<String?> remoteMuxBackend,
-      Value<bool> autoForwardPorts,
-      Value<String?> portProxyName,
-      Value<int> sortOrder,
-    });
-typedef $$HostsTableUpdateCompanionBuilder =
-    HostsCompanion Function({
-      Value<int> id,
-      Value<String> label,
-      Value<String> hostname,
-      Value<int> port,
-      Value<String> username,
-      Value<String?> password,
-      Value<int?> keyId,
-      Value<int?> groupId,
-      Value<int?> jumpHostId,
-      Value<String?> skipJumpHostOnSsids,
-      Value<bool> isFavorite,
-      Value<String?> color,
-      Value<String?> notes,
-      Value<String?> tags,
-      Value<DateTime> createdAt,
-      Value<DateTime> updatedAt,
-      Value<DateTime?> lastConnectedAt,
-      Value<String?> terminalThemeLightId,
-      Value<String?> terminalThemeDarkId,
-      Value<String?> terminalFontFamily,
-      Value<String?> autoConnectCommand,
-      Value<int?> autoConnectSnippetId,
-      Value<bool> autoConnectRequiresConfirmation,
-      Value<String?> tmuxSessionName,
-      Value<String?> tmuxWorkingDirectory,
-      Value<String?> tmuxExtraFlags,
-      Value<String?> remoteMuxBackend,
-      Value<bool> autoForwardPorts,
-      Value<String?> portProxyName,
-      Value<int> sortOrder,
-    });
+typedef $$HostsTableCreateCompanionBuilder = HostsCompanion Function({
+  Value<int> id,
+  required String label,
+  required String hostname,
+  Value<int> port,
+  required String username,
+  Value<String?> password,
+  Value<int?> keyId,
+  Value<int?> groupId,
+  Value<int?> jumpHostId,
+  Value<String?> skipJumpHostOnSsids,
+  Value<bool> isFavorite,
+  Value<String?> color,
+  Value<String?> notes,
+  Value<String?> tags,
+  Value<DateTime> createdAt,
+  Value<DateTime> updatedAt,
+  Value<DateTime?> lastConnectedAt,
+  Value<String?> terminalThemeLightId,
+  Value<String?> terminalThemeDarkId,
+  Value<String?> terminalFontFamily,
+  Value<String?> autoConnectCommand,
+  Value<int?> autoConnectSnippetId,
+  Value<bool> autoConnectRequiresConfirmation,
+  Value<String?> tmuxSessionName,
+  Value<String?> tmuxWorkingDirectory,
+  Value<String?> tmuxExtraFlags,
+  Value<String?> remoteMuxBackend,
+  Value<bool> autoForwardPorts,
+  Value<String?> portProxyName,
+  Value<int> sortOrder,
+});
+typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
+  Value<int> id,
+  Value<String> label,
+  Value<String> hostname,
+  Value<int> port,
+  Value<String> username,
+  Value<String?> password,
+  Value<int?> keyId,
+  Value<int?> groupId,
+  Value<int?> jumpHostId,
+  Value<String?> skipJumpHostOnSsids,
+  Value<bool> isFavorite,
+  Value<String?> color,
+  Value<String?> notes,
+  Value<String?> tags,
+  Value<DateTime> createdAt,
+  Value<DateTime> updatedAt,
+  Value<DateTime?> lastConnectedAt,
+  Value<String?> terminalThemeLightId,
+  Value<String?> terminalThemeDarkId,
+  Value<String?> terminalFontFamily,
+  Value<String?> autoConnectCommand,
+  Value<int?> autoConnectSnippetId,
+  Value<bool> autoConnectRequiresConfirmation,
+  Value<String?> tmuxSessionName,
+  Value<String?> tmuxWorkingDirectory,
+  Value<String?> tmuxExtraFlags,
+  Value<String?> remoteMuxBackend,
+  Value<bool> autoForwardPorts,
+  Value<String?> portProxyName,
+  Value<int> sortOrder,
+});
 
 final class $$HostsTableReferences
     extends BaseReferences<_$AppDatabase, $HostsTable, Host> {
@@ -7910,8 +7898,10 @@ class $$HostsTableTableManager
               ),
           withReferenceMapper: (p0) => p0
               .map(
-                (e) =>
-                    (e.readTable(table), $$HostsTableReferences(db, table, e)),
+                (e) => (
+                  e.readTable<$HostsTable, Host>(table),
+                  $$HostsTableReferences(db, table, e),
+                ),
               )
               .toList(),
           prefetchHooksCallback:
@@ -7944,56 +7934,49 @@ class $$HostsTableTableManager
                         >
                       >(state) {
                         if (keyId) {
-                          state =
-                              state.withJoin(
-                                    currentTable: table,
-                                    currentColumn: table.keyId,
-                                    referencedTable: $$HostsTableReferences
-                                        ._keyIdTable(db),
-                                    referencedColumn: $$HostsTableReferences
-                                        ._keyIdTable(db)
-                                        .id,
-                                  )
-                                  as T;
+                          state = state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.keyId,
+                            referencedTable: $$HostsTableReferences._keyIdTable(
+                              db,
+                            ),
+                            referencedColumn: $$HostsTableReferences
+                                ._keyIdTable(db)
+                                .id,
+                          ) as T;
                         }
                         if (groupId) {
-                          state =
-                              state.withJoin(
-                                    currentTable: table,
-                                    currentColumn: table.groupId,
-                                    referencedTable: $$HostsTableReferences
-                                        ._groupIdTable(db),
-                                    referencedColumn: $$HostsTableReferences
-                                        ._groupIdTable(db)
-                                        .id,
-                                  )
-                                  as T;
+                          state = state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.groupId,
+                            referencedTable: $$HostsTableReferences
+                                ._groupIdTable(db),
+                            referencedColumn: $$HostsTableReferences
+                                ._groupIdTable(db)
+                                .id,
+                          ) as T;
                         }
                         if (jumpHostId) {
-                          state =
-                              state.withJoin(
-                                    currentTable: table,
-                                    currentColumn: table.jumpHostId,
-                                    referencedTable: $$HostsTableReferences
-                                        ._jumpHostIdTable(db),
-                                    referencedColumn: $$HostsTableReferences
-                                        ._jumpHostIdTable(db)
-                                        .id,
-                                  )
-                                  as T;
+                          state = state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.jumpHostId,
+                            referencedTable: $$HostsTableReferences
+                                ._jumpHostIdTable(db),
+                            referencedColumn: $$HostsTableReferences
+                                ._jumpHostIdTable(db)
+                                .id,
+                          ) as T;
                         }
                         if (autoConnectSnippetId) {
-                          state =
-                              state.withJoin(
-                                    currentTable: table,
-                                    currentColumn: table.autoConnectSnippetId,
-                                    referencedTable: $$HostsTableReferences
-                                        ._autoConnectSnippetIdTable(db),
-                                    referencedColumn: $$HostsTableReferences
-                                        ._autoConnectSnippetIdTable(db)
-                                        .id,
-                                  )
-                                  as T;
+                          state = state.withJoin(
+                            currentTable: table,
+                            currentColumn: table.autoConnectSnippetId,
+                            referencedTable: $$HostsTableReferences
+                                ._autoConnectSnippetIdTable(db),
+                            referencedColumn: $$HostsTableReferences
+                                ._autoConnectSnippetIdTable(db)
+                                .id,
+                          ) as T;
                         }
 
                         return state;
@@ -8397,7 +8380,7 @@ class $$PortForwardsTableTableManager
           withReferenceMapper: (p0) => p0
               .map(
                 (e) => (
-                  e.readTable(table),
+                  e.readTable<$PortForwardsTable, PortForward>(table),
                   $$PortForwardsTableReferences(db, table, e),
                 ),
               )
@@ -8423,17 +8406,15 @@ class $$PortForwardsTableTableManager
                     >
                   >(state) {
                     if (hostId) {
-                      state =
-                          state.withJoin(
-                                currentTable: table,
-                                currentColumn: table.hostId,
-                                referencedTable: $$PortForwardsTableReferences
-                                    ._hostIdTable(db),
-                                referencedColumn: $$PortForwardsTableReferences
-                                    ._hostIdTable(db)
-                                    .id,
-                              )
-                              as T;
+                      state = state.withJoin(
+                        currentTable: table,
+                        currentColumn: table.hostId,
+                        referencedTable: $$PortForwardsTableReferences
+                            ._hostIdTable(db),
+                        referencedColumn: $$PortForwardsTableReferences
+                            ._hostIdTable(db)
+                            .id,
+                      ) as T;
                     }
 
                     return state;
@@ -8461,28 +8442,26 @@ typedef $$PortForwardsTableProcessedTableManager =
       PortForward,
       PrefetchHooks Function({bool hostId})
     >;
-typedef $$KnownHostsTableCreateCompanionBuilder =
-    KnownHostsCompanion Function({
-      Value<int> id,
-      required String hostname,
-      required int port,
-      required String keyType,
-      required String fingerprint,
-      required String hostKey,
-      Value<DateTime> firstSeen,
-      Value<DateTime> lastSeen,
-    });
-typedef $$KnownHostsTableUpdateCompanionBuilder =
-    KnownHostsCompanion Function({
-      Value<int> id,
-      Value<String> hostname,
-      Value<int> port,
-      Value<String> keyType,
-      Value<String> fingerprint,
-      Value<String> hostKey,
-      Value<DateTime> firstSeen,
-      Value<DateTime> lastSeen,
-    });
+typedef $$KnownHostsTableCreateCompanionBuilder = KnownHostsCompanion Function({
+  Value<int> id,
+  required String hostname,
+  required int port,
+  required String keyType,
+  required String fingerprint,
+  required String hostKey,
+  Value<DateTime> firstSeen,
+  Value<DateTime> lastSeen,
+});
+typedef $$KnownHostsTableUpdateCompanionBuilder = KnownHostsCompanion Function({
+  Value<int> id,
+  Value<String> hostname,
+  Value<int> port,
+  Value<String> keyType,
+  Value<String> fingerprint,
+  Value<String> hostKey,
+  Value<DateTime> firstSeen,
+  Value<DateTime> lastSeen,
+});
 
 class $$KnownHostsTableFilterComposer
     extends Composer<_$AppDatabase, $KnownHostsTable> {
@@ -8690,7 +8669,16 @@ class $$KnownHostsTableTableManager
                 lastSeen: lastSeen,
               ),
           withReferenceMapper: (p0) => p0
-              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .map(
+                (e) => (
+                  e.readTable<$KnownHostsTable, KnownHost>(table),
+                  BaseReferences<_$AppDatabase, $KnownHostsTable, KnownHost>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
               .toList(),
           prefetchHooksCallback: null,
         ),
@@ -8711,18 +8699,16 @@ typedef $$KnownHostsTableProcessedTableManager =
       KnownHost,
       PrefetchHooks Function()
     >;
-typedef $$SettingsTableCreateCompanionBuilder =
-    SettingsCompanion Function({
-      required String key,
-      required String value,
-      Value<int> rowid,
-    });
-typedef $$SettingsTableUpdateCompanionBuilder =
-    SettingsCompanion Function({
-      Value<String> key,
-      Value<String> value,
-      Value<int> rowid,
-    });
+typedef $$SettingsTableCreateCompanionBuilder = SettingsCompanion Function({
+  required String key,
+  required String value,
+  Value<int> rowid,
+});
+typedef $$SettingsTableUpdateCompanionBuilder = SettingsCompanion Function({
+  Value<String> key,
+  Value<String> value,
+  Value<int> rowid,
+});
 
 class $$SettingsTableFilterComposer
     extends Composer<_$AppDatabase, $SettingsTable> {
@@ -8806,24 +8792,27 @@ class $$SettingsTableTableManager
               $$SettingsTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$SettingsTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback:
-              ({
-                Value<String> key = const Value.absent(),
-                Value<String> value = const Value.absent(),
-                Value<int> rowid = const Value.absent(),
-              }) => SettingsCompanion(key: key, value: value, rowid: rowid),
-          createCompanionCallback:
-              ({
-                required String key,
-                required String value,
-                Value<int> rowid = const Value.absent(),
-              }) => SettingsCompanion.insert(
-                key: key,
-                value: value,
-                rowid: rowid,
-              ),
+          updateCompanionCallback: ({
+            Value<String> key = const Value.absent(),
+            Value<String> value = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) => SettingsCompanion(key: key, value: value, rowid: rowid),
+          createCompanionCallback: ({
+            required String key,
+            required String value,
+            Value<int> rowid = const Value.absent(),
+          }) => SettingsCompanion.insert(key: key, value: value, rowid: rowid),
           withReferenceMapper: (p0) => p0
-              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .map(
+                (e) => (
+                  e.readTable<$SettingsTable, Setting>(table),
+                  BaseReferences<_$AppDatabase, $SettingsTable, Setting>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
               .toList(),
           prefetchHooksCallback: null,
         ),

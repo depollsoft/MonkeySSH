@@ -1452,24 +1452,27 @@ class SshConnectionCancellationToken {
 }
 
 /// Progress callback for long-running SSH connection attempts.
-typedef ConnectionProgressCallback =
-    void Function(ConnectionProgressUpdate update);
+typedef ConnectionProgressCallback = void Function(
+  ConnectionProgressUpdate update,
+);
 
 /// Connects a raw SSH socket for the requested host.
-typedef SshSocketConnector =
-    Future<SSHSocket> Function(String host, int port, {Duration? timeout});
+typedef SshSocketConnector = Future<SSHSocket> Function(
+  String host,
+  int port, {
+  Duration? timeout,
+});
 
 /// Creates an [SSHClient] for a prepared socket.
-typedef SshClientFactory =
-    SSHClient Function(
-      SSHSocket socket, {
-      required String username,
-      SSHHostkeyVerifyHandler? onVerifyHostKey,
-      SSHPasswordRequestHandler? onPasswordRequest,
-      SSHUserInfoRequestHandler? onUserInfoRequest,
-      List<SSHKeyPair>? identities,
-      Duration? keepAliveInterval,
-    });
+typedef SshClientFactory = SSHClient Function(
+  SSHSocket socket, {
+  required String username,
+  SSHHostkeyVerifyHandler? onVerifyHostKey,
+  SSHPasswordRequestHandler? onPasswordRequest,
+  SSHUserInfoRequestHandler? onUserInfoRequest,
+  List<SSHKeyPair>? identities,
+  Duration? keepAliveInterval,
+});
 
 /// Exposes the raw SSH host key bytes observed during the handshake.
 abstract interface class HostKeySource {
@@ -1683,7 +1686,7 @@ class SshService {
       );
 
       if (isAppReviewDemoHost(host)) {
-        return _connectToAppReviewDemoHost(
+        return await _connectToAppReviewDemoHost(
           host,
           useHostThemeOverrides: useHostThemeOverrides,
           onProgress: onProgress,
@@ -2254,8 +2257,7 @@ class SshService {
         SSHHostkeyError(:final message) =>
           'Host key verification failed: $message',
         SSHAuthFailError(:final message) => 'Authentication failed: $message',
-        SSHChannelOpenError() =>
-          'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
+        SSHChannelOpenError() => 'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
         SSHError() => 'The SSH connection failed. Reconnect to try again.',
         SocketException(:final message) => 'Connection failed: $message',
         TimeoutException(:final message) => message ?? 'Connection timed out',
@@ -2909,28 +2911,27 @@ Future<void> _relayForward(
     }, onError: failed),
   );
   try {
-    final opening = Future<SSHForwardChannel?>.sync(openChannel).then((
-      channel,
-    ) {
-      if (channel == null) return null;
-      if (finished) {
-        destroy(channel);
-        return null;
-      }
-      unawaited(
-        channel.sink.done.then<void>(
-          (_) {
-            forwardSinkClosed = true;
-            if (!closingForwardSink) closed();
-          },
-          onError: (Object error, StackTrace stackTrace) {
-            forwardSinkClosed = true;
-            failed(error, stackTrace);
-          },
-        ),
-      );
-      return forward = channel;
-    });
+    final opening = Future<SSHForwardChannel?>.sync(openChannel)
+        .then((channel) {
+          if (channel == null) return null;
+          if (finished) {
+            destroy(channel);
+            return null;
+          }
+          unawaited(
+            channel.sink.done.then<void>(
+              (_) {
+                forwardSinkClosed = true;
+                if (!closingForwardSink) closed();
+              },
+              onError: (Object error, StackTrace stackTrace) {
+                forwardSinkClosed = true;
+                failed(error, stackTrace);
+              },
+            ),
+          );
+          return forward = channel;
+        });
     outgoing = StreamIterator(socket);
     final source = outgoing;
     final socketToForward = () async {
@@ -7253,21 +7254,36 @@ class _AppReviewDemoSftpFile implements SftpFile {
     Stream<Uint8List> stream, {
     int offset = 0,
     void Function(int total)? onProgress,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
   }) {
     _ensureOpen();
     if (offset < 0) {
       // ignore: only_throw_errors
       throw SftpError('Write offset must not be negative');
     }
+    if (chunkSize <= 0 || maxPendingRequests <= 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write chunk size and request count must be positive');
+    }
     return _AppReviewDemoSftpFileWriter(this, stream, offset, onProgress);
   }
 
   @override
-  Future<void> writeBytes(Uint8List data, {int offset = 0}) async {
+  Future<void> writeBytes(
+    Uint8List data, {
+    int offset = 0,
+    int chunkSize = 16 * 1024,
+    int maxPendingRequests = 64,
+  }) async {
     _ensureOpen();
     if (offset < 0) {
       // ignore: only_throw_errors
       throw SftpError('Write offset must not be negative');
+    }
+    if (chunkSize <= 0 || maxPendingRequests <= 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Write chunk size and request count must be positive');
     }
     final previousBytes = _readContent();
     final requiredLength = offset + data.length;
@@ -7314,27 +7330,18 @@ class _AppReviewDemoSftpFile implements SftpFile {
   }
 
   @override
-  Future<int> downloadToRandomAccess(
-    RandomAccessFile destination, {
-    int? length,
-    int offset = 0,
-    void Function(int bytesRead)? onProgress,
-    int chunkSize = 16 * 1024,
-    int maxPendingRequests = 64,
-  }) async {
-    var total = 0;
-    await for (final chunk in read(
-      length: length,
-      offset: offset,
-      chunkSize: chunkSize,
-      maxPendingRequests: maxPendingRequests,
-    )) {
-      await destination.setPosition(offset + total);
-      await destination.writeFrom(chunk);
-      total += chunk.length;
-      onProgress?.call(total);
+  Future<Uint8List?> readChunk(int length, [int offset = 0]) async {
+    _ensureOpen();
+    if (offset < 0 || length < 0) {
+      // ignore: only_throw_errors
+      throw SftpError('Read offset and length must not be negative');
     }
-    return total;
+    final bytes = _readContent();
+    if (offset >= bytes.length) {
+      return null;
+    }
+    final end = math.min(offset + length, bytes.length);
+    return Uint8List.sublistView(bytes, offset, end);
   }
 }
 
@@ -8962,9 +8969,10 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       return;
     }
     state = {...state};
-    final hostSessions = getConnectionsForHost(
-      hostId,
-    ).map(getSession).whereType<SshSession>().toList(growable: false);
+    final hostSessions = getConnectionsForHost(hostId)
+        .map(getSession)
+        .whereType<SshSession>()
+        .toList(growable: false);
     final manualRemoteListeners = _manualListenerExclusions(
       hostSessions.expand((session) => session.activeTunnels),
     );

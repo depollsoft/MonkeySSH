@@ -1490,12 +1490,12 @@ String _sanitizeErrorSummary(Object error) {
     final firstLine = error.toString().split(RegExp(r'[\r\n]')).first;
     // These bounded protocol status codes are useful even when the server's
     // entire description is private. Do not retain arbitrary numeric values.
-    final channelCode = RegExp(
-      r'^SSHChannelOpenError\(([1-4]):',
-    ).firstMatch(firstLine)?.group(1);
-    final sftpCode = RegExp(
-      r'^SftpStatusError: .*\(code ([0-8])\)$',
-    ).firstMatch(firstLine)?.group(1);
+    final channelCode = RegExp(r'^SSHChannelOpenError\(([1-4]):')
+        .firstMatch(firstLine)
+        ?.group(1);
+    final sftpCode = RegExp(r'^SftpStatusError: .*\(code ([0-8])\)$')
+        .firstMatch(firstLine)
+        ?.group(1);
     final code = channelCode ?? sftpCode;
     final codePrefix = code == null ? '' : 'code $code: ';
     var message = firstLine;

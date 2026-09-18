@@ -1190,8 +1190,7 @@ class AcpSessionManager {
         },
         message: switch (error.kind) {
           MonkeyMuxAcpBridgeErrorKind.invalidMetadata ||
-          MonkeyMuxAcpBridgeErrorKind.unsupportedVersion =>
-            'MonkeyMux needs to be updated on this host. Reconnect and try again.',
+          MonkeyMuxAcpBridgeErrorKind.unsupportedVersion => 'MonkeyMux needs to be updated on this host. Reconnect and try again.',
           MonkeyMuxAcpBridgeErrorKind.invalidLaunch =>
             'The agent launch configuration was rejected.',
           MonkeyMuxAcpBridgeErrorKind.invalidBridgeId =>
@@ -1202,8 +1201,7 @@ class AcpSessionManager {
           MonkeyMuxAcpBridgeErrorKind.providerUnavailable =>
             'The native agent process exited.',
           MonkeyMuxAcpBridgeErrorKind.helperUnavailable ||
-          MonkeyMuxAcpBridgeErrorKind.helperProcess =>
-            'MonkeyMux could not start the native agent bridge. Reconnect and try again.',
+          MonkeyMuxAcpBridgeErrorKind.helperProcess => 'MonkeyMux could not start the native agent bridge. Reconnect and try again.',
           _ => 'The native agent connection was interrupted.',
         },
       );

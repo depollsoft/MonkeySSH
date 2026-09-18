@@ -74,15 +74,13 @@ Widget _wrap(
   final sshSession = _MockSshSession();
   when(() => sshSession.connectionId).thenReturn(7);
   when(() => sshSession.hostId).thenReturn(key.hostId);
-  when(
-    sshSession.sftp,
-  ).thenAnswer((_) async => sftpClient ?? _FakeSftpClient());
+  when(sshSession.sftp)
+      .thenAnswer((_) async => sftpClient ?? _FakeSftpClient());
   when(() => ssh.getSessionsForHost(any())).thenReturn(
     hasActiveSshSession ? <SshSession>[sshSession] : const <SshSession>[],
   );
-  when(
-    () => launchPreferences.getPreferencesForHost(any()),
-  ).thenAnswer((_) async => const HostCliLaunchPreferences());
+  when(() => launchPreferences.getPreferencesForHost(any()))
+      .thenAnswer((_) async => const HostCliLaunchPreferences());
   return ProviderScope(
     overrides: [
       acpSessionManagerProvider.overrideWithValue(manager),
@@ -321,18 +319,16 @@ void main() {
     );
     const globalSettingsPath = '/home/demo/.pi/agent/settings.json';
     when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-    when(() => sftp.stat(any(), followLink: false)).thenAnswer((
-      invocation,
-    ) async {
-      final path = invocation.positionalArguments.single as String;
-      if (path == globalSettingsPath) {
-        return SftpFileAttrs(size: settingsBytes.length);
-      }
-      throw StateError('missing optional project settings');
-    });
-    when(
-      () => sftp.open(globalSettingsPath),
-    ).thenAnswer((_) async => settingsFile);
+    when(() => sftp.stat(any(), followLink: false))
+        .thenAnswer((invocation) async {
+          final path = invocation.positionalArguments.single as String;
+          if (path == globalSettingsPath) {
+            return SftpFileAttrs(size: settingsBytes.length);
+          }
+          throw StateError('missing optional project settings');
+        });
+    when(() => sftp.open(globalSettingsPath))
+        .thenAnswer((_) async => settingsFile);
     when(settingsFile.read).thenAnswer((_) => Stream.value(settingsBytes));
     when(settingsFile.close).thenAnswer((_) async {});
 

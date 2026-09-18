@@ -297,29 +297,26 @@ void main() {
       expect(collapsed.key, isNot(expanded.key));
     });
 
-    test(
-      'native notification route builds an embedded terminal target and refreshes each tap',
-      () {
-        final router = container.read(routerProvider);
-        final route = router.configuration.routes
-            .whereType<GoRoute>()
-            .singleWhere((route) => route.name == Routes.terminal);
-        TerminalScreen screen(String query) => _terminalScreenFor(
-          router: router,
-          route: route,
-          uri: Uri.parse(
-            '/terminal/7?p=builtin%3Api&b=bridge-1&s=session-1&$query',
-          ),
-        );
-        final first = screen('notificationTap=first');
-        final repeated = screen('notificationTap=second');
-        expect(first.initialNativeAcpSessionKey?.hostId, 7);
-        expect(first.initialNativeAcpSessionKey?.providerId, 'builtin:pi');
-        expect(first.initialNativeAcpSessionKey?.bridgeId, 'bridge-1');
-        expect(first.initialNativeAcpSessionKey?.acpSessionId, 'session-1');
-        expect(first.key, isNot(repeated.key));
-      },
-    );
+    test('native notification route builds an embedded terminal target and refreshes each tap', () {
+      final router = container.read(routerProvider);
+      final route = router.configuration.routes
+          .whereType<GoRoute>()
+          .singleWhere((route) => route.name == Routes.terminal);
+      TerminalScreen screen(String query) => _terminalScreenFor(
+        router: router,
+        route: route,
+        uri: Uri.parse(
+          '/terminal/7?p=builtin%3Api&b=bridge-1&s=session-1&$query',
+        ),
+      );
+      final first = screen('notificationTap=first');
+      final repeated = screen('notificationTap=second');
+      expect(first.initialNativeAcpSessionKey?.hostId, 7);
+      expect(first.initialNativeAcpSessionKey?.providerId, 'builtin:pi');
+      expect(first.initialNativeAcpSessionKey?.bridgeId, 'bridge-1');
+      expect(first.initialNativeAcpSessionKey?.acpSessionId, 'session-1');
+      expect(first.key, isNot(repeated.key));
+    });
 
     test('intentionally returns a new GoRouter instance when authState changes '
         'to reset protected back-stack history', () async {
@@ -378,34 +375,31 @@ void main() {
       );
     });
 
-    test(
-      'new GoRouter after locking has redirect that sends to /lock',
-      () async {
-        container.read(authStateProvider);
-        await pumpEventQueue();
+    test('new GoRouter after locking has redirect that sends to /lock', () async {
+      container.read(authStateProvider);
+      await pumpEventQueue();
 
-        container.read(authStateProvider.notifier).lockForAutoLock();
+      container.read(authStateProvider.notifier).lockForAutoLock();
 
-        final lockedRouter = container.read(routerProvider);
+      final lockedRouter = container.read(routerProvider);
 
-        // The router carries the locked auth state in its redirect closure.
-        // Verify by calling redirectForAuthState with the locked state directly,
-        // which mirrors what the GoRouter redirect callback will do.
-        expect(
-          redirectForAuthState(
-            authState: AuthState.locked,
-            matchedLocation: '/settings',
-          ),
-          '/lock',
-          reason:
-              'After locking, any attempt to navigate to a non-lock route '
-              'is redirected to /lock.',
-        );
+      // The router carries the locked auth state in its redirect closure.
+      // Verify by calling redirectForAuthState with the locked state directly,
+      // which mirrors what the GoRouter redirect callback will do.
+      expect(
+        redirectForAuthState(
+          authState: AuthState.locked,
+          matchedLocation: '/settings',
+        ),
+        '/lock',
+        reason:
+            'After locking, any attempt to navigate to a non-lock route '
+            'is redirected to /lock.',
+      );
 
-        // Sanity-check the router itself is a valid GoRouter instance.
-        expect(lockedRouter, isA<GoRouter>());
-      },
-    );
+      // Sanity-check the router itself is a valid GoRouter instance.
+      expect(lockedRouter, isA<GoRouter>());
+    });
 
     test('new GoRouter after unlocking allows navigation past /lock', () async {
       // Start locked.

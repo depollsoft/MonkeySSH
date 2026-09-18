@@ -296,9 +296,10 @@ void main() {
 
     final fieldFinder = find.byType(TextField);
     final field = tester.widget<TextField>(fieldFinder);
-    final bodyFamily = Theme.of(
-      tester.element(fieldFinder),
-    ).textTheme.bodyMedium?.fontFamily;
+    final bodyFamily = Theme.of(tester.element(fieldFinder))
+        .textTheme
+        .bodyMedium
+        ?.fontFamily;
     expect(field.style?.fontFamily, bodyFamily);
     expect(field.style?.fontFamily, isNot(FluttyTheme.monoStyle.fontFamily));
   });
@@ -571,9 +572,8 @@ void main() {
       MaterialApp(
         home: Builder(
           builder: (context) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(viewInsets: const EdgeInsets.only(bottom: 250)),
+            data: MediaQuery.of(context)
+                .copyWith(viewInsets: const EdgeInsets.only(bottom: 250)),
             child: Scaffold(
               body: Column(
                 children: [

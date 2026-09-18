@@ -36,9 +36,8 @@ void main() {
   test(
     'closes the remote handle when the local download cannot open',
     () async {
-      when(
-        () => remoteFile.read(),
-      ).thenAnswer((_) => Stream.value(Uint8List.fromList([1, 2, 3])));
+      when(() => remoteFile.read())
+          .thenAnswer((_) => Stream.value(Uint8List.fromList([1, 2, 3])));
 
       await expectLater(
         service.downloadFile(
@@ -55,9 +54,8 @@ void main() {
 
   test('closes the remote handle when the download stream fails', () async {
     final failure = SftpStatusError(SftpStatusCode.failure, 'read failed');
-    when(
-      () => remoteFile.read(),
-    ).thenAnswer((_) => Stream<Uint8List>.error(failure));
+    when(() => remoteFile.read())
+        .thenAnswer((_) => Stream<Uint8List>.error(failure));
 
     await expectLater(
       service.downloadFile(
@@ -94,9 +92,8 @@ void main() {
       Uint8List.fromList([1, 2]),
       Uint8List.fromList([3]),
     ];
-    when(
-      () => remoteFile.read(),
-    ).thenAnswer((_) => Stream.fromIterable(chunks));
+    when(() => remoteFile.read())
+        .thenAnswer((_) => Stream.fromIterable(chunks));
     final file = File('${directory.path}/file');
     final progress = <int>[];
     await service.downloadFile(
@@ -231,9 +228,8 @@ void main() {
       final chunk = Uint8List.fromList([1, 2, 3]);
       final failure = FileSystemException('$operation failed');
       when(() => remoteFile.read()).thenAnswer((_) => Stream.value(chunk));
-      when(
-        () => localFile.open(mode: FileMode.write),
-      ).thenAnswer((_) async => localHandle);
+      when(() => localFile.open(mode: FileMode.write))
+          .thenAnswer((_) async => localHandle);
       when(() => localHandle.writeFrom(chunk)).thenAnswer((_) async {
         if (operation == 'write') throw failure;
         return localHandle;

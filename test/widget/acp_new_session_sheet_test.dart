@@ -130,9 +130,8 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
   final presetService = _MockAgentLaunchPresetService();
   final launchPreferencesService = _MockHostCliLaunchPreferencesService();
   when(() => ssh.allSessions).thenReturn(<SshSession>[?activeSession]);
-  when(
-    () => ssh.getSessionsForHost(any()),
-  ).thenReturn(<SshSession>[?activeSession]);
+  when(() => ssh.getSessionsForHost(any()))
+      .thenReturn(<SshSession>[?activeSession]);
   when(() => ssh.getSession(any())).thenReturn(activeSession);
   when(() => presetService.getPresetForHost(any())).thenAnswer((_) async {
     if (presetError != null) {
@@ -242,9 +241,8 @@ void main() {
     when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
     when(() => exec.done).thenAnswer((_) => Future<void>.value());
     when(exec.close).thenAnswer((_) {});
-    when(
-      () => client.execute(any(), pty: any(named: 'pty')),
-    ).thenAnswer((_) async => exec);
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async => exec);
     final activeSession = SshSession(
       connectionId: 7,
       hostId: 1,
@@ -396,9 +394,8 @@ void main() {
         remoteMuxBackend: RemoteMuxBackend.monkeyMux.storageValue,
       );
       when(() => ssh.allSessions).thenReturn(const <SshSession>[]);
-      when(
-        () => ssh.getSessionsForHost(any()),
-      ).thenReturn(const <SshSession>[]);
+      when(() => ssh.getSessionsForHost(any()))
+          .thenReturn(const <SshSession>[]);
       when(() => presetService.getPresetForHost(host.id)).thenAnswer(
         (_) async => const AgentLaunchPreset(
           tool: AgentLaunchTool.openCode,

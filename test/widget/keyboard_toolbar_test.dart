@@ -15,9 +15,8 @@ String _terminalKeyOutput(
   bool ctrl = false,
 }) {
   final output = <String>[];
-  Terminal(
-    onOutput: output.add,
-  ).keyInput(key, shift: shift, alt: alt, ctrl: ctrl);
+  Terminal(onOutput: output.add)
+      .keyInput(key, shift: shift, alt: alt, ctrl: ctrl);
   return output.join();
 }
 

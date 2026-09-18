@@ -1003,8 +1003,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   }) async {
     if (isAppReviewDemoSession(session)) {
       return const TerminalClientCommandResult(
-        output:
-            '{"version":1,"type":"started","bridgeId":"00000000000000000000000000000000"}',
+        output: '{"version":1,"type":"started","bridgeId":"00000000000000000000000000000000"}',
         exitCode: 0,
       );
     }

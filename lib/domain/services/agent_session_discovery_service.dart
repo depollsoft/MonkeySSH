@@ -558,9 +558,8 @@ parseCopilotWorkspaceYamlMetadata(String raw) {
     }
 
     if (updatedAt == null) {
-      final updatedAtMatch = RegExp(
-        r'^updated_at:\s*(.+)\s*$',
-      ).firstMatch(line);
+      final updatedAtMatch = RegExp(r'^updated_at:\s*(.+)\s*$')
+          .firstMatch(line);
       if (updatedAtMatch != null) {
         updatedAt = DateTime.tryParse(updatedAtMatch.group(1)!.trim());
       }
@@ -574,9 +573,8 @@ parseCopilotWorkspaceYamlMetadata(String raw) {
     }
 
     if (repository == null) {
-      final repositoryMatch = RegExp(
-        r'^repository:\s*(.+)\s*$',
-      ).firstMatch(line);
+      final repositoryMatch = RegExp(r'^repository:\s*(.+)\s*$')
+          .firstMatch(line);
       if (repositoryMatch != null) {
         repository = repositoryMatch.group(1)!.trim();
       }
@@ -968,9 +966,8 @@ List<ToolSessionInfo> parseMuseSessionIndex(String output) {
     final id = row['session_id'];
     final cwd = row['workspace_root'];
     if (id is! String ||
-        !RegExp(
-          r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$',
-        ).hasMatch(id) ||
+        !RegExp(r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')
+            .hasMatch(id) ||
         cwd is! String ||
         cwd.trim().isEmpty) {
       continue;
@@ -2626,9 +2623,9 @@ class AgentSessionDiscoveryService {
                 scanLimit,
               ),
             );
-      final jsonPaths = _nonEmptyLines(
-        jsonPathOutput,
-      ).take(metadataReadLimit).toList(growable: false);
+      final jsonPaths = _nonEmptyLines(jsonPathOutput)
+          .take(metadataReadLimit)
+          .toList(growable: false);
       final jsonSnapshots = await _readRemoteFileSnapshots(
         session,
         jsonPaths,
@@ -2682,9 +2679,9 @@ class AgentSessionDiscoveryService {
                 scanLimit,
               ),
             );
-      final conversationPaths = _nonEmptyLines(
-        conversationPathOutput,
-      ).take(metadataReadLimit).toList(growable: false);
+      final conversationPaths = _nonEmptyLines(conversationPathOutput)
+          .take(metadataReadLimit)
+          .toList(growable: false);
       if (conversationPaths.isNotEmpty) {
         final historyOutput = session.remoteIsWindows
             ? await _execWindowsPowerShell(
@@ -2929,9 +2926,10 @@ class AgentSessionDiscoveryService {
         return const _ToolDiscoveryResult.success('Grok Build', []);
       }
 
-      final summaryPaths = _nonEmptyLines(
-        output,
-      ).toSet().take(metadataReadLimit).toList(growable: false);
+      final summaryPaths = _nonEmptyLines(output)
+          .toSet()
+          .take(metadataReadLimit)
+          .toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
         summaryPaths,
@@ -3234,8 +3232,7 @@ class AgentSessionDiscoveryService {
                   limit: limit,
                   overrideRootEnvironmentVariable: 'XDG_DATA_HOME',
                   overrideRelativeRoot: 'muse/sessions',
-                  pathRegexFilter:
-                      r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
+                  pathRegexFilter: r'/muse/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-fA-F-]{36}/session\.jsonl$',
                 ),
               )
             : await _exec(
@@ -3565,9 +3562,9 @@ class AgentSessionDiscoveryService {
         );
       }
 
-      final storagePaths = _nonEmptyLines(
-        storagePathOutput,
-      ).take(metadataReadLimit).toList(growable: false);
+      final storagePaths = _nonEmptyLines(storagePathOutput)
+          .take(metadataReadLimit)
+          .toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
         storagePaths,
@@ -4598,9 +4595,8 @@ String _fileNameWithoutExtension(String path) {
 
 String? _antigravityAnnotationPathForConversationFile(String path) {
   final normalizedPath = path.replaceAll(_backslashPattern, '/');
-  final match = RegExp(
-    r'^(.*)/(?:conversations|implicit)/([^/]+)\.pb$',
-  ).firstMatch(normalizedPath);
+  final match = RegExp(r'^(.*)/(?:conversations|implicit)/([^/]+)\.pb$')
+      .firstMatch(normalizedPath);
   if (match == null) return null;
   return '${match.group(1)!}/annotations/${match.group(2)!}.pbtxt';
 }

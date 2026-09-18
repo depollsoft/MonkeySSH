@@ -271,9 +271,8 @@ void main() {
     test('skips Google Play offers with no pricing phases', () {
       final productDetails = MockGooglePlayProductDetails();
       when(() => productDetails.subscriptionIndex).thenReturn(0);
-      when(
-        () => productDetails.id,
-      ).thenReturn(MonetizationProductIds.androidPro);
+      when(() => productDetails.id)
+          .thenReturn(MonetizationProductIds.androidPro);
       when(() => productDetails.offerToken).thenReturn('monthly-base-token');
       when(() => productDetails.productDetails).thenReturn(
         ProductDetailsWrapper(
@@ -405,9 +404,8 @@ void main() {
         buildSignature: '',
       );
 
-      when(
-        () => inAppPurchase.purchaseStream,
-      ).thenAnswer((_) => purchaseController.stream);
+      when(() => inAppPurchase.purchaseStream)
+          .thenAnswer((_) => purchaseController.stream);
       when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => false);
     });
 
@@ -549,9 +547,9 @@ void main() {
         await service.initialize();
 
         final queriedProductIds =
-            verify(
-                  () => inAppPurchase.queryProductDetails(captureAny()),
-                ).captured.single
+            verify(() => inAppPurchase.queryProductDetails(captureAny()))
+                    .captured
+                    .single
                 as Set<String>;
         expect(
           queriedProductIds,
@@ -586,9 +584,9 @@ void main() {
       await service.initialize();
 
       final queriedProductIds =
-          verify(
-                () => inAppPurchase.queryProductDetails(captureAny()),
-              ).captured.single
+          verify(() => inAppPurchase.queryProductDetails(captureAny()))
+                  .captured
+                  .single
               as Set<String>;
       expect(
         queriedProductIds,
@@ -665,9 +663,8 @@ void main() {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
         final availabilityCompleter = Completer<bool>();
-        when(
-          () => inAppPurchase.isAvailable(),
-        ).thenAnswer((_) => availabilityCompleter.future);
+        when(() => inAppPurchase.isAvailable())
+            .thenAnswer((_) => availabilityCompleter.future);
 
         final service = buildService();
 
@@ -688,198 +685,174 @@ void main() {
       },
     );
 
-    test(
-      'purchase stream activates lifetime entitlement when a redeemed lifetime product arrives',
-      () async {
-        final service = buildService();
+    test('purchase stream activates lifetime entitlement when a redeemed lifetime product arrives', () async {
+      final service = buildService();
 
-        final purchase = _purchase(
-          MonetizationProductIds.iosProLifetimeProd,
-          PurchaseStatus.purchased,
-        );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) async {});
+      final purchase = _purchase(
+        MonetizationProductIds.iosProLifetimeProd,
+        PurchaseStatus.purchased,
+      );
+      when(() => inAppPurchase.completePurchase(purchase))
+          .thenAnswer((_) async {});
 
-        await service.initialize();
-        purchaseController.add([purchase]);
-        await Future<void>.delayed(const Duration(milliseconds: 10));
+      await service.initialize();
+      purchaseController.add([purchase]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
 
-        expect(service.currentState.isProUnlocked, isTrue);
-        expect(service.currentState.isLifetimeUnlocked, isTrue);
-        expect(
-          service.currentState.activeProductId,
-          MonetizationProductIds.iosProLifetimeProd,
-        );
-        expect(service.currentState.activeOfferId, isNull);
-        expect(
-          await settings.getString(SettingKeys.monetizationActiveProductId),
-          MonetizationProductIds.iosProLifetimeProd,
-        );
-        verify(() => inAppPurchase.completePurchase(purchase)).called(1);
-      },
-    );
+      expect(service.currentState.isProUnlocked, isTrue);
+      expect(service.currentState.isLifetimeUnlocked, isTrue);
+      expect(
+        service.currentState.activeProductId,
+        MonetizationProductIds.iosProLifetimeProd,
+      );
+      expect(service.currentState.activeOfferId, isNull);
+      expect(
+        await settings.getString(SettingKeys.monetizationActiveProductId),
+        MonetizationProductIds.iosProLifetimeProd,
+      );
+      verify(() => inAppPurchase.completePurchase(purchase)).called(1);
+    });
 
-    test(
-      'lifetime purchase clears any stale activeOfferId carried over from a prior subscription',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    test('lifetime purchase clears any stale activeOfferId carried over from a prior subscription', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-        // Simulate a user who previously had a subscription: pre-seed
-        // the cached entitlement settings with an active subscription
-        // product and offer.
-        await settings.setBool(
-          SettingKeys.monetizationProUnlocked,
-          value: true,
-        );
-        await settings.setString(
-          SettingKeys.monetizationActiveProductId,
-          MonetizationProductIds.iosMonthly,
-        );
-        await settings.setString(
-          SettingKeys.monetizationActiveOfferId,
-          'monthly-base-offer',
-        );
+      // Simulate a user who previously had a subscription: pre-seed
+      // the cached entitlement settings with an active subscription
+      // product and offer.
+      await settings.setBool(SettingKeys.monetizationProUnlocked, value: true);
+      await settings.setString(
+        SettingKeys.monetizationActiveProductId,
+        MonetizationProductIds.iosMonthly,
+      );
+      await settings.setString(
+        SettingKeys.monetizationActiveOfferId,
+        'monthly-base-offer',
+      );
 
-        final service = buildService();
+      final service = buildService();
 
-        final purchase = _purchase(
-          MonetizationProductIds.iosProLifetimeProd,
-          PurchaseStatus.purchased,
-        );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) async {});
+      final purchase = _purchase(
+        MonetizationProductIds.iosProLifetimeProd,
+        PurchaseStatus.purchased,
+      );
+      when(() => inAppPurchase.completePurchase(purchase))
+          .thenAnswer((_) async {});
 
-        await service.initialize();
-        // Sanity check: the prior subscription offer was loaded from settings.
-        expect(service.currentState.activeOfferId, 'monthly-base-offer');
+      await service.initialize();
+      // Sanity check: the prior subscription offer was loaded from settings.
+      expect(service.currentState.activeOfferId, 'monthly-base-offer');
 
-        purchaseController.add([purchase]);
-        await Future<void>.delayed(const Duration(milliseconds: 10));
+      purchaseController.add([purchase]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
 
-        expect(service.currentState.isLifetimeUnlocked, isTrue);
-        expect(
-          service.currentState.activeProductId,
-          MonetizationProductIds.iosProLifetimeProd,
-        );
-        // The stale subscription offer must be cleared from both the
-        // in-memory state and the persisted settings.
-        expect(service.currentState.activeOfferId, isNull);
-        expect(
-          await settings.getString(SettingKeys.monetizationActiveOfferId),
-          isNull,
-        );
-      },
-    );
+      expect(service.currentState.isLifetimeUnlocked, isTrue);
+      expect(
+        service.currentState.activeProductId,
+        MonetizationProductIds.iosProLifetimeProd,
+      );
+      // The stale subscription offer must be cleared from both the
+      // in-memory state and the persisted settings.
+      expect(service.currentState.activeOfferId, isNull);
+      expect(
+        await settings.getString(SettingKeys.monetizationActiveOfferId),
+        isNull,
+      );
+    });
 
-    test(
-      'lifetime entitlement is preserved when a stale subscription transaction is replayed by the purchase stream',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    test('lifetime entitlement is preserved when a stale subscription transaction is replayed by the purchase stream', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-        final service = buildService();
+      final service = buildService();
 
-        final lifetime = MockPurchaseDetails();
-        when(
-          () => lifetime.productID,
-        ).thenReturn(MonetizationProductIds.iosProLifetimeProd);
-        when(() => lifetime.status).thenReturn(PurchaseStatus.restored);
-        when(() => lifetime.pendingCompletePurchase).thenReturn(true);
-        when(() => lifetime.transactionDate).thenReturn('1712732400000');
-        when(
-          () => inAppPurchase.completePurchase(lifetime),
-        ).thenAnswer((_) async {});
+      final lifetime = MockPurchaseDetails();
+      when(() => lifetime.productID)
+          .thenReturn(MonetizationProductIds.iosProLifetimeProd);
+      when(() => lifetime.status).thenReturn(PurchaseStatus.restored);
+      when(() => lifetime.pendingCompletePurchase).thenReturn(true);
+      when(() => lifetime.transactionDate).thenReturn('1712732400000');
+      when(() => inAppPurchase.completePurchase(lifetime))
+          .thenAnswer((_) async {});
 
-        final staleSub = MockPurchaseDetails();
-        when(
-          () => staleSub.productID,
-        ).thenReturn(MonetizationProductIds.iosMonthly);
-        when(() => staleSub.status).thenReturn(PurchaseStatus.restored);
-        when(() => staleSub.pendingCompletePurchase).thenReturn(true);
-        when(() => staleSub.transactionDate).thenReturn('1712732401000');
-        when(
-          () => inAppPurchase.completePurchase(staleSub),
-        ).thenAnswer((_) async {});
+      final staleSub = MockPurchaseDetails();
+      when(() => staleSub.productID)
+          .thenReturn(MonetizationProductIds.iosMonthly);
+      when(() => staleSub.status).thenReturn(PurchaseStatus.restored);
+      when(() => staleSub.pendingCompletePurchase).thenReturn(true);
+      when(() => staleSub.transactionDate).thenReturn('1712732401000');
+      when(() => inAppPurchase.completePurchase(staleSub))
+          .thenAnswer((_) async {});
 
-        await service.initialize();
-        // Deliver both transactions in the same batch, mimicking what
-        // StoreKit does during a restore.
-        purchaseController.add([lifetime, staleSub]);
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+      await service.initialize();
+      // Deliver both transactions in the same batch, mimicking what
+      // StoreKit does during a restore.
+      purchaseController.add([lifetime, staleSub]);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
 
-        // Lifetime must win regardless of replay order.
-        expect(service.currentState.isLifetimeUnlocked, isTrue);
-        expect(
-          service.currentState.activeProductId,
-          MonetizationProductIds.iosProLifetimeProd,
-        );
-        expect(service.currentState.activeOfferId, isNull);
-        expect(
-          await settings.getString(SettingKeys.monetizationActiveProductId),
-          MonetizationProductIds.iosProLifetimeProd,
-        );
-      },
-    );
+      // Lifetime must win regardless of replay order.
+      expect(service.currentState.isLifetimeUnlocked, isTrue);
+      expect(
+        service.currentState.activeProductId,
+        MonetizationProductIds.iosProLifetimeProd,
+      );
+      expect(service.currentState.activeOfferId, isNull);
+      expect(
+        await settings.getString(SettingKeys.monetizationActiveProductId),
+        MonetizationProductIds.iosProLifetimeProd,
+      );
+    });
 
-    test(
-      'Android reconcile promotes lifetime when a previously cached subscription has lapsed',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    test('Android reconcile promotes lifetime when a previously cached subscription has lapsed', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-        // Pre-seed cached entitlement as the now-defunct subscription.
-        await settings.setBool(
-          SettingKeys.monetizationProUnlocked,
-          value: true,
-        );
-        await settings.setString(
-          SettingKeys.monetizationActiveProductId,
-          MonetizationProductIds.androidPro,
-        );
-        await settings.setString(
-          SettingKeys.monetizationActiveOfferId,
-          'monthly-base',
-        );
+      // Pre-seed cached entitlement as the now-defunct subscription.
+      await settings.setBool(SettingKeys.monetizationProUnlocked, value: true);
+      await settings.setString(
+        SettingKeys.monetizationActiveProductId,
+        MonetizationProductIds.androidPro,
+      );
+      await settings.setString(
+        SettingKeys.monetizationActiveOfferId,
+        'monthly-base',
+      );
 
-        when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
-        when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
-          (_) async => ProductDetailsResponse(
-            productDetails: const [],
-            notFoundIDs: const [],
-          ),
-        );
-        when(androidPlatformAddition.queryPastPurchases).thenAnswer(
-          (_) async => QueryPurchaseDetailsResponse(
-            pastPurchases: [
-              _androidPastLifetimePurchase(purchaseTimeMillis: 1712732400000),
-            ],
-          ),
-        );
+      when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
+      when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+        (_) async => ProductDetailsResponse(
+          productDetails: const [],
+          notFoundIDs: const [],
+        ),
+      );
+      when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+        (_) async => QueryPurchaseDetailsResponse(
+          pastPurchases: [
+            _androidPastLifetimePurchase(purchaseTimeMillis: 1712732400000),
+          ],
+        ),
+      );
 
-        final service = buildService(android: true);
+      final service = buildService(android: true);
 
-        await service.initialize();
+      await service.initialize();
 
-        expect(service.currentState.isProUnlocked, isTrue);
-        expect(service.currentState.isLifetimeUnlocked, isTrue);
-        expect(
-          service.currentState.activeProductId,
-          MonetizationProductIds.androidProLifetime,
-        );
-        expect(service.currentState.activeOfferId, isNull);
-        expect(
-          await settings.getString(SettingKeys.monetizationActiveProductId),
-          MonetizationProductIds.androidProLifetime,
-        );
-        expect(
-          await settings.getString(SettingKeys.monetizationActiveOfferId),
-          isNull,
-        );
-      },
-    );
+      expect(service.currentState.isProUnlocked, isTrue);
+      expect(service.currentState.isLifetimeUnlocked, isTrue);
+      expect(
+        service.currentState.activeProductId,
+        MonetizationProductIds.androidProLifetime,
+      );
+      expect(service.currentState.activeOfferId, isNull);
+      expect(
+        await settings.getString(SettingKeys.monetizationActiveProductId),
+        MonetizationProductIds.androidProLifetime,
+      );
+      expect(
+        await settings.getString(SettingKeys.monetizationActiveOfferId),
+        isNull,
+      );
+    });
 
     test('Android restore guards pending purchase completion', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -971,18 +944,16 @@ void main() {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
         when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
-        when(
-          () => inAppPurchase.queryProductDetails(any()),
-        ).thenThrow(StateError('Catalog unavailable'));
+        when(() => inAppPurchase.queryProductDetails(any()))
+            .thenThrow(StateError('Catalog unavailable'));
         final service = buildService();
 
         final purchase = _purchase(
           MonetizationProductIds.androidPro,
           PurchaseStatus.purchased,
         );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) async {});
+        when(() => inAppPurchase.completePurchase(purchase))
+            .thenAnswer((_) async {});
 
         await expectLater(service.initialize(), throwsStateError);
         when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
@@ -1032,9 +1003,8 @@ void main() {
           MonetizationProductIds.androidPro,
           PurchaseStatus.purchased,
         );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) async {});
+        when(() => inAppPurchase.completePurchase(purchase))
+            .thenAnswer((_) async {});
 
         final diagnostics = RecordingDiagnosticsLogger();
         final service = buildService(android: true, diagnostics: diagnostics);
@@ -1155,143 +1125,132 @@ void main() {
       },
     );
 
-    test(
-      'Android stale checkout recovery honors lifetime before retrying a subscription',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    test('Android stale checkout recovery honors lifetime before retrying a subscription', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-        when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
-        when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
-          (_) async => ProductDetailsResponse(
-            productDetails: _androidCatalogDetails(),
-            notFoundIDs: const [],
-          ),
-        );
-        var buyCallCount = 0;
-        when(
-          () => inAppPurchase.buyNonConsumable(
-            purchaseParam: any(named: 'purchaseParam'),
-          ),
-        ).thenAnswer((_) async {
-          buyCallCount += 1;
-          return true;
-        });
-        when(androidPlatformAddition.queryPastPurchases).thenAnswer(
-          (_) async => QueryPurchaseDetailsResponse(
-            pastPurchases: [
-              _androidPastLifetimePurchase(purchaseTimeMillis: 1712732400000),
-              _androidPastPurchase(purchaseTimeMillis: 1712732401000),
-            ],
-          ),
-        );
+      when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
+      when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+        (_) async => ProductDetailsResponse(
+          productDetails: _androidCatalogDetails(),
+          notFoundIDs: const [],
+        ),
+      );
+      var buyCallCount = 0;
+      when(
+        () => inAppPurchase.buyNonConsumable(
+          purchaseParam: any(named: 'purchaseParam'),
+        ),
+      ).thenAnswer((_) async {
+        buyCallCount += 1;
+        return true;
+      });
+      when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+        (_) async => QueryPurchaseDetailsResponse(
+          pastPurchases: [
+            _androidPastLifetimePurchase(purchaseTimeMillis: 1712732400000),
+            _androidPastPurchase(purchaseTimeMillis: 1712732401000),
+          ],
+        ),
+      );
 
-        final service = buildService(android: true);
+      final service = buildService(android: true);
 
-        await service.initialize();
-        final monthlyOfferId = service.currentState.offers
-            .firstWhere(
-              (offer) =>
-                  offer.billingPeriod == MonetizationBillingPeriod.monthly,
-            )
-            .id;
-        final annualOfferId = service.currentState.offers
-            .firstWhere(
-              (offer) =>
-                  offer.billingPeriod == MonetizationBillingPeriod.annual,
-            )
-            .id;
+      await service.initialize();
+      final monthlyOfferId = service.currentState.offers
+          .firstWhere(
+            (offer) => offer.billingPeriod == MonetizationBillingPeriod.monthly,
+          )
+          .id;
+      final annualOfferId = service.currentState.offers
+          .firstWhere(
+            (offer) => offer.billingPeriod == MonetizationBillingPeriod.annual,
+          )
+          .id;
 
-        final firstAttempt = service.purchaseOffer(monthlyOfferId);
-        await Future<void>.delayed(Duration.zero);
+      final firstAttempt = service.purchaseOffer(monthlyOfferId);
+      await Future<void>.delayed(Duration.zero);
 
-        final secondResult = await service.purchaseOffer(annualOfferId);
-        final firstResult = await firstAttempt;
+      final secondResult = await service.purchaseOffer(annualOfferId);
+      final firstResult = await firstAttempt;
 
-        expect(firstResult.success, isTrue);
-        expect(firstResult.message, contains('Lifetime'));
-        expect(secondResult.success, isFalse);
-        expect(secondResult.message, contains('Lifetime is already active'));
-        expect(service.currentState.isProUnlocked, isTrue);
-        expect(service.currentState.isLifetimeUnlocked, isTrue);
-        expect(
-          service.currentState.activeProductId,
-          MonetizationProductIds.androidProLifetime,
-        );
-        expect(service.currentState.activeOfferId, isNull);
-        expect(buyCallCount, 1);
-        verify(androidPlatformAddition.queryPastPurchases).called(1);
-      },
-    );
+      expect(firstResult.success, isTrue);
+      expect(firstResult.message, contains('Lifetime'));
+      expect(secondResult.success, isFalse);
+      expect(secondResult.message, contains('Lifetime is already active'));
+      expect(service.currentState.isProUnlocked, isTrue);
+      expect(service.currentState.isLifetimeUnlocked, isTrue);
+      expect(
+        service.currentState.activeProductId,
+        MonetizationProductIds.androidProLifetime,
+      );
+      expect(service.currentState.activeOfferId, isNull);
+      expect(buyCallCount, 1);
+      verify(androidPlatformAddition.queryPastPurchases).called(1);
+    });
 
-    test(
-      'purchaseOffer lets Android users retry with another plan after dismissing Play checkout',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    test('purchaseOffer lets Android users retry with another plan after dismissing Play checkout', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-        when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
-        when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
-          (_) async => ProductDetailsResponse(
-            productDetails: _androidCatalogDetails(),
-            notFoundIDs: const [],
-          ),
-        );
-        var buyCallCount = 0;
-        when(
-          () => inAppPurchase.buyNonConsumable(
-            purchaseParam: any(named: 'purchaseParam'),
-          ),
-        ).thenAnswer((_) async {
-          buyCallCount += 1;
-          return true;
-        });
-        when(androidPlatformAddition.queryPastPurchases).thenAnswer(
-          (_) async => QueryPurchaseDetailsResponse(pastPurchases: const []),
-        );
+      when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
+      when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+        (_) async => ProductDetailsResponse(
+          productDetails: _androidCatalogDetails(),
+          notFoundIDs: const [],
+        ),
+      );
+      var buyCallCount = 0;
+      when(
+        () => inAppPurchase.buyNonConsumable(
+          purchaseParam: any(named: 'purchaseParam'),
+        ),
+      ).thenAnswer((_) async {
+        buyCallCount += 1;
+        return true;
+      });
+      when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+        (_) async => QueryPurchaseDetailsResponse(pastPurchases: const []),
+      );
 
-        final purchase = _purchase(
-          MonetizationProductIds.androidPro,
-          PurchaseStatus.purchased,
-        );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) async {});
+      final purchase = _purchase(
+        MonetizationProductIds.androidPro,
+        PurchaseStatus.purchased,
+      );
+      when(() => inAppPurchase.completePurchase(purchase))
+          .thenAnswer((_) async {});
 
-        final service = buildService(android: true);
+      final service = buildService(android: true);
 
-        await service.initialize();
-        final monthlyOfferId = service.currentState.offers
-            .firstWhere(
-              (offer) =>
-                  offer.billingPeriod == MonetizationBillingPeriod.monthly,
-            )
-            .id;
-        final annualOfferId = service.currentState.offers
-            .firstWhere(
-              (offer) =>
-                  offer.billingPeriod == MonetizationBillingPeriod.annual,
-            )
-            .id;
+      await service.initialize();
+      final monthlyOfferId = service.currentState.offers
+          .firstWhere(
+            (offer) => offer.billingPeriod == MonetizationBillingPeriod.monthly,
+          )
+          .id;
+      final annualOfferId = service.currentState.offers
+          .firstWhere(
+            (offer) => offer.billingPeriod == MonetizationBillingPeriod.annual,
+          )
+          .id;
 
-        final firstAttempt = service.purchaseOffer(monthlyOfferId);
-        await Future<void>.delayed(Duration.zero);
+      final firstAttempt = service.purchaseOffer(monthlyOfferId);
+      await Future<void>.delayed(Duration.zero);
 
-        final secondAttempt = service.purchaseOffer(annualOfferId);
-        await Future<void>.delayed(Duration.zero);
+      final secondAttempt = service.purchaseOffer(annualOfferId);
+      await Future<void>.delayed(Duration.zero);
 
-        final firstResult = await firstAttempt;
-        purchaseController.add([purchase]);
-        final secondResult = await secondAttempt;
+      final firstResult = await firstAttempt;
+      purchaseController.add([purchase]);
+      final secondResult = await secondAttempt;
 
-        expect(firstResult.success, isFalse);
-        expect(firstResult.cancelled, isTrue);
-        expect(secondResult.success, isTrue);
-        expect(service.currentState.activeOfferId, annualOfferId);
-        expect(buyCallCount, 2);
-        verify(androidPlatformAddition.queryPastPurchases).called(1);
-      },
-    );
+      expect(firstResult.success, isFalse);
+      expect(firstResult.cancelled, isTrue);
+      expect(secondResult.success, isTrue);
+      expect(service.currentState.activeOfferId, annualOfferId);
+      expect(buyCallCount, 2);
+      verify(androidPlatformAddition.queryPastPurchases).called(1);
+    });
 
     test(
       'restorePurchases refuses to start while another purchase is in progress',
@@ -1334,42 +1293,36 @@ void main() {
       },
     );
 
-    test(
-      'initialization clears cached Android entitlement when Play has no active subscription',
-      () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        await settings.setBool(
-          SettingKeys.monetizationProUnlocked,
-          value: true,
-        );
-        await settings.setString(
-          SettingKeys.monetizationActiveProductId,
-          MonetizationProductIds.androidPro,
-        );
+    test('initialization clears cached Android entitlement when Play has no active subscription', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await settings.setBool(SettingKeys.monetizationProUnlocked, value: true);
+      await settings.setString(
+        SettingKeys.monetizationActiveProductId,
+        MonetizationProductIds.androidPro,
+      );
 
-        when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
-        when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
-          (_) async => ProductDetailsResponse(
-            productDetails: _androidCatalogDetails(),
-            notFoundIDs: const [],
-          ),
-        );
-        when(androidPlatformAddition.queryPastPurchases).thenAnswer(
-          (_) async => QueryPurchaseDetailsResponse(pastPurchases: []),
-        );
+      when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
+      when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+        (_) async => ProductDetailsResponse(
+          productDetails: _androidCatalogDetails(),
+          notFoundIDs: const [],
+        ),
+      );
+      when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+        (_) async => QueryPurchaseDetailsResponse(pastPurchases: []),
+      );
 
-        final service = buildService(android: true);
+      final service = buildService(android: true);
 
-        await service.initialize();
+      await service.initialize();
 
-        expect(service.currentState.isProUnlocked, isFalse);
-        expect(
-          await settings.getBool(SettingKeys.monetizationProUnlocked),
-          isFalse,
-        );
-      },
-    );
+      expect(service.currentState.isProUnlocked, isFalse);
+      expect(
+        await settings.getBool(SettingKeys.monetizationProUnlocked),
+        isFalse,
+      );
+    });
 
     test(
       'restorePurchases uses active Google Play subscriptions on Android',
@@ -1420,9 +1373,8 @@ void main() {
       for (final entry in cachedStrings.entries) {
         await settings.setString(entry.key, entry.value);
       }
-      when(
-        () => inAppPurchase.restorePurchases(),
-      ).thenThrow(Exception('offline'));
+      when(() => inAppPurchase.restorePurchases())
+          .thenThrow(Exception('offline'));
       final service = buildService(
         restoreEmptyResultGracePeriod: Duration.zero,
       );
@@ -1478,9 +1430,8 @@ void main() {
             when(() => purchase.status).thenReturn(PurchaseStatus.restored);
             when(() => purchase.pendingCompletePurchase).thenReturn(true);
             when(() => purchase.transactionDate).thenReturn('1712732400000');
-            when(
-              () => inAppPurchase.completePurchase(purchase),
-            ).thenAnswer((_) async {});
+            when(() => inAppPurchase.completePurchase(purchase))
+                .thenAnswer((_) async {});
           }
           when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {
             purchaseController.add(const []);
@@ -1580,9 +1531,8 @@ void main() {
           MonetizationProductIds.androidPro,
           PurchaseStatus.restored,
         );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenAnswer((_) => Completer<void>().future);
+        when(() => inAppPurchase.completePurchase(purchase))
+            .thenAnswer((_) => Completer<void>().future);
         when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {});
 
         final service = buildService(
@@ -1686,9 +1636,8 @@ void main() {
         MonetizationProductIds.iosMonthlyProd,
         PurchaseStatus.restored,
       );
-      when(
-        () => inAppPurchase.completePurchase(purchase),
-      ).thenAnswer((_) async {});
+      when(() => inAppPurchase.completePurchase(purchase))
+          .thenAnswer((_) async {});
       when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {
         purchaseController.add([purchase]);
       });
@@ -1739,9 +1688,8 @@ void main() {
           MonetizationProductIds.androidPro,
           PurchaseStatus.purchased,
         );
-        when(
-          () => inAppPurchase.completePurchase(purchase),
-        ).thenThrow(Exception('billing finalize failed'));
+        when(() => inAppPurchase.completePurchase(purchase))
+            .thenThrow(Exception('billing finalize failed'));
 
         final service = buildService(android: true);
 

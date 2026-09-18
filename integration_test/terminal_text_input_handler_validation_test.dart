@@ -459,8 +459,7 @@ void main() {
     ),
     _ValidationCase(
       id: '09-space-boundary-insert',
-      title:
-          'Inserting at a moved space boundary does not overwrite the next word',
+      title: 'Inserting at a moved space boundary does not overwrite the next word',
       expectedVisibleText: 'foo Xbar',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -490,8 +489,7 @@ void main() {
     ),
     _ValidationCase(
       id: '11-repeated-word-replace',
-      title:
-          'Replacing the middle repeated word leaves the trailing match untouched',
+      title: 'Replacing the middle repeated word leaves the trailing match untouched',
       expectedVisibleText: 'go gone go',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -506,8 +504,7 @@ void main() {
     ),
     _ValidationCase(
       id: '12-space-boundary-insert-backspace',
-      title:
-          'Insert then backspace at a moved space boundary restores the original spacing',
+      title: 'Insert then backspace at a moved space boundary restores the original spacing',
       expectedVisibleText: 'foo bar',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -523,8 +520,7 @@ void main() {
     ),
     _ValidationCase(
       id: '13-double-space-insert-backspace',
-      title:
-          'Insert then backspace between repeated spaces does not drift the cursor',
+      title: 'Insert then backspace between repeated spaces does not drift the cursor',
       expectedVisibleText: 'foo  bar',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -540,8 +536,7 @@ void main() {
     ),
     _ValidationCase(
       id: '14-repeated-word-replace-backspace',
-      title:
-          'Replacing a repeated middle word still leaves backspace targeting that word',
+      title: 'Replacing a repeated middle word still leaves backspace targeting that word',
       expectedVisibleText: 'go gon go',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -557,8 +552,7 @@ void main() {
     ),
     _ValidationCase(
       id: '15-marker-loss-clear',
-      title:
-          'Losing the delete-detection marker clears all buffered text instead of one character',
+      title: 'Losing the delete-detection marker clears all buffered text instead of one character',
       expectedVisibleText: '',
       expectedRawOutput: 'hello\x7f\x7f\x7f\x7f\x7f',
       expectedEditingText: _deleteDetectionMarker,
@@ -568,8 +562,7 @@ void main() {
     ),
     _ValidationCase(
       id: '16-replacement-selection-backspace',
-      title:
-          'Replacement selection followed by immediate backspace keeps the cursor on the replaced word',
+      title: 'Replacement selection followed by immediate backspace keeps the cursor on the replaced word',
       expectedVisibleText: 'echo th world',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -585,8 +578,7 @@ void main() {
     ),
     _ValidationCase(
       id: '17-identical-char-insert',
-      title:
-          'Inserting an identical character at a moved caret stays anchored to that caret',
+      title: 'Inserting an identical character at a moved caret stays anchored to that caret',
       expectedVisibleText: 'aaaaa',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -601,8 +593,7 @@ void main() {
     ),
     _ValidationCase(
       id: '18-identical-char-delete',
-      title:
-          'Deleting an identical character at a moved caret backspaces at that caret',
+      title: 'Deleting an identical character at a moved caret backspaces at that caret',
       expectedVisibleText: 'aaaa',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -617,8 +608,7 @@ void main() {
     ),
     _ValidationCase(
       id: '19-repeated-selection-replace-backspace',
-      title:
-          'Repeated non-collapsed replacement updates still leave backspace on the intended word',
+      title: 'Repeated non-collapsed replacement updates still leave backspace on the intended word',
       expectedVisibleText: 'echo th world',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -636,8 +626,7 @@ void main() {
     ),
     _ValidationCase(
       id: '20-replace-move-later-backspace',
-      title:
-          'Replacing one word then backspacing later elsewhere keeps the later caret anchored',
+      title: 'Replacing one word then backspacing later elsewhere keeps the later caret anchored',
       expectedVisibleText: 'echo the worl',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -654,8 +643,7 @@ void main() {
     ),
     _ValidationCase(
       id: '21-replacement-separator-reinsert',
-      title:
-          'Deleting and reinserting the replacement separator restores the intended spacing without drift',
+      title: 'Deleting and reinserting the replacement separator restores the intended spacing without drift',
       expectedVisibleText: 'echo the world',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -672,8 +660,7 @@ void main() {
     ),
     _ValidationCase(
       id: '22-replace-elsewhere',
-      title:
-          'Replacing one word and then replacing a later word keeps both edits anchored',
+      title: 'Replacing one word and then replacing a later word keeps both edits anchored',
       expectedVisibleText: 'echo the earth',
       expectedEditingText:
           '$_deleteDetectionMarker'
@@ -690,8 +677,7 @@ void main() {
     ),
     _ValidationCase(
       id: '23-shorter-prefix-replacement',
-      title:
-          'Backspacing to a shorter prefix before choosing a replacement keeps the replacement text ordered correctly',
+      title: 'Backspacing to a shorter prefix before choosing a replacement keeps the replacement text ordered correctly',
       expectedVisibleText: 'I stink',
       expectedEditingText:
           '$_deleteDetectionMarker'

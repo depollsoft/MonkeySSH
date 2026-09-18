@@ -52,14 +52,14 @@ runs:
 
     - name: Save Apple compilation cache
       if: steps.sizes.outputs.compilation == 'true' && inputs.compilation-hit != 'true'
-      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/Library/Caches/monkeyssh-xcode
         key: ${{ inputs.compilation-key }}
 
     - name: Save resolved Swift packages
       if: steps.sizes.outputs.workspace == 'true' && inputs.workspace-hit != 'true'
-      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           build/${{ inputs.platform }}/SourcePackages/checkouts
@@ -70,7 +70,7 @@ runs:
 
     - name: Save SwiftPM cache
       if: inputs.phase == 'swiftpm'
-      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/Library/Caches/org.swift.swiftpm
         key: spm-${{ runner.os }}-${{ hashFiles('ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
