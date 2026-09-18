@@ -402,7 +402,16 @@ func ownTestConPty(t *testing.T, backend *conPtyBackend, write, read, console, p
 			}
 			// ClosePseudoConsole can block while flushing output. Keep draining
 			// until the console is closed, then release the process and pipes.
-			backend.close(console)
+			closed := make(chan struct{})
+			go func() {
+				backend.close(console)
+				close(closed)
+			}()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out closing ConPTY")
+			}
 			_ = windows.CloseHandle(process)
 			_ = input.Close()
 			select {
@@ -410,7 +419,11 @@ func ownTestConPty(t *testing.T, backend *conPtyBackend, write, read, console, p
 			case <-time.After(5 * time.Second):
 				t.Error("timed out draining ConPTY output")
 				_ = output.Close()
-				data = <-drained
+				select {
+				case data = <-drained:
+				case <-time.After(2 * time.Second):
+					t.Error("ConPTY output reader did not exit after close")
+				}
 			}
 			_ = output.Close()
 		})

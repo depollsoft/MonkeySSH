@@ -303,7 +303,7 @@ jobs:
     needs: [changes, monkeymux-assets]
     if: needs.changes.outputs.go == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -355,7 +355,10 @@ jobs:
           if [ "${{ matrix.name }}" = "linux" ]; then
             go test -race ./...
           else
-            go test ./...
+            # Default go test timeout is 10m, but this job used to share a 10m
+            # budget with setup, so a hung ConPTY helper cancelled the whole
+            # matrix as failed_checks and booted the merge queue.
+            go test -timeout 8m -count=1 ./...
           fi
 
       # Vet the platform-gated sources (including their tests) that this
