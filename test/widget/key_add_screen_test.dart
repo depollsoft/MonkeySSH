@@ -11,6 +11,10 @@ import 'package:monkeyssh/presentation/screens/key_add_screen.dart';
 
 class _MockKeyService extends Mock implements KeyService {}
 
+// KeyService is mocked; only the form's PEM envelope check needs to pass.
+const _privateKeyFixture =
+    '-----BEGIN TEST FIXTURE-----\n-----END TEST FIXTURE-----';
+
 void main() {
   for (final importing in [false, true]) {
     for (final name in ['   ', 'x' * 256]) {
@@ -41,7 +45,7 @@ void main() {
           if (importing) {
             await tester.enterText(
               find.widgetWithText(TextFormField, 'Private Key (PEM format)'),
-              '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----',
+              _privateKeyFixture,
             );
           }
           final submit = find.text(importing ? 'Import Key' : 'Generate Key');
@@ -75,10 +79,8 @@ void main() {
         addTearDown(db.close);
         final service = _MockKeyService();
         final name = 'x' * 255;
-        const privateKey =
-            '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----';
         Future<SshKey?> submitKey() => importing
-            ? service.importKey(name: name, privateKeyPem: privateKey)
+            ? service.importKey(name: name, privateKeyPem: _privateKeyFixture)
             : service.generateKey(name: name, keyType: SshKeyType.ed25519);
         when(submitKey).thenAnswer((_) async => null);
         await tester.pumpWidget(
@@ -100,7 +102,7 @@ void main() {
         if (importing) {
           await tester.enterText(
             find.widgetWithText(TextFormField, 'Private Key (PEM format)'),
-            privateKey,
+            _privateKeyFixture,
           );
         }
         final submit = find.text(importing ? 'Import Key' : 'Generate Key');
@@ -120,13 +122,11 @@ void main() {
         addTearDown(db.close);
         final service = _MockKeyService();
         final completion = Completer<SshKey?>();
-        const privateKey =
-            '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----';
         when(
           () => importing
               ? service.importKey(
                   name: 'Test key',
-                  privateKeyPem: privateKey,
+                  privateKeyPem: _privateKeyFixture,
                   passphrase: 'secret',
                 )
               : service.generateKey(
@@ -162,7 +162,7 @@ void main() {
         await tester.pumpAndSettle();
         for (final (label, value) in [
           ('Key Name', 'Test key'),
-          if (importing) ('Private Key (PEM format)', privateKey),
+          if (importing) ('Private Key (PEM format)', _privateKeyFixture),
           (
             importing ? 'Passphrase (if encrypted)' : 'Passphrase (optional)',
             'secret',
@@ -193,7 +193,7 @@ void main() {
             name: 'Test key',
             keyType: 'ed25519',
             publicKey: 'public key',
-            privateKey: privateKey,
+            privateKey: _privateKeyFixture,
             createdAt: DateTime(2026),
           ),
         );
