@@ -414,6 +414,15 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(
         find.widgetWithText(TextFormField, 'Folder name'),
+        'x' * 256,
+      );
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+      expect(find.text('Name must be 255 characters or fewer'), findsOneWidget);
+      verifyNever(() => snippetRepository.insertFolder(any()));
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Folder name'),
         'Deploy',
       );
       await tester.tap(find.text('Create'));
