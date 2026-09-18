@@ -715,7 +715,11 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: 'stable'
-          cache: true
+          # Cold Windows builds finish in ~9 minutes, but archiving the SDK
+          # and pub cache afterward has cancelled otherwise successful jobs.
+          # Download them directly so cache compression cannot reject a merge.
+          cache: false
+          pub-cache: false
 
       - name: Install dependencies
         run: flutter pub get
