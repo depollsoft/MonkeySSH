@@ -240,7 +240,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.deployment-cancel-in-progress }}
 
 env:
-  FLUTTER_VERSION: '3.44.8'
+  FLUTTER_VERSION: '3.47.4'
 
 jobs:
   validate-build-inputs:

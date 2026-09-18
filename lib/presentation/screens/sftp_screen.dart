@@ -450,9 +450,10 @@ String? formatRemoteModifiedTime(int? modifyTime) {
   if (modifyTime == null) {
     return null;
   }
-  return DateTime.fromMillisecondsSinceEpoch(
-    modifyTime * 1000,
-  ).toString().split('.').first;
+  return DateTime.fromMillisecondsSinceEpoch(modifyTime * 1000)
+      .toString()
+      .split('.')
+      .first;
 }
 
 /// Returns an error when a picker-provided upload name is not a single file.
@@ -599,8 +600,9 @@ class RemoteFileSelection {
 
 /// Returns null when a remote file can be selected, or a short user-facing
 /// reason when it should remain visible but unavailable.
-typedef RemoteFileSelectionAvailability =
-    String? Function(RemoteFileSelection file);
+typedef RemoteFileSelectionAvailability = String? Function(
+  RemoteFileSelection file,
+);
 
 /// Configures SFTP remote-file selection mode.
 ///
@@ -1302,7 +1304,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         'reconnect_success',
         fields: {'connectionId': connectionId},
       );
-      return _loadDirectory(
+      return await _loadDirectory(
         path,
         requestGeneration: request,
         nextHistory: nextHistory,
@@ -1703,9 +1705,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   void _showMessage(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2568,9 +2569,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         final message = selectedFiles.length == 1
             ? 'Uploaded "${selectedFiles.single.name}"'
             : 'Uploaded ${selectedFiles.length} files';
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(message)));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(message)));
       }
     }
     unawaited(
@@ -3411,9 +3411,8 @@ class _InfoRow extends StatelessWidget {
           width: 80,
           child: Text(
             label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.outline,
-            ),
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: Theme.of(context).colorScheme.outline),
           ),
         ),
         Expanded(
@@ -3951,9 +3950,8 @@ class _RemoteImageViewerScreen extends StatelessWidget {
                   fit: BoxFit.contain,
                   errorBuilder: (context, error, stackTrace) => Text(
                     'Could not render image preview',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: Colors.white),
+                    style: Theme.of(context).textTheme.bodyMedium
+                        ?.copyWith(color: Colors.white),
                   ),
                 ),
         ),

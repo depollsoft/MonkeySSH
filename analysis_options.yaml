@@ -17,6 +17,11 @@ analyzer:
     - ".dart_tool/**"
     # Vendored upstream code keeps its own analysis_options.yaml.
     - "third_party/**"
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   rules:
@@ -47,7 +52,6 @@ linter:
     - avoid_implementing_value_types
     - avoid_multiple_declarations_per_line
     - avoid_positional_boolean_parameters
-    - avoid_private_typedef_functions
     - avoid_redundant_argument_values
     - avoid_returning_this
     - avoid_setters_without_getters
@@ -87,7 +91,6 @@ linter:
     - sort_unnamed_constructors_first
     - type_annotate_public_apis
     - unawaited_futures
-    - unnecessary_await_in_return
     - unnecessary_lambdas
     - unnecessary_null_aware_assignments
     - unnecessary_null_checks

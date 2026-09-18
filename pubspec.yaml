@@ -8,7 +8,7 @@ publish_to: 'none'
 version: 0.7.1+1
 
 environment:
-  sdk: ^3.12.0
+  sdk: ^3.13.0
 
 dependencies:
   flutter:
@@ -88,18 +88,13 @@ dependencies:
   network_info_plus: ^8.2.1
   permission_handler: ^13.0.2
   wakelock_plus: ^1.8.0
-  sqlite3: ^3.5.2
+  sqlite3: ^3.6.0
   firebase_core: ^4.15.0
   firebase_analytics: ^12.6.0
   firebase_crashlytics: ^5.4.0
   mime: ^2.1.0
 
 dependency_overrides:
-  # material_ui 1.3.0 and cupertino_ui 1.1.0 use @awaitNotRequired, which
-  # landed in Flutter 3.47. Pin the last versions that compile on 3.44.8:
-  # https://github.com/flutter/flutter/issues/192839
-  material_ui: 1.2.0
-  cupertino_ui: 1.0.2
   # Play Billing can invoke one callback twice and crash Android while the app
   # is backgrounded. Use the vendored upstream single-reply guard until Flutter
   # packages releases it: https://github.com/flutter/packages/pull/12640
@@ -120,7 +115,7 @@ dev_dependencies:
   flutter_lints: ^6.0.0
 
   # Code generation
-  build_runner: ^2.15.1
+  build_runner: ^2.16.1
   drift_dev: ^2.35.0
 
   # Testing

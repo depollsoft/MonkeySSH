@@ -1451,24 +1451,27 @@ class SshConnectionCancellationToken {
 }
 
 /// Progress callback for long-running SSH connection attempts.
-typedef ConnectionProgressCallback =
-    void Function(ConnectionProgressUpdate update);
+typedef ConnectionProgressCallback = void Function(
+  ConnectionProgressUpdate update,
+);
 
 /// Connects a raw SSH socket for the requested host.
-typedef SshSocketConnector =
-    Future<SSHSocket> Function(String host, int port, {Duration? timeout});
+typedef SshSocketConnector = Future<SSHSocket> Function(
+  String host,
+  int port, {
+  Duration? timeout,
+});
 
 /// Creates an [SSHClient] for a prepared socket.
-typedef SshClientFactory =
-    SSHClient Function(
-      SSHSocket socket, {
-      required String username,
-      SSHHostkeyVerifyHandler? onVerifyHostKey,
-      SSHPasswordRequestHandler? onPasswordRequest,
-      SSHUserInfoRequestHandler? onUserInfoRequest,
-      List<SSHKeyPair>? identities,
-      Duration? keepAliveInterval,
-    });
+typedef SshClientFactory = SSHClient Function(
+  SSHSocket socket, {
+  required String username,
+  SSHHostkeyVerifyHandler? onVerifyHostKey,
+  SSHPasswordRequestHandler? onPasswordRequest,
+  SSHUserInfoRequestHandler? onUserInfoRequest,
+  List<SSHKeyPair>? identities,
+  Duration? keepAliveInterval,
+});
 
 /// Exposes the raw SSH host key bytes observed during the handshake.
 abstract interface class HostKeySource {
@@ -1682,7 +1685,7 @@ class SshService {
       );
 
       if (isAppReviewDemoHost(host)) {
-        return _connectToAppReviewDemoHost(
+        return await _connectToAppReviewDemoHost(
           host,
           useHostThemeOverrides: useHostThemeOverrides,
           onProgress: onProgress,
@@ -2253,8 +2256,7 @@ class SshService {
         SSHHostkeyError(:final message) =>
           'Host key verification failed: $message',
         SSHAuthFailError(:final message) => 'Authentication failed: $message',
-        SSHChannelOpenError() =>
-          'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
+        SSHChannelOpenError() => 'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
         SSHError() => 'The SSH connection failed. Reconnect to try again.',
         SocketException(:final message) => 'Connection failed: $message',
         TimeoutException(:final message) => message ?? 'Connection timed out',
@@ -2908,28 +2910,27 @@ Future<void> _relayForward(
     }, onError: failed),
   );
   try {
-    final opening = Future<SSHForwardChannel?>.sync(openChannel).then((
-      channel,
-    ) {
-      if (channel == null) return null;
-      if (finished) {
-        destroy(channel);
-        return null;
-      }
-      unawaited(
-        channel.sink.done.then<void>(
-          (_) {
-            forwardSinkClosed = true;
-            if (!closingForwardSink) closed();
-          },
-          onError: (Object error, StackTrace stackTrace) {
-            forwardSinkClosed = true;
-            failed(error, stackTrace);
-          },
-        ),
-      );
-      return forward = channel;
-    });
+    final opening = Future<SSHForwardChannel?>.sync(openChannel)
+        .then((channel) {
+          if (channel == null) return null;
+          if (finished) {
+            destroy(channel);
+            return null;
+          }
+          unawaited(
+            channel.sink.done.then<void>(
+              (_) {
+                forwardSinkClosed = true;
+                if (!closingForwardSink) closed();
+              },
+              onError: (Object error, StackTrace stackTrace) {
+                forwardSinkClosed = true;
+                failed(error, stackTrace);
+              },
+            ),
+          );
+          return forward = channel;
+        });
     outgoing = StreamIterator(socket);
     final source = outgoing;
     final socketToForward = () async {
@@ -8965,9 +8966,10 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       return;
     }
     state = {...state};
-    final hostSessions = getConnectionsForHost(
-      hostId,
-    ).map(getSession).whereType<SshSession>().toList(growable: false);
+    final hostSessions = getConnectionsForHost(hostId)
+        .map(getSession)
+        .whereType<SshSession>()
+        .toList(growable: false);
     final manualRemoteListeners = _manualListenerExclusions(
       hostSessions.expand((session) => session.activeTunnels),
     );
