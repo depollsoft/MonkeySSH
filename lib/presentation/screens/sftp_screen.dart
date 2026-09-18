@@ -130,7 +130,9 @@ Future<T> withSftpOperationTimeout<T>(
 String sftpTimeoutMessage(String action) =>
     'Timed out $action. The SSH connection may be stale; reconnect and try again.';
 
-Future<int?> _selectedUploadSizeBytes(List<PlatformFile> files) async {
+/// Sums picker-reported sizes, or `null` when any file's length is unknown.
+@visibleForTesting
+Future<int?> selectedUploadSizeBytes(List<PlatformFile> files) async {
   var total = 0;
   try {
     for (final file in files) {
@@ -2500,7 +2502,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         telemetryService.logSftpTransferFailed(
           direction: 'upload',
           fileCount: selectedFiles.length,
-          sizeBytes: await _selectedUploadSizeBytes(selectedFiles),
+          sizeBytes: await selectedUploadSizeBytes(selectedFiles),
           duration: Duration.zero,
           failureCategory: 'invalid_name',
         ),
@@ -2516,7 +2518,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     final startedAt = DateTime.now();
-    final sizeBytes = await _selectedUploadSizeBytes(selectedFiles);
+    final sizeBytes = await selectedUploadSizeBytes(selectedFiles);
     if (!mounted || _sftp == null) {
       return;
     }

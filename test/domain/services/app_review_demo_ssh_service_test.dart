@@ -5,6 +5,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
+// dartssh2 exports downloadToRandomAccess only through this IO library.
+// The public barrel's conditional export is invisible to flutter analyze.
 import 'package:dartssh2/src/sftp/sftp_file_io.dart';
 
 import 'package:drift/drift.dart' hide isNotNull, isNull;

@@ -760,6 +760,26 @@ void main() {
       );
     });
 
+    test('treats unknown picker lengths as an unknown upload size', () async {
+      expect(
+        await selectedUploadSizeBytes([
+          AppPlatformFile(name: 'a.txt', size: 3),
+          AppPlatformFile(name: 'b.txt', size: 4),
+        ]),
+        7,
+      );
+
+      final broken = _MockXFile();
+      when(broken.length).thenThrow(const FileSystemException('stat failed'));
+      expect(
+        await selectedUploadSizeBytes([
+          AppPlatformFile(name: 'a.txt', size: 3),
+          AppPlatformFile(name: 'unknown.bin', xFile: broken),
+        ]),
+        isNull,
+      );
+    });
+
     test('rejects picker names that can escape the upload directory', () {
       expect(validateSftpUploadFileName('notes.txt'), isNull);
       expect(validateSftpUploadFileName('..'), isNotNull);
