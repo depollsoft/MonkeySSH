@@ -27,7 +27,8 @@ type terminalScreen struct {
 	// rendered to escape sequences (attributes included, rendition left at
 	// default). Bytes are far cheaper than cell rows and are exactly what
 	// RenderFrame needs to emit.
-	scrollback [][]byte
+	scrollback      [][]byte
+	scrollbackBytes int
 
 	attrs      vtAttrs
 	top        int // scroll region, 0-based inclusive
@@ -52,6 +53,9 @@ type terminalScreen struct {
 
 const (
 	vtScrollbackLimit = 1000
+	// vtScrollbackByteLimit bounds the rendered scrollback as a whole: a wide
+	// grid with per-cell renditions can make one line tens of kilobytes.
+	vtScrollbackByteLimit = 1 << 20
 	// Bounds on the grid a client can ask for: a malformed size must not
 	// allocate an unbounded pair of cell grids.
 	vtMaxColumns = 4096
@@ -360,8 +364,14 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 func (s *terminalScreen) pushScrollback(row []vtCell) {
 	line := renderVTCells(make([]byte, 0, 64), row, true)
 	s.scrollback = append(s.scrollback, line)
-	if len(s.scrollback) > vtScrollbackLimit {
-		excess := len(s.scrollback) - vtScrollbackLimit
+	s.scrollbackBytes += len(line)
+	excess := 0
+	for len(s.scrollback)-excess > vtScrollbackLimit ||
+		(excess < len(s.scrollback) && s.scrollbackBytes > vtScrollbackByteLimit) {
+		s.scrollbackBytes -= len(s.scrollback[excess])
+		excess++
+	}
+	if excess > 0 {
 		copy(s.scrollback, s.scrollback[excess:])
 		for i := len(s.scrollback) - excess; i < len(s.scrollback); i++ {
 			s.scrollback[i] = nil
@@ -1370,6 +1380,7 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		}
 	case 3:
 		s.scrollback = nil
+		s.scrollbackBytes = 0
 	}
 	g.pendingWrap = false
 }

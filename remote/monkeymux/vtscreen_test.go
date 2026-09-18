@@ -840,3 +840,30 @@ func TestKittyPlaceholderDiacriticsMatchClient(t *testing.T) {
 		t.Fatalf("placeholder marks advanced the cursor: col %d", c)
 	}
 }
+
+func TestVTScreenScrollbackByteBudget(t *testing.T) {
+	s := newTerminalScreen(4000, 2)
+	// Each scrolled line alternates truecolor renditions per cell, so a single
+	// line renders to well over 50 KB.
+	var line strings.Builder
+	for i := 0; i < 4000; i++ {
+		fmt.Fprintf(&line, "\x1b[38;2;%d;%d;%dmx", i%256, (i*7)%256, (i*13)%256)
+	}
+	for i := 0; i < 60; i++ {
+		s.Write([]byte(line.String() + "\x1b[0m\r\n"))
+	}
+	if s.scrollbackBytes > vtScrollbackByteLimit || len(s.scrollback) == 0 {
+		t.Fatalf("scrollback holds %d bytes in %d lines", s.scrollbackBytes, len(s.scrollback))
+	}
+	total := 0
+	for _, kept := range s.scrollback {
+		total += len(kept)
+	}
+	if total != s.scrollbackBytes {
+		t.Fatalf("byte accounting drifted: %d vs %d", total, s.scrollbackBytes)
+	}
+	s.Write([]byte("\x1b[3J"))
+	if s.scrollbackBytes != 0 {
+		t.Fatal("ED 3 must reset the byte accounting")
+	}
+}
