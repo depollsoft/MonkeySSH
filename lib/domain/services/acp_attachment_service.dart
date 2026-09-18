@@ -879,9 +879,8 @@ final class AcpAttachmentPreparationService {
     if (mimeType == null) return;
     final normalized = mimeType.trim();
     if (utf8.encode(normalized).length > limits.maxMimeTypeBytes ||
-        !RegExp(
-          r'^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$',
-        ).hasMatch(normalized)) {
+        !RegExp(r'^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$')
+            .hasMatch(normalized)) {
       throw const AcpAttachmentException(
         AcpAttachmentFailure.invalidMimeType,
         'An attachment has an invalid MIME type.',

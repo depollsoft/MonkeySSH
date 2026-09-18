@@ -34,163 +34,161 @@ const _hasSshImeTestConfig =
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'TerminalScreen IME behavior matches in a real SSH session',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(1400, 1000));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+  testWidgets('TerminalScreen IME behavior matches in a real SSH session', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
 
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final encryptionService = SecretEncryptionService.forTesting();
-      final hostRepository = HostRepository(db, encryptionService);
-      final keyRepository = KeyRepository(db, encryptionService);
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final encryptionService = SecretEncryptionService.forTesting();
+    final hostRepository = HostRepository(db, encryptionService);
+    final keyRepository = KeyRepository(db, encryptionService);
 
-      final privateKey = utf8.decode(base64Decode(_testPrivateKeyBase64));
-      final publicKey = utf8.decode(base64Decode(_testPublicKeyBase64));
-      final keyId = await keyRepository.insert(
-        SshKeysCompanion.insert(
-          name: 'IME SSH Test Key',
-          keyType: 'ed25519',
-          publicKey: publicKey,
-          privateKey: privateKey,
-          passphrase: const Value(null),
-          fingerprint: const Value('ime-ssh-test'),
+    final privateKey = utf8.decode(base64Decode(_testPrivateKeyBase64));
+    final publicKey = utf8.decode(base64Decode(_testPublicKeyBase64));
+    final keyId = await keyRepository.insert(
+      SshKeysCompanion.insert(
+        name: 'IME SSH Test Key',
+        keyType: 'ed25519',
+        publicKey: publicKey,
+        privateKey: privateKey,
+        passphrase: const Value(null),
+        fingerprint: const Value('ime-ssh-test'),
+      ),
+    );
+
+    final hostId = await hostRepository.insert(
+      HostsCompanion.insert(
+        label: 'IME SSH Test Host',
+        hostname: _testHost,
+        port: const Value(_testPort),
+        username: _testUsername,
+        keyId: Value(keyId),
+        password: const Value(null),
+      ),
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        secretEncryptionServiceProvider.overrideWithValue(encryptionService),
+        hostKeyPromptHandlerProvider.overrideWithValue(
+          (_) async => HostKeyTrustDecision.trust,
         ),
-      );
+      ],
+    );
+    addTearDown(container.dispose);
 
-      final hostId = await hostRepository.insert(
-        HostsCompanion.insert(
-          label: 'IME SSH Test Host',
-          hostname: _testHost,
-          port: const Value(_testPort),
-          username: _testUsername,
-          keyId: Value(keyId),
-          password: const Value(null),
-        ),
-      );
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(home: TerminalScreen(hostId: hostId)),
+      ),
+    );
 
-      final container = ProviderContainer(
-        overrides: [
-          databaseProvider.overrideWithValue(db),
-          secretEncryptionServiceProvider.overrideWithValue(encryptionService),
-          hostKeyPromptHandlerProvider.overrideWithValue(
-            (_) async => HostKeyTrustDecision.trust,
+    await _pumpUntilConnected(tester);
+    await _focusTerminal(tester);
+
+    final terminal = _terminalFromView(tester);
+
+    await _runRemoteEchoCase(
+      tester,
+      terminal: terminal,
+      readyMarker: 'R1',
+      resultMarker: 'V1',
+      input: () async {
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '\u200B\u200Bteh ',
+            selection: TextSelection.collapsed(offset: 6),
           ),
-        ],
-      );
-      addTearDown(container.dispose);
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '\u200B\u200Bte',
+            selection: TextSelection.collapsed(offset: 4),
+          ),
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '\u200B\u200B the ',
+            selection: TextSelection.collapsed(offset: 7),
+          ),
+        );
+        await _submitNewline(tester);
+      },
+      expectedResult: 'the ',
+    );
 
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(home: TerminalScreen(hostId: hostId)),
-        ),
-      );
+    await _runRemoteEchoCase(
+      tester,
+      terminal: terminal,
+      readyMarker: 'R2',
+      resultMarker: 'V2',
+      input: () async {
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '${_deleteDetectionMarker}hello',
+            selection: TextSelection.collapsed(offset: 7),
+          ),
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '${_deleteDetectionMarker}hell',
+            selection: TextSelection.collapsed(offset: 6),
+          ),
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '${_deleteDetectionMarker}o',
+            selection: TextSelection.collapsed(offset: 3),
+          ),
+        );
+        await _submitNewline(tester);
+      },
+      expectedResult: 'hello',
+    );
 
-      await _pumpUntilConnected(tester);
-      await _focusTerminal(tester);
-
-      final terminal = _terminalFromView(tester);
-
-      await _runRemoteEchoCase(
-        tester,
-        terminal: terminal,
-        readyMarker: 'R1',
-        resultMarker: 'V1',
-        input: () async {
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '\u200B\u200Bteh ',
-              selection: TextSelection.collapsed(offset: 6),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '\u200B\u200Bte',
-              selection: TextSelection.collapsed(offset: 4),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '\u200B\u200B the ',
-              selection: TextSelection.collapsed(offset: 7),
-            ),
-          );
-          await _submitNewline(tester);
-        },
-        expectedResult: 'the ',
-      );
-
-      await _runRemoteEchoCase(
-        tester,
-        terminal: terminal,
-        readyMarker: 'R2',
-        resultMarker: 'V2',
-        input: () async {
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '${_deleteDetectionMarker}hello',
-              selection: TextSelection.collapsed(offset: 7),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '${_deleteDetectionMarker}hell',
-              selection: TextSelection.collapsed(offset: 6),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '${_deleteDetectionMarker}o',
-              selection: TextSelection.collapsed(offset: 3),
-            ),
-          );
-          await _submitNewline(tester);
-        },
-        expectedResult: 'hello',
-      );
-
-      await _runRemoteEchoCase(
-        tester,
-        terminal: terminal,
-        readyMarker: 'R3',
-        resultMarker: 'V3',
-        input: () async {
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '${_deleteDetectionMarker}didnt',
-              selection: TextSelection.collapsed(offset: 7),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '${_deleteDetectionMarker}didn',
-              selection: TextSelection.collapsed(offset: 6),
-            ),
-          );
-          await _updateTerminalEditingValue(
-            tester,
-            const TextEditingValue(
-              text: '$_deleteDetectionMarker test',
-              selection: TextSelection.collapsed(offset: 7),
-            ),
-          );
-          await _submitNewline(tester);
-        },
-        expectedResult: 'didntest',
-      );
-    },
-    skip: !_hasSshImeTestConfig,
-  );
+    await _runRemoteEchoCase(
+      tester,
+      terminal: terminal,
+      readyMarker: 'R3',
+      resultMarker: 'V3',
+      input: () async {
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '${_deleteDetectionMarker}didnt',
+            selection: TextSelection.collapsed(offset: 7),
+          ),
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '${_deleteDetectionMarker}didn',
+            selection: TextSelection.collapsed(offset: 6),
+          ),
+        );
+        await _updateTerminalEditingValue(
+          tester,
+          const TextEditingValue(
+            text: '$_deleteDetectionMarker test',
+            selection: TextSelection.collapsed(offset: 7),
+          ),
+        );
+        await _submitNewline(tester);
+      },
+      expectedResult: 'didntest',
+    );
+  }, skip: !_hasSshImeTestConfig);
 }
 
 Future<void> _pumpUntilConnected(WidgetTester tester) async {

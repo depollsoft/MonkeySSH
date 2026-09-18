@@ -46,12 +46,10 @@ final class AcpBridgeSession {
     required this.client,
     required this.transportStates,
     required this.transportErrors,
-    required Future<void> Function() onClose,
-    bool Function()? skippedHistoricalReplay,
-    int Function()? lastDeliveredSequence,
-  }) : _onClose = onClose,
-       _skippedHistoricalReplay = skippedHistoricalReplay,
-       _lastDeliveredSequence = lastDeliveredSequence;
+    required this._onClose,
+    this._skippedHistoricalReplay,
+    this._lastDeliveredSequence,
+  });
 
   /// Typed ACP client bound to the bridge transport.
   final AcpClient client;
@@ -136,16 +134,15 @@ abstract interface class AcpBridgeConnector {
 final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
   /// Creates a connector.
   ///
-  /// [sessionResolver] resolves the active [SshSession] for a saved host. It
+  /// [_sessionResolver] resolves the active [SshSession] for a saved host. It
   /// is invoked lazily so a bridge attachment can transparently reconnect
   /// through a freshly re-established SSH session.
   MonkeyMuxAcpBridgeConnector({
-    required MonkeyMuxAcpBridgeService bridgeService,
-    required Future<SshSession> Function(int hostId) sessionResolver,
+    required this._bridgeService,
+    required this._sessionResolver,
     this.defaultRequestTimeout = const Duration(seconds: 60),
     this.capabilityLimits = const AcpClientCapabilityLimits(),
-  }) : _bridgeService = bridgeService,
-       _sessionResolver = sessionResolver;
+  });
 
   final MonkeyMuxAcpBridgeService _bridgeService;
   final Future<SshSession> Function(int hostId) _sessionResolver;

@@ -52,9 +52,9 @@ void main() {
         await tester.pump();
         if (composing) {
           expect(harness.terminalOutput, isEmpty);
-          (tester.state(find.byType(TerminalTextInputHandler))
-                  as TextInputClient)
-              .performAction(TextInputAction.newline);
+          (tester.state(
+            find.byType(TerminalTextInputHandler),
+          ) as TextInputClient).performAction(TextInputAction.newline);
           await tester.pump();
         }
 
@@ -109,9 +109,9 @@ void main() {
             );
             await tester.pump();
           }
-          (tester.state(find.byType(TerminalTextInputHandler))
-                  as TextInputClient)
-              .performAction(TextInputAction.newline);
+          (tester.state(
+            find.byType(TerminalTextInputHandler),
+          ) as TextInputClient).performAction(TextInputAction.newline);
           await tester.pump();
 
           expect(harness.terminalOutput, [
@@ -137,9 +137,9 @@ void main() {
       await tester.pump();
       switch (reset) {
         case 'Return':
-          (tester.state(find.byType(TerminalTextInputHandler))
-                  as TextInputClient)
-              .performAction(TextInputAction.newline);
+          (tester.state(
+            find.byType(TerminalTextInputHandler),
+          ) as TextInputClient).performAction(TextInputAction.newline);
         case 'toolbar key':
           harness.controller.clearImeBuffer();
         case 'connection':
@@ -235,43 +235,41 @@ void main() {
   }
 
   for (final repeat in [false, true]) {
-    testWidgets(
-      'ends framing on raw Android Backspace, repeat: $repeat',
-      (tester) async {
-        final harness = await pumpTerminalInputHarness(
-          tester,
-          initialTerminalOutput: '\x1b[?2004h',
-        );
-        tester.testTextInput.updateEditingValue(_editingValue('hello'));
-        await tester.pump();
+    testWidgets('ends framing on raw Android Backspace, repeat: $repeat', (
+      tester,
+    ) async {
+      final harness = await pumpTerminalInputHarness(
+        tester,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+      tester.testTextInput.updateEditingValue(_editingValue('hello'));
+      await tester.pump();
+      harness.controller.debugHandleAndroidImeKey(
+        TerminalKey.backspace,
+        TerminalKeyEventType.press,
+      );
+      if (repeat) {
         harness.controller.debugHandleAndroidImeKey(
           TerminalKey.backspace,
-          TerminalKeyEventType.press,
+          TerminalKeyEventType.repeat,
         );
-        if (repeat) {
-          harness.controller.debugHandleAndroidImeKey(
-            TerminalKey.backspace,
-            TerminalKeyEventType.repeat,
-          );
-        }
-        harness.controller.debugHandleAndroidImeKey(
-          TerminalKey.backspace,
-          TerminalKeyEventType.release,
-        );
-        // Some IMEs never send the editing-value deletion after raw Backspace.
-        tester.testTextInput.updateEditingValue(_editingValue('hello?'));
-        await tester.pump();
+      }
+      harness.controller.debugHandleAndroidImeKey(
+        TerminalKey.backspace,
+        TerminalKeyEventType.release,
+      );
+      // Some IMEs never send the editing-value deletion after raw Backspace.
+      tester.testTextInput.updateEditingValue(_editingValue('hello?'));
+      await tester.pump();
 
-        expect(harness.terminalOutput, [
-          '\x1b[200~hello\x1b[201~',
-          '\x7f',
-          if (repeat) '\x7f',
-          '?',
-        ]);
-        await disposeTerminalInputHarness(tester, harness);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.android),
-    );
+      expect(harness.terminalOutput, [
+        '\x1b[200~hello\x1b[201~',
+        '\x7f',
+        if (repeat) '\x7f',
+        '?',
+      ]);
+      await disposeTerminalInputHarness(tester, harness);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
   }
 
   for (final composing in [false, true]) {

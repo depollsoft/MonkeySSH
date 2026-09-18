@@ -93,9 +93,8 @@ class _AcpCodeBlockState extends State<AcpCodeBlock> {
     final scheme = theme.colorScheme;
     final syntaxTheme =
         widget.syntaxTheme ?? defaultAcpSyntaxTheme(theme.brightness);
-    final baseStyle = AcpChatTypography.monoStyleOf(
-      context,
-    ).copyWith(color: scheme.onSurface, height: 1.4);
+    final baseStyle = AcpChatTypography.monoStyleOf(context)
+        .copyWith(color: scheme.onSurface, height: 1.4);
     final language = widget.language;
 
     return Semantics(
@@ -172,9 +171,8 @@ class _CodeBlockHeader extends StatelessWidget {
           Expanded(
             child: Text(
               language != null && language!.isNotEmpty ? language! : 'text',
-              style: AcpChatTypography.monoStyleOf(
-                context,
-              ).copyWith(fontSize: 11, color: scheme.onSurfaceVariant),
+              style: AcpChatTypography.monoStyleOf(context)
+                  .copyWith(fontSize: 11, color: scheme.onSurfaceVariant),
             ),
           ),
           Tooltip(

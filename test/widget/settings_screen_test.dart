@@ -119,12 +119,10 @@ Future<void> _pumpSettingsScreen(
       );
   final billing = _MockMonetizationService();
   when(() => billing.currentState).thenReturn(access);
-  when(
-    () => billing.canUseFeature(MonetizationFeature.agentManagement),
-  ).thenAnswer((_) async => pro ?? false);
-  when(
-    () => billing.canUseFeature(MonetizationFeature.migrationImportExport),
-  ).thenAnswer((_) async => pro ?? false);
+  when(() => billing.canUseFeature(MonetizationFeature.agentManagement))
+      .thenAnswer((_) async => pro ?? false);
+  when(() => billing.canUseFeature(MonetizationFeature.migrationImportExport))
+      .thenAnswer((_) async => pro ?? false);
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -179,35 +177,33 @@ void main() {
     });
 
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
-      testWidgets(
-        'explains platform-specific local clipboard reads',
-        (tester) async {
-          final db = AppDatabase.forTesting(NativeDatabase.memory());
-          addTearDown(db.close);
-          tester.view.physicalSize = const Size(390, 844);
-          tester.view.devicePixelRatio = 1;
-          addTearDown(tester.view.resetPhysicalSize);
-          addTearDown(tester.view.resetDevicePixelRatio);
-          await _pumpSettingsScreen(tester, db: db);
-          await tester.scrollUntilVisible(
-            find.text('Remote can read clipboard'),
-            300,
-            scrollable: find.byType(Scrollable).first,
-          );
-          await tester.pumpAndSettle();
-          expect(
-            find.text(
-              platform == TargetPlatform.iOS
-                  ? 'Allow remote OSC 52 queries to read local clipboard text. '
-                        'The clipboard is not polled automatically on iOS.'
-                  : 'Allow remote OSC 52 queries and clipboard sync to send local clipboard text to the connected host',
-            ),
-            findsOneWidget,
-          );
-          expect(tester.takeException(), isNull);
-        },
-        variant: TargetPlatformVariant.only(platform),
-      );
+      testWidgets('explains platform-specific local clipboard reads', (
+        tester,
+      ) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await _pumpSettingsScreen(tester, db: db);
+        await tester.scrollUntilVisible(
+          find.text('Remote can read clipboard'),
+          300,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.text(
+            platform == TargetPlatform.iOS
+                ? 'Allow remote OSC 52 queries to read local clipboard text. '
+                      'The clipboard is not polled automatically on iOS.'
+                : 'Allow remote OSC 52 queries and clipboard sync to send local clipboard text to the connected host',
+          ),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }, variant: TargetPlatformVariant.only(platform));
     }
 
     testWidgets('displays all sections', (tester) async {
@@ -323,9 +319,8 @@ void main() {
 
       expect(tester.widget<SwitchListTile>(tile).value, isFalse);
       expect(
-        await SettingsService(
-          db,
-        ).getBool(SettingKeys.agentUpdateNotifications, defaultValue: true),
+        await SettingsService(db)
+            .getBool(SettingKeys.agentUpdateNotifications, defaultValue: true),
         isFalse,
       );
     });
@@ -373,9 +368,8 @@ void main() {
 
       expect(find.textContaining('Prefer native chat'), findsOneWidget);
       expect(
-        await SettingsService(
-          db,
-        ).getString(SettingKeys.agentWindowModePreference),
+        await SettingsService(db)
+            .getString(SettingKeys.agentWindowModePreference),
         'native',
       );
     });
@@ -405,9 +399,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        await SettingsService(
-          db,
-        ).getBool(SettingKeys.shellCompletions, defaultValue: true),
+        await SettingsService(db)
+            .getBool(SettingKeys.shellCompletions, defaultValue: true),
         isFalse,
       );
     });
@@ -437,9 +430,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        await SettingsService(
-          db,
-        ).getBool(SettingKeys.portForwardBrowserLinks, defaultValue: true),
+        await SettingsService(db)
+            .getBool(SettingKeys.portForwardBrowserLinks, defaultValue: true),
         isFalse,
       );
     });
@@ -466,9 +458,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        await SettingsService(
-          db,
-        ).getBool(SettingKeys.terminalNotifications, defaultValue: true),
+        await SettingsService(db)
+            .getBool(SettingKeys.terminalNotifications, defaultValue: true),
         isFalse,
       );
     });
@@ -478,9 +469,8 @@ void main() {
     ) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      await SettingsService(
-        db,
-      ).setBool(SettingKeys.monetizationProUnlocked, value: true);
+      await SettingsService(db)
+          .setBool(SettingKeys.monetizationProUnlocked, value: true);
 
       await _pumpSettingsScreen(tester, db: db);
 

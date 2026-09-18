@@ -44,15 +44,17 @@ Write-Output 'CONNECTION_CAN_CONTINUE'
 ''',
     );
     try {
-      final result =
-          await Process.run(Platform.isWindows ? 'powershell.exe' : 'pwsh', [
-            '-NoProfile',
-            '-NonInteractive',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            script.path,
-          ]).timeout(const Duration(seconds: 20));
+      final result = await Process.run(
+        Platform.isWindows ? 'powershell.exe' : 'pwsh',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          script.path,
+        ],
+      ).timeout(const Duration(seconds: 20));
       expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
       expect(result.stdout, contains('CONNECTION_CAN_CONTINUE'));
       return result;
@@ -180,61 +182,53 @@ Write-Output 'CONNECTION_CAN_CONTINUE'
     expect(previous.existsSync(), isTrue);
   });
 
-  test(
-    'Windows locked builds survive and are pruned after release',
-    () async {
-      final current = await binary('0.2.0/windows-amd64/$digest');
-      final locked = await binary('0.1.0/windows-amd64/$digest');
-      final result = await runCleanup(
-        current,
-        before:
-            '\$lock = [IO.File]::Open(${powerShellSingleQuote(locked.path)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)',
-        after: r'$lock.Dispose()',
-      );
-      expect(result!.stdout, contains('MONKEYMUX_CLEANUP:0:1'));
-      expect(locked.existsSync(), isTrue);
-      expect(
-        (await runCleanup(current))!.stdout,
-        contains('MONKEYMUX_CLEANUP:1:0'),
-      );
-      expect(locked.parent.existsSync(), isFalse);
-    },
-    skip: !Platform.isWindows,
-  );
+  test('Windows locked builds survive and are pruned after release', () async {
+    final current = await binary('0.2.0/windows-amd64/$digest');
+    final locked = await binary('0.1.0/windows-amd64/$digest');
+    final result = await runCleanup(
+      current,
+      before:
+          '\$lock = [IO.File]::Open(${powerShellSingleQuote(locked.path)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)',
+      after: r'$lock.Dispose()',
+    );
+    expect(result!.stdout, contains('MONKEYMUX_CLEANUP:0:1'));
+    expect(locked.existsSync(), isTrue);
+    expect(
+      (await runCleanup(current))!.stdout,
+      contains('MONKEYMUX_CLEANUP:1:0'),
+    );
+    expect(locked.parent.existsSync(), isFalse);
+  }, skip: !Platform.isWindows);
 
-  test(
-    'Windows running executable survives until its process exits',
-    () async {
-      final current = await binary('0.2.0/windows-amd64/$digest');
-      final running = await binary('0.1.0/windows-amd64/$digest');
-      await File(Platform.environment['ComSpec']!).copy(running.path);
-      await running.setLastModified(old);
-      final process = await Process.start(running.path, ['/d', '/q']);
-      final ready = Completer<void>();
-      final output = process.stdout.listen((_) {
-        if (!ready.isCompleted) ready.complete();
-      });
-      final errors = process.stderr.listen((_) {});
-      try {
-        process.stdin.writeln('echo MONKEYMUX_READY');
-        await process.stdin.flush();
-        await ready.future.timeout(const Duration(seconds: 10));
-        final result = await runCleanup(current);
-        expect(result!.stdout, contains('MONKEYMUX_CLEANUP:0:1'));
-        expect(running.existsSync(), isTrue);
-      } finally {
-        process.kill();
-        await process.exitCode;
-        await process.stdin.close();
-        await output.cancel();
-        await errors.cancel();
-      }
-      expect(
-        (await runCleanup(current))!.stdout,
-        contains('MONKEYMUX_CLEANUP:1:0'),
-      );
-      expect(running.parent.existsSync(), isFalse);
-    },
-    skip: !Platform.isWindows,
-  );
+  test('Windows running executable survives until its process exits', () async {
+    final current = await binary('0.2.0/windows-amd64/$digest');
+    final running = await binary('0.1.0/windows-amd64/$digest');
+    await File(Platform.environment['ComSpec']!).copy(running.path);
+    await running.setLastModified(old);
+    final process = await Process.start(running.path, ['/d', '/q']);
+    final ready = Completer<void>();
+    final output = process.stdout.listen((_) {
+      if (!ready.isCompleted) ready.complete();
+    });
+    final errors = process.stderr.listen((_) {});
+    try {
+      process.stdin.writeln('echo MONKEYMUX_READY');
+      await process.stdin.flush();
+      await ready.future.timeout(const Duration(seconds: 10));
+      final result = await runCleanup(current);
+      expect(result!.stdout, contains('MONKEYMUX_CLEANUP:0:1'));
+      expect(running.existsSync(), isTrue);
+    } finally {
+      process.kill();
+      await process.exitCode;
+      await process.stdin.close();
+      await output.cancel();
+      await errors.cancel();
+    }
+    expect(
+      (await runCleanup(current))!.stdout,
+      contains('MONKEYMUX_CLEANUP:1:0'),
+    );
+    expect(running.parent.existsSync(), isFalse);
+  }, skip: !Platform.isWindows);
 }

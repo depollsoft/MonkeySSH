@@ -1295,12 +1295,14 @@ void main() {
         cwd: '/repo',
       );
       final key = (result as AcpSessionLaunchStarted).key;
-      capableConnector.servers[key.bridgeId]!
-          .pushServerRequest('fs/write_text_file', {
-            'sessionId': key.acpSessionId,
-            'path': '/repo/new.txt',
-            'content': 'pending content',
-          });
+      capableConnector.servers[key.bridgeId]!.pushServerRequest(
+        'fs/write_text_file',
+        {
+          'sessionId': key.acpSessionId,
+          'path': '/repo/new.txt',
+          'content': 'pending content',
+        },
+      );
       await _pump();
       expect(
         capableManager.state.byKeyValue(key.value)!.pendingWrites,
@@ -1629,9 +1631,9 @@ void main() {
           cwd: '/repo',
         );
         final second = (secondResult as AcpSessionLaunchStarted).key;
-        final bridge = (await restored.listRemoteBridges(
-          1,
-        )).where((candidate) => candidate.id == first.bridgeId).single;
+        final bridge = (await restored.listRemoteBridges(1))
+            .where((candidate) => candidate.id == first.bridgeId)
+            .single;
 
         final result = await restored.reconnectSession(
           hostId: first.hostId,
@@ -2089,40 +2091,37 @@ void main() {
       },
     );
 
-    test(
-      'resume after helper upgrade recreates an expired bridge and keeps the ACP session id',
-      () async {
-        final key = await startCopilot();
-        await manager.detachSession(key);
-        connector.availableBridges.remove(key.bridgeId);
-        Future<bool> confirmInstall(MonkeyMuxInstallRequest _) async => true;
+    test('resume after helper upgrade recreates an expired bridge and keeps the ACP session id', () async {
+      final key = await startCopilot();
+      await manager.detachSession(key);
+      connector.availableBridges.remove(key.bridgeId);
+      Future<bool> confirmInstall(MonkeyMuxInstallRequest _) async => true;
 
-        final result = await manager.reconnectSession(
-          hostId: key.hostId,
-          providerId: key.providerId,
-          bridgeId: key.bridgeId,
-          acpSessionId: key.acpSessionId,
-          cwd: '/repo',
-          confirmInstall: confirmInstall,
-        );
+      final result = await manager.reconnectSession(
+        hostId: key.hostId,
+        providerId: key.providerId,
+        bridgeId: key.bridgeId,
+        acpSessionId: key.acpSessionId,
+        cwd: '/repo',
+        confirmInstall: confirmInstall,
+      );
 
-        expect(result, isA<AcpSessionLaunchStarted>());
-        final resumedKey = (result as AcpSessionLaunchStarted).key;
-        expect(resumedKey.bridgeId, isNot(key.bridgeId));
-        expect(resumedKey.acpSessionId, key.acpSessionId);
-        expect(connector.startedBridges, hasLength(2));
-        expect(connector.lastListConfirmInstall, same(confirmInstall));
-        expect(
-          connector.servers[resumedKey.bridgeId]!.methods,
-          contains('session/load'),
-        );
-        expect(manager.state.byKeyValue(key.value), isNull);
-        expect(manager.state.byKeyValue(resumedKey.value)!.isLive, isTrue);
-        final recents = await manager.loadRecentSessions();
-        expect(recents.map((recent) => recent.key), contains(resumedKey));
-        expect(recents.map((recent) => recent.key), isNot(contains(key)));
-      },
-    );
+      expect(result, isA<AcpSessionLaunchStarted>());
+      final resumedKey = (result as AcpSessionLaunchStarted).key;
+      expect(resumedKey.bridgeId, isNot(key.bridgeId));
+      expect(resumedKey.acpSessionId, key.acpSessionId);
+      expect(connector.startedBridges, hasLength(2));
+      expect(connector.lastListConfirmInstall, same(confirmInstall));
+      expect(
+        connector.servers[resumedKey.bridgeId]!.methods,
+        contains('session/load'),
+      );
+      expect(manager.state.byKeyValue(key.value), isNull);
+      expect(manager.state.byKeyValue(resumedKey.value)!.isLive, isTrue);
+      final recents = await manager.loadRecentSessions();
+      expect(recents.map((recent) => recent.key), contains(resumedKey));
+      expect(recents.map((recent) => recent.key), isNot(contains(key)));
+    });
 
     test(
       'discovered native session starts a fresh bridge and resumes',

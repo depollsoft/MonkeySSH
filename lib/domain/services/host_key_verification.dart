@@ -19,8 +19,9 @@ enum HostKeyTrustDecision {
 }
 
 /// Callback used to collect a host-key trust decision from the UI.
-typedef HostKeyPromptHandler =
-    Future<HostKeyTrustDecision> Function(HostKeyVerificationRequest request);
+typedef HostKeyPromptHandler = Future<HostKeyTrustDecision> Function(
+  HostKeyVerificationRequest request,
+);
 
 /// An SSH host key presented during connection setup.
 class VerifiedHostKey {
@@ -101,14 +102,11 @@ enum _TrustedHostUpdateMode { touch, upsert }
 /// A deferred persistence action to apply after authentication succeeds.
 class PendingHostTrustUpdate {
   PendingHostTrustUpdate._({
-    required VerifiedHostKey presentedHostKey,
-    required _TrustedHostUpdateMode mode,
-    bool resetFirstSeen = false,
-    bool persistBeforeAuthentication = false,
-  }) : _presentedHostKey = presentedHostKey,
-       _mode = mode,
-       _resetFirstSeen = resetFirstSeen,
-       _persistBeforeAuthentication = persistBeforeAuthentication;
+    required this._presentedHostKey,
+    required this._mode,
+    this._resetFirstSeen = false,
+    this._persistBeforeAuthentication = false,
+  });
 
   /// Creates an update that refreshes the stored host key metadata.
   factory PendingHostTrustUpdate.touch(VerifiedHostKey presentedHostKey) =>
@@ -198,9 +196,9 @@ class HostKeyVerificationException implements Exception {
 class HostKeyVerificationService {
   /// Creates a [HostKeyVerificationService].
   const HostKeyVerificationService({
-    required KnownHostsRepository knownHostsRepository,
+    required this._knownHostsRepository,
     this.promptHandler,
-  }) : _knownHostsRepository = knownHostsRepository;
+  });
 
   final KnownHostsRepository _knownHostsRepository;
 
@@ -327,8 +325,8 @@ bool sshHostTrustMatches({
 class _HostTrustMaterial {
   _HostTrustMaterial({
     required this.encodedHostKey,
-    required Set<String> fingerprints,
-  }) : _fingerprints = fingerprints;
+    required this._fingerprints,
+  });
 
   factory _HostTrustMaterial.fromRecord({
     required String fingerprint,

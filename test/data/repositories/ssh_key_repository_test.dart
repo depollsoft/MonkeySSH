@@ -367,41 +367,44 @@ void main() {
       expect(key, isNull);
     });
 
-    test('insert does not double-encrypt a pre-encrypted private key', () async {
-      const privateKey = 'fixture-open-ssh-material...';
-      final id = await repository.insert(
-        SshKeysCompanion.insert(
-          name: 'Key',
-          keyType: 'ed25519',
-          publicKey: 'ssh-ed25519 AAAA...',
-          privateKey: privateKey,
-        ),
-      );
+    test(
+      'insert does not double-encrypt a pre-encrypted private key',
+      () async {
+        const privateKey = 'fixture-open-ssh-material...';
+        final id = await repository.insert(
+          SshKeysCompanion.insert(
+            name: 'Key',
+            keyType: 'ed25519',
+            publicKey: 'ssh-ed25519 AAAA...',
+            privateKey: privateKey,
+          ),
+        );
 
-      // Read the raw stored row (private key already encrypted by insert).
-      final rawKey = await (db.select(
-        db.sshKeys,
-      )..where((k) => k.id.equals(id))).getSingle();
-      expect(rawKey.privateKey, startsWith('ENCv1:'));
-      final storedEncryptedPrivKey = rawKey.privateKey;
+        // Read the raw stored row (private key already encrypted by insert).
+        final rawKey = await (db.select(
+          db.sshKeys,
+        )..where((k) => k.id.equals(id))).getSingle();
+        expect(rawKey.privateKey, startsWith('ENCv1:'));
+        final storedEncryptedPrivKey = rawKey.privateKey;
 
-      // Reinsert the encrypted row to verify that valid envelopes are preserved.
-      await repository.delete(id);
-      await repository.insert(rawKey.toCompanion(true));
+        // Reinsert the encrypted row to verify that valid envelopes are preserved.
+        await repository.delete(id);
+        await repository.insert(rawKey.toCompanion(true));
 
-      final afterInsert = await (db.select(
-        db.sshKeys,
-      )..where((k) => k.id.equals(id))).getSingle();
-      expect(afterInsert.privateKey, startsWith('ENCv1:'));
-      expect(afterInsert.privateKey, isNot(contains('ENCv1:ENCv1:')));
-      // Service skips re-encrypting a valid envelope, so the stored bytes
-      // must be identical.
-      expect(afterInsert.privateKey, storedEncryptedPrivKey);
+        final afterInsert = await (db.select(
+          db.sshKeys,
+        )..where((k) => k.id.equals(id))).getSingle();
+        expect(afterInsert.privateKey, startsWith('ENCv1:'));
+        expect(afterInsert.privateKey, isNot(contains('ENCv1:ENCv1:')));
+        // Service skips re-encrypting a valid envelope, so the stored bytes
+        // must be identical.
+        expect(afterInsert.privateKey, storedEncryptedPrivKey);
 
-      // Round-trip through the repository must still yield the original key.
-      final decrypted = await repository.getById(id);
-      expect(decrypted!.privateKey, privateKey);
-    });
+        // Round-trip through the repository must still yield the original key.
+        final decrypted = await repository.getById(id);
+        expect(decrypted!.privateKey, privateKey);
+      },
+    );
 
     test('insert does not double-encrypt a pre-encrypted passphrase', () async {
       const privateKey = 'fixture-open-ssh-material...';

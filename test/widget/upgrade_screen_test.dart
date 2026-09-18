@@ -121,23 +121,21 @@ void main() {
         );
       }
 
-      testWidgets(
-        '${link.button} handles a launch failure after disposal',
-        (tester) async {
-          final launch = Completer<bool>();
-          launcher.launchResult = () => launch.future;
-          await showUpgrade(tester);
-          await tester.scrollUntilVisible(find.text(link.button), 300);
-          await tester.tap(find.text(link.button));
-          await tester.pumpWidget(const SizedBox.shrink());
-          launch.completeError(PlatformException(code: 'ACTIVITY_NOT_FOUND'));
-          await tester.pump();
+      testWidgets('${link.button} handles a launch failure after disposal', (
+        tester,
+      ) async {
+        final launch = Completer<bool>();
+        launcher.launchResult = () => launch.future;
+        await showUpgrade(tester);
+        await tester.scrollUntilVisible(find.text(link.button), 300);
+        await tester.tap(find.text(link.button));
+        await tester.pumpWidget(const SizedBox.shrink());
+        launch.completeError(PlatformException(code: 'ACTIVITY_NOT_FOUND'));
+        await tester.pump();
 
-          expect(launcher.launchedUrls, hasLength(1));
-          expect(tester.takeException(), isNull);
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.android),
-      );
+        expect(launcher.launchedUrls, hasLength(1));
+        expect(tester.takeException(), isNull);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
     }
 
     testWidgets(
@@ -226,9 +224,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
 
     await tester.pumpWidget(
@@ -291,9 +288,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
 
     final darkTheme = ThemeData.dark(useMaterial3: true);
@@ -411,9 +407,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
     await tester.pumpWidget(
       ProviderScope(
@@ -466,9 +461,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
 
     await tester.pumpWidget(
@@ -544,9 +538,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
 
     await tester.pumpWidget(
@@ -601,9 +594,8 @@ void main() {
     );
 
     when(() => service.currentState).thenReturn(state);
-    when(
-      () => service.purchaseOffer(any()),
-    ).thenAnswer(_cancelledPurchaseResult);
+    when(() => service.purchaseOffer(any()))
+        .thenAnswer(_cancelledPurchaseResult);
     _stubRestorePurchases(service);
 
     await tester.pumpWidget(
@@ -655,9 +647,8 @@ void main() {
             debugUnlocked: false,
           );
           when(() => service.currentState).thenReturn(state);
-          when(
-            () => service.purchaseOffer('monthly'),
-          ).thenAnswer((_) => purchase.future);
+          when(() => service.purchaseOffer('monthly'))
+              .thenAnswer((_) => purchase.future);
           _stubRestorePurchases(service);
 
           await tester.pumpWidget(
@@ -718,9 +709,8 @@ void main() {
       );
 
       when(() => service.currentState).thenReturn(state);
-      when(
-        () => service.purchaseOffer(any()),
-      ).thenAnswer(_cancelledPurchaseResult);
+      when(() => service.purchaseOffer(any()))
+          .thenAnswer(_cancelledPurchaseResult);
       _stubRestorePurchases(service);
 
       await tester.pumpWidget(

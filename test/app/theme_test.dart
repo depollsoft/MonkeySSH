@@ -112,9 +112,9 @@ void main() {
     });
 
     test('bundles regular and italic fonts and their OFL notices', () async {
-      final manifest =
-          jsonDecode(await rootBundle.loadString('FontManifest.json'))
-              as List<dynamic>;
+      final manifest = jsonDecode(
+        await rootBundle.loadString('FontManifest.json'),
+      ) as List<dynamic>;
       for (final (family, filename, license) in [
         ('Inter', 'Inter', 'OFL-Inter.txt'),
         ('JetBrains Mono', 'JetBrainsMono', 'OFL-JetBrainsMono.txt'),

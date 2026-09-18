@@ -42,20 +42,17 @@ class _AppReviewDemoScreenState extends ConsumerState<AppReviewDemoScreen> {
               _DemoFeatureTile(
                 icon: Icons.dns_outlined,
                 title: 'Hosts and jump host',
-                description:
-                    'A MonkeyMux workspace, an agent workspace, an SFTP host, and a bastion jump host.',
+                description: 'A MonkeyMux workspace, an agent workspace, an SFTP host, and a bastion jump host.',
               ),
               _DemoFeatureTile(
                 icon: Icons.key_outlined,
                 title: 'Key, snippets, and automation',
-                description:
-                    'A sample SSH key, review snippets, auto-connect review prompts, and coding-agent launch presets.',
+                description: 'A sample SSH key, review snippets, auto-connect review prompts, and coding-agent launch presets.',
               ),
               _DemoFeatureTile(
                 icon: Icons.alt_route_outlined,
                 title: 'Tunnels and Pro configuration examples',
-                description:
-                    'Local port-forward rules, host-specific terminal themes, and saved CLI YOLO preferences.',
+                description: 'Local port-forward rules, host-specific terminal themes, and saved CLI YOLO preferences.',
               ),
             ],
           ),
@@ -66,20 +63,17 @@ class _AppReviewDemoScreenState extends ConsumerState<AppReviewDemoScreen> {
               const _DemoInstructionTile(
                 number: '1',
                 title: 'Load the sample workspace',
-                description:
-                    'Tap the primary button above. It only adds local sample data and never contacts an external server.',
+                description: 'Tap the primary button above. It only adds local sample data and never contacts an external server.',
               ),
               const _DemoInstructionTile(
                 number: '2',
                 title: 'Open the seeded app surfaces',
-                description:
-                    'Use Hosts, Keys, Snippets, and Port Forwards to inspect the pre-populated content.',
+                description: 'Use Hosts, Keys, Snippets, and Port Forwards to inspect the pre-populated content.',
               ),
               const _DemoInstructionTile(
                 number: '3',
                 title: 'Review connection-dependent controls',
-                description:
-                    'Tap a seeded host to open an in-app local demo shell with sample SFTP files and tunnel responses.',
+                description: 'Tap a seeded host to open an in-app local demo shell with sample SFTP files and tunnel responses.',
               ),
               const SizedBox(height: 8),
               Padding(

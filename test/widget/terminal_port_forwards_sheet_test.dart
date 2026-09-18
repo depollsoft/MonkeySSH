@@ -320,20 +320,17 @@ void main() {
     );
     addTearDown(session.changes.close);
     addTearDown(automaticOwner.changes.close);
-    when(
-      () => repository.watchByHostId(session.hostId),
-    ).thenAnswer((_) => Stream.value([_portForward()]));
-    when(
-      () => repository.insert(any()),
-    ).thenAnswer((_) => insertCompleter.future);
+    when(() => repository.watchByHostId(session.hostId))
+        .thenAnswer((_) => Stream.value([_portForward()]));
+    when(() => repository.insert(any()))
+        .thenAnswer((_) => insertCompleter.future);
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           portForwardRepositoryProvider.overrideWithValue(repository),
-          hostByIdProvider(
-            session.hostId,
-          ).overrideWith((ref) => Stream.value(_host())),
+          hostByIdProvider(session.hostId)
+              .overrideWith((ref) => Stream.value(_host())),
           activeSessionsProvider.overrideWith(
             () => _TestActiveSessionsNotifier([session, automaticOwner]),
           ),
@@ -495,9 +492,8 @@ void main() {
       addTearDown(hosts.close);
       final notifier = _TestActiveSessionsNotifier([session]);
 
-      when(
-        () => portForwardRepository.watchByHostId(session.hostId),
-      ).thenAnswer((_) => Stream.value([_portForward()]));
+      when(() => portForwardRepository.watchByHostId(session.hostId))
+          .thenAnswer((_) => Stream.value([_portForward()]));
       when(
         () => hostRepository.setAutoForwardPorts(
           any(),
@@ -558,9 +554,8 @@ void main() {
       await tester.tap(autoSwitch);
       await tester.pumpAndSettle();
 
-      verify(
-        () => hostRepository.setAutoForwardPorts(10, enabled: true),
-      ).called(1);
+      verify(() => hostRepository.setAutoForwardPorts(10, enabled: true))
+          .called(1);
       expect(notifier.reconfiguredHostIds, [10]);
       expect(tester.widget<SwitchListTile>(autoSwitch).value, isTrue);
       expect(
@@ -585,9 +580,8 @@ void main() {
     final notifier = _TestActiveSessionsNotifier([session]);
 
     // Saved forwards never resolve, so the sheet stays in its loading state.
-    when(
-      () => portForwardRepository.watchByHostId(session.hostId),
-    ).thenAnswer((_) => const Stream<List<PortForward>>.empty());
+    when(() => portForwardRepository.watchByHostId(session.hostId))
+        .thenAnswer((_) => const Stream<List<PortForward>>.empty());
     when(
       () => hostRepository.setAutoForwardPorts(
         any(),
@@ -617,9 +611,8 @@ void main() {
     await tester.tap(autoSwitch);
     await tester.pumpAndSettle();
 
-    verify(
-      () => hostRepository.setAutoForwardPorts(10, enabled: true),
-    ).called(1);
+    verify(() => hostRepository.setAutoForwardPorts(10, enabled: true))
+        .called(1);
     expect(notifier.reconfiguredHostIds, [10]);
   });
 
@@ -635,9 +628,8 @@ void main() {
     );
     addTearDown(session.changes.close);
 
-    when(
-      () => portForwardRepository.watchByHostId(session.hostId),
-    ).thenAnswer((_) => Stream.value([_portForward()]));
+    when(() => portForwardRepository.watchByHostId(session.hostId))
+        .thenAnswer((_) => Stream.value([_portForward()]));
 
     await tester.pumpWidget(
       _buildSheetHost(
@@ -674,9 +666,8 @@ void main() {
     final notifier = _TestActiveSessionsNotifier([session]);
     final saveCompleter = Completer<bool>();
 
-    when(
-      () => portForwardRepository.watchByHostId(session.hostId),
-    ).thenAnswer((_) => Stream.value([_portForward()]));
+    when(() => portForwardRepository.watchByHostId(session.hostId))
+        .thenAnswer((_) => Stream.value([_portForward()]));
     when(
       () => hostRepository.setAutoForwardPorts(
         any(),

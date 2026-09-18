@@ -99,8 +99,10 @@ int? resolveTerminalWheelRowsPerEvent({
   return bestScore >= 2 && !tied ? bestRows : null;
 }
 
-typedef TerminalWheelCalibrationSettled =
-    void Function(int previousRowsPerEvent, int rowsPerEvent);
+typedef TerminalWheelCalibrationSettled = void Function(
+  int previousRowsPerEvent,
+  int rowsPerEvent,
+);
 
 /// Learns wheel-report row granularity from the next terminal response.
 class TerminalWheelScrollCalibrator {

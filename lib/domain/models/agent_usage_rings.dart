@@ -13,8 +13,8 @@ class AgentUsageRings {
   const AgentUsageRings({
     this.shortTerm,
     this.weekly,
-    List<AgentUsageRingSegment> segments = const [],
-  }) : _segments = segments;
+    this._segments = const [],
+  });
 
   /// Reported five-hour percentage remaining, when applicable.
   final double? shortTerm;

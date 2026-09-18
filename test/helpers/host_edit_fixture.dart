@@ -18,11 +18,10 @@ import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
 
 class FakeHostRepository extends HostRepository {
   FakeHostRepository({
-    required Host host,
+    required this._host,
     required AppDatabase database,
     required SecretEncryptionService encryptionService,
-  }) : _host = host,
-       super(database, encryptionService);
+  }) : super(database, encryptionService);
 
   Host _host;
   Host? updatedHost;
@@ -60,10 +59,9 @@ class FakeKeyRepository extends KeyRepository {
 
 class FakeSnippetRepository extends SnippetRepository {
   FakeSnippetRepository({
-    required List<Snippet> snippets,
+    required this._snippets,
     required AppDatabase database,
-  }) : _snippets = snippets,
-       super(database);
+  }) : super(database);
 
   final List<Snippet> _snippets;
 

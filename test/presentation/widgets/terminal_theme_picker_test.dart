@@ -179,9 +179,9 @@ void main() {
       await tester.pumpAndSettle();
 
       final saved =
-          verify(
-                () => themeService.saveCustomTheme(captureAny()),
-              ).captured.single
+          verify(() => themeService.saveCustomTheme(captureAny()))
+                  .captured
+                  .single
               as TerminalThemeData;
       expect(saved.id, _remoteTheme.id);
       expect(saved.isCustom, isTrue);
@@ -194,9 +194,8 @@ void main() {
     ) async {
       final pendingDelete = Completer<void>();
       final themeService = _MockTerminalThemeService();
-      when(
-        () => themeService.deleteCustomTheme(_remoteTheme.id),
-      ).thenAnswer((_) => pendingDelete.future);
+      when(() => themeService.deleteCustomTheme(_remoteTheme.id))
+          .thenAnswer((_) => pendingDelete.future);
       await _pumpPicker(
         tester,
         onThemeSelected: (_) {},

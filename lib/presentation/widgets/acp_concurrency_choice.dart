@@ -147,9 +147,9 @@ class _ConcurrencyChoiceSheet extends StatelessWidget {
           const SizedBox(height: FluttyTheme.spacingLg),
           if (allowStopAndContinue) ...[
             FilledButton.icon(
-              onPressed: () => Navigator.of(
-                context,
-              ).pop(AcpConcurrencyChoice.stopAndContinue),
+              onPressed: () =>
+                  Navigator.of(context)
+                      .pop(AcpConcurrencyChoice.stopAndContinue),
               icon: const Icon(Icons.stop_circle_outlined),
               label: const Text('Stop and continue free'),
             ),

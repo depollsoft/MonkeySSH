@@ -56,9 +56,8 @@ class PortForwardTypeField extends StatelessWidget {
     children: [
       Text(
         'Forward Type',
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
+        style: Theme.of(context).textTheme.bodySmall
+            ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
       ),
       const SizedBox(height: 8),
       SegmentedButton<String>(
@@ -84,9 +83,8 @@ class PortForwardTypeField extends StatelessWidget {
         value == 'local'
             ? 'Forward local port to remote host'
             : 'Forward remote port to local host',
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.outline,
-        ),
+        style: Theme.of(context).textTheme.bodySmall
+            ?.copyWith(color: Theme.of(context).colorScheme.outline),
       ),
     ],
   );

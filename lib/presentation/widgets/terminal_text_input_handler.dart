@@ -196,15 +196,15 @@ void debugSetModifierChordClock(DateTime Function()? clock) {
 }
 
 /// Confirms suspicious text inserted through the system keyboard or IME.
-typedef TerminalTextInputReviewCallback =
-    Future<bool> Function(TerminalCommandReview review);
+typedef TerminalTextInputReviewCallback = Future<bool> Function(
+  TerminalCommandReview review,
+);
 
 /// Builds the command text that should be reviewed for a pending IME delta.
-typedef TerminalTextInputReviewTextBuilder =
-    String Function(
-      ({int deletedCount, String appendedText}) delta,
-      String currentText,
-    );
+typedef TerminalTextInputReviewTextBuilder = String Function(
+  ({int deletedCount, String appendedText}) delta,
+  String currentText,
+);
 
 /// Resolves the current terminal text that appears before the cursor.
 typedef TerminalTextBeforeCursorResolver = String? Function();

@@ -143,8 +143,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
         (_authMethodLoadFailed || isLockedWithoutAvailableAuth);
     final subtitle = switch ((isInitializing, showAuthMethodError)) {
       (true, _) => 'Checking your security settings…',
-      (false, true) =>
-        'Authentication data is unavailable or corrupted. The app will stay locked until authentication is ready.',
+      (false, true) => 'Authentication data is unavailable or corrupted. The app will stay locked until authentication is ready.',
       (false, false) => 'Enter your PIN to unlock',
     };
 

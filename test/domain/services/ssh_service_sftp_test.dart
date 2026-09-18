@@ -62,9 +62,8 @@ void main() {
       final oldOpen = Completer<SftpClient>();
       final newOpen = Completer<SftpClient>();
       var opens = 0;
-      when(
-        client.sftp,
-      ).thenAnswer((_) => opens++ == 0 ? oldOpen.future : newOpen.future);
+      when(client.sftp)
+          .thenAnswer((_) => opens++ == 0 ? oldOpen.future : newOpen.future);
       final oldFuture = session.sftp();
       final first = expectLater(oldFuture, throwsA(isA<SSHStateError>()));
       final second = expectLater(session.sftp(), throwsA(isA<SSHStateError>()));

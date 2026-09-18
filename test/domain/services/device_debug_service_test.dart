@@ -181,9 +181,8 @@ void main() {
     'ADB channel opening times out, releases queue and closes late channel',
     (tester) async {
       final client = _MockSshClient();
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       final session = _adbSession(
         client,
         connectionId: 88002,
@@ -192,9 +191,8 @@ void main() {
         username: 'tester',
       );
       final opening = Completer<SSHSession>();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => opening.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
       const runner = SshRemoteAdbCommandRunner();
       final result = expectLater(
         runner.connect(session, address: '127.0.0.1:41002'),
@@ -275,17 +273,16 @@ void main() {
       final client = _MockSshClient();
       final executedCommands = <String>[];
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        final command = invocation.positionalArguments.single as String;
-        executedCommands.add(command);
-        return _adbExec(
-          command.contains('command -v adb')
-              ? 'MOTD greeting noise\n/opt/homebrew/bin/adb\n'
-              : 'Android Debug Bridge version 1.0.41',
-        );
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            executedCommands.add(command);
+            return _adbExec(
+              command.contains('command -v adb')
+                  ? 'MOTD greeting noise\n/opt/homebrew/bin/adb\n'
+                  : 'Android Debug Bridge version 1.0.41',
+            );
+          });
       final session = _adbSession(client, connectionId: 91);
       const runner = SshRemoteAdbCommandRunner();
 
@@ -309,19 +306,18 @@ void main() {
         var resolvedPath = '/opt/homebrew/bin/adb';
         var valid = true;
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) async {
-          final command = invocation.positionalArguments.single as String;
-          executedCommands.add(command);
-          return _adbExec(
-            command.contains('command -v adb')
-                ? '$resolvedPath\n'
-                : valid
-                ? 'Android Debug Bridge version 1.0.41'
-                : 'missing',
-          );
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              final command = invocation.positionalArguments.single as String;
+              executedCommands.add(command);
+              return _adbExec(
+                command.contains('command -v adb')
+                    ? '$resolvedPath\n'
+                    : valid
+                    ? 'Android Debug Bridge version 1.0.41'
+                    : 'missing',
+              );
+            });
         final session = _adbSession(client, connectionId: 91);
         const runner = SshRemoteAdbCommandRunner();
 
@@ -1098,9 +1094,8 @@ void main() {
 
 SSHSession _adbExec(String output) {
   final channel = _MockExecChannel();
-  when(
-    () => channel.stdout,
-  ).thenAnswer((_) => Stream.value(Uint8List.fromList(utf8.encode(output))));
+  when(() => channel.stdout)
+      .thenAnswer((_) => Stream.value(Uint8List.fromList(utf8.encode(output))));
   when(() => channel.stderr).thenAnswer((_) => const Stream<Uint8List>.empty());
   when(() => channel.done).thenAnswer((_) async {});
   when(() => channel.exitCode).thenReturn(0);

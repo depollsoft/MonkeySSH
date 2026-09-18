@@ -615,20 +615,24 @@ String? _normalizeAgentToolArguments({
   }
 
   final sanitizedAdditionalArguments = switch (tool) {
-    AgentLaunchTool.claudeCode =>
-      _stripArgumentPatterns(trimmedAdditionalArguments, [
+    AgentLaunchTool.claudeCode => _stripArgumentPatterns(
+      trimmedAdditionalArguments,
+      [
         _claudeDangerouslySkipPermissionsPattern,
         _claudePermissionModeEqualsPattern,
         _claudePermissionModeSeparatedPattern,
-      ]),
-    AgentLaunchTool.copilotCli =>
-      _stripArgumentPatterns(trimmedAdditionalArguments, [
+      ],
+    ),
+    AgentLaunchTool.copilotCli => _stripArgumentPatterns(
+      trimmedAdditionalArguments,
+      [
         _copilotAllowAllPattern,
         _copilotYoloPattern,
         _copilotAllowAllToolsPattern,
         _copilotAllowAllPathsPattern,
         _copilotAllowAllUrlsPattern,
-      ]),
+      ],
+    ),
     AgentLaunchTool.codex => _stripCodexYoloConflicts(
       trimmedAdditionalArguments,
     ),
@@ -650,23 +654,28 @@ String? _normalizeAgentToolArguments({
       trimmedAdditionalArguments,
       [_hermesYoloPattern],
     ),
-    AgentLaunchTool.museCode => _stripArgumentPatterns(trimmedAdditionalArguments, [
-      _hermesYoloPattern,
-      _codexApprovalModeEqualsPattern,
-      _codexApprovalModeSeparatedPattern,
-      RegExp(
-        r'''(?<!\S)--(?:permission-profile|approval-judge|sandbox-network)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)''',
-      ),
-      RegExp(
-        r'(?<!\S)--(?:disable-approval|disable-sandbox|trust-workspace)(?=\s|$)',
-      ),
-    ]),
-    AgentLaunchTool.grokBuild =>
-      _stripArgumentPatterns(trimmedAdditionalArguments, [
+    AgentLaunchTool.museCode => _stripArgumentPatterns(
+      trimmedAdditionalArguments,
+      [
+        _hermesYoloPattern,
+        _codexApprovalModeEqualsPattern,
+        _codexApprovalModeSeparatedPattern,
+        RegExp(
+          r'''(?<!\S)--(?:permission-profile|approval-judge|sandbox-network)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)''',
+        ),
+        RegExp(
+          r'(?<!\S)--(?:disable-approval|disable-sandbox|trust-workspace)(?=\s|$)',
+        ),
+      ],
+    ),
+    AgentLaunchTool.grokBuild => _stripArgumentPatterns(
+      trimmedAdditionalArguments,
+      [
         _grokYoloPattern,
         _grokPermissionModeEqualsPattern,
         _grokPermissionModeSeparatedPattern,
-      ]),
+      ],
+    ),
   };
 
   return sanitizedAdditionalArguments;

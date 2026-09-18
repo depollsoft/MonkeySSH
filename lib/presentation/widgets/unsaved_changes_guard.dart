@@ -10,8 +10,7 @@ class UnsavedChangesGuard extends StatefulWidget {
     required this.hasUnsavedChanges,
     required this.child,
     this.title = 'Discard changes?',
-    this.message =
-        'You have unsaved changes. If you leave now, those changes will be lost.',
+    this.message = 'You have unsaved changes. If you leave now, those changes will be lost.',
     super.key,
   });
 

@@ -36,9 +36,8 @@ void main() {
   test('selection rotates across days', () {
     final seen = <String>{
       for (var day = 0; day < MessageOfTheDay.messages.length; day++)
-        MessageOfTheDay(
-          date: DateTime(2026, 6, 15).add(Duration(days: day)),
-        ).message,
+        MessageOfTheDay(date: DateTime(2026, 6, 15).add(Duration(days: day)))
+            .message,
     };
     // Distinct days within one cycle should cover the whole pool.
     expect(seen.length, MessageOfTheDay.messages.length);

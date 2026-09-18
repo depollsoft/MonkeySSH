@@ -242,9 +242,9 @@ void main() {
       await tester.pumpWidget(buildEditor(controller: controller));
       await tester.pump(); // settle post-frame callbacks
 
-      final state =
-          tester.state(find.byType(RemoteTextEditorScreen))
-              as State<RemoteTextEditorScreen>;
+      final state = tester.state(
+        find.byType(RemoteTextEditorScreen),
+      ) as State<RemoteTextEditorScreen>;
       expect(cachedRemoteEditorSelectionCaretX(state), isNotNull);
       expect(cachedRemoteEditorSelectionCaretXExtentOffset(state), 5);
     });
@@ -259,9 +259,9 @@ void main() {
       await tester.pumpWidget(buildEditor(controller: controller));
       await tester.pump();
 
-      final state =
-          tester.state(find.byType(RemoteTextEditorScreen))
-              as State<RemoteTextEditorScreen>;
+      final state = tester.state(
+        find.byType(RemoteTextEditorScreen),
+      ) as State<RemoteTextEditorScreen>;
       final firstX = cachedRemoteEditorSelectionCaretX(state);
       expect(firstX, isNotNull);
 
@@ -284,9 +284,9 @@ void main() {
       await tester.pumpWidget(buildEditor(controller: controller));
       await tester.pump();
 
-      final state =
-          tester.state(find.byType(RemoteTextEditorScreen))
-              as State<RemoteTextEditorScreen>;
+      final state = tester.state(
+        find.byType(RemoteTextEditorScreen),
+      ) as State<RemoteTextEditorScreen>;
       expect(cachedRemoteEditorSelectionCaretXExtentOffset(state), 2);
 
       controller.selection = const TextSelection.collapsed(offset: 8);
@@ -333,9 +333,9 @@ void main() {
       );
       await tester.pump();
 
-      final state =
-          tester.state(find.byType(RemoteTextEditorScreen))
-              as State<RemoteTextEditorScreen>;
+      final state = tester.state(
+        find.byType(RemoteTextEditorScreen),
+      ) as State<RemoteTextEditorScreen>;
       // After the controller swap the cache reflects controller2's selection.
       expect(cachedRemoteEditorSelectionCaretXExtentOffset(state), 6);
     });

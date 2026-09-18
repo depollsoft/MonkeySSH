@@ -337,13 +337,11 @@ Future<_MockSftpClient> _pumpCrashlyticsBrowser(
   when(() => monetization.currentState).thenReturn(_proMonetizationState);
   when(ssh.sftp).thenAnswer((_) async => sftp);
   when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-  when(
-    () => sftp.listdir('/home/demo'),
-  ).thenAnswer((_) async => entries ?? [_fileEntry('notes.txt')]);
+  when(() => sftp.listdir('/home/demo'))
+      .thenAnswer((_) async => entries ?? [_fileEntry('notes.txt')]);
   if (remoteFiles is _MockRemoteFileService) {
-    when(
-      () => remoteFiles.resolveInitialDirectory(sftp),
-    ).thenAnswer((_) async => '/home/demo');
+    when(() => remoteFiles.resolveInitialDirectory(sftp))
+        .thenAnswer((_) async => '/home/demo');
   }
   await tester.pumpWidget(
     _buildSftpTestApp(
@@ -938,12 +936,10 @@ void main() {
             ),
           ],
         );
-        when(
-          () => sftp.open('/home/demo/picture.png'),
-        ).thenAnswer((_) async => remoteFile);
-        when(
-          () => remoteFile.readBytes(length: any(named: 'length')),
-        ).thenAnswer((_) async => _onePixelPngBytes);
+        when(() => sftp.open('/home/demo/picture.png'))
+            .thenAnswer((_) async => remoteFile);
+        when(() => remoteFile.readBytes(length: any(named: 'length')))
+            .thenAnswer((_) async => _onePixelPngBytes);
         when(remoteFile.close).thenAnswer((_) async {});
 
         await tester.pumpWidget(
@@ -981,9 +977,8 @@ void main() {
       addTearDown(session.close);
       when(sshClient.sftp).thenAnswer((_) async => sftp);
       when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-      when(
-        () => sftp.listdir('/home/demo'),
-      ).thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
+      when(() => sftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
 
       await tester.pumpWidget(
         _buildSftpTestApp(
@@ -1014,9 +1009,8 @@ void main() {
         when(() => sftp.stat('/repo')).thenAnswer(
           (_) async => SftpFileAttrs(mode: const SftpFileMode.value(1 << 14)),
         );
-        when(
-          () => sftp.listdir('/repo'),
-        ).thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
+        when(() => sftp.listdir('/repo'))
+            .thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
 
         await tester.pumpWidget(
           _buildSftpTestApp(
@@ -1080,9 +1074,8 @@ void main() {
               ),
             ],
           );
-          when(
-            () => sftp.listdir('/fallback'),
-          ).thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
+          when(() => sftp.listdir('/fallback'))
+              .thenAnswer((_) async => [_fileEntry('notes.txt', size: 7)]);
           await tester.pumpWidget(
             _buildSftpTestApp(
               session: session,
@@ -1142,9 +1135,8 @@ void main() {
           addTearDown(session.close);
           when(sshClient.sftp).thenAnswer((_) async => sftp);
           when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-          when(
-            () => sftp.listdir('/home/demo'),
-          ).thenAnswer((_) async => [_fileEntry('clip.mp4', size: 3)]);
+          when(() => sftp.listdir('/home/demo'))
+              .thenAnswer((_) async => [_fileEntry('clip.mp4', size: 3)]);
           // Create completers in the runAsync zone where they are awaited.
           final service = (await tester.runAsync(
             () async => _ControlledDownloadService(),
@@ -1225,12 +1217,10 @@ void main() {
           _fileEntry('picture.png', size: _onePixelPngBytes.length),
         ],
       );
-      when(
-        () => sftp.open('/home/demo/picture.png'),
-      ).thenAnswer((_) async => remoteFile);
-      when(
-        () => remoteFile.readBytes(length: any(named: 'length')),
-      ).thenAnswer((_) async => _onePixelPngBytes);
+      when(() => sftp.open('/home/demo/picture.png'))
+          .thenAnswer((_) async => remoteFile);
+      when(() => remoteFile.readBytes(length: any(named: 'length')))
+          .thenAnswer((_) async => _onePixelPngBytes);
       when(remoteFile.close).thenAnswer((_) async {});
 
       await tester.pumpWidget(
@@ -1257,9 +1247,8 @@ void main() {
       addTearDown(session.close);
       when(sshClient.sftp).thenAnswer((_) async => sftp);
       when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-      when(
-        () => sftp.listdir('/home/demo'),
-      ).thenAnswer((_) async => [_fileEntry('notes.txt')]);
+      when(() => sftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt')]);
 
       await tester.pumpWidget(
         _buildSftpTestApp(
@@ -1315,12 +1304,10 @@ void main() {
           when(
             sshClient.sftp,
           ).thenAnswer((_) => opens++ == 0 ? oldOpen.future : newOpen.future);
-          when(
-            () => replacement.absolute('.'),
-          ).thenAnswer((_) async => '/home/demo');
-          when(
-            () => replacement.listdir('/home/demo'),
-          ).thenAnswer((_) async => [_fileEntry('replacement.txt')]);
+          when(() => replacement.absolute('.'))
+              .thenAnswer((_) async => '/home/demo');
+          when(() => replacement.listdir('/home/demo'))
+              .thenAnswer((_) async => [_fileEntry('replacement.txt')]);
 
           // The browser joins another consumer's shared pending open.
           final oldFuture = session.sftp();
@@ -1403,15 +1390,13 @@ void main() {
           (_) => opens++ == 0 ? Future.value(sftp) : reconnect.future,
         );
         when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-        when(
-          () => sftp.listdir('/home/demo'),
-        ).thenAnswer((_) async => [_fileEntry('initial.txt')]);
+        when(() => sftp.listdir('/home/demo'))
+            .thenAnswer((_) async => [_fileEntry('initial.txt')]);
         when(() => sftp.listdir('/home')).thenAnswer((_) => older.future);
         when(() => sftp.listdir('/')).thenAnswer((_) => newer.future);
         when(() => freshSftp.listdir('/')).thenAnswer((_) => newer.future);
-        when(
-          () => freshSftp.listdir('/home/demo'),
-        ).thenAnswer((_) async => [_fileEntry('initial.txt')]);
+        when(() => freshSftp.listdir('/home/demo'))
+            .thenAnswer((_) async => [_fileEntry('initial.txt')]);
         await tester.pumpWidget(
           _buildSftpTestApp(
             session: session,
@@ -1470,9 +1455,8 @@ void main() {
           ],
         );
         final deletion = Completer<void>();
-        when(
-          () => sftp.rmdir('/home/demo/folder'),
-        ).thenAnswer((_) => deletion.future);
+        when(() => sftp.rmdir('/home/demo/folder'))
+            .thenAnswer((_) => deletion.future);
         await tester.longPress(find.text('folder'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Delete'));
@@ -1563,16 +1547,14 @@ void main() {
               ),
             ).thenAnswer((_) async {});
             when(successfulFile.close).thenAnswer((_) async {});
-            when(
-              () => sftp.setStat('/home/demo/first.txt', any()),
-            ).thenAnswer((_) async {});
+            when(() => sftp.setStat('/home/demo/first.txt', any()))
+                .thenAnswer((_) async {});
           }
           when(
             () => sftp.open('/home/demo/$failedName', mode: any(named: 'mode')),
           ).thenAnswer((_) async => failedFile);
-          when(
-            () => failedFile.writeBytes(any(), offset: any(named: 'offset')),
-          ).thenAnswer((_) => Future<void>.error(failure));
+          when(() => failedFile.writeBytes(any(), offset: any(named: 'offset')))
+              .thenAnswer((_) => Future<void>.error(failure));
           when(failedFile.close).thenAnswer((_) async {});
           final message = hasEarlierSuccess
               ? 'Uploaded 1 of 3 files. Upload failed. Check the connection and try again.'
@@ -1607,9 +1589,8 @@ void main() {
             verify(successfulFile.close).called(1);
             verify(() => sftp.setStat('/home/demo/first.txt', any())).called(1);
           }
-          verify(
-            () => sftp.listdir('/home/demo'),
-          ).called(hasEarlierSuccess ? 2 : 1);
+          verify(() => sftp.listdir('/home/demo'))
+              .called(hasEarlierSuccess ? 2 : 1);
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox.shrink());
         });
@@ -1649,15 +1630,12 @@ void main() {
         when(
           () => sftp.rename('/home/demo/notes.txt', '/home/demo/renamed.txt'),
         ).thenAnswer((_) => Future<void>.error(failure));
-        when(
-          () => sftp.mkdir('/home/demo/new-folder'),
-        ).thenAnswer((_) => Future<void>.error(failure));
-        when(
-          () => sftp.remove('/home/demo/notes.txt'),
-        ).thenAnswer((_) => Future<void>.error(failure));
-        when(
-          () => sftp.open('/home/demo/notes.txt'),
-        ).thenAnswer((_) => Future<SftpFile>.error(failure));
+        when(() => sftp.mkdir('/home/demo/new-folder'))
+            .thenAnswer((_) => Future<void>.error(failure));
+        when(() => sftp.remove('/home/demo/notes.txt'))
+            .thenAnswer((_) => Future<void>.error(failure));
+        when(() => sftp.open('/home/demo/notes.txt'))
+            .thenAnswer((_) => Future<SftpFile>.error(failure));
         if (action == 'mkdir') {
           await tester.tap(find.byTooltip('New folder'));
           await tester.pumpAndSettle();
@@ -1721,9 +1699,8 @@ void main() {
         final file = _MockSftpFile();
         final reading = Completer<void>();
         final stream = StreamController<Uint8List>();
-        when(
-          () => sftp.open('/home/demo/movie.mp4'),
-        ).thenAnswer((_) async => file);
+        when(() => sftp.open('/home/demo/movie.mp4'))
+            .thenAnswer((_) async => file);
         when(file.read).thenAnswer((_) {
           reading.complete();
           return stream.stream;
@@ -1740,8 +1717,7 @@ void main() {
           () =>
               reading.isCompleted &&
               directory.listSync(recursive: true).whereType<File>().isNotEmpty,
-          reason:
-              'The preview must start reading and create a cache before cancellation.',
+          reason: 'The preview must start reading and create a cache before cancellation.',
         );
         expect(find.text('Loading video preview'), findsOneWidget);
         await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
@@ -1799,12 +1775,10 @@ void main() {
           ];
           when(sshClient.sftp).thenAnswer((_) async => sftp);
           when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-          when(
-            () => sftp.listdir(any()),
-          ).thenAnswer((_) async => [_fileEntry('notes.txt')]);
-          when(
-            () => remoteFiles.resolveInitialDirectory(sftp),
-          ).thenAnswer((_) async => '/home/demo');
+          when(() => sftp.listdir(any()))
+              .thenAnswer((_) async => [_fileEntry('notes.txt')]);
+          when(() => remoteFiles.resolveInitialDirectory(sftp))
+              .thenAnswer((_) async => '/home/demo');
           registerFallbackValue(const Stream<List<int>>.empty());
           final firstUpload = Completer<void>();
           final destinations = <String>[];
@@ -1887,9 +1861,8 @@ void main() {
         return sftpOpenAttempts == 1 ? staleSftp : freshSftp;
       });
       when(() => staleSftp.absolute('.')).thenAnswer((_) async => '/home/demo');
-      when(
-        () => staleSftp.listdir('/home/demo'),
-      ).thenThrow(SSHStateError('Connection closed'));
+      when(() => staleSftp.listdir('/home/demo'))
+          .thenThrow(SSHStateError('Connection closed'));
       when(staleSftp.close).thenAnswer((_) async {});
       when(() => freshSftp.listdir('/home/demo')).thenAnswer(
         (_) async => [

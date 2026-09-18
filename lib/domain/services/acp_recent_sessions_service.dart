@@ -17,8 +17,10 @@ import 'settings_service.dart';
 /// serialized so overlapping writes cannot drop one another's changes.
 class AcpRecentSessionsService {
   /// Creates a recent-sessions service.
-  AcpRecentSessionsService(this._settings, {int maxEntries = defaultMaxEntries})
-    : _maxEntries = maxEntries;
+  AcpRecentSessionsService(
+    this._settings, {
+    this._maxEntries = defaultMaxEntries,
+  });
 
   /// Default maximum number of retained recent-session references.
   static const defaultMaxEntries = 50;

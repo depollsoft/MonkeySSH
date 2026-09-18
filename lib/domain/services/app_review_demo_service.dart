@@ -62,22 +62,15 @@ class AppReviewDemoSetupResult {
 class AppReviewDemoService {
   /// Creates an App Review demo service.
   const AppReviewDemoService({
-    required GroupRepository groupRepository,
-    required HostRepository hostRepository,
-    required KeyRepository keyRepository,
-    required SnippetRepository snippetRepository,
-    required PortForwardRepository portForwardRepository,
-    required AgentLaunchPresetService agentLaunchPresetService,
-    required HostCliLaunchPreferencesService hostCliLaunchPreferencesService,
-    required SettingsService settingsService,
-  }) : _groupRepository = groupRepository,
-       _hostRepository = hostRepository,
-       _keyRepository = keyRepository,
-       _snippetRepository = snippetRepository,
-       _portForwardRepository = portForwardRepository,
-       _agentLaunchPresetService = agentLaunchPresetService,
-       _hostCliLaunchPreferencesService = hostCliLaunchPreferencesService,
-       _settingsService = settingsService;
+    required this._groupRepository,
+    required this._hostRepository,
+    required this._keyRepository,
+    required this._snippetRepository,
+    required this._portForwardRepository,
+    required this._agentLaunchPresetService,
+    required this._hostCliLaunchPreferencesService,
+    required this._settingsService,
+  });
 
   final GroupRepository _groupRepository;
   final HostRepository _hostRepository;
@@ -336,8 +329,7 @@ class AppReviewDemoService {
       SshKeysCompanion.insert(
         name: _keyName,
         keyType: 'ed25519',
-        publicKey:
-            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAppReviewOnlyNotARealKey monkeyssh-app-review-demo',
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoAppReviewOnlyNotARealKey monkeyssh-app-review-demo',
         privateKey: _demoPrivateKey,
         fingerprint: const Value('SHA256:MonkeySSHAppReviewDemoOnly'),
       ),

@@ -21,38 +21,36 @@ const _hasMacRemoteClipboardConfig =
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'Mac remote clipboard commands work with device clipboard APIs',
-    (tester) async {
-      final client = await _connectClient();
-      addTearDown(client.close);
+  testWidgets('Mac remote clipboard commands work with device clipboard APIs', (
+    tester,
+  ) async {
+    final client = await _connectClient();
+    addTearDown(client.close);
 
-      const localText = 'device-local-copy';
-      await Clipboard.setData(const ClipboardData(text: localText));
-      final writeSession = await client.execute(
-        RemoteClipboardSyncService.buildWriteCommand(localText),
-      );
-      await _drainSession(writeSession);
+    const localText = 'device-local-copy';
+    await Clipboard.setData(const ClipboardData(text: localText));
+    final writeSession = await client.execute(
+      RemoteClipboardSyncService.buildWriteCommand(localText),
+    );
+    await _drainSession(writeSession);
 
-      final remoteReadback = await _runCommand(client, 'pbpaste');
-      expect(remoteReadback.trimRight(), localText);
+    final remoteReadback = await _runCommand(client, 'pbpaste');
+    expect(remoteReadback.trimRight(), localText);
 
-      const remoteText = 'remote-mac-copy';
-      await _runCommand(client, "printf %s 'remote-mac-copy' | pbcopy");
-      final readSession = await client.execute(
-        RemoteClipboardSyncService.buildReadCommand(),
-      );
-      final readOutput = await _drainSession(readSession);
-      final parsed = RemoteClipboardSyncService.parseReadOutput(readOutput);
-      expect(parsed.supported, isTrue);
-      expect(parsed.text, remoteText);
+    const remoteText = 'remote-mac-copy';
+    await _runCommand(client, "printf %s 'remote-mac-copy' | pbcopy");
+    final readSession = await client.execute(
+      RemoteClipboardSyncService.buildReadCommand(),
+    );
+    final readOutput = await _drainSession(readSession);
+    final parsed = RemoteClipboardSyncService.parseReadOutput(readOutput);
+    expect(parsed.supported, isTrue);
+    expect(parsed.text, remoteText);
 
-      await Clipboard.setData(ClipboardData(text: parsed.text));
-      final localClipboard = await Clipboard.getData(Clipboard.kTextPlain);
-      expect(localClipboard?.text, remoteText);
-    },
-    skip: !_hasMacRemoteClipboardConfig,
-  );
+    await Clipboard.setData(ClipboardData(text: parsed.text));
+    final localClipboard = await Clipboard.getData(Clipboard.kTextPlain);
+    expect(localClipboard?.text, remoteText);
+  }, skip: !_hasMacRemoteClipboardConfig);
 }
 
 Future<SSHClient> _connectClient() async {

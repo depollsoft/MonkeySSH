@@ -160,12 +160,11 @@ void main() {
       const service = TmuxService();
       final commands = <String>[];
 
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        return _buildOpenExecSession(stdout: '3.4\n${_doneMarker()}');
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.single as String);
+            return _buildOpenExecSession(stdout: '3.4\n${_doneMarker()}');
+          });
 
       final version = await service.detectedVersion(
         session,
@@ -336,9 +335,8 @@ void main() {
         buildTerminalThemeRefreshReports(TerminalThemes.dracula),
       ];
       expect(
-        RegExp(
-          r'refresh-client -t "\$client" -r "\$pane":',
-        ).allMatches(command),
+        RegExp(r'refresh-client -t "\$client" -r "\$pane":')
+            .allMatches(command),
         hasLength(tmuxCacheReports.length),
       );
       for (final report in tmuxCacheReports) {
@@ -521,9 +519,8 @@ void main() {
       'detectInstalledAgentTools uses PowerShell on Windows remotes',
       () async {
         final client = _MockSshClient();
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         final session = _buildSession(client, connectionId: 66);
         const service = TmuxService();
         final execSession = _buildClosedExecSession(
@@ -554,9 +551,8 @@ void main() {
       'detectInstalledAgentTools caches empty Windows output after timeout',
       () async {
         final client = _MockSshClient();
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         final session = _buildSession(client, connectionId: 67);
         const service = TmuxService(
           execOutputTimeout: Duration(milliseconds: 1),
@@ -1243,9 +1239,8 @@ void main() {
       final session = _buildSession(client, connectionId: 36);
       const service = TmuxService(execOpenTimeout: Duration(milliseconds: 1));
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => Completer<SSHSession>().future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => Completer<SSHSession>().future);
 
       await expectLater(
         service.listWindows(session, 'main'),
@@ -1253,28 +1248,25 @@ void main() {
       );
     });
 
-    test(
-      'listWindows completes when stdout stays open after the done marker',
-      () async {
-        final client = _MockSshClient();
-        final session = _buildSession(client);
-        const service = TmuxService();
-        final execSession = _buildOpenExecSession(
-          stdout:
-              '1\x1feditor\x1f1\x1fvim\x1f/tmp\x1f*\x1fvim-title\x1f1712930000\n'
-              '${_doneMarker()}',
-        );
+    test('listWindows completes when stdout stays open after the done marker', () async {
+      final client = _MockSshClient();
+      final session = _buildSession(client);
+      const service = TmuxService();
+      final execSession = _buildOpenExecSession(
+        stdout:
+            '1\x1feditor\x1f1\x1fvim\x1f/tmp\x1f*\x1fvim-title\x1f1712930000\n'
+            '${_doneMarker()}',
+      );
 
-        _stubExec(client, (_) async => execSession);
+      _stubExec(client, (_) async => execSession);
 
-        final windows = await service.listWindows(session, 'main');
+      final windows = await service.listWindows(session, 'main');
 
-        expect(windows, hasLength(1));
-        expect(windows.single.index, 1);
-        expect(windows.single.name, 'editor');
-        verify(execSession.close).called(1);
-      },
-    );
+      expect(windows, hasLength(1));
+      expect(windows.single.index, 1);
+      expect(windows.single.name, 'editor');
+      verify(execSession.close).called(1);
+    });
 
     test('listWindows uses only reusable client flags when provided', () async {
       final client = _MockSshClient();
@@ -1295,9 +1287,9 @@ void main() {
       );
 
       final command =
-          verify(
-                () => client.execute(captureAny(), pty: any(named: 'pty')),
-              ).captured.single
+          verify(() => client.execute(captureAny(), pty: any(named: 'pty')))
+                  .captured
+                  .single
               as String;
       expect(
         command,
@@ -1317,9 +1309,8 @@ void main() {
             '${_doneMarker()}',
       );
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => openCompleter.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => openCompleter.future);
 
       final first = service.listWindows(session, 'main');
       final second = service.listWindows(session, 'main');
@@ -1736,21 +1727,20 @@ void main() {
         );
         var executeCalls = 0;
 
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) {
-          executeCalls += 1;
-          final command = invocation.positionalArguments.single as String;
-          if (command.contains('command -v tmux')) {
-            return Future.value(
-              _buildOpenExecSession(
-                stdout: 'zsh\n/usr/bin/tmux\n${_doneMarker()}',
-              ),
-            );
-          }
-          expect(command, contains('attach-session'));
-          return controlOpenCompleter.future;
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) {
+              executeCalls += 1;
+              final command = invocation.positionalArguments.single as String;
+              if (command.contains('command -v tmux')) {
+                return Future.value(
+                  _buildOpenExecSession(
+                    stdout: 'zsh\n/usr/bin/tmux\n${_doneMarker()}',
+                  ),
+                );
+              }
+              expect(command, contains('attach-session'));
+              return controlOpenCompleter.future;
+            });
 
         final subscription = service
             .watchWindowChanges(session, 'main')
@@ -2064,9 +2054,9 @@ void main() {
           final refresh = writes.firstWhere(
             (value) => value.startsWith('refresh-client '),
           );
-          final name = RegExp(
-            r"flutty-[^:'\s]+",
-          ).firstMatch(refresh)!.group(0)!;
+          final name = RegExp(r"flutty-[^:'\s]+")
+              .firstMatch(refresh)!
+              .group(0)!;
           stdoutController.add(
             _utf8Bytes(
               '%subscription-changed $name \$1 @2 2 %2 : ${windowLine(activity)}\n',
@@ -2682,21 +2672,19 @@ void main() {
             final session = _buildSession(client, connectionId: 4000);
             final otherClient = _MockSshClient();
             final other = _buildSession(otherClient, connectionId: 4001);
-            when(
-              () => otherClient.execute(any(), pty: any(named: 'pty')),
-            ).thenAnswer(
-              (_) async => _buildOpenExecSession(
-                stdout: '/usr/bin/codex\n${_doneMarker()}',
-              ),
-            );
+            when(() => otherClient.execute(any(), pty: any(named: 'pty')))
+                .thenAnswer(
+                  (_) async => _buildOpenExecSession(
+                    stdout: '/usr/bin/codex\n${_doneMarker()}',
+                  ),
+                );
             await service.detectInstalledAgentTools(other);
             final opening = Completer<SSHSession>();
             final output = StreamController<Uint8List>();
             final exec = _buildOpenExecSession();
             when(() => exec.stdout).thenAnswer((_) => output.stream);
-            when(
-              () => client.execute(any(), pty: any(named: 'pty')),
-            ).thenAnswer((_) => opening.future);
+            when(() => client.execute(any(), pty: any(named: 'pty')))
+                .thenAnswer((_) => opening.future);
             final request = pathProbe
                 ? service.hasSessionOrThrow(session, 'main')
                 : service.listWindows(session, 'main');
@@ -2848,42 +2836,39 @@ void main() {
       },
     );
 
-    test(
-      'clears window snapshot cache so stale windows are not served',
-      () async {
-        final client = _MockSshClient();
-        final session = _buildSession(client, connectionId: 62);
-        const service = TmuxService();
-        const sep = tmuxWindowFieldSeparator;
-        final windowLine = [
-          '0',
-          'editor',
-          '1',
-          'nvim',
-          '/home/user/project',
-          '*',
-          'editor',
-          '200',
-          'nvim',
-          '',
-          '@1',
-        ].join(sep);
+    test('clears window snapshot cache so stale windows are not served', () async {
+      final client = _MockSshClient();
+      final session = _buildSession(client, connectionId: 62);
+      const service = TmuxService();
+      const sep = tmuxWindowFieldSeparator;
+      final windowLine = [
+        '0',
+        'editor',
+        '1',
+        'nvim',
+        '/home/user/project',
+        '*',
+        'editor',
+        '200',
+        'nvim',
+        '',
+        '@1',
+      ].join(sep);
 
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
-          (_) async =>
-              _buildOpenExecSession(stdout: '$windowLine\n${_doneMarker()}'),
-        );
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+        (_) async =>
+            _buildOpenExecSession(stdout: '$windowLine\n${_doneMarker()}'),
+      );
 
-        // listWindows populates _windowSnapshotCache when results are non-empty.
-        final windows = await service.listWindows(session, 'main');
-        expect(windows, hasLength(1));
-        expect(TmuxService.hasWindowSnapshotCacheEntry(62), isTrue);
+      // listWindows populates _windowSnapshotCache when results are non-empty.
+      final windows = await service.listWindows(session, 'main');
+      expect(windows, hasLength(1));
+      expect(TmuxService.hasWindowSnapshotCacheEntry(62), isTrue);
 
-        // After clearCache the snapshot is gone.
-        await service.clearCache(62);
-        expect(TmuxService.hasWindowSnapshotCacheEntry(62), isFalse);
-      },
-    );
+      // After clearCache the snapshot is gone.
+      await service.clearCache(62);
+      expect(TmuxService.hasWindowSnapshotCacheEntry(62), isFalse);
+    });
 
     test(
       'clears exec-channel backoff so the next exec channel is not throttled',

@@ -31,9 +31,8 @@ class AgentUsageSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     final snapshot = usage;
     final scheme = Theme.of(context).colorScheme;
-    final style = Theme.of(
-      context,
-    ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+    final style = Theme.of(context).textTheme.bodySmall
+        ?.copyWith(color: scheme.onSurfaceVariant);
     final clock = now ?? DateTime.now();
     final retryAt = snapshot?.retryAt;
     String? retryLabel;

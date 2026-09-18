@@ -106,9 +106,8 @@ void main() {
     );
     final permission = await permissionFuture;
     expect(
-      AcpPermissionRequest.fromJson(
-        AcpJson.object(permission.params)!,
-      ).options.map((option) => (option.id, option.name, option.kind.value)),
+      AcpPermissionRequest.fromJson(AcpJson.object(permission.params)!).options
+          .map((option) => (option.id, option.name, option.kind.value)),
       [
         ('allow-once', 'Allow once', 'allow_once'),
         ('allow-always', 'Always allow', 'allow_always'),

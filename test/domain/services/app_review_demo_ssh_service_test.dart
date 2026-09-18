@@ -245,9 +245,8 @@ void main() {
     expect(utf8.decode(await uploadedFile.readBytes()), uploadedText);
     await uploadedFile.close();
     expect(
-      (await sftp.listdir(
-        '/home/reviewer/work/monkeyssh-demo',
-      )).map((file) => file.filename),
+      (await sftp.listdir('/home/reviewer/work/monkeyssh-demo'))
+          .map((file) => file.filename),
       contains('upload.txt'),
     );
 

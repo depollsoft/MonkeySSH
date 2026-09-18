@@ -125,9 +125,8 @@ class KeysScreen extends ConsumerWidget {
       await ref.read(keyRepositoryProvider).delete(key.id);
       ref.invalidate(allKeysProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Deleted "${key.name}"')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Deleted "${key.name}"')));
       }
     }
   }
@@ -346,9 +345,8 @@ class _KeyDetailsSheet extends StatelessWidget {
 
   void _copyToClipboard(BuildContext context, String text) {
     Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Copied to clipboard')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Copied to clipboard')));
   }
 
   Future<void> _confirmAndCopyPrivateKey(BuildContext context) async {

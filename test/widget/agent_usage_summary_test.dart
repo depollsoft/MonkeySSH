@@ -48,9 +48,8 @@ void main() {
       expect(find.textContaining('Usage check rate limited'), findsOneWidget);
       expect(find.textContaining('Next usage check after'), findsOneWidget);
       final context = tester.element(find.byType(AgentUsageSummary));
-      final time = MaterialLocalizations.of(
-        context,
-      ).formatTimeOfDay(TimeOfDay.fromDateTime(retryAt.toLocal()));
+      final time = MaterialLocalizations.of(context)
+          .formatTimeOfDay(TimeOfDay.fromDateTime(retryAt.toLocal()));
       expect(find.textContaining(time), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
       expect(tester.takeException(), isNull);

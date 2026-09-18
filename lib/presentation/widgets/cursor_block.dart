@@ -124,14 +124,11 @@ class _RenderCursorBox extends RenderBox {
   _RenderCursorBox({
     required double width,
     required double height,
-    required double radius,
-    required Color color,
-    required bool visible,
+    required this._radius,
+    required this._color,
+    required this._visible,
   }) : _boxWidth = width,
-       _boxHeight = height,
-       _radius = radius,
-       _color = color,
-       _visible = visible;
+       _boxHeight = height;
 
   double _boxWidth;
   double _boxHeight;

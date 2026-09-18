@@ -967,9 +967,10 @@ bool _isDecorativeShellTitle(String value) {
 }
 
 String _normalizeAgentTitleForComparison(String value) =>
-    _stripLeadingDecorativePrefix(
-      value,
-    ).replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+    _stripLeadingDecorativePrefix(value)
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .toLowerCase();
 
 Set<String> _agentTitleAliases(AgentLaunchTool tool) => switch (tool) {
   AgentLaunchTool.claudeCode => const {'claude', 'claude code'},
@@ -1028,9 +1029,10 @@ bool _titlesMatch(String? left, String? right) {
 String? _normalizeTitleForComparison(String? value) {
   final normalized = _normalizedTmuxTitle(value, stripPlaceholderPrefix: true);
   if (normalized == null) return null;
-  final comparable = _stripLeadingDecorativePrefix(
-    normalized,
-  ).replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+  final comparable = _stripLeadingDecorativePrefix(normalized)
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim()
+      .toLowerCase();
   return comparable.isEmpty ? null : comparable;
 }
 
@@ -1221,17 +1223,15 @@ String? parseTmuxSessionName(String? command) {
   // Use a whitespace lookbehind so we match standalone flags like `-s`
   // or combined flags like `-As`, but not subcommand suffixes like
   // `list-sessions`.
-  final sFlag = RegExp(
-    '(?<=\\s)-[A-Za-z]*s\\s+$argPattern',
-  ).firstMatch(tmuxPart);
+  final sFlag = RegExp('(?<=\\s)-[A-Za-z]*s\\s+$argPattern')
+      .firstMatch(tmuxPart);
   if (sFlag != null) {
     return sFlag.group(1) ?? sFlag.group(2) ?? sFlag.group(3);
   }
 
   // Try -t <name> (attach / attach-session)
-  final tFlag = RegExp(
-    '(?<=\\s)-[A-Za-z]*t\\s+$argPattern',
-  ).firstMatch(tmuxPart);
+  final tFlag = RegExp('(?<=\\s)-[A-Za-z]*t\\s+$argPattern')
+      .firstMatch(tmuxPart);
   if (tFlag != null) {
     return tFlag.group(1) ?? tFlag.group(2) ?? tFlag.group(3);
   }

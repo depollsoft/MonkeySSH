@@ -47,9 +47,8 @@ void main() {
       FlutterError.onError = reportedErrors.add;
       addTearDown(() => FlutterError.onError = originalOnError);
 
-      when(
-        authService.getAuthMethod,
-      ).thenThrow(Exception('secure storage unavailable'));
+      when(authService.getAuthMethod)
+          .thenThrow(Exception('secure storage unavailable'));
 
       await tester.pumpWidget(
         ProviderScope(
@@ -197,9 +196,8 @@ void main() {
         addTearDown(container.dispose);
 
         when(authService.isAuthEnabled).thenAnswer((_) async => true);
-        when(
-          authService.getAuthMethod,
-        ).thenAnswer((_) async => AuthMethod.none);
+        when(authService.getAuthMethod)
+            .thenAnswer((_) async => AuthMethod.none);
 
         await tester.pumpWidget(
           UncontrolledProviderScope(

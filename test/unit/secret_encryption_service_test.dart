@@ -106,13 +106,9 @@ void main() {
       'validation and decryption reject the same malformed structures',
       () async {
         final encrypted = await service.encryptRequired('secret');
-        final envelope =
-            jsonDecode(
-                  utf8.decode(
-                    base64Url.decode(encrypted.substring('ENCv1:'.length)),
-                  ),
-                )
-                as Map<String, dynamic>;
+        final envelope = jsonDecode(
+          utf8.decode(base64Url.decode(encrypted.substring('ENCv1:'.length))),
+        ) as Map<String, dynamic>;
         final malformed = <Object>[
           [],
           {...envelope}..remove('c'),
@@ -141,12 +137,10 @@ void main() {
         List<int>.generate(32, (index) => index),
       );
 
-      when(
-        () => storage.read(key: 'flutty_db_encryption_key_v1'),
-      ).thenAnswer((_) async => null);
-      when(
-        () => storage.read(key: _legacyMasterKeyStorageEntry),
-      ).thenAnswer((_) async => legacyValue);
+      when(() => storage.read(key: 'flutty_db_encryption_key_v1'))
+          .thenAnswer((_) async => null);
+      when(() => storage.read(key: _legacyMasterKeyStorageEntry))
+          .thenAnswer((_) async => legacyValue);
       when(
         () => storage.write(
           key: any(named: 'key'),

@@ -156,14 +156,11 @@ final class LeaveAgentPresetUnchanged extends AgentPresetAction {
 class SaveHostCommand {
   /// Creates a [SaveHostCommand].
   SaveHostCommand({
-    required AppDatabase db,
-    required HostRepository hostRepository,
-    required AgentLaunchPresetService presetService,
-    required HostCliLaunchPreferencesService cliPreferencesService,
-  }) : _db = db,
-       _hostRepository = hostRepository,
-       _presetService = presetService,
-       _cliPreferencesService = cliPreferencesService;
+    required this._db,
+    required this._hostRepository,
+    required this._presetService,
+    required this._cliPreferencesService,
+  });
 
   final AppDatabase _db;
   final HostRepository _hostRepository;

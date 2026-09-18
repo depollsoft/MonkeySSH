@@ -62,8 +62,10 @@ final portForwardsForHostProvider = StreamProvider.autoDispose
     });
 
 /// Signature for invalidating shared providers from any Riverpod context.
-typedef ProviderInvalidator =
-    void Function(ProviderBase<Object?> provider, {bool asReload});
+typedef ProviderInvalidator = void Function(
+  ProviderBase<Object?> provider, {
+  bool asReload,
+});
 
 /// Refreshes shared entity list providers after migration imports replace data.
 void invalidateImportedEntityProviders(ProviderInvalidator invalidate) {

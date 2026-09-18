@@ -73,18 +73,13 @@ abstract interface class TelemetryCrashReporter {
 class TelemetryService {
   /// Creates a telemetry service.
   TelemetryService({
-    required TelemetryServiceStatus status,
-    required bool collectionEnabled,
-    required DiagnosticsLogger diagnosticsLogger,
-    TelemetryAnalyticsClient? analyticsClient,
-    TelemetryCrashReporter? crashReporter,
+    required this._status,
+    required this._collectionEnabled,
+    required this._diagnosticsLogger,
+    this._analyticsClient,
+    this._crashReporter,
     AbsorbedErrorRateLimiter? absorbedErrorRateLimiter,
-  }) : _status = status,
-       _collectionEnabled = collectionEnabled,
-       _diagnosticsLogger = diagnosticsLogger,
-       _analyticsClient = analyticsClient,
-       _crashReporter = crashReporter,
-       _absorbedErrorRateLimiter =
+  }) : _absorbedErrorRateLimiter =
            absorbedErrorRateLimiter ?? _processAbsorbedErrorRateLimiter;
 
   static final _processAbsorbedErrorRateLimiter = AbsorbedErrorRateLimiter();
@@ -1490,12 +1485,12 @@ String _sanitizeErrorSummary(Object error) {
     final firstLine = error.toString().split(RegExp(r'[\r\n]')).first;
     // These bounded protocol status codes are useful even when the server's
     // entire description is private. Do not retain arbitrary numeric values.
-    final channelCode = RegExp(
-      r'^SSHChannelOpenError\(([1-4]):',
-    ).firstMatch(firstLine)?.group(1);
-    final sftpCode = RegExp(
-      r'^SftpStatusError: .*\(code ([0-8])\)$',
-    ).firstMatch(firstLine)?.group(1);
+    final channelCode = RegExp(r'^SSHChannelOpenError\(([1-4]):')
+        .firstMatch(firstLine)
+        ?.group(1);
+    final sftpCode = RegExp(r'^SftpStatusError: .*\(code ([0-8])\)$')
+        .firstMatch(firstLine)
+        ?.group(1);
     final code = channelCode ?? sftpCode;
     final codePrefix = code == null ? '' : 'code $code: ';
     var message = firstLine;

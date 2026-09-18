@@ -65,12 +65,10 @@ void main() {
       final snippetsController = StreamController<List<Snippet>>();
       addTearDown(snippetsController.close);
 
-      when(
-        snippetRepository.watchAll,
-      ).thenAnswer((_) => snippetsController.stream);
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(snippetRepository.watchAll)
+          .thenAnswer((_) => snippetsController.stream);
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
 
       await tester.pumpWidget(
         ProviderScope(
@@ -104,9 +102,8 @@ void main() {
             _buildSnippet(id: 1, name: 'Restart API', sortOrder: 0),
           ]),
         );
-        when(
-          snippetRepository.watchAllFolders,
-        ).thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+        when(snippetRepository.watchAllFolders)
+            .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
 
         await tester.pumpWidget(
           ProviderScope(
@@ -136,12 +133,10 @@ void main() {
       tester,
     ) async {
       final snippetRepository = _MockSnippetRepository();
-      when(
-        snippetRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <Snippet>[]));
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(snippetRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <Snippet>[]));
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
 
       await tester.pumpWidget(
         ProviderScope(
@@ -185,12 +180,10 @@ void main() {
       final foldersController = StreamController<List<SnippetFolder>>();
       addTearDown(snippetsController.close);
       addTearDown(foldersController.close);
-      when(
-        snippetRepository.watchAll,
-      ).thenAnswer((_) => snippetsController.stream);
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => foldersController.stream);
+      when(snippetRepository.watchAll)
+          .thenAnswer((_) => snippetsController.stream);
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => foldersController.stream);
       when(() => snippetRepository.insertFolder(any())).thenAnswer((_) async {
         foldersController.add([_buildFolder(id: 7, name: 'Deploy')]);
         return 7;
@@ -229,12 +222,10 @@ void main() {
       final foldersController = StreamController<List<SnippetFolder>>();
       addTearDown(snippetsController.close);
       addTearDown(foldersController.close);
-      when(
-        snippetRepository.watchAll,
-      ).thenAnswer((_) => snippetsController.stream);
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => foldersController.stream);
+      when(snippetRepository.watchAll)
+          .thenAnswer((_) => snippetsController.stream);
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => foldersController.stream);
       when(() => snippetRepository.deleteFolder(10)).thenAnswer((_) async {
         foldersController.add(const <SnippetFolder>[]);
         snippetsController.add([
@@ -318,9 +309,8 @@ void main() {
       tester,
     ) async {
       final snippetRepository = _MockSnippetRepository();
-      when(
-        snippetRepository.getAllFolders,
-      ).thenAnswer((_) async => const <SnippetFolder>[]);
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -345,9 +335,8 @@ void main() {
 
     testWidgets('full editor uses snippet prefill values', (tester) async {
       final snippetRepository = _MockSnippetRepository();
-      when(
-        snippetRepository.getAllFolders,
-      ).thenAnswer((_) async => const <SnippetFolder>[]);
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -394,9 +383,8 @@ void main() {
         }
         return [_buildFolder(id: 9, name: 'Deploy')];
       });
-      when(
-        () => snippetRepository.insertFolder(any()),
-      ).thenAnswer((_) async => 9);
+      when(() => snippetRepository.insertFolder(any()))
+          .thenAnswer((_) async => 9);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -431,12 +419,10 @@ void main() {
           _buildSnippet(id: 2, name: 'Second', sortOrder: 1),
         ]),
       );
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
-      when(
-        () => snippetRepository.reorderByIds(any()),
-      ).thenAnswer((_) async {});
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(() => snippetRepository.reorderByIds(any()))
+          .thenAnswer((_) async {});
 
       await tester.pumpWidget(
         ProviderScope(
@@ -484,9 +470,8 @@ void main() {
       when(
         snippetRepository.watchAllFolders,
       ).thenAnswer((_) => Stream.value([_buildFolder(id: 10, name: 'Deploy')]));
-      when(
-        () => snippetRepository.reorderByIds(any()),
-      ).thenAnswer((_) async {});
+      when(() => snippetRepository.reorderByIds(any()))
+          .thenAnswer((_) async {});
 
       await tester.pumpWidget(
         ProviderScope(

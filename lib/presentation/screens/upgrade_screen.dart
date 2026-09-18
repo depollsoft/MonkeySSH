@@ -143,9 +143,8 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
 
   String _lifetimeDetailLabel(BuildContext context, MonetizationState state) {
     if (state.entitlementUpdatedAt case final unlockedAt?) {
-      final formattedDate = MaterialLocalizations.of(
-        context,
-      ).formatMediumDate(unlockedAt);
+      final formattedDate = MaterialLocalizations.of(context)
+          .formatMediumDate(unlockedAt);
       return 'Unlocked with a one-time purchase on $formattedDate.';
     }
     return 'Unlocked with a one-time purchase.';
@@ -342,38 +341,32 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
           const _UpgradeBenefitTile(
             icon: Icons.hub_outlined,
             title: 'Parallel native chats',
-            subtitle:
-                'Keep multiple native agents connected, switch instantly, and fork active sessions.',
+            subtitle: 'Keep multiple native agents connected, switch instantly, and fork active sessions.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.history_outlined,
             title: 'Recent terminal sessions',
-            subtitle:
-                'Discover agent work across windows and jump back in without hunting for it.',
+            subtitle: 'Discover agent work across windows and jump back in without hunting for it.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.system_update_alt_rounded,
             title: 'Agent Management',
-            subtitle:
-                'Install, repair, and update remote coding agents, with automatic update checks.',
+            subtitle: 'Install, repair, and update remote coding agents, with automatic update checks.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.rocket_launch_outlined,
             title: 'Agent launch presets',
-            subtitle:
-                'Save repeatable startup flows per host for Codex, Claude Code, Copilot CLI, OpenCode, and more.',
+            subtitle: 'Save repeatable startup flows per host for Codex, Claude Code, Copilot CLI, OpenCode, and more.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.play_circle_outline,
             title: 'Auto-connect workflows',
-            subtitle:
-                'Run a command or saved snippet automatically after opening a terminal.',
+            subtitle: 'Run a command or saved snippet automatically after opening a terminal.',
           ),
           const _UpgradeBenefitTile(
             icon: Icons.swap_horiz_outlined,
             title: 'Encrypted transfers',
-            subtitle:
-                'Share hosts, keys, and migration bundles through encrypted files.',
+            subtitle: 'Share hosts, keys, and migration bundles through encrypted files.',
           ),
           if (state.offers.isNotEmpty && !isLifetimeUnlocked) ...[
             const SizedBox(height: 24),
@@ -468,8 +461,7 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
                               : switch (state.activeOffer) {
                                   final activeOffer? =>
                                     '${activeOffer.planLabel} is active on this device.',
-                                  null =>
-                                    'MonkeySSH Pro is already unlocked on this device.',
+                                  null => 'MonkeySSH Pro is already unlocked on this device.',
                                 }
                         : 'No trial traps, fake urgency, or hidden close buttons. You can restore or manage your subscription from Settings at any time.',
                     style: priceCardEmphasisStyle,
@@ -763,10 +755,8 @@ class _PlanPill extends StatelessWidget {
     ),
     child: Text(
       label,
-      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-        color: foregroundColor,
-        fontWeight: FontWeight.w700,
-      ),
+      style: Theme.of(context).textTheme.labelMedium
+          ?.copyWith(color: foregroundColor, fontWeight: FontWeight.w700),
     ),
   );
 }
@@ -795,10 +785,8 @@ class _UpgradeBanner extends StatelessWidget {
     ),
     child: Text(
       message,
-      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-        color: foregroundColor,
-        fontWeight: FontWeight.w700,
-      ),
+      style: Theme.of(context).textTheme.bodyMedium
+          ?.copyWith(color: foregroundColor, fontWeight: FontWeight.w700),
     ),
   );
 }

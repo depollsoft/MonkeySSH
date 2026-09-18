@@ -103,34 +103,25 @@ void main() {
       )..getOrCreateTerminal();
 
       when(() => hostRepository.getById(host.id)).thenAnswer((_) async => host);
-      when(
-        () => sshClient.shell(pty: any(named: 'pty')),
-      ).thenAnswer((_) async => shellChannel);
-      when(
-        () => shellChannel.stdout,
-      ).thenAnswer((_) => shellStdoutController.stream);
-      when(
-        () => shellChannel.stderr,
-      ).thenAnswer((_) => const Stream<Uint8List>.empty());
-      when(
-        () => shellChannel.done,
-      ).thenAnswer((_) => shellDoneCompleter.future);
+      when(() => sshClient.shell(pty: any(named: 'pty')))
+          .thenAnswer((_) async => shellChannel);
+      when(() => shellChannel.stdout)
+          .thenAnswer((_) => shellStdoutController.stream);
+      when(() => shellChannel.stderr)
+          .thenAnswer((_) => const Stream<Uint8List>.empty());
+      when(() => shellChannel.done)
+          .thenAnswer((_) => shellDoneCompleter.future);
       when(() => shellChannel.write(any())).thenReturn(null);
-      when(
-        () => monetizationService.currentState,
-      ).thenReturn(_proMonetizationState);
-      when(
-        () => monetizationService.states,
-      ).thenAnswer((_) => Stream.value(_proMonetizationState));
-      when(
-        monetizationService.initialize,
-      ).thenAnswer((_) => Future<void>.value());
-      when(
-        () => monetizationService.canUseFeature(any()),
-      ).thenAnswer((_) async => true);
-      when(
-        () => tmuxService.hasSessionOrThrow(session, tmuxSessionName),
-      ).thenAnswer((_) async => true);
+      when(() => monetizationService.currentState)
+          .thenReturn(_proMonetizationState);
+      when(() => monetizationService.states)
+          .thenAnswer((_) => Stream.value(_proMonetizationState));
+      when(monetizationService.initialize)
+          .thenAnswer((_) => Future<void>.value());
+      when(() => monetizationService.canUseFeature(any()))
+          .thenAnswer((_) async => true);
+      when(() => tmuxService.hasSessionOrThrow(session, tmuxSessionName))
+          .thenAnswer((_) async => true);
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(index: 1, id: '@8', name: 'shell', isActive: true),
@@ -150,18 +141,14 @@ void main() {
           windowId: targetWindowId,
         ),
       ).thenAnswer((_) async {});
-      when(
-        () => tmuxService.hasForegroundClient(session, tmuxSessionName),
-      ).thenAnswer((_) async => true);
-      when(
-        () => tmuxService.watchWindowChanges(session, tmuxSessionName),
-      ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
-      when(
-        () => tmuxService.prefetchInstalledAgentTools(session),
-      ).thenAnswer((_) async {});
-      when(
-        () => tmuxService.detectInstalledAgentTools(session),
-      ).thenAnswer((_) async => const <AgentLaunchTool>{});
+      when(() => tmuxService.hasForegroundClient(session, tmuxSessionName))
+          .thenAnswer((_) async => true);
+      when(() => tmuxService.watchWindowChanges(session, tmuxSessionName))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      when(() => tmuxService.detectInstalledAgentTools(session))
+          .thenAnswer((_) async => const <AgentLaunchTool>{});
 
       await tester.pumpWidget(
         ProviderScope(

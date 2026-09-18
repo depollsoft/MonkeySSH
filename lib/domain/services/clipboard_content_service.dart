@@ -9,15 +9,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// wraps that channel so the screen widget can be tested without a live
 /// platform channel.
 class ClipboardContentService {
-  /// Creates a [ClipboardContentService] backed by the given [channel].
+  /// Creates a [ClipboardContentService] backed by the given [_channel].
   ///
   /// The default value uses the production channel name so callers do not need
   /// to specify it in app code.
   const ClipboardContentService({
-    MethodChannel channel = const MethodChannel(
+    this._channel = const MethodChannel(
       'xyz.depollsoft.monkeyssh/clipboard_content',
     ),
-  }) : _channel = channel;
+  });
 
   final MethodChannel _channel;
 

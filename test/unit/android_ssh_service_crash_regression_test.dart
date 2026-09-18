@@ -7,9 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 const _nativeRoot = 'android/app/src/main/kotlin/xyz/depollsoft/monkeyssh';
 
 String _body(String source, String name) {
-  final declaration = RegExp(
-    'fun $name\\s*\\([^{}]*\\)[^{}]*\\{',
-  ).firstMatch(source);
+  final declaration = RegExp('fun $name\\s*\\([^{}]*\\)[^{}]*\\{')
+      .firstMatch(source);
   expect(declaration, isNotNull, reason: 'Missing Kotlin function $name');
   final start = declaration!.end;
   var depth = 1;
@@ -24,13 +23,11 @@ String _body(String source, String name) {
 }
 
 void main() {
-  final service = File(
-    '$_nativeRoot/SshConnectionService.kt',
-  ).readAsStringSync();
+  final service = File('$_nativeRoot/SshConnectionService.kt')
+      .readAsStringSync();
   final activity = File('$_nativeRoot/MainActivity.kt').readAsStringSync();
-  final channel = File(
-    '$_nativeRoot/SshServiceChannelHandler.kt',
-  ).readAsStringSync();
+  final channel = File('$_nativeRoot/SshServiceChannelHandler.kt')
+      .readAsStringSync();
 
   test(
     'bf0aa132/0055b556: every delivered intent promotes before branching',
@@ -65,44 +62,38 @@ void main() {
     },
   );
 
-  test(
-    'bf0aa132/0055b556: late Dart updates cannot start a new background service',
-    () {
-      final sync = _body(service, 'syncServiceState');
-      expect(
-        sync.indexOf('!isActivityVisible'),
-        lessThan(sync.indexOf('ContextCompat.startForegroundService')),
-      );
-      expect(sync, contains('catch (error: IllegalStateException)'));
-      expect(sync, contains('if (startRequested) return'));
-      expect(
-        _body(service, 'promoteImmediately'),
-        contains('error is ForegroundServiceStartNotAllowedException'),
-      );
-      final pause = _body(activity, 'onPause');
-      expect(
-        pause.indexOf('setForegroundState(applicationContext, false)'),
-        lessThan(pause.indexOf('super.onPause()')),
-      );
-      expect(_body(activity, 'onStop'), contains('setActivityVisible(false)'));
-      expect(
-        channel,
-        isNot(contains('SshConnectionService.setForegroundState')),
-      );
-      expect(
-        channel,
-        contains('SshConnectionService.refresh(applicationContext)'),
-      );
-      expect(
-        _body(channel, 'resumedActivity'),
-        contains('Lifecycle.State.RESUMED'),
-      );
-      expect(
-        channel,
-        contains('resumedActivity()?.ensureNotificationPermission()'),
-      );
-    },
-  );
+  test('bf0aa132/0055b556: late Dart updates cannot start a new background service', () {
+    final sync = _body(service, 'syncServiceState');
+    expect(
+      sync.indexOf('!isActivityVisible'),
+      lessThan(sync.indexOf('ContextCompat.startForegroundService')),
+    );
+    expect(sync, contains('catch (error: IllegalStateException)'));
+    expect(sync, contains('if (startRequested) return'));
+    expect(
+      _body(service, 'promoteImmediately'),
+      contains('error is ForegroundServiceStartNotAllowedException'),
+    );
+    final pause = _body(activity, 'onPause');
+    expect(
+      pause.indexOf('setForegroundState(applicationContext, false)'),
+      lessThan(pause.indexOf('super.onPause()')),
+    );
+    expect(_body(activity, 'onStop'), contains('setActivityVisible(false)'));
+    expect(channel, isNot(contains('SshConnectionService.setForegroundState')));
+    expect(
+      channel,
+      contains('SshConnectionService.refresh(applicationContext)'),
+    );
+    expect(
+      _body(channel, 'resumedActivity'),
+      contains('Lifecycle.State.RESUMED'),
+    );
+    expect(
+      channel,
+      contains('resumedActivity()?.ensureNotificationPermission()'),
+    );
+  });
 
   test('320a5e10: live service stops directly before cleanup', () {
     final stop = _body(service, 'stopServiceUnlessStarting');
@@ -124,9 +115,9 @@ void main() {
       contains('stopImmediately()'),
     );
     expect(
-      RegExp(
-        r'stopAfterForegroundServiceTimeout\(\)',
-      ).allMatches(service).length,
+      RegExp(r'stopAfterForegroundServiceTimeout\(\)')
+          .allMatches(service)
+          .length,
       3,
     );
     expect(
@@ -136,27 +127,24 @@ void main() {
     expect(_body(service, 'onMain'), contains('mainHandler.post'));
   });
 
-  test(
-    'd6046c28/7487bf9a: optional notification work cannot delay service callbacks',
-    () {
-      expect(service, isNot(contains('ensureSharedFlutterEngine')));
-      final refresh = _body(service, 'refreshPresentation');
-      expect(
-        refresh.indexOf('notificationExecutor.execute'),
-        lessThan(refresh.indexOf('buildNotification(status)')),
-      );
-      expect(
-        refresh,
-        contains(
-          'instance === this && isPresenting && presentationGeneration == generation',
-        ),
-      );
-      expect(
-        _body(service, 'hidePresentation'),
-        contains('presentationGeneration++'),
-      );
-    },
-  );
+  test('d6046c28/7487bf9a: optional notification work cannot delay service callbacks', () {
+    expect(service, isNot(contains('ensureSharedFlutterEngine')));
+    final refresh = _body(service, 'refreshPresentation');
+    expect(
+      refresh.indexOf('notificationExecutor.execute'),
+      lessThan(refresh.indexOf('buildNotification(status)')),
+    );
+    expect(
+      refresh,
+      contains(
+        'instance === this && isPresenting && presentationGeneration == generation',
+      ),
+    );
+    expect(
+      _body(service, 'hidePresentation'),
+      contains('presentationGeneration++'),
+    );
+  });
 
   test(
     'd6046c28/7487bf9a: content provider reads run off the platform thread',

@@ -70,9 +70,8 @@ void main() {
       expect(command.length, lessThan(7500));
       expect(command, isNot(contains(r'$')));
       expect(command, isNot(contains('`')));
-      final payload = RegExp(
-        r"FromBase64String\('([^']+)'\)",
-      ).firstMatch(command)![1]!;
+      final payload = RegExp(r"FromBase64String\('([^']+)'\)")
+          .firstMatch(command)![1]!;
       expect(utf8.decode(gzip.decode(base64.decode(payload))), script);
     });
   });
@@ -84,38 +83,34 @@ void main() {
     );
   });
 
-  test(
-    'Windows PATH refresh discovers new user entries without duplicates',
-    () async {
-      // Exercise the exact refresh fragment without loading real user profiles or
-      // changing the registry. The literal represents a freshly read User PATH.
-      final refresh = powerShellProfilePathPreamble
-          .split(r'$__flProfilePaths')
-          .first
-          .replaceFirst(
-            "[Environment]::GetEnvironmentVariable('Path','User')",
-            r"'C:\existing;%LOCALAPPDATA%\agy\bin;;C:\new tools'",
-          );
-      final script =
-          r"$env:Path='C:\existing';$env:LOCALAPPDATA='C:\Local';" +
-          refresh +
-          refresh +
-          r'[Console]::WriteLine($env:Path);';
-      final command = buildWindowsPowerShellCommand(script);
-      final result = await Process.run('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        command,
-      ]).timeout(const Duration(seconds: 20));
-      expect(result.exitCode, 0, reason: '${result.stderr}');
-      expect(
-        (result.stdout as String).trim(),
-        r'C:\existing;C:\Local\agy\bin;C:\new tools',
-      );
-    },
-    skip: !Platform.isWindows,
-  );
+  test('Windows PATH refresh discovers new user entries without duplicates', () async {
+    // Exercise the exact refresh fragment without loading real user profiles or
+    // changing the registry. The literal represents a freshly read User PATH.
+    final refresh = powerShellProfilePathPreamble
+        .split(r'$__flProfilePaths')
+        .first
+        .replaceFirst(
+          "[Environment]::GetEnvironmentVariable('Path','User')",
+          r"'C:\existing;%LOCALAPPDATA%\agy\bin;;C:\new tools'",
+        );
+    final script =
+        r"$env:Path='C:\existing';$env:LOCALAPPDATA='C:\Local';" +
+        refresh +
+        refresh +
+        r'[Console]::WriteLine($env:Path);';
+    final command = buildWindowsPowerShellCommand(script);
+    final result = await Process.run('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ]).timeout(const Duration(seconds: 20));
+    expect(result.exitCode, 0, reason: '${result.stderr}');
+    expect(
+      (result.stdout as String).trim(),
+      r'C:\existing;C:\Local\agy\bin;C:\new tools',
+    );
+  }, skip: !Platform.isWindows);
 
   for (final large in [false, true]) {
     test(

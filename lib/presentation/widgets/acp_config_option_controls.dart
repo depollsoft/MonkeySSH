@@ -8,8 +8,10 @@ import '../../domain/models/acp_session_state.dart';
 import '../../domain/services/acp_session_manager.dart';
 
 /// Sets a generic session configuration option by id.
-typedef AcpConfigOptionSetter =
-    Future<void> Function(String configId, Object value);
+typedef AcpConfigOptionSetter = Future<void> Function(
+  String configId,
+  Object value,
+);
 
 /// Sets the legacy session mode by id.
 typedef AcpLegacyModeSetter = Future<void> Function(String modeId);

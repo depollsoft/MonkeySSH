@@ -27,8 +27,7 @@ void main() {
       buildAgentToolCommand(
         tool,
         startInYoloMode: true,
-        additionalArguments:
-            '--approval-mode untrusted --permission-profile=review --yolo --model muse',
+        additionalArguments: '--approval-mode untrusted --permission-profile=review --yolo --model muse',
       ),
       'muse --yolo --model muse',
     );
@@ -347,59 +346,51 @@ void main() {
   );
 
   for (final scenario in ['shim', 'native', 'override', 'invalid version']) {
-    test(
-      'Windows Muse chat resolves $scenario executable',
-      () async {
-        final temp = await Directory.systemTemp.createTemp('muse chat ');
-        addTearDown(() => temp.delete(recursive: true));
-        final nativePath = '${temp.path}/muse-bin-1.3.0-R3233.1.exe';
-        await File(nativePath).writeAsString('fixture');
-        await File('${temp.path}/.muse-version').writeAsString(
-          scenario == 'invalid version' ? '../invalid' : '1.3.0-R3233.1\n',
+    test('Windows Muse chat resolves $scenario executable', () async {
+      final temp = await Directory.systemTemp.createTemp('muse chat ');
+      addTearDown(() => temp.delete(recursive: true));
+      final nativePath = '${temp.path}/muse-bin-1.3.0-R3233.1.exe';
+      await File(nativePath).writeAsString('fixture');
+      await File('${temp.path}/.muse-version').writeAsString(
+        scenario == 'invalid version' ? '../invalid' : '1.3.0-R3233.1\n',
+      );
+      final provider = File('${temp.path}/adapter.ps1');
+      await provider.writeAsString(
+        r'[Console]::Write($env:MUSE_CODE_EXECUTABLE)',
+      );
+      final command = buildMonkeyMuxAcpProviderCommand(
+        [provider.path],
+        isWindows: true,
+        providerId: AcpBuiltinProviderIds.museCode,
+      );
+      final script = decodeEncodedPowerShell(command)
+          .replaceFirst(powerShellProfilePathPreamble, '');
+      final source = scenario == 'native'
+          ? nativePath
+          : '${temp.path}/muse.cmd';
+      final fixture =
+          'function Get-Command { [pscustomobject]@{Source=${powerShellSingleQuote(source)}} };'
+          '${scenario == 'override' ? r"$env:MUSE_CODE_EXECUTABLE='custom.exe';" : r"$env:MUSE_CODE_EXECUTABLE='';"}'
+          '$script';
+      final result = await Process.run(powerShell!, [
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        encodePowerShellCommand(fixture),
+      ]);
+      if (scenario == 'invalid version') {
+        expect(result.exitCode, isNot(0));
+        expect(result.stderr, contains('Muse native executable was not found'));
+      } else {
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        expect(
+          (result.stdout as String).replaceAll(r'\', '/'),
+          scenario == 'override'
+              ? 'custom.exe'
+              : nativePath.replaceAll(r'\', '/'),
         );
-        final provider = File('${temp.path}/adapter.ps1');
-        await provider.writeAsString(
-          r'[Console]::Write($env:MUSE_CODE_EXECUTABLE)',
-        );
-        final command = buildMonkeyMuxAcpProviderCommand(
-          [provider.path],
-          isWindows: true,
-          providerId: AcpBuiltinProviderIds.museCode,
-        );
-        final script = decodeEncodedPowerShell(
-          command,
-        ).replaceFirst(powerShellProfilePathPreamble, '');
-        final source = scenario == 'native'
-            ? nativePath
-            : '${temp.path}/muse.cmd';
-        final fixture =
-            'function Get-Command { [pscustomobject]@{Source=${powerShellSingleQuote(source)}} };'
-            '${scenario == 'override' ? r"$env:MUSE_CODE_EXECUTABLE='custom.exe';" : r"$env:MUSE_CODE_EXECUTABLE='';"}'
-            '$script';
-        final result = await Process.run(powerShell!, [
-          '-NoProfile',
-          '-NonInteractive',
-          '-EncodedCommand',
-          encodePowerShellCommand(fixture),
-        ]);
-        if (scenario == 'invalid version') {
-          expect(result.exitCode, isNot(0));
-          expect(
-            result.stderr,
-            contains('Muse native executable was not found'),
-          );
-        } else {
-          expect(result.exitCode, 0, reason: '${result.stderr}');
-          expect(
-            (result.stdout as String).replaceAll(r'\', '/'),
-            scenario == 'override'
-                ? 'custom.exe'
-                : nativePath.replaceAll(r'\', '/'),
-          );
-        }
-      },
-      skip: powerShell == null ? 'Requires PowerShell' : false,
-    );
+      }
+    }, skip: powerShell == null ? 'Requires PowerShell' : false);
   }
 
   test(

@@ -647,9 +647,8 @@ class _UpdateBar extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         '$manualCount ${manualCount == 1 ? 'requires' : 'require'} a manual update on the host.',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
                       ),
                     ],
                   ],
@@ -750,9 +749,8 @@ class _RuntimeSection extends StatelessWidget {
               const SizedBox(height: 4),
               Text(
                 subtitle,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
           ),
@@ -946,9 +944,8 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                     Expanded(
                       child: Text(
                         runtime.definition.label,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: Theme.of(context).textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w600),
                       ),
                     ),
                     Icon(
@@ -996,9 +993,8 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                   message,
                   maxLines: _expanded ? null : 2,
                   overflow: _expanded ? null : TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
               ],
               if (runtime.definition.kind == AgentRuntimeKind.cli &&
@@ -1082,9 +1078,8 @@ class _DetailLine extends StatelessWidget {
       children: [
         Text(
           label,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+          style: Theme.of(context).textTheme.bodySmall
+              ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: 2),
         SelectableText(

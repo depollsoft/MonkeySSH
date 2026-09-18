@@ -390,9 +390,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   Widget build(BuildContext context) {
     final isEditing = widget.hostId != null;
     final isLoading = ref.watch(
-      hostEditViewModelProvider(
-        widget.hostId,
-      ).select((state) => state.isLoading),
+      hostEditViewModelProvider(widget.hostId)
+          .select((state) => state.isLoading),
     );
     final keysAsync = ref.watch(allKeysProvider);
     final hostsAsync = ref.watch(allHostsProvider);
@@ -645,8 +644,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                               decoration: const InputDecoration(
                                 labelText: 'SSH Key (optional)',
                                 prefixIcon: Icon(Icons.key),
-                                helperText:
-                                    'Auto tries up to 5 installed keys when password is empty',
+                                helperText: 'Auto tries up to 5 installed keys when password is empty',
                                 helperMaxLines: _hostFieldHelperMaxLines,
                               ),
                               items: [
@@ -724,8 +722,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                                   decoration: const InputDecoration(
                                     labelText: 'Jump Host (optional)',
                                     prefixIcon: Icon(Icons.hub),
-                                    helperText:
-                                        'Connect through another host (bastion)',
+                                    helperText: 'Connect through another host (bastion)',
                                     helperMaxLines: _hostFieldHelperMaxLines,
                                   ),
                                   items: [
@@ -765,9 +762,9 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                                   'terminal theme',
                                   style: FluttyTheme.displayMono(
                                     fontSize: 14,
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurface,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurface,
                                   ),
                                 ),
                                 const SizedBox(width: 8),
@@ -957,8 +954,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Startup behavior',
             prefixIcon: Icon(Icons.play_circle_outline),
-            helperText:
-                'Pick the startup flow for this host. Choose MonkeyMux for the bundled window manager, or tmux for an existing remote tmux setup.',
+            helperText: 'Pick the startup flow for this host. Choose MonkeyMux for the bundled window manager, or tmux for an existing remote tmux setup.',
             helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: _hostStartupModeOptions
@@ -1009,10 +1005,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     final sessionHelperText = switch (_selectedStartupMode) {
       HostStartupMode.muxAuto =>
         'Legacy automatic mode. New edits use MonkeyMux or tmux explicitly.',
-      HostStartupMode.monkeyMux =>
-        'Uses MonkeySSH\'s bundled helper to keep windows alive across reconnects and report window changes over a backchannel.',
-      HostStartupMode.tmux =>
-        'Uses tmux already installed on the remote host. Choose this when you want tmux-compatible sessions or shared tmux clients.',
+      HostStartupMode.monkeyMux => 'Uses MonkeySSH\'s bundled helper to keep windows alive across reconnects and report window changes over a backchannel.',
+      HostStartupMode.tmux => 'Uses tmux already installed on the remote host. Choose this when you want tmux-compatible sessions or shared tmux clients.',
       _ => '',
     };
     final effectiveTmuxExtraFlags = resolveTmuxExtraFlags(
@@ -1158,8 +1152,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               padding: const EdgeInsets.all(12),
               child: AgentToolIcon(tool: _selectedAgentLaunchTool),
             ),
-            helperText:
-                'Launch an agent directly, or pair it with MonkeyMux or tmux so MonkeySSH can show window navigation.',
+            helperText: 'Launch an agent directly, or pair it with MonkeyMux or tmux so MonkeySSH can show window navigation.',
             helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: AgentLaunchTool.uiDisplayOrder
@@ -1200,8 +1193,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Terminal window backend',
             prefixIcon: Icon(Icons.view_carousel_outlined),
-            helperText:
-                'Choose how the agent terminal is kept in the window switcher: MonkeyMux uses the bundled helper; tmux uses a remote tmux session.',
+            helperText: 'Choose how the agent terminal is kept in the window switcher: MonkeyMux uses the bundled helper; tmux uses a remote tmux session.',
             helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: const [
@@ -1292,8 +1284,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 labelText: 'Extra tmux new-session flags (optional)',
                 hintText: '-x 160 -y 48',
                 prefixIcon: Icon(Icons.tune_outlined),
-                helperText:
-                    'Passed directly to `tmux new-session`. Used only when a tmux session is set for the coding agent launch.',
+                helperText: 'Passed directly to `tmux new-session`. Used only when a tmux session is set for the coding agent launch.',
                 helperMaxLines: _hostFieldHelperMaxLines,
               ),
               autovalidateMode: AutovalidateMode.onUserInteraction,
@@ -1355,50 +1346,47 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         else if (generatedCommandError case final error?)
           Text(
             error,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.error,
-            ),
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: Theme.of(context).colorScheme.error),
           ),
       ],
     );
   }
 
-  Widget _buildCustomCommandFields({
-    required bool hasAutomationAccess,
-  }) => Column(
-    children: [
-      const SizedBox(height: 16),
-      KeyedSubtree(
-        key: _customCommandFieldLocationKey,
-        child: TextFormField(
-          key: const Key('host-auto-connect-command-field'),
-          controller: _autoConnectCommandController,
-          focusNode: _customCommandFocusNode,
-          decoration: const InputDecoration(
-            labelText: 'Custom command',
-            hintText: defaultAutoConnectCommandSuggestion,
-            helperText:
-                'Run any shell command after connect. Choose the tmux or agent modes above for extra window-aware behavior.',
-            prefixIcon: Icon(Icons.terminal),
-            helperMaxLines: _hostFieldHelperMaxLines,
+  Widget _buildCustomCommandFields({required bool hasAutomationAccess}) =>
+      Column(
+        children: [
+          const SizedBox(height: 16),
+          KeyedSubtree(
+            key: _customCommandFieldLocationKey,
+            child: TextFormField(
+              key: const Key('host-auto-connect-command-field'),
+              controller: _autoConnectCommandController,
+              focusNode: _customCommandFocusNode,
+              decoration: const InputDecoration(
+                labelText: 'Custom command',
+                hintText: defaultAutoConnectCommandSuggestion,
+                helperText: 'Run any shell command after connect. Choose the tmux or agent modes above for extra window-aware behavior.',
+                prefixIcon: Icon(Icons.terminal),
+                helperMaxLines: _hostFieldHelperMaxLines,
+              ),
+              minLines: 1,
+              maxLines: 3,
+              readOnly: !hasAutomationAccess,
+              autocorrect: false,
+              validator: (value) {
+                if (_selectedStartupMode != HostStartupMode.customCommand) {
+                  return null;
+                }
+                if (value == null || value.trim().isEmpty) {
+                  return 'Enter a command or choose "Do nothing"';
+                }
+                return null;
+              },
+            ),
           ),
-          minLines: 1,
-          maxLines: 3,
-          readOnly: !hasAutomationAccess,
-          autocorrect: false,
-          validator: (value) {
-            if (_selectedStartupMode != HostStartupMode.customCommand) {
-              return null;
-            }
-            if (value == null || value.trim().isEmpty) {
-              return 'Enter a command or choose "Do nothing"';
-            }
-            return null;
-          },
-        ),
-      ),
-    ],
-  );
+        ],
+      );
 
   Widget _buildSnippetFields(
     BuildContext context, {
@@ -1434,8 +1422,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                   decoration: const InputDecoration(
                     labelText: 'Snippet',
                     prefixIcon: Icon(Icons.code),
-                    helperText:
-                        'Variable prompts are not shown when a snippet runs automatically.',
+                    helperText: 'Variable prompts are not shown when a snippet runs automatically.',
                     helperMaxLines: _hostFieldHelperMaxLines,
                   ),
                   isExpanded: true,
@@ -1917,8 +1904,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         messenger.showSnackBar(
           SnackBar(
             content: Text(
-              result.error ??
-                  'Connection test failed. Check the host, port, and credentials, then test again.',
+              result.error ?? 'Connection test failed. Check the host, port, and credentials, then test again.',
             ),
           ),
         );
@@ -2183,8 +2169,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 labelText: 'Proxy domain (optional)',
                 suffixText: '.localhost',
                 prefixIcon: Icon(Icons.language_rounded),
-                helperText:
-                    'Leave blank to generate a unique name from the host label.',
+                helperText: 'Leave blank to generate a unique name from the host label.',
                 helperMaxLines: _hostFieldHelperMaxLines,
               ),
               autocorrect: false,
@@ -2294,9 +2279,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         .getByHostId(widget.hostId!);
     if (mounted) {
       setState(() => _portForwards = updated);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(result.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(result.message)));
     }
   }
 
@@ -2354,9 +2338,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       final updated = await repo.getByHostId(widget.hostId!);
       if (mounted) {
         setState(() => _portForwards = updated);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Deleted "${pf.name}"')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Deleted "${pf.name}"')));
       }
     }
   }

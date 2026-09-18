@@ -77,42 +77,33 @@ void main() {
           calls.add('listen:notifications');
           return const Stream.empty();
         });
-        when(
-          () => notifications.terminalNotificationTaps,
-        ).thenAnswer((_) => const Stream.empty());
-        when(
-          () => notifications.acpNotificationTaps,
-        ).thenAnswer((_) => const Stream.empty());
+        when(() => notifications.terminalNotificationTaps)
+            .thenAnswer((_) => const Stream.empty());
+        when(() => notifications.acpNotificationTaps)
+            .thenAnswer((_) => const Stream.empty());
         when(notifications.initialize).thenAnswer((_) async {
           calls.add('notifications');
           return true;
         });
-        when(
-          notifications.consumeLaunchTmuxAlert,
-        ).thenAnswer((_) async => null);
-        when(
-          notifications.consumeLaunchTerminalNotification,
-        ).thenAnswer((_) async => null);
-        when(
-          notifications.consumeLaunchAcpNotification,
-        ).thenAnswer((_) async => null);
+        when(notifications.consumeLaunchTmuxAlert)
+            .thenAnswer((_) async => null);
+        when(notifications.consumeLaunchTerminalNotification)
+            .thenAnswer((_) async => null);
+        when(notifications.consumeLaunchAcpNotification)
+            .thenAnswer((_) async => null);
         when(hosts.watchAll).thenAnswer((_) {
           calls.add('listen:shortcuts');
           return const Stream.empty();
         });
-        when(
-          preferences.watchPinnedHostIds,
-        ).thenAnswer((_) => const Stream.empty());
-        when(
-          shortcuts.initialize,
-        ).thenAnswer((_) async => calls.add('shortcuts'));
-        when(
-          monetization.initialize,
-        ).thenAnswer((_) async => calls.add('monetization'));
+        when(preferences.watchPinnedHostIds)
+            .thenAnswer((_) => const Stream.empty());
+        when(shortcuts.initialize)
+            .thenAnswer((_) async => calls.add('shortcuts'));
+        when(monetization.initialize)
+            .thenAnswer((_) async => calls.add('monetization'));
         when(acp.handleForeground).thenAnswer((_) async {});
-        when(
-          acp.handleBackground,
-        ).thenAnswer((_) async => calls.add('background'));
+        when(acp.handleBackground)
+            .thenAnswer((_) async => calls.add('background'));
         final router = GoRouter(
           routes: [
             GoRoute(path: '/', builder: (_, _) => const SizedBox.shrink()),
@@ -163,13 +154,12 @@ void main() {
         for (final state in AppLifecycleState.values) {
           calls.clear();
           final authComplete = Completer<void>();
-          when(() => auth.handleLifecycleStateChanged(state)).thenAnswer((
-            _,
-          ) async {
-            calls.add('auth:start');
-            await authComplete.future;
-            calls.add('auth:end');
-          });
+          when(() => auth.handleLifecycleStateChanged(state))
+              .thenAnswer((_) async {
+                calls.add('auth:start');
+                await authComplete.future;
+                calls.add('auth:end');
+              });
           bridge.didChangeAppLifecycleState(state);
           await tester.pump();
           expect(calls, ['auth:start']);

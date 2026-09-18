@@ -124,39 +124,37 @@ void main() {
     focusNode.dispose();
   });
 
-  testWidgets(
-    'terminal replacement stops a held iOS hardware key repeat',
-    (tester) async {
-      final originalOutput = <String>[];
-      final replacementOutput = <String>[];
-      var terminal = Terminal(onOutput: originalOutput.add);
-      final focusNode = FocusNode();
+  testWidgets('terminal replacement stops a held iOS hardware key repeat', (
+    tester,
+  ) async {
+    final originalOutput = <String>[];
+    final replacementOutput = <String>[];
+    var terminal = Terminal(onOutput: originalOutput.add);
+    final focusNode = FocusNode();
 
-      Widget build() => MaterialApp(
-        home: Scaffold(
-          body: TerminalTextInputHandler(
-            terminal: terminal,
-            focusNode: focusNode,
-            child: const SizedBox.expand(),
-          ),
+    Widget build() => MaterialApp(
+      home: Scaffold(
+        body: TerminalTextInputHandler(
+          terminal: terminal,
+          focusNode: focusNode,
+          child: const SizedBox.expand(),
         ),
-      );
+      ),
+    );
 
-      await tester.pumpWidget(build());
-      focusNode.requestFocus();
-      await tester.pump();
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowUp);
-      expect(originalOutput, isNotEmpty);
-      terminal = Terminal(onOutput: replacementOutput.add);
-      await tester.pumpWidget(build());
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowUp);
-      expect(replacementOutput, isEmpty);
-      await tester.pumpWidget(const SizedBox.shrink());
-      focusNode.dispose();
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+    await tester.pumpWidget(build());
+    focusNode.requestFocus();
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowUp);
+    expect(originalOutput, isNotEmpty);
+    terminal = Terminal(onOutput: replacementOutput.add);
+    await tester.pumpWidget(build());
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowUp);
+    expect(replacementOutput, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+    focusNode.dispose();
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('terminal replacement clears the previous IME delta baseline', (
     tester,

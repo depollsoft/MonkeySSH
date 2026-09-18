@@ -96,9 +96,8 @@ void main() {
             } else {
               verify(underlying.destroy).called(1);
             }
-            verify(
-              () => client.execute(any(), pty: any(named: 'pty')),
-            ).called(1);
+            verify(() => client.execute(any(), pty: any(named: 'pty')))
+                .called(1);
             blocker.complete();
             await blocked;
             stdout.close().ignore();
@@ -640,9 +639,8 @@ void main() {
               ...snapshot,
               'agentModelProvider': ?provider,
             })!;
-        final initial = parse(
-          'openai-codex',
-        ).copyWith(agentSessionTitle: 'Task');
+        final initial = parse('openai-codex')
+            .copyWith(agentSessionTitle: 'Task');
         expect(initial.agentModelProvider, 'openai-codex');
         expect(
           initial,
@@ -870,9 +868,8 @@ void main() {
           priority: SshExecPriority.normal,
         ),
       ).thenAnswer((_) async => _fakeInstallation);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => controlSession);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
       when(() => controlSession.write(any())).thenAnswer((invocation) {
         final data = invocation.positionalArguments.single as List<int>;
         final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
@@ -1016,12 +1013,10 @@ void main() {
       );
       var opens = 0;
 
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => opens++ == 0 ? oldControl : newControl);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => opens++ == 0 ? oldControl : newControl);
 
       final service = MonkeyMuxService(
         installer: installer,
@@ -1059,12 +1054,10 @@ void main() {
         output,
         window: _fakeWindowJson,
       );
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => control);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => control);
       final service = MonkeyMuxService(
         installer: installer,
         agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
@@ -1110,12 +1103,10 @@ void main() {
       final controlSession = _buildSilentControlSession(stdoutController);
       final requests = <Map<String, Object?>>[];
 
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => controlSession);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
       when(() => controlSession.write(any())).thenAnswer((invocation) {
         final data = invocation.positionalArguments.single as List<int>;
         final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
@@ -1181,58 +1172,52 @@ void main() {
   group('MonkeyMux control channel timeout', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));
 
-    test(
-      'listWindows fails instead of hanging when no response arrives',
-      () async {
-        final client = _MockSshClient();
-        final installer = _MockMonkeyMuxInstaller();
-        final session = _buildSession(client, connectionId: 900);
-        // A control channel that opens successfully but never emits a response
-        // line reproduces the stuck window switcher: without a timeout the
-        // request completer would never resolve.
-        final stdoutController = StreamController<Uint8List>();
-        final controlSession = _buildSilentControlSession(stdoutController);
+    test('listWindows fails instead of hanging when no response arrives', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client, connectionId: 900);
+      // A control channel that opens successfully but never emits a response
+      // line reproduces the stuck window switcher: without a timeout the
+      // request completer would never resolve.
+      final stdoutController = StreamController<Uint8List>();
+      final controlSession = _buildSilentControlSession(stdoutController);
 
-        when(
-          () => installer.ensureInstalled(session),
-        ).thenAnswer((_) async => _fakeInstallation);
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => controlSession);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
 
-        final service = MonkeyMuxService(
-          installer: installer,
-          agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
-          controlResponseTimeout: const Duration(milliseconds: 80),
-        );
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+        controlResponseTimeout: const Duration(milliseconds: 80),
+      );
 
-        // Registering the observer routes listWindows through the persistent
-        // control channel, which is the path that previously lacked a timeout.
-        final stuckReload = (service..watchWindowChanges(session, 'work'))
-            .listWindows(session, 'work');
+      // Registering the observer routes listWindows through the persistent
+      // control channel, which is the path that previously lacked a timeout.
+      final stuckReload = (service..watchWindowChanges(session, 'work'))
+          .listWindows(session, 'work');
 
-        await expectLater(stuckReload, throwsA(isA<TimeoutException>()));
+      await expectLater(stuckReload, throwsA(isA<TimeoutException>()));
 
-        // A subsequent reload succeeds once the control channel responds, proving
-        // the timeout unblocks the window switcher instead of wedging it.
-        final reconnectController = StreamController<Uint8List>();
-        final reconnectSession = _buildRespondingControlSession(
-          reconnectController,
-          window: _fakeWindowJson,
-        );
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => reconnectSession);
+      // A subsequent reload succeeds once the control channel responds, proving
+      // the timeout unblocks the window switcher instead of wedging it.
+      final reconnectController = StreamController<Uint8List>();
+      final reconnectSession = _buildRespondingControlSession(
+        reconnectController,
+        window: _fakeWindowJson,
+      );
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => reconnectSession);
 
-        final windows = await service.listWindows(session, 'work');
-        expect(windows, hasLength(1));
-        expect(windows.single.name, 'Codex');
+      final windows = await service.listWindows(session, 'work');
+      expect(windows, hasLength(1));
+      expect(windows.single.name, 'Codex');
 
-        await reconnectController.close();
-        await stdoutController.close();
-        await service.clearCache(900);
-      },
-    );
+      await reconnectController.close();
+      await stdoutController.close();
+      await service.clearCache(900);
+    });
 
     test(
       'refreshWindows starts a new query after an older request fails',
@@ -1244,12 +1229,10 @@ void main() {
         final controlSession = _buildSilentControlSession(stdoutController);
         final requests = <Map<String, Object?>>[];
 
-        when(
-          () => installer.ensureInstalled(session),
-        ).thenAnswer((_) async => _fakeInstallation);
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => controlSession);
+        when(() => installer.ensureInstalled(session))
+            .thenAnswer((_) async => _fakeInstallation);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => controlSession);
         when(() => controlSession.write(any())).thenAnswer((invocation) {
           final data = invocation.positionalArguments.single as List<int>;
           requests.add(jsonDecode(utf8.decode(data)) as Map<String, Object?>);
@@ -1294,12 +1277,10 @@ void main() {
         final stdoutController = StreamController<Uint8List>();
         final controlSession = _buildSilentControlSession(stdoutController);
 
-        when(
-          () => installer.ensureInstalled(session),
-        ).thenAnswer((_) async => _fakeInstallation);
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => controlSession);
+        when(() => installer.ensureInstalled(session))
+            .thenAnswer((_) async => _fakeInstallation);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => controlSession);
 
         final service = MonkeyMuxService(
           installer: installer,
@@ -1350,14 +1331,12 @@ void main() {
       final session = _buildSession(client, connectionId: 903);
       final neverOpens = Completer<SSHSession>();
 
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
       // A channel open that never resolves used to block runCommand before the
       // request deadline was armed, so no timeout could ever fire.
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => neverOpens.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => neverOpens.future);
 
       final service = MonkeyMuxService(
         installer: installer,
@@ -1377,9 +1356,8 @@ void main() {
         reconnectController,
         window: _fakeWindowJson,
       );
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => reconnectSession);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => reconnectSession);
 
       final windows = await service.listWindows(session, 'work');
       expect(windows, hasLength(1));
@@ -1406,12 +1384,10 @@ void main() {
       final controlSession = _buildSilentControlSession(stdoutController);
       final requests = <Map<String, Object?>>[];
 
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => controlSession);
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
       when(() => controlSession.write(any())).thenAnswer((invocation) {
         final data = invocation.positionalArguments.single as List<int>;
         requests.add(jsonDecode(utf8.decode(data)) as Map<String, Object?>);
@@ -1454,22 +1430,19 @@ void main() {
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 909);
       final commands = <String>[];
-      when(
-        () => installer.ensureInstalled(session),
-      ).thenAnswer((_) async => _fakeInstallation);
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        return _buildOutputSession(
-          '{"type":"hello","status":"ok","version":"0.2.4",'
-          '"capabilities":[]}\n',
-        );
-      });
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.single as String);
+            return _buildOutputSession(
+              '{"type":"hello","status":"ok","version":"0.2.4",'
+              '"capabilities":[]}\n',
+            );
+          });
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).detectedVersion(session, 'work');
+      final version = await MonkeyMuxService(installer: installer)
+          .detectedVersion(session, 'work');
 
       expect(version, '0.2.4');
       expect(
@@ -1496,9 +1469,8 @@ void main() {
           ),
         );
 
-        final status = await MonkeyMuxService(
-          installer: installer,
-        ).runningServerStatus(session, _fakeInstallation, 'work');
+        final status = await MonkeyMuxService(installer: installer)
+            .runningServerStatus(session, _fakeInstallation, 'work');
 
         expect(status, isNotNull);
         expect(status!.version, '0.2.4');
@@ -1519,16 +1491,14 @@ void main() {
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 910);
       final commands = <String>[];
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        return _buildOutputSession('0.1.89\n');
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.single as String);
+            return _buildOutputSession('0.1.89\n');
+          });
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, '0.1.89');
       expect(
@@ -1542,12 +1512,11 @@ void main() {
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 911);
       final commands = <String>[];
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        return _buildOutputSession('0.1.90\r\n');
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.single as String);
+            return _buildOutputSession('0.1.90\r\n');
+          });
 
       final version = await MonkeyMuxService(installer: installer)
           .installedHelperVersion(
@@ -1567,13 +1536,11 @@ void main() {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 912);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => _buildOutputSession(''));
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => _buildOutputSession(''));
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, isNull);
     });
@@ -1588,9 +1555,8 @@ void main() {
         ),
       );
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, '0.1.89');
     });
@@ -1603,9 +1569,8 @@ void main() {
         (_) async => _buildOutputSession('monkeymux: command not found\n'),
       );
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, isNull);
     });
@@ -1614,13 +1579,11 @@ void main() {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 916);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => _buildOutputSession('0.1.90-dev.3\n'));
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => _buildOutputSession('0.1.90-dev.3\n'));
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, '0.1.90-dev.3');
     });
@@ -1629,13 +1592,11 @@ void main() {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 913);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenThrow(SSHStateError('channel closed'));
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenThrow(SSHStateError('channel closed'));
 
-      final version = await MonkeyMuxService(
-        installer: installer,
-      ).installedHelperVersion(session, _fakeInstallation);
+      final version = await MonkeyMuxService(installer: installer)
+          .installedHelperVersion(session, _fakeInstallation);
 
       expect(version, isNull);
     });

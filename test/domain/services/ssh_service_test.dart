@@ -990,9 +990,8 @@ LISTEN ::1:4201
 
     test('builds a streaming Windows watcher command', () {
       final client = _MockSshClient();
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       final session = _testSession(
         client,
         connectionId: 7,
@@ -1044,9 +1043,8 @@ LISTEN ::1:4201
         execSession,
         stdout: 'LISTEN 0 4096 127.0.0.1:3000 0.0.0.0:*\n',
       );
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => execSession);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => execSession);
       final session = _testSession(
         client,
         hostId: 7,
@@ -1066,9 +1064,8 @@ LISTEN ::1:4201
         execSession,
         stdout: '__monkeyssh_port_discovery_done__\n',
       );
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => execSession);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => execSession);
       final session = _testSession(
         client,
         connectionId: 7,
@@ -1079,9 +1076,9 @@ LISTEN ::1:4201
       await session.discoverRemoteListeningTcpListeners();
 
       final command =
-          verify(
-                () => client.execute(captureAny(), pty: any(named: 'pty')),
-              ).captured.single
+          verify(() => client.execute(captureAny(), pty: any(named: 'pty')))
+                  .captured
+                  .single
               as String;
       expect(command, startsWith('/bin/sh -c '));
       expect(command, contains('MONKEYSSH_SHELL_TOKEN'));
@@ -1182,13 +1179,11 @@ LISTEN ::1:4201
       final remoteForward = _MockRemoteForward();
       when(() => remoteForward.host).thenReturn('127.0.0.1');
       when(() => remoteForward.port).thenReturn(41002);
-      when(
-        () => remoteForward.connections,
-      ).thenAnswer((_) => const Stream<SSHForwardChannel>.empty());
+      when(() => remoteForward.connections)
+          .thenAnswer((_) => const Stream<SSHForwardChannel>.empty());
       when(remoteForward.close).thenReturn(null);
-      when(
-        () => client.forwardRemote(host: '127.0.0.1', port: 0),
-      ).thenAnswer((_) async => remoteForward);
+      when(() => client.forwardRemote(host: '127.0.0.1', port: 0))
+          .thenAnswer((_) async => remoteForward);
 
       final session = _AutomaticForwardTestSession(
         connectionId: 1,
@@ -1400,9 +1395,8 @@ LISTEN ::1:4201
         final watcher = _MockExecSession();
         final stdout = StreamController<Uint8List>();
         final done = Completer<void>();
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => watcher);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => watcher);
         when(() => watcher.stdout).thenAnswer((_) => stdout.stream);
         when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
         when(() => watcher.done).thenAnswer((_) => done.future);
@@ -1428,9 +1422,9 @@ LISTEN ::1:4201
         );
         await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
         final watcherCommand =
-            verify(
-                  () => client.execute(captureAny(), pty: any(named: 'pty')),
-                ).captured.single
+            verify(() => client.execute(captureAny(), pty: any(named: 'pty')))
+                    .captured
+                    .single
                 as String;
         expect(watcherCommand, contains('while :; do'));
         expect(watcherCommand, contains('sleep 0.5'));
@@ -1491,9 +1485,8 @@ LISTEN ::1:4201
       final watcher = _MockExecSession();
       final stdout = StreamController<Uint8List>();
       final done = Completer<void>();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => watcher);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => watcher);
       when(() => watcher.stdout).thenAnswer((_) => stdout.stream);
       when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
       when(() => watcher.done).thenAnswer((_) => done.future);
@@ -1561,22 +1554,18 @@ LISTEN ::1:4201
       ];
       final doneCompleters = [Completer<void>(), Completer<void>()];
       var watcherIndex = 0;
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        _,
-      ) async {
-        final index = watcherIndex++;
-        return watchers[index];
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async {
+            final index = watcherIndex++;
+            return watchers[index];
+          });
       for (var index = 0; index < watchers.length; index++) {
-        when(
-          () => watchers[index].stdout,
-        ).thenAnswer((_) => stdoutControllers[index].stream);
-        when(
-          () => watchers[index].stderr,
-        ).thenAnswer((_) => const Stream.empty());
-        when(
-          () => watchers[index].done,
-        ).thenAnswer((_) => doneCompleters[index].future);
+        when(() => watchers[index].stdout)
+            .thenAnswer((_) => stdoutControllers[index].stream);
+        when(() => watchers[index].stderr)
+            .thenAnswer((_) => const Stream.empty());
+        when(() => watchers[index].done)
+            .thenAnswer((_) => doneCompleters[index].future);
         when(watchers[index].close).thenAnswer((_) {});
       }
       final session = _testSession(
@@ -1651,9 +1640,8 @@ LISTEN ::1:4201
       final watcher = _MockExecSession();
       final stdout = StreamController<Uint8List>();
       final done = Completer<void>();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => watcher);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => watcher);
       when(() => watcher.stdout).thenAnswer((_) => stdout.stream);
       when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
       when(() => watcher.done).thenAnswer((_) => done.future);
@@ -1727,12 +1715,11 @@ LISTEN ::1:4201
               '__monkeyssh_port_discovery_done__\n',
         );
         var executeCount = 0;
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          _,
-        ) async {
-          executeCount++;
-          return executeCount == 1 ? watcher : scan;
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async {
+              executeCount++;
+              return executeCount == 1 ? watcher : scan;
+            });
         when(() => watcher.stdout).thenAnswer((_) => watcherStdout.stream);
         when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
         when(() => watcher.done).thenAnswer((_) => watcherDone.future);
@@ -2073,11 +2060,9 @@ LISTEN ::1:4201
             'BEGINEND',
             reason: 'slice $sliceSize leaked image payload into the buffer',
           );
-          expect(
-            terminal.heldImageSignatures().keys,
-            <int>[93],
-            reason: 'slice $sliceSize must reassemble exactly one image',
-          );
+          expect(terminal.heldImageSignatures().keys, <int>[
+            93,
+          ], reason: 'slice $sliceSize must reassemble exactly one image');
         }
       },
     );
@@ -2277,19 +2262,16 @@ LISTEN ::1:4201
       expect(decoder.add(''), isEmpty);
     });
 
-    test(
-      'decodes a long fragmented passthrough without emitting a partial payload',
-      () {
-        final decoder = TerminalTmuxPassthroughDecoder();
-        final chunk = 'x' * 4096;
-        expect(decoder.add('before\x1bPtmux;'), 'before');
-        for (var index = 0; index < 256; index++) {
-          expect(decoder.add(chunk), isEmpty);
-        }
-        expect(decoder.add('\x1b'), isEmpty);
-        expect(decoder.add(r'\after'), '${chunk * 256}after');
-      },
-    );
+    test('decodes a long fragmented passthrough without emitting a partial payload', () {
+      final decoder = TerminalTmuxPassthroughDecoder();
+      final chunk = 'x' * 4096;
+      expect(decoder.add('before\x1bPtmux;'), 'before');
+      for (var index = 0; index < 256; index++) {
+        expect(decoder.add(chunk), isEmpty);
+      }
+      expect(decoder.add('\x1b'), isEmpty);
+      expect(decoder.add(r'\after'), '${chunk * 256}after');
+    });
 
     test('preserves every split boundary and ordinary escape sequence', () {
       const input = 'plain\x1b[31m\x1bPtm\x1bPtmux;A\x1b\x1b\\B\x1bX\x1b\\tail';
@@ -2624,26 +2606,23 @@ LISTEN ::1:4201
   });
 
   group('host key capture', () {
-    test(
-      'captures host key bytes from fragmented SSH identification and kex packets',
-      () async {
-        final expectedHostKey = _ed25519HostKeyBlob([1, 2, 3, 4]);
-        final kexReplyPacket = _sshBinaryPacket(
-          _sshMessageWithHostKey(31, expectedHostKey),
-        );
+    test('captures host key bytes from fragmented SSH identification and kex packets', () async {
+      final expectedHostKey = _ed25519HostKeyBlob([1, 2, 3, 4]);
+      final kexReplyPacket = _sshBinaryPacket(
+        _sshMessageWithHostKey(31, expectedHostKey),
+      );
 
-        await expectLater(
-          captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
-            Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r')),
-            Uint8List.fromList(utf8.encode('\n')),
-            Uint8List.sublistView(kexReplyPacket, 0, 3),
-            Uint8List.sublistView(kexReplyPacket, 3, 9),
-            Uint8List.sublistView(kexReplyPacket, 9),
-          ]),
-          completion(expectedHostKey),
-        );
-      },
-    );
+      await expectLater(
+        captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
+          Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r')),
+          Uint8List.fromList(utf8.encode('\n')),
+          Uint8List.sublistView(kexReplyPacket, 0, 3),
+          Uint8List.sublistView(kexReplyPacket, 3, 9),
+          Uint8List.sublistView(kexReplyPacket, 9),
+        ]),
+        completion(expectedHostKey),
+      );
+    });
 
     test(
       'fails host key capture when the handshake packet is too large',
@@ -2764,8 +2743,7 @@ LISTEN ::1:4201
                 name: 'Test Key',
                 keyType: 'ed25519',
                 publicKey: 'ssh-ed25519 AAAA...',
-                privateKey:
-                    'test-open-ssh-key-material\ntest\ntest-open-ssh-key-material-end',
+                privateKey: 'test-open-ssh-key-material\ntest\ntest-open-ssh-key-material-end',
                 passphrase: const Value('keypass'),
               ),
             );
@@ -2910,9 +2888,8 @@ LISTEN ::1:4201
       final execSession = _MockExecSession();
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => execSession);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => execSession);
 
       final result = await session.execute(
         'tmux -CC attach-session -t test',
@@ -2934,9 +2911,8 @@ LISTEN ::1:4201
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
       const pty = SSHPtyConfig(width: 120, height: 30);
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => shell);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shell);
       when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
       when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
       when(() => shell.done).thenAnswer((_) => Future<void>.value());
@@ -2957,9 +2933,8 @@ LISTEN ::1:4201
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
       const pty = SSHPtyConfig(width: 120, height: 30);
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => shell);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shell);
       when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
       when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
       when(() => shell.done).thenAnswer((_) => Completer<void>().future);
@@ -2994,9 +2969,8 @@ LISTEN ::1:4201
           hostname: 'example.com',
         );
 
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => shell);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => shell);
         when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
         when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
         when(() => shell.done).thenAnswer((_) => shellDone.future);
@@ -3031,12 +3005,10 @@ LISTEN ::1:4201
       () async {
         final client = _MockSshClient();
         final shell = _MockExecSession();
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenAnswer((_) async => shell);
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => shell);
         when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
         when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
         when(() => shell.done).thenAnswer((_) => Completer<void>().future);
@@ -3060,123 +3032,116 @@ LISTEN ::1:4201
       },
     );
 
-    test(
-      'returns completed startup commands to a login shell without disconnecting',
-      () async {
-        final client = _MockSshClient();
-        final startupShell = _MockExecSession();
-        final loginShell = _MockExecSession();
-        final startupStdout = StreamController<Uint8List>();
-        final loginStdout = StreamController<Uint8List>();
-        final startupDone = Completer<void>();
-        final loginDone = Completer<void>();
-        final loginOpen = Completer<SSHSession>();
-        final executedCommands = <String>[];
-        final startupWrites = <List<int>>[];
-        final loginWrites = <List<int>>[];
-        final session = _testSession(
-          client,
-          hostId: 2,
-          hostname: 'example.com',
+    test('returns completed startup commands to a login shell without disconnecting', () async {
+      final client = _MockSshClient();
+      final startupShell = _MockExecSession();
+      final loginShell = _MockExecSession();
+      final startupStdout = StreamController<Uint8List>();
+      final loginStdout = StreamController<Uint8List>();
+      final startupDone = Completer<void>();
+      final loginDone = Completer<void>();
+      final loginOpen = Completer<SSHSession>();
+      final executedCommands = <String>[];
+      final startupWrites = <List<int>>[];
+      final loginWrites = <List<int>>[];
+      final session = _testSession(client, hostId: 2, hostname: 'example.com');
+      const pty = SSHPtyConfig(width: 120, height: 30);
+
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) {
+        executedCommands.add(invocation.positionalArguments.single as String);
+        return executedCommands.length == 1
+            ? Future.value(startupShell)
+            : loginOpen.future;
+      });
+      when(() => startupShell.stdout).thenAnswer((_) => startupStdout.stream);
+      when(() => startupShell.stderr).thenAnswer((_) => const Stream.empty());
+      when(() => startupShell.done).thenAnswer((_) => startupDone.future);
+      when(() => startupShell.write(any())).thenAnswer((invocation) {
+        startupWrites.add(
+          List<int>.from(invocation.positionalArguments.single as List<int>),
         );
-        const pty = SSHPtyConfig(width: 120, height: 30);
+      });
+      when(startupShell.close).thenAnswer((_) {});
+      when(() => loginShell.stdout).thenAnswer((_) => loginStdout.stream);
+      when(() => loginShell.stderr).thenAnswer((_) => const Stream.empty());
+      when(() => loginShell.done).thenAnswer((_) => loginDone.future);
+      when(() => loginShell.write(any())).thenAnswer((invocation) {
+        loginWrites.add(
+          List<int>.from(invocation.positionalArguments.single as List<int>),
+        );
+      });
+      when(loginShell.close).thenAnswer((_) {});
 
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) {
-          executedCommands.add(invocation.positionalArguments.single as String);
-          return executedCommands.length == 1
-              ? Future.value(startupShell)
-              : loginOpen.future;
-        });
-        when(() => startupShell.stdout).thenAnswer((_) => startupStdout.stream);
-        when(() => startupShell.stderr).thenAnswer((_) => const Stream.empty());
-        when(() => startupShell.done).thenAnswer((_) => startupDone.future);
-        when(() => startupShell.write(any())).thenAnswer((invocation) {
-          startupWrites.add(
-            List<int>.from(invocation.positionalArguments.single as List<int>),
-          );
-        });
-        when(startupShell.close).thenAnswer((_) {});
-        when(() => loginShell.stdout).thenAnswer((_) => loginStdout.stream);
-        when(() => loginShell.stderr).thenAnswer((_) => const Stream.empty());
-        when(() => loginShell.done).thenAnswer((_) => loginDone.future);
-        when(() => loginShell.write(any())).thenAnswer((invocation) {
-          loginWrites.add(
-            List<int>.from(invocation.positionalArguments.single as List<int>),
-          );
-        });
-        when(loginShell.close).thenAnswer((_) {});
+      addTearDown(() async {
+        await session.closeShell(waitForStreams: false);
+        await startupStdout.close();
+        await loginStdout.close();
+        if (!startupDone.isCompleted) {
+          startupDone.complete();
+        }
+        if (!loginDone.isCompleted) {
+          loginDone.complete();
+        }
+      });
 
-        addTearDown(() async {
-          await session.closeShell(waitForStreams: false);
-          await startupStdout.close();
-          await loginStdout.close();
-          if (!startupDone.isCompleted) {
-            startupDone.complete();
-          }
-          if (!loginDone.isCompleted) {
-            loginDone.complete();
-          }
-        });
+      final openedShell = await session.getShell(
+        pty: pty,
+        command: 'monkeymux attach work',
+        returnToLoginShell: true,
+      );
+      expect(openedShell, same(startupShell));
+      final shellDoneEvents = <void>[];
+      final shellDoneSubscription = session.shellDoneStream.listen(
+        shellDoneEvents.add,
+      );
+      addTearDown(shellDoneSubscription.cancel);
+      var commandCompletedCount = 0;
+      final commandCompletedSubscription = session.shellCommandCompletedStream
+          .listen((_) => commandCompletedCount += 1);
+      addTearDown(commandCompletedSubscription.cancel);
 
-        final openedShell = await session.getShell(
+      startupStdout.add(Uint8List.fromList(utf8.encode('\x1b[?9001h')));
+      await pumpEventQueue();
+      session.debugFlushPendingTerminalOutput();
+      startupDone.complete();
+      await untilCalled(
+        () => client.execute(
+          any(that: contains('COLORTERM=truecolor')),
           pty: pty,
-          command: 'monkeymux attach work',
-          returnToLoginShell: true,
-        );
-        expect(openedShell, same(startupShell));
-        final shellDoneEvents = <void>[];
-        final shellDoneSubscription = session.shellDoneStream.listen(
-          shellDoneEvents.add,
-        );
-        addTearDown(shellDoneSubscription.cancel);
-        var commandCompletedCount = 0;
-        final commandCompletedSubscription = session.shellCommandCompletedStream
-            .listen((_) => commandCompletedCount += 1);
-        addTearDown(commandCompletedSubscription.cancel);
+        ),
+      );
+      session.writeToShell('queued input');
+      loginOpen.complete(loginShell);
+      final replacementShell = await session.getShell();
 
-        startupStdout.add(Uint8List.fromList(utf8.encode('\x1b[?9001h')));
-        await pumpEventQueue();
-        session.debugFlushPendingTerminalOutput();
-        startupDone.complete();
-        await untilCalled(
-          () => client.execute(
-            any(that: contains('COLORTERM=truecolor')),
-            pty: pty,
-          ),
-        );
-        session.writeToShell('queued input');
-        loginOpen.complete(loginShell);
-        final replacementShell = await session.getShell();
+      expect(replacementShell, same(loginShell));
+      expect(commandCompletedCount, 1);
+      expect(shellDoneEvents, isEmpty);
+      expect(startupWrites, isEmpty);
+      expect(loginWrites.map(utf8.decode), contains('queued input'));
+      expect(executedCommands, [
+        _expectedMarkedCommand(session, 'monkeymux attach work'),
+        _expectedLoginShellCommand(session),
+      ]);
+      session.writeToShell('live input');
+      expect(loginWrites.map(utf8.decode), contains('live input'));
 
-        expect(replacementShell, same(loginShell));
-        expect(commandCompletedCount, 1);
-        expect(shellDoneEvents, isEmpty);
-        expect(startupWrites, isEmpty);
-        expect(loginWrites.map(utf8.decode), contains('queued input'));
-        expect(executedCommands, [
-          _expectedMarkedCommand(session, 'monkeymux attach work'),
-          _expectedLoginShellCommand(session),
-        ]);
-        session.writeToShell('live input');
-        expect(loginWrites.map(utf8.decode), contains('live input'));
+      final loginOutput = Completer<String>();
+      final stdoutSubscription = session.shellStdoutStream.listen(
+        loginOutput.complete,
+      );
+      addTearDown(stdoutSubscription.cancel);
+      loginStdout.add(Uint8List.fromList(utf8.encode('login prompt')));
+      await pumpEventQueue();
+      session.debugFlushPendingTerminalOutput();
+      expect(await loginOutput.future, 'login prompt');
 
-        final loginOutput = Completer<String>();
-        final stdoutSubscription = session.shellStdoutStream.listen(
-          loginOutput.complete,
-        );
-        addTearDown(stdoutSubscription.cancel);
-        loginStdout.add(Uint8List.fromList(utf8.encode('login prompt')));
-        await pumpEventQueue();
-        session.debugFlushPendingTerminalOutput();
-        expect(await loginOutput.future, 'login prompt');
-
-        loginDone.complete();
-        await pumpEventQueue();
-        expect(shellDoneEvents, hasLength(1));
-      },
-    );
+      loginDone.complete();
+      await pumpEventQueue();
+      expect(shellDoneEvents, hasLength(1));
+    });
 
     test(
       'falls back to shell request when truecolor bootstrap is rejected',
@@ -3190,12 +3155,10 @@ LISTEN ::1:4201
         );
         const pty = SSHPtyConfig(width: 120, height: 30);
 
-        when(
-          () => client.execute(any(), pty: any(named: 'pty')),
-        ).thenThrow(SSHChannelRequestError('exec request rejected'));
-        when(
-          () => client.shell(pty: any(named: 'pty')),
-        ).thenAnswer((_) async => shell);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenThrow(SSHChannelRequestError('exec request rejected'));
+        when(() => client.shell(pty: any(named: 'pty')))
+            .thenAnswer((_) async => shell);
         when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
         when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
         when(() => shell.done).thenAnswer((_) => Future<void>.value());
@@ -3224,9 +3187,8 @@ LISTEN ::1:4201
         'MONKEYSSH_SHELL_TOKEN': session.shellLineageToken,
       };
 
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       when(
         () => client.shell(
           pty: any(named: 'pty'),
@@ -3264,23 +3226,21 @@ LISTEN ::1:4201
         );
         const pty = SSHPtyConfig(width: 120, height: 30);
 
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         when(
           () => client.shell(
             pty: any(named: 'pty'),
             environment: any(named: 'environment'),
           ),
         ).thenThrow(SSHChannelRequestError('env rejected'));
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) async {
-          if (invocation.namedArguments[#pty] == null) {
-            return detection;
-          }
-          return shell;
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              if (invocation.namedArguments[#pty] == null) {
+                return detection;
+              }
+              return shell;
+            });
         _stubSessionStreams(detection, stdout: 'cmd');
         _stubSessionStreams(shell);
 
@@ -3315,23 +3275,21 @@ LISTEN ::1:4201
         );
         const pty = SSHPtyConfig(width: 120, height: 30);
 
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         when(
           () => client.shell(
             pty: any(named: 'pty'),
             environment: any(named: 'environment'),
           ),
         ).thenThrow(SSHChannelRequestError('env rejected'));
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) async {
-          if (invocation.namedArguments[#pty] == null) {
-            return detection;
-          }
-          return shell;
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              if (invocation.namedArguments[#pty] == null) {
+                return detection;
+              }
+              return shell;
+            });
         _stubSessionStreams(detection, stdout: 'powershell');
         _stubSessionStreams(shell);
 
@@ -3571,9 +3529,8 @@ LISTEN ::1:4201
         hostname: 'example.com',
       );
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => shell);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shell);
       when(() => shell.stdout).thenAnswer((_) => stdout.stream);
       when(() => shell.stderr).thenAnswer((_) => stderr.stream);
       when(() => shell.done).thenAnswer((_) => done.future);
@@ -4574,10 +4531,9 @@ LISTEN ::1:4201
         await pumpEventQueue();
       }
       final callsBeforeUpdate = List<String>.of(notificationService.calls);
-      (container.read(terminalNotificationsNotifierProvider.notifier)
-                  as _EnabledTerminalNotificationsNotifier)
-              .debugEnabled =
-          false;
+      (container.read(
+        terminalNotificationsNotifierProvider.notifier,
+      ) as _EnabledTerminalNotificationsNotifier).debugEnabled = false;
 
       sendOsc('99', const ['i=timed', 'Ignored']);
       await pumpEventQueue();
@@ -4802,9 +4758,8 @@ LISTEN ::1:4201
       );
       await older.updateAutomaticPortForwardProcessRoots({7300});
       final hostRepository = _MockHostRepository();
-      when(
-        () => hostRepository.getById(42),
-      ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final localContainer = ProviderContainer(
         overrides: [
           hostRepositoryProvider.overrideWithValue(hostRepository),
@@ -4861,9 +4816,8 @@ LISTEN ::1:4201
       );
       await older.updateAutomaticPortForwardProcessRoots({7300});
       final hostRepository = _MockHostRepository();
-      when(
-        () => hostRepository.getById(42),
-      ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final localContainer = ProviderContainer(
         overrides: [
           hostRepositoryProvider.overrideWithValue(hostRepository),
@@ -4926,9 +4880,8 @@ LISTEN ::1:4201
         isShellRelated: true,
       );
       final hostRepository = _MockHostRepository();
-      when(
-        () => hostRepository.getById(42),
-      ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       when(
         () => hostRepository.getById(43),
       ).thenAnswer((_) async => _automaticForwardHost(enabled: true, id: 43));
@@ -5075,9 +5028,8 @@ LISTEN ::1:4201
           isShellRelated: true,
         );
         final hostRepository = _MockHostRepository();
-        when(
-          () => hostRepository.getById(42),
-        ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
+        when(() => hostRepository.getById(42))
+            .thenAnswer((_) async => _automaticForwardHost(enabled: true));
         final localContainer = ProviderContainer(
           overrides: [
             hostRepositoryProvider.overrideWithValue(hostRepository),
@@ -5108,75 +5060,67 @@ LISTEN ::1:4201
       });
     }
 
-    test(
-      'manual exclusions stay stable on automatic events and track reverse listeners',
-      () async {
-        final changes = StreamController<void>.broadcast(sync: true);
-        addTearDown(changes.close);
-        final service = _FakeActiveSessionsSshService(
-          useRecordedTunnels: true,
-          tunnelChanges: changes,
+    test('manual exclusions stay stable on automatic events and track reverse listeners', () async {
+      final changes = StreamController<void>.broadcast(sync: true);
+      addTearDown(changes.close);
+      final service = _FakeActiveSessionsSshService(
+        useRecordedTunnels: true,
+        tunnelChanges: changes,
+      );
+      final hosts = _MockHostRepository();
+      when(() => hosts.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      final localContainer = ProviderContainer(
+        overrides: [
+          sshServiceProvider.overrideWithValue(service),
+          hostRepositoryProvider.overrideWithValue(hosts),
+          portForwardRepositoryProvider.overrideWithValue(
+            _emptyPortForwardRepository(),
+          ),
+        ],
+      );
+      addTearDown(localContainer.dispose);
+      final notifier = localContainer.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      expect(result.success, isTrue);
+      final session =
+          service.getSession(result.connectionId!)!
+              as _RecordingAutomaticForwardSession;
+      var configured = session.automaticConfigurations.length;
+      for (final (id, port, remoteHost, isLocal, automatic) in [
+        (1, 3000, 'localhost', true, false),
+        (-1, 3001, '127.0.0.1', true, true),
+        (2, 3002, 'localhost', false, false),
+      ]) {
+        session.tunnels[id] = ActiveTunnelInfo(
+          portForwardId: id,
+          localHost: '127.0.0.1',
+          localPort: port + 1000,
+          remoteHost: remoteHost,
+          remotePort: port,
+          isLocal: isLocal,
+          isAutomatic: automatic,
         );
-        final hosts = _MockHostRepository();
-        when(
-          () => hosts.getById(42),
-        ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
-        final localContainer = ProviderContainer(
-          overrides: [
-            sshServiceProvider.overrideWithValue(service),
-            hostRepositoryProvider.overrideWithValue(hosts),
-            portForwardRepositoryProvider.overrideWithValue(
-              _emptyPortForwardRepository(),
-            ),
-          ],
-        );
-        addTearDown(localContainer.dispose);
-        final notifier = localContainer.read(activeSessionsProvider.notifier);
-        final result = await notifier.connect(42, forceNew: true);
-        expect(result.success, isTrue);
-        final session =
-            service.getSession(result.connectionId!)!
-                as _RecordingAutomaticForwardSession;
-        var configured = session.automaticConfigurations.length;
-        for (final (id, port, remoteHost, isLocal, automatic) in [
-          (1, 3000, 'localhost', true, false),
-          (-1, 3001, '127.0.0.1', true, true),
-          (2, 3002, 'localhost', false, false),
-        ]) {
-          session.tunnels[id] = ActiveTunnelInfo(
-            portForwardId: id,
-            localHost: '127.0.0.1',
-            localPort: port + 1000,
-            remoteHost: remoteHost,
-            remotePort: port,
-            isLocal: isLocal,
-            isAutomatic: automatic,
-          );
-          changes.add(null);
-          await pumpEventQueue();
-          if (automatic) {
-            expect(session.automaticConfigurations, hasLength(configured));
-          } else {
-            expect(
-              session.automaticConfigurations.last.excludedRemoteListeners,
-              {
-                ...remoteTcpListenerExclusionKeys('localhost', 3000),
-                if (!isLocal)
-                  ...remoteTcpListenerExclusionKeys('localhost', 3002),
-              },
-            );
-            configured = session.automaticConfigurations.length;
-          }
-        }
-        session.tunnels.remove(2);
         changes.add(null);
         await pumpEventQueue();
-        expect(
-          session.automaticConfigurations.last.excludedRemoteListeners,
-          remoteTcpListenerExclusionKeys('localhost', 3000),
-        );
-      },
-    );
+        if (automatic) {
+          expect(session.automaticConfigurations, hasLength(configured));
+        } else {
+          expect(session.automaticConfigurations.last.excludedRemoteListeners, {
+            ...remoteTcpListenerExclusionKeys('localhost', 3000),
+            if (!isLocal) ...remoteTcpListenerExclusionKeys('localhost', 3002),
+          });
+          configured = session.automaticConfigurations.length;
+        }
+      }
+      session.tunnels.remove(2);
+      changes.add(null);
+      await pumpEventQueue();
+      expect(
+        session.automaticConfigurations.last.excludedRemoteListeners,
+        remoteTcpListenerExclusionKeys('localhost', 3000),
+      );
+    });
 
     test('excludes stopped saved local forwards from discovery', () async {
       final primary = _RecordingAutomaticForwardSession(
@@ -5190,9 +5134,8 @@ LISTEN ::1:4201
         ),
       );
       final hostRepository = _MockHostRepository();
-      when(
-        () => hostRepository.getById(42),
-      ).thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final portForwardRepository = _MockPortForwardRepository();
       when(() => portForwardRepository.getByHostId(42)).thenAnswer(
         (_) async => [
@@ -5251,9 +5194,8 @@ LISTEN ::1:4201
         );
         final hostRepository = _MockHostRepository();
         var currentHost = _automaticForwardHost(enabled: true);
-        when(
-          () => hostRepository.getById(42),
-        ).thenAnswer((_) async => currentHost);
+        when(() => hostRepository.getById(42))
+            .thenAnswer((_) async => currentHost);
         final localContainer = ProviderContainer(
           overrides: [
             sshServiceProvider.overrideWithValue(slowSshService),
@@ -5284,9 +5226,8 @@ LISTEN ::1:4201
     test('serializes automatic forwarding reconfiguration per host', () async {
       final localSshService = _FakeActiveSessionsSshService();
       final hostRepository = _MockHostRepository();
-      when(
-        () => hostRepository.getById(42),
-      ).thenAnswer((_) async => _automaticForwardHost(enabled: false));
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: false));
       when(
         () => hostRepository.resolveProxyName(
           hostId: any(named: 'hostId'),
@@ -5531,59 +5472,56 @@ LISTEN ::1:4201
       },
     );
 
-    test(
-      'removes stale sessions when IPv6 browser forwards report a closed transport',
-      () async {
-        final notifier = container.read(activeSessionsProvider.notifier);
+    test('removes stale sessions when IPv6 browser forwards report a closed transport', () async {
+      final notifier = container.read(activeSessionsProvider.notifier);
 
-        final result = await notifier.connect(42, forceNew: true);
-        expect(result.success, isTrue);
-        expect(result.connectionId, isNotNull);
+      final result = await notifier.connect(42, forceNew: true);
+      expect(result.success, isTrue);
+      expect(result.connectionId, isNotNull);
 
-        final connectionId = result.connectionId!;
-        final session = fakeSshService.getSession(connectionId)!;
-        await pumpEventQueue();
-        when(
-          () => fakeSshService
-              .clientFor(connectionId)
-              .forwardLocal('remote.example.com', 80),
-        ).thenThrow(SSHStateError('Transport is closed'));
+      final connectionId = result.connectionId!;
+      final session = fakeSshService.getSession(connectionId)!;
+      await pumpEventQueue();
+      when(
+        () => fakeSshService
+            .clientFor(connectionId)
+            .forwardLocal('remote.example.com', 80),
+      ).thenThrow(SSHStateError('Transport is closed'));
 
-        addTearDown(session.stopAllForwards);
+      addTearDown(session.stopAllForwards);
 
-        expect(
-          await session.startLocalForward(
-            portForwardId: 1,
-            localHost: InternetAddress.loopbackIPv4.address,
-            localPort: 0,
-            remoteHost: 'remote.example.com',
-            remotePort: 80,
-          ),
-          isTrue,
-        );
+      expect(
+        await session.startLocalForward(
+          portForwardId: 1,
+          localHost: InternetAddress.loopbackIPv4.address,
+          localPort: 0,
+          remoteHost: 'remote.example.com',
+          remotePort: 80,
+        ),
+        isTrue,
+      );
 
-        final activeTunnel = session.activeTunnels.single;
-        expect(
-          activeTunnel.browserHost,
-          portForwardBrowserHostForPortForwardId(activeTunnel.portForwardId),
-        );
-        expect(activeTunnel.browserPort, activeTunnel.localPort);
-        final socket = await Socket.connect(
-          InternetAddress.loopbackIPv6,
-          activeTunnel.browserPort!,
-        );
-        socket.destroy();
-        await Future<void>.delayed(Duration.zero);
-        await Future<void>.delayed(Duration.zero);
+      final activeTunnel = session.activeTunnels.single;
+      expect(
+        activeTunnel.browserHost,
+        portForwardBrowserHostForPortForwardId(activeTunnel.portForwardId),
+      );
+      expect(activeTunnel.browserPort, activeTunnel.localPort);
+      final socket = await Socket.connect(
+        InternetAddress.loopbackIPv6,
+        activeTunnel.browserPort!,
+      );
+      socket.destroy();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
 
-        expect(notifier.getSession(connectionId), isNull);
-        expect(container.read(activeSessionsProvider)[connectionId], isNull);
-        expect(
-          notifier.getConnectionAttempt(42)?.latestMessage,
-          'Connection became unresponsive. Reconnect to continue.',
-        );
-      },
-    );
+      expect(notifier.getSession(connectionId), isNull);
+      expect(container.read(activeSessionsProvider)[connectionId], isNull);
+      expect(
+        notifier.getConnectionAttempt(42)?.latestMessage,
+        'Connection became unresponsive. Reconnect to continue.',
+      );
+    });
 
     for (final isLocal in [true, false]) {
       for (final ending in ['socket EOF', 'channel EOF', 'channel error']) {
@@ -5601,9 +5539,8 @@ LISTEN ::1:4201
             );
             late final Socket socket;
             if (isLocal) {
-              when(
-                () => client.forwardLocal('remote.example.com', 80),
-              ).thenAnswer((_) async => forward);
+              when(() => client.forwardLocal('remote.example.com', 80))
+                  .thenAnswer((_) async => forward);
               expect(
                 await session.startLocalForward(
                   portForwardId: 1,
@@ -5629,13 +5566,11 @@ LISTEN ::1:4201
               final subscription = targetServer.listen(accepted.complete);
               when(() => remoteForward.host).thenReturn('127.0.0.1');
               when(() => remoteForward.port).thenReturn(8022);
-              when(
-                () => remoteForward.connections,
-              ).thenAnswer((_) => connections.stream);
+              when(() => remoteForward.connections)
+                  .thenAnswer((_) => connections.stream);
               when(remoteForward.close).thenReturn(null);
-              when(
-                () => client.forwardRemote(host: '127.0.0.1', port: 8022),
-              ).thenAnswer((_) async => remoteForward);
+              when(() => client.forwardRemote(host: '127.0.0.1', port: 8022))
+                  .thenAnswer((_) async => remoteForward);
               expect(
                 await session.startRemoteForward(
                   portForwardId: 1,
@@ -5730,12 +5665,11 @@ LISTEN ::1:4201
           };
         }
         final session = _testSession(client);
-        when(() => client.forwardLocal('remote.example.com', 80)).thenAnswer((
-          _,
-        ) {
-          requested.complete();
-          return opening.future;
-        });
+        when(() => client.forwardLocal('remote.example.com', 80))
+            .thenAnswer((_) {
+              requested.complete();
+              return opening.future;
+            });
         addTearDown(() async {
           if (!releaseFlush.isCompleted) releaseFlush.complete();
           await session.stopAllForwards();
@@ -6036,9 +5970,8 @@ LISTEN ::1:4201
           final repository = _MockHostRepository();
           final timestamp = Completer<bool>();
           when(() => repository.getById(host.id)).thenAnswer((_) async => host);
-          when(
-            () => repository.updateLastConnected(host.id),
-          ).thenAnswer((_) => timestamp.future);
+          when(() => repository.updateLastConnected(host.id))
+              .thenAnswer((_) => timestamp.future);
           final service = demo
               ? SshService(hostRepository: repository)
               : (await _AuthenticationFixture.create(
@@ -6069,12 +6002,10 @@ LISTEN ::1:4201
         'bulk shutdown preserves new sessions when close fails: $failClose',
         () async {
           final repository = _MockHostRepository();
-          when(
-            () => repository.getById(any()),
-          ).thenAnswer((_) async => _automaticForwardHost(enabled: false));
-          when(
-            () => repository.updateLastConnected(any()),
-          ).thenAnswer((_) async => true);
+          when(() => repository.getById(any()))
+              .thenAnswer((_) async => _automaticForwardHost(enabled: false));
+          when(() => repository.updateLastConnected(any()))
+              .thenAnswer((_) async => true);
           final service = _CapturingSshService(
             hostRepository: repository,
             keyRepository: null,
@@ -6608,69 +6539,66 @@ LISTEN ::1:4201
       },
     );
 
-    test(
-      'connectToHost falls back to Auto keys for jump host when selected key is missing',
-      () async {
-        final db = AppDatabase.forTesting(NativeDatabase.memory());
-        addTearDown(db.close);
-        final encryptionService = SecretEncryptionService.forTesting();
-        final hostRepo = HostRepository(db, encryptionService);
-        final keyRepo = _CountingKeyRepository(
-          db,
-          encryptionService,
-          returnNullOnGetById: true,
-        );
-        final service = _CapturingSshService(
-          hostRepository: hostRepo,
-          keyRepository: keyRepo,
-        );
+    test('connectToHost falls back to Auto keys for jump host when selected key is missing', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final encryptionService = SecretEncryptionService.forTesting();
+      final hostRepo = HostRepository(db, encryptionService);
+      final keyRepo = _CountingKeyRepository(
+        db,
+        encryptionService,
+        returnNullOnGetById: true,
+      );
+      final service = _CapturingSshService(
+        hostRepository: hostRepo,
+        keyRepository: keyRepo,
+      );
 
-        final selectedJumpKeyId = await keyRepo.insert(
-          SshKeysCompanion.insert(
-            name: 'Selected Jump Key',
-            keyType: 'ed25519',
-            publicKey: 'ssh-ed25519 EEEE...',
-            privateKey: 'selected-jump-key-material',
-          ),
-        );
-        await keyRepo.insert(
-          SshKeysCompanion.insert(
-            name: 'Auto Key',
-            keyType: 'rsa',
-            publicKey: 'ssh-rsa FFFF...',
-            privateKey: 'auto-key-material',
-          ),
-        );
-        final jumpHostId = await db
-            .into(db.hosts)
-            .insert(
-              HostsCompanion.insert(
-                label: 'Jump Host',
-                hostname: '10.0.0.31',
-                username: 'jump',
-                keyId: Value(selectedJumpKeyId),
-              ),
-            );
-        final hostId = await db
-            .into(db.hosts)
-            .insert(
-              HostsCompanion.insert(
-                label: 'Target Host',
-                hostname: '10.0.0.32',
-                username: 'target',
-                jumpHostId: Value(jumpHostId),
-              ),
-            );
+      final selectedJumpKeyId = await keyRepo.insert(
+        SshKeysCompanion.insert(
+          name: 'Selected Jump Key',
+          keyType: 'ed25519',
+          publicKey: 'ssh-ed25519 EEEE...',
+          privateKey: 'selected-jump-key-material',
+        ),
+      );
+      await keyRepo.insert(
+        SshKeysCompanion.insert(
+          name: 'Auto Key',
+          keyType: 'rsa',
+          publicKey: 'ssh-rsa FFFF...',
+          privateKey: 'auto-key-material',
+        ),
+      );
+      final jumpHostId = await db
+          .into(db.hosts)
+          .insert(
+            HostsCompanion.insert(
+              label: 'Jump Host',
+              hostname: '10.0.0.31',
+              username: 'jump',
+              keyId: Value(selectedJumpKeyId),
+            ),
+          );
+      final hostId = await db
+          .into(db.hosts)
+          .insert(
+            HostsCompanion.insert(
+              label: 'Target Host',
+              hostname: '10.0.0.32',
+              username: 'target',
+              jumpHostId: Value(jumpHostId),
+            ),
+          );
 
-        await service.connectToHost(hostId);
+      await service.connectToHost(hostId);
 
-        final config = service.capturedConfig;
-        expect(config, isNotNull);
-        expect(config!.jumpHost, isNotNull);
-        expect(config.jumpHost!.privateKey, isNull);
-        expect(config.jumpHost!.identityKeys, hasLength(2));
-      },
-    );
+      final config = service.capturedConfig;
+      expect(config, isNotNull);
+      expect(config!.jumpHost, isNotNull);
+      expect(config.jumpHost!.privateKey, isNull);
+      expect(config.jumpHost!.identityKeys, hasLength(2));
+    });
 
     test('connectToHost skips Auto keys when host has a password', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -6832,9 +6760,8 @@ LISTEN ::1:4201
           final jump = _MockSshClient();
           when(() => jump.authenticated).thenAnswer((_) async {});
           when(jump.close).thenAnswer((_) async {});
-          when(
-            () => jump.forwardLocal('destination', 22),
-          ).thenAnswer((_) async => endpoint);
+          when(() => jump.forwardLocal('destination', 22))
+              .thenAnswer((_) async => endpoint);
           final failure = StateError('client construction failed');
           final service = SshService(
             knownHostsRepository: repository,
@@ -7540,38 +7467,34 @@ LISTEN ::1:4201
       expect(result.error, contains('changed between verification'));
     });
 
-    test(
-      'refused jump-host forward returns a failed connection through cancellation guard',
-      () async {
-        final fixture = await _AuthenticationFixture.create(
-          hostname: 'jump.example.com',
-          keyBytes: [1, 2, 3],
-        );
-        when(
-          () => fixture.client.forwardLocal('target.example.com', 22),
-        ).thenAnswer(
-          (_) => Future<SSHForwardChannel>.error(
-            SSHChannelOpenError(1, 'administratively prohibited'),
-          ),
-        );
-        final result = await fixture.service.connect(
-          const SshConnectionConfig(
-            hostname: 'target.example.com',
+    test('refused jump-host forward returns a failed connection through cancellation guard', () async {
+      final fixture = await _AuthenticationFixture.create(
+        hostname: 'jump.example.com',
+        keyBytes: [1, 2, 3],
+      );
+      when(() => fixture.client.forwardLocal('target.example.com', 22))
+          .thenAnswer(
+            (_) => Future<SSHForwardChannel>.error(
+              SSHChannelOpenError(1, 'administratively prohibited'),
+            ),
+          );
+      final result = await fixture.service.connect(
+        const SshConnectionConfig(
+          hostname: 'target.example.com',
+          port: 22,
+          username: 'tester',
+          jumpHost: SshConnectionConfig(
+            hostname: 'jump.example.com',
             port: 22,
             username: 'tester',
-            jumpHost: SshConnectionConfig(
-              hostname: 'jump.example.com',
-              port: 22,
-              username: 'tester',
-            ),
           ),
-          cancellationToken: SshConnectionCancellationToken(),
-        );
-        expect(result.success, isFalse);
-        expect(result.error, contains('refused the tunnel'));
-        verify(fixture.client.close).called(1);
-      },
-    );
+        ),
+        cancellationToken: SshConnectionCancellationToken(),
+      );
+      expect(result.success, isFalse);
+      expect(result.error, contains('refused the tunnel'));
+      verify(fixture.client.close).called(1);
+    });
 
     test(
       'cancelled channel open consumes late refusal and teardown failure',
@@ -7617,9 +7540,8 @@ LISTEN ::1:4201
       final targetClient = _MockSshClient();
       var clientIndex = 0;
 
-      when(
-        () => jumpClient.forwardLocal('target.example.com', 22),
-      ).thenAnswer(_returnTargetSocket(targetSocket));
+      when(() => jumpClient.forwardLocal('target.example.com', 22))
+          .thenAnswer(_returnTargetSocket(targetSocket));
       when(jumpClient.close).thenAnswer((_) async {});
       when(targetClient.close).thenAnswer((_) async {});
 
@@ -7729,12 +7651,11 @@ LISTEN ::1:4201
       var clientIndex = 0;
       var promptCount = 0;
 
-      when(
-        () => jumpClient.forwardLocal('target-trusted.example.com', 22),
-      ).thenAnswer((_) async {
-        forwardCount++;
-        return targetSocket;
-      });
+      when(() => jumpClient.forwardLocal('target-trusted.example.com', 22))
+          .thenAnswer((_) async {
+            forwardCount++;
+            return targetSocket;
+          });
       when(jumpClient.close).thenAnswer((_) async {});
       when(targetClient.close).thenAnswer((_) async {});
 
@@ -8210,16 +8131,15 @@ LISTEN ::1:4201
         knownHostsRepository: knownHostsRepository,
         socketConnector: (host, port, {timeout}) async =>
             _FakeHostKeySocket(hostKeyBytes),
-        clientFactory:
-            (
-              socket, {
-              required username,
-              onVerifyHostKey,
-              onPasswordRequest,
-              onUserInfoRequest,
-              identities,
-              keepAliveInterval,
-            }) => client,
+        clientFactory: (
+          socket, {
+          required username,
+          onVerifyHostKey,
+          onPasswordRequest,
+          onUserInfoRequest,
+          identities,
+          keepAliveInterval,
+        }) => client,
       );
 
       final token = SshConnectionCancellationToken();

@@ -255,116 +255,106 @@ void main() {
       },
     );
 
-    test(
-      'ignores stale Copilot locks when a pane PID is reused',
-      () async {
-        final home = await Directory.systemTemp.createTemp(
-          'monkeyssh-copilot-lock-test-',
-        );
-        addTearDown(() => home.delete(recursive: true));
-        final fakeBin = await Directory(
-          '${home.path}/bin',
-        ).create(recursive: true);
-        final fakePs = File('${fakeBin.path}/ps');
-        await fakePs.writeAsString(
-          [
-            '#!/bin/sh',
-            r'case "$*" in',
-            '  "-eo pid=,ppid=,comm=,args=")',
-            r"    printf '%s\n' '42 1 zsh zsh' '501 42 copilot /opt/copilot'",
-            '    ;;',
-            '  "-p 501 -o etime=")',
-            r"    printf '00:10\n'",
-            '    ;;',
-            'esac',
-            '',
-          ].join('\n'),
-        );
-        final fakeStat = File('${fakeBin.path}/stat');
-        await fakeStat.writeAsString(
-          [
-            '#!/bin/sh',
-            r'case "$1" in',
-            '  -f)',
-            r"    printf 'GNU stat filesystem output\n'",
-            '    exit 1',
-            '    ;;',
-            '  -c)',
-            r'    case "$3" in',
-            r"      *aaa-stale*) printf '1\n' ;;",
-            '      *) date +%s ;;',
-            '    esac',
-            '    ;;',
-            'esac',
-            '',
-          ].join('\n'),
-        );
-        final chmod = await Process.run('chmod', [
-          '+x',
-          fakePs.path,
-          fakeStat.path,
-        ]);
-        expect(chmod.exitCode, 0, reason: chmod.stderr as String?);
+    test('ignores stale Copilot locks when a pane PID is reused', () async {
+      final home = await Directory.systemTemp.createTemp(
+        'monkeyssh-copilot-lock-test-',
+      );
+      addTearDown(() => home.delete(recursive: true));
+      final fakeBin = await Directory('${home.path}/bin')
+          .create(recursive: true);
+      final fakePs = File('${fakeBin.path}/ps');
+      await fakePs.writeAsString(
+        [
+          '#!/bin/sh',
+          r'case "$*" in',
+          '  "-eo pid=,ppid=,comm=,args=")',
+          r"    printf '%s\n' '42 1 zsh zsh' '501 42 copilot /opt/copilot'",
+          '    ;;',
+          '  "-p 501 -o etime=")',
+          r"    printf '00:10\n'",
+          '    ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      final fakeStat = File('${fakeBin.path}/stat');
+      await fakeStat.writeAsString(
+        [
+          '#!/bin/sh',
+          r'case "$1" in',
+          '  -f)',
+          r"    printf 'GNU stat filesystem output\n'",
+          '    exit 1',
+          '    ;;',
+          '  -c)',
+          r'    case "$3" in',
+          r"      *aaa-stale*) printf '1\n' ;;",
+          '      *) date +%s ;;',
+          '    esac',
+          '    ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      final chmod = await Process.run('chmod', [
+        '+x',
+        fakePs.path,
+        fakeStat.path,
+      ]);
+      expect(chmod.exitCode, 0, reason: chmod.stderr as String?);
 
-        final stateDirectory = Directory('${home.path}/.copilot/session-state');
-        final staleSession = await Directory(
-          '${stateDirectory.path}/aaa-stale',
-        ).create(recursive: true);
-        await File(
-          '${staleSession.path}/workspace.yaml',
-        ).writeAsString('summary: Different Copilot session\n');
-        final staleLock = File('${staleSession.path}/inuse.501.lock');
-        await staleLock.writeAsString('501');
-        await staleLock.setLastModified(
-          DateTime.now().subtract(const Duration(minutes: 10)),
-        );
+      final stateDirectory = Directory('${home.path}/.copilot/session-state');
+      final staleSession = await Directory('${stateDirectory.path}/aaa-stale')
+          .create(recursive: true);
+      await File('${staleSession.path}/workspace.yaml')
+          .writeAsString('summary: Different Copilot session\n');
+      final staleLock = File('${staleSession.path}/inuse.501.lock');
+      await staleLock.writeAsString('501');
+      await staleLock.setLastModified(
+        DateTime.now().subtract(const Duration(minutes: 10)),
+      );
 
-        final command = buildAgentActiveSessionMetadataCommand(const {42});
-        Future<ProcessResult> runProbe() => Process.run(
-          '/bin/sh',
-          ['-c', command],
-          environment: {
-            'HOME': home.path,
-            'PATH': '${fakeBin.path}:/usr/bin:/bin',
-          },
-          includeParentEnvironment: false,
-        );
+      final command = buildAgentActiveSessionMetadataCommand(const {42});
+      Future<ProcessResult> runProbe() => Process.run(
+        '/bin/sh',
+        ['-c', command],
+        environment: {
+          'HOME': home.path,
+          'PATH': '${fakeBin.path}:/usr/bin:/bin',
+        },
+        includeParentEnvironment: false,
+      );
 
-        final staleResult = await runProbe();
-        expect(staleResult.exitCode, 0, reason: staleResult.stderr as String?);
-        expect(
-          parseAgentActiveSessionMetadataOutput(
-            staleResult.stdout as String,
-            const {42},
-          ),
-          isEmpty,
-        );
-
-        final currentSession = await Directory(
-          '${stateDirectory.path}/zzz-current',
-        ).create(recursive: true);
-        await File(
-          '${currentSession.path}/workspace.yaml',
-        ).writeAsString('summary: Current Copilot session\n');
-        await File(
-          '${currentSession.path}/inuse.501.lock',
-        ).writeAsString('501');
-
-        final currentResult = await runProbe();
-        expect(
-          currentResult.exitCode,
-          0,
-          reason: currentResult.stderr as String?,
-        );
-        final metadata = parseAgentActiveSessionMetadataOutput(
-          currentResult.stdout as String,
+      final staleResult = await runProbe();
+      expect(staleResult.exitCode, 0, reason: staleResult.stderr as String?);
+      expect(
+        parseAgentActiveSessionMetadataOutput(
+          staleResult.stdout as String,
           const {42},
-        );
-        expect(metadata[42]?.sessionId, 'zzz-current');
-        expect(metadata[42]?.title, 'Current Copilot session');
-      },
-      skip: Platform.isWindows ? 'Requires a POSIX shell.' : false,
-    );
+        ),
+        isEmpty,
+      );
+
+      final currentSession = await Directory(
+        '${stateDirectory.path}/zzz-current',
+      ).create(recursive: true);
+      await File('${currentSession.path}/workspace.yaml')
+          .writeAsString('summary: Current Copilot session\n');
+      await File('${currentSession.path}/inuse.501.lock').writeAsString('501');
+
+      final currentResult = await runProbe();
+      expect(
+        currentResult.exitCode,
+        0,
+        reason: currentResult.stderr as String?,
+      );
+      final metadata = parseAgentActiveSessionMetadataOutput(
+        currentResult.stdout as String,
+        const {42},
+      );
+      expect(metadata[42]?.sessionId, 'zzz-current');
+      expect(metadata[42]?.title, 'Current Copilot session');
+    }, skip: Platform.isWindows ? 'Requires a POSIX shell.' : false);
 
     test('command no longer identifies or resolves Gemini CLI sessions', () {
       final command = buildAgentActiveSessionMetadataCommand(const {42});
@@ -386,20 +376,23 @@ void main() {
       expect(command, contains('.gemini/antigravity-cli/annotations'));
     });
 
-    test('command prefers Antigravity history title before annotation title', () {
-      final command = buildAgentActiveSessionMetadataCommand(const {42});
+    test(
+      'command prefers Antigravity history title before annotation title',
+      () {
+        final command = buildAgentActiveSessionMetadataCommand(const {42});
 
-      expect(
-        command.indexOf(
-          r'title=$(grep -F "$session_id" "$home/.gemini/antigravity-cli/history.jsonl"',
-        ),
-        lessThan(
+        expect(
           command.indexOf(
-            r'annotation_file="$home/.gemini/antigravity-cli/annotations/${session_id}.pbtxt"',
+            r'title=$(grep -F "$session_id" "$home/.gemini/antigravity-cli/history.jsonl"',
           ),
-        ),
-      );
-    });
+          lessThan(
+            command.indexOf(
+              r'annotation_file="$home/.gemini/antigravity-cli/annotations/${session_id}.pbtxt"',
+            ),
+          ),
+        );
+      },
+    );
 
     test('parses live session titles by matched pane PID', () {
       const sep = tmuxWindowFieldSeparator;

@@ -254,9 +254,8 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
         const SizedBox(height: 8),
         Text(
           'A passphrase adds extra security. You will need to enter it each time you use this key.',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.outline,
-          ),
+          style: Theme.of(context).textTheme.bodySmall
+              ?.copyWith(color: Theme.of(context).colorScheme.outline),
         ),
         const SizedBox(height: 32),
 
@@ -624,9 +623,8 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
           : file.name;
     }
     _notifyUnsavedChangesChanged();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Loaded "${file.name}"')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Loaded "${file.name}"')));
   }
 
   Future<void> _importFromEncryptedFile() async {

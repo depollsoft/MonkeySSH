@@ -862,9 +862,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       expandedEntries.add(entry);
       if (entry.folder?.id == folder.id) {
         expandedEntries.addAll(
-          _snippetsInFolder(
-            folder.id,
-          ).map((snippet) => _SnippetMenuEntry.snippet(snippet, folder)),
+          _snippetsInFolder(folder.id)
+              .map((snippet) => _SnippetMenuEntry.snippet(snippet, folder)),
         );
       }
     }

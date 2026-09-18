@@ -47,9 +47,8 @@ void _stubHistoryExec(ssh.SSHClient client, List<String> commands) {
   );
   when(() => exec.stderr).thenAnswer((_) => const Stream<Uint8List>.empty());
   when(() => exec.done).thenAnswer((_) => Future<void>.value());
-  when(
-    () => client.execute(any(), pty: any(named: 'pty')),
-  ).thenAnswer((_) async => exec);
+  when(() => client.execute(any(), pty: any(named: 'pty')))
+      .thenAnswer((_) async => exec);
 }
 
 class _PendingHistoryExec {
@@ -57,14 +56,13 @@ class _PendingHistoryExec {
     when(() => exec.stdout).thenAnswer((_) => _stdout.stream);
     when(() => exec.stderr).thenAnswer((_) => const Stream<Uint8List>.empty());
     when(() => exec.done).thenAnswer((_) => _done.future);
-    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-      _,
-    ) async {
-      if (!started.isCompleted) {
-        started.complete();
-      }
-      return exec;
-    });
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async {
+          if (!started.isCompleted) {
+            started.complete();
+          }
+          return exec;
+        });
   }
 
   final _MockSshExecSession exec = _MockSshExecSession();
@@ -127,9 +125,8 @@ void main() {
               utf8.encode(output).map((byte) => Uint8List.fromList([byte])),
             ),
           );
-          when(
-            () => exec.stderr,
-          ).thenAnswer((_) => Stream.value(Uint8List.fromList([1, 2, 3])));
+          when(() => exec.stderr)
+              .thenAnswer((_) => Stream.value(Uint8List.fromList([1, 2, 3])));
           when(() => exec.done).thenAnswer((_) => Future<void>.value());
           return exec;
         });
@@ -158,16 +155,15 @@ void main() {
         hostId: 102,
       );
       final execs = <ssh.SSHSession>[];
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        _,
-      ) async {
-        final exec = _MockSshExecSession();
-        execs.add(exec);
-        when(() => exec.stdout).thenAnswer((_) => const Stream.empty());
-        when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
-        when(() => exec.done).thenAnswer((_) => Completer<void>().future);
-        return exec;
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async {
+            final exec = _MockSshExecSession();
+            execs.add(exec);
+            when(() => exec.stdout).thenAnswer((_) => const Stream.empty());
+            when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+            when(() => exec.done).thenAnswer((_) => Completer<void>().future);
+            return exec;
+          });
       final invocation = _commandInvocation('xyz', '/repo');
       await expectLater(
         service.complete(session, invocation),
@@ -737,9 +733,8 @@ void main() {
           'checkout',
           'git checkout feature/login',
         ]);
-        verify(
-          () => secondClient.execute(any(), pty: any(named: 'pty')),
-        ).called(1);
+        verify(() => secondClient.execute(any(), pty: any(named: 'pty')))
+            .called(1);
       },
     );
 
@@ -753,30 +748,27 @@ void main() {
           connectionId: 7,
           hostId: 99,
         );
-        when(
-          () => client.remoteVersion,
-        ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) async {
-          final command = invocation.positionalArguments.first as String;
-          final script = decodeEncodedPowerShell(command);
-          final output = script.contains('ConsoleHost_history')
-              ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
-              : 'command\tgit\ncommand\tgitk\n';
-          final exec = _MockSshExecSession();
-          when(() => exec.stdout).thenAnswer(
-            (_) => Stream<Uint8List>.fromIterable([
-              Uint8List.fromList(utf8.encode(output)),
-            ]),
-          );
-          when(
-            () => exec.stderr,
-          ).thenAnswer((_) => const Stream<Uint8List>.empty());
-          when(() => exec.done).thenAnswer((_) => Future<void>.value());
-          when(exec.close).thenAnswer((_) {});
-          return exec;
-        });
+        when(() => client.remoteVersion)
+            .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              final command = invocation.positionalArguments.first as String;
+              final script = decodeEncodedPowerShell(command);
+              final output = script.contains('ConsoleHost_history')
+                  ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
+                  : 'command\tgit\ncommand\tgitk\n';
+              final exec = _MockSshExecSession();
+              when(() => exec.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.fromIterable([
+                  Uint8List.fromList(utf8.encode(output)),
+                ]),
+              );
+              when(() => exec.stderr)
+                  .thenAnswer((_) => const Stream<Uint8List>.empty());
+              when(() => exec.done).thenAnswer((_) => Future<void>.value());
+              when(exec.close).thenAnswer((_) {});
+              return exec;
+            });
         const invocation = ShellCompletionInvocation(
           commandLine: 'gi',
           cursorOffset: 2,
@@ -811,30 +803,27 @@ void main() {
         connectionId: 8,
         hostId: 100,
       );
-      when(
-        () => client.remoteVersion,
-      ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        final command = invocation.positionalArguments.first as String;
-        final script = decodeEncodedPowerShell(command);
-        final output = script.contains('HistorySavePath')
-            ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
-            : 'argument\tcheckout\nargument\tcherry-pick\n';
-        final exec = _MockSshExecSession();
-        when(() => exec.stdout).thenAnswer(
-          (_) => Stream<Uint8List>.fromIterable([
-            Uint8List.fromList(utf8.encode(output)),
-          ]),
-        );
-        when(
-          () => exec.stderr,
-        ).thenAnswer((_) => const Stream<Uint8List>.empty());
-        when(() => exec.done).thenAnswer((_) => Future<void>.value());
-        when(exec.close).thenAnswer((_) {});
-        return exec;
-      });
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.first as String;
+            final script = decodeEncodedPowerShell(command);
+            final output = script.contains('HistorySavePath')
+                ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
+                : 'argument\tcheckout\nargument\tcherry-pick\n';
+            final exec = _MockSshExecSession();
+            when(() => exec.stdout).thenAnswer(
+              (_) => Stream<Uint8List>.fromIterable([
+                Uint8List.fromList(utf8.encode(output)),
+              ]),
+            );
+            when(() => exec.stderr)
+                .thenAnswer((_) => const Stream<Uint8List>.empty());
+            when(() => exec.done).thenAnswer((_) => Future<void>.value());
+            when(exec.close).thenAnswer((_) {});
+            return exec;
+          });
       const invocation = ShellCompletionInvocation(
         commandLine: 'git ch',
         cursorOffset: 6,
@@ -907,9 +896,8 @@ void main() {
           'checkout',
           'git checkout feature/login',
         ]);
-        verify(
-          () => secondClient.execute(any(), pty: any(named: 'pty')),
-        ).called(1);
+        verify(() => secondClient.execute(any(), pty: any(named: 'pty')))
+            .called(1);
 
         await pendingExec.complete(['git commit']);
         final firstSuggestions = await firstFuture;

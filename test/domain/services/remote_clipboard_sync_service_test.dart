@@ -18,9 +18,8 @@ void main() {
         );
         expect(result.exitCode, 0, reason: '${result.stderr}');
         expect(
-          RemoteClipboardSyncService.parseReadOutput(
-            result.stdout as String,
-          ).text,
+          RemoteClipboardSyncService.parseReadOutput(result.stdout as String)
+              .text,
           text,
         );
       }, skip: Platform.isWindows);

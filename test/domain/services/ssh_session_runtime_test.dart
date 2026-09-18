@@ -18,9 +18,8 @@ void main() {
     final client = _Client();
     final shell = _Shell();
     final opening = Completer<SSHSession>();
-    when(
-      () => client.remoteVersion,
-    ).thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+    when(() => client.remoteVersion)
+        .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
     when(
       () => client.shell(
         pty: any(named: 'pty'),
@@ -28,14 +27,13 @@ void main() {
       ),
     ).thenThrow(SSHChannelRequestError('env rejected'));
     final commands = <String>[];
-    when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-      invocation,
-    ) {
-      commands.add(invocation.positionalArguments.first as String);
-      return invocation.namedArguments[#pty] == null
-          ? opening.future
-          : Future.value(shell);
-    });
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((invocation) {
+          commands.add(invocation.positionalArguments.first as String);
+          return invocation.namedArguments[#pty] == null
+              ? opening.future
+              : Future.value(shell);
+        });
     when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
     when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
     when(() => shell.done).thenAnswer((_) => Completer<void>().future);
@@ -90,9 +88,8 @@ void main() {
 
     test('ordinary getters share one pending channel negotiation', () async {
       final opening = Completer<SSHSession>();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => opening.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
       final first = session.getShell(requestPty: false, command: 'first');
       final second = session.getShell(requestPty: false, command: 'second');
       final results = Future.wait([first, second]);
@@ -110,13 +107,12 @@ void main() {
         final opening = Completer<SSHSession>();
         final started = Completer<void>();
         final commands = <String>[];
-        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-          invocation,
-        ) {
-          commands.add(invocation.positionalArguments.first as String);
-          if (!started.isCompleted) started.complete();
-          return opening.future;
-        });
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) {
+              commands.add(invocation.positionalArguments.first as String);
+              if (!started.isCompleted) started.complete();
+              return opening.future;
+            });
         final replacement = session.getShell(
           requestPty: false,
           command: 'replacement',
@@ -138,9 +134,8 @@ void main() {
 
     test('failed shared negotiation can be retried', () async {
       final opening = Completer<SSHSession>();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => opening.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
       final failure = StateError('channel rejected');
       final first = expectLater(
         session.getShell(requestPty: false, command: 'first'),
@@ -154,9 +149,8 @@ void main() {
       await Future.wait([first, second]);
       verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
 
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => shell);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shell);
       expect(
         await session.getShell(requestPty: false, command: 'retry'),
         same(shell),
@@ -219,9 +213,8 @@ void main() {
           username: 'tester',
         ),
       );
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => opening.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
       for (final shell in [lateShell, replacement]) {
         when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
         when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
@@ -232,9 +225,8 @@ void main() {
       final pending = session.getShell(requestPty: false, command: 'first');
       final rejected = expectLater(pending, throwsA(isA<StateError>()));
       await session.closeShell(waitForStreams: false);
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) async => replacement);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => replacement);
       expect(
         await session.getShell(requestPty: false, command: 'second'),
         same(replacement),

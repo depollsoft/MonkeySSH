@@ -240,9 +240,7 @@ void main() {
           bracketedPasteMode: true,
           windows: true,
         ),
-        [
-          '$start${r'"C:\Users\John Smith\.cache\monkeyssh\uploads\a.png"'}$end ',
-        ],
+        ['$start${r'"C:\Users\John Smith\.cache\monkeyssh\uploads\a.png"'}$end '],
       );
       expect(
         buildTerminalAttachmentPasteSegments(

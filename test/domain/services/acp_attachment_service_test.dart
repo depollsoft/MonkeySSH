@@ -743,9 +743,8 @@ void main() {
     setUp(() {
       sftp = _MockSftpClient();
       remoteFileService = _MockRemoteFileService();
-      when(
-        () => remoteFileService.resolveInitialDirectory(sftp),
-      ).thenAnswer((_) async => '/home/demo');
+      when(() => remoteFileService.resolveInitialDirectory(sftp))
+          .thenAnswer((_) async => '/home/demo');
       when(
         () => remoteFileService.ensureDirectoryExists(
           sftp,
@@ -974,13 +973,11 @@ void main() {
       'defensively copies bytes and does not expose content in toString',
       () {
         final source = Uint8List.fromList(<int>[1, 2, 3]);
-        final candidate =
-            AcpAttachmentCandidate.memory(
-                  name: 'private.txt',
-                  bytes: source,
-                  mimeType: 'text/plain',
-                )
-                as AcpMemoryAttachmentCandidate;
+        final candidate = AcpAttachmentCandidate.memory(
+          name: 'private.txt',
+          bytes: source,
+          mimeType: 'text/plain',
+        ) as AcpMemoryAttachmentCandidate;
         source[0] = 9;
 
         expect(candidate.bytes, <int>[1, 2, 3]);

@@ -165,9 +165,9 @@ void main() {
 
         expect(keyboard.visible, isTrue);
         expect(
-          MediaQuery.of(
-            tester.element(find.byType(TmuxToolPickerSheet)),
-          ).viewInsets.bottom,
+          MediaQuery.of(tester.element(find.byType(TmuxToolPickerSheet)))
+              .viewInsets
+              .bottom,
           300,
         );
         expect(

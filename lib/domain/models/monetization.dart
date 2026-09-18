@@ -145,16 +145,14 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Move the whole app state with encrypted migration packages.',
     MonetizationFeature.autoConnectAutomation =>
       'Run commands or saved snippets automatically after connect.',
-    MonetizationFeature.agentLaunchPresets =>
-      'Save repeatable startup flows for tools like Codex, Claude Code, Copilot CLI, or OpenCode.',
+    MonetizationFeature.agentLaunchPresets => 'Save repeatable startup flows for tools like Codex, Claude Code, Copilot CLI, or OpenCode.',
     MonetizationFeature.agentManagement =>
       'Install, repair, and update coding agents on your remote hosts.',
     MonetizationFeature.agentUsageRings =>
       'See remaining agent allowances in the MonkeyMux bar.',
     MonetizationFeature.concurrentAcpSessions =>
       'Keep multiple native agent chats connected across hosts and providers.',
-    MonetizationFeature.hostSpecificThemes =>
-      'Save terminal theme overrides for individual hosts while keeping app-wide defaults unchanged.',
+    MonetizationFeature.hostSpecificThemes => 'Save terminal theme overrides for individual hosts while keeping app-wide defaults unchanged.',
   };
 
   /// The blocked action shown at the top of feature-triggered paywalls.
@@ -177,20 +175,13 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
   String get blockedOutcome => switch (this) {
     MonetizationFeature.encryptedTransfers =>
       'Unlock Pro to move hosts and keys between devices with encrypted files.',
-    MonetizationFeature.migrationImportExport =>
-      'Unlock Pro to restore or migrate all MonkeySSH data in one encrypted package.',
-    MonetizationFeature.autoConnectAutomation =>
-      'Unlock Pro to run a command or saved snippet automatically after connecting.',
-    MonetizationFeature.agentLaunchPresets =>
-      'Unlock Pro to repeat your preferred coding-agent startup flow on each host.',
-    MonetizationFeature.concurrentAcpSessions =>
-      'Unlock Pro to keep multiple native chats connected, switch instantly, and fork active sessions.',
-    MonetizationFeature.hostSpecificThemes =>
-      'Unlock Pro to keep this host on its own terminal theme while preserving your app defaults.',
-    MonetizationFeature.agentManagement =>
-      'Unlock Pro to install, repair, and update agents, with automatic update checks.',
-    MonetizationFeature.agentUsageRings =>
-      'Unlock Pro to see live account-usage rings without leaving the terminal.',
+    MonetizationFeature.migrationImportExport => 'Unlock Pro to restore or migrate all MonkeySSH data in one encrypted package.',
+    MonetizationFeature.autoConnectAutomation => 'Unlock Pro to run a command or saved snippet automatically after connecting.',
+    MonetizationFeature.agentLaunchPresets => 'Unlock Pro to repeat your preferred coding-agent startup flow on each host.',
+    MonetizationFeature.concurrentAcpSessions => 'Unlock Pro to keep multiple native chats connected, switch instantly, and fork active sessions.',
+    MonetizationFeature.hostSpecificThemes => 'Unlock Pro to keep this host on its own terminal theme while preserving your app defaults.',
+    MonetizationFeature.agentManagement => 'Unlock Pro to install, repair, and update agents, with automatic update checks.',
+    MonetizationFeature.agentUsageRings => 'Unlock Pro to see live account-usage rings without leaving the terminal.',
   };
 }
 

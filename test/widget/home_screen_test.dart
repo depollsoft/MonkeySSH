@@ -520,9 +520,8 @@ void main() {
                 key: key,
                 transferPassphrase: 'transfer-passphrase',
               );
-        when(
-          createPayload,
-        ).thenAnswer((_) async => throw FormatException(message));
+        when(createPayload)
+            .thenAnswer((_) async => throw FormatException(message));
         final billing = _MockMonetizationService();
         when(() => billing.currentState).thenReturn(_proMonetizationState);
         when(
@@ -741,12 +740,10 @@ void main() {
           _buildSnippet(id: 2, name: 'Second', sortOrder: 1),
         ]),
       );
-      when(
-        snippetRepository.watchAllFolders,
-      ).thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
-      when(
-        () => snippetRepository.reorderByIds(any()),
-      ).thenAnswer((_) async {});
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(() => snippetRepository.reorderByIds(any()))
+          .thenAnswer((_) async {});
 
       await tester.pumpWidget(
         buildMobileHomeScreen(
@@ -1375,15 +1372,12 @@ void main() {
     );
 
     when(() => tmuxService.isTmuxActive(session)).thenAnswer((_) async => true);
-    when(
-      () => tmuxService.currentSessionName(session),
-    ).thenAnswer((_) async => 'wrong-session');
-    when(
-      () => tmuxService.hasSession(session, 'correct-session'),
-    ).thenAnswer((_) async => true);
-    when(
-      () => tmuxService.watchWindowChanges(session, any()),
-    ).thenAnswer((_) => _idleWindowChanges());
+    when(() => tmuxService.currentSessionName(session))
+        .thenAnswer((_) async => 'wrong-session');
+    when(() => tmuxService.hasSession(session, 'correct-session'))
+        .thenAnswer((_) async => true);
+    when(() => tmuxService.watchWindowChanges(session, any()))
+        .thenAnswer((_) => _idleWindowChanges());
     when(() => tmuxService.listWindows(session, any())).thenAnswer(
       (_) async => const <TmuxWindow>[
         TmuxWindow(index: 0, name: 'editor', isActive: true),
@@ -1447,12 +1441,10 @@ void main() {
         ],
         initialSessions: [session],
       );
-      when(
-        () => tmux.watchWindowChanges(session, any()),
-      ).thenAnswer((_) => _idleWindowChanges());
-      when(
-        () => monkeyMux.watchWindowChanges(session, any()),
-      ).thenAnswer((_) => _idleWindowChanges());
+      when(() => tmux.watchWindowChanges(session, any()))
+          .thenAnswer((_) => _idleWindowChanges());
+      when(() => monkeyMux.watchWindowChanges(session, any()))
+          .thenAnswer((_) => _idleWindowChanges());
       var queries = 0;
       final listWindows = backend == RemoteMuxBackend.monkeyMux
           ? () => monkeyMux.listWindows(session, any())
@@ -1517,15 +1509,12 @@ void main() {
           ],
           initialSessions: [session],
         );
-        when(
-          () => tmux.currentSessionName(session),
-        ).thenAnswer((_) async => 'shell');
-        when(
-          () => tmux.watchWindowChanges(session, any()),
-        ).thenAnswer((_) => _idleWindowChanges());
-        when(
-          () => monkeyMux.watchWindowChanges(session, any()),
-        ).thenAnswer((_) => _idleWindowChanges());
+        when(() => tmux.currentSessionName(session))
+            .thenAnswer((_) async => 'shell');
+        when(() => tmux.watchWindowChanges(session, any()))
+            .thenAnswer((_) => _idleWindowChanges());
+        when(() => monkeyMux.watchWindowChanges(session, any()))
+            .thenAnswer((_) => _idleWindowChanges());
         const windows = [TmuxWindow(index: 0, name: 'editor', isActive: true)];
         var queries = 0;
         when(() => tmux.listWindows(session, any())).thenAnswer((_) async {
@@ -1587,9 +1576,8 @@ void main() {
         expect(find.text('saved-session · 1 windows'), findsOneWidget);
         expect(queries, 2);
         if (backend == RemoteMuxBackend.monkeyMux) {
-          verify(
-            () => monkeyMux.listWindows(session, 'saved-session'),
-          ).called(1);
+          verify(() => monkeyMux.listWindows(session, 'saved-session'))
+              .called(1);
         } else {
           verify(() => tmux.listWindows(session, 'saved-session')).called(1);
         }
@@ -1654,18 +1642,15 @@ void main() {
           initialSessions: [session],
         );
 
-        when(
-          () => tmuxService.isTmuxActive(session),
-        ).thenAnswer((_) async => true);
-        when(
-          () => tmuxService.currentSessionName(session),
-        ).thenAnswer((_) async => 'work');
+        when(() => tmuxService.isTmuxActive(session))
+            .thenAnswer((_) async => true);
+        when(() => tmuxService.currentSessionName(session))
+            .thenAnswer((_) async => 'work');
         when(() => tmuxService.watchWindowChanges(session, 'work')).thenAnswer(
           (_) => duringCancellation ? changes.stream : _idleWindowChanges(),
         );
-        when(
-          () => tmuxService.listWindows(session, 'work'),
-        ).thenAnswer((_) async => const <TmuxWindow>[]);
+        when(() => tmuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => const <TmuxWindow>[]);
 
         try {
           await tester.pumpWidget(
@@ -1703,9 +1688,8 @@ void main() {
           await tester.pump();
           expect(presetLoadStarted, isTrue);
           if (duringCancellation) {
-            verify(
-              () => tmuxService.watchWindowChanges(session, 'work'),
-            ).called(1);
+            verify(() => tmuxService.watchWindowChanges(session, 'work'))
+                .called(1);
             verify(() => tmuxService.listWindows(session, 'work')).called(1);
             expect(cancelling, isFalse);
             // Empty windows schedule a retry that replaces the subscription.
@@ -1880,9 +1864,8 @@ void main() {
         ],
         initialSessions: [session],
       );
-      when(
-        () => tmuxService.currentSessionName(session),
-      ).thenAnswer((_) async => currentSessionName);
+      when(() => tmuxService.currentSessionName(session))
+          .thenAnswer((_) async => currentSessionName);
       when(() => tmuxService.watchWindowChanges(session, any())).thenAnswer((
         invocation,
       ) {
@@ -1899,9 +1882,8 @@ void main() {
         windowChangeControllers.add(controller);
         return controller.stream;
       });
-      when(
-        () => tmuxService.listWindows(session, 'old-session'),
-      ).thenAnswer((_) => oldWindows.future);
+      when(() => tmuxService.listWindows(session, 'old-session'))
+          .thenAnswer((_) => oldWindows.future);
       when(() => tmuxService.listWindows(session, 'new-session')).thenAnswer(
         (_) async => const [
           TmuxWindow(index: 0, name: 'current-window', isActive: true),
@@ -1952,9 +1934,8 @@ void main() {
         oldSubscriptionCancellation.complete();
         await tester.pump();
         await tester.pump();
-        verify(
-          () => tmuxService.watchWindowChanges(session, 'new-session'),
-        ).called(1);
+        verify(() => tmuxService.watchWindowChanges(session, 'new-session'))
+            .called(1);
         expect(oldWindows.isCompleted, isFalse);
         verifyNever(() => tmuxService.listWindows(session, 'new-session'));
 
@@ -2118,9 +2099,8 @@ void main() {
         initialSessions: [session],
       );
 
-      when(
-        () => tmuxService.watchWindowChanges(session, sessionName),
-      ).thenAnswer((_) => _idleWindowChanges());
+      when(() => tmuxService.watchWindowChanges(session, sessionName))
+          .thenAnswer((_) => _idleWindowChanges());
       when(() => tmuxService.listWindows(session, sessionName)).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(
@@ -2180,21 +2160,16 @@ void main() {
         initialSessions: [session],
       );
 
-      when(
-        () => tmuxService.isTmuxActive(session),
-      ).thenAnswer((_) async => true);
-      when(
-        () => tmuxService.currentSessionName(session),
-      ).thenAnswer((_) async => null);
-      when(
-        () => tmuxService.hasSession(session, 'correct-session'),
-      ).thenAnswer((_) async => true);
-      when(
-        () => tmuxService.watchWindowChanges(session, any()),
-      ).thenAnswer((_) => _idleWindowChanges());
-      when(
-        () => tmuxService.listWindows(session, 'correct-session'),
-      ).thenAnswer((_) => delayedWindows.future);
+      when(() => tmuxService.isTmuxActive(session))
+          .thenAnswer((_) async => true);
+      when(() => tmuxService.currentSessionName(session))
+          .thenAnswer((_) async => null);
+      when(() => tmuxService.hasSession(session, 'correct-session'))
+          .thenAnswer((_) async => true);
+      when(() => tmuxService.watchWindowChanges(session, any()))
+          .thenAnswer((_) => _idleWindowChanges());
+      when(() => tmuxService.listWindows(session, 'correct-session'))
+          .thenAnswer((_) => delayedWindows.future);
 
       await tester.pumpWidget(
         buildMobileHomeScreen(
@@ -2239,9 +2214,8 @@ void main() {
 
       expect(find.text('correct-session · 1 windows'), findsOneWidget);
       verifyNever(() => tmuxService.currentSessionName(session));
-      verify(
-        () => tmuxService.listWindows(session, 'correct-session'),
-      ).called(1);
+      verify(() => tmuxService.listWindows(session, 'correct-session'))
+          .called(1);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     },
@@ -2269,18 +2243,16 @@ void main() {
       (oldFlags, 'old-server'),
       (newFlags, 'new-server'),
     ]) {
-      when(
-        () => tmuxService.hasSession(session, 'work', extraFlags: flags),
-      ).thenAnswer((_) async => true);
+      when(() => tmuxService.hasSession(session, 'work', extraFlags: flags))
+          .thenAnswer((_) async => true);
       when(
         () =>
             tmuxService.watchWindowChanges(session, 'work', extraFlags: flags),
       ).thenAnswer((_) => _idleWindowChanges());
-      when(
-        () => tmuxService.listWindows(session, 'work', extraFlags: flags),
-      ).thenAnswer(
-        (_) async => [TmuxWindow(index: 0, name: name, isActive: true)],
-      );
+      when(() => tmuxService.listWindows(session, 'work', extraFlags: flags))
+          .thenAnswer(
+            (_) async => [TmuxWindow(index: 0, name: name, isActive: true)],
+          );
     }
 
     await tester.pumpWidget(
@@ -2330,12 +2302,10 @@ void main() {
 
     expect(find.text('new-server'), findsOneWidget);
     expect(find.text('old-server'), findsNothing);
-    verify(
-      () => tmuxService.listWindows(session, 'work', extraFlags: oldFlags),
-    ).called(1);
-    verify(
-      () => tmuxService.listWindows(session, 'work', extraFlags: newFlags),
-    ).called(1);
+    verify(() => tmuxService.listWindows(session, 'work', extraFlags: oldFlags))
+        .called(1);
+    verify(() => tmuxService.listWindows(session, 'work', extraFlags: newFlags))
+        .called(1);
   });
 
   testWidgets(
@@ -2371,21 +2341,16 @@ void main() {
         summary: 'Resume codex work',
       );
 
-      when(
-        () => monetizationService.currentState,
-      ).thenReturn(_proMonetizationState);
-      when(
-        () => monetizationService.states,
-      ).thenAnswer((_) => Stream.value(_proMonetizationState));
-      when(
-        monetizationService.initialize,
-      ).thenAnswer((_) => Future<void>.value());
-      when(
-        () => monetizationService.canUseFeature(any()),
-      ).thenAnswer((_) async => true);
-      when(
-        () => tmuxService.watchWindowChanges(session, 'work'),
-      ).thenAnswer((_) => _idleWindowChanges());
+      when(() => monetizationService.currentState)
+          .thenReturn(_proMonetizationState);
+      when(() => monetizationService.states)
+          .thenAnswer((_) => Stream.value(_proMonetizationState));
+      when(monetizationService.initialize)
+          .thenAnswer((_) => Future<void>.value());
+      when(() => monetizationService.canUseFeature(any()))
+          .thenAnswer((_) async => true);
+      when(() => tmuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => _idleWindowChanges());
       when(() => tmuxService.listWindows(session, 'work')).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(index: 0, name: 'shell', isActive: true),

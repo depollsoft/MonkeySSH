@@ -101,9 +101,8 @@ class ThemePreviewCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         theme.name,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w500,
-                        ),
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(fontWeight: FontWeight.w500),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),

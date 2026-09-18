@@ -123,9 +123,8 @@ class _AcpDiffViewState extends State<AcpDiffView> {
         ? const Color(0xFF3FB950)
         : const Color(0xFF1A7F37);
     final deletionColor = scheme.error;
-    final monoBase = AcpChatTypography.monoStyleOf(
-      context,
-    ).copyWith(fontSize: 12, height: 1.4);
+    final monoBase = AcpChatTypography.monoStyleOf(context)
+        .copyWith(fontSize: 12, height: 1.4);
 
     final rows = <Widget>[];
     final visible = math.min(_visibleCount, _lines.length);

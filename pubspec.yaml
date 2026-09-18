@@ -121,6 +121,9 @@ dev_dependencies:
   # Testing
   mocktail: ^1.0.5
   wakelock_plus_platform_interface: ^1.7.0
+  plugin_platform_interface: ^2.1.8
+  webview_flutter_platform_interface: ^2.15.1
+  url_launcher_platform_interface: ^2.3.2
   integration_test:
     sdk: flutter
 

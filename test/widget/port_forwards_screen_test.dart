@@ -69,12 +69,10 @@ void main() {
 
   group('PortForwardsScreen', () {
     testWidgets('shows empty state when no port forwards', (tester) async {
-      when(
-        portForwardRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <PortForward>[]));
-      when(
-        hostRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <Host>[]));
+      when(portForwardRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <PortForward>[]));
+      when(hostRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <Host>[]));
 
       await tester.pumpWidget(buildWidget());
       await tester.pump();
@@ -87,9 +85,8 @@ void main() {
       final host = _buildHost(id: 1, label: 'My Server');
       final pf = _buildPortForward(id: 1, hostId: 1, name: 'Web Forward');
 
-      when(
-        portForwardRepository.watchAll,
-      ).thenAnswer((_) => Stream.value([pf]));
+      when(portForwardRepository.watchAll)
+          .thenAnswer((_) => Stream.value([pf]));
       when(hostRepository.watchAll).thenAnswer((_) => Stream.value([host]));
 
       await tester.pumpWidget(buildWidget());
@@ -114,9 +111,8 @@ void main() {
         forwardType: 'remote',
       );
 
-      when(
-        portForwardRepository.watchAll,
-      ).thenAnswer((_) => Stream.value([localForward, remoteForward]));
+      when(portForwardRepository.watchAll)
+          .thenAnswer((_) => Stream.value([localForward, remoteForward]));
       when(hostRepository.watchAll).thenAnswer((_) => Stream.value([host]));
 
       await tester.pumpWidget(buildWidget());
@@ -131,9 +127,8 @@ void main() {
       addTearDown(controller.close);
 
       when(portForwardRepository.watchAll).thenAnswer((_) => controller.stream);
-      when(
-        hostRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <Host>[]));
+      when(hostRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <Host>[]));
 
       await tester.pumpWidget(buildWidget());
 
@@ -154,12 +149,10 @@ void main() {
     });
 
     testWidgets('routes to add screen via FAB', (tester) async {
-      when(
-        portForwardRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <PortForward>[]));
-      when(
-        hostRepository.watchAll,
-      ).thenAnswer((_) => Stream.value(const <Host>[]));
+      when(portForwardRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <PortForward>[]));
+      when(hostRepository.watchAll)
+          .thenAnswer((_) => Stream.value(const <Host>[]));
 
       await tester.pumpWidget(
         ProviderScope(

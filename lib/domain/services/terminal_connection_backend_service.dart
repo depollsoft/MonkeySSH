@@ -92,10 +92,9 @@ abstract interface class TerminalConnectionBackend {
 class TerminalConnectionBackendService {
   /// Creates a terminal backend resolver.
   const TerminalConnectionBackendService({
-    required RemoteMultiplexerService tmuxMultiplexer,
-    required MonkeyMuxService monkeyMuxService,
-  }) : _tmuxMultiplexer = tmuxMultiplexer,
-       _monkeyMuxService = monkeyMuxService;
+    required this._tmuxMultiplexer,
+    required this._monkeyMuxService,
+  });
 
   final RemoteMultiplexerService _tmuxMultiplexer;
   final MonkeyMuxService _monkeyMuxService;
@@ -232,20 +231,14 @@ class _DirectTerminalConnectionBackend implements TerminalConnectionBackend {
 class _MultiplexedTerminalConnectionBackend
     implements TerminalConnectionBackend {
   const _MultiplexedTerminalConnectionBackend({
-    required SshSession session,
-    required TerminalBackendType type,
-    required RemoteMuxBackend remoteMuxBackend,
-    required String sessionName,
-    required RemoteMultiplexerService remoteMultiplexer,
-    MonkeyMuxService? monkeyMuxService,
-    String? extraFlags,
-  }) : _session = session,
-       _type = type,
-       _remoteMuxBackend = remoteMuxBackend,
-       _sessionName = sessionName,
-       _remoteMultiplexer = remoteMultiplexer,
-       _monkeyMuxService = monkeyMuxService,
-       _extraFlags = extraFlags;
+    required this._session,
+    required this._type,
+    required this._remoteMuxBackend,
+    required this._sessionName,
+    required this._remoteMultiplexer,
+    this._monkeyMuxService,
+    this._extraFlags,
+  });
 
   static const _tmuxCapabilities = TerminalBackendCapabilities(
     supportsWindows: true,

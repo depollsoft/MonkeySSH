@@ -819,9 +819,8 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                     Expanded(
                       child: Text(
                         _error!,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.error,
-                        ),
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(color: colorScheme.error),
                       ),
                     ),
                   ],

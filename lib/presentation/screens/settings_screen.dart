@@ -735,8 +735,7 @@ class _TerminalSection extends ConsumerWidget {
       children: [
         const _SectionHeader(
           title: 'terminal',
-          subtitle:
-              'Themes, fonts, agent windows, links, keyboard, and clipboard behavior',
+          subtitle: 'Themes, fonts, agent windows, links, keyboard, and clipboard behavior',
         ),
         ListTile(
           leading: const Icon(Icons.palette_outlined),
@@ -858,8 +857,7 @@ class _TerminalSection extends ConsumerWidget {
           provider: portForwardBrowserLinksNotifierProvider,
           icon: Icons.open_in_browser_outlined,
           title: 'Open forwarded links in app',
-          subtitle:
-              'Keeps the SSH connection open while you browse forwarded pages; turn off to use the system browser',
+          subtitle: 'Keeps the SSH connection open while you browse forwarded pages; turn off to use the system browser',
           setEnabled: (notifier, {required enabled}) =>
               notifier.setEnabled(enabled: enabled),
         ),
@@ -867,8 +865,7 @@ class _TerminalSection extends ConsumerWidget {
           provider: shellCompletionsNotifierProvider,
           icon: Icons.auto_awesome_motion_outlined,
           title: 'Shell completion popups',
-          subtitle:
-              'Show command and path suggestions while typing at a shell prompt',
+          subtitle: 'Show command and path suggestions while typing at a shell prompt',
           setEnabled: (notifier, {required enabled}) =>
               notifier.setEnabled(enabled: enabled),
         ),
@@ -1169,16 +1166,14 @@ class _DiagnosticsSectionState extends ConsumerState<_DiagnosticsSection> {
     if (!context.mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Diagnostics log copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Diagnostics log copied')));
   }
 
   void _clearDiagnostics(BuildContext context) {
     _diagnosticsLog.clear();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Diagnostics log cleared')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Diagnostics log cleared')));
   }
 }
 
@@ -1259,9 +1254,8 @@ class _AboutSection extends ConsumerWidget {
     if (!context.mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('GitHub URL copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('GitHub URL copied')));
   }
 }
 
@@ -1462,9 +1456,8 @@ class _ImportExportSection extends ConsumerWidget {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error.message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.message)));
     } on Exception catch (error) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -1561,9 +1554,8 @@ class _ImportExportSection extends ConsumerWidget {
       if (!context.mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Import completed')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Import completed')));
     } on FormatException catch (error) {
       if (!context.mounted) {
         return;

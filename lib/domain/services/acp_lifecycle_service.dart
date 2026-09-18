@@ -47,14 +47,11 @@ String acpSafeAgentDisplayLabel(AcpSessionState session) {
 class AcpLifecycleService {
   /// Creates an ACP lifecycle coordinator.
   AcpLifecycleService({
-    required AcpSessionManager sessionManager,
-    required bool Function(int hostId) hasActiveSshSession,
-    required LocalNotificationService notificationService,
+    required this._sessionManager,
+    required this._hasActiveSshSession,
+    required this._notificationService,
     DiagnosticsLogger? diagnostics,
-  }) : _sessionManager = sessionManager,
-       _hasActiveSshSession = hasActiveSshSession,
-       _notificationService = notificationService,
-       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+  }) : _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final AcpSessionManager _sessionManager;
   final bool Function(int hostId) _hasActiveSshSession;

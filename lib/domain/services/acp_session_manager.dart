@@ -137,24 +137,17 @@ extension _FirstWhereOrNull on List<AcpSessionState> {
 class AcpSessionManager {
   /// Creates a session manager.
   AcpSessionManager({
-    required AcpBridgeConnector connector,
-    required AcpProviderService providerService,
-    required AcpRecentSessionsService recentSessions,
-    required bool Function() isProUnlocked,
+    required this._connector,
+    required this._providerService,
+    required this._recentSessions,
+    required this._isProUnlocked,
     AcpConcurrencyPolicy concurrencyPolicy = const AcpConcurrencyPolicy(),
     DiagnosticsLogger? diagnostics,
-    AcpTelemetrySink telemetry = const NoopAcpTelemetrySink(),
-    DateTime Function() clock = DateTime.now,
-    Duration detachedTurnPollInterval = const Duration(seconds: 3),
-  }) : _connector = connector,
-       _providerService = providerService,
-       _recentSessions = recentSessions,
-       _isProUnlocked = isProUnlocked,
-       _policy = concurrencyPolicy,
-       _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
-       _telemetry = telemetry,
-       _clock = clock,
-       _detachedTurnPollInterval = detachedTurnPollInterval;
+    this._telemetry = const NoopAcpTelemetrySink(),
+    this._clock = DateTime.now,
+    this._detachedTurnPollInterval = const Duration(seconds: 3),
+  }) : _policy = concurrencyPolicy,
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final AcpBridgeConnector _connector;
   final AcpProviderService _providerService;
@@ -1190,8 +1183,7 @@ class AcpSessionManager {
         },
         message: switch (error.kind) {
           MonkeyMuxAcpBridgeErrorKind.invalidMetadata ||
-          MonkeyMuxAcpBridgeErrorKind.unsupportedVersion =>
-            'MonkeyMux needs to be updated on this host. Reconnect and try again.',
+          MonkeyMuxAcpBridgeErrorKind.unsupportedVersion => 'MonkeyMux needs to be updated on this host. Reconnect and try again.',
           MonkeyMuxAcpBridgeErrorKind.invalidLaunch =>
             'The agent launch configuration was rejected.',
           MonkeyMuxAcpBridgeErrorKind.invalidBridgeId =>
@@ -1202,8 +1194,7 @@ class AcpSessionManager {
           MonkeyMuxAcpBridgeErrorKind.providerUnavailable =>
             'The native agent process exited.',
           MonkeyMuxAcpBridgeErrorKind.helperUnavailable ||
-          MonkeyMuxAcpBridgeErrorKind.helperProcess =>
-            'MonkeyMux could not start the native agent bridge. Reconnect and try again.',
+          MonkeyMuxAcpBridgeErrorKind.helperProcess => 'MonkeyMux could not start the native agent bridge. Reconnect and try again.',
           _ => 'The native agent connection was interrupted.',
         },
       );
@@ -1226,15 +1217,11 @@ class _BridgeAttachment {
   _BridgeAttachment({
     required this.bridgeKey,
     required this.providerId,
-    required AcpBridgeSession session,
-    required Future<AcpClientCapabilityService> Function()
-    capabilityServiceFactory,
-    AcpInitializeResult? initialization,
-    AcpClientCapabilityService? capabilityService,
-  }) : _session = session,
-       _capabilityServiceFactory = capabilityServiceFactory,
-       _initialization = initialization,
-       _capabilityService = capabilityService;
+    required this._session,
+    required this._capabilityServiceFactory,
+    this._initialization,
+    this._capabilityService,
+  });
 
   final AcpBridgeKey bridgeKey;
   final String providerId;
@@ -1367,25 +1354,17 @@ const _maxCoalescedReplayTextChars = 32 * 1024;
 /// Owns the normalized state and streaming lifecycle for one ACP session.
 class _SessionController {
   _SessionController({
-    required AcpSessionManager manager,
+    required this._manager,
     required this.attachment,
-    required String providerLabel,
-    required bool isCustomProvider,
-    required String cwd,
-    required DateTime Function() clock,
-    required DiagnosticsLogger diagnostics,
-    required bool autoApprovePermissions,
-    required bool freshBridge,
-    required Duration detachedTurnPollInterval,
-  }) : _manager = manager,
-       _providerLabel = providerLabel,
-       _isCustomProvider = isCustomProvider,
-       _cwd = cwd,
-       _clock = clock,
-       _diagnostics = diagnostics,
-       _autoApprovePermissions = autoApprovePermissions,
-       _freshBridge = freshBridge,
-       _detachedTurnPollInterval = detachedTurnPollInterval;
+    required this._providerLabel,
+    required this._isCustomProvider,
+    required this._cwd,
+    required this._clock,
+    required this._diagnostics,
+    required this._autoApprovePermissions,
+    required this._freshBridge,
+    required this._detachedTurnPollInterval,
+  });
 
   final AcpSessionManager _manager;
 

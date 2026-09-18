@@ -75,12 +75,10 @@ void main() {
       when(() => first.remoteIsWindows).thenReturn(true);
       when(() => first.execute('first')).thenAnswer((_) async => firstTerminal);
       when(second.sftp).thenAnswer((_) async => sftp);
-      when(
-        () => sftp.absolute('/workspace'),
-      ).thenAnswer((_) async => '/workspace');
-      when(
-        () => second.execute('second'),
-      ).thenAnswer((_) async => secondTerminal);
+      when(() => sftp.absolute('/workspace'))
+          .thenAnswer((_) async => '/workspace');
+      when(() => second.execute('second'))
+          .thenAnswer((_) async => secondTerminal);
       var activeSession = first;
       final connector = MonkeyMuxAcpBridgeConnector(
         bridgeService: _unusedBridgeService(),
@@ -118,9 +116,8 @@ void main() {
       when(session.sftp).thenAnswer((_) async => sftp);
       when(() => session.remoteIsWindows).thenReturn(false);
       when(() => sftp.absolute('.')).thenAnswer((_) async => home);
-      when(
-        () => sftp.absolute('$home/Code/project'),
-      ).thenAnswer((_) async => '$home/Code/project');
+      when(() => sftp.absolute('$home/Code/project'))
+          .thenAnswer((_) async => '$home/Code/project');
       final connector = MonkeyMuxAcpBridgeConnector(
         bridgeService: _unusedBridgeService(),
         sessionResolver: (_) async => session,

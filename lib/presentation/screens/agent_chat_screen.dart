@@ -68,16 +68,22 @@ import 'sftp_screen.dart';
 
 /// Builds the attachment picker actions for a chat session. Overridable in
 /// tests so the composer can be exercised without platform pickers.
-typedef AcpChatAttachmentActionsBuilder =
-    AcpComposerAttachmentActions Function(int hostId, int? connectionId);
+typedef AcpChatAttachmentActionsBuilder = AcpComposerAttachmentActions Function(
+  int hostId,
+  int? connectionId,
+);
 
 /// Receives a connection-card preview together with its originating session.
-typedef AcpChatPreviewChanged =
-    void Function(AcpSessionKey sessionKey, String? preview);
+typedef AcpChatPreviewChanged = void Function(
+  AcpSessionKey sessionKey,
+  String? preview,
+);
 
 /// Receives a role-aware native preview together with its originating session.
-typedef AcpChatNativePreviewChanged =
-    void Function(AcpSessionKey sessionKey, AcpNativePreviewSnapshot? preview);
+typedef AcpChatNativePreviewChanged = void Function(
+  AcpSessionKey sessionKey,
+  AcpNativePreviewSnapshot? preview,
+);
 
 /// Session-owned conversation scroll state retained across embedded remounts.
 @immutable
@@ -93,8 +99,10 @@ class AcpChatScrollState {
 }
 
 /// Receives retained scroll state together with its originating session.
-typedef AcpChatScrollChanged =
-    void Function(AcpSessionKey sessionKey, AcpChatScrollState state);
+typedef AcpChatScrollChanged = void Function(
+  AcpSessionKey sessionKey,
+  AcpChatScrollState state,
+);
 
 /// Wide-layout breakpoint for the session rail.
 const double kAgentChatWideBreakpoint = 840;
@@ -1187,9 +1195,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   void _copyToClipboard(String value, String label) {
     unawaited(Clipboard.setData(ClipboardData(text: value)));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$label copied')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('$label copied')));
   }
 
   @override
@@ -1505,9 +1512,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                             'acp-running-cursor',
                                           ),
                                           child: CursorBlock(
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.primary,
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .primary,
                                             size: 12,
                                           ),
                                         ),
@@ -1909,9 +1916,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   String _basename(String path) {
@@ -2028,9 +2034,8 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
                   choice.description!,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
             ],
           ),
@@ -2280,17 +2285,15 @@ class _AcpEmptyConversation extends StatelessWidget {
             Text(
               'Type / for commands · Ctrl/⌘ + Enter to send · pinch to resize.',
               textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: FluttyTheme.spacingXs),
             Text(
               'Tap the title for sessions; windows stay in the top bar.',
               textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ],
         ),

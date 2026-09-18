@@ -607,9 +607,8 @@ void main() {
     final remoteForward = _MockRemoteForward();
     final pendingForward = Completer<SSHRemoteForward?>();
     _stubRemoteForward(remoteForward, port: 8022);
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 8022),
-    ).thenAnswer((_) => pendingForward.future);
+    when(() => client.forwardRemote(host: 'localhost', port: 8022))
+        .thenAnswer((_) => pendingForward.future);
     final session = SshSession(
       connectionId: 7,
       hostId: 10,
@@ -660,12 +659,10 @@ void main() {
     final pendingOldForward = Completer<SSHRemoteForward?>();
     _stubRemoteForward(oldRemoteForward, port: 8022);
     _stubRemoteForward(newRemoteForward, port: 9022);
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 8022),
-    ).thenAnswer((_) => pendingOldForward.future);
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 9022),
-    ).thenAnswer((_) async => newRemoteForward);
+    when(() => client.forwardRemote(host: 'localhost', port: 8022))
+        .thenAnswer((_) => pendingOldForward.future);
+    when(() => client.forwardRemote(host: 'localhost', port: 9022))
+        .thenAnswer((_) async => newRemoteForward);
     final session = SshSession(
       connectionId: 7,
       hostId: 10,
@@ -712,9 +709,8 @@ void main() {
     final lateRemoteForward = _MockRemoteForward();
     final pendingForward = Completer<SSHRemoteForward?>();
     _stubRemoteForward(lateRemoteForward, port: 8022);
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 8022),
-    ).thenAnswer((_) => pendingForward.future);
+    when(() => client.forwardRemote(host: 'localhost', port: 8022))
+        .thenAnswer((_) => pendingForward.future);
     final session = _ShortTimeoutSshSession(
       connectionId: 7,
       hostId: 10,
@@ -774,9 +770,8 @@ void main() {
     final lateRemoteForward = _MockRemoteForward();
     final pendingForward = Completer<SSHRemoteForward?>();
     _stubRemoteForward(lateRemoteForward, port: 8022);
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 8022),
-    ).thenAnswer((_) => pendingForward.future);
+    when(() => client.forwardRemote(host: 'localhost', port: 8022))
+        .thenAnswer((_) => pendingForward.future);
     final session = SshSession(
       connectionId: 7,
       hostId: 10,
@@ -814,9 +809,8 @@ void main() {
       port: 8022,
       connections: connections.stream,
     );
-    when(
-      () => client.forwardRemote(host: 'localhost', port: 8022),
-    ).thenAnswer((_) async => remoteForward);
+    when(() => client.forwardRemote(host: 'localhost', port: 8022))
+        .thenAnswer((_) async => remoteForward);
     final session = SshSession(
       connectionId: 7,
       hostId: 10,

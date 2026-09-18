@@ -454,9 +454,8 @@ AcpContentBlock _truncatedContentBlock(AcpContentBlock block, int maxBytes) {
 /// [AcpSessionState] instead. Unknown updates are ignored so forward-compatible
 /// protocol data never corrupts the timeline.
 class AcpTimelineBuilder {
-  /// Creates a timeline builder bounded by [limits].
-  AcpTimelineBuilder({AcpTimelineLimits limits = const AcpTimelineLimits()})
-    : _limits = limits;
+  /// Creates a timeline builder bounded by [_limits].
+  AcpTimelineBuilder({this._limits = const AcpTimelineLimits()});
 
   final AcpTimelineLimits _limits;
   final List<AcpTimelineEntry> _entries = <AcpTimelineEntry>[];

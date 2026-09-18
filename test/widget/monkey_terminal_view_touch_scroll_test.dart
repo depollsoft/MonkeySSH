@@ -1636,12 +1636,10 @@ void main() {
     expect(output, isEmpty);
     expect(terminal.buffer.getText(controller.selection), 'selected');
 
-    final pendingPaste =
-        Actions.invoke(
-              context,
-              const PasteTextIntent(SelectionChangedCause.keyboard),
-            )
-            as Future<Object?>?;
+    final pendingPaste = Actions.invoke(
+      context,
+      const PasteTextIntent(SelectionChangedCause.keyboard),
+    ) as Future<Object?>?;
     expect(pasteCalls, 2);
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();

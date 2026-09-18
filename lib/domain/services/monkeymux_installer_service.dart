@@ -164,8 +164,9 @@ class MonkeyMuxInstallRequest {
 }
 
 /// Confirms whether MonkeyMux may install its helper on the connected host.
-typedef MonkeyMuxInstallConfirmation =
-    Future<bool> Function(MonkeyMuxInstallRequest request);
+typedef MonkeyMuxInstallConfirmation = Future<bool> Function(
+  MonkeyMuxInstallRequest request,
+);
 
 /// Error thrown when MonkeyMux cannot be installed or used.
 class MonkeyMuxInstallException implements Exception {
@@ -198,12 +199,10 @@ class MonkeyMuxInstallDeclinedException extends MonkeyMuxInstallException {
 class MonkeyMuxInstallerService {
   /// Creates a MonkeyMux installer.
   const MonkeyMuxInstallerService({
-    required Future<MonkeyMuxManifest> manifestFuture,
-    required RemoteFileService remoteFileService,
-    AssetBundle? assetBundle,
-  }) : _manifestFuture = manifestFuture,
-       _remoteFileService = remoteFileService,
-       _assetBundle = assetBundle;
+    required this._manifestFuture,
+    required this._remoteFileService,
+    this._assetBundle,
+  });
 
   final Future<MonkeyMuxManifest> _manifestFuture;
   final RemoteFileService _remoteFileService;
@@ -650,9 +649,8 @@ class MonkeyMuxInstallerService {
           'Could not install the MonkeyMux command launcher.',
         );
       }
-      final cleanup = RegExp(
-        r'MONKEYMUX_CLEANUP:(\d+):(\d+)',
-      ).firstMatch(output);
+      final cleanup = RegExp(r'MONKEYMUX_CLEANUP:(\d+):(\d+)')
+          .firstMatch(output);
       if (cleanup != null) {
         DiagnosticsLogService.instance.info(
           'monkeymux.install',

@@ -30,9 +30,8 @@ void main() {
     ) async {
       final opening = Completer<SSHSession>();
       final client = _MockSshClient();
-      when(
-        () => client.execute(any(), pty: any(named: 'pty')),
-      ).thenAnswer((_) => opening.future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
       final session = _buildSession(client);
       if (useTmux) {
         session
@@ -90,12 +89,11 @@ void main() {
     test('runs direct client commands through the SSH exec queue', () async {
       final client = _MockSshClient();
       final commands = <String>[];
-      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
-        invocation,
-      ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        return _buildExecSession(stdout: 'ok');
-      });
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.single as String);
+            return _buildExecSession(stdout: 'ok');
+          });
       final service = TerminalConnectionBackendService(
         tmuxMultiplexer: _FakeRemoteMultiplexerService(),
         monkeyMuxService: _MockMonkeyMuxService(),

@@ -56,8 +56,9 @@ class SshAuthChallenge {
 /// Implementations return one response per entry in
 /// [SshAuthChallenge.prompts], in the same order, or `null` when the user
 /// cancels (which skips the current authentication method).
-typedef InteractiveAuthPromptHandler =
-    Future<List<String>?> Function(SshAuthChallenge challenge);
+typedef InteractiveAuthPromptHandler = Future<List<String>?> Function(
+  SshAuthChallenge challenge,
+);
 
 /// Provider for the optional UI-backed interactive auth prompt handler.
 ///

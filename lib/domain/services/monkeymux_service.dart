@@ -236,15 +236,12 @@ MonkeyMuxImageReplayResult resolveMonkeyMuxImageReplayBatchForTesting({
 class MonkeyMuxService implements RemoteMultiplexerService {
   /// Creates a MonkeyMux service.
   const MonkeyMuxService({
-    required MonkeyMuxInstallerService installer,
-    Duration agentSessionMetadataPeriodicRefreshInterval = const Duration(
+    required this._installer,
+    this._agentSessionMetadataPeriodicRefreshInterval = const Duration(
       seconds: 10,
     ),
-    @visibleForTesting Duration? controlResponseTimeout,
-  }) : _installer = installer,
-       _agentSessionMetadataPeriodicRefreshInterval =
-           agentSessionMetadataPeriodicRefreshInterval,
-       _controlResponseTimeout = controlResponseTimeout;
+    @visibleForTesting this._controlResponseTimeout,
+  });
 
   final MonkeyMuxInstallerService _installer;
   final Duration _agentSessionMetadataPeriodicRefreshInterval;
@@ -1003,8 +1000,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   }) async {
     if (isAppReviewDemoSession(session)) {
       return const TerminalClientCommandResult(
-        output:
-            '{"version":1,"type":"started","bridgeId":"00000000000000000000000000000000"}',
+        output: '{"version":1,"type":"started","bridgeId":"00000000000000000000000000000000"}',
         exitCode: 0,
       );
     }
