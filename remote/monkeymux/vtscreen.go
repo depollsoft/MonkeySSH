@@ -50,7 +50,37 @@ type terminalScreen struct {
 	parser vtParser
 }
 
-const vtScrollbackLimit = 1000
+const (
+	vtScrollbackLimit = 1000
+	// Bounds on the grid a client can ask for: a malformed size must not
+	// allocate an unbounded pair of cell grids.
+	vtMaxColumns = 4096
+	vtMaxRows    = 1024
+	vtMaxCells   = 400_000
+	// Per-sequence parser bounds; longer input is ignored, never retained.
+	vtIntermediateLimit = 8
+	vtCombiningLimit    = 8
+)
+
+// clampVTSize bounds a requested geometry to something a terminal can show.
+func clampVTSize(width, height int) (int, int) {
+	if width <= 0 {
+		width = defaultColumns
+	}
+	if height <= 0 {
+		height = defaultRows
+	}
+	width = clampInt(width, 1, vtMaxColumns)
+	height = clampInt(height, 1, vtMaxRows)
+	for width*height > vtMaxCells {
+		if height > width {
+			height = vtMaxCells / width
+		} else {
+			width = vtMaxCells / height
+		}
+	}
+	return width, height
+}
 
 type vtGrid struct {
 	rows        [][]vtCell
@@ -122,12 +152,7 @@ type vtAttrs struct {
 }
 
 func newTerminalScreen(width, height int) *terminalScreen {
-	if width <= 0 {
-		width = defaultColumns
-	}
-	if height <= 0 {
-		height = defaultRows
-	}
+	width, height = clampVTSize(width, height)
 	s := &terminalScreen{width: width, height: height}
 	s.main = newVTGrid(width, height)
 	s.alt = newVTGrid(width, height)
@@ -239,7 +264,11 @@ func cloneVTRow(row []vtCell) []vtCell {
 
 // Resize changes both grids to width x height without reflow.
 func (s *terminalScreen) Resize(width, height int) {
-	if width <= 0 || height <= 0 || (width == s.width && height == s.height) {
+	if width <= 0 || height <= 0 {
+		return
+	}
+	width, height = clampVTSize(width, height)
+	if width == s.width && height == s.height {
 		return
 	}
 	s.resizeGrid(&s.main, width, height, true)
@@ -416,6 +445,9 @@ type vtParser struct {
 	utf8          [4]byte
 	utf8Len       int
 	utf8Need      int
+	// stringUtf8 counts UTF-8 continuation bytes still expected inside an
+	// OSC/DCS/APC string, so a 0x9c continuation byte is not taken for ST.
+	stringUtf8 int
 	// Scratch space reused by csiParams so dispatch allocates nothing.
 	values []int
 	starts []int
@@ -428,6 +460,30 @@ func (p vtParser) clone() vtParser {
 	c.intermediates = append([]byte(nil), p.intermediates...)
 	c.values, c.starts, c.groups = nil, nil, nil
 	return c
+}
+
+// inStringRune tracks multi-byte UTF-8 inside a control string and reports
+// whether b is part of such a rune (and therefore never a terminator).
+func (p *vtParser) inStringRune(b byte) bool {
+	if p.stringUtf8 > 0 {
+		if b&0xC0 == 0x80 {
+			p.stringUtf8--
+			return true
+		}
+		p.stringUtf8 = 0
+		return false
+	}
+	switch {
+	case b&0xE0 == 0xC0:
+		p.stringUtf8 = 1
+	case b&0xF0 == 0xE0:
+		p.stringUtf8 = 2
+	case b&0xF8 == 0xF0:
+		p.stringUtf8 = 3
+	default:
+		return false
+	}
+	return true
 }
 
 func (p *vtParser) clear() {
@@ -538,8 +594,10 @@ func (s *terminalScreen) step(b byte) {
 			p.clear()
 		case b == 0x9d:
 			p.state = vtOSCString
+			p.stringUtf8 = 0
 		case b == 0x90:
 			p.state = vtSOSString
+			p.stringUtf8 = 0
 		case b == 0x9c:
 			// A stray string terminator.
 		case b&0xE0 == 0xC0:
@@ -566,8 +624,10 @@ func (s *terminalScreen) step(b byte) {
 			p.clear()
 		case b == ']':
 			p.state = vtOSCString
+			p.stringUtf8 = 0
 		case b == 'P' || b == 'X' || b == '^' || b == '_':
 			p.state = vtSOSString
+			p.stringUtf8 = 0
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
 			p.state = vtEscapeIntermediate
@@ -583,7 +643,11 @@ func (s *terminalScreen) step(b byte) {
 			p.state = vtEscape
 			p.clear()
 		case b >= 0x20 && b <= 0x2f:
-			p.intermediates = append(p.intermediates, b)
+			if len(p.intermediates) < vtIntermediateLimit {
+				p.intermediates = append(p.intermediates, b)
+			} else {
+				p.state = vtCSIIgnore
+			}
 		case b < 0x20:
 			s.execute(b)
 		default:
@@ -594,7 +658,8 @@ func (s *terminalScreen) step(b byte) {
 		s.stepCSI(b)
 	case vtOSCString:
 		switch {
-		case b == 0x07:
+		case p.inStringRune(b):
+		case b == 0x07 || b == 0x9c:
 			p.state = vtGround
 		case b == 0x1b:
 			p.state = vtOSCEscape
@@ -614,10 +679,11 @@ func (s *terminalScreen) step(b byte) {
 			s.step(b)
 		}
 	case vtSOSString:
-		switch b {
-		case 0x1b:
+		switch {
+		case p.inStringRune(b):
+		case b == 0x1b:
 			p.state = vtSOSEscape
-		case 0x18, 0x1a:
+		case b == 0x9c, b == 0x18, b == 0x1a:
 			p.state = vtGround
 		}
 	case vtSOSEscape:
@@ -679,7 +745,11 @@ func (s *terminalScreen) stepCSI(b byte) {
 	case vtCSIIntermediate:
 		switch {
 		case b >= 0x20 && b <= 0x2f:
-			p.intermediates = append(p.intermediates, b)
+			if len(p.intermediates) < vtIntermediateLimit {
+				p.intermediates = append(p.intermediates, b)
+			} else {
+				p.state = vtCSIIgnore
+			}
 		case b >= 0x40 && b <= 0x7e:
 			p.state = vtGround
 			s.csiDispatch(b)
@@ -995,12 +1065,18 @@ func (s *terminalScreen) print(r rune) {
 	}
 	row := g.rows[g.cursorRow]
 	if s.insertMode {
+		// Never split a wide glyph: blank the pair straddling the insertion
+		// point, and the pair whose continuation falls off the right edge.
+		if row[g.cursorCol].width == 0 && g.cursorCol > 0 {
+			row[g.cursorCol-1] = vtCell{width: 1, attrs: row[g.cursorCol-1].attrs}
+			row[g.cursorCol] = vtCell{width: 1, attrs: row[g.cursorCol].attrs}
+		}
 		copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
 		for i := g.cursorCol; i < g.cursorCol+width && i < len(row); i++ {
 			row[i] = vtCell{width: 1}
 		}
-		if len(row) > 0 && row[len(row)-1].width == 0 {
-			row[len(row)-1] = vtCell{width: 1}
+		if last := len(row) - 1; last >= 0 && row[last].width == 2 {
+			row[last] = vtCell{width: 1, attrs: row[last].attrs}
 		}
 	}
 	col := g.cursorCol
@@ -1041,7 +1117,7 @@ func (s *terminalScreen) attachCombining(r rune) {
 	if row[col].width == 0 && col > 0 {
 		col--
 	}
-	if row[col].r == 0 {
+	if row[col].r == 0 || len(row[col].comb) >= vtCombiningLimit {
 		return
 	}
 	row[col].comb = append(row[col].comb, r)

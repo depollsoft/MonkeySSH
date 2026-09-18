@@ -330,8 +330,8 @@ var deliverForegroundGeometry = func(
 		return
 	}
 	if !window.ptySizeIs(width, height) {
-		window.screenWidth, window.screenHeight = width, height
 		window.resizePty(width, height)
+		window.recordScreenGeometryLocked(width, height)
 		return
 	}
 	simulateForegroundResize(window, width, height)
@@ -9823,8 +9823,18 @@ func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int)
 	if window.retainsConPtyNormalScreenLocked() && window.ptySizeIs(width, height) {
 		return
 	}
-	window.screenWidth, window.screenHeight = width, height
 	window.resizePty(width, height)
+	window.recordScreenGeometryLocked(width, height)
+}
+
+// recordScreenGeometryLocked adopts a geometry for the screen model once the
+// PTY confirmed it, so a rejected resize never lays the model out for a size
+// the foreground app never saw.
+func (w *muxWindow) recordScreenGeometryLocked(width int, height int) {
+	if w == nil || !w.ptySizeIs(width, height) {
+		return
+	}
+	w.screenWidth, w.screenHeight = width, height
 }
 
 func (s *muxServer) writeAttachReplayAndResizeLocked(
@@ -10146,17 +10156,20 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// Finish the sequence that began in the retained history before
 					// appending replay's parser reset. Otherwise its continuation can
 					// become text or a control command in the restored frame.
-					withContinuation := func(data []byte) []byte {
-						if window.redrawForwardingFallbackScreen == nil {
-							return fallbackReplay
-						}
+					// The secondary buffer holds the child's output without the
+					// query bytes routed to the primary, so it is the continuation
+					// to finish the frame with; the queries are re-attached to the
+					// primary and failover deliveries exactly as the other branches
+					// do, so the response wait still has something to wait for.
+					frame := fallbackReplay
+					if window.redrawForwardingFallbackScreen != nil {
 						screen := window.redrawForwardingFallbackScreen.Clone()
-						screen.Write(data)
-						return s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
+						screen.Write(secondaryBuffered)
+						frame = s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
 					}
-					buffered = withContinuation(buffered)
-					failoverBuffered = withContinuation(failoverBuffered)
-					secondaryBuffered = withContinuation(secondaryBuffered)
+					buffered = append(append([]byte(nil), frame...), queryData...)
+					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
+					secondaryBuffered = append([]byte(nil), frame...)
 				}
 			} else {
 				replay = nil

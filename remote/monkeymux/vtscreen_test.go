@@ -89,8 +89,11 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) {
 	if strings.Join(boolStrings(s.tabs), "") != strings.Join(boolStrings(replica.tabs), "") {
 		t.Fatal("round trip changed tab stops")
 	}
-	if a, b := *s.saved(), *replica.saved(); a.valid && (a.row != b.row || a.col != b.col || a.attrs != b.attrs) {
+	if a, b := *s.saved(), *replica.saved(); a.valid && a != b {
 		t.Fatalf("round trip changed the saved cursor: %+v vs %+v", a, b)
+	}
+	if a, b := s.scoCursor, replica.scoCursor; a.valid && (a.row != b.row || a.col != b.col) {
+		t.Fatalf("round trip changed the SCO cursor: %+v vs %+v", a, b)
 	}
 	if !s.AlternateScreenActive() {
 		if len(s.scrollback) != len(replica.scrollback) {
@@ -534,6 +537,11 @@ func TestVTScreenRenderRoundTrip(t *testing.T) {
 			s.Write([]byte("\x1b[3g\x1b[1;5H\x1bH\x1b[2;3H\x1b[33m\x1b7\x1b[0m\x1b[4h\x1b[1;1Habcdefghijkl"))
 			return s
 		}},
+		{"saved cursor with origin mode and charsets", func() *terminalScreen {
+			s := newTerminalScreen(20, 8)
+			s.Write([]byte("\x1b[3;6r\x1b[?6h\x1b[2;4H\x1b[1;35m\x1b(0\x1b)0\x0e\x1b7\x1b[0m\x0f\x1b(B\x1b[1;1Hqq\x1b[5;2H\x1b[s"))
+			return s
+		}},
 		{"pending wrap after a wide glyph", func() *terminalScreen {
 			s := newTerminalScreen(6, 2)
 			s.Write([]byte("abcd漢"))
@@ -711,4 +719,70 @@ func TestVTScreenScrollbackRowsAreTrimmed(t *testing.T) {
 		t.Fatalf("scrollback line lost its rendition: %q", got)
 	}
 	vtRoundTrip(t, s)
+}
+
+func TestVTScreenBounds(t *testing.T) {
+	s := newTerminalScreen(1<<20, 1<<20)
+	if w, h := s.Size(); w*h > vtMaxCells || w > vtMaxColumns || h > vtMaxRows {
+		t.Fatalf("size not clamped: %dx%d", w, h)
+	}
+	s.Resize(100000, 3)
+	if w, _ := s.Size(); w != vtMaxColumns {
+		t.Fatalf("resize not clamped: %d", w)
+	}
+	s = newTerminalScreen(10, 2)
+	// The final byte that ends an over-long sequence is consumed with it.
+	s.Write([]byte("\x1b" + strings.Repeat(" ", 1000) + "8xY"))
+	if len(s.parser.intermediates) > vtIntermediateLimit {
+		t.Fatal("intermediates unbounded")
+	}
+	if got := s.TextRows()[0]; got != "Y" {
+		t.Fatalf("oversized sequence was not ignored cleanly: %q", got)
+	}
+	s.Write([]byte("\x1b[" + strings.Repeat("!", 1000) + "p"))
+	s.Write([]byte("e" + strings.Repeat("\u0301", 100)))
+	if got := len(s.grid().rows[0][1].comb); got != vtCombiningLimit {
+		t.Fatalf("combining marks unbounded: %d", got)
+	}
+}
+
+func TestVTScreenC1TerminatorInsideStrings(t *testing.T) {
+	s := newTerminalScreen(20, 2)
+	// ✳ is E2 9C B3: the 9C inside it must not end the title.
+	s.Write([]byte("\x9d0;\xe2\x9c\xb3 Claude\x9cok\x1b]2;title\x9c!\x1bPdata\x9c?"))
+	if got := s.TextRows()[0]; got != "ok!?" {
+		t.Fatalf("C1 ST handling: %q", got)
+	}
+}
+
+func TestVTScreenInsertModeKeepsWidePairs(t *testing.T) {
+	s := newTerminalScreen(6, 1)
+	s.Write([]byte("ab漢cd\x1b[1;1H\x1b[4hX"))
+	row := s.grid().rows[0]
+	for i, cell := range row {
+		if cell.width == 2 && (i+1 >= len(row) || row[i+1].width != 0) {
+			t.Fatalf("wide lead at %d lost its continuation: %q", i, s.TextRows()[0])
+		}
+		if cell.width == 0 && (i == 0 || row[i-1].width != 2) {
+			t.Fatalf("orphan continuation at %d: %q", i, s.TextRows()[0])
+		}
+	}
+	if got := s.TextRows()[0]; got != "Xab漢c" {
+		t.Fatalf("insert shifted wrongly: %q", got)
+	}
+	s.Write([]byte("\x1b[4l\x1b[1;4HY"))
+	if got := s.TextRows()[0]; got != "XabY c" {
+		t.Fatalf("splitting a shifted pair: %q", got)
+	}
+	vtRoundTrip(t, s)
+}
+
+func TestVTScreenFrameRebuildsDefaultTabStops(t *testing.T) {
+	client := newTerminalScreen(20, 1)
+	client.Write([]byte("\x1b[3g\x1b[1;3H\x1bH"))
+	client.Write(newTerminalScreen(20, 1).RenderFrame())
+	client.Write([]byte("\x1b[1;1H\tX"))
+	if got := client.TextRows()[0]; got != "        X" {
+		t.Fatalf("frame left the client's custom tab stops: %q", got)
+	}
 }

@@ -49,21 +49,34 @@ func (s *terminalScreen) RenderFrame() []byte {
 	}
 	out = append(out, "\x1b[0m"...)
 	g := s.grid()
+	if sco := s.scoCursor; sco.valid {
+		// SCOSC state for a later CSI u.
+		out = appendVTCursorPosition(out, sco.row, sco.col)
+		out = append(out, "\x1b[s"...)
+	}
 	if saved := *s.saved(); saved.valid {
-		// DECSC state: live output may DECRC into it after the frame.
-		out = appendVTCursorPosition(out, saved.row, saved.col)
+		// DECSC state: live output may DECRC into it after the frame. DECSC
+		// captures position, rendition, origin mode and charsets, so stage
+		// all of them, save, then undo the staging.
+		if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {
+			out = appendVTRegion(out, s.top, s.bottom)
+		}
+		if saved.originMode {
+			out = append(out, "\x1b[?6h"...)
+			out = appendVTCursorPosition(out, saved.row-s.top, saved.col)
+		} else {
+			out = appendVTCursorPosition(out, saved.row, saved.col)
+		}
 		out = appendVTSGR(out, saved.attrs)
-		out = append(out, "\x1b7\x1b[0m"...)
+		out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
+		out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
+		out = appendVTCharsets(out, false, false, false)
 	}
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
 	}
 	if s.top != 0 || s.bottom != s.height-1 {
-		out = append(out, "\x1b["...)
-		out = strconv.AppendInt(out, int64(s.top+1), 10)
-		out = append(out, ';')
-		out = strconv.AppendInt(out, int64(s.bottom+1), 10)
-		out = append(out, 'r')
+		out = appendVTRegion(out, s.top, s.bottom)
 	}
 	if s.originMode {
 		out = append(out, "\x1b[?6h"...)
@@ -88,23 +101,34 @@ func (s *terminalScreen) RenderFrame() []byte {
 	} else {
 		out = appendVTCursorPosition(out, row, g.cursorCol)
 	}
-	if s.g0Graphics {
+	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
+	out = appendVTSGR(out, s.attrs)
+	return out
+}
+
+func appendVTRegion(out []byte, top, bottom int) []byte {
+	out = append(out, "\x1b["...)
+	out = strconv.AppendInt(out, int64(top+1), 10)
+	out = append(out, ';')
+	out = strconv.AppendInt(out, int64(bottom+1), 10)
+	return append(out, 'r')
+}
+
+func appendVTCharsets(out []byte, g0Graphics, g1Graphics, shiftOut bool) []byte {
+	if g0Graphics {
 		out = append(out, "\x1b(0"...)
 	} else {
 		out = append(out, "\x1b(B"...)
 	}
-	if s.g1Graphics {
+	if g1Graphics {
 		out = append(out, "\x1b)0"...)
 	} else {
 		out = append(out, "\x1b)B"...)
 	}
-	if s.shiftOut {
-		out = append(out, 0x0e)
-	} else {
-		out = append(out, 0x0f)
+	if shiftOut {
+		return append(out, 0x0e)
 	}
-	out = appendVTSGR(out, s.attrs)
-	return out
+	return append(out, 0x0f)
 }
 
 // renderVTCells appends a row's cells. Trailing default blanks are omitted
@@ -326,19 +350,11 @@ func appendVTCursorPosition(out []byte, row, col int) []byte {
 	return append(out, 'H')
 }
 
-// appendTabStops restores non-default tab stops. Emitted before any content
-// because setting a stop moves the cursor.
+// appendTabStops replaces the client's tab stops with the model's. The client
+// may carry stops from a previous window, so the set is always rebuilt, even
+// when it is the default one. Emitted before any content because setting a
+// stop moves the cursor.
 func (s *terminalScreen) appendTabStops(out []byte) []byte {
-	isDefault := true
-	for i, set := range s.tabs {
-		if set != (i > 0 && i%8 == 0) {
-			isDefault = false
-			break
-		}
-	}
-	if isDefault {
-		return out
-	}
 	out = append(out, "\x1b[3g"...)
 	for i, set := range s.tabs {
 		if set {
