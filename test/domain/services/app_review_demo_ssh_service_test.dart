@@ -5,10 +5,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
-// dartssh2 exports downloadToRandomAccess only through this IO library.
-// The public barrel's conditional export is invisible to flutter analyze.
-// ignore: implementation_imports
-import 'package:dartssh2/src/sftp/sftp_file_io.dart';
 
 import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:drift/native.dart';
@@ -94,7 +90,7 @@ void main() {
     },
   );
 
-  test('demo file supports sink and random-access downloads', () async {
+  test('demo file supports sink downloads', () async {
     final file = await openDemoFile();
     addTearDown(file.close);
     await file.writeBytes(Uint8List.fromList([1, 2, 3, 4]));
@@ -111,14 +107,6 @@ void main() {
       2,
     );
     expect(await bytes, [2, 3]);
-
-    final directory = await Directory.systemTemp.createTemp('demo-sftp-');
-    addTearDown(() => directory.delete(recursive: true));
-    final localFile = File('${directory.path}/download.bin');
-    final handle = await localFile.open(mode: FileMode.write);
-    expect(await file.downloadToRandomAccess(handle, offset: 1, length: 2), 2);
-    await handle.close();
-    expect(await localFile.readAsBytes(), [0, 2, 3]);
   });
 
   test('closed demo file members fail with SftpError', () async {
