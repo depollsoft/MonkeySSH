@@ -1382,6 +1382,8 @@ jobs:
         id: ios-deploy
         if: inputs.deploy-ios-to != 'none'
         env:
+          # Swift package build settings can take longer on a cold CI runner.
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: '120'
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
           MATCH_GIT_WRITE_BASIC_AUTHORIZATION: ${{ inputs.deploy-ios-to == 'firebase' && !inputs.ios-resign-match-readonly && secrets.MATCH_GIT_WRITE_BASIC_AUTHORIZATION || '' }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
