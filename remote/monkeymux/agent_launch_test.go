@@ -420,6 +420,11 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MONKEYMUX_PANE_TTY", "/dev/test-pane")
+	// The wrapper only defaults this for Claude and passes an inherited value
+	// through for every tool, so a test run from inside a MonkeyMux-launched
+	// Claude session (which exports it) must start without it to observe the
+	// default-only behaviour.
+	unsetenvForTest(t, "CLAUDE_CODE_SCROLL_SPEED")
 	t.Setenv("MONKEYMUX_AGENT_PID", "stale")
 	t.Setenv("OPENCODE_TUI_CONFIG", "custom")
 	stub := "#!/bin/sh\n" +
@@ -713,4 +718,18 @@ func TestRestoreWrapsBothAgentLaunchLegs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unsetenvForTest removes a variable for the test's duration; t.Setenv can
+// only set values, and an empty value is not the same as absence to a child.
+func unsetenvForTest(t *testing.T, key string) {
+	t.Helper()
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return
+	}
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Setenv(key, value) })
 }

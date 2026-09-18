@@ -4930,9 +4930,9 @@ func TestRestartedRedrawPauseKeepsOriginalFallback(t *testing.T) {
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	first := string(window.redrawForwardingFallbackHistory)
-	// The first redraw produced only a clear, so the history no longer holds a
+	// The first redraw produced only a clear, so the screen no longer holds a
 	// usable frame.
-	window.history = []byte("\x1b[H\x1b[2J")
+	window.appendHistoryLocked([]byte("\x1b[H\x1b[2J"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	second := string(window.redrawForwardingFallbackHistory)
 	server.mu.Unlock()
@@ -4969,7 +4969,7 @@ func TestRestartedRedrawPauseRefreshesUsableFallback(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	window.history = []byte("\x1b[Hnewer complete frame")
+	window.appendHistoryLocked([]byte("\x1b[H\x1b[2Jnewer complete frame"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	second := string(window.redrawForwardingFallbackHistory)
 	server.mu.Unlock()
@@ -9640,18 +9640,32 @@ func TestActiveReplayRestoresResetEditorModesAfterHistory(t *testing.T) {
 	}
 }
 
-func TestActiveReplayResetsCharacterSetAfterHistory(t *testing.T) {
+func TestActiveReplayRestoresCharacterSetAfterHistory(t *testing.T) {
 	server := newMuxServer("test")
 	history := "prompt\x1b)0\x0eqqq"
 	window := &muxWindow{id: "@1", history: []byte(history)}
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
 
+	// The replay resets the client's character sets and then re-applies the
+	// state the screen model knows the application is in, so a shell that
+	// really is shifted into DEC line drawing keeps drawing lines.
+	want := history + terminalParserResetSequence + terminalCharacterSetResetSequence +
+		"\x1b)0\x0e" + cursorVisibilityReplaySequence(true)
+	if !strings.HasSuffix(string(server.activeReplayLocked()), want) {
+		t.Fatalf("replay did not restore the shifted character set after history: %q", server.activeReplayLocked())
+	}
+
+	shifted := &muxWindow{id: "@2", history: []byte("prompt\x1b)0\x0eqqq\x0f")}
+	server.windows = []*muxWindow{shifted}
+	server.activeID = "@2"
+	// G1 stays designated for line drawing, but the shell is back in G0.
 	if !strings.HasSuffix(
 		string(server.activeReplayLocked()),
-		history+replayPostHistorySuffixForTest(true),
+		"\x0f"+terminalParserResetSequence+terminalCharacterSetResetSequence+
+			"\x1b)0"+cursorVisibilityReplaySequence(true),
 	) {
-		t.Fatalf("replay did not reset shifted character set after history")
+		t.Fatalf("replay did not leave an unshifted shell unshifted: %q", server.activeReplayLocked())
 	}
 }
 
@@ -12832,5 +12846,28 @@ func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
 				t.Fatal("shutdown wait did not end")
 			}
 		})
+	}
+}
+
+// TestScreenModelIgnoresSyntheticResize pins the model to the window's real
+// geometry: the width-1 resize dance changes the PTY, and a delta the app emits
+// during those 40 ms must not truncate the model's picture.
+func TestScreenModelIgnoresSyntheticResize(t *testing.T) {
+	window := &muxWindow{id: "@1", screenWidth: 10, screenHeight: 4, ptyWidth: 10, ptyHeight: 4}
+	window.appendHistoryLocked([]byte("\x1b[1;1Hrow1......\x1b[4;1Hrow4......"))
+	window.ptyWidth, window.ptyHeight = 9, 3
+	window.appendHistoryLocked([]byte("\x1b[2;1Hdelta"))
+	window.ptyWidth, window.ptyHeight = 10, 4
+	window.appendHistoryLocked([]byte("!"))
+	if w, h := window.screenLocked().Size(); w != 10 || h != 4 {
+		t.Fatalf("model followed the synthetic PTY size: %dx%d", w, h)
+	}
+	rows := window.screenLocked().TextRows()
+	if rows[0] != "row1......" || rows[1] != "delta!" || rows[3] != "row4......" {
+		t.Fatalf("synthetic resize damaged the model: %q", rows)
+	}
+	window.screenWidth = 12
+	if w, _ := window.screenLocked().Size(); w != 12 {
+		t.Fatal("model did not follow the real geometry")
 	}
 }

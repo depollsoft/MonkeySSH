@@ -331,6 +331,7 @@ var deliverForegroundGeometry = func(
 	}
 	if !window.ptySizeIs(width, height) {
 		window.resizePty(width, height)
+		window.recordScreenGeometryLocked(width, height)
 		return
 	}
 	simulateForegroundResize(window, width, height)
@@ -727,6 +728,9 @@ type muxWindow struct {
 	resizeGeneration            atomic.Uint64
 	proc                        muxProcess
 	history                     []byte
+	screen                      *terminalScreen // authoritative pane picture; see screenLocked
+	screenWidth                 int             // geometry the app is laid out for, guarded by s.mu
+	screenHeight                int
 	oscBuffer                   []byte
 	attachOscBuffer             []byte
 	csiBuffer                   []byte
@@ -764,6 +768,7 @@ type muxWindow struct {
 	redrawForwardingGeneration           int
 	redrawForwardingReplay               []byte
 	redrawForwardingFallbackHistory      []byte
+	redrawForwardingFallbackScreen       *terminalScreen
 	redrawForwardingBuffer               []byte
 	redrawForwardingFailoverBuffer       []byte
 	redrawForwardingSecondaryBuffer      []byte
@@ -6336,6 +6341,8 @@ func (s *muxServer) createWindowWithStarter(
 		pty:                       windowPty,
 		ptyWidth:                  cols,
 		ptyHeight:                 rows,
+		screenWidth:               cols,
+		screenHeight:              rows,
 		proc:                      proc,
 		history:                   append([]byte(nil), options.history...),
 		lastActivity:              time.Now(),
@@ -6702,6 +6709,7 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.clearKittyGraphicsPendingLocked()
 	window.clearKittyImagesLocked()
 	window.history = nil
+	window.screen = nil
 	window.oscBuffer = nil
 	window.attachOscBuffer = nil
 	window.csiBuffer = nil
@@ -9816,6 +9824,17 @@ func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int)
 		return
 	}
 	window.resizePty(width, height)
+	window.recordScreenGeometryLocked(width, height)
+}
+
+// recordScreenGeometryLocked adopts a geometry for the screen model once the
+// PTY confirmed it, so a rejected resize never lays the model out for a size
+// the foreground app never saw.
+func (w *muxWindow) recordScreenGeometryLocked(width int, height int) {
+	if w == nil || !w.ptySizeIs(width, height) {
+		return
+	}
+	w.screenWidth, w.screenHeight = width, height
 }
 
 func (s *muxServer) writeAttachReplayAndResizeLocked(
@@ -9966,8 +9985,10 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 			window,
 		); terminalOutputHasVisibleContent(snapshot) {
 			window.redrawForwardingFallbackHistory = snapshot
+			window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
 		} else {
 			window.redrawForwardingFallbackHistory = nil
+			window.redrawForwardingFallbackScreen = nil
 		}
 	} else if refreshed := s.foregroundHistoryFallbackHistoryLocked(
 		window,
@@ -9978,6 +9999,7 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 		// frame and hand the user exactly the emptiness this fallback exists to
 		// avoid, so the original snapshot is kept instead.
 		window.redrawForwardingFallbackHistory = refreshed
+		window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
 	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
@@ -10073,17 +10095,36 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// on SIGWINCH. The reset replay already establishes a clean terminal frame,
 	// so retain only a parser-safe tail of that redraw instead of sending many
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
+	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
+	paintedFromScreen := false
 	if len(replay) > 0 && window.terminalOutputIsGroundLocked() {
-		buffered = trimForegroundRedrawBuffer(buffered, queryData)
-		failoverBuffered = trimForegroundRedrawBuffer(failoverBuffered, queryData)
-		secondaryBuffered = trimForegroundRedrawBuffer(secondaryBuffered, nil)
+		oversized := len(buffered) > foregroundRedrawBufferLimitBytes ||
+			len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
+			len(secondaryBuffered) > foregroundRedrawBufferLimitBytes
+		if oversized && window.screenLocked().HasVisibleContent() {
+			// Cutting the head off a long repaint loses the top of the frame.
+			// The screen model has already absorbed the whole redraw, so paint
+			// its picture instead of a bounded tail of the bytes.
+			frame := s.foregroundHistoryFallbackReplayLocked(
+				window,
+				window.screenLocked().RenderFrame(),
+			)
+			replay = nil
+			buffered = append(append([]byte(nil), frame...), queryData...)
+			failoverBuffered = append(append([]byte(nil), frame...), queryData...)
+			secondaryBuffered = append([]byte(nil), frame...)
+			paintedFromScreen = true
+		} else {
+			buffered = trimForegroundRedrawBuffer(buffered, queryData)
+			failoverBuffered = trimForegroundRedrawBuffer(failoverBuffered, queryData)
+			secondaryBuffered = trimForegroundRedrawBuffer(secondaryBuffered, nil)
+		}
 	}
 	// Substituting the fallback discards the buffered redraw, so it is only
 	// safe once that redraw has ended on a sequence boundary. Resuming mid
 	// escape sequence would drop the head of a sequence whose tail is still to
 	// come and corrupt the client, so leave those redraws to forward normally.
-	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
-	if window.terminalOutputIsGroundLocked() &&
+	if !paintedFromScreen && window.terminalOutputIsGroundLocked() &&
 		(!visibleRedraw || !replacesScreen) {
 		// Some TUIs coalesce the temporary and restored SIGWINCH notifications
 		// and emit either nothing or an incremental update. The normal
@@ -10115,13 +10156,20 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// Finish the sequence that began in the retained history before
 					// appending replay's parser reset. Otherwise its continuation can
 					// become text or a control command in the restored frame.
-					withContinuation := func(data []byte) []byte {
-						history := append(append([]byte(nil), window.redrawForwardingFallbackHistory...), data...)
-						return s.foregroundHistoryFallbackReplayLocked(window, history)
+					// The secondary buffer holds the child's output without the
+					// query bytes routed to the primary, so it is the continuation
+					// to finish the frame with; the queries are re-attached to the
+					// primary and failover deliveries exactly as the other branches
+					// do, so the response wait still has something to wait for.
+					frame := fallbackReplay
+					if window.redrawForwardingFallbackScreen != nil {
+						screen := window.redrawForwardingFallbackScreen.Clone()
+						screen.Write(secondaryBuffered)
+						frame = s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
 					}
-					buffered = withContinuation(buffered)
-					failoverBuffered = withContinuation(failoverBuffered)
-					secondaryBuffered = withContinuation(secondaryBuffered)
+					buffered = append(append([]byte(nil), frame...), queryData...)
+					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
+					secondaryBuffered = append([]byte(nil), frame...)
 				}
 			} else {
 				replay = nil
@@ -10391,6 +10439,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingPaused = false
 	w.redrawForwardingReplay = nil
 	w.redrawForwardingFallbackHistory = nil
+	w.redrawForwardingFallbackScreen = nil
 	w.redrawForwardingBuffer = nil
 	w.redrawForwardingFailoverBuffer = nil
 	w.redrawForwardingSecondaryBuffer = nil
@@ -10409,24 +10458,21 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
 	window *muxWindow,
 ) []byte {
-	if window == nil || !window.supportsForegroundRedrawLocked() {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
 		return nil
 	}
-	history, historyStart := window.historyTailWithParserLocked()
-	// This is a TUI frame recovery, not the short shell scrollback replay.
-	// Differential updates can leave the composer untouched for more than
-	// windowReplayLimitBytes of output. Cutting to that tail discards the
-	// cells (and cursor position) those updates depend on, so a switch paints
-	// the transcript over a blank/misaligned composer until a real resize.
-	// Keep the full, already bounded foreground history and only skip an
-	// incomplete leading control sequence left by history eviction.
-	start := advanceReplayStartToTerminalGround(history, 0, historyStart)
-	history = history[start:]
-	history = stripTerminalQueriesFromReplay(history)
-	if len(history) == 0 {
+	// This is a TUI frame recovery. A tail of the raw byte history is not a
+	// frame: an application that streams incremental updates evicts its last
+	// full repaint from that tail, and replaying the remainder onto a cleared
+	// client paints only the rows the updates touched. Render the complete
+	// picture from the screen model instead, which reproduces every visible
+	// cell, the cursor and the main-screen scrollback regardless of how the
+	// application drew them.
+	screen := window.screenLocked()
+	if !screen.HasVisibleContent() {
 		return nil
 	}
-	return append([]byte(nil), history...)
+	return screen.RenderFrame()
 }
 
 // foregroundHistoryFallbackReplayLocked renders the snapshot taken when the
@@ -10456,7 +10502,7 @@ func buildWindowReplay(window *muxWindow, history []byte) []byte {
 	preHistoryClear := terminalPreHistoryClearSequence(window)
 	postModes := terminalModePostReplaySequence(window)
 	postParser := []byte(terminalParserResetSequence)
-	postCharset := []byte(terminalCharacterSetResetSequence)
+	postCharset := window.screenLocked().CharsetSequence()
 	cursor := cursorVisibilityReplaySequence(window.cursorVisibleForReplayLocked())
 	replay := make(
 		[]byte,
@@ -12001,10 +12047,42 @@ func (s *muxServer) windowByIDLocked(windowID string) *muxWindow {
 	return nil
 }
 
+// screenLocked returns the window's screen model, creating it on first use and
+// keeping its geometry in step with the window's real size. The synthetic
+// width-1 resize dance changes only the PTY, never this geometry, so a delta
+// the app emits during the dance cannot truncate the model. Callers hold the
+// server lock.
+func (w *muxWindow) screenLocked() *terminalScreen {
+	width, height := w.screenWidth, w.screenHeight
+	if width <= 0 || height <= 0 {
+		width, height = defaultColumns, defaultRows
+	}
+	if w.screen == nil {
+		w.screen = newTerminalScreen(width, height)
+		// A window that already holds retained output (restored from a
+		// snapshot, or created before the model existed) is bootstrapped from
+		// that history, skipping any control sequence eviction left open.
+		if len(w.history) > 0 {
+			start := advanceReplayStartToTerminalGround(
+				w.history,
+				0,
+				w.historyStartTerminalOutput,
+			)
+			if start < len(w.history) {
+				w.screen.Write(w.history[start:])
+			}
+		}
+	} else {
+		w.screen.Resize(width, height)
+	}
+	return w.screen
+}
+
 func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
+	w.screenLocked().Write(chunk)
 	limit := w.historyLimitLocked()
 	if len(chunk) >= limit {
 		parser := w.historyStartTerminalOutput
