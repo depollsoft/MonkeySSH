@@ -786,3 +786,57 @@ func TestVTScreenFrameRebuildsDefaultTabStops(t *testing.T) {
 		t.Fatalf("frame left the client's custom tab stops: %q", got)
 	}
 }
+
+// TestKittyPlaceholderDiacriticsMatchClient keeps the model's zero-width
+// placeholder marks identical to the vendored client's list, so a placeholder
+// grid lays out the same on both sides.
+func TestKittyPlaceholderDiacriticsMatchClient(t *testing.T) {
+	source, err := os.ReadFile("../../third_party/xterm/lib/src/terminal.dart")
+	if err != nil {
+		t.Skipf("client source unavailable: %v", err)
+	}
+	text := string(source)
+	start := strings.Index(text, "const _kittyPlaceholderDiacritics = <int>[")
+	if start < 0 {
+		t.Fatal("client diacritic list not found")
+	}
+	body := text[start:]
+	body = body[:strings.Index(body, "];")]
+	want := map[rune]bool{}
+	for _, field := range strings.Fields(strings.ReplaceAll(body, ",", " ")) {
+		if strings.HasPrefix(field, "0x") {
+			var value int
+			if _, err := fmt.Sscanf(field, "0x%x", &value); err == nil {
+				want[rune(value)] = true
+			}
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("client diacritic list is empty")
+	}
+	got := map[rune]bool{}
+	for i, r := range kittyPlaceholderDiacritics {
+		got[r] = true
+		if i > 0 && kittyPlaceholderDiacritics[i-1] >= r {
+			t.Fatalf("diacritic list is not sorted at %#x", r)
+		}
+		if runeWidth(r) != 0 {
+			t.Fatalf("placeholder diacritic %#x is not zero width", r)
+		}
+		if !want[r] {
+			t.Fatalf("model lists %#x, client does not", r)
+		}
+	}
+	for r := range want {
+		if !got[r] {
+			t.Fatalf("client lists %#x, model does not", r)
+		}
+	}
+	// A placeholder row: the base glyph carries row/column marks the client
+	// swallows, so the next placeholder lands in the adjacent cell.
+	s := newTerminalScreen(6, 1)
+	s.Write([]byte("\U0010EEEE\u07EB\u0305\U0010EEEE\u07EB\u030DX"))
+	if r, c := s.CursorPosition(); r != 0 || c != 3 {
+		t.Fatalf("placeholder marks advanced the cursor: col %d", c)
+	}
+}
