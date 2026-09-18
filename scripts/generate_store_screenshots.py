@@ -477,7 +477,18 @@ class StoreDemoEnvironment:
             or hashlib.sha256(executable.read_bytes()).hexdigest()
             != hashlib.sha256(binary_bytes).hexdigest()
         ):
-            executable.write_bytes(binary_bytes)
+            # Replacing an executable in place can leave macOS with cached
+            # code-signature pages for its old contents, causing SIGKILL on
+            # launch. A new inode also preserves any running old helper.
+            with tempfile.NamedTemporaryFile(dir=install_dir, delete=False) as staged:
+                staged_path = Path(staged.name)
+                try:
+                    staged.write(binary_bytes)
+                    staged.flush()
+                    os.chmod(staged_path, 0o700)
+                    os.replace(staged_path, executable)
+                finally:
+                    staged_path.unlink(missing_ok=True)
         os.chmod(executable, 0o700)
 
     def _build_monkeymux_env(self) -> dict[str, str]:

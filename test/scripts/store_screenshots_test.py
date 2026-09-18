@@ -18,6 +18,22 @@ import store_media
 
 
 class LiveAgentCaptureTest(unittest.TestCase):
+    def test_staging_helper_preserves_open_old_binary_and_reuses_matching_build(self):
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(capture.Path, 'home', return_value=Path(directory)):
+            demo._stage_bundled_monkeymux_install('test', 'darwin-arm64', b'old')
+            executable = Path(directory) / '.monkeyssh/bin/monkeymux/test/darwin-arm64/monkeymux'
+            with executable.open('rb') as running_binary:
+                demo._stage_bundled_monkeymux_install('test', 'darwin-arm64', b'new')
+                self.assertEqual(running_binary.read(), b'old')
+                self.assertEqual(executable.read_bytes(), b'new')
+            self.assertEqual(executable.stat().st_mode & 0o777, 0o700)
+            inode = executable.stat().st_ino
+            demo._stage_bundled_monkeymux_install('test', 'darwin-arm64', b'new')
+            self.assertEqual(executable.stat().st_ino, inode)
+            self.assertEqual(list(executable.parent.iterdir()), [executable])
+
     def test_preflight_reports_all_missing_tools_before_creating_resources(self):
         def which(name):
             return None if name in {'codex', 'codex-cli', 'pi'} else '/bin/' + name

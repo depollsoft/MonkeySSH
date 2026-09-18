@@ -30,6 +30,7 @@ import 'package:monkeyssh/domain/services/host_key_prompt_handler_provider.dart'
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
@@ -927,23 +928,36 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     }
     final muxService = ref.read(monkeyMuxServiceProvider);
     final deadline = DateTime.now().add(const Duration(seconds: 30));
+    var windowCount = 0;
+    var missing = _requiredStoreAgentWindows;
+    String? lastError;
     while (DateTime.now().isBefore(deadline)) {
       try {
         final windows = await muxService
             .listWindows(session, _muxSessionName)
             .timeout(const Duration(seconds: 8));
         final names = windows.map((window) => window.name).toSet();
+        windowCount = windows.length;
+        missing = _requiredStoreAgentWindows.difference(names);
         if (names.containsAll(_requiredStoreAgentWindows)) {
           await Future<void>.delayed(const Duration(milliseconds: 400));
           return;
         }
-      } on Object {
+      } on Object catch (error) {
+        // Installer messages contain fixed text and platform/exit-status values.
+        // Other exceptions may contain remote content, so report only their type.
+        lastError = error is MonkeyMuxInstallException
+            ? error.message
+            : error.runtimeType.toString();
         // Keep polling until the deadline; transient control-channel errors are
         // expected while the session is still warming up.
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
-    throw TimeoutException('MonkeyMux windows did not become ready.');
+    throw TimeoutException(
+      'MonkeyMux windows did not become ready. '
+      'count=$windowCount missing=${missing.join(",")} error=$lastError',
+    );
   }
 
   Future<void> _scrollMuxWindows({required bool toEnd}) async {

@@ -17,7 +17,7 @@ Parse free text after `/prepare-release`:
 
 | Token | Meaning | Default |
 | --- | --- | --- |
-| `vX.Y.Z` / `X.Y.Z` | Exact app version to ship | Ask only if shipping and version is unclear; otherwise let `release.yml` choose the next App Store patch from `pubspec.yaml` |
+| `vX.Y.Z` / `X.Y.Z` | Exact app version to ship | Recommend a version from the changes in step 2: minor for new features, patch for fixes only |
 | `--channel production\|internal` | Release channel | `production` |
 | `--platform both\|ios\|android` | Store media + ship platforms | `both` |
 | `--skip-media` | Do not regenerate or publish screenshots/videos | off |
@@ -64,7 +64,7 @@ Copy this checklist and keep it updated while running:
 Prepare-release progress
 - [ ] 0. Parse args + confirm ship intent
 - [ ] 1. Repo hygiene (fetch main, clean worktree/PR branch)
-- [ ] 2. Decide what changed since last release
+- [ ] 2. Decide what changed since last release + recommend version
 - [ ] 3. Listing copy updates (if needed)
 - [ ] 4. Validate listing copy
 - [ ] 5. Regenerate store media (if needed)
@@ -106,6 +106,31 @@ Refresh media when UI, onboarding, MonkeyMux/agent surfaces, or store-facing flo
 ```bash
 gh release view store-assets --json publishedAt,url,assets
 ```
+
+#### Recommend the release version
+
+Use the latest shipped production version as the baseline. Check successful
+production Release workflow runs as well as GitHub Releases, since a manual
+release may have no GitHub tag. Cross-check `pubspec.yaml` and existing tags so
+an already-prepared version is not mistaken for a shipped release.
+
+- New user-facing features require a **minor** bump and reset the patch to zero.
+  For example, adding an agent integration after `0.7.1` warrants `0.8.0`.
+- Bug fixes and maintenance without new features require a **patch** bump.
+  For example, a fixes-only release after `0.7.1` warrants `0.7.2`.
+- A mix of features and fixes is a minor release. The size of a diff or a
+  dependency update alone does not make a release a feature release.
+
+State the recommended exact version and the changes that justify it. When
+shipping is authorized and no exact version was supplied, proceed with that
+recommendation. Respect an explicit user-specified version, explaining any
+difference from the recommendation. Ask only when the release baseline or
+scope cannot be established.
+
+Update `pubspec.yaml` to the chosen version in the prep PR, preserving the
+build-number suffix. Use the same exact version for the GitHub Release tag or
+the Release workflow's `version` input. Do not let the automatic patch resolver
+choose the version of a feature release.
 
 ### 3) Listing copy (git-managed)
 
@@ -211,9 +236,9 @@ Optional restore check:
 ./scripts/store_assets.sh download
 ```
 
-### 8) Commit copy-only changes + PR
+### 8) Commit release prep changes + PR
 
-If listing copy/docs changed:
+If listing copy, the version, or other release prep files changed:
 
 ```bash
 git status --short
@@ -229,6 +254,10 @@ git push -u origin HEAD
 gh pr create --base main --title "chore: refresh store listing copy for release" --body "..."
 ```
 
+Also stage `pubspec.yaml` when the release version changed, and any intentionally
+updated release scripts or skill instructions. Open the prep PR even if its
+only change is the version bump.
+
 If shipping immediately, wait for the copy PR to merge (or merge it if the user wants you to) so `main` has the text the release will upload.
 
 ### 9) Ship
@@ -240,7 +269,7 @@ Skip if `--no-ship`, `--media-only`, or `--copy-only`.
 Preferred: publish a GitHub Release with tag `vX.Y.Z`:
 
 ```bash
-version=X.Y.Z  # from args or agreed version
+version=X.Y.Z  # explicit override or the recommendation from step 2
 gh release create "v${version}" --generate-notes --title "v${version}"
 ```
 
@@ -259,7 +288,7 @@ gh workflow run release.yml \
   -f channel=production \
   -f ios=true \
   -f android=true \
-  -f version=X.Y.Z   # optional override; blank lets iOS auto-pick patch
+  -f version=X.Y.Z   # always pass the chosen release version
 ```
 
 #### Internal only
@@ -286,6 +315,7 @@ Always tell the user:
 2. `store-assets` release URL and publish-store-assets run URL
 3. Copy PR URL (if any) and merge state
 4. Release tag / release.yml run URL
+   and the feature-versus-fix rationale for the chosen version
 5. Manual leftovers:
    - If the Google Play promo MP4 changed, it must be uploaded to YouTube (public/unlisted, ads off) and the Play Console listing video URL updated — Fastlane does not upload Play videos
    - App Review may still need human attention in App Store Connect / Play Console
@@ -302,7 +332,7 @@ If `--dry-run`, print the exact commands for the chosen path and stop without ge
 /prepare-release --ship
 ```
 
-Agent runs copy review → media regen/publish → merge copy if needed → `gh release create vX.Y.Z`.
+Agent recommends a version from the changes, then runs copy review → media regen/publish → merge prep PR if needed → `gh release create vX.Y.Z`.
 
 ### Media refresh only
 
@@ -347,6 +377,6 @@ python3 scripts/validate_store_demo_videos.py all
 
 # ship
 gh release create vX.Y.Z --generate-notes
-gh workflow run release.yml -f channel=production -f ios=true -f android=true
+gh workflow run release.yml -f channel=production -f ios=true -f android=true -f version=X.Y.Z
 gh run list --workflow release.yml --limit 5
 ```
