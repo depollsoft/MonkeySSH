@@ -400,32 +400,20 @@ func ownTestConPty(t *testing.T, backend *conPtyBackend, write, read, console, p
 					t.Errorf("helper exit code = %d, error=%v", exitCode, err)
 				}
 			}
-			// ClosePseudoConsole can block while flushing output. Keep draining
-			// until the console is closed, then release the process and pipes.
-			closed := make(chan struct{})
-			go func() {
-				backend.close(console)
-				close(closed)
-			}()
-			select {
-			case <-closed:
-			case <-time.After(5 * time.Second):
-				t.Error("timed out closing ConPTY")
-			}
-			_ = windows.CloseHandle(process)
+			// Close the pipes first. ConptyClosePseudoConsole waits for
+			// outstanding Reads on the output pipe and deadlocks on
+			// Windows Server 2025 if the HPCON is closed while a reader
+			// is still blocked. The helper has already exited (or been
+			// killed), so remaining bytes are in the pipe.
 			_ = input.Close()
+			_ = output.Close()
 			select {
 			case data = <-drained:
 			case <-time.After(5 * time.Second):
 				t.Error("timed out draining ConPTY output")
-				_ = output.Close()
-				select {
-				case data = <-drained:
-				case <-time.After(2 * time.Second):
-					t.Error("ConPTY output reader did not exit after close")
-				}
 			}
-			_ = output.Close()
+			backend.close(console)
+			_ = windows.CloseHandle(process)
 		})
 		return data
 	}
