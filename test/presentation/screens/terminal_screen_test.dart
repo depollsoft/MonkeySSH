@@ -66,6 +66,7 @@ import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
+import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:wakelock_plus_platform_interface/wakelock_plus_platform_interface.dart';
 import 'package:xterm/xterm.dart';
@@ -702,6 +703,18 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
       }
     }
     return null;
+  }
+
+  @override
+  void updateSessionTheme(
+    int connectionId,
+    String themeId, {
+    required bool isDark,
+  }) {
+    if (getSession(connectionId)?.setTerminalThemeId(themeId, isDark: isDark) ??
+        false) {
+      state = {...state};
+    }
   }
 
   @override
@@ -2275,6 +2288,94 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(launchedUrls, [url]);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    for (final disposeBeforeSave in [false, true]) {
+      testWidgets(
+        'save theme snackbar with disposed terminal $disposeBeforeSave',
+        (tester) async {
+          final visible = ValueNotifier(true);
+          addTearDown(visible.dispose);
+          when(
+            () => hostRepository.updateFields(any(), any()),
+          ).thenAnswer((_) async => true);
+          await tester.pumpWidget(
+            buildScreen(
+              child: MaterialApp(
+                home: ValueListenableBuilder<bool>(
+                  valueListenable: visible,
+                  builder: (_, show, _) => show
+                      ? TerminalScreen(
+                          hostId: host.id,
+                          connectionId: session.connectionId,
+                        )
+                      : const Scaffold(body: Text('Terminal closed')),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await openTerminalOverflowMenu(tester);
+          await tester.tap(terminalMenuItemButton('Change Theme'));
+          await tester.pumpAndSettle();
+          tester
+              .widget<TerminalThemePicker>(find.byType(TerminalThemePicker))
+              .onThemeSelected(monkey_themes.TerminalThemes.defaultDarkTheme);
+          await tester.pumpAndSettle();
+          expect(find.text('Save to Host'), findsOneWidget);
+
+          if (disposeBeforeSave) {
+            visible.value = false;
+            await tester.pumpAndSettle();
+            expect(find.byType(TerminalScreen), findsNothing);
+          }
+          expect(find.text('Save to Host'), findsOneWidget);
+          await tester.tap(find.text('Save to Host'));
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          if (disposeBeforeSave) {
+            verifyNever(() => hostRepository.updateFields(any(), any()));
+          } else {
+            final update =
+                verify(
+                      () => hostRepository.updateFields(host.id, captureAny()),
+                    ).captured.single
+                    as HostsCompanion;
+            expect(
+              update.terminalThemeLightId.value,
+              monkey_themes.TerminalThemes.defaultDarkTheme.id,
+            );
+            expect(find.text('Theme saved to ${host.label}'), findsOneWidget);
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+        },
+      );
+    }
+
+    testWidgets(
+      'terminal link snapshots follow resizes without terminal output',
+      (tester) async {
+        await pumpScreen(tester);
+        final terminal = session.terminal!;
+        const url = 'https://example.com/docs';
+        terminal
+          ..resize(20, 24)
+          ..write('\x1b[2J\x1b[H$url');
+        final view = tester.widget<MonkeyTerminalView>(
+          find.byType(MonkeyTerminalView),
+        );
+        expect(view.resolveLinkTap!(const CellOffset(3, 0)), url);
+
+        // resize() reflows the buffer without notifying content listeners.
+        // Column 22 was outside the cached 20-column snapshot.
+        terminal.resize(40, 24);
+        expect(view.resolveLinkTap!(const CellOffset(22, 0)), url);
+
+        terminal.resize(12, 24);
+        expect(view.resolveLinkTap!(const CellOffset(3, 1)), url);
+        await tester.pumpWidget(const SizedBox.shrink());
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
