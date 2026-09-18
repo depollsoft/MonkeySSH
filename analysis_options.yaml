@@ -9,6 +9,7 @@ analyzer:
     missing_return: error
     must_be_immutable: error
     invalid_annotation_target: ignore
+    prefer_initializing_formals: ignore
   exclude:
     - "**/*.g.dart"
     - "**/*.freezed.dart"

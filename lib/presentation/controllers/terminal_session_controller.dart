@@ -13,17 +13,26 @@ import '../../domain/services/terminal_wake_lock_service.dart';
 class TerminalSessionController {
   /// Creates a controller for one terminal screen instance.
   TerminalSessionController({
-    required this._wakeLockService,
-    required this._wakeLockOwnerId,
-    required this._readCurrentConnectionState,
-    required this._getSession,
-    required this._connectionId,
-    required this._hasActiveShell,
-    required this._hasError,
-    required this._isBackgrounded,
-    required this._onSessionMetadataChanged,
-    this._sessionMetadataDebounce = const Duration(milliseconds: 75),
-  });
+    required TerminalWakeLockService wakeLockService,
+    required int wakeLockOwnerId,
+    required SshConnectionState Function() readCurrentConnectionState,
+    required SshSession? Function(int connectionId) getSession,
+    required int? Function() connectionId,
+    required bool Function() hasActiveShell,
+    required bool Function() hasError,
+    required bool Function() isBackgrounded,
+    required VoidCallback onSessionMetadataChanged,
+    Duration sessionMetadataDebounce = const Duration(milliseconds: 75),
+  }) : _wakeLockService = wakeLockService,
+       _wakeLockOwnerId = wakeLockOwnerId,
+       _readCurrentConnectionState = readCurrentConnectionState,
+       _getSession = getSession,
+       _connectionId = connectionId,
+       _hasActiveShell = hasActiveShell,
+       _hasError = hasError,
+       _isBackgrounded = isBackgrounded,
+       _onSessionMetadataChanged = onSessionMetadataChanged,
+       _sessionMetadataDebounce = sessionMetadataDebounce;
 
   final TerminalWakeLockService _wakeLockService;
   final int _wakeLockOwnerId;

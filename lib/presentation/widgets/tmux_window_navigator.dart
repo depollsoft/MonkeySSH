@@ -49,12 +49,21 @@ const _tmuxToolPickerMaxHeightCap = 320.0;
 class TmuxWindowLoader {
   /// Creates a loader whose callbacks read the view's current session and state.
   TmuxWindowLoader({
-    required this._fetch,
-    required this._currentWindows,
-    required this._onChanged,
-    required this._connectionId,
-    this._acceptEmpty,
-  });
+    required Future<List<TmuxWindow>> Function() fetch,
+    required List<TmuxWindow>? Function() currentWindows,
+    required void Function(
+      List<TmuxWindow>? windows,
+      AsyncError? error, {
+      required bool shouldRecover,
+    })
+    onChanged,
+    required int Function() connectionId,
+    bool Function()? acceptEmpty,
+  }) : _fetch = fetch,
+       _currentWindows = currentWindows,
+       _onChanged = onChanged,
+       _connectionId = connectionId,
+       _acceptEmpty = acceptEmpty;
 
   final Future<List<TmuxWindow>> Function() _fetch;
   final List<TmuxWindow>? Function() _currentWindows;

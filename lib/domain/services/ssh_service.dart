@@ -447,9 +447,10 @@ class _TerminalOutputCursorTracker {
     required int? cursorRow,
     required int? marginTop,
     required int? marginBottom,
-    required this._originMode,
+    required bool originMode,
   }) : _columns = columns != null && columns > 0 ? columns : null,
-       _rows = rows != null && rows > 0 ? rows : null {
+       _rows = rows != null && rows > 0 ? rows : null,
+       _originMode = originMode {
     final validRows = _rows;
     final validColumns = _columns;
     if (validRows == null ||
@@ -7151,10 +7152,12 @@ class _AppReviewDemoSftpClient implements SftpClient {
 
 class _AppReviewDemoSftpFile implements SftpFile {
   _AppReviewDemoSftpFile({
-    required this._attrs,
-    required this._readContent,
-    required this._writeContent,
-  });
+    required SftpFileAttrs attrs,
+    required Uint8List Function() readContent,
+    required void Function(Uint8List value) writeContent,
+  }) : _attrs = attrs,
+       _readContent = readContent,
+       _writeContent = writeContent;
 
   final Uint8List Function() _readContent;
   final void Function(Uint8List value) _writeContent;

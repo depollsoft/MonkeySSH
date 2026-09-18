@@ -152,9 +152,10 @@ class SecureTransferService {
     this._db,
     this._keyRepository,
     this._hostRepository, {
-    this._diagnosticsLogger = const NoopDiagnosticsLogger(),
-    this._onHostsChanged,
-  });
+    DiagnosticsLogger diagnosticsLogger = const NoopDiagnosticsLogger(),
+    Future<void> Function()? onHostsChanged,
+  }) : _diagnosticsLogger = diagnosticsLogger,
+       _onHostsChanged = onHostsChanged;
 
   final AppDatabase _db;
   final KeyRepository _keyRepository;

@@ -73,13 +73,18 @@ abstract interface class TelemetryCrashReporter {
 class TelemetryService {
   /// Creates a telemetry service.
   TelemetryService({
-    required this._status,
-    required this._collectionEnabled,
-    required this._diagnosticsLogger,
-    this._analyticsClient,
-    this._crashReporter,
+    required TelemetryServiceStatus status,
+    required bool collectionEnabled,
+    required DiagnosticsLogger diagnosticsLogger,
+    TelemetryAnalyticsClient? analyticsClient,
+    TelemetryCrashReporter? crashReporter,
     AbsorbedErrorRateLimiter? absorbedErrorRateLimiter,
-  }) : _absorbedErrorRateLimiter =
+  }) : _status = status,
+       _collectionEnabled = collectionEnabled,
+       _diagnosticsLogger = diagnosticsLogger,
+       _analyticsClient = analyticsClient,
+       _crashReporter = crashReporter,
+       _absorbedErrorRateLimiter =
            absorbedErrorRateLimiter ?? _processAbsorbedErrorRateLimiter;
 
   static final _processAbsorbedErrorRateLimiter = AbsorbedErrorRateLimiter();

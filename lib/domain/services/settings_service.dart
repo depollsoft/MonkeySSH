@@ -293,7 +293,8 @@ abstract class _AsyncSettingsNotifier<T> extends Notifier<T> {
 }
 
 abstract class _BooleanSettingsNotifier extends _AsyncSettingsNotifier<bool> {
-  _BooleanSettingsNotifier(this._key, {required this._defaultValue});
+  _BooleanSettingsNotifier(this._key, {required bool defaultValue})
+    : _defaultValue = defaultValue;
 
   final String _key;
 

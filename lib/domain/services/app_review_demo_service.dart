@@ -62,15 +62,22 @@ class AppReviewDemoSetupResult {
 class AppReviewDemoService {
   /// Creates an App Review demo service.
   const AppReviewDemoService({
-    required this._groupRepository,
-    required this._hostRepository,
-    required this._keyRepository,
-    required this._snippetRepository,
-    required this._portForwardRepository,
-    required this._agentLaunchPresetService,
-    required this._hostCliLaunchPreferencesService,
-    required this._settingsService,
-  });
+    required GroupRepository groupRepository,
+    required HostRepository hostRepository,
+    required KeyRepository keyRepository,
+    required SnippetRepository snippetRepository,
+    required PortForwardRepository portForwardRepository,
+    required AgentLaunchPresetService agentLaunchPresetService,
+    required HostCliLaunchPreferencesService hostCliLaunchPreferencesService,
+    required SettingsService settingsService,
+  }) : _groupRepository = groupRepository,
+       _hostRepository = hostRepository,
+       _keyRepository = keyRepository,
+       _snippetRepository = snippetRepository,
+       _portForwardRepository = portForwardRepository,
+       _agentLaunchPresetService = agentLaunchPresetService,
+       _hostCliLaunchPreferencesService = hostCliLaunchPreferencesService,
+       _settingsService = settingsService;
 
   final GroupRepository _groupRepository;
   final HostRepository _hostRepository;

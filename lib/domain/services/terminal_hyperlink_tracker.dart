@@ -4,9 +4,10 @@ import 'package:xterm/xterm.dart';
 /// Tracks OSC 8 terminal hyperlinks so taps can open links whose labels do not
 /// visibly contain the destination URL.
 class TerminalHyperlinkTracker {
-  /// Creates a tracker that retains at most [_maxRetainedLinks] fully closed
+  /// Creates a tracker that retains at most [maxRetainedLinks] fully closed
   /// hyperlinks. Oldest links are evicted first (LRU) once the cap is reached.
-  TerminalHyperlinkTracker({this._maxRetainedLinks = defaultMaxRetainedLinks});
+  TerminalHyperlinkTracker({int maxRetainedLinks = defaultMaxRetainedLinks})
+    : _maxRetainedLinks = maxRetainedLinks;
 
   /// Default cap on the number of fully closed hyperlinks retained in memory.
   static const int defaultMaxRetainedLinks = 200;

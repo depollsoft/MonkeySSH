@@ -89,9 +89,11 @@ final class AcpJsonRpcServerRequest {
     required this.method,
     required this.params,
     required this.raw,
-    required this._respond,
-    required this._respondError,
-  });
+    required Future<void> Function(Object? result) respond,
+    required Future<void> Function(int code, String message, Object? data)
+    respondError,
+  }) : _respond = respond,
+       _respondError = respondError;
 
   /// Request identifier.
   final AcpRequestId id;

@@ -171,14 +171,19 @@ class AcpComposerAttachment {
 /// immediately so the user can type steering or follow-up text while the active
 /// turn continues. Failed submissions are restored without dropping newer text.
 class AcpComposerController extends ChangeNotifier {
-  /// Creates a composer controller for [_sessionKey].
+  /// Creates a composer controller for [sessionKey].
   AcpComposerController({
-    required this._manager,
-    required this._sessionKey,
-    this._preparationService = const AcpAttachmentPreparationService(),
-    this._uploaderBuilder,
+    required AcpSessionManager manager,
+    required AcpSessionKey sessionKey,
+    AcpAttachmentPreparationService preparationService =
+        const AcpAttachmentPreparationService(),
+    AcpAttachmentUploader? Function()? uploaderBuilder,
     AcpSessionState? initialSession,
-  }) : _session = initialSession {
+  }) : _manager = manager,
+       _sessionKey = sessionKey,
+       _preparationService = preparationService,
+       _uploaderBuilder = uploaderBuilder,
+       _session = initialSession {
     _recomputeSlash();
   }
 

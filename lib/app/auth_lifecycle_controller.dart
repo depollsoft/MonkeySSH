@@ -17,7 +17,8 @@ final authLifecycleControllerProvider = Provider<AuthLifecycleController>(
 /// Coordinates app lifecycle transitions with app locking behavior.
 class AuthLifecycleController {
   /// Creates a new [AuthLifecycleController].
-  AuthLifecycleController(this._ref, {required this._now});
+  AuthLifecycleController(this._ref, {required DateTime Function() now})
+    : _now = now;
 
   final Ref _ref;
   final DateTime Function() _now;

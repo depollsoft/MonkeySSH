@@ -236,12 +236,15 @@ MonkeyMuxImageReplayResult resolveMonkeyMuxImageReplayBatchForTesting({
 class MonkeyMuxService implements RemoteMultiplexerService {
   /// Creates a MonkeyMux service.
   const MonkeyMuxService({
-    required this._installer,
-    this._agentSessionMetadataPeriodicRefreshInterval = const Duration(
+    required MonkeyMuxInstallerService installer,
+    Duration agentSessionMetadataPeriodicRefreshInterval = const Duration(
       seconds: 10,
     ),
-    @visibleForTesting this._controlResponseTimeout,
-  });
+    @visibleForTesting Duration? controlResponseTimeout,
+  }) : _installer = installer,
+       _agentSessionMetadataPeriodicRefreshInterval =
+           agentSessionMetadataPeriodicRefreshInterval,
+       _controlResponseTimeout = controlResponseTimeout;
 
   final MonkeyMuxInstallerService _installer;
   final Duration _agentSessionMetadataPeriodicRefreshInterval;

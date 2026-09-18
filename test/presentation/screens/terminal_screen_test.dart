@@ -525,8 +525,8 @@ class _ActiveTunnelsSshSession extends SshSession {
     required super.hostId,
     required super.client,
     required super.config,
-    required this._activeTunnels,
-  });
+    required List<ActiveTunnelInfo> activeTunnels,
+  }) : _activeTunnels = activeTunnels;
 
   final List<ActiveTunnelInfo> _activeTunnels;
 

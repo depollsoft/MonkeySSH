@@ -28,15 +28,19 @@ class MonetizationService {
   MonetizationService(
     this._settings, {
     InAppPurchase? inAppPurchase,
-    this._androidPlatformAddition,
+    InAppPurchaseAndroidPlatformAddition? androidPlatformAddition,
     bool? allowDebugUnlock,
-    this._purchaseTimeout = const Duration(seconds: 60),
-    this._restoreTimeout = const Duration(seconds: 45),
-    this._restoreEmptyResultGracePeriod = const Duration(seconds: 2),
+    Duration purchaseTimeout = const Duration(seconds: 60),
+    Duration restoreTimeout = const Duration(seconds: 45),
+    Duration restoreEmptyResultGracePeriod = const Duration(seconds: 2),
     Future<String> Function()? packageNameLoader,
     DiagnosticsLogger? diagnostics,
   }) : _inAppPurchase = inAppPurchase ?? InAppPurchase.instance,
+       _androidPlatformAddition = androidPlatformAddition,
        _allowDebugUnlock = allowDebugUnlock ?? kDebugMode,
+       _purchaseTimeout = purchaseTimeout,
+       _restoreTimeout = restoreTimeout,
+       _restoreEmptyResultGracePeriod = restoreEmptyResultGracePeriod,
        _packageNameLoader = packageNameLoader ?? _loadPackageName,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 

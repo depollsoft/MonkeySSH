@@ -1583,8 +1583,9 @@ class AgentSessionDiscoveryService {
   /// Creates a new [AgentSessionDiscoveryService].
   AgentSessionDiscoveryService({
     DateTime Function()? now,
-    this._terminalBackendService,
-  }) : _now = now ?? DateTime.now;
+    TerminalConnectionBackendService? terminalBackendService,
+  }) : _now = now ?? DateTime.now,
+       _terminalBackendService = terminalBackendService;
 
   final DateTime Function() _now;
   final TerminalConnectionBackendService? _terminalBackendService;

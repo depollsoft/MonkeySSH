@@ -7,8 +7,9 @@ import 'routes.dart';
 
 /// Navigator observer that records route-level feature usage without paths.
 class TelemetryRouteObserver extends NavigatorObserver {
-  /// Creates a route observer backed by [_telemetryService].
-  TelemetryRouteObserver({required this._telemetryService});
+  /// Creates a route observer backed by [telemetryService].
+  TelemetryRouteObserver({required TelemetryService telemetryService})
+    : _telemetryService = telemetryService;
 
   final TelemetryService _telemetryService;
 

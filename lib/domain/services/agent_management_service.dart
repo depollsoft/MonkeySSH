@@ -607,9 +607,10 @@ class AgentManagementService {
   /// Creates the service.
   AgentManagementService(
     this._discovery, {
-    required this._canManageAgents,
+    required Future<bool> Function() canManageAgents,
     DateTime Function()? now,
-  }) : _now = now ?? DateTime.now;
+  }) : _canManageAgents = canManageAgents,
+       _now = now ?? DateTime.now;
 
   final Future<bool> Function() _canManageAgents;
   final DateTime Function() _now;

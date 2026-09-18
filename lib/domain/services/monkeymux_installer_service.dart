@@ -199,10 +199,12 @@ class MonkeyMuxInstallDeclinedException extends MonkeyMuxInstallException {
 class MonkeyMuxInstallerService {
   /// Creates a MonkeyMux installer.
   const MonkeyMuxInstallerService({
-    required this._manifestFuture,
-    required this._remoteFileService,
-    this._assetBundle,
-  });
+    required Future<MonkeyMuxManifest> manifestFuture,
+    required RemoteFileService remoteFileService,
+    AssetBundle? assetBundle,
+  }) : _manifestFuture = manifestFuture,
+       _remoteFileService = remoteFileService,
+       _assetBundle = assetBundle;
 
   final Future<MonkeyMuxManifest> _manifestFuture;
   final RemoteFileService _remoteFileService;

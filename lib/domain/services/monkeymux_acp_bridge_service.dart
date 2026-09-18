@@ -220,10 +220,12 @@ List<String> _validatedExecutableProbeNames(Iterable<String> executables) {
 final class MonkeyMuxAcpBridgeService {
   /// Creates a bridge service.
   MonkeyMuxAcpBridgeService({
-    required this._installer,
-    this._monkeyMuxService,
+    required MonkeyMuxInstallerService installer,
+    MonkeyMuxService? monkeyMuxService,
     DiagnosticsLogger? diagnostics,
-  }) : _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+  }) : _installer = installer,
+       _monkeyMuxService = monkeyMuxService,
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final MonkeyMuxInstallerService _installer;
   final MonkeyMuxService? _monkeyMuxService;
@@ -522,15 +524,21 @@ final class MonkeyMuxAcpBridgeService {
 /// Reconnecting MonkeyMux bridge transport with byte and decoded ACP input.
 final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   MonkeyMuxAcpTransport._({
-    required this._installer,
-    required this._sessionProvider,
-    required this._bridgeId,
-    required this._providerHash,
-    required this._diagnostics,
+    required MonkeyMuxInstallerService installer,
+    required Future<SshSession> Function() sessionProvider,
+    required String bridgeId,
+    required String providerHash,
+    required DiagnosticsLogger diagnostics,
     required List<Duration> reconnectBackoff,
-    required this._handshakeTimeout,
+    required Duration handshakeTimeout,
     required int lastAcknowledgedSequence,
-  }) : _reconnectBackoff = List.unmodifiable(reconnectBackoff),
+  }) : _installer = installer,
+       _sessionProvider = sessionProvider,
+       _bridgeId = bridgeId,
+       _providerHash = providerHash,
+       _diagnostics = diagnostics,
+       _reconnectBackoff = List.unmodifiable(reconnectBackoff),
+       _handshakeTimeout = handshakeTimeout,
        _lastDeliveredSequence = lastAcknowledgedSequence,
        _freshBaselineEstablished = lastAcknowledgedSequence > 0 {
     scheduleMicrotask(() {

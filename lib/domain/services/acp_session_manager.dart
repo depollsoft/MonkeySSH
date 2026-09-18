@@ -137,17 +137,24 @@ extension _FirstWhereOrNull on List<AcpSessionState> {
 class AcpSessionManager {
   /// Creates a session manager.
   AcpSessionManager({
-    required this._connector,
-    required this._providerService,
-    required this._recentSessions,
-    required this._isProUnlocked,
+    required AcpBridgeConnector connector,
+    required AcpProviderService providerService,
+    required AcpRecentSessionsService recentSessions,
+    required bool Function() isProUnlocked,
     AcpConcurrencyPolicy concurrencyPolicy = const AcpConcurrencyPolicy(),
     DiagnosticsLogger? diagnostics,
-    this._telemetry = const NoopAcpTelemetrySink(),
-    this._clock = DateTime.now,
-    this._detachedTurnPollInterval = const Duration(seconds: 3),
-  }) : _policy = concurrencyPolicy,
-       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+    AcpTelemetrySink telemetry = const NoopAcpTelemetrySink(),
+    DateTime Function() clock = DateTime.now,
+    Duration detachedTurnPollInterval = const Duration(seconds: 3),
+  }) : _connector = connector,
+       _providerService = providerService,
+       _recentSessions = recentSessions,
+       _isProUnlocked = isProUnlocked,
+       _policy = concurrencyPolicy,
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
+       _telemetry = telemetry,
+       _clock = clock,
+       _detachedTurnPollInterval = detachedTurnPollInterval;
 
   final AcpBridgeConnector _connector;
   final AcpProviderService _providerService;
@@ -1217,11 +1224,15 @@ class _BridgeAttachment {
   _BridgeAttachment({
     required this.bridgeKey,
     required this.providerId,
-    required this._session,
-    required this._capabilityServiceFactory,
-    this._initialization,
-    this._capabilityService,
-  });
+    required AcpBridgeSession session,
+    required Future<AcpClientCapabilityService> Function()
+    capabilityServiceFactory,
+    AcpInitializeResult? initialization,
+    AcpClientCapabilityService? capabilityService,
+  }) : _session = session,
+       _capabilityServiceFactory = capabilityServiceFactory,
+       _initialization = initialization,
+       _capabilityService = capabilityService;
 
   final AcpBridgeKey bridgeKey;
   final String providerId;
@@ -1354,17 +1365,25 @@ const _maxCoalescedReplayTextChars = 32 * 1024;
 /// Owns the normalized state and streaming lifecycle for one ACP session.
 class _SessionController {
   _SessionController({
-    required this._manager,
+    required AcpSessionManager manager,
     required this.attachment,
-    required this._providerLabel,
-    required this._isCustomProvider,
-    required this._cwd,
-    required this._clock,
-    required this._diagnostics,
-    required this._autoApprovePermissions,
-    required this._freshBridge,
-    required this._detachedTurnPollInterval,
-  });
+    required String providerLabel,
+    required bool isCustomProvider,
+    required String cwd,
+    required DateTime Function() clock,
+    required DiagnosticsLogger diagnostics,
+    required bool autoApprovePermissions,
+    required bool freshBridge,
+    required Duration detachedTurnPollInterval,
+  }) : _manager = manager,
+       _providerLabel = providerLabel,
+       _isCustomProvider = isCustomProvider,
+       _cwd = cwd,
+       _clock = clock,
+       _diagnostics = diagnostics,
+       _autoApprovePermissions = autoApprovePermissions,
+       _freshBridge = freshBridge,
+       _detachedTurnPollInterval = detachedTurnPollInterval;
 
   final AcpSessionManager _manager;
 

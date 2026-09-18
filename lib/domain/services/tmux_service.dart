@@ -62,17 +62,24 @@ typedef _ActiveAgentSessionMetadata = ({
 class TmuxService implements RemoteMultiplexerService {
   /// Creates a new [TmuxService].
   const TmuxService({
-    this._execOpenTimeout = const Duration(seconds: 10),
-    this._execOutputTimeout = const Duration(seconds: 10),
-    this._execChannelNow,
-    this._agentSessionMetadataRefreshDebounce = const Duration(
+    Duration execOpenTimeout = const Duration(seconds: 10),
+    Duration execOutputTimeout = const Duration(seconds: 10),
+    DateTime Function()? execChannelNow,
+    Duration agentSessionMetadataRefreshDebounce = const Duration(
       milliseconds: 150,
     ),
-    this._agentSessionMetadataPeriodicRefreshInterval = const Duration(
+    Duration agentSessionMetadataPeriodicRefreshInterval = const Duration(
       seconds: 10,
     ),
-    this._windowSwitchActivityGracePeriod = const Duration(seconds: 1),
-  });
+    Duration windowSwitchActivityGracePeriod = const Duration(seconds: 1),
+  }) : _execOpenTimeout = execOpenTimeout,
+       _execOutputTimeout = execOutputTimeout,
+       _execChannelNow = execChannelNow,
+       _agentSessionMetadataRefreshDebounce =
+           agentSessionMetadataRefreshDebounce,
+       _agentSessionMetadataPeriodicRefreshInterval =
+           agentSessionMetadataPeriodicRefreshInterval,
+       _windowSwitchActivityGracePeriod = windowSwitchActivityGracePeriod;
 
   final Duration _execOpenTimeout;
   final Duration _execOutputTimeout;

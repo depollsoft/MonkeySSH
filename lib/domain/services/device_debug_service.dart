@@ -143,10 +143,10 @@ class MethodChannelAndroidDeviceDebugPlatform
     implements AndroidDeviceDebugPlatform {
   /// Creates the Android platform bridge.
   MethodChannelAndroidDeviceDebugPlatform({
-    this._channel = const MethodChannel(
+    MethodChannel channel = const MethodChannel(
       'xyz.depollsoft.monkeyssh/device_debug',
     ),
-  }) {
+  }) : _channel = channel {
     _channel.setMethodCallHandler(_handlePlatformCall);
   }
 
@@ -952,9 +952,10 @@ abstract interface class DeviceDebugSessionRegistry {
 class DeviceDebugSessionService implements DeviceDebugSessionRegistry {
   /// Creates a device-debug session registry.
   DeviceDebugSessionService({
-    required this._platform,
-    required this._remoteRunner,
-  });
+    required AndroidDeviceDebugPlatform platform,
+    required RemoteAdbCommandRunner remoteRunner,
+  }) : _platform = platform,
+       _remoteRunner = remoteRunner;
 
   final AndroidDeviceDebugPlatform _platform;
   final RemoteAdbCommandRunner _remoteRunner;
@@ -992,12 +993,14 @@ class DeviceDebugSessionService implements DeviceDebugSessionRegistry {
 
 /// Owns Wireless ADB discovery, pairing, reverse forwarding, and cleanup.
 class DeviceDebugSessionController extends ChangeNotifier {
-  /// Creates a controller for one SSH [_session].
+  /// Creates a controller for one SSH [session].
   DeviceDebugSessionController({
-    required this._session,
-    required this._platform,
-    required this._remoteRunner,
-  });
+    required SshSession session,
+    required AndroidDeviceDebugPlatform platform,
+    required RemoteAdbCommandRunner remoteRunner,
+  }) : _session = session,
+       _platform = platform,
+       _remoteRunner = remoteRunner;
 
   static const _pairingTunnelId = -2147483001;
   static const _connectTunnelId = -2147483002;

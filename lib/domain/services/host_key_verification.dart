@@ -102,11 +102,14 @@ enum _TrustedHostUpdateMode { touch, upsert }
 /// A deferred persistence action to apply after authentication succeeds.
 class PendingHostTrustUpdate {
   PendingHostTrustUpdate._({
-    required this._presentedHostKey,
-    required this._mode,
-    this._resetFirstSeen = false,
-    this._persistBeforeAuthentication = false,
-  });
+    required VerifiedHostKey presentedHostKey,
+    required _TrustedHostUpdateMode mode,
+    bool resetFirstSeen = false,
+    bool persistBeforeAuthentication = false,
+  }) : _presentedHostKey = presentedHostKey,
+       _mode = mode,
+       _resetFirstSeen = resetFirstSeen,
+       _persistBeforeAuthentication = persistBeforeAuthentication;
 
   /// Creates an update that refreshes the stored host key metadata.
   factory PendingHostTrustUpdate.touch(VerifiedHostKey presentedHostKey) =>
@@ -196,9 +199,9 @@ class HostKeyVerificationException implements Exception {
 class HostKeyVerificationService {
   /// Creates a [HostKeyVerificationService].
   const HostKeyVerificationService({
-    required this._knownHostsRepository,
+    required KnownHostsRepository knownHostsRepository,
     this.promptHandler,
-  });
+  }) : _knownHostsRepository = knownHostsRepository;
 
   final KnownHostsRepository _knownHostsRepository;
 
@@ -325,8 +328,8 @@ bool sshHostTrustMatches({
 class _HostTrustMaterial {
   _HostTrustMaterial({
     required this.encodedHostKey,
-    required this._fingerprints,
-  });
+    required Set<String> fingerprints,
+  }) : _fingerprints = fingerprints;
 
   factory _HostTrustMaterial.fromRecord({
     required String fingerprint,
