@@ -8,6 +8,13 @@ import (
 	"testing"
 )
 
+// vtScrollbackText renders a stored scrollback line back to plain text.
+func vtScrollbackText(line []byte) string {
+	s := newTerminalScreen(400, 1)
+	s.Write(line)
+	return s.TextRows()[0]
+}
+
 func vtText(t *testing.T, s *terminalScreen) string {
 	t.Helper()
 	return strings.Join(s.TextRows(), "\n")
@@ -90,8 +97,8 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) {
 			t.Fatalf("round trip changed scrollback length: want %d got %d", len(s.scrollback), len(replica.scrollback))
 		}
 		for i := range s.scrollback {
-			if vtRowText(s.scrollback[i]) != vtRowText(replica.scrollback[i]) {
-				t.Fatalf("scrollback line %d differs: %q vs %q", i, vtRowText(s.scrollback[i]), vtRowText(replica.scrollback[i]))
+			if !bytes.Equal(s.scrollback[i], replica.scrollback[i]) {
+				t.Fatalf("scrollback line %d differs: %q vs %q", i, s.scrollback[i], replica.scrollback[i])
 			}
 		}
 	}
@@ -248,7 +255,7 @@ func TestVTScreenScrollbackAndClear(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		s.Write([]byte(fmt.Sprintf("row %d\r\n", i)))
 	}
-	if len(s.scrollback) != 3 || vtRowText(s.scrollback[0]) != "row 1" || vtRowText(s.scrollback[2]) != "row 3" {
+	if len(s.scrollback) != 3 || vtScrollbackText(s.scrollback[0]) != "row 1" || vtScrollbackText(s.scrollback[2]) != "row 3" {
 		t.Fatalf("scrollback: %d lines", len(s.scrollback))
 	}
 	if got := s.TextRows(); got[0] != "row 4" || got[1] != "row 5" || got[2] != "" {
@@ -280,8 +287,8 @@ func TestVTScreenScrollbackBounded(t *testing.T) {
 	if len(s.scrollback) != vtScrollbackLimit {
 		t.Fatalf("scrollback length %d", len(s.scrollback))
 	}
-	if vtRowText(s.scrollback[0]) != "49" {
-		t.Fatalf("oldest retained line %q", vtRowText(s.scrollback[0]))
+	if vtScrollbackText(s.scrollback[0]) != "49" {
+		t.Fatalf("oldest retained line %q", vtScrollbackText(s.scrollback[0]))
 	}
 }
 
@@ -405,7 +412,7 @@ func TestVTScreenResize(t *testing.T) {
 	if r, c := s.CursorPosition(); r != 1 || c != 2 {
 		t.Fatalf("cursor after shrink: (%d,%d)", r, c)
 	}
-	if len(s.scrollback) != 2 || vtRowText(s.scrollback[1]) != "two" {
+	if len(s.scrollback) != 2 || vtScrollbackText(s.scrollback[1]) != "two" {
 		t.Fatalf("rows leaving the top enter the scrollback: %d", len(s.scrollback))
 	}
 	s.Resize(8, 5)
@@ -696,9 +703,12 @@ func TestVTScreenASCIIFastPathMatchesSlowPath(t *testing.T) {
 
 func TestVTScreenScrollbackRowsAreTrimmed(t *testing.T) {
 	s := newTerminalScreen(200, 2)
-	s.Write([]byte("hi\r\n\r\n"))
-	if got := len(s.scrollback[0]); got != 2 {
-		t.Fatalf("scrollback row retained %d cells, want 2", got)
+	s.Write([]byte("hi\r\n\x1b[31mred\x1b[0m\r\n\r\n"))
+	if got := string(s.scrollback[0]); got != "hi" {
+		t.Fatalf("scrollback line retained %q, want the used prefix", got)
+	}
+	if got := string(s.scrollback[1]); got != "\x1b[0;31mred" {
+		t.Fatalf("scrollback line lost its rendition: %q", got)
 	}
 	vtRoundTrip(t, s)
 }

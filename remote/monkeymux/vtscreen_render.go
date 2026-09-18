@@ -26,10 +26,7 @@ func (s *terminalScreen) RenderFrame() []byte {
 	if !s.altActive && len(s.scrollback) > 0 {
 		out = append(out, "\x1b[H"...)
 		for _, line := range s.scrollback {
-			if len(line) > s.width {
-				line = line[:s.width]
-			}
-			out = renderVTCells(out, line, true)
+			out = append(out, line...)
 			out = append(out, "\x1b[0m\r\n"...)
 		}
 		for i := 1; i < s.height; i++ {

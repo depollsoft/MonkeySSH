@@ -23,7 +23,11 @@ type terminalScreen struct {
 	alt       vtGrid
 	altActive bool
 
-	scrollback [][]vtCell
+	// scrollback holds main-screen lines that scrolled off the top, already
+	// rendered to escape sequences (attributes included, rendition left at
+	// default). Bytes are far cheaper than cell rows and are exactly what
+	// RenderFrame needs to emit.
+	scrollback [][]byte
 
 	attrs      vtAttrs
 	top        int // scroll region, 0-based inclusive
@@ -206,10 +210,8 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c := *s
 	c.main = s.main.clone()
 	c.alt = s.alt.clone()
-	c.scrollback = make([][]vtCell, len(s.scrollback))
-	for i, row := range s.scrollback {
-		c.scrollback[i] = cloneVTRow(row)
-	}
+	// Rendered lines are never mutated, so the clone may share them.
+	c.scrollback = append([][]byte(nil), s.scrollback...)
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
 	return &c
@@ -327,14 +329,8 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 }
 
 func (s *terminalScreen) pushScrollback(row []vtCell) {
-	// Retain only the used prefix of the line: a full-width row per
-	// scrollback line would cost tens of kilobytes for a short prompt.
-	end := len(row)
-	for end > 0 && row[end-1].isDefaultBlank() {
-		end--
-	}
-	row = append([]vtCell(nil), row[:end]...)
-	s.scrollback = append(s.scrollback, row)
+	line := renderVTCells(make([]byte, 0, 64), row, true)
+	s.scrollback = append(s.scrollback, line)
 	if len(s.scrollback) > vtScrollbackLimit {
 		excess := len(s.scrollback) - vtScrollbackLimit
 		copy(s.scrollback, s.scrollback[excess:])
@@ -420,12 +416,17 @@ type vtParser struct {
 	utf8          [4]byte
 	utf8Len       int
 	utf8Need      int
+	// Scratch space reused by csiParams so dispatch allocates nothing.
+	values []int
+	starts []int
+	groups [][]int
 }
 
 func (p vtParser) clone() vtParser {
 	c := p
 	c.params = append([]byte(nil), p.params...)
 	c.intermediates = append([]byte(nil), p.intermediates...)
+	c.values, c.starts, c.groups = nil, nil, nil
 	return c
 }
 
@@ -692,42 +693,35 @@ func (s *terminalScreen) stepCSI(b byte) {
 	}
 }
 
-// csiParams splits the raw parameter bytes into groups of sub-parameters.
-// "1;2:3;;4" -> [[1] [2 3] [0] [4]] with a parallel record of which entries
-// were explicitly given (needed for SGR 38/48 semantics and defaults).
+// csiParams splits the raw parameter bytes into groups of sub-parameters:
+// "1;2:3;;4" -> [[1] [2 3] [0] [4]]. Missing values read as 0. The returned
+// slices alias parser scratch space and are only valid until the next call.
 func (p *vtParser) csiParams() [][]int {
-	groups := make([][]int, 0, 8)
-	current := []int{0}
-	explicit := false
+	p.values = append(p.values[:0], 0)
+	p.starts = append(p.starts[:0], 0)
 	value := 0
-	flush := func() {
-		if explicit {
-			current[len(current)-1] = value
-		}
-	}
 	for _, b := range p.params {
 		switch {
 		case b >= '0' && b <= '9':
 			if value < 100000 {
 				value = value*10 + int(b-'0')
 			}
-			explicit = true
+			p.values[len(p.values)-1] = value
 		case b == ':':
-			flush()
-			current = append(current, 0)
+			p.values = append(p.values, 0)
 			value = 0
-			explicit = false
 		case b == ';':
-			flush()
-			groups = append(groups, current)
-			current = []int{0}
+			p.starts = append(p.starts, len(p.values))
+			p.values = append(p.values, 0)
 			value = 0
-			explicit = false
 		}
 	}
-	flush()
-	groups = append(groups, current)
-	return groups
+	p.starts = append(p.starts, len(p.values))
+	p.groups = p.groups[:0]
+	for i := 0; i+1 < len(p.starts); i++ {
+		p.groups = append(p.groups, p.values[p.starts[i]:p.starts[i+1]])
+	}
+	return p.groups
 }
 
 func (p *vtParser) param(groups [][]int, index int, fallback int) int {
@@ -890,9 +884,13 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 			s.pushScrollback(g.rows[top+i])
 		}
 	}
+	// Recycle the rows leaving the region as the fresh rows entering it, so
+	// scrolling output allocates nothing per line.
+	recycled := make([][]vtCell, n)
+	copy(recycled, g.rows[top:top+n])
 	copy(g.rows[top:bottom+1], g.rows[top+n:bottom+1])
-	for i := bottom - n + 1; i <= bottom; i++ {
-		g.rows[i] = s.blankRow()
+	for i := 0; i < n; i++ {
+		g.rows[bottom-n+1+i] = s.clearRow(recycled[i])
 	}
 }
 
@@ -909,9 +907,11 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 	if n > size {
 		n = size
 	}
+	recycled := make([][]vtCell, n)
+	copy(recycled, g.rows[bottom+1-n:bottom+1])
 	copy(g.rows[top+n:bottom+1], g.rows[top:bottom+1-n])
-	for i := top; i < top+n; i++ {
-		g.rows[i] = s.blankRow()
+	for i := 0; i < n; i++ {
+		g.rows[top+i] = s.clearRow(recycled[i])
 	}
 }
 
@@ -1281,16 +1281,16 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 	case 0:
 		s.eraseLine(0)
 		for r := g.cursorRow + 1; r < s.height; r++ {
-			g.rows[r] = s.blankRow()
+			s.clearRow(g.rows[r])
 		}
 	case 1:
 		s.eraseLine(1)
 		for r := 0; r < g.cursorRow; r++ {
-			g.rows[r] = s.blankRow()
+			s.clearRow(g.rows[r])
 		}
 	case 2:
 		for r := range g.rows {
-			g.rows[r] = s.blankRow()
+			s.clearRow(g.rows[r])
 		}
 	case 3:
 		s.scrollback = nil
@@ -1300,11 +1300,14 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 
 // blankRow erases with the current background (bce), as xterm does.
 func (s *terminalScreen) blankRow() []vtCell {
-	row := newVTRow(s.width)
-	if s.attrs.bg.kind != vtColorDefault {
-		for i := range row {
-			row[i].attrs.bg = s.attrs.bg
-		}
+	return s.clearRow(newVTRow(s.width))
+}
+
+// clearRow blanks a row in place with the current background.
+func (s *terminalScreen) clearRow(row []vtCell) []vtCell {
+	blank := s.blankCell()
+	for i := range row {
+		row[i] = blank
 	}
 	return row
 }
@@ -1409,9 +1412,11 @@ func (s *terminalScreen) deleteLines(n int) {
 	if n > s.bottom-g.cursorRow+1 {
 		n = s.bottom - g.cursorRow + 1
 	}
+	recycled := make([][]vtCell, n)
+	copy(recycled, g.rows[g.cursorRow:g.cursorRow+n])
 	copy(g.rows[g.cursorRow:s.bottom+1], g.rows[g.cursorRow+n:s.bottom+1])
-	for i := s.bottom - n + 1; i <= s.bottom; i++ {
-		g.rows[i] = s.blankRow()
+	for i := 0; i < n; i++ {
+		g.rows[s.bottom-n+1+i] = s.clearRow(recycled[i])
 	}
 	g.cursorCol = 0
 	g.pendingWrap = false
