@@ -1,9 +1,10 @@
 What's new
 
-- Pro: Pi usage rings follow the selected model provider in terminal panes and native chat, and preserve valid readings during refresh limits.
-- Agent notifications open the correct chat in its terminal workspace.
-- Prevented agent TUIs from accelerating touch scroll gestures.
-- Restored selected window icons and native badges in the tablet MonkeyMux sidebar.
-- Fixed extra space below native chat after dismissing the keyboard.
+- Added Muse Code support.
+- Fixed incomplete terminal redraws and stray text when switching windows.
+- Fixed Enter after swipe typing and punctuation.
+- Fixed terminal and form crashes.
+- Improved touch scrolling, tablet icons, chat notifications, and keyboard spacing.
+- Pro: Pi usage rings follow the selected model provider.
 
-Update MonkeyMux and restart existing Pi terminal panes to enable the new rings.
+Update MonkeyMux for terminal fixes. Restart Pi terminal panes for provider usage rings.
