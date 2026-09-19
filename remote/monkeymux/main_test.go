@@ -76,11 +76,36 @@ func synchronizedTerminalOutputForTest(data string) string {
 	return terminalSynchronizedOutputBegin + data + terminalSynchronizedOutputEnd
 }
 
+func TestWrapSynchronizedTerminalOutputKeepsReplayClearInsideTransaction(t *testing.T) {
+	replay := []byte(activeWindowReplayPrefix + "\x1b[?2004h")
+	redraw := []byte("\x1b[1;1Hframe")
+
+	got := string(wrapSynchronizedTerminalOutput(replay, redraw))
+
+	// The replay clears the client. SSH can split the resume write anywhere,
+	// so the clear must sit inside the 9002 transaction with the redraw or a
+	// client that parses the first chunk alone paints a blank screen until the
+	// rest of the redraw arrives.
+	want := terminalSynchronizedOutputBegin + string(replay) + string(redraw) + terminalSynchronizedOutputEnd
+	if got != want {
+		t.Fatalf("resume write = %q, want %q", got, want)
+	}
+	if string(wrapSynchronizedTerminalOutput(replay, nil)) != string(replay) {
+		t.Fatalf("a replay with no redraw must be returned unwrapped")
+	}
+	if wrapSynchronizedTerminalOutput(nil, nil) != nil {
+		t.Fatalf("an empty resume must write nothing")
+	}
+}
+
+// synchronizedTerminalOutputAfterPrefixForTest is the resume write for a
+// reattach replay (prefix) followed by a buffered redraw: both sit inside one
+// 9002 transaction so the replay's clear never paints on its own.
 func synchronizedTerminalOutputAfterPrefixForTest(
 	prefix string,
 	data string,
 ) string {
-	return prefix + synchronizedTerminalOutputForTest(data)
+	return synchronizedTerminalOutputForTest(prefix + data)
 }
 
 func openTestPty(t *testing.T) muxPty {
@@ -5105,12 +5130,11 @@ func TestPartialSequenceRedrawKeepsNormalForwarding(t *testing.T) {
 	if strings.Contains(got, "last known tui screen") {
 		t.Fatalf("fallback replaced a redraw that ended mid sequence: %q", got)
 	}
-	// The complete prefix still forwards normally; the unterminated OSC tail is
-	// carried until the rest of it arrives.
-	if !strings.HasSuffix(
-		got,
-		terminalSynchronizedOutputBegin+"\x1b[H"+terminalSynchronizedOutputEnd,
-	) {
+	// The complete prefix still forwards normally inside the replay's 9002
+	// transaction; the unterminated OSC tail is carried until the rest of it
+	// arrives.
+	if !strings.HasPrefix(got, terminalSynchronizedOutputBegin) ||
+		!strings.HasSuffix(got, "\x1b[H"+terminalSynchronizedOutputEnd) {
 		t.Fatalf("buffered redraw prefix was not forwarded normally: %q", got)
 	}
 }
