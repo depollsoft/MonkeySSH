@@ -532,7 +532,13 @@ String? buildAgentInstallCommand(
         plainTextOutput: true,
       );
     }
-    return '$_profilePrefix${_shellQuote(executablePath)} '
+    // Cursor checks the macOS keychain before dispatching even `update`.
+    // Updating needs no credentials. Use its in-memory store for this process
+    // only, avoiding keychain access without moving saved credentials to disk.
+    final environment = definition.tool == AgentLaunchTool.cursorAgent
+        ? 'env AGENT_CLI_CREDENTIAL_STORE=memory NO_COLOR=1 '
+        : '';
+    return '$_profilePrefix$environment${_shellQuote(executablePath)} '
         '${definition.selfUpdateArguments.map(_shellQuote).join(' ')}';
   }
   if (update && detectionSource == 'PATH') return null;
@@ -1390,6 +1396,15 @@ class AgentManagementService {
     late AgentRuntimeActionResult result;
     try {
       result = await _run(session, command, onOutput: onOutput, timeout: null);
+      // The result dialog is plain text. Strip terminal colors and cursor
+      // controls after assembling chunks, since escapes can cross SSH packets.
+      result = AgentRuntimeActionResult(
+        succeeded: result.succeeded,
+        exitCode: result.exitCode,
+        output: result.output
+            .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
+            .trim(),
+      );
       if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
         final verified = await inspect(session, definition);
         final healthy =

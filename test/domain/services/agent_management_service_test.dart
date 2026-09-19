@@ -1862,8 +1862,81 @@ esac
         );
         final script = decodeEncodedPowerShell(windows!);
         expect(script, contains("& '${entry.$2}' $quotedArguments"));
+        expect(script, isNot(contains('AGENT_CLI_CREDENTIAL_STORE')));
+        if (definition.tool != AgentLaunchTool.cursorAgent) {
+          expect(posix, isNot(contains('AGENT_CLI_CREDENTIAL_STORE')));
+        }
       }
     });
+
+    test(
+      'Cursor updater needs no keychain and preserves its exit code',
+      () async {
+        final root = await Directory.systemTemp.createTemp('cursor-update-');
+        addTearDown(() => root.delete(recursive: true));
+        final launcher = File("${root.path}/custom install/it's cursor-agent");
+        launcher.parent.createSync();
+        launcher.writeAsStringSync(
+          r'''
+#!/bin/sh
+if [ "$AGENT_CLI_CREDENTIAL_STORE" != memory ]; then
+  printf '\033[33mError: Your macOS login keychain is locked.\033[0m\n' >&2
+  exit 1
+fi
+[ "$#" = 1 ] && [ "$1" = update ] || exit 2
+[ "$NO_COLOR" = 1 ] || exit 3
+echo 'Updater reached without keychain access'
+exit "${CURSOR_TEST_EXIT:-0}"
+'''
+              .trimLeft(),
+        );
+        await Process.run('chmod', ['+x', launcher.path]);
+        final definition = agentCliRuntimeDefinitions.firstWhere(
+          (d) => d.id == 'cli:cursor',
+        );
+        final command = buildAgentInstallCommand(
+          definition,
+          windows: false,
+          update: true,
+          detectionSource: 'PATH',
+          executablePath: launcher.path,
+        )!;
+        final script =
+            '$command\n'
+            r'''
+result=$?
+[ "$AGENT_CLI_CREDENTIAL_STORE" = default ] || exit 4
+[ "$NO_COLOR" = original ] || exit 5
+exit "$result"
+''';
+        for (final shell in [
+          'bash',
+          if (File('/bin/zsh').existsSync()) '/bin/zsh',
+        ]) {
+          for (final exitCode in [0, 23]) {
+            final result = await Process.run(
+              shell,
+              ['-c', script],
+              environment: {
+                'HOME': root.path,
+                'PATH': '/usr/bin:/bin',
+                'SHELL': shell,
+                'AGENT_CLI_CREDENTIAL_STORE': 'default',
+                'NO_COLOR': 'original',
+                'CURSOR_TEST_EXIT': '$exitCode',
+              },
+              includeParentEnvironment: false,
+            );
+            expect(result.exitCode, exitCode, reason: '${result.stderr}');
+            expect(
+              result.stdout,
+              contains('Updater reached without keychain access'),
+            );
+          }
+        }
+      },
+      skip: Platform.isWindows,
+    );
 
     test('keeps Homebrew updates with the detected package manager', () {
       final definition = agentCliRuntimeDefinitions.firstWhere(
@@ -1931,6 +2004,46 @@ esac
   });
 
   group('AgentManagementService', () {
+    test(
+      'failed update results strip terminal controls across chunks',
+      () async {
+        final client = _MockSshClient();
+        final discovery = _MockDiscovery();
+        final session = _remoteSession(client);
+        when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+        final exec = _execOutput('', exitCode: 23);
+        when(() => exec.stderr).thenAnswer(
+          (_) => Stream.fromIterable([
+            Uint8List.fromList(utf8.encode('\x1b[3')),
+            Uint8List.fromList(
+              utf8.encode('3mUpdate failed.\x1b[0m\n\x1b[2KTry again.\n'),
+            ),
+          ]),
+        );
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => exec);
+        when(() => discovery.invalidateSession(session)).thenReturn(null);
+        final definition = agentCliRuntimeDefinitions.firstWhere(
+          (d) => d.id == 'cli:cursor',
+        );
+        final result = await _unlockedManagementService(discovery)
+            .installOrUpdate(
+              session,
+              definition,
+              update: true,
+              current: AgentRuntimeInfo(
+                definition: definition,
+                status: AgentRuntimeStatus.updateAvailable,
+                executablePath: '/opt/tools/cursor-agent',
+              ),
+            );
+        expect(result.succeeded, isFalse);
+        expect(result.exitCode, 23);
+        expect(result.output, 'Update failed.\nTry again.');
+        verify(() => discovery.invalidateSession(session)).called(1);
+      },
+    );
+
     test('detects npm ownership and an available update', () async {
       final client = _MockSshClient();
       final discovery = _MockDiscovery();
