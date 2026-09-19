@@ -4623,6 +4623,168 @@ LISTEN ::1:4201
       },
     );
 
+    test(
+      'terminal notification stamps the published mux window focus',
+      () async {
+        final notifier = container.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        final connectionId = result.connectionId!;
+        final session = notifier.getSession(connectionId)!;
+        notificationService.releaseShow.complete();
+        notifier.updateSessionMuxWindowFocus(
+          connectionId,
+          sessionName: 'work',
+          windowIndex: 3,
+          windowId: '@9',
+        );
+
+        session.debugHandlePrivateOsc('99', const ['w=60000', 'Windowed']);
+        for (
+          var attempt = 0;
+          attempt < 20 && notificationService.lastPayload == null;
+          attempt += 1
+        ) {
+          await pumpEventQueue();
+        }
+        final payload = notificationService.lastPayload!;
+        expect(payload.tmuxSessionName, 'work');
+        expect(payload.tmuxWindowIndex, 3);
+        expect(payload.tmuxWindowId, '@9');
+      },
+    );
+
+    test(
+      'queued terminal notification keeps its enqueue-time mux window',
+      () async {
+        final notifier = container.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        final connectionId = result.connectionId!;
+        final session = notifier.getSession(connectionId)!;
+        notifier.updateSessionMuxWindowFocus(
+          connectionId,
+          sessionName: 'work',
+          windowIndex: 3,
+          windowId: '@9',
+        );
+
+        // The first notification occupies the presenter while the second
+        // waits in the queue.
+        session.debugHandlePrivateOsc('99', const ['i=first:w=60000', 'First']);
+        for (
+          var attempt = 0;
+          attempt < 20 && !notificationService.showStarted.isCompleted;
+          attempt += 1
+        ) {
+          await pumpEventQueue();
+        }
+        session.debugHandlePrivateOsc('99', const [
+          'i=second:w=60000',
+          'Second',
+        ]);
+        await pumpEventQueue();
+
+        // Switching windows while the second request waits must not rewrite
+        // the window it was emitted from.
+        notifier.updateSessionMuxWindowFocus(
+          connectionId,
+          sessionName: 'work',
+          windowIndex: 5,
+          windowId: '@4',
+        );
+        notificationService.releaseShow.complete();
+        for (
+          var attempt = 0;
+          attempt < 20 &&
+              notificationService.lastPayload?.notificationIdentifier !=
+                  'second';
+          attempt += 1
+        ) {
+          await pumpEventQueue();
+        }
+        final payload = notificationService.lastPayload!;
+        expect(payload.notificationIdentifier, 'second');
+        expect(payload.tmuxSessionName, 'work');
+        expect(payload.tmuxWindowIndex, 3);
+        expect(payload.tmuxWindowId, '@9');
+      },
+    );
+
+    test(
+      'terminal notification omits the mux window without published focus',
+      () async {
+        final notifier = container.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        final session = notifier.getSession(result.connectionId!)!;
+        notificationService.releaseShow.complete();
+
+        session.debugHandlePrivateOsc('99', const ['w=60000', 'Unfocused']);
+        for (
+          var attempt = 0;
+          attempt < 20 && notificationService.lastPayload == null;
+          attempt += 1
+        ) {
+          await pumpEventQueue();
+        }
+        final payload = notificationService.lastPayload!;
+        expect(payload.tmuxSessionName, isNull);
+        expect(payload.tmuxWindowIndex, isNull);
+        expect(payload.tmuxWindowId, isNull);
+      },
+    );
+
+    test('updateSessionMuxWindowFocus sanitizes routing identifiers', () async {
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final connectionId = result.connectionId!;
+      final session = notifier.getSession(connectionId)!;
+
+      notifier.updateSessionMuxWindowFocus(
+        connectionId,
+        sessionName: 'work',
+        windowIndex: 3,
+        windowId: 'not-a-window-id',
+      );
+      expect(session.activeMuxWindowSessionName, 'work');
+      expect(session.activeMuxWindowIndex, 3);
+      expect(session.activeMuxWindowId, isNull);
+
+      notifier.updateSessionMuxWindowFocus(
+        connectionId,
+        sessionName: '   ',
+        windowIndex: 3,
+        windowId: '@9',
+      );
+      expect(session.activeMuxWindowSessionName, isNull);
+      expect(session.activeMuxWindowIndex, isNull);
+      expect(session.activeMuxWindowId, isNull);
+
+      notifier.updateSessionMuxWindowFocus(
+        connectionId,
+        sessionName: 'work',
+        windowIndex: -1,
+        windowId: '@9',
+      );
+      expect(session.activeMuxWindowSessionName, isNull);
+      expect(session.activeMuxWindowIndex, isNull);
+      expect(session.activeMuxWindowId, isNull);
+
+      notifier.updateSessionMuxWindowFocus(
+        connectionId,
+        sessionName: null,
+        windowIndex: null,
+        windowId: null,
+      );
+      expect(session.activeMuxWindowSessionName, isNull);
+
+      // Unknown connections are a no-op rather than a crash.
+      notifier.updateSessionMuxWindowFocus(
+        9999,
+        sessionName: 'work',
+        windowIndex: 3,
+        windowId: '@9',
+      );
+    });
+
     test('cancelConnectionAttempt aborts an in-flight connect', () async {
       final cancellableService = _CancellableConnectSshService();
       final hostRepository = _MockHostRepository();

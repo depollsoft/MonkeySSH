@@ -228,10 +228,13 @@ class TerminalNotificationPayload {
     this.notificationIdentifier,
     this.reportsActivation = false,
     this.focusOnActivation = true,
+    this.tmuxSessionName,
+    this.tmuxWindowIndex,
+    this.tmuxWindowId,
   });
 
   static const _type = 'terminal-notification';
-  static const _version = 3;
+  static const _version = 4;
 
   /// Host that owns the connection that emitted the notification.
   final int hostId;
@@ -251,6 +254,19 @@ class TerminalNotificationPayload {
   /// Whether tapping should navigate to the originating terminal.
   final bool focusOnActivation;
 
+  /// Multiplexer session that owned the foreground window when the
+  /// notification was emitted, when known.
+  ///
+  /// Opaque routing identifier only, matching the tmux alert payload: never
+  /// a window name, title, command, or path.
+  final String? tmuxSessionName;
+
+  /// Index of the foreground window inside [tmuxSessionName], when known.
+  final int? tmuxWindowIndex;
+
+  /// Stable ID (for example `@7`) of the foreground window, when reported.
+  final String? tmuxWindowId;
+
   /// Encodes this payload for the notification plugin.
   String encode() => jsonEncode(<String, Object>{
     'type': _type,
@@ -261,6 +277,9 @@ class TerminalNotificationPayload {
     'notificationIdentifier': ?notificationIdentifier,
     'reportsActivation': reportsActivation,
     'focusOnActivation': focusOnActivation,
+    'tmuxSessionName': ?tmuxSessionName,
+    'tmuxWindowIndex': ?tmuxWindowIndex,
+    'tmuxWindowId': ?tmuxWindowId,
   });
 
   /// Decodes current payloads and navigation-only version 1 payloads.
@@ -272,13 +291,18 @@ class TerminalNotificationPayload {
         return null;
       }
       final version = decoded['version'];
-      if (version != 1 && version != 2 && version != _version) return null;
+      if (version != 1 && version != 2 && version != 3 && version != _version) {
+        return null;
+      }
       final hostId = decoded['hostId'];
       final connectionId = decoded['connectionId'];
       final platformNotificationId = decoded['platformNotificationId'];
       final identifier = decoded['notificationIdentifier'];
       final reportsActivation = decoded['reportsActivation'];
       final focusOnActivation = decoded['focusOnActivation'];
+      final tmuxSessionName = decoded['tmuxSessionName'];
+      final tmuxWindowIndex = decoded['tmuxWindowIndex'];
+      final tmuxWindowId = decoded['tmuxWindowId'];
       if (hostId is! int ||
           connectionId is! int ||
           (platformNotificationId != null && platformNotificationId is! int) ||
@@ -287,6 +311,13 @@ class TerminalNotificationPayload {
           (focusOnActivation != null && focusOnActivation is! bool)) {
         return null;
       }
+      // The window fields are optional routing context, so wrong-typed or
+      // malformed values sanitize to absent (session-level navigation)
+      // instead of dropping the notification tap the way a required-field
+      // mismatch would.
+      final sessionName = tmuxSessionName is String ? tmuxSessionName : null;
+      final windowIndex = tmuxWindowIndex is int ? tmuxWindowIndex : null;
+      final windowId = tmuxWindowId is String ? tmuxWindowId : null;
       return TerminalNotificationPayload(
         hostId: hostId,
         connectionId: connectionId,
@@ -294,6 +325,15 @@ class TerminalNotificationPayload {
         notificationIdentifier: identifier as String?,
         reportsActivation: reportsActivation as bool? ?? false,
         focusOnActivation: focusOnActivation as bool? ?? true,
+        tmuxSessionName: sessionName != null && sessionName.trim().isNotEmpty
+            ? sessionName
+            : null,
+        tmuxWindowIndex: windowIndex != null && windowIndex >= 0
+            ? windowIndex
+            : null,
+        tmuxWindowId: windowId != null && isValidTmuxWindowId(windowId)
+            ? windowId
+            : null,
       );
     } on FormatException {
       return null;
@@ -309,7 +349,10 @@ class TerminalNotificationPayload {
           platformNotificationId == other.platformNotificationId &&
           notificationIdentifier == other.notificationIdentifier &&
           reportsActivation == other.reportsActivation &&
-          focusOnActivation == other.focusOnActivation;
+          focusOnActivation == other.focusOnActivation &&
+          tmuxSessionName == other.tmuxSessionName &&
+          tmuxWindowIndex == other.tmuxWindowIndex &&
+          tmuxWindowId == other.tmuxWindowId;
 
   @override
   int get hashCode => Object.hash(
@@ -319,6 +362,9 @@ class TerminalNotificationPayload {
     notificationIdentifier,
     reportsActivation,
     focusOnActivation,
+    tmuxSessionName,
+    tmuxWindowIndex,
+    tmuxWindowId,
   );
 }
 
@@ -330,13 +376,32 @@ int buildTerminalNotificationId(int connectionId, {String? identifier}) =>
     Object.hash('terminal-notification', connectionId, identifier) & 0x3fffffff;
 
 /// Builds the terminal route location for a terminal notification tap.
-String buildTerminalNotificationLocation(TerminalNotificationPayload payload) =>
-    Uri(
-      path: '/terminal/${payload.hostId}',
-      queryParameters: <String, String>{
-        'connectionId': '${payload.connectionId}',
-      },
-    ).toString();
+///
+/// Carries the emitting multiplexer window when the payload captured one so
+/// the tap focuses that window instead of whichever window is active later.
+/// Without window context the tap falls back to session-level navigation.
+String buildTerminalNotificationLocation(TerminalNotificationPayload payload) {
+  final tmuxSessionName = payload.tmuxSessionName?.trim();
+  final tmuxWindowIndex = payload.tmuxWindowIndex;
+  final tmuxWindowId = payload.tmuxWindowId;
+  final hasWindowTarget =
+      tmuxSessionName != null &&
+      tmuxSessionName.isNotEmpty &&
+      tmuxWindowIndex != null &&
+      tmuxWindowIndex >= 0;
+  return Uri(
+    path: '/terminal/${payload.hostId}',
+    queryParameters: <String, String>{
+      'connectionId': '${payload.connectionId}',
+      if (hasWindowTarget) 'tmuxSession': tmuxSessionName,
+      if (hasWindowTarget) 'tmuxWindow': '$tmuxWindowIndex',
+      if (hasWindowTarget &&
+          tmuxWindowId != null &&
+          isValidTmuxWindowId(tmuxWindowId))
+        'tmuxWindowId': tmuxWindowId,
+    },
+  ).toString();
+}
 
 /// Coarse category of an ACP notification. Never carries prompt, tool, path,
 /// or content details.
@@ -666,18 +731,36 @@ class LocalNotificationService {
   }
 
   /// Shows or refreshes a tmux alert notification.
+  ///
+  /// Server-forwarded background notifications reuse this routing with
+  /// their own title, body, and Kitty presentation (urgency, sound,
+  /// timeout); plain bell/activity alerts omit those and keep alert
+  /// styling.
   Future<void> showTmuxAlert({
     required int notificationId,
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
-  }) => _showNotification(
-    notificationId: notificationId,
-    title: title,
-    body: body,
-    payload: payload.encode(),
-    details: _alertDetails(_tmuxAlertNotificationChannel),
-  );
+    TerminalNotificationUrgency? urgency,
+    TerminalNotificationSound? sound,
+    Duration? timeout,
+  }) {
+    final details = urgency == null && sound == null && timeout == null
+        ? _alertDetails(_tmuxAlertNotificationChannel)
+        : buildTerminalNotificationDetails(
+            urgency: urgency ?? TerminalNotificationUrgency.normal,
+            sound: sound ?? TerminalNotificationSound.silent,
+            timeout: timeout,
+          );
+    return _showNotification(
+      notificationId: notificationId,
+      title: title,
+      body: body,
+      payload: payload.encode(),
+      allowSound: sound == TerminalNotificationSound.system,
+      details: details,
+    );
+  }
 
   /// Clears a previously shown tmux alert notification.
   Future<void> clearTmuxAlert(int notificationId) =>

@@ -669,7 +669,10 @@ void main() {
             } else {
               service.completion.complete();
             }
-            await Future<void>.delayed(const Duration(milliseconds: 20));
+            // Real time: the cancelled download's continuation must run
+            // before the next frame is pumped. Keep headroom for loaded CI
+            // shards.
+            await Future<void>.delayed(const Duration(milliseconds: 200));
           });
           await tester.pump();
           expect(observer.pops, 1);

@@ -34,6 +34,7 @@ import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/presentation/screens/agent_management_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart'
     show storeDemoImagePasteCompleter;
@@ -121,6 +122,9 @@ class _NoOpLocalNotificationService extends LocalNotificationService {
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
+    TerminalNotificationUrgency? urgency,
+    TerminalNotificationSound? sound,
+    Duration? timeout,
   }) async {}
 
   @override

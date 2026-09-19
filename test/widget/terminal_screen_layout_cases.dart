@@ -5,7 +5,7 @@ import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
-import 'package:monkeyssh/presentation/screens/terminal/terminal_screen_policy.dart';
+import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 
 void registerTerminalScreenLayoutTests() {
@@ -1406,6 +1406,114 @@ void registerTerminalScreenLayoutTests() {
         );
 
         expect(resolveTmuxBarSafeInsets(strippedMediaQuery).bottom, 0);
+      });
+    });
+
+    group('forwarded background notifications', () {
+      const windowA = TmuxWindow(
+        index: 0,
+        id: '@1',
+        name: 'shell',
+        isActive: false,
+      );
+      const windowB = TmuxWindow(
+        index: 2,
+        id: '@3',
+        name: 'agent',
+        isActive: false,
+      );
+
+      String keyFor(TmuxWindow window) => window.id ?? 'index:${window.index}';
+
+      test('reports unseen sequences oldest first', () {
+        const windows = [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'shell',
+            isActive: false,
+            pendingNotifications: [
+              MuxWindowNotification(seq: 2, payload: '99;second'),
+              MuxWindowNotification(seq: 1, payload: '99;first'),
+            ],
+          ),
+        ];
+        final seen = <String, int>{};
+
+        final shows = collectUnseenMuxForwardedNotifications(
+          windows,
+          seen,
+          windowKeyFor: keyFor,
+        );
+
+        expect(shows.map((show) => show.notification.seq), [1, 2]);
+        expect(seen, {'@1': 2});
+      });
+
+      test('skips active windows but still advances their sequences', () {
+        const windows = [
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'agent',
+            isActive: true,
+            pendingNotifications: [
+              MuxWindowNotification(seq: 7, payload: '99;viewed'),
+            ],
+          ),
+          windowA,
+        ];
+        final seen = <String, int>{};
+
+        final shows = collectUnseenMuxForwardedNotifications(
+          windows,
+          seen,
+          windowKeyFor: keyFor,
+        );
+
+        expect(shows, isEmpty);
+        expect(seen, {'@3': 7});
+      });
+
+      test('only reports sequences newer than the recorded ones', () {
+        const windows = [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'shell',
+            isActive: false,
+            pendingNotifications: [
+              MuxWindowNotification(seq: 1, payload: '99;old'),
+              MuxWindowNotification(seq: 2, payload: '99;new'),
+            ],
+          ),
+          windowB,
+        ];
+        final seen = <String, int>{'@1': 1};
+
+        final shows = collectUnseenMuxForwardedNotifications(
+          windows,
+          seen,
+          windowKeyFor: keyFor,
+        );
+
+        expect(shows, hasLength(1));
+        expect(shows.single.notification.seq, 2);
+        expect(shows.single.window.id, '@1');
+        expect(seen, {'@1': 2});
+      });
+
+      test('leaves windows without pending notifications alone', () {
+        final seen = <String, int>{'@9': 3};
+
+        final shows = collectUnseenMuxForwardedNotifications(
+          const [windowA, windowB],
+          seen,
+          windowKeyFor: keyFor,
+        );
+
+        expect(shows, isEmpty);
+        expect(seen, {'@9': 3});
       });
     });
   });

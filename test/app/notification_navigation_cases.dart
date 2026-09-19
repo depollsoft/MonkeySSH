@@ -246,5 +246,64 @@ void registerNotificationNavigationTests() {
 
       expect(find.text('home:connections'), findsOneWidget);
     });
+
+    testWidgets('terminal notification with mux window opens that window', (
+      tester,
+    ) async {
+      final terminalLocations = <String>[];
+      final router = GoRouter(
+        initialLocation: '/settings',
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => Scaffold(
+              body: Text('home:${state.uri.queryParameters['tab'] ?? 'hosts'}'),
+            ),
+          ),
+          GoRoute(
+            path: '/settings',
+            builder: (context, state) => const Scaffold(body: Text('settings')),
+          ),
+          GoRoute(
+            path: '/terminal/:hostId',
+            builder: (context, state) {
+              terminalLocations.add(state.uri.toString());
+              return Scaffold(
+                body: Text('terminal:${state.pathParameters['hostId']}'),
+              );
+            },
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+
+      openTerminalNotificationStack(
+        router: router,
+        payload: const TerminalNotificationPayload(
+          hostId: 7,
+          connectionId: 21,
+          tmuxSessionName: 'work',
+          tmuxWindowIndex: 3,
+          tmuxWindowId: '@9',
+        ),
+        notificationTapId: 'tap-3',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('terminal:7'), findsOneWidget);
+      expect(router.canPop(), isTrue);
+      expect(
+        terminalLocations.single,
+        '/terminal/7?connectionId=21&tmuxSession=work&tmuxWindow=3&tmuxWindowId=%409&notificationTap=tap-3',
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+
+      expect(find.text('home:connections'), findsOneWidget);
+    });
   });
 }

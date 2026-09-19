@@ -44,6 +44,7 @@ import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
@@ -53,6 +54,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/terminal_theme_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
@@ -580,6 +582,44 @@ class _RecordingPortForwardBrowserPageState
   @override
   Widget build(BuildContext context) =>
       const Scaffold(body: Text('Forward browser opened'));
+}
+
+class _RecordingLocalNotificationService extends LocalNotificationService {
+  final shownNotificationIds = <int>[];
+  final clearedNotificationIds = <int>[];
+  final shownTmuxAlerts =
+      <
+        ({
+          int id,
+          String title,
+          String body,
+          TmuxAlertNotificationPayload payload,
+        })
+      >[];
+
+  @override
+  Future<void> showTmuxAlert({
+    required int notificationId,
+    required String title,
+    required String body,
+    required TmuxAlertNotificationPayload payload,
+    TerminalNotificationUrgency? urgency,
+    TerminalNotificationSound? sound,
+    Duration? timeout,
+  }) async {
+    shownNotificationIds.add(notificationId);
+    shownTmuxAlerts.add((
+      id: notificationId,
+      title: title,
+      body: body,
+      payload: payload,
+    ));
+  }
+
+  @override
+  Future<void> clearTmuxAlert(int notificationId) async {
+    clearedNotificationIds.add(notificationId);
+  }
 }
 
 class _TestShellCompletionService extends ShellCompletionService {
@@ -8145,6 +8185,222 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.macOS),
       );
     }
+
+    testWidgets(
+      'bar shows server-forwarded background notifications with their text',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final notifications = _RecordingLocalNotificationService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        addTearDown(windowEvents.close);
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        session
+          ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+          ..remoteMuxSessionName = 'work';
+        var windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'agent',
+            isActive: false,
+            pendingNotifications: [
+              MuxWindowNotification(
+                seq: 1,
+                payload: '777;notify;Deploy done;All green',
+              ),
+            ],
+          ),
+        ];
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => windows);
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => windowEvents.stream);
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            'work',
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => null);
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              localNotificationServiceProvider.overrideWithValue(notifications),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(notifications.shownTmuxAlerts, hasLength(1));
+        final shown = notifications.shownTmuxAlerts.single;
+        expect(shown.title, 'Deploy done');
+        expect(shown.body, 'All green');
+        expect(shown.payload.hostId, host.id);
+        expect(shown.payload.connectionId, session.connectionId);
+        expect(shown.payload.tmuxSessionName, 'work');
+        expect(shown.payload.windowIndex, 2);
+        expect(shown.payload.windowId, '@3');
+
+        // Re-reporting the same sequence never notifies twice.
+        windowEvents.add(TmuxWindowListEvent(windows));
+        await tester.pumpAndSettle();
+        expect(notifications.shownTmuxAlerts, hasLength(1));
+
+        // Viewing the window clears the shown notification.
+        windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: false),
+          TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: true),
+        ];
+        windowEvents.add(TmuxWindowListEvent(windows));
+        await tester.pumpAndSettle();
+        expect(notifications.shownTmuxAlerts, hasLength(1));
+        expect(notifications.clearedNotificationIds, [shown.id]);
+
+        // Newer multipart sequences assemble into one notification.
+        windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'agent',
+            isActive: false,
+            pendingNotifications: [
+              MuxWindowNotification(seq: 2, payload: '99;i=n9:d=0;Wave title'),
+              MuxWindowNotification(
+                seq: 3,
+                payload: '99;i=n9:p=body:d=1;Wave body',
+              ),
+            ],
+          ),
+        ];
+        windowEvents.add(TmuxWindowListEvent(windows));
+        await tester.pumpAndSettle();
+        expect(notifications.shownTmuxAlerts, hasLength(2));
+        expect(notifications.shownTmuxAlerts[1].title, 'Wave title');
+        expect(notifications.shownTmuxAlerts[1].body, 'Wave body');
+        expect(notifications.shownTmuxAlerts[1].payload.windowId, '@3');
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'terminal screen publishes its active mux window for notification routing',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        final activeSessions = _TestActiveSessionsNotifier(session);
+        addTearDown(windowEvents.close);
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        session
+          ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+          ..remoteMuxSessionName = 'work';
+        var windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: false),
+          TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: true),
+        ];
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => windows);
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => windowEvents.stream);
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            'work',
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => null);
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        when(() => tmuxService.clearCache(session.connectionId))
+            .thenAnswer((_) async {});
+        when(() => monkeyMuxService.clearCache(session.connectionId))
+            .thenAnswer((_) async {});
+        await tester.pumpWidget(
+          buildScreen(
+            activeSessions: activeSessions,
+            overrides: [
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+            ],
+            child: MaterialApp(
+              initialRoute: '/terminal',
+              routes: {
+                '/': (_) => const SizedBox.shrink(),
+                '/terminal': (_) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, 'work');
+        expect(session.activeMuxWindowIndex, 2);
+        expect(session.activeMuxWindowId, '@3');
+
+        // A list with no active window clears the snapshot so taps fall
+        // back to session-level navigation.
+        windowEvents.add(
+          const TmuxWindowListEvent(<TmuxWindow>[
+            TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: false),
+            TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: false),
+          ]),
+        );
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, isNull);
+        expect(session.activeMuxWindowIndex, isNull);
+        expect(session.activeMuxWindowId, isNull);
+
+        windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: false),
+        ];
+        windowEvents.add(TmuxWindowListEvent(windows));
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, 'work');
+        expect(session.activeMuxWindowIndex, 0);
+        expect(session.activeMuxWindowId, '@1');
+
+        // Ending the mux session also clears the published snapshot so a
+        // later notification cannot navigate back to the stale window.
+        windowEvents.add(const TmuxWindowListEvent(<TmuxWindow>[]));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(activeSessions.disconnectedConnectionIds, [
+          session.connectionId,
+        ]);
+        expect(session.activeMuxWindowSessionName, isNull);
+        expect(session.activeMuxWindowIndex, isNull);
+        expect(session.activeMuxWindowId, isNull);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
 
     testWidgets('Pi handle follows live model-provider changes', (
       tester,

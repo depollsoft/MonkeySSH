@@ -23,6 +23,7 @@ import '../models/remote_multiplexer.dart';
 import '../models/terminal_preview.dart';
 import '../models/terminal_progress.dart';
 import '../models/terminal_theme.dart';
+import '../models/tmux_state.dart' show isValidTmuxWindowId;
 import 'app_review_demo_service.dart';
 import 'background_ssh_service.dart';
 import 'clipboard_sharing_service.dart';
@@ -3826,6 +3827,23 @@ class SshSession {
 
   /// The terminal multiplexer session name currently attached in this session.
   String? remoteMuxSessionName;
+
+  /// Multiplexer session that owned the foreground window the last time the
+  /// terminal UI published its window list.
+  ///
+  /// Terminal (OSC) notifications arrive on the attached foreground stream,
+  /// so the active window at publish time is the window a newly shown
+  /// notification belongs to. Stamped onto notification payloads so a tap
+  /// can return to the emitting window. Opaque routing identifiers only —
+  /// never window names, titles, commands, or paths. Null when no window
+  /// list has been published (plain shell or undiscovered mux).
+  String? activeMuxWindowSessionName;
+
+  /// Index of the foreground window inside [activeMuxWindowSessionName].
+  int? activeMuxWindowIndex;
+
+  /// Stable ID (for example `@7`) of the foreground window, when reported.
+  String? activeMuxWindowId;
 
   /// Whether the attached MonkeyMux server publishes its shared PTY grid size.
   bool monkeyMuxViewportClippingEnabled = false;
@@ -8880,8 +8898,17 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       _TerminalNotificationQueue.new,
     );
     final shouldStart = !queue.isProcessing;
+    // Capture the emitting window now: the request can wait behind an
+    // in-flight notification, and showing awaits session-label resolution,
+    // so sampling later could record a window the user switched to after
+    // the OSC event arrived.
     queue
-      ..add(request)
+      ..add(
+        request,
+        tmuxSessionName: session.activeMuxWindowSessionName,
+        tmuxWindowIndex: session.activeMuxWindowIndex,
+        tmuxWindowId: session.activeMuxWindowId,
+      )
       ..isProcessing = true;
     if (!shouldStart) return;
     unawaited(_drainTerminalNotificationQueue(session, queue));
@@ -8895,9 +8922,15 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     while (ref.mounted &&
         identical(_terminalNotificationQueues[connectionId], queue) &&
         queue.pending.isNotEmpty) {
-      final request = queue.pending.removeAt(0);
+      final entry = queue.pending.removeAt(0);
       try {
-        await _showTerminalNotification(session, request);
+        await _showTerminalNotification(
+          session,
+          entry.request,
+          tmuxSessionName: entry.tmuxSessionName,
+          tmuxWindowIndex: entry.tmuxWindowIndex,
+          tmuxWindowId: entry.tmuxWindowId,
+        );
       } on Object catch (error, stackTrace) {
         FlutterError.reportError(
           FlutterErrorDetails(
@@ -8920,8 +8953,11 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   Future<void> _showTerminalNotification(
     SshSession session,
-    TerminalNotificationRequest request,
-  ) async {
+    TerminalNotificationRequest request, {
+    required String? tmuxSessionName,
+    required int? tmuxWindowIndex,
+    required String? tmuxWindowId,
+  }) async {
     if (!ref.mounted) return;
     if (request.action == TerminalNotificationAction.show &&
         !ref.read(terminalNotificationsNotifierProvider)) {
@@ -8968,6 +9004,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
           notificationIdentifier: request.identifier,
           reportsActivation: request.reportsActivation,
           focusOnActivation: request.focusOnActivation,
+          tmuxSessionName: tmuxSessionName,
+          tmuxWindowIndex: tmuxWindowIndex,
+          tmuxWindowId: tmuxWindowId,
         ),
       );
     } on Object {
@@ -9318,6 +9357,47 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     state = {...state};
   }
 
+  /// Records the foreground multiplexer window published by the terminal UI.
+  ///
+  /// Deliberately does not notify listeners: the snapshot is read
+  /// synchronously when a terminal notification is shown, and notifying on
+  /// every window-list refresh would rebuild terminal UI for no visible
+  /// change. Only sanitized routing identifiers are stored; anything else
+  /// clears the snapshot so taps fall back to session-level navigation.
+  void updateSessionMuxWindowFocus(
+    int connectionId, {
+    required String? sessionName,
+    required int? windowIndex,
+    required String? windowId,
+  }) {
+    final session = getSession(connectionId);
+    if (session == null) {
+      return;
+    }
+    final normalizedSessionName = sessionName?.trim();
+    final hasTarget =
+        normalizedSessionName != null &&
+        normalizedSessionName.isNotEmpty &&
+        windowIndex != null &&
+        windowIndex >= 0;
+    final normalizedWindowId =
+        windowId != null && isValidTmuxWindowId(windowId.trim())
+        ? windowId.trim()
+        : null;
+    final nextSessionName = hasTarget ? normalizedSessionName : null;
+    final nextWindowIndex = hasTarget ? windowIndex : null;
+    final nextWindowId = hasTarget ? normalizedWindowId : null;
+    if (session.activeMuxWindowSessionName == nextSessionName &&
+        session.activeMuxWindowIndex == nextWindowIndex &&
+        session.activeMuxWindowId == nextWindowId) {
+      return;
+    }
+    session
+      ..activeMuxWindowSessionName = nextSessionName
+      ..activeMuxWindowIndex = nextWindowIndex
+      ..activeMuxWindowId = nextWindowId;
+  }
+
   /// Updates the bounded preview for the focused native ACP session.
   void updateSessionNativeAcpPreview(int connectionId, String? preview) {
     final session = getSession(connectionId);
@@ -9400,20 +9480,41 @@ class _TerminalNotificationExpiry {
   final String? identifier;
 }
 
+/// A queued terminal notification bundled with the emitting multiplexer
+/// window captured when the OSC event arrived.
+typedef _QueuedTerminalNotification = ({
+  TerminalNotificationRequest request,
+  String? tmuxSessionName,
+  int? tmuxWindowIndex,
+  String? tmuxWindowId,
+});
+
 class _TerminalNotificationQueue {
   static const maxPending = 64;
 
-  final List<TerminalNotificationRequest> pending = [];
+  final List<_QueuedTerminalNotification> pending = [];
   bool isProcessing = false;
 
-  void add(TerminalNotificationRequest request) {
+  void add(
+    TerminalNotificationRequest request, {
+    required String? tmuxSessionName,
+    required int? tmuxWindowIndex,
+    required String? tmuxWindowId,
+  }) {
     final identity = request.platformIdentifier;
     if (identity != null) {
-      pending.removeWhere((queued) => queued.platformIdentifier == identity);
+      pending.removeWhere(
+        (queued) => queued.request.platformIdentifier == identity,
+      );
     }
     if (pending.length >= maxPending) {
       pending.removeAt(0);
     }
-    pending.add(request);
+    pending.add((
+      request: request,
+      tmuxSessionName: tmuxSessionName,
+      tmuxWindowIndex: tmuxWindowIndex,
+      tmuxWindowId: tmuxWindowId,
+    ));
   }
 }
