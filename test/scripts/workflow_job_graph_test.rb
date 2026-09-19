@@ -44,7 +44,11 @@ class WorkflowJobGraphTest < Minitest::Test
         chdir: File.expand_path('../..', __dir__),
       )
       assert(status.success?, error)
-      assert(JSON.parse(output).fetch('run_check'))
+      result = JSON.parse(output)
+      assert(result.fetch('run_check'))
+      # terminal-test is gated on third_party, so that output carries the
+      # vendored package's own dependency changes.
+      assert(result.fetch('third_party'))
     end
   end
 
@@ -54,7 +58,10 @@ class WorkflowJobGraphTest < Minitest::Test
     ).fetch('jobs')
     terminal = jobs.fetch('terminal-test')
     assert_match(/^macos-/, terminal.fetch('runs-on'))
-    assert_equal("needs.changes.outputs.run_check == 'true'", terminal.fetch('if'))
+    assert_equal(
+      "needs.changes.outputs.third_party == 'true' && github.event_name != 'push'",
+      terminal.fetch('if'),
+    )
     step = terminal.fetch('steps').find { |entry| entry['working-directory'] == 'third_party/xterm' }
     assert_includes(step.fetch('run'), 'flutter pub get')
     assert_includes(step.fetch('run'), 'flutter test --no-pub')

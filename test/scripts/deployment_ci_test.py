@@ -208,6 +208,23 @@ class DeploymentContractsTest(unittest.TestCase):
                         self.assertEqual(step['with']['production-environment'], "${{ matrix.app == 'production' && 'true' || 'false' }}")
                         self.assertEqual(step['with']['environment-url'], "${{ matrix.app == 'production' && 'https://play.google.com/store/apps/details?id=xyz.depollsoft.monkeyssh' || '' }}")
 
+    def test_missing_editable_app_store_version_warns_instead_of_failing(self):
+        # A version in review or Ready for Distribution has no editable
+        # metadata. That is the normal state between releases, so it must not
+        # leave sync-metadata permanently red on main; only a real upload
+        # failure or cancellation fails the run.
+        gate = self.workflows['sync-metadata.yml']['jobs']['metadata-result']['steps'][0]
+        self.assertEqual(gate['env']['BLOCKED'], '${{ needs.preflight-ios.outputs.blocked }}')
+        blocked, failed = gate['run'].split('if [[ "$RESULTS"')
+        self.assertIn('::warning::', blocked)
+        self.assertNotIn('exit 1', blocked)
+        self.assertIn('$GITHUB_STEP_SUMMARY', blocked)
+        self.assertNotIn('BLOCKED', failed)
+        self.assertIn('*failure*', failed)
+        self.assertIn('*cancelled*', failed)
+        self.assertIn('::error::', failed)
+        self.assertIn('exit 1', failed)
+
     def test_published_validation_applies_to_the_same_artifact_snapshot(self):
         publisher = self.workflows['publish-store-assets.yml']['jobs']['sync-metadata']
         self.assertTrue(publisher['with']['use-validated-store-assets'])

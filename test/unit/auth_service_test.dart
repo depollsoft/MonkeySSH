@@ -30,7 +30,11 @@ void main() {
   setUp(() {
     mockStorage = MockFlutterSecureStorage();
     mockLocalAuth = MockLocalAuthentication();
-    authService = AuthService(storage: mockStorage, localAuth: mockLocalAuth);
+    authService = AuthService(
+      storage: mockStorage,
+      localAuth: mockLocalAuth,
+      pinKdfIterations: 10,
+    );
     when(() => mockStorage.read(key: any(named: 'key')))
         .thenAnswer((_) async => null);
     when(
@@ -41,6 +45,28 @@ void main() {
     ).thenAnswer((_) async {});
     when(() => mockStorage.delete(key: any(named: 'key')))
         .thenAnswer((_) async {});
+  });
+
+  test('rejects PIN KDF iteration counts the record parser would refuse', () {
+    for (final iterations in [0, -1, 1000001]) {
+      expect(
+        () => AuthService(
+          storage: mockStorage,
+          localAuth: mockLocalAuth,
+          pinKdfIterations: iterations,
+        ),
+        throwsArgumentError,
+        reason: '$iterations',
+      );
+    }
+    expect(
+      AuthService(
+        storage: mockStorage,
+        localAuth: mockLocalAuth,
+        pinKdfIterations: 1000000,
+      ),
+      isNotNull,
+    );
   });
 
   group('AuthService', () {
@@ -110,6 +136,10 @@ void main() {
 
     group('setupPin', () {
       test('stores hardened PIN data and enables auth', () async {
+        authService = AuthService(
+          storage: mockStorage,
+          localAuth: mockLocalAuth,
+        );
         final writes = <String, String>{};
         when(
           () => mockStorage.write(
@@ -128,7 +158,7 @@ void main() {
         final pinPayload =
             jsonDecode(writes['flutty_pin_hash']!) as Map<String, dynamic>;
         expect(pinPayload['version'], 1);
-        expect(pinPayload['iterations'], greaterThan(0));
+        expect(pinPayload['iterations'], 120000);
         expect(pinPayload['hash'], isA<String>());
       });
     });
@@ -156,7 +186,15 @@ void main() {
 
           await authService.setupPin('1234');
 
-          final result = await authService.verifyPin(pin);
+          expect(
+            (jsonDecode(storage['flutty_pin_hash']!) as Map)['iterations'],
+            10,
+          );
+          // Verification reads the saved work factor, even with default settings.
+          final result = await AuthService(
+            storage: mockStorage,
+            localAuth: mockLocalAuth,
+          ).verifyPin(pin);
 
           expect(result, expected);
         });

@@ -22,19 +22,21 @@ import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
 
-const _posixVersionRunner = r'''
+String _posixVersionRunner({int versionTimeoutSeconds = 5}) =>
+    r'''
 __fl_agent_version() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 5 "$@"
+    timeout __VERSION_TIMEOUT__ "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 5 "$@"
+    gtimeout __VERSION_TIMEOUT__ "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e '$t=shift; alarm $t; exec @ARGV' 5 "$@"
+    perl -e '$t=shift; alarm $t; exec @ARGV' __VERSION_TIMEOUT__ "$@"
   else
     return 124
   fi
 }
-''';
+'''
+        .replaceAll('__VERSION_TIMEOUT__', '$versionTimeoutSeconds');
 // Isolate native commands so a hung executable cannot block the remaining rows.
 const _windowsVersionRunner = r'''
 function ConvertTo-AgentLiteral([string]$Value) {
@@ -608,6 +610,39 @@ String? buildAgentInstallCommand(
   };
 }
 
+/// Time limits for remote agent probes and commands.
+@immutable
+class AgentProbeTimeouts {
+  /// Creates time limits with the production defaults.
+  const AgentProbeTimeouts({
+    this.batchProbe = const Duration(seconds: 8),
+    this.metadataProbe = const Duration(seconds: 30),
+    this.metadataProbeBase = const Duration(seconds: 20),
+    this.usageProbe = const Duration(seconds: 14),
+    this.install = const Duration(seconds: 18),
+    this.defaultRun = const Duration(seconds: 15),
+  });
+
+  /// Base timeout for a batch of runtime probes.
+  final Duration batchProbe;
+
+  /// Timeout for one group of registry metadata probes.
+  final Duration metadataProbe;
+
+  /// Base of the batched registry-metadata timeout, which grows by 10 seconds
+  /// for every four installed runtimes.
+  final Duration metadataProbeBase;
+
+  /// Timeout for a usage probe.
+  final Duration usageProbe;
+
+  /// Timeout for an install-related probe.
+  final Duration install;
+
+  /// Default command and exec-channel opening timeout.
+  final Duration defaultRun;
+}
+
 /// Inspects and manages coding-agent runtimes over non-interactive SSH exec.
 class AgentManagementService {
   /// Creates the service.
@@ -615,9 +650,12 @@ class AgentManagementService {
     this._discovery, {
     required Future<bool> Function() canManageAgents,
     DateTime Function()? now,
-  }) : _canManageAgents = canManageAgents,
+    AgentProbeTimeouts timeouts = const AgentProbeTimeouts(),
+  }) : _timeouts = timeouts,
+       _canManageAgents = canManageAgents,
        _now = now ?? DateTime.now;
 
+  final AgentProbeTimeouts _timeouts;
   final Future<bool> Function() _canManageAgents;
   final DateTime Function() _now;
 
@@ -771,11 +809,13 @@ class AgentManagementService {
           windows: session.remoteIsWindows,
         ),
         priority: priority,
-        timeout: Duration(
-          seconds: session.remoteIsWindows
-              ? 8 + ((definitions.length + 3) ~/ 4) * 6
-              : 8,
-        ),
+        timeout:
+            _timeouts.batchProbe +
+            Duration(
+              seconds: session.remoteIsWindows
+                  ? ((definitions.length + 3) ~/ 4) * 6
+                  : 0,
+            ),
       );
     } on Object catch (error) {
       final failed = [
@@ -809,9 +849,9 @@ class AgentManagementService {
             windows: session.remoteIsWindows,
           ),
           priority: priority,
-          timeout: Duration(
-            seconds: 20 + ((installedDefinitions.length + 3) ~/ 4) * 10,
-          ),
+          timeout:
+              _timeouts.metadataProbeBase +
+              Duration(seconds: ((installedDefinitions.length + 3) ~/ 4) * 10),
           keepPartialOutputOnTimeout: true,
         );
         metadata = parseAgentMetadataProbeOutput(metadataOutput.output);
@@ -876,7 +916,7 @@ class AgentManagementService {
           definition,
         ], windows: session.remoteIsWindows),
         priority: priority,
-        timeout: const Duration(seconds: 8),
+        timeout: _timeouts.batchProbe,
       );
       final snapshot =
           parseAgentBatchProbeOutput(probeOutput.output)[definition.id] ??
@@ -890,7 +930,7 @@ class AgentManagementService {
               definition,
             ], windows: session.remoteIsWindows),
             priority: priority,
-            timeout: const Duration(seconds: 30),
+            timeout: _timeouts.metadataProbe,
             keepPartialOutputOnTimeout: true,
           );
           metadata = parseAgentMetadataProbeOutput(
@@ -1031,7 +1071,7 @@ class AgentManagementService {
             definition,
           ], windows: session.remoteIsWindows),
           priority: SshExecPriority.low,
-          timeout: const Duration(seconds: 14),
+          timeout: _timeouts.usageProbe,
           shouldContinue: runtimeCurrent,
         );
       } on _UsageReadCancelled {
@@ -1243,7 +1283,7 @@ class AgentManagementService {
         input: session.remoteIsWindows
             ? Uint8List.fromList(utf8.encode('$source\n'))
             : null,
-        timeout: const Duration(seconds: 18),
+        timeout: _timeouts.install,
         keepPartialOutputOnTimeout: true,
         shouldContinue: shouldContinue,
       );
@@ -1395,7 +1435,12 @@ class AgentManagementService {
     );
     late AgentRuntimeActionResult result;
     try {
-      result = await _run(session, command, onOutput: onOutput, timeout: null);
+      result = await _run(
+        session,
+        command,
+        onOutput: onOutput,
+        unlimitedTimeout: true,
+      );
       // The result dialog is plain text. Strip terminal colors and cursor
       // controls after assembling chunks, since escapes can cross SSH packets.
       result = AgentRuntimeActionResult(
@@ -1473,7 +1518,8 @@ class AgentManagementService {
     SshSession session,
     String command, {
     ValueChanged<String>? onOutput,
-    Duration? timeout = const Duration(seconds: 15),
+    Duration? timeout,
+    bool unlimitedTimeout = false,
     bool keepPartialOutputOnTimeout = false,
     Uint8List? input,
     SshExecPriority priority = SshExecPriority.normal,
@@ -1483,9 +1529,12 @@ class AgentManagementService {
         (!shouldContinue() || !await _canManageAgents() || !shouldContinue())) {
       throw const _UsageReadCancelled();
     }
+    final runTimeout = unlimitedTimeout
+        ? null
+        : timeout ?? _timeouts.defaultRun;
     final exec = await openSshExec(
       session.execute(command),
-      timeout ?? const Duration(seconds: 15),
+      runTimeout ?? _timeouts.defaultRun,
     );
     var finished = false;
     try {
@@ -1510,12 +1559,12 @@ class AgentManagementService {
         exec.done,
         if (input != null) exec.stdin.close(),
       ]);
-      if (timeout == null) {
+      if (runTimeout == null) {
         await completion;
         finished = true;
       } else {
         try {
-          await completion.timeout(timeout);
+          await completion.timeout(runTimeout);
           finished = true;
         } on TimeoutException {
           if (!keepPartialOutputOnTimeout) rethrow;
@@ -1703,6 +1752,7 @@ final _windowsRecordEnd =
 String buildAgentBatchProbeCommand(
   List<AgentRuntimeDefinition> definitions, {
   required bool windows,
+  int versionTimeoutSeconds = 5,
 }) {
   if (windows) {
     final records = [
@@ -1716,11 +1766,14 @@ String buildAgentBatchProbeCommand(
     );
   }
 
-  final command = StringBuffer(_posixVersionRunner)
-    ..write(
-      r'__fl_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/monkeyssh-agent.XXXXXX") || exit 1; ',
-    )
-    ..write('__fl_probe_pids=; ');
+  final command =
+      StringBuffer(
+          _posixVersionRunner(versionTimeoutSeconds: versionTimeoutSeconds),
+        )
+        ..write(
+          r'__fl_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/monkeyssh-agent.XXXXXX") || exit 1; ',
+        )
+        ..write('__fl_probe_pids=; ');
   for (var index = 0; index < definitions.length; index += 1) {
     final definition = definitions[index];
     command
@@ -1835,7 +1888,7 @@ String buildAgentMetadataProbeCommand(
     );
   }
 
-  final command = StringBuffer('$_profilePrefix\n$_posixVersionRunner')
+  final command = StringBuffer('$_profilePrefix\n${_posixVersionRunner()}')
     ..write(
       r'__fl_meta_dir=$(mktemp -d "${TMPDIR:-/tmp}/monkeyssh-meta.XXXXXX") || exit 1; ',
     )

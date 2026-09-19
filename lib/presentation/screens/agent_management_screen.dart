@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -10,13 +8,11 @@ import '../../domain/models/monetization.dart';
 import '../../domain/services/agent_management_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/ssh_service.dart';
+import '../view_models/agent_management_view_model.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/agent_usage_summary.dart';
 import '../widgets/premium_access.dart';
-
-const _redactStoreScreenshotIdentities = bool.fromEnvironment(
-  'STORE_SCREENSHOT_REDACT_IDENTITIES',
-);
+import 'agent_management_presentation.dart';
 
 /// Manages coding-agent CLIs and ACP adapters on an active remote host.
 class AgentManagementScreen extends ConsumerStatefulWidget {
@@ -47,154 +43,36 @@ class AgentManagementScreen extends ConsumerStatefulWidget {
 }
 
 class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
-  late List<AgentRuntimeInfo> _runtimes;
-  final Set<String> _runningActions = <String>{};
-  final Map<String, String> _actionOutput = <String, String>{};
-  bool _refreshing = false;
-  bool _checkingUsage = false;
-  int _usageGeneration = 0;
-  Map<String, AgentUsage> _usage = {};
-  Timer? _usageClock;
-  bool _updatingAll = false;
-  String? _refreshError;
-  final Set<String> _queuedActions = <String>{};
-  final Set<String> _recheckingActions = <String>{};
-  int _completedUpdates = 0;
-  int _totalUpdates = 0;
-
-  bool get _busy => _updatingAll || _runningActions.isNotEmpty;
-
-  AgentManagementService get _service =>
-      widget.service ?? ref.read(agentManagementServiceProvider);
+  late final AgentManagementViewModel _model;
 
   @override
   void initState() {
     super.initState();
-    _runtimes = [
-      for (final definition in agentRuntimeDefinitions)
-        AgentRuntimeInfo(
-          definition: definition,
-          status: AgentRuntimeStatus.checking,
-        ),
-    ];
-    _usageClock = Timer.periodic(const Duration(minutes: 1), (_) {
-      if (mounted && _usage.isNotEmpty) setState(() {});
-    });
-    unawaited(_refresh());
+    _model = AgentManagementViewModel(
+      session: () => widget.session,
+      service: () => widget.service ?? ref.read(agentManagementServiceProvider),
+      canManageAgents: () => ref
+          .read(monetizationServiceProvider)
+          .canUseFeature(MonetizationFeature.agentManagement),
+      onRuntimesRefreshed: (runtimes) =>
+          widget.onRuntimesRefreshed?.call(runtimes),
+      onProvidersRefreshed: () => widget.onProvidersRefreshed?.call(),
+      showActionResult: _showActionResult,
+      showBulkFailures: _showBulkFailures,
+    )..addListener(_modelChanged);
+    _model.initialize();
   }
+
+  void _modelChanged() => setState(() {});
 
   @override
   void dispose() {
-    _usageClock?.cancel();
+    _model.removeListener(_modelChanged);
+    _model.dispose();
     super.dispose();
   }
 
-  Future<void> _refreshUsage() async {
-    final generation = ++_usageGeneration;
-    setState(() => _checkingUsage = true);
-    try {
-      final usage = await _service.readUsage(
-        widget.session,
-        _runtimes
-            .where((runtime) => runtime.definition.kind == AgentRuntimeKind.cli)
-            .toList(),
-      );
-      if (!mounted || generation != _usageGeneration) return;
-      setState(() => _usage = usage);
-    } on Object {
-      if (!mounted || generation != _usageGeneration) return;
-      setState(
-        () => _usage = {
-          for (final runtime in _runtimes)
-            if (runtime.definition.kind == AgentRuntimeKind.cli)
-              runtime.definition.id: const AgentUsage(
-                status: AgentUsageStatus.unavailable,
-              ),
-        },
-      );
-    } finally {
-      if (mounted && generation == _usageGeneration) {
-        setState(() => _checkingUsage = false);
-      }
-    }
-  }
-
-  Future<bool> _canManageAgents() => ref
-      .read(monetizationServiceProvider)
-      .canUseFeature(MonetizationFeature.agentManagement);
-
-  Future<void> _refresh({bool afterAction = false}) async {
-    if (!await _canManageAgents() || !mounted) return;
-    if (_refreshing || (_busy && !afterAction)) return;
-    setState(() {
-      _refreshing = true;
-      _refreshError = null;
-    });
-    try {
-      var usageStarted = false;
-      final runtimes = await _service.refreshAll(
-        widget.session,
-        onDiscovered: (discovered) {
-          if (!mounted) return;
-          setState(() => _runtimes = discovered);
-          usageStarted = true;
-          unawaited(_refreshUsage());
-        },
-      );
-      if (!mounted) return;
-      setState(() => _runtimes = runtimes);
-      widget.onRuntimesRefreshed?.call(runtimes);
-      widget.onProvidersRefreshed?.call();
-      if (!usageStarted) unawaited(_refreshUsage());
-    } on Object catch (error) {
-      if (!mounted) return;
-      setState(() => _refreshError = error.toString());
-    } finally {
-      if (mounted) setState(() => _refreshing = false);
-    }
-  }
-
-  Future<void> _updateAll() async {
-    if (!await _canManageAgents() || !mounted) return;
-    final updates = _runtimes
-        .where(
-          (runtime) => runtime.hasUpdate && runtime.managedByPackageManager,
-        )
-        .toList(growable: false);
-    if (updates.isEmpty || _busy || _refreshing) return;
-
-    setState(() {
-      _updatingAll = true;
-      _completedUpdates = 0;
-      _totalUpdates = updates.length;
-      for (final runtime in updates) {
-        _queuedActions.add(runtime.definition.id);
-        _actionOutput[runtime.definition.id] = '';
-      }
-    });
-    final failures = <String>[];
-    try {
-      for (final runtime in updates) {
-        if (!mounted || !await _canManageAgents() || !mounted) break;
-        final result = await _executeAction(runtime, refreshAfterAction: false);
-        if (!result.succeeded) failures.add(runtime.definition.label);
-        if (mounted) setState(() => _completedUpdates++);
-      }
-    } finally {
-      if (mounted) {
-        try {
-          await _refresh(afterAction: true);
-        } finally {
-          if (mounted) {
-            setState(() {
-              _updatingAll = false;
-              _queuedActions.clear();
-            });
-          }
-        }
-      }
-    }
-    if (!mounted || failures.isEmpty) return;
+  Future<void> _showBulkFailures(List<String> failures) async {
     await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -212,110 +90,6 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
         ],
       ),
     );
-  }
-
-  Future<void> _runAction(AgentRuntimeInfo runtime) async {
-    if (!await _canManageAgents() || !mounted) return;
-    if (_busy || _refreshing) return;
-    final result = await _executeAction(runtime);
-    if (!mounted) return;
-    if (!result.succeeded) await _showActionResult(runtime, result);
-  }
-
-  Future<AgentRuntimeActionResult> _executeAction(
-    AgentRuntimeInfo runtime, {
-    bool refreshAfterAction = true,
-  }) async {
-    final id = runtime.definition.id;
-    final update = runtime.status == AgentRuntimeStatus.updateAvailable;
-    setState(() {
-      _queuedActions.remove(id);
-      _runningActions.add(id);
-      _actionOutput[id] = '';
-    });
-
-    late final AgentRuntimeActionResult result;
-    try {
-      result = await _service.installOrUpdate(
-        widget.session,
-        runtime.definition,
-        update: update,
-        current: runtime,
-        onOutput: (chunk) {
-          if (!mounted) return;
-          setState(() {
-            final combined = '${_actionOutput[id] ?? ''}$chunk';
-            _actionOutput[id] = combined.length <= 1200
-                ? combined
-                : combined.substring(combined.length - 1200);
-          });
-        },
-      );
-    } on Object catch (error) {
-      result = AgentRuntimeActionResult(
-        succeeded: false,
-        output: 'The remote command could not be completed. $error',
-      );
-    } finally {
-      if (mounted) {
-        if (refreshAfterAction) await _refresh(afterAction: true);
-        if (mounted) setState(() => _runningActions.remove(id));
-      }
-    }
-    return result;
-  }
-
-  Future<void> _recheck(AgentRuntimeInfo runtime) async {
-    if (!await _canManageAgents() || !mounted || _busy || _refreshing) return;
-    final id = runtime.definition.id;
-    setState(() {
-      _runningActions.add(id);
-      _recheckingActions.add(id);
-      _actionOutput[id] = '';
-    });
-    try {
-      final updated = await _service.inspect(
-        widget.session,
-        runtime.definition,
-      );
-      if (!mounted) return;
-      if (updated.status == AgentRuntimeStatus.failed) {
-        await _showActionResult(
-          runtime,
-          AgentRuntimeActionResult(
-            succeeded: false,
-            output:
-                'Could not check this agent. ${updated.message ?? 'The probe failed.'}',
-          ),
-        );
-        return;
-      }
-      setState(() {
-        final index = _runtimes.indexWhere(
-          (entry) => entry.definition.id == id,
-        );
-        if (index >= 0) _runtimes[index] = updated;
-      });
-      widget.onRuntimesRefreshed?.call(_runtimes);
-      widget.onProvidersRefreshed?.call();
-      unawaited(_refreshUsage());
-    } on Object catch (error) {
-      if (!mounted) return;
-      await _showActionResult(
-        runtime,
-        AgentRuntimeActionResult(
-          succeeded: false,
-          output: 'Could not check this agent. $error',
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _runningActions.remove(id);
-          _recheckingActions.remove(id);
-        });
-      }
-    }
   }
 
   Future<void> _showActionResult(
@@ -406,7 +180,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                               feature: MonetizationFeature.agentManagement,
                             ) &&
                             mounted) {
-                          await _refresh();
+                          await _model.refresh();
                         }
                       },
                       child: const Text('Unlock Pro'),
@@ -419,31 +193,33 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
         ),
       );
     }
-    final updates = _runtimes.where((runtime) => runtime.hasUpdate).toList();
+    final updates = _model.runtimes
+        .where((runtime) => runtime.hasUpdate)
+        .toList();
     final managedUpdates = updates
         .where((runtime) => runtime.managedByPackageManager)
         .length;
     final initiallyChecking =
-        _runtimes.isNotEmpty &&
-        _runtimes.every(
+        _model.runtimes.isNotEmpty &&
+        _model.runtimes.every(
           (runtime) => runtime.status == AgentRuntimeStatus.checking,
         );
     Widget section(AgentRuntimeKind kind, String title, String subtitle) =>
         _RuntimeSection(
           title: title,
           subtitle: subtitle,
-          runtimes: _runtimes
+          runtimes: _model.runtimes
               .where((runtime) => runtime.definition.kind == kind)
               .toList(),
-          runningActions: _runningActions,
-          queuedActions: _queuedActions,
-          recheckingActions: _recheckingActions,
-          actionOutput: _actionOutput,
-          usage: _usage,
-          checkingUsage: _checkingUsage,
-          locked: _busy || _refreshing,
-          onAction: _runAction,
-          onRecheck: _recheck,
+          runningActions: _model.runningActions,
+          queuedActions: _model.queuedActions,
+          recheckingActions: _model.recheckingActions,
+          actionOutput: _model.actionOutput,
+          usage: _model.usage,
+          checkingUsage: _model.checkingUsage,
+          locked: _model.busy || _model.refreshing,
+          onAction: _model.runAction,
+          onRecheck: _model.recheck,
         );
     final cliSection = section(
       AgentRuntimeKind.cli,
@@ -462,7 +238,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           IconButton(
             key: const ValueKey('agent-management-refresh'),
             tooltip: 'Refresh agents',
-            onPressed: _refreshing || _busy ? null : _refresh,
+            onPressed: _model.refreshing || _model.busy ? null : _model.refresh,
             icon: const Icon(Icons.refresh_rounded),
           ),
         ],
@@ -470,7 +246,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           preferredSize: const Size.fromHeight(2),
           child: SizedBox(
             height: 2,
-            child: _refreshing
+            child: _model.refreshing
                 ? const LinearProgressIndicator(
                     minHeight: 2,
                     semanticsLabel: 'Checking agent versions',
@@ -479,21 +255,23 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           ),
         ),
       ),
-      bottomNavigationBar: updates.isNotEmpty || _updatingAll
+      bottomNavigationBar: updates.isNotEmpty || _model.updatingAll
           ? _UpdateBar(
-              label: _updatingAll
-                  ? 'Updating ${_completedUpdates + 1 > _totalUpdates ? _totalUpdates : _completedUpdates + 1} of $_totalUpdates'
+              label: _model.updatingAll
+                  ? 'Updating ${_model.completedUpdates + 1 > _model.totalUpdates ? _model.totalUpdates : _model.completedUpdates + 1} of ${_model.totalUpdates}'
                   : '${updates.length} ${updates.length == 1 ? 'update' : 'updates'} available',
-              busy: _updatingAll,
+              busy: _model.updatingAll,
               managedCount: managedUpdates,
               manualCount: updates.length - managedUpdates,
-              onUpdate: _busy || _refreshing ? null : _updateAll,
+              onUpdate: _model.busy || _model.refreshing
+                  ? null
+                  : _model.updateAll,
             )
           : null,
       body: SafeArea(
         top: false,
         child: RefreshIndicator(
-          onRefresh: _refresh,
+          onRefresh: _model.refresh,
           child: LayoutBuilder(
             builder: (context, constraints) {
               final wide =
@@ -509,10 +287,12 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: EdgeInsets.fromLTRB(padding, 16, padding, 24),
                 children: [
-                  if (_refreshError != null)
+                  if (_model.refreshError != null)
                     _ErrorBanner(
-                      message: _refreshError!,
-                      onRetry: _refreshing || _busy ? null : _refresh,
+                      message: _model.refreshError!,
+                      onRetry: _model.refreshing || _model.busy
+                          ? null
+                          : _model.refresh,
                     )
                   else
                     Padding(
@@ -520,9 +300,9 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                       child: Semantics(
                         key: const ValueKey('agent-usage-announcement'),
                         liveRegion: true,
-                        label: _checkingUsage
+                        label: _model.checkingUsage
                             ? 'Checking account usage.'
-                            : _usageGeneration > 0
+                            : _model.usageGeneration > 0
                             ? 'Account usage checks complete. Review each agent for results.'
                             : null,
                         child: Row(
@@ -539,7 +319,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                               child: Text(
                                 initiallyChecking
                                     ? 'Checking installed agents…'
-                                    : _refreshing
+                                    : _model.refreshing
                                     ? 'Refreshing versions…'
                                     : 'Installed versions and account usage',
                                 style: theme.textTheme.bodySmall?.copyWith(
@@ -551,7 +331,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                         ),
                       ),
                     ),
-                  if (_runtimes.isEmpty && !_refreshing)
+                  if (_model.runtimes.isEmpty && !_model.refreshing)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 32),
                       child: Text(
@@ -833,13 +613,13 @@ class _RuntimeRowState extends State<_RuntimeRow> {
     final runtime = widget.runtime;
     final scheme = Theme.of(context).colorScheme;
     final status = widget.queued
-        ? _StatusPresentation(
+        ? AgentStatusPresentation(
             'Queued',
             Icons.schedule_rounded,
             scheme.onSurfaceVariant,
           )
         : widget.busy
-        ? _StatusPresentation(
+        ? AgentStatusPresentation(
             widget.rechecking
                 ? 'Checking…'
                 : runtime.hasUpdate
@@ -850,7 +630,7 @@ class _RuntimeRowState extends State<_RuntimeRow> {
             Icons.sync_rounded,
             scheme.onSurfaceVariant,
           )
-        : _statusPresentation(runtime, scheme);
+        : agentStatusPresentation(runtime, scheme);
     final repair =
         runtime.status == AgentRuntimeStatus.needsRepair &&
         runtime.definition.supportsManagedInstall;
@@ -974,7 +754,7 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                 liveRegion: widget.busy || widget.queued,
                 child: _StatusLabel(presentation: status),
               ),
-              if (_sourceLine(runtime) case final String source
+              if (agentSourceLine(runtime) case final String source
                   when !_expanded) ...[
                 const SizedBox(height: 4),
                 Text(
@@ -1024,7 +804,7 @@ class _RuntimeRowState extends State<_RuntimeRow> {
                 if (runtime.executablePath case final value?)
                   _DetailLine(
                     label: 'Executable',
-                    value: _displayExecutablePath(value),
+                    value: displayAgentExecutablePath(value),
                   ),
                 if (runtime.hasUpdate && !runtime.managedByPackageManager)
                   const Text(
@@ -1094,7 +874,7 @@ class _DetailLine extends StatelessWidget {
 class _StatusLabel extends StatelessWidget {
   const _StatusLabel({required this.presentation});
 
-  final _StatusPresentation presentation;
+  final AgentStatusPresentation presentation;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -1148,65 +928,3 @@ class _ErrorBanner extends StatelessWidget {
     );
   }
 }
-
-class _StatusPresentation {
-  const _StatusPresentation(this.label, this.icon, this.color);
-
-  final String label;
-  final IconData icon;
-  final Color color;
-}
-
-_StatusPresentation _statusPresentation(
-  AgentRuntimeInfo runtime,
-  ColorScheme scheme,
-) => switch (runtime.status) {
-  AgentRuntimeStatus.checking => _StatusPresentation(
-    'Checking…',
-    Icons.sync_rounded,
-    scheme.onSurfaceVariant,
-  ),
-  AgentRuntimeStatus.installed => _StatusPresentation(
-    runtime.installedVersion == null
-        ? 'Installed'
-        : 'Installed v${runtime.installedVersion}',
-    Icons.check_circle_outline,
-    scheme.onSurfaceVariant,
-  ),
-  AgentRuntimeStatus.updateAvailable => _StatusPresentation(
-    'Update v${runtime.installedVersion ?? '?'} → v${runtime.latestVersion ?? '?'}',
-    Icons.upgrade_rounded,
-    scheme.onSurface,
-  ),
-  AgentRuntimeStatus.notInstalled => _StatusPresentation(
-    'Not installed${runtime.latestVersion == null ? '' : ' · latest v${runtime.latestVersion}'}',
-    Icons.remove_circle_outline,
-    scheme.onSurfaceVariant,
-  ),
-  AgentRuntimeStatus.needsRepair => _StatusPresentation(
-    'Needs repair',
-    Icons.build_circle_outlined,
-    scheme.error,
-  ),
-  AgentRuntimeStatus.unavailable => _StatusPresentation(
-    'Unavailable',
-    Icons.block_outlined,
-    scheme.onSurfaceVariant,
-  ),
-  AgentRuntimeStatus.failed => _StatusPresentation(
-    'Check failed',
-    Icons.error_outline,
-    scheme.error,
-  ),
-};
-
-String? _sourceLine(AgentRuntimeInfo runtime) {
-  final path = runtime.executablePath;
-  if (path == null) return null;
-  final source = runtime.detectionSource;
-  final displayPath = _displayExecutablePath(path);
-  return source == null ? displayPath : '$source · $displayPath';
-}
-
-String _displayExecutablePath(String path) =>
-    _redactStoreScreenshotIdentities ? path.split(RegExp(r'[/\\]')).last : path;

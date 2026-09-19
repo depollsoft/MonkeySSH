@@ -45,6 +45,10 @@ func TestMuseSessionStoreAndExactBinding(t *testing.T) {
 	cwd := t.TempDir()
 	path := filepath.Join(museSessionsRoot(), "2026", "09", "16", id, "session.jsonl")
 	nested := filepath.Join(filepath.Dir(path), "subagent", nestedID, "session.jsonl")
+	// The candidate cache is keyed on size, mode and mtime. Rewrites below
+	// keep the size, so give every write a distinct mtime instead of relying
+	// on the filesystem's timestamp resolution (coarse on Windows CI).
+	writes := 0
 	write := func(path, sessionID string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -57,6 +61,11 @@ func TestMuseSessionStoreAndExactBinding(t *testing.T) {
 		data = append([]byte("{\"retained_frame\":\"session_permission_transaction\"}\n"), data...)
 		data = append(data, []byte("\n{\"truncated\":")...)
 		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		writes++
+		stamp := time.Now().Add(time.Duration(writes) * time.Second)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -27,7 +27,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../app/theme.dart';
 import '../../domain/models/acp_attachment.dart';
 import '../../domain/models/acp_native_preview.dart';
-import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
@@ -64,6 +63,7 @@ import '../widgets/system_bottom_inset.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
+import 'acp_quick_selectors.dart';
 import 'sftp_screen.dart';
 
 /// Builds the attachment picker actions for a chat session. Overridable in
@@ -688,7 +688,18 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   Widget? _buildQuickConfigControls(AcpSessionState session) {
-    final selectors = _quickConfigSelectors(session);
+    final manager = ref.read(acpSessionManagerProvider);
+    final selectors = buildAcpQuickSelectors(
+      session,
+      providerId: _key.providerId,
+      piEnabledModelPatterns: _piEnabledModelPatterns,
+      setConfigOption: (configId, value) =>
+          manager.setConfigOption(_key, configId: configId, value: value),
+      setModel: (value) => manager.setModel(_key, value),
+      setMode: (value) => manager.setMode(_key, value),
+      setAutoApprovePermissions: ({required enabled}) =>
+          manager.setAutoApprovePermissions(_key, enabled: enabled),
+    );
     if (selectors.isEmpty) {
       return null;
     }
@@ -712,281 +723,6 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           },
         ),
       ),
-    );
-  }
-
-  List<_AcpQuickSelectorData> _quickConfigSelectors(AcpSessionState session) {
-    final manager = ref.read(acpSessionManagerProvider);
-    final generic = session.configOptions.whereType<AcpSelectConfigOption>();
-    AcpSelectConfigOption? firstMatching(
-      bool Function(AcpSelectConfigOption option) matches,
-    ) => generic.where(matches).firstOrNull;
-
-    final modelOption = firstMatching(
-      (option) => (option.category ?? '').toLowerCase() == 'model',
-    );
-    final effortOption = firstMatching(_quickConfigOptionIsEffort);
-    final permissionOption = firstMatching(_quickConfigOptionIsPermissionMode);
-    final permissionToggle = session.configOptions
-        .whereType<AcpBooleanConfigOption>()
-        .where(_quickConfigOptionIsPermissionMode)
-        .firstOrNull;
-    final modeOption = firstMatching(
-      (option) =>
-          (option.category ?? '').toLowerCase() == 'mode' &&
-          !_quickConfigOptionIsEffort(option) &&
-          !_quickConfigOptionIsPermissionMode(option),
-    );
-    final selectors = <_AcpQuickSelectorData>[];
-    final displayedOptionIds = <String>{};
-
-    void addGeneric(
-      String label,
-      AcpSelectConfigOption? option, {
-      bool scopePiModels = false,
-    }) {
-      if (option == null) {
-        return;
-      }
-      final allChoices = _quickConfigChoices(option);
-      if (allChoices.isEmpty) {
-        return;
-      }
-      displayedOptionIds.add(option.id);
-      final partition = scopePiModels
-          ? _partitionPiModelChoices(allChoices, option.currentValue)
-          : (visible: allChoices, hidden: const <_AcpQuickChoice>[]);
-      selectors.add(
-        _AcpQuickSelectorData(
-          label: label,
-          currentValue: option.currentValue,
-          choices: partition.visible,
-          hiddenChoices: partition.hidden,
-          onSelected: (value) =>
-              manager.setConfigOption(_key, configId: option.id, value: value),
-        ),
-      );
-    }
-
-    addGeneric('Model', modelOption, scopePiModels: true);
-    if (modelOption == null) {
-      final state = session.modelState;
-      if (state != null && state.availableModels.isNotEmpty) {
-        final allChoices = [
-          for (final model in state.availableModels)
-            _AcpQuickChoice(
-              value: model.id,
-              label: model.name.isEmpty ? model.id : model.name,
-              description: model.description,
-            ),
-        ];
-        final partition = _partitionPiModelChoices(
-          allChoices,
-          state.currentModelId,
-        );
-        selectors.add(
-          _AcpQuickSelectorData(
-            label: 'Model',
-            currentValue: state.currentModelId,
-            choices: partition.visible,
-            hiddenChoices: partition.hidden,
-            onSelected: (value) => manager.setModel(_key, value),
-          ),
-        );
-      }
-    }
-
-    addGeneric('Effort', effortOption);
-    final legacyModeState = session.modeState;
-    final legacyModeIsEffort =
-        legacyModeState != null && _legacyModeStateIsEffort(legacyModeState);
-    if (legacyModeState != null &&
-        legacyModeState.availableModes.isNotEmpty &&
-        (legacyModeIsEffort ? effortOption == null : modeOption == null)) {
-      selectors.add(
-        _AcpQuickSelectorData(
-          label: legacyModeIsEffort ? 'Effort' : 'Mode',
-          currentValue: legacyModeState.currentModeId,
-          choices: [
-            for (final mode in legacyModeState.availableModes)
-              _AcpQuickChoice(
-                value: mode.id,
-                label: mode.name.isEmpty ? mode.id : mode.name,
-                description: mode.description,
-              ),
-          ],
-          onSelected: (value) => manager.setMode(_key, value),
-        ),
-      );
-    }
-    addGeneric('Mode', modeOption);
-
-    addGeneric('Permission', permissionOption);
-    if (permissionOption == null) {
-      if (permissionToggle != null) {
-        displayedOptionIds.add(permissionToggle.id);
-      }
-      final autoApprove =
-          permissionToggle?.currentValue ?? session.autoApprovePermissions;
-      final onSelected = permissionToggle != null
-          ? (String value) => manager.setConfigOption(
-              _key,
-              configId: permissionToggle.id,
-              value: value == 'true',
-            )
-          : (String value) => manager.setAutoApprovePermissions(
-              _key,
-              enabled: value == 'true',
-            );
-      selectors.add(
-        _AcpQuickSelectorData(
-          label: 'Permission',
-          currentValue: autoApprove ? 'true' : 'false',
-          choices: const [
-            _AcpQuickChoice(
-              value: 'false',
-              label: 'Ask',
-              description: 'Ask before protected actions.',
-            ),
-            _AcpQuickChoice(
-              value: 'true',
-              label: 'YOLO',
-              description: 'Auto-approve supported actions for this session.',
-            ),
-          ],
-          onSelected: onSelected,
-        ),
-      );
-    }
-
-    // ACP providers may use extension categories such as Codex's
-    // model_config (Fast mode) or collaboration_mode. Preserve the canonical
-    // Model / Effort / Mode ordering above, then surface every remaining
-    // advertised select option instead of silently hiding it.
-    for (final option in generic) {
-      if (!displayedOptionIds.contains(option.id)) {
-        addGeneric(option.name.isEmpty ? option.id : option.name, option);
-      }
-    }
-    return selectors;
-  }
-
-  bool _quickConfigOptionIsPermissionMode(AcpSessionConfigOption option) {
-    final category = (option.category ?? '').toLowerCase();
-    final identity = '${option.id} ${option.name}'.toLowerCase();
-    return category == 'permission' ||
-        category == 'permissions' ||
-        identity.contains('permission') ||
-        identity.contains('approval') ||
-        identity.contains('auto-approve') ||
-        identity.contains('yolo');
-  }
-
-  bool _quickConfigOptionIsEffort(AcpSelectConfigOption option) {
-    final identity = '${option.id} ${option.name}'.toLowerCase();
-    if (identity.contains('effort') ||
-        identity.contains('reasoning') ||
-        identity.contains('thinking')) {
-      return true;
-    }
-    final values = [
-      for (final value in option.options) value.value,
-      for (final group in option.groups)
-        for (final value in group.options) value.value,
-    ];
-    return values.any(_isEffortStrengthLevel) && values.every(_isEffortLevel);
-  }
-
-  bool _legacyModeStateIsEffort(AcpSessionModeState state) =>
-      state.availableModes.any(
-        (mode) =>
-            _isEffortStrengthLevel(mode.id) ||
-            _isEffortStrengthLevel(mode.name),
-      ) &&
-      state.availableModes.every(
-        (mode) => _isEffortLevel(mode.id) || _isEffortLevel(mode.name),
-      );
-
-  bool _isEffortStrengthLevel(String value) => const {
-    'minimal',
-    'low',
-    'medium',
-    'high',
-    'xhigh',
-    'max',
-  }.contains(_normalizedConfigValue(value));
-
-  bool _isEffortLevel(String value) {
-    final normalized = _normalizedConfigValue(value);
-    return const {
-      'off',
-      'none',
-      'minimal',
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-      'max',
-      'auto',
-      'default',
-    }.contains(normalized);
-  }
-
-  String _normalizedConfigValue(String value) =>
-      value.trim().toLowerCase().replaceAll(RegExp(r'[\s_-]+'), '');
-
-  List<_AcpQuickChoice> _quickConfigChoices(AcpSelectConfigOption option) => [
-    for (final value in option.options)
-      _AcpQuickChoice(
-        value: value.value,
-        label: value.name.isEmpty ? value.value : value.name,
-        description: value.description,
-      ),
-    for (final group in option.groups)
-      for (final value in group.options)
-        _AcpQuickChoice(
-          value: value.value,
-          label: group.name.isEmpty
-              ? (value.name.isEmpty ? value.value : value.name)
-              : '${group.name} · ${value.name.isEmpty ? value.value : value.name}',
-          description: value.description,
-        ),
-  ];
-
-  ({List<_AcpQuickChoice> visible, List<_AcpQuickChoice> hidden})
-  _partitionPiModelChoices(
-    List<_AcpQuickChoice> allChoices,
-    String currentValue,
-  ) {
-    final patterns = _piEnabledModelPatterns;
-    if (_key.providerId != AcpBuiltinProviderIds.pi ||
-        patterns == null ||
-        patterns.isEmpty) {
-      return (visible: allChoices, hidden: const <_AcpQuickChoice>[]);
-    }
-    final byValue = <String, _AcpQuickChoice>{
-      for (final choice in allChoices) choice.value: choice,
-    };
-    final scopedIds = resolvePiScopedModelIds(
-      patterns: patterns,
-      availableModelIds: byValue.keys.toList(growable: false),
-      modelNames: <String, String>{
-        for (final choice in allChoices) choice.value: choice.label,
-      },
-    );
-    final visible = <_AcpQuickChoice>[for (final id in scopedIds) ?byValue[id]];
-    final current = byValue[currentValue];
-    if (current != null &&
-        !visible.any((choice) => choice.value == currentValue)) {
-      visible.insert(0, current);
-    }
-    final visibleValues = visible.map((choice) => choice.value).toSet();
-    final hidden = allChoices
-        .where((choice) => !visibleValues.contains(choice.value))
-        .toList(growable: false);
-    return (
-      visible: List<_AcpQuickChoice>.unmodifiable(visible),
-      hidden: List<_AcpQuickChoice>.unmodifiable(hidden),
     );
   }
 
@@ -1930,42 +1666,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 }
 
-@immutable
-class _AcpQuickChoice {
-  const _AcpQuickChoice({
-    required this.value,
-    required this.label,
-    this.description,
-  });
-
-  final String value;
-  final String label;
-  final String? description;
-}
-
-@immutable
-class _AcpQuickSelectorData {
-  const _AcpQuickSelectorData({
-    required this.label,
-    required this.currentValue,
-    required this.choices,
-    required this.onSelected,
-    this.hiddenChoices = const <_AcpQuickChoice>[],
-  });
-
-  final String label;
-  final String currentValue;
-  final List<_AcpQuickChoice> choices;
-  final List<_AcpQuickChoice> hiddenChoices;
-  final Future<void> Function(String value) onSelected;
-}
-
 enum _AcpQuickMenuAction { showAll, showScoped }
 
 class _AcpQuickSelector extends StatefulWidget {
   const _AcpQuickSelector({required this.selector, super.key});
 
-  final _AcpQuickSelectorData selector;
+  final AcpQuickSelectorData selector;
 
   @override
   State<_AcpQuickSelector> createState() => _AcpQuickSelectorState();
@@ -1975,7 +1681,7 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
   final _menuKey = GlobalKey<PopupMenuButtonState<Object>>();
   var _showAll = false;
 
-  _AcpQuickSelectorData get selector => widget.selector;
+  AcpQuickSelectorData get selector => widget.selector;
 
   @override
   void didUpdateWidget(covariant _AcpQuickSelector oldWidget) {
@@ -2010,7 +1716,7 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
   }
 
   PopupMenuItem<Object> _choiceItem(
-    _AcpQuickChoice choice,
+    AcpQuickChoice choice,
     ColorScheme scheme,
   ) => PopupMenuItem<Object>(
     value: choice.value,
@@ -2048,7 +1754,7 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final allChoices = <_AcpQuickChoice>[
+    final allChoices = <AcpQuickChoice>[
       ...selector.choices,
       ...selector.hiddenChoices,
     ];

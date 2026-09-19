@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -7,8 +5,8 @@ import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/services/monetization_service.dart';
-import '../../domain/services/ssh_error_policy.dart';
 import '../../domain/services/ssh_service.dart';
+import 'connection_attempt_logic.dart';
 
 /// Runs a host connection while showing a live progress dialog.
 Future<SshConnectionResult> connectToHostWithProgressDialog(
@@ -41,13 +39,10 @@ Future<SshConnectionResult> connectToHostWithProgressDialog(
   } catch (error, stackTrace) {
     // Everything caught here comes from connect, so raw transport failures
     // are expected even when their stack has no SSH frame.
-    final expectedFailure =
-        isExpectedSshOperationError(error, stackTrace) ||
-        error is SocketException ||
-        error is HandshakeException ||
-        error is TlsException ||
-        error is OSError ||
-        error is SshConnectionCancelledException;
+    final expectedFailure = isExpectedConnectionAttemptFailure(
+      error,
+      stackTrace,
+    );
     if (!expectedFailure) {
       FlutterError.reportError(
         FlutterErrorDetails(

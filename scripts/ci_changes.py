@@ -7,7 +7,22 @@ import subprocess
 
 
 PLATFORMS = ('android', 'ios', 'macos', 'windows', 'linux')
-OUTPUTS = ('run_check', 'go', 'tooling', *PLATFORMS)
+# `<platform>_native` is true only when that platform's own native sources moved,
+# which is a much narrower signal than `<platform>` (which also fires on shared
+# inputs such as pubspec.lock). CI uses it to keep the expensive Apple/Windows
+# builds off the pull_request path unless the platform itself changed.
+NATIVE_OUTPUTS = tuple(f'{platform}_native' for platform in PLATFORMS)
+OUTPUTS = ('run_check', 'go', 'tooling', 'third_party', 'deps',
+           *PLATFORMS, *NATIVE_OUTPUTS)
+
+# Lockfiles that key the Apple compilation caches. Only a run on main can write
+# a cache that later PR and merge-queue runs restore, so CI keeps the otherwise
+# cache-warm-only push run building iOS/macOS when one of these moves.
+DEPENDENCY_LOCKS = {
+    'pubspec.lock',
+    'ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved',
+    'macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved',
+}
 PAYLOAD_SCRIPTS = {
     'scripts/build_monkeymux_assets.sh',
     'scripts/ensure_monkeymux_assets.sh',
@@ -79,15 +94,30 @@ def classify(paths):
             or '/fastlane/' in path
         )
         result['tooling'] |= tooling
+        # ci.yml owns the pinned Flutter SDK and the terminal-test job itself,
+        # so changes to it must exercise the vendored suite too.
+        result['third_party'] |= (
+            path.startswith('third_party/') or path == '.github/workflows/ci.yml'
+        )
+        result['deps'] |= path in DEPENDENCY_LOCKS
         result['windows'] |= path in WINDOWS_TEST_INPUTS
+        result['windows_native'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
 
         # Changes to the CI builder itself must exercise all its build jobs.
         # Other workflow/tooling edits use the independent tooling job.
+        #
+        # The MonkeyMux payload is deliberately *not* here. It ships as an
+        # opaque binary blob under assets/monkeymux/, so it cannot break a
+        # native toolchain; go-test and the monkeymux-assets build already
+        # validate it. It still needs the Dart checks (run_check below) because
+        # the blob is bundled as a Flutter asset.
         global_build = (
-            payload
-            or path.startswith('.github/actions/apple-cache-')
-            or path.startswith(('assets/', 'third_party/'))
+            path.startswith('.github/actions/apple-cache-')
+            or path.startswith('.github/actions/flutter-setup/')
+            or path.startswith('third_party/')
+            or (path.startswith('assets/')
+                and not path.startswith('assets/monkeymux/'))
             or path in {
                 'pubspec.yaml', 'pubspec.lock',
                 '.github/workflows/ci.yml',
@@ -100,10 +130,11 @@ def classify(paths):
             platform_source = (
                 path.startswith(f'{platform}/') and '/fastlane/' not in path
             )
+            result[f'{platform}_native'] |= platform_source
             result[platform] |= global_build or platform_source
             native |= platform_source
         result['run_check'] |= (
-            global_build or native or path.endswith('.dart')
+            global_build or native or payload or path.endswith('.dart')
             or path == 'analysis_options.yaml' or path.startswith('web/')
         )
     return result

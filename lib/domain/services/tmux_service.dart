@@ -65,6 +65,9 @@ class TmuxService implements RemoteMultiplexerService {
     Duration execOpenTimeout = const Duration(seconds: 10),
     Duration execOutputTimeout = const Duration(seconds: 10),
     DateTime Function()? execChannelNow,
+    DateTime Function() now = DateTime.now,
+    Duration Function(int failureCount) execChannelBackoff =
+        resolveTmuxExecChannelBackoffDelay,
     Duration agentSessionMetadataRefreshDebounce = const Duration(
       milliseconds: 150,
     ),
@@ -75,6 +78,8 @@ class TmuxService implements RemoteMultiplexerService {
   }) : _execOpenTimeout = execOpenTimeout,
        _execOutputTimeout = execOutputTimeout,
        _execChannelNow = execChannelNow,
+       _now = now,
+       _execChannelBackoff = execChannelBackoff,
        _agentSessionMetadataRefreshDebounce =
            agentSessionMetadataRefreshDebounce,
        _agentSessionMetadataPeriodicRefreshInterval =
@@ -84,6 +89,8 @@ class TmuxService implements RemoteMultiplexerService {
   final Duration _execOpenTimeout;
   final Duration _execOutputTimeout;
   final DateTime Function()? _execChannelNow;
+  final DateTime Function() _now;
+  final Duration Function(int failureCount) _execChannelBackoff;
   final Duration _agentSessionMetadataRefreshDebounce;
   final Duration _agentSessionMetadataPeriodicRefreshInterval;
   final Duration _windowSwitchActivityGracePeriod;
@@ -1793,7 +1800,7 @@ class TmuxService implements RemoteMultiplexerService {
       );
       // Keep capturing while SSH opens or queues the command. Completion starts
       // the grace period without forgetting a snapshot received in flight.
-      activitySuppression?.captureUntil = DateTime.now().add(
+      activitySuppression?.captureUntil = _now().add(
         _windowSwitchActivityGracePeriod,
       );
       activitySuppression?.previous = null;
@@ -1906,7 +1913,7 @@ class TmuxService implements RemoteMultiplexerService {
   void _recordExecChannelFailure(int connectionId, Object error) {
     final state = _stateFor(connectionId);
     final failureCount = (state.execChannelBackoff?.failureCount ?? 0) + 1;
-    final delay = resolveTmuxExecChannelBackoffDelay(failureCount);
+    final delay = _execChannelBackoff(failureCount);
     state.execChannelBackoff = _TmuxExecChannelBackoff(
       failureCount: failureCount,
       cooldownUntil: (_execChannelNow?.call() ?? DateTime.now()).add(delay),
@@ -1977,7 +1984,7 @@ class TmuxService implements RemoteMultiplexerService {
     final suppressions = _connectionStates[key.connectionId]
         ?.windowSwitchActivitySuppressions[key];
     if (suppressions == null || suppressions.isEmpty) return windows;
-    final now = DateTime.now();
+    final now = _now();
     final obsolete = <_TmuxWindowSwitchActivitySuppression>{};
     final filtered = windows
         .map((window) {

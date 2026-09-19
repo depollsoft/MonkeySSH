@@ -3,14 +3,14 @@ title = 'Flutty gitleaks configuration'
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = 'Ignore known false positives: generated Podfile checksums, encryption-key identifier strings, and the OpenSSH private-key format marker documented and asserted in the in-app key generator and its test.'
 condition = 'AND'
 paths = [
   '''(?:^|/)(?:ios|macos)/Podfile\.lock$''',
   '''(?:^|/)lib/data/security/secret_encryption_service\.dart$''',
   '''(?:^|/)test/unit/secret_encryption_service_test\.dart$''',
-  '''(?:^|/)test/data/repositories/ssh_key_repository_test\.dart$''',
+  '''(?:^|/)test/data/repositories/ssh_key_repository_(?:test|cases)\.dart$''',
   '''(?:^|/)lib/domain/services/openssh_key_generator\.dart$''',
   '''(?:^|/)test/domain/services/openssh_key_generator_test\.dart$''',
 ]
@@ -20,4 +20,10 @@ regexes = [
   '''flutty_db_(?:encryption|secret)_key_v1''',
   '''privateKey: 'fixture-(?:open-ssh|rsa|ec)-material(?:-[0-9]+)?\.\.\.',''',
   '''-----BEGIN OPENSSH PRIVATE KEY-----''',
+]
+
+[[allowlists]]
+description = 'Throwaway OpenSSH test keys committed as fixtures so key_service and ssh_service tests do not generate keys per test. They are generated for this repository only and grant access to nothing.'
+paths = [
+  '''(?:^|/)test/helpers/ssh_key_fixtures\.dart$''',
 ]

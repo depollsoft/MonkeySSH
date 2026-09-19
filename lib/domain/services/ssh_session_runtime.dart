@@ -74,7 +74,11 @@ class _SshSessionRuntime {
   Terminal? _terminal;
 
   static const _defaultTerminalOutputFlushInterval = Duration(milliseconds: 8);
-  static const _monkeyMuxReplayCoalesceQuietPeriod = Duration(milliseconds: 24);
+  static const _defaultMonkeyMuxReplayCoalesceQuietPeriod = Duration(
+    milliseconds: 24,
+  );
+  Duration _monkeyMuxReplayCoalesceQuietPeriod =
+      _defaultMonkeyMuxReplayCoalesceQuietPeriod;
   // The replay that follows a window switch is coalesced so it renders as one
   // batch instead of janky pieces. The quiet-period timer resets on every
   // chunk, and a large image/content replay arrives as a continuous stream of
@@ -1210,6 +1214,14 @@ if(!$__flResolved){$__flResolved='cmd'}
   @visibleForTesting
   set debugTerminalOutputFlushInterval(Duration value) =>
       _terminalOutputFlushInterval = value;
+
+  @visibleForTesting
+  Duration get debugMonkeyMuxReplayCoalesceQuietPeriod =>
+      _monkeyMuxReplayCoalesceQuietPeriod;
+
+  @visibleForTesting
+  set debugMonkeyMuxReplayCoalesceQuietPeriod(Duration value) =>
+      _monkeyMuxReplayCoalesceQuietPeriod = value;
 
   @visibleForTesting
   void debugFlushPendingTerminalOutput() =>

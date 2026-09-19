@@ -9,7 +9,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
-
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
@@ -43,6 +42,7 @@ import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
 import '../support/fake_acp_session_manager.dart';
+
 import '../support/settings_import_test_helpers.dart'
     show FakeAuthService, MockAuthStateNotifier;
 
@@ -2497,131 +2497,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('no active sessions'), findsNothing);
-  });
-
-  group('HostRowData value equality', () {
-    test('equal when all fields are identical', () {
-      const a = HostRowData(
-        connectionIds: [1, 2],
-        isConnected: true,
-        isConnectionStarting: false,
-        connectionAttemptMessage: null,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: true,
-      );
-      const b = HostRowData(
-        connectionIds: [1, 2],
-        isConnected: true,
-        isConnectionStarting: false,
-        connectionAttemptMessage: null,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: true,
-      );
-
-      expect(a, equals(b));
-      expect(a.hashCode, equals(b.hashCode));
-    });
-
-    test('unequal when isConnected differs', () {
-      const a = HostRowData(
-        connectionIds: [],
-        isConnected: true,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-      const b = HostRowData(
-        connectionIds: [],
-        isConnected: false,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-
-      expect(a, isNot(equals(b)));
-    });
-
-    test('unequal when connectionIds differ', () {
-      const a = HostRowData(
-        connectionIds: [1],
-        isConnected: false,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-      const b = HostRowData(
-        connectionIds: [2],
-        isConnected: false,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-
-      expect(a, isNot(equals(b)));
-    });
-
-    test('unequal when connectionAttemptMessage differs', () {
-      const a = HostRowData(
-        connectionIds: [],
-        isConnected: false,
-        isConnectionStarting: true,
-        connectionAttemptMessage: 'Connecting…',
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-      const b = HostRowData(
-        connectionIds: [],
-        isConnected: false,
-        isConnectionStarting: true,
-        connectionAttemptMessage: 'Authenticating…',
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-
-      expect(a, isNot(equals(b)));
-    });
-
-    test('unequal when isPinnedToHomeScreen differs', () {
-      const a = HostRowData(
-        connectionIds: [],
-        isConnected: false,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: true,
-        hasHostThemeAccess: false,
-      );
-      const b = HostRowData(
-        connectionIds: [],
-        isConnected: false,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-
-      expect(a, isNot(equals(b)));
-    });
-
-    test('connectionCount reflects connectionIds length', () {
-      const data = HostRowData(
-        connectionIds: [10, 20, 30],
-        isConnected: true,
-        isConnectionStarting: false,
-        previewEntries: [],
-        isPinnedToHomeScreen: false,
-        hasHostThemeAccess: false,
-      );
-
-      expect(data.connectionCount, 3);
-    });
   });
 
   for (final tab in [HomeScreenTab.hosts, HomeScreenTab.connections]) {

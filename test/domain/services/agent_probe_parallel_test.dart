@@ -106,7 +106,7 @@ while (@(Get-ChildItem -LiteralPath ${powerShellSingleQuote(root.path)} -Filter 
 touch '${root.path}/'"\$2".ready
 attempt=0
 while [ "\$(find '${root.path}' -name '*.ready' | wc -l | tr -d ' ')" -lt 2 ]; do
-  attempt=\$((attempt+1)); [ "\$attempt" -lt 30 ] || exit 1; sleep 0.1
+  attempt=\$((attempt+1)); [ "\$attempt" -lt 300 ] || exit 1; sleep 0.01
 done
 echo 1.2.3
 ''');

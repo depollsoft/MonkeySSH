@@ -4,6 +4,28 @@
 - Use JDK 17 for Android/Gradle builds in this repo. JDK 25 fails in the Android/Kotlin toolchain with `IllegalArgumentException: 25.0.1`.
 - On macOS, set `JAVA_HOME="$(/usr/libexec/java_home -v 17)"` before running `flutter build ...` or `./gradlew ...` for Android.
 
+## What CI runs on which event
+
+`ci.yml` fires on `pull_request`, `merge_group` and `push` to `main`, but the three
+runs are deliberately not equivalent — the GitHub Team plan caps concurrent macOS
+jobs at 5, and `preview-ios.yml` holds one of them for the same commit.
+
+- **`merge_group`** is the gating run and the only one that does everything an
+  affected change needs. Treat a merge-queue failure as the real failure.
+- **`pull_request`** skips `build-ios` / `build-macos` / `build-windows` unless the
+  platform's own native directory changed (`<platform>_native` in
+  `scripts/ci_changes.py`). A `pubspec.lock` bump alone does not build them on a PR;
+  the merge queue does. Android and Linux build as before.
+- **`push` to `main`** is cache warming only. Actions caches written from a
+  `gh-readonly-queue/...` ref are scoped to that throwaway ref, so only a run on
+  `main` can write caches that later PRs restore. It runs `changes`,
+  `monkeymux-assets`, and — when a dependency lockfile moved (`deps`) —
+  `build-ios` / `build-macos`. Every other job carries `github.event_name != 'push'`.
+
+MonkeyMux payload changes set `go` and `run_check` but not the platform builds: the
+Go binary ships as an opaque blob under `assets/monkeymux/`, and `go-test` plus the
+`monkeymux-assets` build already validate it.
+
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.

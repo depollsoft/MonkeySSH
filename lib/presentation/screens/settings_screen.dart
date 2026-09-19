@@ -27,6 +27,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
+import 'settings_labels.dart';
 import 'transfer_screen.dart';
 
 const _githubUrl = 'https://github.com/depollsoft/MonkeySSH';
@@ -150,13 +151,7 @@ class _SubscriptionSection extends ConsumerWidget {
                 : Icons.workspace_premium_outlined,
           ),
           title: const Text('Subscription'),
-          subtitle: Text(
-            state.isProUnlocked
-                ? state.isLifetimeUnlocked
-                      ? 'Lifetime — unlocked on this device'
-                      : 'Unlocked on this device'
-                : 'Unlock transfers, automation, and agent launch presets',
-          ),
+          subtitle: Text(settingsSubscriptionLabel(state)),
           trailing: state.isProUnlocked
               ? PremiumBadge(
                   label: state.isLifetimeUnlocked ? 'Lifetime' : 'Active',
@@ -254,7 +249,7 @@ class _AppearanceSection extends ConsumerWidget {
         ListTile(
           leading: const Icon(Icons.palette_outlined),
           title: const Text('Theme'),
-          subtitle: Text(_themeModeLabel(themeMode)),
+          subtitle: Text(settingsThemeModeLabel(themeMode)),
           onTap: () => _showThemeDialog(context, ref, themeMode),
         ),
         _SettingSwitch(
@@ -270,12 +265,6 @@ class _AppearanceSection extends ConsumerWidget {
     );
   }
 
-  String _themeModeLabel(ThemeMode mode) => switch (mode) {
-    ThemeMode.light => 'Light',
-    ThemeMode.dark => 'Dark',
-    ThemeMode.system => 'System default',
-  };
-
   void _showThemeDialog(
     BuildContext context,
     WidgetRef ref,
@@ -285,7 +274,7 @@ class _AppearanceSection extends ConsumerWidget {
     title: 'Theme',
     current: current,
     options: const [ThemeMode.system, ThemeMode.light, ThemeMode.dark],
-    label: _themeModeLabel,
+    label: settingsThemeModeLabel,
     onSelected: ref.read(themeModeNotifierProvider.notifier).setThemeMode,
   );
 }
@@ -348,10 +337,10 @@ class _SecuritySection extends ConsumerWidget {
             secondary: const Icon(Icons.fingerprint),
             title: const Text('Biometric authentication'),
             subtitle: Text(
-              _biometricSubtitle(
+              settingsBiometricSubtitle(
                 isAuthKnown: isAuthKnown,
                 isAuthConfigured: isAuthConfigured,
-                state: state,
+                availability: state.availability,
               ),
             ),
             value: state.isEnabled && state.canAuthenticateWithBiometrics,
@@ -385,13 +374,11 @@ class _SecuritySection extends ConsumerWidget {
           leading: const Icon(Icons.timer_outlined),
           title: const Text('Auto-lock timeout'),
           subtitle: Text(
-            !isAuthKnown
-                ? 'Checking security status'
-                : isAuthConfigured
-                ? autoLockTimeout == 0
-                      ? 'Disabled'
-                      : '$autoLockTimeout minute${autoLockTimeout == 1 ? '' : 's'}'
-                : 'Set up app lock first',
+            settingsAutoLockLabel(
+              isAuthKnown: isAuthKnown,
+              isAuthConfigured: isAuthConfigured,
+              autoLockTimeout: autoLockTimeout,
+            ),
           ),
           enabled: isAuthConfigured,
           onTap: isAuthConfigured
@@ -400,30 +387,6 @@ class _SecuritySection extends ConsumerWidget {
         ),
       ],
     );
-  }
-
-  String _biometricSubtitle({
-    required bool isAuthKnown,
-    required bool isAuthConfigured,
-    required _BiometricSettingsState state,
-  }) {
-    if (!isAuthKnown) {
-      return 'Checking security status';
-    }
-    if (!state.isBiometricHardwareSupported) {
-      return state.isDeviceAuthSupported
-          ? 'Device lock is available, but no biometric hardware was reported'
-          : 'Biometric hardware not supported on this device';
-    }
-    if (!isAuthConfigured) {
-      return state.needsBiometricEnrollment
-          ? 'Enroll fingerprint or face in system settings before enabling'
-          : 'Set up app lock first';
-    }
-    if (state.canAuthenticateWithBiometrics) {
-      return 'Use fingerprint or face to unlock';
-    }
-    return 'Enroll fingerprint or face in system settings, then return and re-check';
   }
 
   void _showChangePinDialog(BuildContext context, WidgetRef ref) {
@@ -644,7 +607,7 @@ class _PrivacySection extends ConsumerWidget {
           secondary: const Icon(Icons.insights_outlined),
           title: const Text('Share analytics and crash reports'),
           subtitle: Text(
-            _telemetrySubtitle(
+            settingsTelemetrySubtitle(
               status: telemetryService.status,
               enabled: telemetryCollectionEnabled,
             ),
@@ -662,27 +625,6 @@ class _PrivacySection extends ConsumerWidget {
         ),
       ],
     );
-  }
-
-  String _telemetrySubtitle({
-    required TelemetryServiceStatus status,
-    required bool enabled,
-  }) {
-    if (status != TelemetryServiceStatus.ready) {
-      return switch (status) {
-        TelemetryServiceStatus.disabledByBuild =>
-          'Not available in this build.',
-        TelemetryServiceStatus.unsupportedPlatform =>
-          'Not available on this platform.',
-        TelemetryServiceStatus.initializationFailed =>
-          'Unavailable because Firebase could not initialize.',
-        TelemetryServiceStatus.ready => '',
-      };
-    }
-    if (!enabled) {
-      return 'Off. When on, MonkeySSH shares anonymous feature usage and sanitized crash reports.';
-    }
-    return 'On. Never includes hostnames, usernames, commands, terminal output, paths, clipboard, or credentials.';
   }
 }
 
@@ -802,7 +744,7 @@ class _TerminalSection extends ConsumerWidget {
         ListTile(
           leading: const Icon(Icons.text_fields),
           title: const Text('Cursor style'),
-          subtitle: Text(_cursorStyleLabel(cursorStyle)),
+          subtitle: Text(settingsCursorStyleLabel(cursorStyle)),
           onTap: () => _showCursorStyleDialog(context, ref, cursorStyle),
         ),
         _SettingSwitch(
@@ -981,13 +923,6 @@ class _TerminalSection extends ConsumerWidget {
     }
   }
 
-  String _cursorStyleLabel(String style) => switch (style) {
-    'block' => 'Block',
-    'underline' => 'Underline',
-    'bar' => 'Bar',
-    _ => style,
-  };
-
   void _showFontSizeDialog(
     BuildContext context,
     WidgetRef ref,
@@ -1088,7 +1023,7 @@ class _TerminalSection extends ConsumerWidget {
     title: 'Cursor style',
     current: current,
     options: const ['block', 'underline', 'bar'],
-    label: _cursorStyleLabel,
+    label: settingsCursorStyleLabel,
     onSelected: ref.read(cursorStyleNotifierProvider.notifier).setCursorStyle,
   );
 }
@@ -1197,7 +1132,7 @@ class _AboutSection extends ConsumerWidget {
           leading: const Icon(Icons.info_outline),
           title: const Text('App version'),
           subtitle: Text(
-            _versionLabel(appMetadata),
+            settingsVersionLabel(appMetadata),
             style: FluttyTheme.monoStyle.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -1235,19 +1170,13 @@ class _AboutSection extends ConsumerWidget {
           onTap: () => showLicensePage(
             context: context,
             applicationName: appName,
-            applicationVersion: _versionLabel(appMetadata),
+            applicationVersion: settingsVersionLabel(appMetadata),
           ),
         ),
         const MessageOfTheDay(),
       ],
     );
   }
-
-  String _versionLabel(AsyncValue<AppMetadata> appMetadata) => appMetadata.when(
-    data: (value) => value.versionLabel,
-    loading: () => 'Loading...',
-    error: (_, _) => 'Unavailable',
-  );
 
   Future<void> _copyGitHubUrl(BuildContext context) async {
     await Clipboard.setData(const ClipboardData(text: _githubUrl));
