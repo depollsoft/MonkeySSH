@@ -19,6 +19,14 @@ String _tmuxSendKeysHex(String value) => value.codeUnits
     .join(' ');
 
 void main() {
+  test('keeps production exec channel backoff schedule', () {
+    expect(resolveTmuxExecChannelBackoffDelay(1), const Duration(seconds: 2));
+    expect(resolveTmuxExecChannelBackoffDelay(2), const Duration(seconds: 4));
+    expect(resolveTmuxExecChannelBackoffDelay(3), const Duration(seconds: 8));
+    expect(resolveTmuxExecChannelBackoffDelay(4), const Duration(seconds: 16));
+    expect(resolveTmuxExecChannelBackoffDelay(5), const Duration(seconds: 30));
+  });
+
   setUpAll(() {
     registerFallbackValue(Uint8List(0));
   });
@@ -945,9 +953,13 @@ void main() {
     test('Copilot metadata refreshes wait for exec channel backoff', () async {
       final client = _MockSshClient();
       final session = _buildSession(client, connectionId: 35);
-      const service = TmuxService(
-        agentSessionMetadataRefreshDebounce: Duration(milliseconds: 10),
+      var now = DateTime.utc(2026);
+      final service = TmuxService(
+        execChannelNow: () => now,
+        execChannelBackoff: (_) => const Duration(milliseconds: 1),
+        agentSessionMetadataRefreshDebounce: const Duration(milliseconds: 10),
       );
+      addTearDown(() => service.clearCache(session.connectionId));
       var metadataAttempts = 0;
 
       _stubExec(client, (command) async {
@@ -979,7 +991,9 @@ void main() {
       );
 
       await service.listWindows(session, 'main');
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+      // Keep the cooldown clock fixed while real timers exercise deferred
+      // refreshes, so no retry can race the assertions below.
+      await Future<void>.delayed(const Duration(milliseconds: 30));
 
       expect(
         metadataAttempts,
@@ -987,7 +1001,8 @@ void main() {
         reason: 'metadata refreshes should not hammer SSH during backoff',
       );
 
-      await Future<void>.delayed(const Duration(milliseconds: 1800));
+      now = now.add(const Duration(milliseconds: 1));
+      await Future<void>.delayed(const Duration(milliseconds: 80));
 
       expect(metadataAttempts, 2);
       expect(

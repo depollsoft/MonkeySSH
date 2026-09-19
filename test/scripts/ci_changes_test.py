@@ -40,6 +40,10 @@ class ClassificationTest(unittest.TestCase):
                 result = self.assert_platforms([path], ['windows'])
                 self.assertTrue(result['run_check'])
                 self.assertFalse(result['go'])
+                # These live outside windows/, but they are the reason the
+                # Windows build runs, so they must survive the pull_request
+                # gate that requires a native change.
+                self.assertTrue(result['windows_native'])
 
     def test_release_and_workflow_tooling_do_not_require_flutter(self):
         for path in [
@@ -60,6 +64,8 @@ class ClassificationTest(unittest.TestCase):
             with self.subTest(platform=platform):
                 result = self.assert_platforms([f'{platform}/native/source'], [platform])
                 self.assertTrue(result['run_check'])
+                self.assertEqual({p for p in changes.PLATFORMS if result[f'{p}_native']},
+                                 {platform})
 
     def test_shared_dependencies_assets_and_ci_changes_build_every_platform(self):
         for path in [
@@ -73,12 +79,43 @@ class ClassificationTest(unittest.TestCase):
                 result = self.assert_platforms([path], changes.PLATFORMS)
                 self.assertTrue(result['run_check'])
 
-    def test_helper_inputs_also_run_go_tests(self):
+    def test_shared_inputs_are_not_native_changes(self):
+        # `<platform>` fires on shared inputs; `<platform>_native` must not, or
+        # the pull_request gate on the Apple/Windows builds means nothing.
+        for path in ['pubspec.yaml', 'pubspec.lock', 'assets/version_codenames.json',
+                     '.github/workflows/ci.yml', 'scripts/ci_changes.py',
+                     'third_party/xterm/lib/src/terminal.dart',
+                     'ios/fastlane/Fastfile', 'macos/fastlane/Deliverfile']:
+            with self.subTest(path=path):
+                result = changes.classify([path])
+                self.assertFalse(any(result[f'{p}_native'] for p in changes.PLATFORMS))
+
+    def test_dependency_locks_are_flagged_for_apple_cache_warming(self):
+        # These are exactly the files the Apple compilation cache keys hash, so
+        # a push that moves one still warms build-ios/build-macos from main.
+        for path, platforms in [
+            ('pubspec.lock', changes.PLATFORMS),
+            ('ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', ['ios']),
+            ('macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', ['macos']),
+        ]:
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).exists(), path)
+                result = self.assert_platforms([path], platforms)
+                self.assertTrue(result['deps'])
+        for path in ['pubspec.yaml', 'lib/main.dart', 'ios/Runner/AppDelegate.swift']:
+            with self.subTest(path=path):
+                self.assertFalse(changes.classify([path])['deps'])
+
+    def test_helper_inputs_run_go_tests_without_the_platform_builds(self):
+        # The payload ships as an opaque blob under assets/monkeymux/, so it
+        # cannot break a native toolchain: go-test and the monkeymux-assets
+        # build already validate it. It still needs the Dart checks.
         for path in [*changes.PAYLOAD_SCRIPTS, 'remote/monkeymux/go.mod',
                      'remote/monkeymux/conpty/ConPTY.dll', 'remote/monkeymux/main.go']:
             with self.subTest(path=path):
-                result = self.assert_platforms([path], changes.PLATFORMS)
+                result = self.assert_platforms([path], [])
                 self.assertTrue(result['go'])
+                self.assertTrue(result['run_check'])
 
     def test_daemon_tests_only_run_go_and_readme_is_documentation(self):
         for path in ['remote/monkeymux/main_test.go', 'remote/monkeymux/internal/example_test.go']:
@@ -92,7 +129,7 @@ class ClassificationTest(unittest.TestCase):
         for path in ['remote/monkeymux/conpty/example_test.go',
                      'remote/monkeymux/conpty/README.md', 'remote/monkeymux/unknown.input']:
             with self.subTest(path=path):
-                result = self.assert_platforms([path], changes.PLATFORMS)
+                result = self.assert_platforms([path], [])
                 self.assertTrue(result['go'])
                 self.assertTrue(result['run_check'])
 
@@ -103,13 +140,24 @@ class ClassificationTest(unittest.TestCase):
         result = self.assert_platforms(['remote/monkeymux/README.md', 'ios/native.swift'], ['ios'])
         self.assertFalse(result['go'])
         self.assertTrue(result['run_check'])
-        self.assert_platforms(['remote/monkeymux/main_test.go', 'remote/monkeymux/main.go'],
-                              changes.PLATFORMS)
+        result = self.assert_platforms(
+            ['remote/monkeymux/main_test.go', 'remote/monkeymux/main.go'], [])
+        self.assertTrue(result['go'])
+        self.assertTrue(result['run_check'])
 
     def test_vendored_terminal_inputs_keep_test_coverage(self):
         for path in ['third_party/xterm/pubspec.yaml', 'third_party/xterm/pubspec.lock',
                      'third_party/xterm/lib/src/terminal.dart']:
-            self.assertTrue(changes.classify([path])['run_check'])
+            with self.subTest(path=path):
+                result = changes.classify([path])
+                self.assertTrue(result['run_check'])
+                # terminal-test is gated on third_party alone: the vendored
+                # package has no path dependency on lib/.
+                self.assertTrue(result['third_party'])
+        for path in ['lib/main.dart', 'test/widget/example_test.dart', 'pubspec.yaml',
+                     'remote/monkeymux/main.go']:
+            with self.subTest(path=path):
+                self.assertFalse(changes.classify([path])['third_party'])
 
 
 class GitDiffTest(unittest.TestCase):
@@ -157,7 +205,9 @@ class GitDiffTest(unittest.TestCase):
                 self.assertEqual(result['ios'], 'false')
 
     def test_daemon_renames_classify_both_old_and_new_paths(self):
-        for source, target, builds, go in [
+        # The payload never triggers the platform builds, so `run_check` and the
+        # platform outputs diverge for every packaged daemon input.
+        for source, target, run_check, go in [
             ('main.go', 'main_test.go', True, True),
             ('main_test.go', 'main.go', True, True),
             ('main_test.go', 'renamed_test.go', False, True),
@@ -175,8 +225,9 @@ class GitDiffTest(unittest.TestCase):
                 self.git('commit', '-qm', 'rename daemon input')
                 result = self.classify(base=base)
                 self.assertEqual(result['go'], str(go).lower())
-                for output in ['run_check', *changes.PLATFORMS]:
-                    self.assertEqual(result[output], str(builds).lower())
+                self.assertEqual(result['run_check'], str(run_check).lower())
+                for output in changes.PLATFORMS:
+                    self.assertEqual(result[output], 'false')
 
     def resolve_security_commits(self, base, head):
         script = subprocess.check_output(['ruby', '-ryaml', '-e',
@@ -366,6 +417,94 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertIn('terminal-test', jobs['ci']['needs'])
         self.assertEqual(jobs['tooling']['needs'], 'changes')
         self.assertNotIn('monkeymux-assets', jobs['terminal-test']['needs'])
+        # The gate itself must stay unconditional so it reports on pull_request,
+        # merge_group and the cache-warm push run alike; `skipped` counts as
+        # success there, which is what keeps the push run green.
+        self.assertNotIn('push', jobs['ci']['if'])
+        self.assertIn('skipped)', jobs['ci']['steps'][0]['run'])
+
+    def test_push_to_main_only_warms_caches(self):
+        jobs = self.workflows['ci.yml']['jobs']
+        warm = {'changes', 'monkeymux-assets', 'ci', 'build-ios', 'build-macos'}
+        for name, job in jobs.items():
+            with self.subTest(job=name):
+                if name in warm:
+                    continue
+                self.assertIn("github.event_name != 'push'", job['if'])
+        # The payload cache is written from main, so that job keeps running.
+        self.assertNotIn('push', jobs['monkeymux-assets']['if'])
+        # The Apple compilation caches are keyed on the dependency lockfiles and
+        # can only be written from main, so a lockfile bump still builds there.
+        for platform in ['ios', 'macos']:
+            condition = jobs[f'build-{platform}']['if']
+            self.assertIn(
+                "(github.event_name != 'push' || needs.changes.outputs.deps == 'true')",
+                condition)
+
+    def test_pull_requests_skip_apple_and_windows_builds_without_native_changes(self):
+        jobs = self.workflows['ci.yml']['jobs']
+        outputs = self.workflows['ci.yml']['jobs']['changes']['outputs']
+        for platform in ['ios', 'macos', 'windows']:
+            with self.subTest(platform=platform):
+                self.assertEqual(outputs[f'{platform}_native'],
+                                 '${{ steps.filter.outputs.' + platform + '_native }}')
+                self.assertIn(
+                    "(github.event_name != 'pull_request' || "
+                    f"needs.changes.outputs.{platform}_native == 'true')",
+                    jobs[f'build-{platform}']['if'])
+        # Android and Linux do not use the 5-slot macOS pool and stay unchanged.
+        for platform in ['android', 'linux']:
+            self.assertNotIn('pull_request', jobs[f'build-{platform}']['if'])
+        self.assertEqual(outputs['third_party'], '${{ steps.filter.outputs.third_party }}')
+        self.assertEqual(outputs['deps'], '${{ steps.filter.outputs.deps }}')
+        self.assertIn("needs.changes.outputs.third_party == 'true'",
+                      jobs['terminal-test']['if'])
+
+    def test_shards_use_the_whole_runner_and_no_build_artifacts_are_uploaded(self):
+        jobs = self.workflows['ci.yml']['jobs']
+        self.assertEqual(jobs['test']['strategy']['matrix']['shard-index'], [0, 1, 2, 3, 4, 5])
+        self.assertIn('Shard ${{ matrix.shard-index }}/6', jobs['test']['name'])
+        shard = next(s for s in jobs['test']['steps'] if s.get('name') == 'Run tests')
+        self.assertIn('-j 4 --total-shards 6', shard['run'])
+        # Nothing downstream consumes the compiled builds; only the diagnostics
+        # logs are worth retaining.
+        uploads = [step['with']['name'] for job in jobs.values()
+                   for step in job.get('steps', [])
+                   if step.get('uses', '').startswith('actions/upload-artifact@')
+                   and 'name' in step.get('with', {})]
+        self.assertEqual(sorted(uploads), [
+            'ci-ios-build-log', 'ci-macos-build-log',
+            'flutter-test-failures-${{ matrix.shard-index }}',
+            'monkeymux-assets', 'terminal-test-failures',
+        ])
+
+    def test_flutter_setup_is_shared_and_pins_the_action(self):
+        action = json.loads(subprocess.check_output(
+            ['ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))',
+             str(ROOT / '.github/actions/flutter-setup/action.yml')], text=True))
+        steps = action['runs']['steps']
+        self.assertEqual(steps[0]['uses'],
+                         'subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2')
+        self.assertEqual(steps[1]['run'], 'flutter pub get')
+        self.assertEqual(steps[2]['if'], "inputs.sqlite-targets != ''")
+        self.assertEqual(action['inputs']['cache']['default'], 'true')
+        self.assertEqual(action['inputs']['pub-cache']['default'], 'true')
+        jobs = self.workflows['ci.yml']['jobs']
+        users = {name for name, job in jobs.items() for step in job.get('steps', [])
+                 if step.get('uses') == './.github/actions/flutter-setup'}
+        self.assertEqual(users, {'check', 'test', 'build-android', 'build-ios',
+                                 'build-macos', 'build-windows', 'build-linux'})
+        for name, job in jobs.items():
+            for step in job.get('steps', []):
+                if step.get('uses', '').startswith('subosito/flutter-action@'):
+                    # terminal-test runs pub get inside third_party/xterm, so it
+                    # is the one job that is not the setup trio.
+                    self.assertEqual(name, 'terminal-test')
+        windows = next(s for s in jobs['build-windows']['steps']
+                       if s.get('uses') == './.github/actions/flutter-setup')
+        # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is safe.
+        self.assertEqual(windows['with']['cache'], 'false')
+        self.assertEqual(windows['with']['pub-cache'], 'true')
 
     def test_payload_cache_can_only_be_saved_by_push_to_main_ci(self):
         for filename, workflow in self.workflows.items():

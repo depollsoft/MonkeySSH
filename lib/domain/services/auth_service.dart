@@ -75,9 +75,13 @@ class BiometricAvailability {
 /// Service for handling app authentication (PIN/biometric).
 class AuthService {
   /// Creates a new [AuthService].
-  AuthService({FlutterSecureStorage? storage, LocalAuthentication? localAuth})
-    : _storage = storage ?? _secureStorage,
-      _localAuth = localAuth ?? LocalAuthentication();
+  AuthService({
+    FlutterSecureStorage? storage,
+    LocalAuthentication? localAuth,
+    int pinKdfIterations = 120000,
+  }) : _pinKdfIterations = pinKdfIterations,
+       _storage = storage ?? _secureStorage,
+       _localAuth = localAuth ?? LocalAuthentication();
 
   final FlutterSecureStorage _storage;
   final LocalAuthentication _localAuth;
@@ -87,7 +91,7 @@ class AuthService {
   static const _authEnabledKey = 'flutty_auth_enabled';
   static const _biometricEnabledKey = 'flutty_biometric_enabled';
   static const _pinKdfVersion = 1;
-  static const _pinKdfIterations = 120000;
+  final int _pinKdfIterations;
   static const _pinKdfBits = 256;
   static const _pinHashLength = _pinKdfBits ~/ 8;
   static const _pinSaltLength = 16;

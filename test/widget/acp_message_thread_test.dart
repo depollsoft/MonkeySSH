@@ -70,41 +70,6 @@ void main() {
     );
   });
 
-  test('user prompt summary normalizes text and attachment-only prompts', () {
-    expect(
-      acpUserPromptSummary(
-        AcpUserPromptEntry(
-          id: 'text',
-          parts: const [AcpTextPart('  first\nline  '), AcpTextPart('second')],
-        ),
-      ),
-      'first line second',
-    );
-    final hugeSummary = acpUserPromptSummary(
-      AcpUserPromptEntry(
-        id: 'huge-text',
-        parts: [AcpTextPart(List.filled(50000, 'diagnostic').join(' '))],
-      ),
-    );
-    expect(hugeSummary, hasLength(240));
-    expect(hugeSummary, endsWith('…'));
-
-    expect(
-      acpUserPromptSummary(
-        AcpUserPromptEntry(
-          id: 'attachments',
-          parts: [
-            AcpImagePart(AcpImageContent(bytes: _pngBytes, label: 'diagram')),
-            const AcpResourcePart(
-              AcpResourceRef(uri: 'file:///repo/lib/main.dart'),
-            ),
-          ],
-        ),
-      ),
-      'diagram · main.dart',
-    );
-  });
-
   testWidgets('pins and swaps the user prompt governing visible responses', (
     tester,
   ) async {

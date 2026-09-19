@@ -1,3 +1,8 @@
+import 'dart:async';
+
+// fake_async is supplied transitively by flutter_test.
+// ignore: depend_on_referenced_packages
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 
@@ -54,23 +59,26 @@ void main() {
       expect(lines, ['second', 'third']);
     });
 
-    test('coalesces listener notifications', () async {
-      final log = DiagnosticsLogService(enabled: true);
-      var notificationCount = 0;
-      log.addListener(() => notificationCount += 1);
-      addTearDown(log.dispose);
+    test(
+      'coalesces listener notifications',
+      () => _withFakeTime((async) async {
+        final log = DiagnosticsLogService(enabled: true);
+        var notificationCount = 0;
+        log.addListener(() => notificationCount += 1);
+        addTearDown(log.dispose);
 
-      log
-        ..info('test', 'first')
-        ..info('test', 'second')
-        ..info('test', 'third');
+        log
+          ..info('test', 'first')
+          ..info('test', 'second')
+          ..info('test', 'third');
 
-      expect(notificationCount, 0);
+        expect(notificationCount, 0);
 
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+        async.elapse(const Duration(milliseconds: 300));
 
-      expect(notificationCount, 1);
-    });
+        expect(notificationCount, 1);
+      }),
+    );
 
     test('exports a privacy notice with entries', () {
       final log = DiagnosticsLogService(
@@ -85,5 +93,16 @@ void main() {
       expect(exported, contains('Privacy:'));
       expect(exported, contains('tmux.watch restart_scheduled attempt=2'));
     });
+  });
+}
+
+// Keep mocked async work in the fake zone and fail if an assertion-bearing
+// continuation is left waiting for an event this test did not drive.
+void _withFakeTime(Future<void> Function(FakeAsync async) body) {
+  fakeAsync((async) {
+    var completed = false;
+    unawaited(body(async).then((_) => completed = true));
+    async.flushMicrotasks();
+    expect(completed, isTrue, reason: 'Fake-time test must complete all work');
   });
 }

@@ -32,6 +32,7 @@ typedef _GenerateParams = ({
   SshKeyType keyType,
   String comment,
   String? passphrase,
+  int kdfRounds,
 });
 
 /// Generated OpenSSH private key and its encoded public key.
@@ -50,10 +51,12 @@ Future<GeneratedOpenSshKey> generateOpenSshKey({
   required SshKeyType keyType,
   required String comment,
   String? passphrase,
+  int kdfRounds = 16,
 }) => compute(_generateOpenSshKey, (
   keyType: keyType,
   comment: comment,
   passphrase: passphrase,
+  kdfRounds: kdfRounds,
 ));
 
 Future<GeneratedOpenSshKey> _generateOpenSshKey(_GenerateParams params) async {
@@ -63,17 +66,18 @@ Future<GeneratedOpenSshKey> _generateOpenSshKey(_GenerateParams params) async {
 
   switch (params.keyType) {
     case SshKeyType.ed25519:
-      return _buildEd25519Pem(params.comment, passphrase);
+      return _buildEd25519Pem(params.comment, passphrase, params.kdfRounds);
     case SshKeyType.rsa2048:
-      return _buildRsaPem(2048, params.comment, passphrase);
+      return _buildRsaPem(2048, params.comment, passphrase, params.kdfRounds);
     case SshKeyType.rsa4096:
-      return _buildRsaPem(4096, params.comment, passphrase);
+      return _buildRsaPem(4096, params.comment, passphrase, params.kdfRounds);
   }
 }
 
 Future<GeneratedOpenSshKey> _buildEd25519Pem(
   String comment,
   String? passphrase,
+  int kdfRounds,
 ) async {
   // Force the pure-Dart implementation so generation is deterministic and safe
   // to run inside a background isolate (a platform-backed implementation could
@@ -103,10 +107,16 @@ Future<GeneratedOpenSshKey> _buildEd25519Pem(
     publicKeyBlob: publicKeyBlob,
     privateSection: privateSection.toBytes(),
     passphrase: passphrase,
+    kdfRounds: kdfRounds,
   );
 }
 
-GeneratedOpenSshKey _buildRsaPem(int bits, String comment, String? passphrase) {
+GeneratedOpenSshKey _buildRsaPem(
+  int bits,
+  String comment,
+  String? passphrase,
+  int kdfRounds,
+) {
   final pair = _generateRsaKeyPair(bits);
   final public = pair.publicKey as pc.RSAPublicKey;
   final private = pair.privateKey as pc.RSAPrivateKey;
@@ -145,6 +155,7 @@ GeneratedOpenSshKey _buildRsaPem(int bits, String comment, String? passphrase) {
     publicKeyBlob: publicKeyBlob,
     privateSection: privateSection.toBytes(),
     passphrase: passphrase,
+    kdfRounds: kdfRounds,
   );
 }
 
@@ -169,6 +180,7 @@ GeneratedOpenSshKey _assembleOpenSshKey({
   required Uint8List publicKeyBlob,
   required Uint8List privateSection,
   required String? passphrase,
+  required int kdfRounds,
 }) {
   final encrypt = passphrase != null && passphrase.isNotEmpty;
   final blockSize = encrypt ? 16 : 8;
@@ -191,7 +203,7 @@ GeneratedOpenSshKey _assembleOpenSshKey({
 
   if (encrypt) {
     final salt = _randomBytes(16);
-    const rounds = 16;
+    final rounds = kdfRounds;
     final derived = Uint8List(48); // 32-byte key + 16-byte IV
     final passphraseBytes = Uint8List.fromList(utf8.encode(passphrase));
     final result = bcrypt_pbkdf(

@@ -37,6 +37,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/terminal_theme_picker.dart';
 import '../widgets/unsaved_changes_guard.dart';
+import 'host_edit_logic.dart';
 import 'transfer_screen.dart';
 
 const _hostFieldHelperMaxLines = 4;
@@ -1551,28 +1552,18 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         await _showValidationFailure((
           locationKey: _portProxyNameFieldLocationKey,
           focusNode: _portProxyNameFocusNode,
-          message: '${e.message}. Choose a different proxy domain.',
+          message: hostSaveFailureMessage(e),
         ));
       }
-    } on InvalidDataException {
+    } on InvalidDataException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t save this host. Check the field values and try again.',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(hostSaveFailureMessage(e))));
       }
-    } on FormatException {
+    } on FormatException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t read the saved credentials. Re-enter the password or import the SSH key again.',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(hostSaveFailureMessage(e))));
       }
     } on Exception catch (e) {
       FlutterError.reportError(
@@ -1583,13 +1574,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         ),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t save this host. Check the required fields and try again.',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(hostSaveFailureMessage(e))));
       }
     } finally {
       if (mounted) {
@@ -1649,11 +1635,15 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         label: 'Username',
       ),
     ]) {
-      if (field.controller.text.length > 255) {
+      final lengthError = validateHostFieldLength(
+        field.controller.text,
+        field.label,
+      );
+      if (lengthError != null) {
         return (
           locationKey: field.locationKey,
           focusNode: field.focusNode,
-          message: '${field.label} must be 255 characters or fewer',
+          message: lengthError,
         );
       }
     }
@@ -1764,62 +1754,42 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     }
   }
 
-  /// Carries shared remote-window configuration across a startup-mode change so
-  /// the session name, working directory, and tmux options a user enters for a
-  /// MonkeyMux/tmux startup are retained when switching to (or from) a coding
-  /// agent that reuses the same window backend. Only blank destination fields
-  /// are seeded, so text already entered in the target mode is never
-  /// overwritten.
   void _carryWindowConfigAcrossModeChange(
     HostStartupMode from,
     HostStartupMode to,
   ) {
-    if (from.usesRemoteMultiplexer && to == HostStartupMode.agent) {
-      final agentUnconfigured = _agentTmuxSessionController.text.trim().isEmpty;
-      _seedControllerIfEmpty(
-        _agentTmuxSessionController,
-        _tmuxSessionController.text,
-      );
-      _seedControllerIfEmpty(
-        _agentWorkingDirectoryController,
-        _tmuxWorkingDirectoryController.text,
-      );
-      _seedControllerIfEmpty(
-        _agentTmuxExtraFlagsController,
-        _tmuxExtraFlagsController.text,
-      );
-      if (agentUnconfigured) {
-        _selectedAgentMuxBackend =
-            from.remoteMuxBackend == RemoteMuxBackend.tmux
-            ? RemoteMuxBackend.tmux
-            : RemoteMuxBackend.monkeyMux;
-        _disableAgentTmuxStatusBar = _disableTmuxStatusBar;
-      }
-    } else if (from == HostStartupMode.agent && to.usesRemoteMultiplexer) {
-      final muxUnconfigured = _tmuxSessionController.text.trim().isEmpty;
-      _seedControllerIfEmpty(
-        _tmuxSessionController,
-        _agentTmuxSessionController.text,
-      );
-      _seedControllerIfEmpty(
-        _tmuxWorkingDirectoryController,
-        _agentWorkingDirectoryController.text,
-      );
-      _seedControllerIfEmpty(
-        _tmuxExtraFlagsController,
-        _agentTmuxExtraFlagsController.text,
-      );
-      if (muxUnconfigured) {
-        _disableTmuxStatusBar = _disableAgentTmuxStatusBar;
-      }
+    final carried = carryWindowConfigAcrossModeChange(
+      from: from,
+      to: to,
+      mux: (
+        session: _tmuxSessionController.text,
+        directory: _tmuxWorkingDirectoryController.text,
+        flags: _tmuxExtraFlagsController.text,
+        disableStatusBar: _disableTmuxStatusBar,
+      ),
+      agent: (
+        session: _agentTmuxSessionController.text,
+        directory: _agentWorkingDirectoryController.text,
+        flags: _agentTmuxExtraFlagsController.text,
+        disableStatusBar: _disableAgentTmuxStatusBar,
+      ),
+      agentBackend: _selectedAgentMuxBackend,
+    );
+    void apply(TextEditingController controller, String text) {
+      if (controller.text != text) controller.text = text;
     }
-  }
 
-  /// Copies [value] into [controller] only when the controller is currently
-  /// blank, preserving any text the user already entered in the destination.
-  void _seedControllerIfEmpty(TextEditingController controller, String value) {
-    if (controller.text.trim().isEmpty && value.trim().isNotEmpty) {
-      controller.text = value;
+    if (from.usesRemoteMultiplexer && to == HostStartupMode.agent) {
+      apply(_agentTmuxSessionController, carried.agent.session);
+      apply(_agentWorkingDirectoryController, carried.agent.directory);
+      apply(_agentTmuxExtraFlagsController, carried.agent.flags);
+      _selectedAgentMuxBackend = carried.agentBackend;
+      _disableAgentTmuxStatusBar = carried.agent.disableStatusBar;
+    } else if (from == HostStartupMode.agent && to.usesRemoteMultiplexer) {
+      apply(_tmuxSessionController, carried.mux.session);
+      apply(_tmuxWorkingDirectoryController, carried.mux.directory);
+      apply(_tmuxExtraFlagsController, carried.mux.flags);
+      _disableTmuxStatusBar = carried.mux.disableStatusBar;
     }
   }
 

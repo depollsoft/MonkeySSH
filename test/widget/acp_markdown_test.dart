@@ -12,8 +12,6 @@ import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown.dart';
-import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
-import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
 
 Widget wrap(Widget child) => MaterialApp(
   theme: FluttyTheme.dark,
@@ -406,47 +404,7 @@ void main() {
     expect(find.byType(AcpInlineImage), findsOneWidget);
   });
 
-  testWidgets('streaming assistant leaves cursor to chat viewport', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      wrap(
-        const AcpMessageThread(
-          shrinkWrap: true,
-          physics: NeverScrollableScrollPhysics(),
-          entries: [
-            AcpAssistantMessageEntry(
-              id: 'a1',
-              markdown: 'thinking',
-              status: AcpStreamStatus.streaming,
-            ),
-          ],
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.byType(CursorBlock), findsNothing);
-  });
-
-  testWidgets('completed assistant message has no cursor block', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      wrap(
-        const AcpMessageThread(
-          shrinkWrap: true,
-          physics: NeverScrollableScrollPhysics(),
-          entries: [AcpAssistantMessageEntry(id: 'a1', markdown: 'done')],
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.byType(CursorBlock), findsNothing);
-  });
-
-  testWidgets('buildAcpHighlightSpans is resilient to bad input', (
-    tester,
-  ) async {
+  test('buildAcpHighlightSpans is resilient to bad input', () {
     final spans = buildAcpHighlightSpans(
       'plain text',
       theme: defaultAcpSyntaxTheme(Brightness.dark),

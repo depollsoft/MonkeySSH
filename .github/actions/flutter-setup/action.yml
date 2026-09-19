@@ -1,0 +1,46 @@
+name: Set up Flutter
+description: >-
+  Install the pinned Flutter SDK, fetch packages, and optionally pre-cache the
+  SQLite native assets for a set of build targets.
+
+inputs:
+  flutter-version:
+    description: Flutter SDK version to install.
+    required: true
+  sqlite-targets:
+    description: >-
+      Space-separated cache_sqlite3_native_assets.sh targets. Empty skips the
+      step, which is what the analyzer/tooling jobs want.
+    required: false
+    default: ''
+  cache:
+    description: Persist the ~2.1 GB Flutter SDK archive between runs.
+    required: false
+    default: 'true'
+  pub-cache:
+    description: Persist the ~32 MB pub package cache between runs.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      with:
+        flutter-version: ${{ inputs.flutter-version }}
+        channel: 'stable'
+        cache: ${{ inputs.cache }}
+        pub-cache: ${{ inputs.pub-cache }}
+
+    - name: Install dependencies
+      shell: bash
+      run: flutter pub get
+
+    - name: Cache SQLite native assets
+      if: inputs.sqlite-targets != ''
+      shell: bash
+      env:
+        SQLITE_TARGETS: ${{ inputs.sqlite-targets }}
+      # Word splitting is intentional: the input is a target list.
+      # shellcheck disable=SC2086
+      run: scripts/cache_sqlite3_native_assets.sh $SQLITE_TARGETS

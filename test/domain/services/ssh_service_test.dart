@@ -30,9 +30,8 @@ import 'package:monkeyssh/domain/services/background_ssh_service.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
 import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
-import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
-import 'package:monkeyssh/domain/services/openssh_key_generator.dart';
+
 import 'package:monkeyssh/domain/services/port_forward_browser_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
@@ -43,6 +42,7 @@ import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../helpers/powershell_test_helpers.dart';
+import '../../helpers/ssh_key_fixtures.dart';
 
 const _backgroundSshChannel = MethodChannel(
   'xyz.depollsoft.monkeyssh/ssh_service',
@@ -5314,9 +5314,15 @@ LISTEN ::1:4201
       () async {
         final notifier = container.read(activeSessionsProvider.notifier);
         final providerUpdates = <Map<int, SshConnectionState>>[];
+        Completer<void>? themePublished;
         final subscription = container.listen<Map<int, SshConnectionState>>(
           activeSessionsProvider,
-          (_, next) => providerUpdates.add(next),
+          (_, next) {
+            providerUpdates.add(next);
+            if (themePublished != null && !themePublished.isCompleted) {
+              themePublished.complete();
+            }
+          },
         );
         addTearDown(subscription.close);
 
@@ -5324,10 +5330,11 @@ LISTEN ::1:4201
         expect(result.success, isTrue);
         final connectionId = result.connectionId!;
         providerUpdates.clear();
+        themePublished = Completer<void>();
 
         fakeSshService.getSession(connectionId)!.terminalTheme =
             monkey_themes.TerminalThemes.defaultDarkTheme;
-        await Future<void>.delayed(const Duration(milliseconds: 200));
+        await themePublished.future;
 
         expect(providerUpdates, isNotEmpty);
         expect(
@@ -6660,11 +6667,6 @@ LISTEN ::1:4201
         () async {
           final db = AppDatabase.forTesting(NativeDatabase.memory());
           addTearDown(db.close);
-          final generated = await generateOpenSshKey(
-            keyType: SshKeyType.ed25519,
-            comment: 'test',
-            passphrase: 'correct',
-          );
           var socketCalls = 0;
           final service = SshService(
             knownHostsRepository: KnownHostsRepository(db),
@@ -6678,7 +6680,7 @@ LISTEN ::1:4201
               hostname: 'destination',
               port: 22,
               username: 'test',
-              privateKey: generated.privateKeyPem,
+              privateKey: sshEd25519EncryptedPrivateKey,
               passphrase: passphrase,
               jumpHost: const SshConnectionConfig(
                 hostname: 'jump',
@@ -6701,11 +6703,6 @@ LISTEN ::1:4201
           hostname: 'destination',
           keyBytes: [1, 2, 3],
         );
-        final generated = await generateOpenSshKey(
-          keyType: SshKeyType.ed25519,
-          comment: 'test',
-          passphrase: 'correct',
-        );
         SshKey identity(int id, String pem, String? passphrase) => SshKey(
           id: id,
           name: 'test',
@@ -6722,9 +6719,9 @@ LISTEN ::1:4201
             username: 'test',
             identityKeys: [
               identity(1, 'invalid PEM', null),
-              identity(2, generated.privateKeyPem, null),
-              identity(3, generated.privateKeyPem, 'incorrect'),
-              identity(4, generated.privateKeyPem, 'correct'),
+              identity(2, sshEd25519EncryptedPrivateKey, null),
+              identity(3, sshEd25519EncryptedPrivateKey, 'incorrect'),
+              identity(4, sshEd25519EncryptedPrivateKey, 'correct'),
             ],
           ),
         );
@@ -6732,7 +6729,9 @@ LISTEN ::1:4201
         expect(fixture.capturedIdentities, hasLength(1));
         expect(
           fixture.capturedIdentities!.single.toPublicKey().encode(),
-          generated.publicKeyBlob,
+          SSHKeyPair.fromPem(sshEd25519PrivateKey).single
+              .toPublicKey()
+              .encode(),
         );
         await result.closeAll();
       },

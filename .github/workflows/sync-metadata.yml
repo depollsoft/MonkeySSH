@@ -438,7 +438,14 @@ jobs:
           BLOCKED: ${{ needs.preflight-ios.outputs.blocked }}
           RESULTS: ${{ join(needs.*.result, ',') }}
         run: |
-          if [ "$BLOCKED" = true ] || [[ "$RESULTS" == *failure* ]] || [[ "$RESULTS" == *cancelled* ]]; then
-            echo '::error::Some requested listings could not be updated. Check editability and upload results above.'
+          # An App Store version that is in review or Ready for Distribution has
+          # no editable metadata. That is the normal state between releases, not
+          # a failure, so it must not leave a red workflow on main.
+          if [ "$BLOCKED" = true ]; then
+            echo '::warning::One or more App Store listings had no editable version; their copy was not synced. Re-run this workflow after the next version is created.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$RESULTS" == *failure* ]] || [[ "$RESULTS" == *cancelled* ]]; then
+            echo '::error::One or more metadata uploads failed. Check the upload results above.'
             exit 1
           fi

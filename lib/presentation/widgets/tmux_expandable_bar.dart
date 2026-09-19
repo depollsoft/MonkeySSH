@@ -1,52 +1,5 @@
 part of '../screens/terminal_screen.dart';
 
-/// Whether a window snapshot changed terminal identity or theme context.
-@visibleForTesting
-bool shouldRefreshTmuxThemeAfterWindowChange(
-  List<TmuxWindow> previousWindows,
-  List<TmuxWindow> nextWindows,
-) {
-  if (previousWindows.length != nextWindows.length) {
-    return true;
-  }
-  final byId = <String, TmuxWindow>{};
-  final byIndex = <int, TmuxWindow>{};
-  for (final window in previousWindows) {
-    if (window.id case final id?) byId.putIfAbsent(id, () => window);
-    byIndex.putIfAbsent(window.index, () => window);
-  }
-  for (final nextWindow in nextWindows) {
-    final previousWindow = nextWindow.id == null
-        ? byIndex[nextWindow.index]
-        : byId[nextWindow.id];
-    if (previousWindow == null ||
-        _tmuxWindowRefreshIdentity(previousWindow) !=
-            _tmuxWindowRefreshIdentity(nextWindow)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-({
-  String? currentCommand,
-  AgentLaunchTool? foregroundAgentTool,
-  String? id,
-  int index,
-  bool isActive,
-  int? panePid,
-  String? paneStartCommand,
-})
-_tmuxWindowRefreshIdentity(TmuxWindow window) => (
-  currentCommand: window.currentCommand,
-  foregroundAgentTool: window.foregroundAgentTool,
-  id: window.id,
-  index: window.index,
-  isActive: window.isActive,
-  panePid: window.panePid,
-  paneStartCommand: window.paneStartCommand,
-);
-
 /// Builds the compact native-agent identity used by collapsed mux handles.
 ///
 /// The provider mark identifies the agent and the chat badge distinguishes a
@@ -233,8 +186,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   List<TmuxWindow>? _windows;
   AgentLaunchTool? _preferredLaunchTool;
-  final _seenAlertWindowKeys = <String>{};
-  final Map<String, int> _alertNotificationIdsByWindowKey = <String, int>{};
+  final _alertTracker = TmuxAlertTracker();
   final Set<String> _closingWindowKeys = <String>{};
   late bool _expanded;
   bool _isLoading = true;
@@ -631,23 +583,14 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final previousTerminalModeSignature = activeTmuxWindowTerminalModeSignature(
       _windows,
     );
-    final currentAlerts = <String, TmuxWindow>{
-      for (final window in windows)
-        if (window.hasAlert) _tmuxAlertWindowKey(window): window,
-    };
-    _seenAlertWindowKeys.retainAll(currentAlerts.keys);
-    for (final key in _alertNotificationIdsByWindowKey.keys.toList()) {
-      final window = currentAlerts[key];
-      if (window == null || window.isActive) _clearAlertNotification(key);
-    }
-    var hasNewAlert = false;
-    for (final entry in currentAlerts.entries) {
-      if (entry.value.isActive || !_seenAlertWindowKeys.add(entry.key)) {
-        continue;
-      }
-      hasNewAlert = true;
-      _sendAlertNotification(entry.value, windows);
-    }
+    final hasNewAlert = _alertTracker.applyWindows(
+      windows,
+      hostId: widget.session.hostId,
+      connectionId: widget.session.connectionId,
+      tmuxSessionName: widget.tmuxSessionName,
+      onAlert: _sendAlertNotification,
+      onClear: (id) => unawaited(_localNotifications.clearTmuxAlert(id)),
+    );
     if (hasNewAlert &&
         mounted &&
         !(MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
@@ -847,57 +790,20 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     await widget.onAction(action);
   }
 
-  int _tmuxAlertNotificationId(
-    SshSession session,
-    String tmuxSessionName,
-    String windowKey,
-  ) =>
-      Object.hash(
-        session.hostId,
-        session.connectionId,
-        tmuxSessionName,
-        windowKey,
-      ) &
-      0x7fffffff;
-
-  int _legacyTmuxAlertNotificationId(
-    SshSession session,
-    String tmuxSessionName,
-    int windowIndex,
-  ) =>
-      Object.hash(
-        session.hostId,
-        session.connectionId,
-        tmuxSessionName,
-        windowIndex,
-      ) &
-      0x7fffffff;
-
-  String _tmuxAlertIndexWindowKey(int windowIndex) => 'index:$windowIndex';
-
-  String _tmuxAlertWindowKey(TmuxWindow window) =>
-      window.id != null && isValidTmuxWindowId(window.id!)
-      ? window.id!
-      : _tmuxAlertIndexWindowKey(window.index);
-
-  void _sendAlertNotification(TmuxWindow window, List<TmuxWindow> windows) {
+  void _sendAlertNotification(
+    TmuxWindow window,
+    List<TmuxWindow> windows,
+    int notificationId,
+    String? stableWindowId,
+  ) {
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: widget.tmuxSessionName,
       window: window,
       windows: windows,
     );
-    final windowId = window.id;
-    final stableWindowId = windowId != null && isValidTmuxWindowId(windowId)
-        ? windowId
-        : null;
     final session = widget.session;
     final tmuxSessionName = widget.tmuxSessionName;
     final windowIndex = window.index;
-    final notificationId = stableWindowId != null
-        ? _tmuxAlertNotificationId(session, tmuxSessionName, stableWindowId)
-        : _legacyTmuxAlertNotificationId(session, tmuxSessionName, windowIndex);
-    _alertNotificationIdsByWindowKey[_tmuxAlertWindowKey(window)] =
-        notificationId;
     final payload = TmuxAlertNotificationPayload(
       hostId: session.hostId,
       connectionId: session.connectionId,
@@ -916,19 +822,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
   }
 
-  void _clearAlertNotification(String windowKey) {
-    final notificationId = _alertNotificationIdsByWindowKey.remove(windowKey);
-    if (notificationId != null) {
-      unawaited(_localNotifications.clearTmuxAlert(notificationId));
-    }
-  }
-
-  void _clearSeenAlertNotifications() {
-    _seenAlertWindowKeys.clear();
-    for (final key in _alertNotificationIdsByWindowKey.keys.toList()) {
-      _clearAlertNotification(key);
-    }
-  }
+  void _clearSeenAlertNotifications() => _alertTracker.clear(
+    (id) => unawaited(_localNotifications.clearTmuxAlert(id)),
+  );
 
   void _onVerticalDragUpdate(DragUpdateDetails details) {
     if (_isSidebar) {

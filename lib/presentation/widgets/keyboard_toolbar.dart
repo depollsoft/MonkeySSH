@@ -937,130 +937,198 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     await action(snippet);
   }
 
+  TerminalToolbarDispatcher get _dispatcher => TerminalToolbarDispatcher(
+    terminal: widget.terminal,
+    controller: _controller,
+    refocusTerminal: _refocusTerminal,
+    onSpecialKey: widget.onSpecialKey,
+    onTextInput: widget.onTextInput,
+    onKeyPressed: widget.onKeyPressed,
+  );
   void _consumeOneShot() {
     _controller.consumeOneShot();
     _refocusTerminal();
   }
 
-  void _sendEscape() {
-    HapticFeedback.lightImpact();
-    if (widget.onSpecialKey case final sink?) {
+  void _sendEscape() => _dispatcher.sendEscape();
+  void _sendTab() => _dispatcher.sendTab();
+  void _sendEnter() => _dispatcher.sendEnter();
+  void _sendText(String text) => _dispatcher.sendText(text);
+  void _sendNavigationKey(
+    TerminalKey key,
+    String legacySequence, {
+    bool withHaptic = true,
+    bool consumeOneShot = true,
+  }) => _dispatcher.sendNavigationKey(
+    key,
+    legacySequence,
+    withHaptic: withHaptic,
+    consumeOneShot: consumeOneShot,
+  );
+}
+
+/// Sends toolbar input and consumes modifiers in the same order as the widget.
+class TerminalToolbarDispatcher {
+  /// Creates an input dispatcher with injectable platform feedback and focus.
+  TerminalToolbarDispatcher({
+    required this.terminal,
+    required this.controller,
+    required this.refocusTerminal,
+    this.onSpecialKey,
+    this.onTextInput,
+    this.onKeyPressed,
+    this.lightImpact = HapticFeedback.lightImpact,
+  });
+
+  /// Terminal receiving encoded input when no custom sink is set.
+  final Terminal terminal;
+
+  /// Modifier state consumed by each dispatched key.
+  final KeyboardToolbarController controller;
+
+  /// Restores terminal focus after dispatch.
+  final VoidCallback refocusTerminal;
+
+  /// Optional custom sink for special keys.
+  final void Function(TerminalKey)? onSpecialKey;
+
+  /// Optional custom sink for text input.
+  final ValueChanged<String>? onTextInput;
+
+  /// Notifies the owner after input was dispatched.
+  final VoidCallback? onKeyPressed;
+
+  /// Produces the key press haptic feedback.
+  final Future<void> Function() lightImpact;
+  void _consumeOneShot() {
+    controller.consumeOneShot();
+    refocusTerminal();
+  }
+
+  /// Sends Escape and delays legacy-terminal refocus by 100 milliseconds.
+  void sendEscape() {
+    lightImpact();
+    if (onSpecialKey case final sink?) {
       sink(TerminalKey.escape);
-      widget.onKeyPressed?.call();
-      _controller.consumeOneShot();
-      _refocusTerminal();
+      onKeyPressed?.call();
+      controller.consumeOneShot();
+      refocusTerminal();
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
-      widget.terminal.keyInput(TerminalKey.escape);
+      terminal.keyInput(TerminalKey.escape);
     } else {
-      widget.terminal.textInput('\x1b');
+      terminal.textInput('\x1b');
     }
-    widget.onKeyPressed?.call();
+    onKeyPressed?.call();
     // Clear one-shot modifiers without the immediate refocus that
     // _consumeOneShot() would do. Refocus after a short delay so the
     // remote terminal's escape-sequence parser times out the bare ESC
     // before the next keystroke can arrive and be misinterpreted as
     // Alt+<key>.
-    _controller.consumeOneShot();
-    Future<void>.delayed(const Duration(milliseconds: 100), _refocusTerminal);
+    controller.consumeOneShot();
+    Future<void>.delayed(const Duration(milliseconds: 100), refocusTerminal);
   }
 
-  void _sendTab() {
-    HapticFeedback.lightImpact();
-    if (widget.onSpecialKey case final sink?) {
+  /// Sends Tab with explicit toolbar modifiers.
+  void sendTab() {
+    lightImpact();
+    if (onSpecialKey case final sink?) {
       sink(TerminalKey.tab);
-      widget.onKeyPressed?.call();
+      onKeyPressed?.call();
       _consumeOneShot();
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
-      widget.terminal.keyInput(
+      terminal.keyInput(
         TerminalKey.tab,
-        shift: _controller.isShiftActive,
-        alt: _controller.isAltActive,
-        ctrl: _controller.isCtrlActive,
+        shift: controller.isShiftActive,
+        alt: controller.isAltActive,
+        ctrl: controller.isCtrlActive,
       );
     } else {
-      widget.terminal.textInput(
-        resolveTerminalTabInput(shiftActive: _controller.isShiftActive),
+      terminal.textInput(
+        resolveTerminalTabInput(shiftActive: controller.isShiftActive),
       );
     }
-    widget.onKeyPressed?.call();
+    onKeyPressed?.call();
     _consumeOneShot();
   }
 
-  void _sendEnter() {
-    HapticFeedback.lightImpact();
-    if (widget.onSpecialKey case final sink?) {
+  /// Sends Enter using the terminal enter-encoding policy.
+  void sendEnter() {
+    lightImpact();
+    if (onSpecialKey case final sink?) {
       sink(TerminalKey.enter);
-      widget.onKeyPressed?.call();
+      onKeyPressed?.call();
       _consumeOneShot();
       return;
     }
     sendTerminalEnterInput(
-      widget.terminal,
-      shiftActive: _controller.isShiftActive,
-      altActive: _controller.isAltActive,
-      ctrlActive: _controller.isCtrlActive,
+      terminal,
+      shiftActive: controller.isShiftActive,
+      altActive: controller.isAltActive,
+      ctrlActive: controller.isCtrlActive,
     );
-    widget.onKeyPressed?.call();
+    onKeyPressed?.call();
     _consumeOneShot();
   }
 
-  void _sendText(String text) {
-    HapticFeedback.lightImpact();
-    final textSink = widget.onTextInput;
+  /// Sends text through the custom sink or applies terminal modifiers.
+  void sendText(String text) {
+    lightImpact();
+    final textSink = onTextInput;
     if (textSink != null) {
-      textSink(_controller.isShiftActive ? text.toUpperCase() : text);
-      widget.onKeyPressed?.call();
+      textSink(controller.isShiftActive ? text.toUpperCase() : text);
+      onKeyPressed?.call();
       _consumeOneShot();
       return;
     }
 
     var output = text;
-    if (_controller.isCtrlActive) {
+    if (controller.isCtrlActive) {
       final ctrlCode = _ctrlCodeForCharacter(output);
       if (ctrlCode != null) {
         output = String.fromCharCode(ctrlCode);
       }
     }
-    if (_controller.isAltActive) {
+    if (controller.isAltActive) {
       // Alt/Meta sends ESC prefix.
       output = '\x1b$output';
     }
-    if (_controller.isShiftActive) {
+    if (controller.isShiftActive) {
       output = output.toUpperCase();
     }
 
-    widget.terminal.textInput(output);
-    widget.onKeyPressed?.call();
+    terminal.textInput(output);
+    onKeyPressed?.call();
     _consumeOneShot();
   }
 
-  void _sendNavigationKey(
+  /// Sends a navigation key with optional feedback and modifier consumption.
+  void sendNavigationKey(
     TerminalKey key,
     String legacySequence, {
     bool withHaptic = true,
     bool consumeOneShot = true,
   }) {
     if (withHaptic) {
-      HapticFeedback.lightImpact();
+      lightImpact();
     }
-    if (widget.onSpecialKey case final sink?) {
+    if (onSpecialKey case final sink?) {
       sink(key);
-      widget.onKeyPressed?.call();
+      onKeyPressed?.call();
       if (consumeOneShot) {
         _consumeOneShot();
       }
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
-      final handled = widget.terminal.keyInput(
+      final handled = terminal.keyInput(
         key,
-        shift: _controller.isShiftActive,
-        alt: _controller.isAltActive,
-        ctrl: _controller.isCtrlActive,
+        shift: controller.isShiftActive,
+        alt: controller.isAltActive,
+        ctrl: controller.isCtrlActive,
       );
       if (!handled) {
         return;
@@ -1074,30 +1142,30 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         TerminalKey.arrowRight => true,
         _ => false,
       };
-      widget.terminal.textInput(
+      terminal.textInput(
         isArrow && modifier.isNotEmpty
             ? '\x1b[1;$modifier${legacySequence[2]}'
             : legacySequence,
       );
     }
-    widget.onKeyPressed?.call();
+    onKeyPressed?.call();
     if (consumeOneShot) {
       _consumeOneShot();
     }
   }
 
   bool _shouldUseKittyKeyboardEncoding() =>
-      widget.terminal.kittyKeyboardMode &&
-      (widget.terminal.kittyKeyboardFlags &
+      terminal.kittyKeyboardMode &&
+      (terminal.kittyKeyboardFlags &
               (KittyKeyboardFlags.disambiguateEscapeCodes |
                   KittyKeyboardFlags.reportAllKeysAsEscapeCodes)) !=
           0;
 
   String _getModifierPrefix() {
     var mod = 1;
-    if (_controller.isShiftActive) mod += 1;
-    if (_controller.isAltActive) mod += 2;
-    if (_controller.isCtrlActive) mod += 4;
+    if (controller.isShiftActive) mod += 1;
+    if (controller.isAltActive) mod += 2;
+    if (controller.isCtrlActive) mod += 4;
     return mod > 1 ? '$mod' : '';
   }
 }

@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -23,6 +24,25 @@ bool _sshKeygenAvailable() {
 String _algorithm(Uint8List blob) {
   final length = (blob[0] << 24) | (blob[1] << 16) | (blob[2] << 8) | blob[3];
   return String.fromCharCodes(blob.sublist(4, 4 + length));
+}
+
+int _bcryptRounds(String pem) {
+  final bytes = base64Decode(
+    pem.split('\n').where((line) => !line.startsWith('-----')).join(),
+  );
+  var offset = 'openssh-key-v1\x00'.length;
+  Uint8List readString() {
+    final length = ByteData.sublistView(bytes).getUint32(offset);
+    offset += 4;
+    final value = Uint8List.sublistView(bytes, offset, offset + length);
+    offset += length;
+    return value;
+  }
+
+  expect(utf8.decode(readString()), 'aes256-ctr');
+  expect(utf8.decode(readString()), 'bcrypt');
+  final options = readString();
+  return ByteData.sublistView(options).getUint32(options.length - 4);
 }
 
 Future<String> _sshKeygenPublicKey(String pem, String passphrase) async {
@@ -55,6 +75,7 @@ void main() {
   group('generateOpenSshKey', () {
     test('generates a parseable unencrypted Ed25519 key', () async {
       final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
       );
@@ -74,6 +95,7 @@ void main() {
 
     test('generates a parseable unencrypted RSA key', () async {
       final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.rsa2048,
         comment: 'unit@test',
       );
@@ -91,6 +113,7 @@ void main() {
     test('encrypts the key with the passphrase (Ed25519)', () async {
       const passphrase = 'correct horse battery staple';
       final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
         passphrase: passphrase,
@@ -98,6 +121,7 @@ void main() {
 
       // Encrypted: cannot be parsed without the passphrase.
       expect(SSHKeyPair.isEncryptedPem(pem), isTrue);
+      expect(_bcryptRounds(pem), 1);
       expect(() => SSHKeyPair.fromPem(pem), throwsA(isA<Object>()));
 
       // Wrong passphrase is rejected.
@@ -116,12 +140,14 @@ void main() {
     test('encrypts the key with the passphrase (RSA)', () async {
       const passphrase = 'p@ss with spaces';
       final (privateKeyPem: pem, :publicKeyBlob) = await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.rsa2048,
         comment: 'unit@test',
         passphrase: passphrase,
       );
 
       expect(SSHKeyPair.isEncryptedPem(pem), isTrue);
+      expect(_bcryptRounds(pem), 1);
       expect(() => SSHKeyPair.fromPem(pem, 'nope'), throwsA(isA<Object>()));
       final keyPairs = SSHKeyPair.fromPem(pem, passphrase);
       expect(keyPairs, hasLength(1));
@@ -130,10 +156,12 @@ void main() {
 
     test('produces a different key on each call', () async {
       final a = (await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
       )).privateKeyPem;
       final b = (await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
       )).privateKeyPem;
@@ -142,6 +170,7 @@ void main() {
 
     test('treats an empty passphrase as no passphrase', () async {
       final pem = (await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
         passphrase: '',
@@ -154,6 +183,7 @@ void main() {
   group('OpenSSH interop (real ssh-keygen)', () {
     test('ssh-keygen accepts an unencrypted Ed25519 key', () async {
       final pem = (await generateOpenSshKey(
+        kdfRounds: 1,
         keyType: SshKeyType.ed25519,
         comment: 'unit@test',
       )).privateKeyPem;
@@ -168,6 +198,7 @@ void main() {
         comment: 'unit@test',
         passphrase: passphrase,
       )).privateKeyPem;
+      expect(_bcryptRounds(pem), 16);
       final publicKey = await _sshKeygenPublicKey(pem, passphrase);
       expect(publicKey, startsWith('ssh-rsa '));
     }, skip: sshKeygen ? false : 'ssh-keygen not available');

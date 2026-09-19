@@ -51,7 +51,19 @@ const _v2EnvelopeFixture =
     'NoZWNrc3VtIjoibFlrcFBkQkJMMThYU1NDcFdVRkVEblJJWkdGU0x2RmRKT0JvSEZKaHRjYz0ifQ'
     '==';
 
+const _fastArgon2idProfile = TransferArgon2idProfile(
+  iterations: 1,
+  memoryKiB: 8192,
+);
+
 void main() {
+  test('keeps production Argon2id work factors', () {
+    const profile = TransferArgon2idProfile();
+    expect(profile.iterations, 3);
+    expect(profile.memoryKiB, 32768);
+    expect(profile.parallelism, 1);
+  });
+
   late AppDatabase db;
   late HostRepository hostRepository;
   late KeyRepository keyRepository;
@@ -69,6 +81,7 @@ void main() {
       db,
       keyRepository,
       hostRepository,
+      argon2idProfile: _fastArgon2idProfile,
       onHostsChanged: () async {
         hostsChangedCount++;
       },
@@ -564,10 +577,22 @@ void main() {
         host: host,
         transferPassphrase: '1234',
       );
-      final decrypted = await transferService.decryptPayload(
-        encodedPayload: encodedPayload,
-        transferPassphrase: '1234',
-      );
+      final envelope = jsonDecode(
+        utf8.decode(base64Url.decode(encodedPayload.substring(6))),
+      ) as Map<String, dynamic>;
+      expect(envelope['iter'], 1);
+      expect(envelope['mem'], 8192);
+      expect(envelope['lanes'], 1);
+      // Import must honor the envelope even when the reader uses another profile.
+      final decrypted =
+          await SecureTransferService(
+            db,
+            keyRepository,
+            hostRepository,
+          ).decryptPayload(
+            encodedPayload: encodedPayload,
+            transferPassphrase: '1234',
+          );
 
       expect(decrypted.type, TransferPayloadType.host);
       final hostData = Map<String, dynamic>.from(decrypted.data['host'] as Map);
@@ -586,10 +611,15 @@ void main() {
     ]) {
       test('decrypts the fixed v$version envelope', () async {
         for (final encoded in [fixture, '  ${fixture.substring(6)}\n']) {
-          final payload = await transferService.decryptPayload(
-            encodedPayload: encoded,
-            transferPassphrase: 'fixture passphrase 🔐',
-          );
+          final payload =
+              await SecureTransferService(
+                db,
+                keyRepository,
+                hostRepository,
+              ).decryptPayload(
+                encodedPayload: encoded,
+                transferPassphrase: 'fixture passphrase 🔐',
+              );
           expect(payload.type, TransferPayloadType.host);
           expect(payload.schemaVersion, 1);
           expect(payload.createdAt, DateTime.utc(2026, 1, 2));
@@ -711,6 +741,7 @@ void main() {
           db,
           keyRepository,
           hostRepository,
+          argon2idProfile: _fastArgon2idProfile,
           diagnosticsLogger: diagnosticsLogger,
         );
         final encodedPayload = await exportingService

@@ -22,7 +22,6 @@ import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
 import '../../domain/services/auth_service.dart';
-import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/home_screen_shortcut_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
@@ -38,6 +37,7 @@ import '../../domain/services/tmux_service.dart';
 import '../../domain/services/transfer_intent_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../providers/host_row_providers.dart';
+import '../view_models/mux_badge_controller.dart';
 import '../widgets/acp_mux_window_status_badge.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
@@ -2996,29 +2996,16 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
       'assets/icons/monkeyssh_icon_monochrome.png';
   static const _initialSessionFetchLimit = 24;
   static const _prefetchSessionFetchLimit = 6;
-  static const _tmuxQueryRetryDelay = Duration(seconds: 2);
 
-  List<TmuxWindow>? _windows;
   String? _preferredSessionToolName;
-  String? _sessionName;
-  RemoteMuxBackend _muxBackend = RemoteMuxBackend.tmux;
-  bool _queried = false;
   bool _expanded = false;
   bool _showSessions = false;
   bool _hasInitializedSessionProviders = false;
   bool _restoredUiState = false;
   RemoteMuxBackend? _preferredAgentMuxBackend;
   String? _preferredAgentSessionName;
-  StreamSubscription<TmuxWindowChangeEvent>? _windowChangeSubscription;
-  Timer? _tmuxRetryTimer;
-  bool _loadingWindows = false;
-  bool _pendingWindowReload = false;
   bool _tmuxQueryScheduled = false;
   bool _needsTmuxQuery = true;
-  bool _muxSessionEnding = false;
-  int _windowReloadGeneration = 0;
-  int _windowEventGeneration = 0;
-  int _tmuxQueryGeneration = 0;
 
   @override
   void didUpdateWidget(covariant _TmuxConnectionBadge oldWidget) {
@@ -3034,19 +3021,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
         preferredSessionChanged ||
         muxBackendChanged ||
         tmuxExtraFlagsChanged) {
-      _tmuxQueryGeneration++;
-      _tmuxRetryTimer?.cancel();
-      _tmuxRetryTimer = null;
-      final subscription = _windowChangeSubscription;
-      _windowChangeSubscription = null;
-      unawaited(subscription?.cancel());
-      _muxSessionEnding = false;
+      _badge.invalidateQuery();
       setState(() {
-        _windows = null;
-        _sessionName = null;
-        _queried = false;
-        _loadingWindows = false;
-        _pendingWindowReload = false;
         if (tmuxExtraFlagsChanged) {
           _showSessions = false;
           _hasInitializedSessionProviders = false;
@@ -3057,13 +3033,35 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     }
   }
 
-  bool _isCurrentTmuxQuery(int generation) =>
-      mounted && generation == _tmuxQueryGeneration;
+  late final MuxBadgeController _badge = MuxBadgeController(
+    getSession: () => ref
+        .read(activeSessionsProvider.notifier)
+        .getSession(widget.connectionId),
+    resolveBackend: _resolveMuxBackend,
+    resolveSessionName: _resolveMuxSessionName,
+    serviceForBackend: _serviceForBackend,
+    extraFlags: () => widget.tmuxExtraFlags,
+    onWindowsChanged: _syncConnectionSessionTitle,
+    disconnect: (session) async {
+      await ref.read(tmuxServiceProvider).clearCache(session.connectionId);
+      await ref.read(monkeyMuxServiceProvider).clearCache(session.connectionId);
+      await ref
+          .read(activeSessionsProvider.notifier)
+          .disconnect(session.connectionId);
+    },
+  )..addListener(_badgeChanged);
+
+  void _badgeChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
 
   @override
   void dispose() {
-    _tmuxRetryTimer?.cancel();
-    unawaited(_windowChangeSubscription?.cancel());
+    _badge.removeListener(_badgeChanged);
+    _badge.dispose();
     super.dispose();
   }
 
@@ -3153,24 +3151,6 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
         .currentSessionName(session, extraFlags: widget.tmuxExtraFlags);
   }
 
-  Future<void> _retryTmuxQuery(
-    int retries, {
-    required int expectedGeneration,
-  }) async {
-    if (!_isCurrentTmuxQuery(expectedGeneration)) {
-      return;
-    }
-    if (retries <= 0) {
-      setState(() => _queried = true);
-      _scheduleTmuxRetry();
-      return;
-    }
-    await Future<void>.delayed(_tmuxQueryRetryDelay);
-    if (_isCurrentTmuxQuery(expectedGeneration)) {
-      await _queryTmux(retries: retries - 1);
-    }
-  }
-
   Future<void> _handleLockedAiSessionsTap() => requireMonetizationFeatureAccess(
     context: context,
     ref: ref,
@@ -3182,7 +3162,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
   );
 
   String? _resolveRecentSessionScopeWorkingDirectory(SshSession session) {
-    final activeWindow = _windows?.where((w) => w.isActive).firstOrNull;
+    final activeWindow = _badge.windows?.where((w) => w.isActive).firstOrNull;
     return resolveAgentSessionScopeWorkingDirectory(
       activeWorkingDirectory: activeWindow?.currentPath,
       sessionWorkingDirectory: session.workingDirectory,
@@ -3222,223 +3202,6 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
         );
   }
 
-  void _scheduleTmuxRetry() {
-    if (_tmuxRetryTimer?.isActive ?? false) return;
-    _tmuxRetryTimer = Timer(const Duration(seconds: 10), () {
-      _tmuxRetryTimer = null;
-      if (mounted) {
-        unawaited(_queryTmux());
-      }
-    });
-  }
-
-  Future<void> _queryTmux({int retries = 3}) async {
-    final queryGeneration = ++_tmuxQueryGeneration;
-    final sessionsNotifier = ref.read(activeSessionsProvider.notifier);
-    final session = sessionsNotifier.getSession(widget.connectionId);
-    if (session == null) {
-      _syncConnectionSessionTitle(null);
-      // Session not available yet — retry after a delay so the badge
-      // still appears for connections that finish establishing shortly.
-      await _retryTmuxQuery(retries, expectedGeneration: queryGeneration);
-      return;
-    }
-
-    final muxBackend = _resolveMuxBackend(session);
-    final mux = _serviceForBackend(muxBackend);
-    final sessionName = await _resolveMuxSessionName(session, muxBackend);
-    if (!_isCurrentTmuxQuery(queryGeneration)) {
-      return;
-    }
-    if (sessionName == null) {
-      _syncConnectionSessionTitle(null);
-      await _retryTmuxQuery(retries, expectedGeneration: queryGeneration);
-      return;
-    }
-    _muxBackend = muxBackend;
-
-    await _windowChangeSubscription?.cancel();
-    if (!_isCurrentTmuxQuery(queryGeneration)) {
-      return;
-    }
-    final generation = ++_windowEventGeneration;
-    _windowChangeSubscription = mux
-        .watchWindowChanges(
-          session,
-          sessionName,
-          extraFlags: muxBackend == RemoteMuxBackend.tmux
-              ? widget.tmuxExtraFlags
-              : null,
-        )
-        .listen((event) {
-          if (!_isCurrentTmuxQuery(queryGeneration)) return;
-          _handleWindowChangeEvent(
-            session,
-            sessionName,
-            event,
-            generation,
-            muxBackend,
-            queryGeneration,
-          );
-        });
-    await _refreshTmuxWindows(
-      session,
-      sessionName,
-      muxBackend: muxBackend,
-      queryGeneration: queryGeneration,
-    );
-  }
-
-  void _handleWindowChangeEvent(
-    SshSession session,
-    String sessionName,
-    TmuxWindowChangeEvent event,
-    int generation,
-    RemoteMuxBackend muxBackend,
-    int queryGeneration,
-  ) {
-    if (!mounted || !_isCurrentTmuxQuery(queryGeneration)) return;
-    if (generation != _windowEventGeneration) return;
-    if (event is TmuxWindowReloadEvent) {
-      _refreshTmuxWindows(
-        session,
-        sessionName,
-        muxBackend: muxBackend,
-        queryGeneration: queryGeneration,
-      );
-      return;
-    }
-    if (event is TmuxWindowListEvent) {
-      _windowReloadGeneration += 1;
-      _tmuxRetryTimer?.cancel();
-      _tmuxRetryTimer = null;
-      if (event.windows.isEmpty && muxBackend == RemoteMuxBackend.monkeyMux) {
-        setState(() {
-          _windows = const <TmuxWindow>[];
-          _sessionName = sessionName;
-          _muxBackend = muxBackend;
-          _queried = true;
-        });
-        _syncConnectionSessionTitle(const <TmuxWindow>[]);
-        unawaited(_disconnectEndedMonkeyMuxSession(session));
-        return;
-      }
-      final currentWindows = _windows;
-      final nextWindows = currentWindows == null
-          ? event.windows
-          : applyTmuxWindowChangeEvent(currentWindows, event);
-      setState(() {
-        _windows = nextWindows;
-        _sessionName = sessionName;
-        _muxBackend = muxBackend;
-        _queried = true;
-      });
-      _syncConnectionSessionTitle(nextWindows);
-      return;
-    }
-    final currentWindows = _windows;
-    if (currentWindows == null) {
-      _refreshTmuxWindows(
-        session,
-        sessionName,
-        muxBackend: muxBackend,
-        queryGeneration: queryGeneration,
-      );
-      return;
-    }
-    _windowReloadGeneration += 1;
-    _tmuxRetryTimer?.cancel();
-    _tmuxRetryTimer = null;
-    final nextWindows = applyTmuxWindowChangeEvent(currentWindows, event);
-    setState(() {
-      _windows = nextWindows;
-      _sessionName = sessionName;
-      _muxBackend = muxBackend;
-      _queried = true;
-    });
-    _syncConnectionSessionTitle(nextWindows);
-  }
-
-  Future<void> _refreshTmuxWindows(
-    SshSession session,
-    String sessionName, {
-    required RemoteMuxBackend muxBackend,
-    required int queryGeneration,
-  }) async {
-    if (!_isCurrentTmuxQuery(queryGeneration)) {
-      return;
-    }
-    if (_loadingWindows) {
-      _pendingWindowReload = true;
-      return;
-    }
-    _loadingWindows = true;
-    final reloadGeneration = ++_windowReloadGeneration;
-    try {
-      final mux = _serviceForBackend(muxBackend);
-      final windows = await mux.listWindows(
-        session,
-        sessionName,
-        extraFlags: muxBackend == RemoteMuxBackend.tmux
-            ? widget.tmuxExtraFlags
-            : null,
-      );
-      if (!_isCurrentTmuxQuery(queryGeneration)) {
-        return;
-      }
-      if (reloadGeneration < _windowReloadGeneration) return;
-      if (windows.isEmpty && muxBackend == RemoteMuxBackend.monkeyMux) {
-        _tmuxRetryTimer?.cancel();
-        _tmuxRetryTimer = null;
-        setState(() {
-          _windows = const <TmuxWindow>[];
-          _sessionName = sessionName;
-          _muxBackend = muxBackend;
-          _queried = true;
-        });
-        _syncConnectionSessionTitle(const <TmuxWindow>[]);
-        await _disconnectEndedMonkeyMuxSession(session);
-        return;
-      }
-      if (windows.isEmpty) {
-        _scheduleTmuxRetry();
-      } else {
-        _tmuxRetryTimer?.cancel();
-        _tmuxRetryTimer = null;
-      }
-      setState(() {
-        _windows = windows;
-        _sessionName = sessionName;
-        _muxBackend = muxBackend;
-        _queried = true;
-      });
-      _syncConnectionSessionTitle(windows);
-    } on Object {
-      if (!_isCurrentTmuxQuery(queryGeneration)) {
-        return;
-      }
-      _scheduleTmuxRetry();
-      setState(() {
-        _queried = true;
-      });
-    } finally {
-      _loadingWindows = false;
-      if (_pendingWindowReload && mounted) {
-        _pendingWindowReload = false;
-        unawaited(
-          _isCurrentTmuxQuery(queryGeneration)
-              ? _refreshTmuxWindows(
-                  session,
-                  sessionName,
-                  muxBackend: muxBackend,
-                  queryGeneration: queryGeneration,
-                )
-              : _queryTmux(),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final connectionState = ref.watch(
@@ -3473,27 +3236,27 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
         !_tmuxQueryScheduled &&
         (_needsTmuxQuery ||
             (connectionState == SshConnectionState.connected &&
-                !_loadingWindows &&
-                !_queried))) {
+                !_badge.loadingWindows &&
+                !_badge.queried))) {
       _tmuxQueryScheduled = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _tmuxQueryScheduled = false;
         _needsTmuxQuery = false;
         if (mounted) {
-          unawaited(_queryTmux());
+          unawaited(_badge.queryTmux());
         }
       });
     }
 
-    if (!_queried || _windows == null) {
+    if (!_badge.queried || _badge.windows == null) {
       return const SizedBox.shrink();
     }
 
-    final windows = _windows!;
+    final windows = _badge.windows!;
     final activeSession = ref
         .read(activeSessionsProvider.notifier)
         .getSession(widget.connectionId);
-    final nativeAcpSessions = _muxBackend == RemoteMuxBackend.monkeyMux
+    final nativeAcpSessions = _badge.muxBackend == RemoteMuxBackend.monkeyMux
         ? () {
             final manager = ref.watch(acpSessionManagerProvider);
             final managerState =
@@ -3543,9 +3306,9 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                   _buildMuxSummaryIcon(theme),
                   const SizedBox(width: 4),
                   Text(
-                    _sessionName != null
-                        ? '$_sessionName · $totalWindowCount windows'
-                        : '${_muxBackend.label} · $totalWindowCount windows',
+                    _badge.sessionName != null
+                        ? '${_badge.sessionName} · $totalWindowCount windows'
+                        : '${_badge.muxBackend.label} · $totalWindowCount windows',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -3653,7 +3416,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                         key: ValueKey<Object>(
                           Object.hashAll(<Object?>[
                             widget.connectionId,
-                            _sessionName,
+                            _badge.sessionName,
                             scopeWorkingDirectory,
                           ]),
                         ),
@@ -3724,7 +3487,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
 
   Widget _buildMuxSummaryIcon(ThemeData theme) {
     final color = theme.colorScheme.onSurfaceVariant;
-    if (_muxBackend == RemoteMuxBackend.monkeyMux) {
+    if (_badge.muxBackend == RemoteMuxBackend.monkeyMux) {
       return ImageIcon(
         const AssetImage(_monkeyMuxSummaryIconAsset),
         key: const ValueKey('monkeymux-connection-summary-icon'),
@@ -3739,12 +3502,12 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(widget.connectionId);
-    if (session == null || _sessionName == null) return;
+    if (session == null || _badge.sessionName == null) return;
 
-    final mux = _serviceForBackend(_muxBackend);
+    final mux = _serviceForBackend(_badge.muxBackend);
     final closesLastMonkeyMuxWindow =
-        _muxBackend == RemoteMuxBackend.monkeyMux &&
-        (_windows?.length ?? 0) <= 1;
+        _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
+        (_badge.windows?.length ?? 0) <= 1;
     _runTmuxPreviewAction(() async {
       if (window.isNativeAcp) {
         await ref
@@ -3756,21 +3519,21 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
       }
       await mux.killWindow(
         session,
-        _sessionName!,
+        _badge.sessionName!,
         window.index,
         windowId: window.id,
-        extraFlags: _muxBackend == RemoteMuxBackend.tmux
+        extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
             ? widget.tmuxExtraFlags
             : null,
       );
       if (closesLastMonkeyMuxWindow) {
-        await _disconnectEndedMonkeyMuxSession(session);
+        await _badge.disconnectEndedMonkeyMuxSession(session);
       }
     }());
 
     // Optimistically remove from the list.
     setState(() {
-      _windows = _windows
+      _badge.windows = _badge.windows
           ?.where(
             (w) =>
                 window.id != null ? w.id != window.id : w.index != window.index,
@@ -3779,42 +3542,20 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     });
   }
 
-  Future<void> _disconnectEndedMonkeyMuxSession(SshSession session) async {
-    if (_muxSessionEnding) {
-      return;
-    }
-    _muxSessionEnding = true;
-    DiagnosticsLogService.instance.info(
-      'tmux.ui',
-      'monkeymux_badge_disconnect',
-      fields: {'connectionId': session.connectionId},
-    );
-    _tmuxRetryTimer?.cancel();
-    _tmuxRetryTimer = null;
-    final subscription = _windowChangeSubscription;
-    _windowChangeSubscription = null;
-    await subscription?.cancel();
-    await ref.read(tmuxServiceProvider).clearCache(session.connectionId);
-    await ref.read(monkeyMuxServiceProvider).clearCache(session.connectionId);
-    await ref
-        .read(activeSessionsProvider.notifier)
-        .disconnect(session.connectionId);
-  }
-
   void _switchAndOpenWindow(TmuxWindow window) {
     // Switch tmux to the target window before opening the terminal.
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(widget.connectionId);
-    if (session != null && _sessionName != null) {
-      final mux = _serviceForBackend(_muxBackend);
+    if (session != null && _badge.sessionName != null) {
+      final mux = _serviceForBackend(_badge.muxBackend);
       _runTmuxPreviewAction(
         mux.selectWindow(
           session,
-          _sessionName!,
+          _badge.sessionName!,
           window.index,
           windowId: window.id,
-          extraFlags: _muxBackend == RemoteMuxBackend.tmux
+          extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
               ? widget.tmuxExtraFlags
               : null,
         ),
@@ -3849,7 +3590,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(widget.connectionId);
-    if (session == null || _sessionName == null) return;
+    if (session == null || _badge.sessionName == null) return;
 
     final cliLaunchPreferences = await ref
         .read(hostCliLaunchPreferencesServiceProvider)
@@ -3861,13 +3602,13 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
       info,
       startInYoloMode: cliLaunchPreferences.startInYoloMode,
     );
-    await _serviceForBackend(_muxBackend).createWindow(
+    await _serviceForBackend(_badge.muxBackend).createWindow(
       session,
-      _sessionName!,
+      _badge.sessionName!,
       command: command,
       name: info.toolName,
       workingDirectory: info.workingDirectory,
-      extraFlags: _muxBackend == RemoteMuxBackend.tmux
+      extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
           ? widget.tmuxExtraFlags
           : null,
     );

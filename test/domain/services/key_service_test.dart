@@ -10,7 +10,8 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/key_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/services/key_service.dart';
-import 'package:monkeyssh/domain/services/openssh_key_generator.dart';
+
+import '../../helpers/ssh_key_fixtures.dart';
 
 class _GenerationOnlyKeyService extends KeyService {
   _GenerationOnlyKeyService(super.keyRepository);
@@ -54,11 +55,7 @@ void main() {
       test(
         'returns null for an encrypted key with the wrong passphrase',
         () async {
-          final encryptedPem = (await generateOpenSshKey(
-            keyType: SshKeyType.ed25519,
-            comment: 'unit@test',
-            passphrase: 'correct-passphrase',
-          )).privateKeyPem;
+          const encryptedPem = sshEd25519EncryptedPrivateKey;
 
           final result = await keyService.importKey(
             name: 'Encrypted',
@@ -71,11 +68,7 @@ void main() {
       );
 
       test('returns null for an encrypted key with no passphrase', () async {
-        final encryptedPem = (await generateOpenSshKey(
-          keyType: SshKeyType.ed25519,
-          comment: 'unit@test',
-          passphrase: 'correct-passphrase',
-        )).privateKeyPem;
+        const encryptedPem = sshEd25519EncryptedPrivateKey;
 
         final result = await keyService.importKey(
           name: 'Encrypted',

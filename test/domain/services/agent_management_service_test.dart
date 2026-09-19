@@ -31,8 +31,13 @@ class _MockChannel extends Mock implements SSHChannel {}
 class _MockDiscovery extends Mock implements AgentSessionDiscoveryService {}
 
 AgentManagementService _unlockedManagementService(
-  AgentSessionDiscoveryService discovery,
-) => AgentManagementService(discovery, canManageAgents: () async => true);
+  AgentSessionDiscoveryService discovery, {
+  AgentProbeTimeouts timeouts = const AgentProbeTimeouts(),
+}) => AgentManagementService(
+  discovery,
+  canManageAgents: () async => true,
+  timeouts: timeouts,
+);
 
 SSHSession _execOutput(String output, {int exitCode = 0}) {
   final exec = _MockExecSession();
@@ -63,6 +68,21 @@ SshSession _remoteSession(
 );
 
 void main() {
+  test('keeps production probe timeout defaults', () {
+    const timeouts = AgentProbeTimeouts();
+    expect(timeouts.batchProbe, const Duration(seconds: 8));
+    expect(timeouts.metadataProbe, const Duration(seconds: 30));
+    expect(timeouts.metadataProbeBase, const Duration(seconds: 20));
+    expect(timeouts.usageProbe, const Duration(seconds: 14));
+    expect(timeouts.install, const Duration(seconds: 18));
+    expect(timeouts.defaultRun, const Duration(seconds: 15));
+    final command = buildAgentBatchProbeCommand(const [], windows: false);
+    expect(command, contains(r'timeout 5 "$@"'));
+    expect(command, contains(r'gtimeout 5 "$@"'));
+    // The Perl program's closing quote is escaped by the outer sh -c command.
+    expect(command, contains(r'''exec @ARGV'\'' 5 "$@"'''));
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('usage review regressions', () {
@@ -2556,12 +2576,16 @@ exit "$result"
               });
               return exec;
             });
-        final runtimes = await _unlockedManagementService(_MockDiscovery())
-            .refreshAll(session);
+        final runtimes = await _unlockedManagementService(
+          _MockDiscovery(),
+          timeouts: const AgentProbeTimeouts(
+            metadataProbe: Duration(milliseconds: 50),
+            metadataProbeBase: Duration(milliseconds: 50),
+          ),
+        ).refreshAll(session);
         expect(runtimes.first.installedVersion, '2.0.0');
         expect(runtimes.first.status, AgentRuntimeStatus.installed);
       },
-      timeout: const Timeout(Duration(seconds: 45)),
     );
 
     test('registry failure does not hide the installed version', () async {
@@ -2839,7 +2863,11 @@ exit "$result"
       ];
       final script = File('${root.path}/probe.sh')
         ..writeAsStringSync(
-          buildAgentBatchProbeCommand(definitions, windows: false),
+          buildAgentBatchProbeCommand(
+            definitions,
+            windows: false,
+            versionTimeoutSeconds: 1,
+          ),
         );
       final shells = <String>['bash'];
       if (File('/bin/zsh').existsSync()) shells.add('/bin/zsh');
@@ -2864,7 +2892,7 @@ exit "$result"
         );
         expect(
           stopwatch.elapsed,
-          lessThan(const Duration(seconds: 8)),
+          lessThan(const Duration(seconds: 3)),
           reason: shell,
         );
         expect(

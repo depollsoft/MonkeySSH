@@ -368,7 +368,7 @@ void main() {
         );
 
         await lifecycle.handleForeground();
-        await _pump();
+        await pumpEventQueue();
         expect(
           manager.state.byKeyValue(key.value)!.status,
           AcpConnectionStatus.detached,

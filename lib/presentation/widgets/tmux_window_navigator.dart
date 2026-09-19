@@ -35,7 +35,10 @@ import 'ai_session_picker.dart';
 import 'premium_badge.dart';
 import 'system_bottom_inset.dart';
 import 'terminal_overlay_focus.dart';
+import 'tmux_window_policy.dart';
 import 'tmux_window_status_badge.dart';
+
+export 'tmux_window_policy.dart';
 
 const _tmuxNavigatorDenseVisualDensity = VisualDensity(vertical: -2);
 const _tmuxNavigatorTilePadding = EdgeInsets.symmetric(horizontal: 16);
@@ -254,27 +257,6 @@ Future<bool> confirmMuxWindowClose({
   return context.mounted;
 }
 
-List<AgentLaunchTool> _orderedAgentLaunchTools(
-  Iterable<AgentLaunchTool> tools, {
-  AgentLaunchTool? preferredTool,
-}) {
-  final ordered = tools.toList(growable: false);
-  if (preferredTool == null) {
-    return ordered;
-  }
-
-  final preferredIndex = ordered.indexOf(preferredTool);
-  if (preferredIndex <= 0) {
-    return ordered;
-  }
-
-  return <AgentLaunchTool>[
-    ordered[preferredIndex],
-    ...ordered.take(preferredIndex),
-    ...ordered.skip(preferredIndex + 1),
-  ];
-}
-
 String _telemetryMuxBackendName(RemoteMuxBackend backend) => switch (backend) {
   RemoteMuxBackend.auto => 'auto',
   RemoteMuxBackend.tmux => 'tmux',
@@ -389,16 +371,19 @@ Future<void> _selectAgentLaunchMode({
   bool forcePicker = false,
 }) async {
   final providerId = nativeAcpProviderIds[tool];
+  final preferredMode = preferredAgentWindowMode(
+    preference: preference,
+    forcePicker: forcePicker,
+    hasNativeProvider: providerId != null,
+  );
   if (providerId == null) {
     Navigator.pop(
       context,
-      TmuxNewWindowAction(
-        command: buildAgentToolCommand(
-          tool,
-          startInYoloMode: startClisInYoloMode,
-        ),
-        windowName: tool.commandName,
-        agentTool: tool,
+      agentWindowActionForMode(
+        mode: preferredMode!,
+        tool: tool,
+        startClisInYoloMode: startClisInYoloMode,
+        providerId: null,
       ),
     );
     return;
@@ -413,32 +398,33 @@ Future<void> _selectAgentLaunchMode({
   if (!context.mounted || mode == null) {
     return;
   }
-  switch (mode) {
-    case AgentWindowMode.terminal:
-      Navigator.pop(
-        context,
-        TmuxNewWindowAction(
-          command: buildAgentToolCommand(
-            tool,
-            startInYoloMode: startClisInYoloMode,
-          ),
-          windowName: tool.commandName,
-          agentTool: tool,
-        ),
-      );
-    case AgentWindowMode.nativeAcp:
-      Navigator.pop(context, TmuxNewAcpSessionAction(providerId: providerId));
-  }
+  Navigator.pop(
+    context,
+    agentWindowActionForMode(
+      mode: mode,
+      tool: tool,
+      startClisInYoloMode: startClisInYoloMode,
+      providerId: providerId,
+    ),
+  );
 }
 
-/// Presentation mode for a supported coding-agent mux window.
-enum AgentWindowMode {
-  /// Run the agent's complete terminal CLI.
-  terminal,
-
-  /// Run the agent through its ACP-native conversation surface.
-  nativeAcp,
-}
+/// Builds the navigator action for a chosen agent mode without presenting UI.
+TmuxNavigatorAction agentWindowActionForMode({
+  required AgentWindowMode mode,
+  required AgentLaunchTool tool,
+  required bool startClisInYoloMode,
+  required String? providerId,
+}) => switch (mode) {
+  AgentWindowMode.terminal => TmuxNewWindowAction(
+    command: buildAgentToolCommand(tool, startInYoloMode: startClisInYoloMode),
+    windowName: tool.commandName,
+    agentTool: tool,
+  ),
+  AgentWindowMode.nativeAcp => TmuxNewAcpSessionAction(
+    providerId: ArgumentError.checkNotNull(providerId, 'providerId'),
+  ),
+};
 
 /// Resolves the app-wide default or presents a one-off mode chooser.
 ///
@@ -451,16 +437,11 @@ Future<AgentWindowMode?> resolveAgentWindowMode({
   required AgentWindowModePreference preference,
   bool forcePicker = false,
 }) {
-  if (!forcePicker) {
-    switch (preference) {
-      case AgentWindowModePreference.preferNative:
-        return Future.value(AgentWindowMode.nativeAcp);
-      case AgentWindowModePreference.preferTerminal:
-        return Future.value(AgentWindowMode.terminal);
-      case AgentWindowModePreference.askEveryTime:
-        break;
-    }
-  }
+  final preferred = preferredAgentWindowMode(
+    preference: preference,
+    forcePicker: forcePicker,
+  );
+  if (preferred != null) return Future.value(preferred);
   return showAgentWindowModePicker(
     context: context,
     tool: tool,
@@ -628,7 +609,7 @@ Future<TmuxNewWindowAction?> showTmuxNewWindowContextMenu({
     Offset.zero & overlayBox.size,
   );
 
-  final tools = await _resolveTmuxNewWindowTools(
+  final tools = await resolveTmuxNewWindowTools(
     installedToolsFuture,
     preferredTool: preferredTool,
   );
@@ -687,24 +668,6 @@ Future<TmuxNewWindowAction?> showTmuxNewWindowContextMenu({
   );
 
   return selection;
-}
-
-Future<List<AgentLaunchTool>> _resolveTmuxNewWindowTools(
-  Future<Set<AgentLaunchTool>>? installedToolsFuture, {
-  AgentLaunchTool? preferredTool,
-}) async {
-  Iterable<AgentLaunchTool> availableTools;
-  if (installedToolsFuture == null) {
-    availableTools = TmuxToolPickerSheet._allTools;
-  } else {
-    try {
-      final installed = await installedToolsFuture;
-      availableTools = TmuxToolPickerSheet._allTools.where(installed.contains);
-    } on Object {
-      availableTools = const <AgentLaunchTool>[];
-    }
-  }
-  return _orderedAgentLaunchTools(availableTools, preferredTool: preferredTool);
 }
 
 /// An action selected from the tmux navigator.
@@ -1614,7 +1577,7 @@ class TmuxToolPickerSheet extends StatelessWidget {
                           snapshot.data ?? const <AgentLaunchTool>{};
                       availableTools = _allTools.where(installed.contains);
                     }
-                    final tools = _orderedAgentLaunchTools(
+                    final tools = orderedAgentLaunchTools(
                       availableTools,
                       preferredTool: preferredTool,
                     );

@@ -50,17 +50,15 @@ class _MonkeyTerminalScrollGestureHandlerState
   /// widget does nothing.
   var isAltBuffer = false;
 
-  /// Tracks the last scroll offset reported by [InfiniteScrollView].
-  var lastScrollOffset = 0.0;
-
   late MouseMode mouseMode;
   late MouseReportMode mouseReportMode;
 
-  /// Accumulates partial scroll deltas so reversing direction still requires a
-  /// full line-height of movement before another terminal wheel event is sent.
-  var scrollRemainder = 0.0;
-
-  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+  late final _accumulator = TerminalScrollAccumulator(
+    terminal: () => widget.terminal,
+    getLineHeight: () => widget.getLineHeight(),
+    sendScrollEvent: ({required up}) => _sendScrollEvent(up),
+  );
+  TerminalWheelScrollCalibrator get _wheelCalibrator => _accumulator.calibrator;
 
   /// This variable tracks the last offset where the scroll gesture started.
   /// Used to calculate the cell offset of the terminal mouse event.
@@ -78,7 +76,7 @@ class _MonkeyTerminalScrollGestureHandlerState
   @override
   void dispose() {
     widget.terminal.removeListener(_onTerminalUpdated);
-    _wheelCalibrator.dispose();
+    _accumulator.dispose();
     super.dispose();
   }
 
@@ -93,8 +91,7 @@ class _MonkeyTerminalScrollGestureHandlerState
       _resetScrollTracking(forgetEstimate: true);
     } else if (oldWidget.simulateScroll != widget.simulateScroll ||
         oldWidget.forceSgr != widget.forceSgr) {
-      _wheelCalibrator.reset();
-      scrollRemainder = 0;
+      _accumulator.resetRemainder();
     }
     super.didUpdateWidget(oldWidget);
   }
@@ -115,8 +112,7 @@ class _MonkeyTerminalScrollGestureHandlerState
       _resetScrollTracking();
       setState(() {});
     } else if (mouseTransportChanged) {
-      _wheelCalibrator.reset();
-      scrollRemainder = 0;
+      _accumulator.resetRemainder();
     } else if (_wheelCalibrator.observingTerminalOutput) {
       _wheelCalibrator.terminalChanged(
         captureTerminalViewportLines(widget.terminal),
@@ -149,54 +145,10 @@ class _MonkeyTerminalScrollGestureHandlerState
   }
 
   void _resetScrollTracking({bool forgetEstimate = false}) {
-    lastScrollOffset = 0;
-    scrollRemainder = 0;
-    _wheelCalibrator.reset(forgetEstimate: forgetEstimate);
+    _accumulator.reset(forgetEstimate: forgetEstimate);
   }
 
-  void _onScroll(double offset) {
-    final lineHeight = widget.getLineHeight();
-    if (lineHeight <= 0) {
-      return;
-    }
-
-    scrollRemainder += offset - lastScrollOffset;
-    lastScrollOffset = offset;
-    _drainScrollRemainder(lineHeight);
-  }
-
-  void _drainScrollRemainder(double lineHeight) {
-    if (_wheelCalibrator.waitingForResponse) {
-      return;
-    }
-    var stepHeight = lineHeight * _wheelCalibrator.rowsPerEvent;
-    while (scrollRemainder.abs() >= stepHeight) {
-      final scrollUp = scrollRemainder < 0;
-      final scrollDirection = scrollUp ? -1 : 1;
-      final calibrationStarted =
-          _wheelCalibrator.needsMeasurement &&
-          _wheelCalibrator.begin(
-            before: captureTerminalViewportLines(widget.terminal),
-            onSettled: (previousRows, rows) {
-              if (!mounted) {
-                return;
-              }
-              scrollRemainder -=
-                  scrollDirection * lineHeight * (rows - previousRows);
-              _drainScrollRemainder(lineHeight);
-            },
-          );
-      final handled = _sendScrollEvent(scrollUp);
-      if (!handled && calibrationStarted) {
-        _wheelCalibrator.cancelPending();
-      }
-      scrollRemainder -= scrollDirection * stepHeight;
-      if (calibrationStarted && handled) {
-        break;
-      }
-      stepHeight = lineHeight * _wheelCalibrator.rowsPerEvent;
-    }
-  }
+  void _onScroll(double offset) => _accumulator.onScroll(offset);
 
   void _rememberPointerPosition(Offset position) {
     lastPointerPosition = position;
@@ -226,5 +178,85 @@ class _MonkeyTerminalScrollGestureHandlerState
           _rememberPointerPosition(event.localPosition + event.pan),
       child: InfiniteScrollView(onScroll: _onScroll, child: widget.child),
     );
+  }
+}
+
+/// Accumulates scroll distance and calibrates terminal wheel row granularity.
+class TerminalScrollAccumulator {
+  TerminalScrollAccumulator({
+    required this.terminal,
+    required this.getLineHeight,
+    required this.sendScrollEvent,
+  });
+  final Terminal Function() terminal;
+  final double Function() getLineHeight;
+  final bool Function({required bool up}) sendScrollEvent;
+  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+  TerminalWheelScrollCalibrator get calibrator => _wheelCalibrator;
+
+  /// Tracks the last offset reported by InfiniteScrollView.
+  double lastScrollOffset = 0;
+
+  /// Partial distance, including reversals, awaiting a full calibrated step.
+  double scrollRemainder = 0;
+  bool _disposed = false;
+
+  void reset({bool forgetEstimate = false}) {
+    lastScrollOffset = 0;
+    resetRemainder(forgetEstimate: forgetEstimate);
+  }
+
+  void resetRemainder({bool forgetEstimate = false}) {
+    scrollRemainder = 0;
+    _wheelCalibrator.reset(forgetEstimate: forgetEstimate);
+  }
+
+  void dispose() {
+    _disposed = true;
+    _wheelCalibrator.dispose();
+  }
+
+  void onScroll(double offset) {
+    final lineHeight = getLineHeight();
+    if (lineHeight <= 0) {
+      return;
+    }
+
+    scrollRemainder += offset - lastScrollOffset;
+    lastScrollOffset = offset;
+    _drain(lineHeight);
+  }
+
+  void _drain(double lineHeight) {
+    if (_wheelCalibrator.waitingForResponse) {
+      return;
+    }
+    var stepHeight = lineHeight * _wheelCalibrator.rowsPerEvent;
+    while (scrollRemainder.abs() >= stepHeight) {
+      final scrollUp = scrollRemainder < 0;
+      final scrollDirection = scrollUp ? -1 : 1;
+      final calibrationStarted =
+          _wheelCalibrator.needsMeasurement &&
+          _wheelCalibrator.begin(
+            before: captureTerminalViewportLines(terminal()),
+            onSettled: (previousRows, rows) {
+              if (_disposed) {
+                return;
+              }
+              scrollRemainder -=
+                  scrollDirection * lineHeight * (rows - previousRows);
+              _drain(lineHeight);
+            },
+          );
+      final handled = sendScrollEvent(up: scrollUp);
+      if (!handled && calibrationStarted) {
+        _wheelCalibrator.cancelPending();
+      }
+      scrollRemainder -= scrollDirection * stepHeight;
+      if (calibrationStarted && handled) {
+        break;
+      }
+      stepHeight = lineHeight * _wheelCalibrator.rowsPerEvent;
+    }
   }
 }

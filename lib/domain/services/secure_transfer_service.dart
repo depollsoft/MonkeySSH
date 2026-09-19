@@ -145,6 +145,25 @@ class MigrationPreview {
   final int knownHostCount;
 }
 
+/// Argon2id parameters written into new transfer envelopes.
+class TransferArgon2idProfile {
+  /// Uses the production work factors unless overridden.
+  const TransferArgon2idProfile({
+    this.iterations = 3,
+    this.memoryKiB = 32768,
+    this.parallelism = 1,
+  });
+
+  /// Number of passes over memory.
+  final int iterations;
+
+  /// Memory cost in KiB.
+  final int memoryKiB;
+
+  /// Number of parallel lanes.
+  final int parallelism;
+}
+
 /// Service that encrypts and imports offline transfer payloads.
 class SecureTransferService {
   /// Creates a new [SecureTransferService].
@@ -154,9 +173,12 @@ class SecureTransferService {
     this._hostRepository, {
     DiagnosticsLogger diagnosticsLogger = const NoopDiagnosticsLogger(),
     Future<void> Function()? onHostsChanged,
-  }) : _diagnosticsLogger = diagnosticsLogger,
+    TransferArgon2idProfile argon2idProfile = const TransferArgon2idProfile(),
+  }) : _argon2idProfile = argon2idProfile,
+       _diagnosticsLogger = diagnosticsLogger,
        _onHostsChanged = onHostsChanged;
 
+  final TransferArgon2idProfile _argon2idProfile;
   final AppDatabase _db;
   final KeyRepository _keyRepository;
   final HostRepository _hostRepository;
@@ -202,7 +224,11 @@ class SecureTransferService {
           'hostCliLaunchPreferences': cliLaunchPreferences.toJson(),
       },
     );
-    return compute(_encryptTransferPayload, (payload, transferPassphrase));
+    return compute(_encryptTransferPayload, (
+      payload,
+      transferPassphrase,
+      _argon2idProfile,
+    ));
   }
 
   /// Creates an encrypted SSH key transfer payload.
@@ -217,7 +243,11 @@ class SecureTransferService {
       createdAt: DateTime.now().toUtc(),
       data: {'key': key.toJson()},
     );
-    return compute(_encryptTransferPayload, (payload, transferPassphrase));
+    return compute(_encryptTransferPayload, (
+      payload,
+      transferPassphrase,
+      _argon2idProfile,
+    ));
   }
 
   /// Creates an encrypted full migration payload.
@@ -231,7 +261,11 @@ class SecureTransferService {
       data: await createMigrationData(),
     );
 
-    return compute(_encryptTransferPayload, (payload, transferPassphrase));
+    return compute(_encryptTransferPayload, (
+      payload,
+      transferPassphrase,
+      _argon2idProfile,
+    ));
   }
 
   /// Creates canonical migration data that can be reused by sync flows.
@@ -1447,9 +1481,9 @@ const _argon2idMemoryKiB = 32768;
 const _argon2idLanes = 1;
 
 Future<String> _encryptTransferPayload(
-  (TransferPayload, String) request,
+  (TransferPayload, String, TransferArgon2idProfile) request,
 ) async {
-  final (payload, transferPassphrase) = request;
+  final (payload, transferPassphrase, profile) = request;
   if (transferPassphrase.trim().isEmpty) {
     throw const FormatException('Transfer passphrase is required');
   }
@@ -1471,9 +1505,9 @@ Future<String> _encryptTransferPayload(
   final secretKey = _deriveArgon2idKey(
     transferPassphrase,
     salt,
-    iterations: _argon2idIterations,
-    memoryKiB: _argon2idMemoryKiB,
-    lanes: _argon2idLanes,
+    iterations: profile.iterations,
+    memoryKiB: profile.memoryKiB,
+    lanes: profile.parallelism,
   );
   final encryptedBox = await AesGcm.with256bits().encrypt(
     payloadBytes,
@@ -1486,9 +1520,9 @@ Future<String> _encryptTransferPayload(
     'v': _envelopeVersion,
     'alg': 'AES-GCM-256',
     'kdf': 'Argon2id',
-    'iter': _argon2idIterations,
-    'mem': _argon2idMemoryKiB,
-    'lanes': _argon2idLanes,
+    'iter': profile.iterations,
+    'mem': profile.memoryKiB,
+    'lanes': profile.parallelism,
     'salt': base64Url.encode(salt),
     'nonce': base64Url.encode(nonce),
     'ciphertext': base64Url.encode(encryptedBox.cipherText),

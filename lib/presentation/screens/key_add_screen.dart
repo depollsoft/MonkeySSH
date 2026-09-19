@@ -15,6 +15,7 @@ import '../../domain/services/telemetry_service.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/unsaved_changes_guard.dart';
+import 'ssh_key_validation.dart';
 import 'transfer_screen.dart';
 
 typedef _GenerateKeyDraft = ({
@@ -183,16 +184,7 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
             prefixIcon: Icon(Icons.label),
           ),
           textInputAction: TextInputAction.next,
-          validator: (value) {
-            final name = value?.trim() ?? '';
-            if (name.isEmpty) {
-              return 'Please enter a name';
-            }
-            if (name.length > 255) {
-              return 'Name must be 255 characters or fewer';
-            }
-            return null;
-          },
+          validator: validateSshKeyName,
         ),
         const SizedBox(height: 24),
 
@@ -461,16 +453,7 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
             prefixIcon: Icon(Icons.label),
           ),
           textInputAction: TextInputAction.next,
-          validator: (value) {
-            final name = value?.trim() ?? '';
-            if (name.isEmpty) {
-              return 'Please enter a name';
-            }
-            if (name.length > 255) {
-              return 'Name must be 255 characters or fewer';
-            }
-            return null;
-          },
+          validator: validateSshKeyName,
         ),
         const SizedBox(height: 16),
 
@@ -484,15 +467,7 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
           ),
           maxLines: 8,
           style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
-          validator: (value) {
-            if (value == null || value.isEmpty) {
-              return 'Please enter the private key';
-            }
-            if (!value.contains('-----BEGIN') || !value.contains('-----END')) {
-              return 'Invalid PEM format';
-            }
-            return null;
-          },
+          validator: validateSshPrivateKeyPem,
         ),
         const SizedBox(height: 16),
 
