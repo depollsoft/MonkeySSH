@@ -2560,17 +2560,11 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         commonSuffixLength > terminalTrailingSuffixRewriteLimit) {
       return false;
     }
-    // Retyping a newline would re-send Enter; keep the cursor-move path then.
-    for (
-      var index = delta.deleteCursorOffset;
-      index < previousLength;
-      index++
-    ) {
-      if (_terminalNewlineSequenceCount(previousGraphemes[index]) > 0) {
-        return false;
-      }
-    }
-    return true;
+    // Retyping control input would repeat an action rather than restore text
+    // (a newline re-sends Enter, a tab reruns completion); keep the
+    // cursor-move path for any control tail.
+    final tail = previousGraphemes.sublist(delta.deleteCursorOffset).join();
+    return !_terminalTextControlPattern.hasMatch(tail);
   }
 
   ({int deletedCount, String appendedText, int deleteCursorOffset})

@@ -2823,6 +2823,38 @@ void main() {
     }
 
     testWidgets(
+      'keeps using arrow keys when the unchanged trailing tail is control input',
+      (tester) async {
+        final harness = await pumpTerminalInputHarness(
+          tester,
+          attachController: false,
+          initialEditingValue: _editingValue(
+            'teh\t',
+            selectionOffset: 'teh\t'.length,
+          ),
+        );
+        final terminalOutput = harness.terminalOutput..clear();
+
+        // Retyping the tab would rerun shell completion, so the edit before
+        // it must still navigate around the tail instead of resending it.
+        tester.testTextInput.updateEditingValue(
+          _editingValue('the\t', selectionOffset: 'the\t'.length),
+        );
+        await tester.pump();
+
+        final output = terminalOutput.join();
+        expect(output, contains(_terminalKeyOutput(TerminalKey.arrowLeft)));
+        expect(
+          _terminalKeyOutput(TerminalKey.backspace).allMatches(output).length,
+          2,
+        );
+        expect(output, isNot(contains('he\t')));
+
+        await disposeTerminalInputHarness(tester, harness);
+      },
+    );
+
+    testWidgets(
       'does not review the retyped tail of a double-space period as inserted text',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
