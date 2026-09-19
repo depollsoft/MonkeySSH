@@ -1,4 +1,7 @@
 What's new in this beta
 
-- Fixed Cursor Agent updates blocked by the macOS keychain when connected to a Mac host.
-- Removed terminal escape codes from Agent Management results.
+- Fixed flickering in the Codex terminal input area while Codex is working.
+- Fixed blank flashes when switching or resuming MonkeyMux windows.
+- Preserved spaces after double-space punctuation and autocorrect in terminal input.
+
+Update MonkeyMux on your hosts to get the window-switching fix.
