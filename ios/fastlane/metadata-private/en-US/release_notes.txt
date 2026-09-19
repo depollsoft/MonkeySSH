@@ -1,9 +1,8 @@
 What's new in this beta
 
-- Fixed flickering in the Codex terminal input area while Codex is working.
-- Fixed blank flashes when switching or resuming MonkeyMux windows.
-- Preserved spaces after double-space punctuation and autocorrect in terminal input.
+- Fixed terminal notification taps opening the wrong tmux or MonkeyMux window.
+- Fixed missed notifications from background MonkeyMux windows.
 
-Update MonkeyMux on your hosts to get the window-switching fix.
+Update MonkeyMux on your hosts to get the background notification fix.
 
 Please report rough edges through the support link.
