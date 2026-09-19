@@ -47,6 +47,28 @@ void main() {
         .thenAnswer((_) async {});
   });
 
+  test('rejects PIN KDF iteration counts the record parser would refuse', () {
+    for (final iterations in [0, -1, 1000001]) {
+      expect(
+        () => AuthService(
+          storage: mockStorage,
+          localAuth: mockLocalAuth,
+          pinKdfIterations: iterations,
+        ),
+        throwsArgumentError,
+        reason: '$iterations',
+      );
+    }
+    expect(
+      AuthService(
+        storage: mockStorage,
+        localAuth: mockLocalAuth,
+        pinKdfIterations: 1000000,
+      ),
+      isNotNull,
+    );
+  });
+
   group('AuthService', () {
     group('isAuthEnabled', () {
       test('returns false when not configured', () async {

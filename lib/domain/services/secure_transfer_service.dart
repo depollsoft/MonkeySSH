@@ -162,6 +162,41 @@ class TransferArgon2idProfile {
 
   /// Number of parallel lanes.
   final int parallelism;
+
+  /// Throws when an envelope produced with this profile would be rejected by
+  /// the importer bounds in `_deriveEnvelopeKey`.
+  void validate() {
+    if (iterations <= 0 ||
+        iterations > maxIterations ||
+        memoryKiB < minMemoryKiB ||
+        memoryKiB > maxMemoryKiB ||
+        parallelism <= 0 ||
+        parallelism > maxParallelism) {
+      throw ArgumentError.value(
+        this,
+        'argon2idProfile',
+        'iterations must be 1..$maxIterations, memoryKiB '
+            '$minMemoryKiB..$maxMemoryKiB, parallelism 1..$maxParallelism',
+      );
+    }
+  }
+
+  /// Largest pass count the importer accepts.
+  static const maxIterations = 10;
+
+  /// Smallest memory cost, in KiB, the importer accepts.
+  static const minMemoryKiB = 8192;
+
+  /// Largest memory cost, in KiB, the importer accepts.
+  static const maxMemoryKiB = 262144;
+
+  /// Largest lane count the importer accepts.
+  static const maxParallelism = 4;
+
+  @override
+  String toString() =>
+      'TransferArgon2idProfile(iterations: $iterations, '
+      'memoryKiB: $memoryKiB, parallelism: $parallelism)';
 }
 
 /// Service that encrypts and imports offline transfer payloads.
@@ -174,7 +209,7 @@ class SecureTransferService {
     DiagnosticsLogger diagnosticsLogger = const NoopDiagnosticsLogger(),
     Future<void> Function()? onHostsChanged,
     TransferArgon2idProfile argon2idProfile = const TransferArgon2idProfile(),
-  }) : _argon2idProfile = argon2idProfile,
+  }) : _argon2idProfile = argon2idProfile..validate(),
        _diagnosticsLogger = diagnosticsLogger,
        _onHostsChanged = onHostsChanged;
 
@@ -1632,11 +1667,11 @@ Future<SecretKey> _deriveEnvelopeKey({
   final memoryKiB = _optionalInt(envelope['mem']) ?? _argon2idMemoryKiB;
   final lanes = _optionalInt(envelope['lanes']) ?? _argon2idLanes;
   if (iterations <= 0 ||
-      iterations > 10 ||
-      memoryKiB < 8192 ||
-      memoryKiB > 262144 ||
+      iterations > TransferArgon2idProfile.maxIterations ||
+      memoryKiB < TransferArgon2idProfile.minMemoryKiB ||
+      memoryKiB > TransferArgon2idProfile.maxMemoryKiB ||
       lanes <= 0 ||
-      lanes > 4) {
+      lanes > TransferArgon2idProfile.maxParallelism) {
     throw const FormatException('Invalid transfer envelope');
   }
 

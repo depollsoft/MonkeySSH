@@ -96,6 +96,18 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 				t.Cleanup(server.close)
 				waitRejectedCondition(t, "agent readiness", func() bool { _, err := os.Stat(ready); return err == nil })
 				foreground := foregroundProcessGroupForWindow(window)
+				if foreground > 0 {
+					// The agent's TERM/HUP traps write into the temp dir. Give
+					// the agent time to exit before t.TempDir's RemoveAll runs
+					// (cleanups run last-registered first), or the removal
+					// races the trap and fails with "directory not empty".
+					t.Cleanup(func() {
+						deadline := time.Now().Add(3 * time.Second)
+						for inspectProcess(foreground).running && time.Now().Before(deadline) {
+							time.Sleep(10 * time.Millisecond)
+						}
+					})
+				}
 				start := time.Now()
 				if mode == "deliberate-close" {
 					if _, err := server.closeWindow(window.id); err != nil {

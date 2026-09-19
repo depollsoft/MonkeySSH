@@ -3965,6 +3965,16 @@ class SshSession {
   set debugTerminalOutputFlushInterval(Duration value) =>
       _runtime.debugTerminalOutputFlushInterval = value;
 
+  /// Quiet period that debounces a coalesced MonkeyMux replay; tests lengthen
+  /// it so hold assertions cannot race wall-clock time on a loaded machine.
+  @visibleForTesting
+  Duration get debugMonkeyMuxReplayCoalesceQuietPeriod =>
+      _runtime.debugMonkeyMuxReplayCoalesceQuietPeriod;
+
+  @visibleForTesting
+  set debugMonkeyMuxReplayCoalesceQuietPeriod(Duration value) =>
+      _runtime.debugMonkeyMuxReplayCoalesceQuietPeriod = value;
+
   /// Synchronously flushes buffered terminal/stdout output. Exposed so tests can
   /// trigger a coalesced flush without waiting on the real coalescing timer.
   @visibleForTesting

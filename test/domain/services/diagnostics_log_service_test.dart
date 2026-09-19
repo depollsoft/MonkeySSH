@@ -1,7 +1,5 @@
 import 'dart:async';
 
-// fake_async is supplied transitively by flutter_test.
-// ignore: depend_on_referenced_packages
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';

@@ -1,5 +1,3 @@
-// fake_async is supplied by flutter_test; dependency manifests are outside this job.
-// ignore: depend_on_referenced_packages
 import 'package:fake_async/fake_async.dart';
 // ignore_for_file: implementation_imports, public_member_api_docs
 

@@ -62,6 +62,21 @@ void main() {
     expect(profile.iterations, 3);
     expect(profile.memoryKiB, 32768);
     expect(profile.parallelism, 1);
+    profile.validate();
+    _fastArgon2idProfile.validate();
+  });
+
+  test('rejects Argon2id profiles the importer would refuse', () {
+    for (final profile in const [
+      TransferArgon2idProfile(iterations: 0),
+      TransferArgon2idProfile(iterations: 11),
+      TransferArgon2idProfile(memoryKiB: 8191),
+      TransferArgon2idProfile(memoryKiB: 262145),
+      TransferArgon2idProfile(parallelism: 0),
+      TransferArgon2idProfile(parallelism: 5),
+    ]) {
+      expect(profile.validate, throwsArgumentError, reason: '$profile');
+    }
   });
 
   late AppDatabase db;

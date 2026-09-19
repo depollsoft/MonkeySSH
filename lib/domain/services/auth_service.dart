@@ -79,7 +79,7 @@ class AuthService {
     FlutterSecureStorage? storage,
     LocalAuthentication? localAuth,
     int pinKdfIterations = 120000,
-  }) : _pinKdfIterations = pinKdfIterations,
+  }) : _pinKdfIterations = _checkPinKdfIterations(pinKdfIterations),
        _storage = storage ?? _secureStorage,
        _localAuth = localAuth ?? LocalAuthentication();
 
@@ -92,7 +92,23 @@ class AuthService {
   static const _biometricEnabledKey = 'flutty_biometric_enabled';
   static const _pinKdfVersion = 1;
   final int _pinKdfIterations;
+
+  /// Upper bound accepted by [_parsePinRecord]; a service configured beyond
+  /// it would persist PIN records it can never verify.
+  static const _maxPinKdfIterations = 1000000;
   static const _pinKdfBits = 256;
+
+  static int _checkPinKdfIterations(int iterations) {
+    if (iterations <= 0 || iterations > _maxPinKdfIterations) {
+      throw ArgumentError.value(
+        iterations,
+        'pinKdfIterations',
+        'must be between 1 and $_maxPinKdfIterations',
+      );
+    }
+    return iterations;
+  }
+
   static const _pinHashLength = _pinKdfBits ~/ 8;
   static const _pinSaltLength = 16;
   static const _secureStorage = FlutterSecureStorage(
@@ -331,7 +347,7 @@ class AuthService {
           version != _pinKdfVersion ||
           iterations is! int ||
           iterations <= 0 ||
-          iterations > 1000000 ||
+          iterations > _maxPinKdfIterations ||
           hash is! String ||
           base64Decode(hash).length != _pinHashLength) {
         return null;

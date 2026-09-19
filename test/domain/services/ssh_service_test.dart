@@ -3728,6 +3728,10 @@ LISTEN ::1:4201
       final shell = await openShell();
       final session = shell.session;
       final terminal = session.terminal!;
+      // The hold assertions below run in real time; a 24ms quiet period can
+      // elapse between two event-loop turns on a loaded CI shard.
+      const quietPeriod = Duration(milliseconds: 400);
+      session.debugMonkeyMuxReplayCoalesceQuietPeriod = quietPeriod;
       final stdoutEvents = <String>[];
       final stdoutSubscription = session.shellStdoutStream.listen(
         stdoutEvents.add,
@@ -3738,9 +3742,8 @@ LISTEN ::1:4201
       terminal.addListener(() => terminalNotifications += 1);
 
       // Writing only a partial replay marker must start coalescing and hold the
-      // output. pumpEventQueue drains the stream event without advancing real
-      // time, so the 24ms coalesce timer cannot fire here (avoids racing a real
-      // wall-clock delay against the quiet period on a loaded CI machine).
+      // output. pumpEventQueue drains the stream event; the lengthened quiet
+      // period keeps the coalesce timer from firing before the assertions.
       shell.stdout.add(
         Uint8List.fromList(utf8.encode(monkeyMuxReplayMarker.substring(0, 12))),
       );
@@ -3761,9 +3764,11 @@ LISTEN ::1:4201
       expect(stdoutEvents, isEmpty);
       expect(terminalNotifications, 0);
 
-      // Wait comfortably past the coalesce quiet period (24ms) so the buffered
-      // chunks flush as a single coalesced write.
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      // Wait comfortably past the coalesce quiet period so the buffered chunks
+      // flush as a single coalesced write.
+      await Future<void>.delayed(
+        quietPeriod + const Duration(milliseconds: 100),
+      );
       await pumpEventQueue();
 
       expect(firstLineText(terminal), 'coalesced replay');

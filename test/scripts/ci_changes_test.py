@@ -154,6 +154,8 @@ class ClassificationTest(unittest.TestCase):
                 # terminal-test is gated on third_party alone: the vendored
                 # package has no path dependency on lib/.
                 self.assertTrue(result['third_party'])
+        # ci.yml defines the terminal-test job and pins the SDK it runs on.
+        self.assertTrue(changes.classify(['.github/workflows/ci.yml'])['third_party'])
         for path in ['lib/main.dart', 'test/widget/example_test.dart', 'pubspec.yaml',
                      'remote/monkeymux/main.go']:
             with self.subTest(path=path):
