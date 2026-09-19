@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -280,11 +281,66 @@ void main() {
       expect(TerminalNotificationPayload.decode(payload.encode()), payload);
     });
 
+    test('round-trips mux window routing fields', () {
+      const payload = TerminalNotificationPayload(
+        hostId: 7,
+        connectionId: 21,
+        tmuxSessionName: 'work',
+        tmuxWindowIndex: 3,
+        tmuxWindowId: '@9',
+      );
+
+      expect(TerminalNotificationPayload.decode(payload.encode()), payload);
+    });
+
     test('decodes legacy navigation-only payloads', () {
       expect(
         TerminalNotificationPayload.decode(
           '{"type":"terminal-notification","version":1,'
           '"hostId":7,"connectionId":21}',
+        ),
+        const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+      );
+    });
+
+    test('decodes version 3 payloads without window context', () {
+      expect(
+        TerminalNotificationPayload.decode(
+          '{"type":"terminal-notification","version":3,'
+          '"hostId":7,"connectionId":21,'
+          '"platformNotificationId":4321,'
+          '"reportsActivation":false,"focusOnActivation":true}',
+        ),
+        const TerminalNotificationPayload(
+          hostId: 7,
+          connectionId: 21,
+          platformNotificationId: 4321,
+        ),
+      );
+    });
+
+    test('rejects unknown payload versions', () {
+      expect(
+        TerminalNotificationPayload.decode(
+          '{"type":"terminal-notification","version":99,'
+          '"hostId":7,"connectionId":21}',
+        ),
+        isNull,
+      );
+    });
+
+    test('sanitizes malformed mux window fields to session routing', () {
+      expect(
+        TerminalNotificationPayload.decode(
+          jsonEncode({
+            'type': 'terminal-notification',
+            'version': 4,
+            'hostId': 7,
+            'connectionId': 21,
+            'tmuxSessionName': '  ',
+            'tmuxWindowIndex': -1,
+            'tmuxWindowId': 'not-a-window-id',
+          }),
         ),
         const TerminalNotificationPayload(hostId: 7, connectionId: 21),
       );
@@ -372,6 +428,36 @@ void main() {
   test('buildTerminalNotificationLocation targets the source connection', () {
     final location = buildTerminalNotificationLocation(
       const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+    );
+
+    expect(location, '/terminal/7?connectionId=21');
+  });
+
+  test('buildTerminalNotificationLocation targets the emitting window', () {
+    final location = buildTerminalNotificationLocation(
+      const TerminalNotificationPayload(
+        hostId: 7,
+        connectionId: 21,
+        tmuxSessionName: 'work',
+        tmuxWindowIndex: 3,
+        tmuxWindowId: '@9',
+      ),
+    );
+
+    expect(
+      location,
+      '/terminal/7?connectionId=21&tmuxSession=work&tmuxWindow=3&tmuxWindowId=%409',
+    );
+  });
+
+  test('buildTerminalNotificationLocation omits partial window context', () {
+    final location = buildTerminalNotificationLocation(
+      const TerminalNotificationPayload(
+        hostId: 7,
+        connectionId: 21,
+        tmuxWindowIndex: 3,
+        tmuxWindowId: '@9',
+      ),
     );
 
     expect(location, '/terminal/7?connectionId=21');

@@ -8334,6 +8334,81 @@ void main() {
       );
     }
 
+    testWidgets(
+      'terminal screen publishes its active mux window for notification routing',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        addTearDown(windowEvents.close);
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        session
+          ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+          ..remoteMuxSessionName = 'work';
+        var windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: false),
+          TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: true),
+        ];
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => windows);
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => windowEvents.stream);
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            'work',
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => null);
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        await pumpScreen(
+          tester,
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+        );
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, 'work');
+        expect(session.activeMuxWindowIndex, 2);
+        expect(session.activeMuxWindowId, '@3');
+
+        windows = const <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: false),
+        ];
+        windowEvents.add(TmuxWindowListEvent(windows));
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, 'work');
+        expect(session.activeMuxWindowIndex, 0);
+        expect(session.activeMuxWindowId, '@1');
+
+        // A list with no active window clears the snapshot so taps fall
+        // back to session-level navigation. (An empty list would end the
+        // mux session instead, which is covered elsewhere.)
+        windowEvents.add(
+          const TmuxWindowListEvent(<TmuxWindow>[
+            TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: false),
+            TmuxWindow(index: 2, id: '@3', name: 'agent', isActive: false),
+          ]),
+        );
+        await tester.pumpAndSettle();
+
+        expect(session.activeMuxWindowSessionName, isNull);
+        expect(session.activeMuxWindowIndex, isNull);
+        expect(session.activeMuxWindowId, isNull);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
     ) async {

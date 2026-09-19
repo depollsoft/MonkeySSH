@@ -11259,6 +11259,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _syncTerminalProgressFromActiveMonkeyMuxWindow(session, windows);
           _syncActiveNativeAcpMuxWindow(session, windows);
         }
+        _publishActiveMuxWindowSnapshot(session, windows);
         _syncAutomaticPortForwardProcessRoots(
           session,
           windows,
@@ -11278,6 +11279,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionWorkingDirectory: session.workingDirectory,
       ),
     );
+  }
+
+  /// Publishes this screen's foreground mux window for notification routing.
+  ///
+  /// Terminal (OSC) notifications arrive on the attached foreground stream,
+  /// so the window active when the window list refreshes is the window a
+  /// newly shown notification belongs to. Stamping that snapshot onto the
+  /// payload lets a tap return to the emitting window instead of whichever
+  /// window happens to be active later. A missing active window clears the
+  /// snapshot and taps fall back to session-level navigation.
+  void _publishActiveMuxWindowSnapshot(
+    SshSession session,
+    List<TmuxWindow> windows,
+  ) {
+    final active = windows.where((window) => window.isActive).firstOrNull;
+    ref
+        .read(activeSessionsProvider.notifier)
+        .updateSessionMuxWindowFocus(
+          session.connectionId,
+          sessionName: _tmuxSessionName,
+          windowIndex: active?.index,
+          windowId: active?.id,
+        );
   }
 
   void _syncActiveNativeAcpMuxWindow(
