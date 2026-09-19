@@ -162,6 +162,17 @@ const (
 	// the synchronous initial replay is constrained to the attach-safe budget.
 	maxKittyImageRepairBytes     = 8 * 1024 * 1024
 	maxKittyGraphicsPendingBytes = maxKittyImageRepairBytes
+	// maxNotificationOscPayloadBytes bounds a single captured OSC payload.
+	// Client notification fields cap at 1 KiB each, so this comfortably
+	// holds title, body, and Kitty metadata while keeping per-window
+	// pending state small.
+	maxNotificationOscPayloadBytes = 2048
+	// maxNotificationOscComplete bounds terminated payloads retained per
+	// observe call so long-lived scanners stay bounded.
+	maxNotificationOscComplete = 16
+	// maxPendingWindowOscNotifications bounds unacknowledged background
+	// desktop notifications retained per window; oldest is dropped first.
+	maxPendingWindowOscNotifications = 8
 )
 
 const terminalParserResetSequence = "\x1b\\"
@@ -574,11 +585,43 @@ type windowSnapshot struct {
 	TerminalBracketedPaste    bool                      `json:"terminalBracketedPasteMode,omitempty"`
 	PrivateModes              map[string]bool           `json:"privateModes,omitempty"`
 	TerminalProgress          *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
+	// Notifications holds unacknowledged desktop notification escapes
+	// captured from this window while it ran in the background, oldest
+	// first. Absent for plain shells and older clients ignore it.
+	Notifications []pendingWindowOscNotification `json:"notifications,omitempty"`
 }
 
 type terminalProgressSnapshot struct {
 	State      int  `json:"state"`
 	Percentage *int `json:"percentage,omitempty"`
+}
+
+// pendingWindowOscNotification is a desktop notification escape captured
+// from a background window's output, awaiting client delivery.
+type pendingWindowOscNotification struct {
+	Seq     uint64 `json:"seq"`
+	Payload string `json:"payload"`
+}
+
+// pendingWindowOscNotificationFromPayload builds a pending notification
+// from raw OSC payload bytes, encoding them so arbitrary terminal bytes
+// survive JSON transport intact.
+func pendingWindowOscNotificationFromPayload(seq uint64, payload []byte) pendingWindowOscNotification {
+	return pendingWindowOscNotification{
+		Seq:     seq,
+		Payload: base64.StdEncoding.EncodeToString(payload),
+	}
+}
+
+// copyPendingWindowOscNotifications copies pending notifications for
+// snapshot serialization, keeping nil empty so the field stays absent.
+func copyPendingWindowOscNotifications(in []pendingWindowOscNotification) []pendingWindowOscNotification {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pendingWindowOscNotification, len(in))
+	copy(out, in)
+	return out
 }
 
 type serverRestore struct {
@@ -737,14 +780,27 @@ type muxWindow struct {
 	terminalOutputState         terminalOutputParserState
 	terminalOutputBytes         int
 	terminalOutputUtf8Remaining int
-	historyStartTerminalOutput  terminalOutputParserSnapshot
-	terminalOutputForwarding    bool
-	lastActivity                time.Time
-	outputGeneration            uint64
-	lastProcessMetadataRefresh  time.Time
-	lastBroadcast               time.Time
-	cursorVisible               bool
-	cursorVisibilityKnown       bool
+	// terminalOutputOscPayload carries the in-progress OSC payload across
+	// output chunks for background notification forwarding.
+	terminalOutputOscPayload []byte
+	// terminalOutputOscOverflow reports that the in-progress OSC payload
+	// exceeded its bound and is being discarded until its terminator.
+	terminalOutputOscOverflow bool
+	// notificationOscSeq counts background desktop notifications captured
+	// from this window. It never resets so clients can tell new arrivals
+	// from replays of already-seen state.
+	notificationOscSeq uint64
+	// notificationOscs holds unacknowledged background desktop
+	// notifications, oldest first. Bounded; selecting the window clears it.
+	notificationOscs           []pendingWindowOscNotification
+	historyStartTerminalOutput terminalOutputParserSnapshot
+	terminalOutputForwarding   bool
+	lastActivity               time.Time
+	outputGeneration           uint64
+	lastProcessMetadataRefresh time.Time
+	lastBroadcast              time.Time
+	cursorVisible              bool
+	cursorVisibilityKnown      bool
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -843,6 +899,19 @@ type terminalOutputParserSnapshot struct {
 	state         terminalOutputParserState
 	bytes         int
 	utf8Remaining int
+	// oscPayload accumulates the payload of the OSC sequence currently
+	// being scanned (excluding introducer and terminator) so background
+	// desktop-notification escapes can be forwarded with their source
+	// window. Reset on OSC entry; bounded by
+	// maxNotificationOscPayloadBytes with overlong sequences dropped.
+	oscPayload []byte
+	// oscOverflow reports that the current OSC payload exceeded its bound
+	// and is being discarded until its terminator.
+	oscOverflow bool
+	// oscComplete holds terminated OSC payloads completed by the latest
+	// observe call. The caller drains it; it is capped so long-lived
+	// scanner structs cannot accumulate unbounded state.
+	oscComplete [][]byte
 }
 
 type windowBroadcastIdentity struct {
@@ -6488,6 +6557,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
+	wasNotificationOscSeq := window.notificationOscSeq
 	// PTY output may contain real work even during a resize redraw pause.
 	// Replaying retained bytes bypasses this path and must not count as activity.
 	window.lastActivity = now
@@ -6496,7 +6566,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	// answered below (and when the answer is encoded in writeWindow).
 	window.observeTerminalModesLocked(chunk)
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
-	terminalBell := window.observeTerminalOutputStateLocked(chunk)
+	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
@@ -6513,6 +6583,26 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		maxAttachSequence = s.nextAttachSequence
 	} else if terminalBell {
 		window.alert = true
+	}
+	// Desktop notification escapes from a background window never reach the
+	// attached terminal, so without this they would be lost silently — the
+	// client only parses them from the live foreground stream. Capture them
+	// with their source window, mirroring the background-bell alert above.
+	// The foreground window keeps flowing through the live stream.
+	if s.activeID != windowID {
+		for _, payload := range completedOscs {
+			if !isForwardableOscNotification(payload) {
+				continue
+			}
+			window.notificationOscSeq++
+			window.notificationOscs = append(
+				window.notificationOscs,
+				pendingWindowOscNotificationFromPayload(window.notificationOscSeq, payload),
+			)
+			for len(window.notificationOscs) > maxPendingWindowOscNotifications {
+				window.notificationOscs = window.notificationOscs[1:]
+			}
+		}
 	}
 	forwarded = window.stripLocallyAnsweredThemeQueriesLocked(chunk, themeHint)
 	if !shouldWrite {
@@ -6548,6 +6638,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	after := window.broadcastIdentityLocked()
 	if before != after ||
 		(!wasAlert && window.alert) ||
+		window.notificationOscSeq != wasNotificationOscSeq ||
 		window.lastBroadcast.IsZero() ||
 		now.Sub(window.lastBroadcast) >= windowUpdateMinInterval {
 		snap := s.snapshotLocked(window)
@@ -6771,6 +6862,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 			if !candidate.closed {
 				s.activeID = candidate.id
 				candidate.alert = false
+				candidate.notificationOscs = nil
 				s.pendingResizeWidth = 0
 				s.pendingResizeHeight = 0
 				s.pendingResizeRedraw = false
@@ -9186,6 +9278,7 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		Index:                     window.index,
 		Name:                      window.name,
 		Active:                    s.activeID == window.id,
+		Notifications:             copyPendingWindowOscNotifications(window.notificationOscs),
 		CurrentCommand:            window.currentCommandLocked(),
 		CurrentPath:               window.cwd,
 		PanePid:                   window.metadataProcessIDLocked(),
@@ -9345,6 +9438,7 @@ func (s *muxServer) selectWindowWithoutReplay(windowID string) error {
 		s.activeID = windowID
 	}
 	window.alert = false
+	window.notificationOscs = nil
 	s.mu.Unlock()
 	s.attachMu.Unlock()
 	s.broadcastWindowList("active_window_changed")
@@ -9437,6 +9531,7 @@ func (s *muxServer) selectWindowWithSkip(
 		s.activeID = windowID
 	}
 	window.alert = false
+	window.notificationOscs = nil
 	s.pendingFocusRefreshConn = nil
 	s.pendingResizeWidth = 0
 	s.pendingResizeHeight = 0
@@ -12301,17 +12396,21 @@ func stripFocusReportsFromAttachInput(data []byte) []byte {
 	return output
 }
 
-func (w *muxWindow) observeTerminalOutputStateLocked(data []byte) bool {
+func (w *muxWindow) observeTerminalOutputStateLocked(data []byte) (bool, [][]byte) {
 	parser := terminalOutputParserSnapshot{
 		state:         w.terminalOutputState,
 		bytes:         w.terminalOutputBytes,
 		utf8Remaining: w.terminalOutputUtf8Remaining,
+		oscPayload:    w.terminalOutputOscPayload,
+		oscOverflow:   w.terminalOutputOscOverflow,
 	}
 	bell := parser.observe(data)
 	w.terminalOutputState = parser.state
 	w.terminalOutputBytes = parser.bytes
 	w.terminalOutputUtf8Remaining = parser.utf8Remaining
-	return bell
+	w.terminalOutputOscPayload = parser.oscPayload
+	w.terminalOutputOscOverflow = parser.oscOverflow
+	return bell, parser.oscComplete
 }
 
 func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
@@ -12319,18 +12418,23 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 		if p.utf8Remaining > 0 {
 			if value&0xc0 == 0x80 {
 				p.utf8Remaining--
+				p.appendOscPayload(value)
 				continue
 			}
 			p.utf8Remaining = 0
 		}
 		if remaining := utf8ContinuationCount(value); remaining > 0 {
 			p.utf8Remaining = remaining
+			p.appendOscPayload(value)
 			continue
 		}
 		if value == 0x18 || value == 0x1a {
 			p.reset()
+			p.oscPayload = p.oscPayload[:0]
+			p.oscOverflow = false
 			continue
 		}
+		p.observeOscPayload(value)
 		if value == '\a' && p.state <= terminalOutputParserCsi {
 			bell = true
 		}
@@ -12345,6 +12449,7 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 				p.state = terminalOutputParserCsi
 			case 0x9d:
 				p.state = terminalOutputParserOsc
+				p.startOscPayload()
 			}
 		case terminalOutputParserEscape:
 			switch {
@@ -12354,6 +12459,7 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 				p.state = terminalOutputParserCsi
 			case value == ']':
 				p.state = terminalOutputParserOsc
+				p.startOscPayload()
 			case value == 'P' || value == 'X' || value == '^' || value == '_':
 				p.state = terminalOutputParserString
 			case value >= 0x20 && value <= 0x2f:
@@ -12419,6 +12525,60 @@ func (p *terminalOutputParserSnapshot) observe(data []byte) (bell bool) {
 		}
 	}
 	return bell
+}
+
+// startOscPayload begins accumulating a new OSC payload, discarding any
+// partial state from an aborted sequence.
+func (p *terminalOutputParserSnapshot) startOscPayload() {
+	p.oscPayload = p.oscPayload[:0]
+	p.oscOverflow = false
+}
+
+// observeOscPayload tracks the payload of the OSC sequence being scanned,
+// if any. Terminator conditions mirror the state machine above: BEL and ST
+// terminate from either OSC state, and ESC \ terminates from the escaped
+// state. ESC itself is never payload content. Callers route UTF-8
+// continuation bytes through appendOscPayload so a 0x9c continuation never
+// ends the capture early, matching the machine which consumes continuations
+// without transitioning.
+func (p *terminalOutputParserSnapshot) observeOscPayload(value byte) {
+	if p.state != terminalOutputParserOsc &&
+		p.state != terminalOutputParserOscEscape {
+		return
+	}
+	if value == '\x1b' {
+		return
+	}
+	if value == '\a' || value == 0x9c ||
+		(p.state == terminalOutputParserOscEscape && value == '\\') {
+		if !p.oscOverflow && len(p.oscComplete) < maxNotificationOscComplete {
+			completed := make([]byte, len(p.oscPayload))
+			copy(completed, p.oscPayload)
+			p.oscComplete = append(p.oscComplete, completed)
+		}
+		p.oscPayload = p.oscPayload[:0]
+		p.oscOverflow = false
+		return
+	}
+	p.appendOscPayload(value)
+}
+
+// appendOscPayload accumulates one content byte, dropping the sequence on
+// overflow. Bytes outside an OSC sequence are ignored.
+func (p *terminalOutputParserSnapshot) appendOscPayload(value byte) {
+	if p.state != terminalOutputParserOsc &&
+		p.state != terminalOutputParserOscEscape {
+		return
+	}
+	if p.oscOverflow {
+		return
+	}
+	if len(p.oscPayload) >= maxNotificationOscPayloadBytes {
+		p.oscOverflow = true
+		p.oscPayload = p.oscPayload[:0]
+		return
+	}
+	p.oscPayload = append(p.oscPayload, value)
 }
 
 // terminalOutputReplacesScreen identifies redraws that replace the previous
@@ -14891,6 +15051,18 @@ func isReplayUnsafeKittyQuery(payload []byte) bool {
 	return false
 }
 
+// isForwardableOscNotification reports whether a captured OSC payload is a
+// desktop notification the client shows (OSC 9 / 777 / 99), mirroring the
+// client's notify set. Internal 1337 agent-identity binds are excluded: the
+// client ignores them and they must never surface as notifications.
+func isForwardableOscNotification(payload []byte) bool {
+	if !isReplayUnsafeOscNotification(payload) {
+		return false
+	}
+	code, _, _ := bytes.Cut(payload, []byte(";"))
+	return string(code) != "1337"
+}
+
 // isReplayUnsafeOscNotification reports whether payload is a desktop
 // notification escape (OSC 9 / 777 / 99). These are transient events, so
 // replaying them when a window is reattached would re-fire the notification.
@@ -16242,6 +16414,7 @@ func (s *muxServer) clearAlertsLocked(activeID string) {
 	for _, window := range s.windows {
 		if window.id == activeID {
 			window.alert = false
+			window.notificationOscs = nil
 		}
 	}
 }

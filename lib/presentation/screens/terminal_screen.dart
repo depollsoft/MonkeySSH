@@ -74,6 +74,7 @@ import '../../domain/services/ssh_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_connection_backend_service.dart';
 import '../../domain/services/terminal_hyperlink_tracker.dart';
+import '../../domain/services/terminal_notification.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/terminal_wake_lock_service.dart';
 import '../../domain/services/tmux_service.dart';
@@ -10216,9 +10217,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     hostWorkingDirectory: _host?.tmuxWorkingDirectory,
   );
 
+  /// Clears the published mux window snapshot so later terminal
+  /// notifications cannot navigate back to a stale window.
+  ///
+  /// Called whenever the mux context is cleared or replaced; the next
+  /// window-list refresh republishes the snapshot when mux is live again.
+  /// Prefers [session]'s connection because disconnect flows reset
+  /// [_connectionId] before clearing mux state.
+  void _clearPublishedMuxWindowSnapshot([SshSession? session]) {
+    final connectionId = session?.connectionId ?? _connectionId;
+    if (connectionId == null) return;
+    ref
+        .read(activeSessionsProvider.notifier)
+        .updateSessionMuxWindowFocus(
+          connectionId,
+          sessionName: null,
+          windowIndex: null,
+          windowId: null,
+        );
+  }
+
   void _clearTmuxState() {
     _automaticPortForwardRootSyncGeneration++;
     final session = _observedSession ?? _activeSession();
+    _clearPublishedMuxWindowSnapshot(session);
     if (session != null) {
       unawaited(session.updateAutomaticPortForwardProcessRoots(const {}));
     }
@@ -10896,6 +10918,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// live, and [_clearTmuxState] would reset its viewport/host-resize state and
   /// forget the session name needed to re-detect it.
   void _hideUnconfirmedTmuxBar() {
+    _clearPublishedMuxWindowSnapshot();
     _stopTmuxForegroundVerification();
     _isTmuxActive = false;
     _tmuxOwnershipConfirmed = false;
@@ -11259,6 +11282,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _syncTerminalProgressFromActiveMonkeyMuxWindow(session, windows);
           _syncActiveNativeAcpMuxWindow(session, windows);
         }
+        _publishActiveMuxWindowSnapshot(session, windows);
         _syncAutomaticPortForwardProcessRoots(
           session,
           windows,
@@ -11278,6 +11302,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionWorkingDirectory: session.workingDirectory,
       ),
     );
+  }
+
+  /// Publishes this screen's foreground mux window for notification routing.
+  ///
+  /// Terminal (OSC) notifications arrive on the attached foreground stream,
+  /// so the window active when the window list refreshes is the window a
+  /// newly shown notification belongs to. Stamping that snapshot onto the
+  /// payload lets a tap return to the emitting window instead of whichever
+  /// window happens to be active later. A missing active window clears the
+  /// snapshot and taps fall back to session-level navigation.
+  void _publishActiveMuxWindowSnapshot(
+    SshSession session,
+    List<TmuxWindow> windows,
+  ) {
+    final active = windows.where((window) => window.isActive).firstOrNull;
+    ref
+        .read(activeSessionsProvider.notifier)
+        .updateSessionMuxWindowFocus(
+          session.connectionId,
+          sessionName: _tmuxSessionName,
+          windowIndex: active?.index,
+          windowId: active?.id,
+        );
   }
 
   void _syncActiveNativeAcpMuxWindow(

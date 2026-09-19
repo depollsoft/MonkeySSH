@@ -2614,7 +2614,32 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
     lastActivityEpochSeconds: value['lastActivityEpochSeconds'] as int?,
+    pendingNotifications: _muxWindowNotificationsFromJson(
+      value['notifications'],
+    ),
   );
+}
+
+/// Parses server-forwarded background notification escapes, tolerating
+/// malformed entries so one corrupt record never drops the window.
+List<MuxWindowNotification> _muxWindowNotificationsFromJson(Object? value) {
+  if (value is! List) return const [];
+  final notifications = <MuxWindowNotification>[];
+  for (final entry in value) {
+    if (entry is! Map<String, Object?>) continue;
+    final seq = entry['seq'];
+    final payload = entry['payload'];
+    if (seq is! int || seq <= 0) continue;
+    if (payload is! String || payload.isEmpty) continue;
+    late final String text;
+    try {
+      text = utf8.decode(base64Decode(payload), allowMalformed: true);
+    } on FormatException {
+      continue;
+    }
+    notifications.add(MuxWindowNotification(seq: seq, payload: text));
+  }
+  return notifications;
 }
 
 TerminalProgress? _terminalProgressFromJson(Object? value) {

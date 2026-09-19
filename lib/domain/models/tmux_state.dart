@@ -35,6 +35,38 @@ class TmuxPaneContext {
   final String? currentCommand;
 }
 
+/// Desktop notification escape a multiplexer captured from a background
+/// window's output, awaiting client delivery.
+///
+/// MonkeyMux observes notification OSC sequences (9 / 777 / 99) per window
+/// and forwards background ones with their source window, mirroring the
+/// background-bell alert. [payload] is the raw OSC payload (for example
+/// `99;i=id:d=1:Build finished`), fed to [TerminalNotificationParser] on
+/// the client so Kitty multipart, base64, timeout, and close semantics stay
+/// in one implementation.
+@immutable
+class MuxWindowNotification {
+  /// Creates a new [MuxWindowNotification].
+  const MuxWindowNotification({required this.seq, required this.payload});
+
+  /// Monotonic per-window sequence; never resets so clients can tell new
+  /// arrivals from replays of already-seen state.
+  final int seq;
+
+  /// Raw OSC payload bytes decoded as text.
+  final String payload;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MuxWindowNotification &&
+          seq == other.seq &&
+          payload == other.payload;
+
+  @override
+  int get hashCode => Object.hash(seq, payload);
+}
+
 /// Represents a single window within a tmux session.
 @immutable
 class TmuxWindow {
@@ -64,6 +96,7 @@ class TmuxWindow {
     this.terminalProgress,
     int? idleSeconds,
     this.lastActivityEpochSeconds,
+    this.pendingNotifications = const [],
   }) : _snapshotIdleSeconds = idleSeconds;
 
   /// Parses a [TmuxWindow] from a tmux format string.
@@ -191,6 +224,12 @@ class TmuxWindow {
   /// tmux's `window_activity` epoch seconds, if available.
   final int? lastActivityEpochSeconds;
 
+  /// Desktop notification escapes the multiplexer captured from this window
+  /// while it ran in the background, oldest first.
+  ///
+  /// Only MonkeyMux reports these; plain tmux snapshots leave this empty.
+  final List<MuxWindowNotification> pendingNotifications;
+
   final int? _snapshotIdleSeconds;
 
   /// Seconds since last output activity in this window, if available.
@@ -273,6 +312,7 @@ class TmuxWindow {
     lastActivityEpochSeconds: clearLastActivityEpochSeconds
         ? null
         : lastActivityEpochSeconds ?? this.lastActivityEpochSeconds,
+    pendingNotifications: pendingNotifications,
   );
 
   /// A best-effort coding-agent session identifier found in tmux metadata.
@@ -561,7 +601,8 @@ class TmuxWindow {
           terminalBracketedPasteMode == other.terminalBracketedPasteMode &&
           terminalProgress == other.terminalProgress &&
           lastActivityEpochSeconds == other.lastActivityEpochSeconds &&
-          _snapshotIdleSeconds == other._snapshotIdleSeconds;
+          _snapshotIdleSeconds == other._snapshotIdleSeconds &&
+          listEquals(pendingNotifications, other.pendingNotifications);
 
   @override
   int get hashCode => Object.hashAll([
@@ -589,6 +630,7 @@ class TmuxWindow {
     terminalProgress,
     lastActivityEpochSeconds,
     _snapshotIdleSeconds,
+    Object.hashAll(pendingNotifications),
   ]);
 }
 
