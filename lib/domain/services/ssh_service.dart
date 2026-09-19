@@ -8898,8 +8898,17 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       _TerminalNotificationQueue.new,
     );
     final shouldStart = !queue.isProcessing;
+    // Capture the emitting window now: the request can wait behind an
+    // in-flight notification, and showing awaits session-label resolution,
+    // so sampling later could record a window the user switched to after
+    // the OSC event arrived.
     queue
-      ..add(request)
+      ..add(
+        request,
+        tmuxSessionName: session.activeMuxWindowSessionName,
+        tmuxWindowIndex: session.activeMuxWindowIndex,
+        tmuxWindowId: session.activeMuxWindowId,
+      )
       ..isProcessing = true;
     if (!shouldStart) return;
     unawaited(_drainTerminalNotificationQueue(session, queue));
@@ -8913,9 +8922,15 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     while (ref.mounted &&
         identical(_terminalNotificationQueues[connectionId], queue) &&
         queue.pending.isNotEmpty) {
-      final request = queue.pending.removeAt(0);
+      final entry = queue.pending.removeAt(0);
       try {
-        await _showTerminalNotification(session, request);
+        await _showTerminalNotification(
+          session,
+          entry.request,
+          tmuxSessionName: entry.tmuxSessionName,
+          tmuxWindowIndex: entry.tmuxWindowIndex,
+          tmuxWindowId: entry.tmuxWindowId,
+        );
       } on Object catch (error, stackTrace) {
         FlutterError.reportError(
           FlutterErrorDetails(
@@ -8938,8 +8953,11 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   Future<void> _showTerminalNotification(
     SshSession session,
-    TerminalNotificationRequest request,
-  ) async {
+    TerminalNotificationRequest request, {
+    required String? tmuxSessionName,
+    required int? tmuxWindowIndex,
+    required String? tmuxWindowId,
+  }) async {
     if (!ref.mounted) return;
     if (request.action == TerminalNotificationAction.show &&
         !ref.read(terminalNotificationsNotifierProvider)) {
@@ -8986,9 +9004,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
           notificationIdentifier: request.identifier,
           reportsActivation: request.reportsActivation,
           focusOnActivation: request.focusOnActivation,
-          tmuxSessionName: session.activeMuxWindowSessionName,
-          tmuxWindowIndex: session.activeMuxWindowIndex,
-          tmuxWindowId: session.activeMuxWindowId,
+          tmuxSessionName: tmuxSessionName,
+          tmuxWindowIndex: tmuxWindowIndex,
+          tmuxWindowId: tmuxWindowId,
         ),
       );
     } on Object {
@@ -9462,20 +9480,41 @@ class _TerminalNotificationExpiry {
   final String? identifier;
 }
 
+/// A queued terminal notification bundled with the emitting multiplexer
+/// window captured when the OSC event arrived.
+typedef _QueuedTerminalNotification = ({
+  TerminalNotificationRequest request,
+  String? tmuxSessionName,
+  int? tmuxWindowIndex,
+  String? tmuxWindowId,
+});
+
 class _TerminalNotificationQueue {
   static const maxPending = 64;
 
-  final List<TerminalNotificationRequest> pending = [];
+  final List<_QueuedTerminalNotification> pending = [];
   bool isProcessing = false;
 
-  void add(TerminalNotificationRequest request) {
+  void add(
+    TerminalNotificationRequest request, {
+    required String? tmuxSessionName,
+    required int? tmuxWindowIndex,
+    required String? tmuxWindowId,
+  }) {
     final identity = request.platformIdentifier;
     if (identity != null) {
-      pending.removeWhere((queued) => queued.platformIdentifier == identity);
+      pending.removeWhere(
+        (queued) => queued.request.platformIdentifier == identity,
+      );
     }
     if (pending.length >= maxPending) {
       pending.removeAt(0);
     }
-    pending.add(request);
+    pending.add((
+      request: request,
+      tmuxSessionName: tmuxSessionName,
+      tmuxWindowIndex: tmuxWindowIndex,
+      tmuxWindowId: tmuxWindowId,
+    ));
   }
 }

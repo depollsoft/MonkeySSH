@@ -308,18 +308,16 @@ class TerminalNotificationPayload {
           (platformNotificationId != null && platformNotificationId is! int) ||
           (identifier != null && identifier is! String) ||
           (reportsActivation != null && reportsActivation is! bool) ||
-          (focusOnActivation != null && focusOnActivation is! bool) ||
-          (tmuxSessionName != null && tmuxSessionName is! String) ||
-          (tmuxWindowIndex != null && tmuxWindowIndex is! int) ||
-          (tmuxWindowId != null && tmuxWindowId is! String)) {
+          (focusOnActivation != null && focusOnActivation is! bool)) {
         return null;
       }
-      // The window fields are optional routing context, so malformed values
-      // sanitize to absent (session-level navigation) instead of dropping
-      // the notification tap the way a required-field mismatch would.
-      final sessionName = tmuxSessionName as String?;
-      final windowIndex = tmuxWindowIndex as int?;
-      final windowId = tmuxWindowId as String?;
+      // The window fields are optional routing context, so wrong-typed or
+      // malformed values sanitize to absent (session-level navigation)
+      // instead of dropping the notification tap the way a required-field
+      // mismatch would.
+      final sessionName = tmuxSessionName is String ? tmuxSessionName : null;
+      final windowIndex = tmuxWindowIndex is int ? tmuxWindowIndex : null;
+      final windowId = tmuxWindowId is String ? tmuxWindowId : null;
       return TerminalNotificationPayload(
         hostId: hostId,
         connectionId: connectionId,
@@ -733,18 +731,36 @@ class LocalNotificationService {
   }
 
   /// Shows or refreshes a tmux alert notification.
+  ///
+  /// Server-forwarded background notifications reuse this routing with
+  /// their own title, body, and Kitty presentation (urgency, sound,
+  /// timeout); plain bell/activity alerts omit those and keep alert
+  /// styling.
   Future<void> showTmuxAlert({
     required int notificationId,
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
-  }) => _showNotification(
-    notificationId: notificationId,
-    title: title,
-    body: body,
-    payload: payload.encode(),
-    details: _alertDetails(_tmuxAlertNotificationChannel),
-  );
+    TerminalNotificationUrgency? urgency,
+    TerminalNotificationSound? sound,
+    Duration? timeout,
+  }) {
+    final details = urgency == null && sound == null && timeout == null
+        ? _alertDetails(_tmuxAlertNotificationChannel)
+        : buildTerminalNotificationDetails(
+            urgency: urgency ?? TerminalNotificationUrgency.normal,
+            sound: sound ?? TerminalNotificationSound.silent,
+            timeout: timeout,
+          );
+    return _showNotification(
+      notificationId: notificationId,
+      title: title,
+      body: body,
+      payload: payload.encode(),
+      allowSound: sound == TerminalNotificationSound.system,
+      details: details,
+    );
+  }
 
   /// Clears a previously shown tmux alert notification.
   Future<void> clearTmuxAlert(int notificationId) =>

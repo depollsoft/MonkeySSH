@@ -2781,7 +2781,7 @@ func TestTerminalOutputHasVisibleContent(t *testing.T) {
 func TestTerminalBellParserHonorsControlSequenceCancellation(t *testing.T) {
 	for _, cancel := range []byte{0x18, 0x1a} {
 		window := &muxWindow{}
-		observed := window.observeTerminalOutputStateLocked(
+		observed, _ := window.observeTerminalOutputStateLocked(
 			append([]byte("\x1b]title"), cancel, '\a'),
 		)
 		if !observed {
@@ -6773,6 +6773,170 @@ func TestInactiveWindowBellParsing(t *testing.T) {
 				t.Fatalf("pane title = %q, want %q", inactiveWindow.paneTitle, tt.wantTitle)
 			}
 		})
+	}
+}
+
+func TestInactiveWindowNotificationOscIsCaptured(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		chunks       [][]byte
+		wantPayloads []string
+		wantAlert    bool
+	}{
+		{"kitty notification", [][]byte{[]byte("\x1b]99;i=n1:d=1;Build finished\x07")}, []string{"99;i=n1:d=1;Build finished"}, false},
+		{"conemu notify", [][]byte{[]byte("\x1b]777;notify;Title;Body\x07")}, []string{"777;notify;Title;Body"}, false},
+		{"iterm notification", [][]byte{[]byte("\x1b]9;Build finished\x07")}, []string{"9;Build finished"}, false},
+		{"esc backslash terminator", [][]byte{[]byte("\x1b]99;done\x1b\\")}, []string{"99;done"}, false},
+		{"c1 introducer and terminator", [][]byte{[]byte("\x9d99;done\x9c")}, []string{"99;done"}, false},
+		{"split across chunks", [][]byte{[]byte("\x1b]99;par"), []byte("tial\x07")}, []string{"99;partial"}, false},
+		{"split introducer", [][]byte{[]byte("\x1b"), []byte("]99;done\x07")}, []string{"99;done"}, false},
+		{"multipart title and body", [][]byte{[]byte("\x1b]99;i=n2:d=0;Title\x07"), []byte("\x1b]99;i=n2:d=1;Body\x07")}, []string{"99;i=n2:d=0;Title", "99;i=n2:d=1;Body"}, false},
+		{"utf8 continuation is content", [][]byte{append(append([]byte("\x1b]99;"), 0xc4, 0x9c), '\a')}, []string{"99;\u011c"}, false},
+		{"title OSC is ignored", [][]byte{[]byte("\x1b]0;build\x07")}, nil, false},
+		{"conemu progress is ignored", [][]byte{[]byte("\x1b]9;4;50\x07")}, nil, false},
+		{"agent identity is ignored", [][]byte{[]byte("\x1b]1337;MonkeyMuxPi=test\x07")}, nil, false},
+		{"cancel aborts capture", [][]byte{append([]byte("\x1b]99;abc"), 0x18, '\a')}, nil, true},
+		{"overlong payload is dropped", [][]byte{append(append([]byte("\x1b]99;"), bytes.Repeat([]byte("x"), maxNotificationOscPayloadBytes+1)...), '\a')}, nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newMuxServer("test")
+			inactiveWindow := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+			server.windows = []*muxWindow{
+				{id: "@1", index: 0, lastActivity: time.Now()},
+				inactiveWindow,
+			}
+			server.activeID = "@1"
+
+			for _, chunk := range tt.chunks {
+				server.handleWindowOutput("@2", chunk)
+			}
+
+			if inactiveWindow.alert != tt.wantAlert {
+				t.Fatalf("window alert = %v, want %v", inactiveWindow.alert, tt.wantAlert)
+			}
+			if len(inactiveWindow.notificationOscs) != len(tt.wantPayloads) {
+				t.Fatalf(
+					"pending notifications = %d, want %d",
+					len(inactiveWindow.notificationOscs),
+					len(tt.wantPayloads),
+				)
+			}
+			for i, want := range tt.wantPayloads {
+				got := inactiveWindow.notificationOscs[i]
+				if got.Seq != uint64(i+1) {
+					t.Fatalf("notification %d seq = %d, want %d", i, got.Seq, i+1)
+				}
+				decoded, err := base64.StdEncoding.DecodeString(got.Payload)
+				if err != nil {
+					t.Fatalf("notification %d payload is not base64: %v", i, err)
+				}
+				if string(decoded) != want {
+					t.Fatalf("notification %d payload = %q, want %q", i, decoded, want)
+				}
+			}
+		})
+	}
+}
+
+func TestActiveWindowNotificationOscStreamsWithoutCapture(t *testing.T) {
+	server := newMuxServer("test")
+	activeWindow := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	server.windows = []*muxWindow{
+		activeWindow,
+		{id: "@2", index: 1, lastActivity: time.Now()},
+	}
+	server.activeID = "@1"
+
+	server.handleWindowOutput("@1", []byte("\x1b]99;foreground\x07"))
+
+	if len(activeWindow.notificationOscs) != 0 {
+		t.Fatalf("foreground notification was captured: %+v", activeWindow.notificationOscs)
+	}
+}
+
+func TestSelectWindowClearsPendingNotifications(t *testing.T) {
+	server := newMuxServer("test")
+	inactiveWindow := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, lastActivity: time.Now()},
+		inactiveWindow,
+	}
+	server.activeID = "@1"
+
+	server.handleWindowOutput("@2", []byte("\x1b]99;first\x07"))
+	if inactiveWindow.notificationOscSeq != 1 {
+		t.Fatalf("notification seq = %d, want 1", inactiveWindow.notificationOscSeq)
+	}
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+	if len(inactiveWindow.notificationOscs) != 0 {
+		t.Fatalf("selecting the window kept %d pending notifications", len(inactiveWindow.notificationOscs))
+	}
+
+	server.handleWindowOutput("@1", []byte("\x1b]99;background again\x07"))
+	if server.windows[0].notificationOscSeq != 1 {
+		t.Fatalf("reselected window seq = %d, want 1", server.windows[0].notificationOscSeq)
+	}
+	if len(server.windows[0].notificationOscs) != 1 {
+		t.Fatalf("reselected window pending = %d, want 1", len(server.windows[0].notificationOscs))
+	}
+}
+
+func TestPendingNotificationsBoundOldestFirst(t *testing.T) {
+	server := newMuxServer("test")
+	inactiveWindow := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, lastActivity: time.Now()},
+		inactiveWindow,
+	}
+	server.activeID = "@1"
+
+	for i := 0; i < maxPendingWindowOscNotifications+2; i++ {
+		server.handleWindowOutput("@2", []byte("\x1b]99;n\x07"))
+	}
+	if len(inactiveWindow.notificationOscs) != maxPendingWindowOscNotifications {
+		t.Fatalf("pending = %d, want bound %d", len(inactiveWindow.notificationOscs), maxPendingWindowOscNotifications)
+	}
+	if got := inactiveWindow.notificationOscs[0].Seq; got != 3 {
+		t.Fatalf("oldest retained seq = %d, want 3", got)
+	}
+}
+
+func TestWindowSnapshotCarriesPendingNotifications(t *testing.T) {
+	server := newMuxServer("test")
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, lastActivity: time.Now()},
+		window,
+	}
+	server.activeID = "@1"
+
+	server.handleWindowOutput("@2", []byte("\x1b]99;done\x07"))
+	snap := server.snapshotLocked(window)
+	if len(snap.Notifications) != 1 || snap.Notifications[0].Seq != 1 {
+		t.Fatalf("snapshot notifications = %+v, want one entry with seq 1", snap.Notifications)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(snap.Notifications[0].Payload)
+	if err != nil || string(decoded) != "99;done" {
+		t.Fatalf("snapshot payload = %q, err = %v; want %q", decoded, err, "99;done")
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"notifications":[{"seq":1`) {
+		t.Fatalf("snapshot JSON omits notifications: %s", raw)
+	}
+
+	plain := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	plainSnap := server.snapshotLocked(plain)
+	raw, err = json.Marshal(plainSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"notifications"`) {
+		t.Fatalf("snapshot JSON carries empty notifications: %s", raw)
 	}
 }
 

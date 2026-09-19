@@ -618,6 +618,73 @@ void main() {
       expect(window, isNotNull);
       expect(window!.hasAlert, isFalse);
     });
+
+    test('maps server-forwarded background notifications onto windows', () {
+      final window = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@2',
+        'index': 1,
+        'name': 'Claude Code',
+        'active': false,
+        'notifications': [
+          {
+            'seq': 4,
+            // Base64 of `99;i=n1:d=1;Build finished`.
+            'payload': 'OTk7aT1uMTpkPTE7QnVpbGQgZmluaXNoZWQ=',
+          },
+          {
+            'seq': 5,
+            // Base64 of `777;notify;Title;Body`.
+            'payload': 'Nzc3O25vdGlmeTtUaXRsZTtCb2R5',
+          },
+        ],
+      });
+
+      expect(window, isNotNull);
+      expect(window!.pendingNotifications, const [
+        MuxWindowNotification(seq: 4, payload: '99;i=n1:d=1;Build finished'),
+        MuxWindowNotification(seq: 5, payload: '777;notify;Title;Body'),
+      ]);
+    });
+
+    test(
+      'ignores malformed forwarded notifications without dropping windows',
+      () {
+        final window = parseMonkeyMuxWindowSnapshotForTesting({
+          'id': '@2',
+          'index': 1,
+          'name': 'Claude Code',
+          'active': false,
+          'notifications': [
+            {'seq': 0, 'payload': 'OTk7ZG9uZQ=='},
+            {'seq': 1, 'payload': 'not-base64!!'},
+            {'seq': 2},
+            'not-a-map',
+            {
+              'seq': 3,
+              'payload': base64Encode(utf8.encode('9;Build finished')),
+            },
+          ],
+        });
+
+        expect(window, isNotNull);
+        expect(window!.pendingNotifications, const [
+          MuxWindowNotification(seq: 3, payload: '9;Build finished'),
+        ]);
+      },
+    );
+
+    test('leaves pending notifications empty when the server omits them', () {
+      final window = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@3',
+        'index': 2,
+        'name': 'shell',
+        'active': false,
+        'currentCommand': 'zsh',
+      });
+
+      expect(window, isNotNull);
+      expect(window!.pendingNotifications, isEmpty);
+    });
   });
 
   group('MonkeyMux agent metadata', () {

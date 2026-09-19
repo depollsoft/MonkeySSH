@@ -346,6 +346,23 @@ void main() {
       );
     });
 
+    test('ignores wrong-typed mux window fields instead of dropping taps', () {
+      expect(
+        TerminalNotificationPayload.decode(
+          jsonEncode({
+            'type': 'terminal-notification',
+            'version': 4,
+            'hostId': 7,
+            'connectionId': 21,
+            'tmuxSessionName': 42,
+            'tmuxWindowIndex': '3',
+            'tmuxWindowId': true,
+          }),
+        ),
+        const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+      );
+    });
+
     test('ignores malformed and unrelated payloads', () {
       expect(TerminalNotificationPayload.decode(null), isNull);
       expect(TerminalNotificationPayload.decode('not json'), isNull);
