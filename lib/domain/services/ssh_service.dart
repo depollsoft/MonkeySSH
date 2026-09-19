@@ -67,7 +67,165 @@ typedef TerminalControlModeState = ({
   bool mouseDragTrackingMode,
   bool mouseMoveTrackingMode,
   bool sgrMouseReportMode,
+  bool synchronizedOutputMode,
 });
+
+/// Upper bound on withheld synchronized-output bytes. A program that opens a
+/// transaction and streams inside it without ever closing it (or a redraw far
+/// larger than any real frame) is applied incrementally past this point rather
+/// than buffered without limit.
+const maxSynchronizedOutputHoldChars = 512 * 1024;
+
+const _synchronizedOutputMode = 2026;
+const _monkeyMuxSynchronizedOutputMode = 9002;
+
+/// Splits terminal [input] into the prefix that may be parsed now and the
+/// suffix that belongs to an unfinished synchronized-output transaction
+/// (DEC mode 2026, or MonkeyMux's private mode 9002) and must wait for its end
+/// marker.
+///
+/// DEC private-mode sets and resets are scanned in wire order, including
+/// multi-parameter forms such as `CSI ? 25 ; 2026 h`, and both modes are
+/// tracked together: the hold starts at the first sequence that opens either
+/// mode and ends at the sequence that leaves both reset, so nested or
+/// overlapping transactions never expose a partial frame. A trailing sequence
+/// that is still incomplete and could open a transaction (for example
+/// `ESC [ ? 20`) is withheld too, so a marker split across two chunks is not
+/// parsed as an already-open transaction's body.
+({String apply, String hold}) splitSynchronizedOutputHold(String input) {
+  var synchronizedOpen = false;
+  var monkeyMuxOpen = false;
+  var holdFrom = -1;
+  var index = 0;
+  while (index < input.length) {
+    final escape = input.indexOf('\x1b', index);
+    if (escape < 0) {
+      break;
+    }
+    final sequence = _parsePrivateModeSequence(input, escape);
+    if (sequence == null) {
+      index = escape + 1;
+      continue;
+    }
+    if (sequence.end < 0) {
+      // Incomplete at the end of the input. Withhold it if it could still
+      // become a begin marker for a transaction that is not already held.
+      if (holdFrom < 0 && sequence.couldOpenTransaction) {
+        holdFrom = escape;
+      }
+      break;
+    }
+    if (sequence.enabled != null) {
+      for (final mode in sequence.modes) {
+        if (mode == _synchronizedOutputMode) {
+          synchronizedOpen = sequence.enabled!;
+        } else if (mode == _monkeyMuxSynchronizedOutputMode) {
+          monkeyMuxOpen = sequence.enabled!;
+        }
+      }
+      final open = synchronizedOpen || monkeyMuxOpen;
+      if (open && holdFrom < 0) {
+        holdFrom = escape;
+      } else if (!open) {
+        holdFrom = -1;
+      }
+    }
+    index = sequence.end;
+  }
+  if (holdFrom < 0 ||
+      input.length - holdFrom > maxSynchronizedOutputHoldChars) {
+    return (apply: input, hold: '');
+  }
+  return (apply: input.substring(0, holdFrom), hold: input.substring(holdFrom));
+}
+
+/// A `CSI ? Pm h/l` sequence starting at an ESC, or an incomplete prefix of
+/// one at the end of the input ([end] < 0).
+typedef _PrivateModeSequence = ({
+  int end,
+  List<int> modes,
+  bool? enabled,
+  bool couldOpenTransaction,
+});
+
+_PrivateModeSequence? _parsePrivateModeSequence(String input, int escape) {
+  const escapeCode = 0x1b;
+  const bracketCode = 0x5b; // [
+  const questionCode = 0x3f; // ?
+  const semicolonCode = 0x3b; // ;
+  const zeroCode = 0x30;
+  const nineCode = 0x39;
+  const setCode = 0x68; // h
+  const resetCode = 0x6c; // l
+  assert(input.codeUnitAt(escape) == escapeCode);
+  var index = escape + 1;
+  const introducer = [bracketCode, questionCode];
+  for (final expected in introducer) {
+    if (index >= input.length) {
+      return (
+        end: -1,
+        modes: const [],
+        enabled: null,
+        couldOpenTransaction: true,
+      );
+    }
+    if (input.codeUnitAt(index) != expected) {
+      return null;
+    }
+    index++;
+  }
+  final modes = <int>[];
+  var current = -1;
+  while (index < input.length) {
+    final code = input.codeUnitAt(index);
+    if (code >= zeroCode && code <= nineCode) {
+      current = (current < 0 ? 0 : current * 10) + (code - zeroCode);
+      if (current > 99999) {
+        return null;
+      }
+      index++;
+      continue;
+    }
+    if (code == semicolonCode) {
+      modes.add(current);
+      current = -1;
+      index++;
+      continue;
+    }
+    if (code == setCode || code == resetCode) {
+      modes.add(current);
+      return (
+        end: index + 1,
+        modes: modes,
+        enabled: code == setCode,
+        couldOpenTransaction: false,
+      );
+    }
+    // Any other final byte (or intermediate) is not a private-mode set/reset.
+    return null;
+  }
+  // Ran out of input inside the parameters.
+  final complete = modes.any(_isSynchronizedOutputMode);
+  final partial =
+      current < 0 ||
+      _isPrefixOfSynchronizedOutputMode(current) ||
+      _isSynchronizedOutputMode(current);
+  return (
+    end: -1,
+    modes: const [],
+    enabled: null,
+    couldOpenTransaction: complete || partial,
+  );
+}
+
+bool _isSynchronizedOutputMode(int mode) =>
+    mode == _synchronizedOutputMode || mode == _monkeyMuxSynchronizedOutputMode;
+
+bool _isPrefixOfSynchronizedOutputMode(int value) {
+  final digits = value.toString();
+  return '$_synchronizedOutputMode'.startsWith(digits) ||
+      '$_monkeyMuxSynchronizedOutputMode'.startsWith(digits);
+}
 
 /// Incrementally unwraps tmux DCS passthroughs, including doubled ESC bytes.
 class TerminalTmuxPassthroughDecoder {
@@ -750,9 +908,11 @@ String? _buildTerminalModeReportResponse(
       mode,
       modeState.colorSchemeUpdatesMode ? _terminalModeSet : _terminalModeReset,
     ),
-    1016 ||
-    2026 ||
-    2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
+    2026 => _formatTerminalModeReport(
+      mode,
+      modeState.synchronizedOutputMode ? _terminalModeSet : _terminalModeReset,
+    ),
+    1016 || 2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
     _ => null,
   };
 }

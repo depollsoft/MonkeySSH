@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.211"
+	monkeyMuxVersion                  = "0.1.212"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -6673,14 +6673,16 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 }
 
 // wrapSynchronizedTerminalOutput builds the resume write for one attach client.
-// prefix (the reattach replay) is emitted verbatim so it repaints immediately,
-// then the buffered foreground-redraw bytes are bracketed by MonkeySSH-private
-// DEC mode 9002 so the client applies them as a single atomic repaint and never
-// paints the synthetic width-1 dance frame captured mid-redraw. The begin and
-// end markers are written together in this one buffer (never via a separate
-// timer), so the close can never land mid-sequence and mode 9002 can never be
-// left open. When there is no buffered redraw there is no intermediate frame to
-// hide, so the replay is returned unwrapped.
+// prefix (the reattach replay, which clears the client) and the buffered
+// foreground-redraw bytes are bracketed together by MonkeySSH-private DEC mode
+// 9002 so the client applies the clear and the repaint as a single atomic
+// paint: it never shows the cleared screen on its own while the redraw is
+// still in flight over SSH, and never paints the synthetic width-1 dance frame
+// captured mid-redraw. The begin and end markers are written together in this
+// one buffer (never via a separate timer), so the close can never land
+// mid-sequence and mode 9002 can never be left open. When there is no buffered
+// redraw there is no intermediate frame to hide, so the replay is returned
+// unwrapped.
 func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 	if len(data) == 0 {
 		if len(prefix) == 0 {
@@ -6691,11 +6693,11 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 	output := make(
 		[]byte,
 		0,
-		len(prefix)+len(terminalSynchronizedOutputBegin)+len(data)+
+		len(terminalSynchronizedOutputBegin)+len(prefix)+len(data)+
 			len(terminalSynchronizedOutputEnd),
 	)
-	output = append(output, prefix...)
 	output = append(output, terminalSynchronizedOutputBegin...)
+	output = append(output, prefix...)
 	output = append(output, data...)
 	output = append(output, terminalSynchronizedOutputEnd...)
 	return output

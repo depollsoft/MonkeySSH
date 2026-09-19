@@ -32,6 +32,11 @@ class _SshSessionRuntime {
   Timer? _terminalOutputFlushTimer;
   Timer? _monkeyMuxReplayCoalesceTimer;
   Timer? _terminalParsePumpTimer;
+  // Bytes of an unfinished synchronized-output transaction (DEC 2026 from the
+  // application, MonkeyMux's private 9002 around server redraws) withheld from
+  // the parser until the end marker arrives. See _processTerminalParseSlice.
+  String _synchronizedOutputHold = '';
+  Timer? _synchronizedOutputWatchdog;
   bool _terminalParsingPaused = false;
   Duration _terminalOutputFlushInterval = _defaultTerminalOutputFlushInterval;
   SSHSession? _pendingShellOutputShell;
@@ -100,6 +105,12 @@ class _SshSessionRuntime {
   // hundreds of ms). The final slice always repaints, so the settled screen is
   // never delayed by more than this interval.
   static const _terminalParseDrainNotifyInterval = Duration(milliseconds: 96);
+  // A synchronized frame whose end marker has not arrived within this window
+  // is applied as-is. Real transactions close within a few ms (they are one
+  // application write split only by transport chunking), so this only fires
+  // when the program died mid-frame or the transport stalled; painting the
+  // partial frame then is better than freezing on the previous one.
+  static const _synchronizedOutputHoldTimeout = Duration(milliseconds: 200);
   static const _monkeyMuxActiveWindowReplayMarker =
       '\x1b\\\x1b[?1000l\x1b[?1002l\x1b[?1003l';
   // SSH pty negotiation sets TERM but cannot advertise COLORTERM or terminal
@@ -1225,6 +1236,7 @@ if(!$__flResolved){$__flResolved='cmd'}
       _terminalParseBacklog.clear();
       _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
+      _discardSynchronizedOutputHold();
       return;
     }
     _lastTerminalParseNotifyAtMs = null;
@@ -1259,13 +1271,17 @@ if(!$__flResolved){$__flResolved='cmd'}
     final pendingBefore = _terminalParsePendingChars;
     final stopwatch = Stopwatch()..start();
     var processedAny = false;
+    var appliedAny = false;
     var sliceCount = 0;
     var worstSliceMicros = 0;
     while (_terminalParseBacklog.isNotEmpty) {
       final sliceStartMicros = diagnosticsEnabled
           ? stopwatch.elapsedMicroseconds
           : 0;
-      _processTerminalParseSlice(terminal, _takeTerminalParseSlice());
+      appliedAny |= _processTerminalParseSlice(
+        terminal,
+        _takeTerminalParseSlice(),
+      );
       processedAny = true;
       sliceCount += 1;
       if (diagnosticsEnabled) {
@@ -1288,9 +1304,15 @@ if(!$__flResolved){$__flResolved='cmd'}
       _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
     }
-    if (processedAny) {
+    _updateSynchronizedOutputWatchdog(terminal);
+    if (appliedAny) {
+      // A slice withheld in full (an open synchronized frame) changed nothing,
+      // so it must not repaint: the point of the hold is that no vsync sees
+      // the half-drawn frame.
       _notifyTerminalParseProgress(terminal, drained: remaining == 0);
       if (!_terminalParsingPaused) _scheduleTerminalPreviewRefresh();
+    }
+    if (processedAny) {
       if (diagnosticsEnabled) {
         DiagnosticsLogService.instance.debug(
           'terminal.parse',
@@ -1302,6 +1324,7 @@ if(!$__flResolved){$__flResolved='cmd'}
             'durationMs': stopwatch.elapsedMilliseconds,
             'worstSliceMs': (worstSliceMicros / 1000).round(),
             'remainingChars': remaining,
+            'heldChars': _synchronizedOutputHold.length,
           },
         );
       }
@@ -1338,6 +1361,70 @@ if(!$__flResolved){$__flResolved='cmd'}
     terminal.notifyListeners();
   }
 
+  void _updateSynchronizedOutputWatchdog(Terminal terminal) {
+    // The core terminal still holds repaints while a MonkeyMux 9002 redraw is
+    // open. The runtime normally applies begin and end together, so the mode
+    // is only left open here when a redraw exceeded the hold cap or a flush
+    // applied a partial one; bound that the same way as the hold itself.
+    if (_synchronizedOutputHold.isEmpty &&
+        !terminal.isMonkeyMuxSynchronizedOutputOpen) {
+      _synchronizedOutputWatchdog?.cancel();
+      _synchronizedOutputWatchdog = null;
+      return;
+    }
+    if (_synchronizedOutputWatchdog?.isActive ?? false) {
+      // Keep the original deadline: the bound is on how long any bytes may be
+      // withheld, not on the gap between chunks.
+      return;
+    }
+    _synchronizedOutputWatchdog = Timer(_synchronizedOutputHoldTimeout, () {
+      _synchronizedOutputWatchdog = null;
+      if (!identical(_terminal, terminal) || _terminalParsingPaused) {
+        return;
+      }
+      _flushSynchronizedOutputHold(terminal, reason: 'timeout');
+    });
+  }
+
+  /// Applies withheld synchronized-output bytes without waiting for the end
+  /// marker and repaints, so a lost end marker can never freeze the view.
+  void _flushSynchronizedOutputHold(
+    Terminal terminal, {
+    required String reason,
+  }) {
+    _synchronizedOutputWatchdog?.cancel();
+    _synchronizedOutputWatchdog = null;
+    final held = _synchronizedOutputHold;
+    if (held.isEmpty && !terminal.isMonkeyMuxSynchronizedOutputOpen) {
+      return;
+    }
+    _synchronizedOutputHold = '';
+    if (held.isNotEmpty) {
+      _applyTerminalParseSlice(terminal, held);
+    }
+    _lastTerminalParseNotifyAtMs = null;
+    // A partial 9002 redraw leaves the core mode set, which would suppress
+    // this repaint (and every later one) until an end marker arrives.
+    if (!terminal.endSynchronizedOutput()) {
+      terminal.notifyListeners();
+    }
+    DiagnosticsLogService.instance.debug(
+      'terminal.parse',
+      'sync_hold_flush',
+      fields: {
+        'connectionId': _session.connectionId,
+        'reason': reason,
+        'chars': held.length,
+      },
+    );
+  }
+
+  void _discardSynchronizedOutputHold() {
+    _synchronizedOutputWatchdog?.cancel();
+    _synchronizedOutputWatchdog = null;
+    _synchronizedOutputHold = '';
+  }
+
   String _takeTerminalParseSlice() {
     final start = _terminalParseOffset;
     final head = _terminalParseBacklog.first;
@@ -1356,7 +1443,56 @@ if(!$__flResolved){$__flResolved='cmd'}
     return slice;
   }
 
-  void _processTerminalParseSlice(Terminal terminal, String slice) {
+  /// Applies [slice] to [terminal], withholding any unfinished
+  /// synchronized-output transaction until its end marker arrives.
+  ///
+  /// ratatui / Codex erase the inline viewport and redraw it inside one
+  /// `CSI ? 2026 h` ... `CSI ? 2026 l` transaction, and MonkeyMux wraps its
+  /// redraws in the private mode 9002 the same way. Both are written by their
+  /// producer in one go, but SSH routinely delivers them split across chunks,
+  /// and Flutter paints straight from the live buffer at the next vsync, so
+  /// parsing the first half on its own lets a repaint observe the erased
+  /// composer (it "blinks in and out" while Codex streams). Keeping the whole
+  /// transaction out of the parser until it is complete makes it land in the
+  /// buffer atomically between two vsyncs, which is the only place atomicity
+  /// can be guaranteed on this side.
+  ///
+  /// Returns whether any bytes reached the parser.
+  bool _processTerminalParseSlice(Terminal terminal, String slice) {
+    final input = _synchronizedOutputHold.isEmpty
+        ? slice
+        : _synchronizedOutputHold + slice;
+    _synchronizedOutputHold = '';
+    final split = splitSynchronizedOutputHold(input);
+    _synchronizedOutputHold = split.hold;
+    if (split.apply.isEmpty) {
+      return false;
+    }
+    _applyTerminalParseSlice(terminal, split.apply);
+    return true;
+  }
+
+  /// DECRQM (`CSI ? Ps $ p`). A query is answered from the terminal state at
+  /// its own position in the stream, so a slice is applied in pieces around
+  /// each one: `2026h`, query, `2026l` in one chunk reports the mode as set.
+  static final _terminalModeReportQuery = RegExp(r'\x1b\[\?\d+\$p');
+
+  void _applyTerminalParseSlice(Terminal terminal, String slice) {
+    if (!slice.contains(r'$p')) {
+      _applyTerminalParsePiece(terminal, slice);
+      return;
+    }
+    var start = 0;
+    for (final match in _terminalModeReportQuery.allMatches(slice)) {
+      _applyTerminalParsePiece(terminal, slice.substring(start, match.end));
+      start = match.end;
+    }
+    if (start < slice.length) {
+      _applyTerminalParsePiece(terminal, slice.substring(start));
+    }
+  }
+
+  void _applyTerminalParsePiece(Terminal terminal, String slice) {
     final terminalOutput = _terminalOutputDecoder.add(
       input: slice,
       terminalColumns: terminal.viewWidth,
@@ -1452,6 +1588,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     _terminalParseBacklog.clear();
     _terminalParsePendingChars = 0;
     _terminalParseOffset = 0;
+    _discardSynchronizedOutputHold();
     _lastTerminalParseNotifyAtMs = null;
     _terminalOutputDecoder.reset();
   }
@@ -1467,15 +1604,25 @@ if(!$__flResolved){$__flResolved='cmd'}
       _terminalParseBacklog.clear();
       _terminalParsePendingChars = 0;
       _terminalParseOffset = 0;
+      _discardSynchronizedOutputHold();
       return;
     }
-    final hadBacklog = _terminalParseBacklog.isNotEmpty;
+    final hadBacklog =
+        _terminalParseBacklog.isNotEmpty || _synchronizedOutputHold.isNotEmpty;
     while (_terminalParseBacklog.isNotEmpty) {
       _processTerminalParseSlice(terminal, _takeTerminalParseSlice());
     }
     _terminalParseBacklog.clear();
     _terminalParsePendingChars = 0;
     _terminalParseOffset = 0;
+    _synchronizedOutputWatchdog?.cancel();
+    _synchronizedOutputWatchdog = null;
+    final held = _synchronizedOutputHold;
+    _synchronizedOutputHold = '';
+    if (held.isNotEmpty) {
+      _applyTerminalParseSlice(terminal, held);
+      terminal.endSynchronizedOutput();
+    }
     if (hadBacklog) {
       // Slices are written silently, so repaint the drained result once.
       _lastTerminalParseNotifyAtMs = null;
@@ -1536,6 +1683,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     mouseDragTrackingMode: terminal.mouseMode == MouseMode.upDownScrollDrag,
     mouseMoveTrackingMode: terminal.mouseMode == MouseMode.upDownScrollMove,
     sgrMouseReportMode: terminal.mouseReportMode == MouseReportMode.sgr,
+    synchronizedOutputMode: terminal.synchronizedOutputMode,
   );
 
   void _scheduleTerminalPreviewRefresh() {

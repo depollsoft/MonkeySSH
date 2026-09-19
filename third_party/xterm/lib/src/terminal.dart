@@ -41,6 +41,14 @@ typedef _GraphicsDeletePosition = ({
 // MonkeySSH-private DEC mode used to make MonkeyMux redraws paint atomically.
 const _monkeyMuxSynchronizedOutputMode = 9002;
 
+// Standard synchronized output (DECSET 2026): applications such as ratatui /
+// Codex wrap every frame in `CSI ? 2026 h` ... `CSI ? 2026 l` so the terminal
+// paints the frame atomically instead of showing the erase-then-redraw halves.
+// The atomic apply itself is owned by the session runtime, which withholds a
+// frame's bytes until its end marker has arrived; the core only tracks the
+// mode so DECRQM can advertise support.
+const _synchronizedOutputMode = 2026;
+
 /// [Terminal] is an interface to interact with command line applications. It
 /// translates escape sequences from the application into updates to the
 /// [buffer] and events such as [onTitleChange] or [onBell], as well as
@@ -80,6 +88,31 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   int _hostResizeGeneration = 0;
   bool _monkeyMuxSynchronizedOutput = false;
+  bool _synchronizedOutput = false;
+
+  /// Whether the application has DEC mode 2026 (synchronized output) set.
+  ///
+  /// This only reports the mode for DECRQM; it never holds repaints, so a
+  /// program that dies mid-frame cannot freeze resize or scroll repaints.
+  bool get synchronizedOutputMode => _synchronizedOutput;
+
+  /// Whether a MonkeyMux synchronized redraw (DEC private mode 9002) is open
+  /// and holding repaints.
+  bool get isMonkeyMuxSynchronizedOutputOpen => _monkeyMuxSynchronizedOutput;
+
+  /// Force-closes an open MonkeyMux synchronized redraw and emits the repaint
+  /// it was holding, so a lost 9002 end marker can never leave the view
+  /// frozen. The owner calls this from a watchdog; a well-behaved server
+  /// always writes the end marker in the same buffer as the begin marker.
+  /// Returns whether a held repaint was emitted.
+  bool endSynchronizedOutput() {
+    if (!_monkeyMuxSynchronizedOutput) {
+      return false;
+    }
+    _monkeyMuxSynchronizedOutput = false;
+    notifyListeners();
+    return true;
+  }
 
   /// Number of MonkeySSH-private host resizes parsed by this terminal.
   int get hostResizeGeneration => _hostResizeGeneration;
@@ -87,16 +120,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// Resets private host-resize negotiation before opening a new transport.
   void resetHostResizeState() {
     _hostResizeGeneration = 0;
-    final wasSynchronized = _monkeyMuxSynchronizedOutput;
-    _monkeyMuxSynchronizedOutput = false;
-    if (wasSynchronized) {
-      // A synchronized redraw (DEC mode 9002) was interrupted mid-transaction
-      // by a transport reset / reattach. The server always writes the begin and
-      // end markers together, so this only happens when the parse was cut off,
-      // e.g. a very large redraw split across parse turns. Flush the repaint we
-      // were holding so the parsed-so-far content is not stranded off-screen.
-      notifyListeners();
-    }
+    _synchronizedOutput = false;
+    // A synchronized redraw (DEC mode 9002) interrupted mid-transaction by a
+    // transport reset / reattach must not strand the repaint it was holding.
+    endSynchronizedOutput();
   }
 
   /// The [TerminalInputHandler] used by this terminal. [defaultInputHandler] is
@@ -1198,10 +1225,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setUnknownDecMode(int mode, bool enabled) {
-    if (mode != _monkeyMuxSynchronizedOutputMode) {
-      return;
+    switch (mode) {
+      case _monkeyMuxSynchronizedOutputMode:
+        _monkeyMuxSynchronizedOutput = enabled;
+      case _synchronizedOutputMode:
+        _synchronizedOutput = enabled;
     }
-    _monkeyMuxSynchronizedOutput = enabled;
   }
 
   @override

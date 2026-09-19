@@ -2385,6 +2385,7 @@ LISTEN ::1:4201
           mouseDragTrackingMode: false,
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: true,
+          synchronizedOutputMode: false,
         ),
       );
 
@@ -2393,7 +2394,7 @@ LISTEN ::1:4201
         '\x1b[?1004;1\$y'
         '\x1b[?2004;2\$y'
         '\x1b[?1006;1\$y'
-        '\x1b[?2026;0\$y',
+        '\x1b[?2026;2\$y',
       );
       expect(result.pendingInput, isEmpty);
 
@@ -2410,6 +2411,7 @@ LISTEN ::1:4201
           mouseDragTrackingMode: false,
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
+          synchronizedOutputMode: false,
         ),
       );
 
@@ -2430,6 +2432,7 @@ LISTEN ::1:4201
           mouseDragTrackingMode: false,
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
+          synchronizedOutputMode: false,
         ),
       );
 
@@ -2449,6 +2452,7 @@ LISTEN ::1:4201
           mouseDragTrackingMode: false,
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
+          synchronizedOutputMode: false,
         ),
       );
 
