@@ -34,6 +34,17 @@ bool _isPromptWhitespaceCodeUnit(int codeUnit) =>
     codeUnit == 0x0A ||
     codeUnit == 0x0D;
 
+/// Longest unchanged trailing tail that is retyped (backspaced and re-sent)
+/// instead of navigated around with arrow keys when an IME edits text just
+/// before it while the caret stays at the end of the buffer.
+///
+/// Covers keyboard double-space on Android and iOS ("word " -> "word. "),
+/// autocorrect-on-space
+/// ("teh " -> "the ") and autocorrect before trailing punctuation
+/// ("teh. " -> "the. ").
+@visibleForTesting
+const terminalTrailingSuffixRewriteLimit = 4;
+
 /// Maximum delay between a modifier chord and its follow-up character for the
 /// follow-up to be treated as part of the chord (e.g. tmux's Ctrl+b, c).
 @visibleForTesting
@@ -486,6 +497,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   String _lastSentText = '';
   bool _isFramingImeText = false;
   int _lastSentCursorOffset = 0;
+
+  /// Graphemes at the end of the most recent computed delta's appended text
+  /// that merely retype an unchanged trailing tail (see
+  /// [terminalTrailingSuffixRewriteLimit]). They are not new user input, so
+  /// the inserted-text review must not count them.
+  int _retypedTrailingTailLength = 0;
   int _iosBackspaceRunwayLength = 0;
   ({bool ctrl, bool alt, bool shift})? _pendingComposingEnterModifiers;
   String? _pendingComposingEnterText;
@@ -2474,6 +2491,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   }) {
     final previousText = previousTextOverride ?? _lastSentText;
     final lastCursorOffset = lastCursorOffsetOverride ?? _lastSentCursorOffset;
+    _retypedTrailingTailLength = 0;
     final previousGraphemes = previousText.characters.toList(growable: false);
     final currentGraphemes = currentText.characters.toList(growable: false);
     final defaultDelta = _computeTextDeltaCandidate(
@@ -2492,12 +2510,61 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       currentGraphemes,
       maxCommonPrefixLength: anchoredPrefixLimit,
     );
-    return _selectPreferredTextDelta(
+    final preferredDelta = _selectPreferredTextDelta(
       defaultDelta: defaultDelta,
       anchoredDelta: anchoredDelta,
       cursorOffsetHint: cursorOffsetHint,
       lastCursorOffset: lastCursorOffset,
     );
+    if (!_shouldRewriteTrailingSuffix(
+      preferredDelta,
+      previousGraphemes: previousGraphemes,
+      currentLength: currentGraphemes.length,
+      cursorOffsetHint: cursorOffsetHint,
+      lastCursorOffset: lastCursorOffset,
+    )) {
+      return preferredDelta;
+    }
+    _retypedTrailingTailLength =
+        previousGraphemes.length - preferredDelta.deleteCursorOffset;
+    // The IME edited text just before an unchanged trailing tail while the
+    // caret stayed at the end (e.g. Gboard or iOS double-space turning "word "
+    // into "word. "). Sending arrow keys around that tail is fragile: prompts
+    // and TUIs that ignore cursor movement end up with the tail dropped or
+    // misplaced ("word.next"). Retyping the short tail keeps the terminal
+    // cursor at the end of the line using only backspaces and text.
+    return _computeTextDeltaCandidate(
+      previousGraphemes,
+      currentGraphemes,
+      rewriteCommonSuffix: true,
+    );
+  }
+
+  bool _shouldRewriteTrailingSuffix(
+    ({int deletedCount, String appendedText, int deleteCursorOffset}) delta, {
+    required List<String> previousGraphemes,
+    required int currentLength,
+    required int cursorOffsetHint,
+    required int lastCursorOffset,
+  }) {
+    final previousLength = previousGraphemes.length;
+    if (cursorOffsetHint != currentLength ||
+        lastCursorOffset != previousLength) {
+      return false;
+    }
+    if (delta.appendedText.isEmpty) {
+      return false;
+    }
+    final commonSuffixLength = previousLength - delta.deleteCursorOffset;
+    if (commonSuffixLength <= 0 ||
+        commonSuffixLength > terminalTrailingSuffixRewriteLimit) {
+      return false;
+    }
+    // Retyping control input would repeat an action rather than restore text
+    // (a newline re-sends Enter, a tab reruns completion); keep the
+    // cursor-move path for any control tail.
+    final tail = previousGraphemes.sublist(delta.deleteCursorOffset).join();
+    return !_terminalTextControlPattern.hasMatch(tail);
   }
 
   ({int deletedCount, String appendedText, int deleteCursorOffset})
@@ -2505,17 +2572,20 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     List<String> previousGraphemes,
     List<String> currentGraphemes, {
     int? maxCommonPrefixLength,
+    bool rewriteCommonSuffix = false,
   }) {
     final commonPrefix = _commonGraphemePrefixLength(
       previousGraphemes,
       currentGraphemes,
       maxLength: maxCommonPrefixLength,
     );
-    final commonSuffix = _commonGraphemeSuffixLength(
-      previousGraphemes,
-      currentGraphemes,
-      commonPrefixLength: commonPrefix,
-    );
+    final commonSuffix = rewriteCommonSuffix
+        ? 0
+        : _commonGraphemeSuffixLength(
+            previousGraphemes,
+            currentGraphemes,
+            commonPrefixLength: commonPrefix,
+          );
     final deleteCursorOffset = previousGraphemes.length - commonSuffix;
     return (
       deletedCount: previousGraphemes.length - commonPrefix - commonSuffix,
@@ -2614,7 +2684,8 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     if (widget.onReviewInsertedText == null) {
       return null;
     }
-    final insertedTextLength = delta.appendedText.characters.length;
+    final insertedText = _insertedTextExcludingRetypedTail(delta.appendedText);
+    final insertedTextLength = insertedText.characters.length;
     if (insertedTextLength <= 1) {
       return null;
     }
@@ -2627,7 +2698,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
         currentText;
     final review = assessKeyboardInsertedCommand(
       reviewText,
-      insertedText: delta.appendedText,
+      insertedText: insertedText,
     );
     if (review.requiresReview) {
       DiagnosticsLogService.instance.debug(
@@ -2650,6 +2721,17 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       );
     }
     return review.requiresReview ? review : null;
+  }
+
+  String _insertedTextExcludingRetypedTail(String appendedText) {
+    if (_retypedTrailingTailLength <= 0) {
+      return appendedText;
+    }
+    final graphemes = appendedText.characters;
+    if (_retypedTrailingTailLength >= graphemes.length) {
+      return '';
+    }
+    return graphemes.skipLast(_retypedTrailingTailLength).toString();
   }
 
   int _clampTextOffset(int offset, int maxOffset) {

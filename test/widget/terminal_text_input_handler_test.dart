@@ -2756,6 +2756,45 @@ void main() {
         expected: (text: 'go t go', cursorOffset: 'go t'.length),
         expectedOutput: null,
       ),
+      (
+        name: 'rewrites a short trailing tail when an autocorrect-on-space edits the word before it',
+        initialEditingValue: _editingValue(
+          'teh ',
+          selectionOffset: 'teh '.length,
+        ),
+        initialState: (text: 'teh ', cursorOffset: 'teh '.length),
+        steps: [_editingValue('the ', selectionOffset: 'the '.length)],
+        expected: (text: 'the ', cursorOffset: 'the '.length),
+        expectedOutput:
+            '${List.filled(3, _terminalKeyOutput(TerminalKey.backspace)).join()}'
+            'he ',
+      ),
+      (
+        name: 'keeps using arrow keys when the unchanged trailing tail is longer than the rewrite limit',
+        initialEditingValue: _editingValue(
+          'i am going home ',
+          selectionOffset: 'i am going home '.length,
+        ),
+        initialState: (
+          text: 'i am going home ',
+          cursorOffset: 'i am going home '.length,
+        ),
+        steps: [
+          _editingValue(
+            'I am going home ',
+            selectionOffset: 'I am going home '.length,
+          ),
+        ],
+        expected: (
+          text: 'I am going home ',
+          cursorOffset: 'I am going home '.length,
+        ),
+        expectedOutput:
+            '${List.filled(15, _terminalKeyOutput(TerminalKey.arrowLeft)).join()}'
+            '${_terminalKeyOutput(TerminalKey.backspace)}'
+            'I'
+            '${List.filled(15, _terminalKeyOutput(TerminalKey.arrowRight)).join()}',
+      ),
     ]) {
       testWidgets(testCase.name, (tester) async {
         final harness = await pumpTerminalInputHarness(
@@ -2782,6 +2821,131 @@ void main() {
         await disposeTerminalInputHarness(tester, harness);
       });
     }
+
+    testWidgets(
+      'keeps using arrow keys when the unchanged trailing tail is control input',
+      (tester) async {
+        final harness = await pumpTerminalInputHarness(
+          tester,
+          attachController: false,
+          initialEditingValue: _editingValue(
+            'teh\t',
+            selectionOffset: 'teh\t'.length,
+          ),
+        );
+        final terminalOutput = harness.terminalOutput..clear();
+
+        // Retyping the tab would rerun shell completion, so the edit before
+        // it must still navigate around the tail instead of resending it.
+        tester.testTextInput.updateEditingValue(
+          _editingValue('the\t', selectionOffset: 'the\t'.length),
+        );
+        await tester.pump();
+
+        final output = terminalOutput.join();
+        expect(output, contains(_terminalKeyOutput(TerminalKey.arrowLeft)));
+        expect(
+          _terminalKeyOutput(TerminalKey.backspace).allMatches(output).length,
+          2,
+        );
+        expect(output, isNot(contains('he\t')));
+
+        await disposeTerminalInputHarness(tester, harness);
+      },
+    );
+
+    testWidgets(
+      'does not review the retyped tail of a double-space period as inserted text',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          var reviewCount = 0;
+          final harness = await pumpTerminalInputHarness(
+            tester,
+            attachController: false,
+            onReviewInsertedText: (_) async {
+              reviewCount++;
+              return true;
+            },
+            initialEditingValue: _editingValue(
+              r'echo $(date) hi ',
+              selectionOffset: r'echo $(date) hi '.length,
+            ),
+          );
+          final terminalOutput = harness.terminalOutput..clear();
+          // Seeding the buffer is itself a multi-grapheme insertion into a
+          // command containing a substitution, so it is reviewed once.
+          final reviewCountAfterSeed = reviewCount;
+
+          tester.testTextInput.updateEditingValue(
+            _editingValue(
+              r'echo $(date) hi. ',
+              selectionOffset: r'echo $(date) hi. '.length,
+            ),
+          );
+          await tester.pump();
+
+          expect(reviewCount, reviewCountAfterSeed);
+          expect(
+            terminalOutput.join(),
+            '${_terminalKeyOutput(TerminalKey.backspace)}. ',
+          );
+
+          await disposeTerminalInputHarness(tester, harness);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+
+    testWidgets(
+      'rewrites the trailing space instead of arrowing around it for a double-space period',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          final harness = await pumpTerminalInputHarness(
+            tester,
+            attachController: false,
+            initialEditingValue: _editingValue(
+              'hello ',
+              selectionOffset: 'hello '.length,
+            ),
+          );
+          final terminalOutput = harness.terminalOutput..clear();
+
+          // Gboard and iOS turn the second space into ". " while the caret stays
+          // at the end of the buffer, then the user keeps typing.
+          for (final value in [
+            _editingValue('hello. ', selectionOffset: 'hello. '.length),
+            _editingValue('hello. w', selectionOffset: 'hello. w'.length),
+          ]) {
+            tester.testTextInput.updateEditingValue(value);
+            await tester.pump();
+          }
+
+          expect(
+            terminalOutput.join(),
+            '${_terminalKeyOutput(TerminalKey.backspace)}. w',
+          );
+          expect(
+            terminalOutput.join(),
+            isNot(contains(_terminalKeyOutput(TerminalKey.arrowLeft))),
+          );
+          expect(
+            terminalStateFromEvents(
+              terminalOutput,
+              initialText: 'hello ',
+              initialCursorOffset: 'hello '.length,
+            ),
+            (text: 'hello. w', cursorOffset: 'hello. w'.length),
+          );
+
+          await disposeTerminalInputHarness(tester, harness);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
 
     testWidgets(
       'preserves replacement text after a later word delete drops part of the marker',
