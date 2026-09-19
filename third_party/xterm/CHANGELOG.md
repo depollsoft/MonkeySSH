@@ -95,11 +95,13 @@ out of scope.
   * DECANM (`CSI ? 2 h/l`) tracks ANSI/VT52 mode and selects the existing
     keytab's VT52 arrow and tab mappings.
 
+  * Synchronized output (`DECSET 2026`) is tracked as a mode
+    (`Terminal.synchronizedOutputMode`) so the app layer can answer DECRQM.
+    The atomic apply and its timeout safeguard live in the MonkeySSH session
+    runtime, which withholds a transaction's bytes until its end marker
+    arrives; the core stays stateless and timer-free.
+
 ### Evaluated but intentionally not ported
-* Synchronized output (`DECSET 2026`) needs a timeout safeguard (a dropped end
-  marker would otherwise freeze the view), which conflicts with this package's
-  deliberately stateless, timer-free core. Flutter already coalesces repaints
-  per frame, limiting the practical benefit.
 * Unicode width tables remain at v11. Bumping them can either help or hurt
   cursor alignment depending on the host's own `wcwidth`, so it is left as a
   separate, deliberate change.

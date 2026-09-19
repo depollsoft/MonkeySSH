@@ -152,6 +152,34 @@ void main() {
     });
   });
 
+  group('DEC 2026 synchronized output', () {
+    test('tracks the mode for DECRQM without holding repaints', () {
+      final terminal = Terminal()..resize(20, 2);
+      var notifications = 0;
+      terminal.addListener(() => notifications++);
+      expect(terminal.synchronizedOutputMode, isFalse);
+
+      // The atomic apply is owned by the session runtime, which withholds the
+      // bytes of an open transaction. Once bytes reach the core they must
+      // paint normally, so a program that dies mid-frame never freezes the
+      // view (resize and scroll repaints still go through).
+      terminal.write('\x1b[?2026hpartial');
+      expect(terminal.synchronizedOutputMode, isTrue);
+      expect(notifications, 1);
+
+      terminal.write('\x1b[?2026l');
+      expect(terminal.synchronizedOutputMode, isFalse);
+      expect(notifications, 2);
+    });
+
+    test('transport reset clears the mode', () {
+      final terminal = Terminal()..write('\x1b[?2026h');
+      expect(terminal.synchronizedOutputMode, isTrue);
+      terminal.resetHostResizeState();
+      expect(terminal.synchronizedOutputMode, isFalse);
+    });
+  });
+
   group('Terminal.resizeFromHost', () {
     test('ignores private host resizes unless explicitly enabled', () {
       final terminal = Terminal(maxLines: 10)..resize(80, 24);

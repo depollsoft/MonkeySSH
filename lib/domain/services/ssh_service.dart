@@ -67,7 +67,70 @@ typedef TerminalControlModeState = ({
   bool mouseDragTrackingMode,
   bool mouseMoveTrackingMode,
   bool sgrMouseReportMode,
+  bool synchronizedOutputMode,
 });
+
+const _synchronizedOutputBeginMarkers = <String>['\x1b[?2026h', '\x1b[?9002h'];
+const _synchronizedOutputEndMarkers = <String>['\x1b[?2026l', '\x1b[?9002l'];
+
+/// Upper bound on withheld synchronized-output bytes. A program that opens a
+/// transaction and streams inside it without ever closing it (or a redraw far
+/// larger than any real frame) is applied incrementally past this point rather
+/// than buffered without limit.
+const maxSynchronizedOutputHoldChars = 512 * 1024;
+
+/// Splits terminal [input] into the prefix that may be parsed now and the
+/// suffix that belongs to an unfinished synchronized-output transaction
+/// (DEC mode 2026, or MonkeyMux's private mode 9002) and must wait for its end
+/// marker.
+///
+/// A trailing fragment that could still turn into a begin marker (for example
+/// `ESC [ ? 20`) is withheld too, so a marker split across two chunks is not
+/// parsed as an already-open transaction's body.
+({String apply, String hold}) splitSynchronizedOutputHold(String input) {
+  var holdFrom = -1;
+  for (var i = 0; i < _synchronizedOutputBeginMarkers.length; i++) {
+    final begin = input.lastIndexOf(_synchronizedOutputBeginMarkers[i]);
+    if (begin < 0) {
+      continue;
+    }
+    final end = input.lastIndexOf(_synchronizedOutputEndMarkers[i]);
+    if (end > begin) {
+      continue;
+    }
+    if (holdFrom < 0 || begin < holdFrom) {
+      holdFrom = begin;
+    }
+  }
+  if (holdFrom < 0) {
+    holdFrom = _partialSynchronizedOutputMarkerStart(input);
+    if (holdFrom < 0) {
+      return (apply: input, hold: '');
+    }
+  }
+  if (input.length - holdFrom > maxSynchronizedOutputHoldChars) {
+    return (apply: input, hold: '');
+  }
+  return (apply: input.substring(0, holdFrom), hold: input.substring(holdFrom));
+}
+
+int _partialSynchronizedOutputMarkerStart(String input) {
+  const longestMarker = 8; // ESC [ ? 2 0 2 6 h
+  if (input.isEmpty) {
+    return -1;
+  }
+  final escape = input.lastIndexOf('\x1b');
+  if (escape < 0 || input.length - escape >= longestMarker) {
+    return -1;
+  }
+  final tail = input.substring(escape);
+  for (final marker in _synchronizedOutputBeginMarkers) {
+    if (marker.length > tail.length && marker.startsWith(tail)) {
+      return escape;
+    }
+  }
+  return -1;
+}
 
 /// Incrementally unwraps tmux DCS passthroughs, including doubled ESC bytes.
 class TerminalTmuxPassthroughDecoder {
@@ -750,9 +813,11 @@ String? _buildTerminalModeReportResponse(
       mode,
       modeState.colorSchemeUpdatesMode ? _terminalModeSet : _terminalModeReset,
     ),
-    1016 ||
-    2026 ||
-    2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
+    2026 => _formatTerminalModeReport(
+      mode,
+      modeState.synchronizedOutputMode ? _terminalModeSet : _terminalModeReset,
+    ),
+    1016 || 2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
     _ => null,
   };
 }

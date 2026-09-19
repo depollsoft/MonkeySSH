@@ -41,6 +41,14 @@ typedef _GraphicsDeletePosition = ({
 // MonkeySSH-private DEC mode used to make MonkeyMux redraws paint atomically.
 const _monkeyMuxSynchronizedOutputMode = 9002;
 
+// Standard synchronized output (DECSET 2026): applications such as ratatui /
+// Codex wrap every frame in `CSI ? 2026 h` ... `CSI ? 2026 l` so the terminal
+// paints the frame atomically instead of showing the erase-then-redraw halves.
+// The atomic apply itself is owned by the session runtime, which withholds a
+// frame's bytes until its end marker has arrived; the core only tracks the
+// mode so DECRQM can advertise support.
+const _synchronizedOutputMode = 2026;
+
 /// [Terminal] is an interface to interact with command line applications. It
 /// translates escape sequences from the application into updates to the
 /// [buffer] and events such as [onTitleChange] or [onBell], as well as
@@ -80,6 +88,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   int _hostResizeGeneration = 0;
   bool _monkeyMuxSynchronizedOutput = false;
+  bool _synchronizedOutput = false;
+
+  /// Whether the application has DEC mode 2026 (synchronized output) set.
+  ///
+  /// This only reports the mode for DECRQM; it never holds repaints, so a
+  /// program that dies mid-frame cannot freeze resize or scroll repaints.
+  bool get synchronizedOutputMode => _synchronizedOutput;
 
   /// Number of MonkeySSH-private host resizes parsed by this terminal.
   int get hostResizeGeneration => _hostResizeGeneration;
@@ -87,6 +102,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// Resets private host-resize negotiation before opening a new transport.
   void resetHostResizeState() {
     _hostResizeGeneration = 0;
+    _synchronizedOutput = false;
     final wasSynchronized = _monkeyMuxSynchronizedOutput;
     _monkeyMuxSynchronizedOutput = false;
     if (wasSynchronized) {
@@ -1198,10 +1214,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setUnknownDecMode(int mode, bool enabled) {
-    if (mode != _monkeyMuxSynchronizedOutputMode) {
-      return;
+    switch (mode) {
+      case _monkeyMuxSynchronizedOutputMode:
+        _monkeyMuxSynchronizedOutput = enabled;
+      case _synchronizedOutputMode:
+        _synchronizedOutput = enabled;
     }
-    _monkeyMuxSynchronizedOutput = enabled;
   }
 
   @override
