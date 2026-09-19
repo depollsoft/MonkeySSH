@@ -1,10 +1,4 @@
 What's new
 
-- Added Muse Code support.
-- Fixed incomplete terminal redraws and stray text when switching windows.
-- Fixed Enter after swipe typing and punctuation.
-- Fixed terminal and form crashes.
-- Improved touch scrolling, tablet icons, chat notifications, and keyboard spacing.
-- Pro: Pi usage rings follow the selected model provider.
-
-Update MonkeyMux for terminal fixes. Restart Pi terminal panes for provider usage rings.
+- Fixed Cursor Agent updates blocked by the macOS keychain when connected to a Mac host.
+- Removed terminal escape codes from Agent Management results.

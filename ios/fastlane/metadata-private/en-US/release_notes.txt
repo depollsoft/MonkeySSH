@@ -1,12 +1,6 @@
 What's new in this beta
 
-- Added Muse Code to agent launchers, native chat, recent sessions, and Agent Management.
-- Fixed incomplete terminal redraws and stray text when switching agent windows.
-- Fixed crashes when tapping terminal links, saving themes, or entering long key and snippet-folder names.
-- Improved touch scrolling and tablet window icons.
-- Pro: Pi usage rings follow the selected model provider.
-- Agent notifications open the correct chat; dismissing the keyboard no longer leaves extra space below native chat.
-
-Update MonkeyMux for the latest terminal fixes and restart existing Pi terminal panes to enable provider usage rings.
+- Fixed Cursor Agent updates blocked by the macOS keychain when connected to a Mac host.
+- Removed terminal escape codes from Agent Management results.
 
 Please report rough edges through the support link.
