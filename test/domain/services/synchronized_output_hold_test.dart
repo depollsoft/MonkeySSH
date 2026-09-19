@@ -99,6 +99,52 @@ void main() {
       expect(splitSynchronizedOutputHold('text\x1b]0;t').hold, isEmpty);
     });
 
+    test('recognises multi-parameter private-mode sequences', () {
+      // The vendored parser applies every parameter of CSI ? Pm h/l, so the
+      // runtime must too.
+      final split = splitSynchronizedOutputHold('a\x1b[?25;2026h\x1b[2Jb');
+      expect(split.apply, 'a');
+      expect(split.hold, '\x1b[?25;2026h\x1b[2Jb');
+      expect(
+        splitSynchronizedOutputHold('\x1b[?25;2026h\x1b[2Jb\x1b[?2026;25l')
+            .hold,
+        isEmpty,
+      );
+      // Other private modes never start a hold.
+      expect(splitSynchronizedOutputHold('\x1b[?25;1049h').hold, isEmpty);
+      // Not a set/reset at all: CSI ? Ps $ p (DECRQM) and CSI ? Ps ; Ps c.
+      expect(splitSynchronizedOutputHold('\x1b[?2026\$p').hold, isEmpty);
+      expect(splitSynchronizedOutputHold('\x1b[?2026;1c').hold, isEmpty);
+    });
+
+    test('holds overlapping transactions until both modes are reset', () {
+      const overlap = '\x1b[?2026herase\x1b[?9002hdraw\x1b[?2026lmore';
+      final split = splitSynchronizedOutputHold('x$overlap');
+      expect(split.apply, 'x');
+      expect(split.hold, overlap);
+      expect(splitSynchronizedOutputHold('x$overlap\x1b[?9002l').hold, isEmpty);
+
+      // A hold covers everything from the first opening sequence, including
+      // a nested transaction that closed on its own.
+      const nested = '\x1b[?9002hA\x1b[?2026hB\x1b[?2026lC';
+      expect(splitSynchronizedOutputHold(nested).hold, nested);
+    });
+
+    test('withholds an incomplete private-mode sequence that could open', () {
+      for (final fragment in [
+        '\x1b[?25;',
+        '\x1b[?25;20',
+        '\x1b[?9',
+        '\x1b[?2026;25',
+      ]) {
+        final split = splitSynchronizedOutputHold('text$fragment');
+        expect(split.hold, fragment, reason: fragment);
+      }
+      // Parameters that can no longer name 2026 or 9002 are not withheld.
+      expect(splitSynchronizedOutputHold('text\x1b[?25;1').hold, isEmpty);
+      expect(splitSynchronizedOutputHold('text\x1b[?20261').hold, isEmpty);
+    });
+
     test('gives up holding past the size cap', () {
       final body = 'x' * (maxSynchronizedOutputHoldChars + 1);
       final split = splitSynchronizedOutputHold('$_begin$body');
@@ -219,6 +265,39 @@ void main() {
       expect(notifications, 3);
     });
 
+    test('a lost 9002 end marker cannot freeze the view', () async {
+      await start();
+      addTearDown(stop);
+
+      // The server's redraw arrives with its begin marker only; the watchdog
+      // applies it and must also release the core 9002 repaint hold, or every
+      // later repaint would stay suppressed.
+      await feed('\x1b[?9002h\x1b[6;1H\x1b[2Kredraw');
+      expect(_row(terminal, 5), '> composer');
+      expect(notifications, 1);
+
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(_row(terminal, 5), 'redraw');
+      expect(notifications, 2);
+
+      await feed('\x1b[6;1H\x1b[2Kafter');
+      expect(_row(terminal, 5), 'after');
+      expect(notifications, 3);
+    });
+
+    test('a multi-parameter begin marker is held like a plain one', () async {
+      await start();
+      addTearDown(stop);
+
+      await feed('\x1b[?25;2026h\x1b[6;1H\x1b[J');
+      expect(_row(terminal, 5), '> composer');
+      expect(notifications, 1);
+
+      await feed('\x1b[6;1H> next\x1b[?2026;25l');
+      expect(_row(terminal, 5), '> next');
+      expect(notifications, 2);
+    });
+
     test('closing the shell applies a withheld frame', () async {
       await start();
 
@@ -272,12 +351,16 @@ void main() {
       expect(writes, ['\x1b[?2026;2\$y']);
 
       // A query inside an open transaction is answered once the frame is
-      // applied, not while its bytes are withheld.
+      // applied, not while its bytes are withheld, and it reports the mode as
+      // it stood at the query's own position: set.
       await feed('$_begin\x1b[?2026\$p');
       expect(writes, hasLength(1));
       await feed(_end);
-      expect(writes, hasLength(2));
-      expect(writes.last, startsWith('\x1b[?2026;'));
+      expect(writes, ['\x1b[?2026;2\$y', '\x1b[?2026;1\$y']);
+
+      // The same holds for a query that arrives in one chunk with both markers.
+      await feed('$_begin\x1b[?2026\$p$_end\x1b[?2026\$p');
+      expect(writes.sublist(2), ['\x1b[?2026;1\$y', '\x1b[?2026;2\$y']);
     });
   });
 }

@@ -178,6 +178,26 @@ void main() {
       terminal.resetHostResizeState();
       expect(terminal.synchronizedOutputMode, isFalse);
     });
+
+    test('endSynchronizedOutput releases a held 9002 repaint', () {
+      final terminal = Terminal()..resize(20, 2);
+      var notifications = 0;
+      terminal.addListener(() => notifications++);
+
+      terminal.writeSilently('\x1b[?9002hpartial');
+      terminal.notifyListeners();
+      expect(terminal.isMonkeyMuxSynchronizedOutputOpen, isTrue);
+      expect(notifications, 0);
+
+      expect(terminal.endSynchronizedOutput(), isTrue);
+      expect(terminal.isMonkeyMuxSynchronizedOutputOpen, isFalse);
+      expect(notifications, 1);
+
+      // Nothing was open: no repaint is emitted.
+      expect(terminal.endSynchronizedOutput(), isFalse);
+      terminal.notifyListeners();
+      expect(notifications, 2);
+    });
   });
 
   group('Terminal.resizeFromHost', () {

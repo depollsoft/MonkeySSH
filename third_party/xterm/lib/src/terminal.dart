@@ -96,6 +96,24 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// program that dies mid-frame cannot freeze resize or scroll repaints.
   bool get synchronizedOutputMode => _synchronizedOutput;
 
+  /// Whether a MonkeyMux synchronized redraw (DEC private mode 9002) is open
+  /// and holding repaints.
+  bool get isMonkeyMuxSynchronizedOutputOpen => _monkeyMuxSynchronizedOutput;
+
+  /// Force-closes an open MonkeyMux synchronized redraw and emits the repaint
+  /// it was holding, so a lost 9002 end marker can never leave the view
+  /// frozen. The owner calls this from a watchdog; a well-behaved server
+  /// always writes the end marker in the same buffer as the begin marker.
+  /// Returns whether a held repaint was emitted.
+  bool endSynchronizedOutput() {
+    if (!_monkeyMuxSynchronizedOutput) {
+      return false;
+    }
+    _monkeyMuxSynchronizedOutput = false;
+    notifyListeners();
+    return true;
+  }
+
   /// Number of MonkeySSH-private host resizes parsed by this terminal.
   int get hostResizeGeneration => _hostResizeGeneration;
 
@@ -103,16 +121,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   void resetHostResizeState() {
     _hostResizeGeneration = 0;
     _synchronizedOutput = false;
-    final wasSynchronized = _monkeyMuxSynchronizedOutput;
-    _monkeyMuxSynchronizedOutput = false;
-    if (wasSynchronized) {
-      // A synchronized redraw (DEC mode 9002) was interrupted mid-transaction
-      // by a transport reset / reattach. The server always writes the begin and
-      // end markers together, so this only happens when the parse was cut off,
-      // e.g. a very large redraw split across parse turns. Flush the repaint we
-      // were holding so the parsed-so-far content is not stranded off-screen.
-      notifyListeners();
-    }
+    // A synchronized redraw (DEC mode 9002) interrupted mid-transaction by a
+    // transport reset / reattach must not strand the repaint it was holding.
+    endSynchronizedOutput();
   }
 
   /// The [TerminalInputHandler] used by this terminal. [defaultInputHandler] is

@@ -1362,7 +1362,12 @@ if(!$__flResolved){$__flResolved='cmd'}
   }
 
   void _updateSynchronizedOutputWatchdog(Terminal terminal) {
-    if (_synchronizedOutputHold.isEmpty) {
+    // The core terminal still holds repaints while a MonkeyMux 9002 redraw is
+    // open. The runtime normally applies begin and end together, so the mode
+    // is only left open here when a redraw exceeded the hold cap or a flush
+    // applied a partial one; bound that the same way as the hold itself.
+    if (_synchronizedOutputHold.isEmpty &&
+        !terminal.isMonkeyMuxSynchronizedOutputOpen) {
       _synchronizedOutputWatchdog?.cancel();
       _synchronizedOutputWatchdog = null;
       return;
@@ -1390,13 +1395,19 @@ if(!$__flResolved){$__flResolved='cmd'}
     _synchronizedOutputWatchdog?.cancel();
     _synchronizedOutputWatchdog = null;
     final held = _synchronizedOutputHold;
-    if (held.isEmpty) {
+    if (held.isEmpty && !terminal.isMonkeyMuxSynchronizedOutputOpen) {
       return;
     }
     _synchronizedOutputHold = '';
-    _applyTerminalParseSlice(terminal, held);
+    if (held.isNotEmpty) {
+      _applyTerminalParseSlice(terminal, held);
+    }
     _lastTerminalParseNotifyAtMs = null;
-    terminal.notifyListeners();
+    // A partial 9002 redraw leaves the core mode set, which would suppress
+    // this repaint (and every later one) until an end marker arrives.
+    if (!terminal.endSynchronizedOutput()) {
+      terminal.notifyListeners();
+    }
     DiagnosticsLogService.instance.debug(
       'terminal.parse',
       'sync_hold_flush',
@@ -1461,7 +1472,27 @@ if(!$__flResolved){$__flResolved='cmd'}
     return true;
   }
 
+  /// DECRQM (`CSI ? Ps $ p`). A query is answered from the terminal state at
+  /// its own position in the stream, so a slice is applied in pieces around
+  /// each one: `2026h`, query, `2026l` in one chunk reports the mode as set.
+  static final _terminalModeReportQuery = RegExp(r'\x1b\[\?\d+\$p');
+
   void _applyTerminalParseSlice(Terminal terminal, String slice) {
+    if (!slice.contains(r'$p')) {
+      _applyTerminalParsePiece(terminal, slice);
+      return;
+    }
+    var start = 0;
+    for (final match in _terminalModeReportQuery.allMatches(slice)) {
+      _applyTerminalParsePiece(terminal, slice.substring(start, match.end));
+      start = match.end;
+    }
+    if (start < slice.length) {
+      _applyTerminalParsePiece(terminal, slice.substring(start));
+    }
+  }
+
+  void _applyTerminalParsePiece(Terminal terminal, String slice) {
     final terminalOutput = _terminalOutputDecoder.add(
       input: slice,
       terminalColumns: terminal.viewWidth,
@@ -1590,6 +1621,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     _synchronizedOutputHold = '';
     if (held.isNotEmpty) {
       _applyTerminalParseSlice(terminal, held);
+      terminal.endSynchronizedOutput();
     }
     if (hadBacklog) {
       // Slices are written silently, so repaint the drained result once.
