@@ -1,6 +1,3 @@
 What's new
 
-- Fixed terminal notification taps opening the wrong tmux or MonkeyMux window.
-- Fixed missed notifications from background MonkeyMux windows.
-
-Update MonkeyMux on your hosts to get the background notification fix.
+- Fixed an extra space before punctuation in Pi when using the keyboard's double-space shortcut to type a period.
