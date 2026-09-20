@@ -410,3 +410,86 @@ func TestSwitchRedrawPreservesScreenUnderIncrementalUpdates(t *testing.T) {
 		})
 	}
 }
+
+// TestOversizedRedrawReplaysEveryPlaceholderImage covers the other half of a
+// frame painted from the screen model: the model reproduces Kitty unicode
+// placeholder cells faithfully, but the parser skips the APC transmissions that
+// fill them, so the images have to travel with the frame. The recency-selected
+// replay only carries a handful, which left a frame referencing more images
+// than that showing blank image areas (Copilot CLI's inline screenshots).
+func TestOversizedRedrawReplaysEveryPlaceholderImage(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "pi"}
+	window.appendHistoryLocked([]byte("\x1b[2J\x1b[Hold frame"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 80, 24)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// More images than the recency replay carries, each big enough that the
+	// replay's byte budget is not what excludes them, and small enough that the
+	// whole set fits the repair budget.
+	const images = maxReplayedKittyImages + 2
+	payload := strings.Repeat("QUJD", 4096)
+	ids := make([]int, 0, images)
+	var repaint bytes.Buffer
+	repaint.WriteString("\x1b[2J\x1b[H")
+	for i := 0; i < images; i++ {
+		id := 0x010000*(i+1) + 0x0203
+		ids = append(ids, id)
+		fmt.Fprintf(
+			&repaint,
+			"\x1b_Ga=T,U=1,f=100,c=2,r=1,q=2,i=%d;%s\x1b\\",
+			id,
+			payload,
+		)
+		// The placeholder cells carry the image id in the foreground colour.
+		fmt.Fprintf(
+			&repaint,
+			"\x1b[38;2;%d;%d;%dm\U0010EEEE̅̅\U0010EEEE̅̍\x1b[0m\r\n",
+			(id>>16)&0xFF,
+			(id>>8)&0xFF,
+			id&0xFF,
+		)
+	}
+	// Push the redraw past the buffer budget so it is painted from the screen
+	// model instead of forwarded as bytes.
+	repaint.WriteString("\x1b[24;1H")
+	for repaint.Len() <= foregroundRedrawBufferLimitBytes+4096 {
+		repaint.WriteString("\x1b[2Ktail status ·\r")
+	}
+	server.handleWindowOutput(window.id, repaint.Bytes())
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	if len(got) > foregroundRedrawBufferLimitBytes {
+		t.Fatalf("client received %d bytes; the redraw was forwarded verbatim", len(got))
+	}
+	firstPlaceholder := strings.Index(got, "\U0010EEEE")
+	if firstPlaceholder < 0 {
+		t.Fatal("frame lost its placeholder cells")
+	}
+	for _, id := range ids {
+		marker := fmt.Sprintf("i=%d;", id)
+		switch count := strings.Count(got, marker); count {
+		case 1:
+		case 0:
+			t.Fatalf("image %d is referenced by the frame but was not replayed", id)
+		default:
+			t.Fatalf("image %d was replayed %d times", id, count)
+		}
+		if strings.Index(got, marker) > firstPlaceholder {
+			t.Fatalf("image %d was replayed after the cells that composite it", id)
+		}
+	}
+	if strings.Contains(got, "a=T") {
+		t.Fatalf("replayed transmissions were not store-only: %q", got[:256])
+	}
+}

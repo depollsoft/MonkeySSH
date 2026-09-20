@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.212"
+	monkeyMuxVersion                  = "0.1.213"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -10585,7 +10585,17 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	if window == nil || len(history) == 0 {
 		return nil
 	}
-	images := window.kittyImageReplayLocked(nil)
+	images, replayed := window.kittyImageReplaySelectionLocked(nil)
+	// The frame is rendered from the screen model, which drops the APC image
+	// transmissions, so every image its placeholder cells reference must travel
+	// with it — not just the few most recently mutated ones.
+	images = append(
+		images,
+		window.kittyPlaceholderImageReplayLocked(
+			replayed,
+			maxKittyImageRepairBytes-len(images),
+		)...,
+	)
 	history = window.withheldAttachOscSuffixTrimmedLocked(history)
 	replayHistory := make([]byte, 0, len(images)+len(history))
 	replayHistory = append(replayHistory, images...)
@@ -13861,8 +13871,18 @@ func computeKittyImageGlobalBudgetBytes() int {
 // so re-sending only adds switch latency. The id still counts against the caps
 // so the "most recent N" window is unchanged whether or not the client has them.
 func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
+	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
+	return out
+}
+
+// kittyImageReplaySelectionLocked is kittyImageReplayLocked plus the set of
+// roots it emitted, so a caller that needs more images (a rendered frame whose
+// placeholder cells point at older roots) can skip the ones already covered.
+func (w *muxWindow) kittyImageReplaySelectionLocked(
+	clientHas map[string]uint32,
+) ([]byte, map[string]struct{}) {
 	if len(w.kittyImageOrder) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Select by mutation recency so an actively changing older root is retained.
 	// Emission below still follows root order to preserve I= mapping semantics.
@@ -13910,6 +13930,50 @@ func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
 		out = append(out, w.kittyImageNumberReplayLocked(id)...)
 		out = append(out, w.kittyImageAnimations[id]...)
 	}
+	return out, selectedSet
+}
+
+// kittyPlaceholderImageReplayLocked returns store-only transmissions for every
+// retained image the screen model's Kitty unicode placeholder cells refer to
+// and that replayed does not already cover.
+//
+// A frame rendered from the screen model reproduces the placeholder cells but
+// not the APC transmissions behind them, and the recency-selected replay is
+// capped at a handful of images, so a frame referencing more images than that
+// would ship placeholders the client cannot composite and paint blank image
+// areas. These are the exact images that frame needs, so they are bounded by
+// bytes only, not by count.
+func (w *muxWindow) kittyPlaceholderImageReplayLocked(
+	replayed map[string]struct{},
+	budget int,
+) []byte {
+	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
+		return nil
+	}
+	wanted := w.screenLocked().PlaceholderImageIDs()
+	if len(wanted) == 0 {
+		return nil
+	}
+	want := make(map[string]struct{}, len(wanted))
+	for _, id := range wanted {
+		want[id] = struct{}{}
+	}
+	// Emit in original transmission order so repeated I= number mappings end in
+	// the same state as the live stream, exactly as the recency replay does.
+	ids := make([]string, 0, len(wanted))
+	for _, id := range w.kittyImageOrder {
+		if _, ok := want[id]; !ok {
+			continue
+		}
+		if _, ok := replayed[id]; ok {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	out, _ := w.kittyImageTransmissionsForBoundedLocked(ids, 0, budget)
 	return out
 }
 
@@ -13944,14 +14008,29 @@ func (w *muxWindow) kittyImageNumberReplayLocked(id string) []byte {
 func (w *muxWindow) kittyImageTransmissionsForLocked(
 	ids []string,
 ) ([]byte, []string) {
-	if len(ids) == 0 || len(w.kittyImages) == 0 {
+	return w.kittyImageTransmissionsForBoundedLocked(
+		ids,
+		maxReplayedKittyImages,
+		maxKittyImageRepairBytes,
+	)
+}
+
+// kittyImageTransmissionsForBoundedLocked is kittyImageTransmissionsForLocked
+// with explicit bounds: maxImages <= 0 emits as many as the byte budget allows,
+// which is what a caller replaying the exact images a frame references needs.
+func (w *muxWindow) kittyImageTransmissionsForBoundedLocked(
+	ids []string,
+	maxImages int,
+	budget int,
+) ([]byte, []string) {
+	if len(ids) == 0 || budget <= 0 || len(w.kittyImages) == 0 {
 		return nil, nil
 	}
 	var out []byte
 	var served []string
 	var seen map[string]struct{}
 	for _, id := range ids {
-		if len(seen) >= maxReplayedKittyImages {
+		if maxImages > 0 && len(seen) >= maxImages {
 			break
 		}
 		if id == "" {
@@ -13968,8 +14047,7 @@ func (w *muxWindow) kittyImageTransmissionsForLocked(
 		mappings := w.kittyImageNumberReplayLocked(id)
 		animation := w.kittyImageAnimations[id]
 		imageBytes := len(buf) + len(mappings) + len(animation)
-		if imageBytes > maxKittyImageRepairBytes ||
-			len(out)+imageBytes > maxKittyImageRepairBytes {
+		if imageBytes > budget || len(out)+imageBytes > budget {
 			continue
 		}
 		if seen == nil {
