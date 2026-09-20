@@ -2292,7 +2292,7 @@ void main() {
       await _disposeImeHarness(driver, harness);
     });
 
-    test('does not review the retyped tail of a double-space period as inserted text', () async {
+    test('does not review the retyped context of a framed double-space period as inserted text', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);
       addTearDown(driver.dispose);
       driver.platform = TargetPlatform.iOS;
@@ -2304,6 +2304,7 @@ void main() {
           reviewCount++;
           return true;
         },
+        initialTerminalOutput: '\x1b[?2004h',
         initialEditingValue: _editingValue(
           r'echo $(date) hi ',
           selectionOffset: r'echo $(date) hi '.length,
@@ -2323,10 +2324,7 @@ void main() {
       await driver.flush();
 
       expect(reviewCount, reviewCountAfterSeed);
-      expect(
-        terminalOutput.join(),
-        '${_terminalKeyOutput(TerminalKey.backspace)}. ',
-      );
+      expect(terminalOutput, ['\x7f', '\x7f', '\x1b[200~i. \x1b[201~']);
 
       await _disposeImeHarness(driver, harness);
     });
@@ -6044,6 +6042,91 @@ TextEditingValue _batchEditingValue(String text, {bool composing = false}) =>
     );
 
 void _batchTests() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final kitty in [false, true]) {
+      test('double-space stays exact in Pi paste mode on $platform, '
+          'Kitty: $kitty', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialTerminalOutput: '\x1b[?2004h${kitty ? '\x1b[>1u' : ''}',
+          initialEditingValue: _batchEditingValue('hello '),
+        );
+        harness.terminalOutput.clear();
+
+        driver.updateEditingValue(_batchEditingValue('hello. '));
+        await driver.flush();
+        driver.updateEditingValue(_batchEditingValue('hello. w'));
+        await driver.flush();
+        driver.engine.performAction(TextInputAction.newline);
+        await driver.flush();
+
+        // Pi prepends a space to a paste starting with '.' after a word.
+        // Retype the known 'o' with the correction to avoid path heuristics,
+        // while retaining paste boundaries and a separate Return for Codex.
+        expect(harness.terminalOutput, [
+          '\x7f',
+          '\x7f',
+          '\x1b[200~o. \x1b[201~',
+          '\x1b[200~w\x1b[201~',
+          '\r',
+        ]);
+        await _disposeImeHarness(driver, harness);
+      });
+    }
+  }
+
+  for (final prefix in ['.', '/', '~']) {
+    for (final preceding in ['o', '_', '1', ' ', '👩🏽‍💻', '']) {
+      test(
+        'path-like IME suffix $prefix after "$preceding" stays literal',
+        () async {
+          final driver = _ImeDriver(platform: TargetPlatform.iOS);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialTerminalOutput: '\x1b[?2004h',
+            initialEditingValue: _batchEditingValue(preceding),
+          );
+          harness.terminalOutput.clear();
+
+          driver.updateEditingValue(_batchEditingValue('$preceding$prefix '));
+          await driver.flush();
+
+          final retype = ['o', '_', '1'].contains(preceding);
+          expect(harness.terminalOutput, [
+            if (retype) '\x7f',
+            '\x1b[200~${retype ? preceding : ''}$prefix \x1b[201~',
+          ]);
+          await _disposeImeHarness(driver, harness);
+        },
+      );
+    }
+  }
+
+  test('does not retype context from before Enter on the next line', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      initialEditingValue: _batchEditingValue('hello'),
+    );
+    harness.terminalOutput.clear();
+
+    driver.updateEditingValue(_batchEditingValue('hello.\n. '));
+    await driver.flush();
+
+    expect(harness.terminalOutput, [
+      '\x7f',
+      '\x1b[200~o.\x1b[201~',
+      '\r',
+      '\x1b[200~. \x1b[201~',
+    ]);
+    await _disposeImeHarness(driver, harness);
+  });
+
   for (final enter in ['\n', '\r', '\r\n']) {
     test('frames IME batch before Return ${enter.codeUnits}', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);
@@ -6134,7 +6217,8 @@ void _batchTests() {
 
         expect(harness.terminalOutput, [
           '\x1b[200~hello\x1b[201~',
-          '\x1b[200~$suffix\x1b[201~',
+          if (suffix == '.') '\x7f',
+          '\x1b[200~${suffix == '.' ? 'o' : ''}$suffix\x1b[201~',
           '\r',
         ]);
         await _disposeImeHarness(driver, harness);
@@ -6366,10 +6450,10 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('hello'));
     await driver.flush();
     alt = true;
-    driver.updateEditingValue(_batchEditingValue('hello?'));
+    driver.updateEditingValue(_batchEditingValue('hello. '));
     await driver.flush();
 
-    expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '\x1b?']);
+    expect(harness.terminalOutput, ['\x1b[200~hello\x1b[201~', '\x1b. ']);
     await _disposeImeHarness(driver, harness);
   });
 
