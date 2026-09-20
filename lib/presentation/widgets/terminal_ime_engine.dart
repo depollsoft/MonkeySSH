@@ -861,8 +861,12 @@ class TerminalImeEngine {
     }
 
     final appendedText = delta.appendedText;
+    final retainedPrefixLength = delta.deleteCursorOffset - deletedCount;
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
+      precedingGrapheme: retainedPrefixLength > 0
+          ? _lastSentText.characters.elementAt(retainedPrefixLength - 1)
+          : null,
       enterModifiers: enterModifiers,
       beforeEnter: beforeEnter,
     );
@@ -897,6 +901,7 @@ class TerminalImeEngine {
 
   int _sendAppendedTerminalInput(
     String text, {
+    String? precedingGrapheme,
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
     bool beforeEnter = false,
   }) {
@@ -926,6 +931,7 @@ class TerminalImeEngine {
 
       _sendTerminalTextSegment(
         text.substring(segmentStart, index),
+        precedingGrapheme: segmentStart == 0 ? precedingGrapheme : null,
         beforeEnter: true,
       );
       _sendTerminalEnterFromTextInput(
@@ -938,12 +944,17 @@ class TerminalImeEngine {
 
     _sendTerminalTextSegment(
       text.substring(segmentStart),
+      precedingGrapheme: segmentStart == 0 ? precedingGrapheme : null,
       beforeEnter: beforeEnter,
     );
     return newlineCount;
   }
 
-  void _sendTerminalTextSegment(String text, {bool beforeEnter = false}) {
+  void _sendTerminalTextSegment(
+    String text, {
+    String? precedingGrapheme,
+    bool beforeEnter = false,
+  }) {
     if (text.isEmpty) {
       return;
     }
@@ -961,7 +972,23 @@ class TerminalImeEngine {
       // Keep framing later commits too: a separately typed question mark
       // after a swiped word can restart paste detection before Return.
       _isFramingImeText = true;
-      terminal.paste(text);
+      var pasteText = text;
+      if ((text.startsWith('.') ||
+              text.startsWith('/') ||
+              text.startsWith('~')) &&
+          precedingGrapheme != null &&
+          precedingGrapheme.length == 1 &&
+          (_isAsciiLetterOrDigitCodeUnit(precedingGrapheme.codeUnitAt(0)) ||
+              precedingGrapheme == '_')) {
+        // Pi treats pastes starting with '.', '/' or '~' as file paths and
+        // inserts a space after a word character. IME edits are literal text,
+        // not file drops. Retype one known preceding character inside the
+        // same paste so double-space punctuation stays "word. ", not
+        // "word . ". Keep the batch boundary for other TUIs' Enter handling.
+        terminal.keyInput(TerminalKey.backspace);
+        pasteText = '$precedingGrapheme$text';
+      }
+      terminal.paste(pasteText);
     } else {
       _isFramingImeText = false;
       terminal.textInput(input);

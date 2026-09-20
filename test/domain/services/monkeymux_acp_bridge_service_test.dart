@@ -1115,7 +1115,6 @@ void main() {
                   'data': {'jsonrpc': '2.0', 'method': 'direct/1'},
                 })}',
               );
-              unawaited(channel.remoteClose());
               return;
             }
             expect(message['lastAck'], 1);
@@ -1172,6 +1171,10 @@ void main() {
       addTearDown(incoming.cancel);
 
       expect(await incoming.moveNext(), isTrue);
+      // Disconnect only after the first frame is delivered. The wire pump
+      // can yield under load; closing from onWrite can discard that frame
+      // before delivery, so the reconnect would not start from ACK 1.
+      await channels.single.remoteClose();
       await _waitUntil(() => !transport.isConnected);
       await expectLater(
         transport.write(
