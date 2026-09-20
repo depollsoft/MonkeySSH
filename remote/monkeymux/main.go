@@ -6435,7 +6435,8 @@ func (s *muxServer) createWindowWithStarter(
 		s.enforceGlobalKittyImageBudgetLocked()
 	}
 	s.clearAlertsLocked(window.id)
-	replay = s.replayBytesLocked(window)
+	var imageFollowUp []byte
+	replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, nil)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	snapshots = s.snapshotsLocked()
 	addedSnapshot = snapshotByID(snapshots, window.id)
@@ -6447,7 +6448,7 @@ func (s *muxServer) createWindowWithStarter(
 	s.mu.Unlock()
 
 	s.attachMu.Lock()
-	redrew := s.broadcastAttachReplayAndResizeLocked(replay, window)
+	redrew := s.broadcastAttachReplayAndResizeLocked(replay, imageFollowUp, window)
 	s.attachMu.Unlock()
 	if refreshPendingFocus || refreshPendingResize {
 		s.refreshPendingClientViewport(refreshPendingFocus, refreshPendingResize)
@@ -6824,6 +6825,7 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 
 func (s *muxServer) markWindowClosed(windowID string) {
 	var replay []byte
+	var imageFollowUp []byte
 	var activeChanged bool
 	var foregroundProcessGroup int
 	var redrawWindow *muxWindow
@@ -6879,7 +6881,8 @@ func (s *muxServer) markWindowClosed(windowID string) {
 				s.publishedWidth = s.width
 				s.publishedHeight = s.height
 				s.resizeActiveLocked(s.width, s.height)
-				replay = s.replayBytesLocked(candidate)
+				replay, imageFollowUp =
+					s.replayBytesWithImageFollowUpLocked(candidate, nil)
 				foregroundProcessGroup = candidate.foregroundProcessGroupLocked()
 				redrawWindow = candidate
 				activeChanged = true
@@ -6891,7 +6894,11 @@ func (s *muxServer) markWindowClosed(windowID string) {
 	shouldShutdown = len(snapshots) == 0
 	s.mu.Unlock()
 	if activeChanged {
-		redrew = s.broadcastAttachReplayAndResizeLocked(replay, redrawWindow)
+		redrew = s.broadcastAttachReplayAndResizeLocked(
+			replay,
+			imageFollowUp,
+			redrawWindow,
+		)
 	}
 	s.attachMu.Unlock()
 
@@ -7154,6 +7161,26 @@ func writeAttachConnection(conn net.Conn, data []byte) error {
 
 func (c *attachClient) enqueue(data []byte, wait bool) (<-chan error, bool) {
 	return c.enqueueWrite(data, wait, "", 0, nil)
+}
+
+// enqueueOptional queues data the client can live without, such as the image
+// follow-up behind a replay: it is skipped unless the write queue still keeps
+// half its limit free afterwards, and it never closes the client. Live output
+// must keep that headroom, and a skipped follow-up is recovered by the
+// client's placeholder-driven image request.
+func (c *attachClient) enqueueOptional(data []byte) bool {
+	if c == nil || len(data) == 0 {
+		return false
+	}
+	c.queueMu.Lock()
+	fits := !c.queueClosed &&
+		c.queuedBytes+len(data) <= attachWriteQueueLimitBytes/2
+	c.queueMu.Unlock()
+	if !fits {
+		return false
+	}
+	_, queued := c.enqueue(data, false)
+	return queued
 }
 
 func (c *attachClient) enqueueTerminalQuery(
@@ -8567,7 +8594,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	} else {
 		s.pendingFocusRefreshConn = nil
 	}
-	replay := s.activeReplayLocked()
+	replay, imageFollowUp := s.activeReplayWithImageFollowUpLocked()
 	var completion <-chan error
 	var queued bool
 	if window != nil {
@@ -8584,6 +8611,10 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	completion, queued = client.enqueue(replay, true)
 	if !queued {
 		client.clearOutputReplay()
+	} else if len(imageFollowUp) > 0 {
+		// Queued behind the replay, and never waited on: the readiness handshake
+		// below only blocks on the replay's own completion.
+		client.enqueueOptional(imageFollowUp)
 	}
 	s.attachViewportTransitionWindowID = ""
 	s.mu.Unlock()
@@ -9512,6 +9543,7 @@ func (s *muxServer) selectWindowWithSkip(
 	clientHas map[string]uint32,
 ) error {
 	var replay []byte
+	var imageFollowUp []byte
 	var foregroundProcessGroup int
 	var redrawWindow *muxWindow
 	var primary net.Conn
@@ -9551,7 +9583,7 @@ func (s *muxServer) selectWindowWithSkip(
 		clientHas = nil
 	}
 	primary = s.attachConn
-	replay = s.replayBytesLockedWithSkip(window, clientHas)
+	replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, clientHas)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	redrawWindow = window
 	s.mu.Unlock()
@@ -9559,7 +9591,11 @@ func (s *muxServer) selectWindowWithSkip(
 	// first would leave it already at the target, forcing that redraw to
 	// manufacture a temporary size and making the foreground app render a whole
 	// extra frame for a geometry that never existed.
-	redrew := s.broadcastAttachReplayAndResizeLocked(replay, redrawWindow)
+	redrew := s.broadcastAttachReplayAndResizeLocked(
+		replay,
+		imageFollowUp,
+		redrawWindow,
+	)
 	if !redrew {
 		s.mu.Lock()
 		s.resizeWindowLocked(window, targetWidth, targetHeight)
@@ -9577,6 +9613,7 @@ func (s *muxServer) selectWindowWithSkip(
 
 func (s *muxServer) closeWindow(windowID string) (bool, error) {
 	var replay []byte
+	var imageFollowUp []byte
 	var activeChanged bool
 	var foregroundProcessGroup int
 	var redrawWindow *muxWindow
@@ -9666,7 +9703,8 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 			s.publishedHeight = s.height
 			targetWidth = s.width
 			targetHeight = s.height
-			replay = s.replayBytesLocked(replacement)
+			replay, imageFollowUp =
+				s.replayBytesWithImageFollowUpLocked(replacement, nil)
 			foregroundProcessGroup = replacement.foregroundProcessGroupLocked()
 			redrawWindow = replacement
 			activeChanged = true
@@ -9688,7 +9726,11 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 	if activeChanged {
 		// The redraw owns delivering the geometry so the replacement window's
 		// foreground app repaints once, at the final size.
-		redrew = s.broadcastAttachReplayAndResizeLocked(replay, redrawWindow)
+		redrew = s.broadcastAttachReplayAndResizeLocked(
+			replay,
+			imageFollowUp,
+			redrawWindow,
+		)
 		if !redrew {
 			s.mu.Lock()
 			s.resizeWindowLocked(redrawWindow, targetWidth, targetHeight)
@@ -9934,28 +9976,38 @@ func (w *muxWindow) recordScreenGeometryLocked(width int, height int) {
 	w.screenWidth, w.screenHeight = width, height
 }
 
+// writeAttachReplayAndResizeLocked delivers the replay, then the Kitty image
+// follow-up as a second write behind it, so the images the replay left out
+// never enlarge the payload a client parses before it is ready. The follow-up
+// only reaches a client the replay itself was queued to.
 func (s *muxServer) writeAttachReplayAndResizeLocked(
 	conn net.Conn,
 	replay []byte,
+	imageFollowUp []byte,
 	window *muxWindow,
 ) bool {
-	s.writeAttachLocked(conn, replay)
+	if s.writeAttachLocked(conn, replay) {
+		s.writeAttachOptionalLocked(conn, imageFollowUp)
+	}
 	return s.simulateForegroundResizeIfAttached(conn, window)
 }
 
 func (s *muxServer) broadcastAttachReplayAndResizeLocked(
 	replay []byte,
+	imageFollowUp []byte,
 	window *muxWindow,
 ) bool {
-	if s.deferAttachReplayForRedrawLocked(replay, window) {
+	if s.deferAttachReplayForRedrawLocked(replay, imageFollowUp, window) {
 		return true
 	}
 	s.writeAllAttachesLocked(replay)
+	s.writeAllAttachesOptionalLocked(imageFollowUp)
 	return s.simulateForegroundResizeIfAnyAttached(window)
 }
 
 func (s *muxServer) deferAttachReplayForRedrawLocked(
 	replay []byte,
+	imageFollowUp []byte,
 	window *muxWindow,
 ) bool {
 	s.mu.Lock()
@@ -9984,6 +10036,22 @@ func (s *muxServer) deferAttachReplayForRedrawLocked(
 		window.redrawForwardingReplay[:0],
 		replay...,
 	)
+	// Nothing is written yet, so there is no synchronous payload for the image
+	// follow-up to grow: it rides behind the replay in the same deferred buffer
+	// and reaches the client with the repaint. When that repaint is replaced by
+	// a frame rendered from the screen model, this buffer is dropped with it and
+	// the rendered frame carries its own placeholder images instead.
+	if len(imageFollowUp) > 0 &&
+		len(window.redrawForwardingReplay)+len(imageFollowUp) <=
+			attachWriteQueueLimitBytes/2 {
+		// The deferred replay and the repaint go out as one write, so keep the
+		// same headroom enqueueOptional would; a skipped follow-up is recovered
+		// by the client's placeholder-driven image request.
+		window.redrawForwardingReplay = append(
+			window.redrawForwardingReplay,
+			imageFollowUp...,
+		)
+	}
 	deliverForegroundGeometry(window, s.publishedWidth, s.publishedHeight)
 	return true
 }
@@ -10479,15 +10547,23 @@ func (w *muxWindow) modeReplayForAttachedTerminalLocked() []byte {
 }
 
 func (s *muxServer) activeReplayLocked() []byte {
+	replay, _ := s.activeReplayWithImageFollowUpLocked()
+	return replay
+}
+
+// activeReplayWithImageFollowUpLocked is activeReplayLocked plus the separate
+// store-only Kitty transmissions to enqueue behind that replay.
+func (s *muxServer) activeReplayWithImageFollowUpLocked() ([]byte, []byte) {
 	window := s.windowByIDLocked(s.activeID)
 	if window == nil || window.closed {
-		return nil
+		return nil, nil
 	}
-	return s.replayBytesLocked(window)
+	return s.replayBytesWithImageFollowUpLocked(window, nil)
 }
 
 func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
-	return s.replayBytesLockedWithSkip(window, nil)
+	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
+	return replay
 }
 
 // replayBytesLockedWithSkip builds the reattach replay, omitting retained Kitty
@@ -10497,6 +10573,27 @@ func (s *muxServer) replayBytesLockedWithSkip(
 	window *muxWindow,
 	clientHas map[string]uint32,
 ) []byte {
+	replay, _ := s.replayBytesWithImageFollowUpLocked(window, clientHas)
+	return replay
+}
+
+// replayBytesWithImageFollowUpLocked returns the reattach replay plus the
+// store-only Kitty transmissions that belong *after* it, as a separate write.
+//
+// The synchronous replay is deliberately capped at maxReplayedKittyImages /
+// maxReplayedKittyImageBytes so a phone can parse it before SSH and terminal
+// readiness deadlines, and the replay bytes here are exactly what they were
+// before the follow-up existed. That cap left every other image a
+// foreground-redraw app repaints blank until the client noticed the orphaned
+// placeholder cells and asked for them back, which costs a request debounce
+// plus a round trip. The follow-up carries precisely the images the window's
+// placeholder cells still reference and the replay did not already transmit,
+// bounded by the repair budget the replay has not spent, so the image bytes in
+// flight right after an attach or switch stay within maxKittyImageRepairBytes.
+func (s *muxServer) replayBytesWithImageFollowUpLocked(
+	window *muxWindow,
+	clientHas map[string]uint32,
+) ([]byte, []byte) {
 	history, historyStart := window.historyTailWithParserLocked()
 	if window.retainsConPtyNormalScreenLocked() {
 		// Keep the full bounded screen history: differential updates may leave
@@ -10504,9 +10601,21 @@ func (s *muxServer) replayBytesLockedWithSkip(
 		start := advanceReplayStartToTerminalGround(history, 0, historyStart)
 		history = stripTerminalQueriesFromReplay(history[start:])
 		history = window.withheldAttachOscSuffixTrimmedLocked(history)
-		images := window.kittyImageReplayLocked(clientHas)
+		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
 		replayHistory := append(images, history...)
-		return wrapSynchronizedTerminalOutput(nil, buildWindowReplay(window, replayHistory))
+		return wrapSynchronizedTerminalOutput(
+				nil,
+				buildWindowReplay(window, replayHistory),
+			),
+			// The raw history tail is bounded, so a transmission it once
+			// carried can have been evicted while its placeholder cells
+			// survive; ids the tail still transmits are excluded by scanning.
+			window.kittyPlaceholderImageFollowUpLocked(
+				replayed,
+				history,
+				clientHas,
+				maxKittyImageRepairBytes-len(images),
+			)
 	}
 	if window.usesForegroundRedrawReplayLocked() {
 		// The foreground app redraws its own cells on reattach (driven by a
@@ -10518,13 +10627,29 @@ func (s *muxServer) replayBytesLockedWithSkip(
 		// have nothing to composite and render blank. The retained transmissions
 		// survive eviction from the rolling visible history and are store-only
 		// (a=T downgraded to a=t) so they produce no visible output themselves.
-		history = window.kittyImageReplayLocked(clientHas)
-	} else {
-		history = trimReplayHistoryForAttachWithParser(history, historyStart)
-		history = stripTerminalQueriesFromReplay(history)
-		history = window.withheldAttachOscSuffixTrimmedLocked(history)
+		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
+		return buildWindowReplay(window, images),
+			window.kittyPlaceholderImageFollowUpLocked(
+				replayed,
+				nil,
+				clientHas,
+				maxKittyImageRepairBytes-len(images),
+			)
 	}
-	return buildWindowReplay(window, history)
+	history = trimReplayHistoryForAttachWithParser(history, historyStart)
+	history = stripTerminalQueriesFromReplay(history)
+	history = window.withheldAttachOscSuffixTrimmedLocked(history)
+	// The replayed tail is cut to windowReplayLimitBytes, which can drop a
+	// transmission whose placeholder cells are still inside the tail. Ids the
+	// tail still transmits are excluded, so this is a no-op for the ordinary
+	// shell window that replays its images intact.
+	return buildWindowReplay(window, history),
+		window.kittyPlaceholderImageFollowUpLocked(
+			nil,
+			history,
+			clientHas,
+			maxKittyImageRepairBytes,
+		)
 }
 
 // releaseRedrawForwardingStateLocked drops every buffer a redraw pause retains
@@ -10593,6 +10718,7 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 		images,
 		window.kittyPlaceholderImageReplayLocked(
 			replayed,
+			nil,
 			maxKittyImageRepairBytes-len(images),
 		)...,
 	)
@@ -10897,15 +11023,40 @@ func (s *muxServer) writeAllAttachesLocked(data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	for _, client := range s.attachClientsSnapshotLocked() {
+		_, _ = client.enqueue(data, false)
+	}
+}
+
+// writeAttachOptionalLocked is writeAttachLocked for data the client can live
+// without: skipped when the queue lacks headroom, never closing the client.
+func (s *muxServer) writeAttachOptionalLocked(conn net.Conn, data []byte) bool {
+	if conn == nil || len(data) == 0 {
+		return false
+	}
+	s.mu.Lock()
+	client := s.attachClients[conn]
+	s.mu.Unlock()
+	return client.enqueueOptional(data)
+}
+
+func (s *muxServer) writeAllAttachesOptionalLocked(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	for _, client := range s.attachClientsSnapshotLocked() {
+		client.enqueueOptional(data)
+	}
+}
+
+func (s *muxServer) attachClientsSnapshotLocked() []*attachClient {
 	s.mu.Lock()
 	clients := make([]*attachClient, 0, len(s.attachClients))
 	for _, client := range s.attachClients {
 		clients = append(clients, client)
 	}
 	s.mu.Unlock()
-	for _, client := range clients {
-		_, _ = client.enqueue(data, false)
-	}
+	return clients
 }
 
 func terminalViewportResizeSequence(
@@ -11630,6 +11781,7 @@ func (s *muxServer) replayActiveWindowToClient(client *attachClient) {
 		return
 	}
 	var replay []byte
+	var imageFollowUp []byte
 	var window *muxWindow
 	var foregroundProcessGroup int
 	var windowID string
@@ -11638,7 +11790,7 @@ func (s *muxServer) replayActiveWindowToClient(client *attachClient) {
 	window = s.windowByIDLocked(s.activeID)
 	if window != nil && !window.closed {
 		windowID = window.id
-		replay = s.replayBytesLocked(window)
+		replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, nil)
 		foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	}
 	s.mu.Unlock()
@@ -11646,7 +11798,12 @@ func (s *muxServer) replayActiveWindowToClient(client *attachClient) {
 		s.attachMu.Unlock()
 		return
 	}
-	redrew := s.writeAttachReplayAndResizeLocked(client.conn, replay, window)
+	redrew := s.writeAttachReplayAndResizeLocked(
+		client.conn,
+		replay,
+		imageFollowUp,
+		window,
+	)
 	s.flushPendingTerminalQueriesLocked(client.conn, windowID)
 	s.attachMu.Unlock()
 	if redrew {
@@ -11701,10 +11858,13 @@ func (s *muxServer) replayFocusedWindowToClient(
 	}
 	s.resizeActiveLocked(width, height)
 	windowID = window.id
-	replay = s.replayBytesLocked(window)
+	replay, imageFollowUp := s.replayBytesWithImageFollowUpLocked(window, nil)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	client.markOutputReplay(windowID, window.outputGeneration)
 	_, queued := client.enqueue(replay, false)
+	if queued && len(imageFollowUp) > 0 {
+		client.enqueueOptional(imageFollowUp)
+	}
 	s.mu.Unlock()
 	if !queued {
 		client.clearOutputReplay()
@@ -13945,6 +14105,7 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 // bytes only, not by count.
 func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 	replayed map[string]struct{},
+	clientHas map[string]uint32,
 	budget int,
 ) []byte {
 	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
@@ -13968,6 +14129,11 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 		if _, ok := replayed[id]; ok {
 			continue
 		}
+		if token, ok := clientHas[id]; ok && token == w.kittyImageToken[id] {
+			// The client holds these exact bytes already; re-sending them only
+			// adds parse latency to the repair it is waiting on.
+			continue
+		}
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
@@ -13975,6 +14141,72 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 	}
 	out, _ := w.kittyImageTransmissionsForBoundedLocked(ids, 0, budget)
 	return out
+}
+
+// kittyPlaceholderImageFollowUpLocked returns the store-only transmissions to
+// enqueue after a replay, for every retained image the screen model's Kitty
+// unicode placeholder cells reference that the replay does not already carry:
+// neither among the roots the recency selection emitted (replayed) nor inside
+// the raw history bytes the replay ships verbatim (replayHistory, nil when the
+// replay carries no raw history), and that the client does not already hold.
+//
+// It is a no-op whenever the replay covers everything the frame references,
+// which is the common case for a window with a handful of images.
+func (w *muxWindow) kittyPlaceholderImageFollowUpLocked(
+	replayed map[string]struct{},
+	replayHistory []byte,
+	clientHas map[string]uint32,
+	budget int,
+) []byte {
+	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
+		return nil
+	}
+	covered := replayed
+	if len(replayHistory) > 0 {
+		if transmitted := w.kittyImageIDsTransmittedInLocked(
+			replayHistory,
+		); len(transmitted) > 0 {
+			covered = make(map[string]struct{}, len(replayed)+len(transmitted))
+			for id := range replayed {
+				covered[id] = struct{}{}
+			}
+			for id := range transmitted {
+				covered[id] = struct{}{}
+			}
+		}
+	}
+	return w.kittyPlaceholderImageReplayLocked(covered, clientHas, budget)
+}
+
+// kittyImageIDsTransmittedInLocked reports the retained root ids whose image
+// bytes already travel inside data, so a follow-up never re-sends an image the
+// replay itself carries.
+func (w *muxWindow) kittyImageIDsTransmittedInLocked(
+	data []byte,
+) map[string]struct{} {
+	if len(data) == 0 {
+		return nil
+	}
+	events, _ := scanKittyTransmissions(data)
+	var transmitted map[string]struct{}
+	for _, event := range events {
+		if event.delete || event.mappingOnly || event.animation ||
+			len(event.buf) == 0 {
+			continue
+		}
+		id := event.id
+		if id == "" && event.imageNumber != "" {
+			id = w.kittyImageNumberToID[event.imageNumber]
+		}
+		if id == "" {
+			continue
+		}
+		if transmitted == nil {
+			transmitted = make(map[string]struct{}, len(events))
+		}
+		transmitted[id] = struct{}{}
+	}
+	return transmitted
 }
 
 func (w *muxWindow) kittyImageNumberReplayLocked(id string) []byte {
