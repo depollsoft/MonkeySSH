@@ -199,6 +199,24 @@ class MockEscapeHandler extends _i1.Mock implements _i2.EscapeHandler {
       );
 
   @override
+  void fullReset() => super.noSuchMethod(
+        Invocation.method(
+          #fullReset,
+          [],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void softReset() => super.noSuchMethod(
+        Invocation.method(
+          #softReset,
+          [],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   void unkownEscape(int? char) => super.noSuchMethod(
         Invocation.method(
           #unkownEscape,

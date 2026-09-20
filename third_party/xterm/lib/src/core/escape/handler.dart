@@ -46,6 +46,20 @@ abstract class EscapeHandler {
 
   void designateCharset(int charset, int name);
 
+  /// `ESC c` Reset to Initial State (RIS).
+  ///
+  /// Returns the terminal to its power-up state: main screen, empty screen and
+  /// scrollback, home cursor, default rendition, character sets, tab stops,
+  /// margins and modes.
+  void fullReset();
+
+  /// `CSI ! p` Soft Terminal Reset (DECSTR).
+  ///
+  /// Resets the rendition, character sets, saved cursor, margins and the modes
+  /// DECSTR owns. The screen contents, the cursor position and the tab stops
+  /// are left alone.
+  void softReset();
+
   void unkownEscape(int char);
 
   /* CSI */

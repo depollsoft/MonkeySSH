@@ -916,15 +916,15 @@ func TestVTScreenTracksKittyPlaceholderImageIDs(t *testing.T) {
 		t.Fatalf("writing to the clone changed the original: %v", got)
 	}
 
-	// An erased screen still reproduces main-screen scrollback, so only a full
-	// reset drops the ids.
+	// An erased screen, and even RIS, still reproduce the main-screen
+	// scrollback, so the ids stay with it.
 	s.Write([]byte("\x1b[2J\x1b[?1049h\x1b[?1049l"))
 	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("clearing the screen dropped the placeholder ids: %v", got)
 	}
 	s.Write([]byte("\x1bc"))
-	if got := s.PlaceholderImageIDs(); len(got) != 0 {
-		t.Fatalf("RIS kept placeholder ids: %v", got)
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RIS dropped the placeholder ids: %v", got)
 	}
 }
 

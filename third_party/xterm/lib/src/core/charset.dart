@@ -45,6 +45,19 @@ class Charset {
     _currentIndex = _savedIndex;
     _updateCache();
   }
+
+  /// Returns every designation, the active slot (SI/SO) and the saved copy
+  /// DECRC would restore to their power-up state: G0..G3 undesignated, G0
+  /// active, ASCII translation.
+  ///
+  /// Used by RIS and DECSTR, both of which reset the character sets.
+  void reset() {
+    _charsetMap = <int, CharsetTranslator>{};
+    _currentIndex = 0;
+    _savedCharsetMap = <int, CharsetTranslator>{};
+    _savedIndex = 0;
+    _updateCache();
+  }
 }
 
 const decSpecGraphics = <int, int>{

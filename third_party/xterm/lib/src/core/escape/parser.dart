@@ -131,7 +131,7 @@ class EscapeParser {
     'H'.charCode: _escHandleTabSet,
     'M'.charCode: _escHandleReverseIndex,
     'P'.charCode: _escHandleDCS, // DCS - XTGETTCAP (others skipped to ST)
-    // 'c'.charCode: _unsupportedHandler,
+    'c'.charCode: _escHandleFullReset, // RIS - Reset to Initial State
     // '#'.charCode: _unsupportedHandler,
     '('.charCode: _escHandleDesignateCharset0, //  SCS - G0
     ')'.charCode: _escHandleDesignateCharset1, //  SCS - G1
@@ -187,6 +187,18 @@ class EscapeParser {
   /// https://terminalguide.namepad.de/seq/a_esc_cm/
   bool _escHandleReverseIndex() {
     handler.reverseIndex();
+    return true;
+  }
+
+  /// `ESC c` Reset to Initial State (RIS)
+  ///
+  /// The first half of what `/usr/bin/reset` writes (`rs1`). Dropping it left
+  /// `reset` clearing nothing, so a terminal left in a broken state by a
+  /// crashed full-screen program stayed broken.
+  ///
+  /// https://terminalguide.namepad.de/seq/a_esc_cc/
+  bool _escHandleFullReset() {
+    handler.fullReset();
     return true;
   }
 
@@ -489,7 +501,9 @@ class EscapeParser {
     }
   }
 
-  /// `ESC [ Ps $ p` Request ANSI Mode (DECRQM).
+  /// `ESC [ ! p` Soft Terminal Reset (DECSTR) and `ESC [ Ps $ p` Request ANSI
+  /// Mode (DECRQM), which share the `p` final byte and are told apart by their
+  /// intermediate byte.
   ///
   /// Only the ANSI-mode form (no prefix) is answered here. The DEC-private form
   /// (`CSI ? Ps $ p`) is answered by the MonkeySSH app layer, which scans shell
@@ -501,6 +515,17 @@ class EscapeParser {
   ///
   /// https://vt100.net/docs/vt510-rm/DECRQM.html
   void _csiHandleRequestMode() {
+    // `CSI ! p` is DECSTR, the second half of what `/usr/bin/reset` writes
+    // (`rs2`). It takes no parameters and no private prefix.
+    if (_csi.intermediate == Ascii.exclamationMark) {
+      if (_csi.prefix == null) {
+        handler.softReset();
+      } else {
+        handler.unknownCSI(_csi.finalByte);
+      }
+      return;
+    }
+
     if (_csi.intermediate != Ascii.dollarSign) {
       handler.unknownCSI(_csi.finalByte);
       return;

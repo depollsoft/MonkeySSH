@@ -180,6 +180,16 @@ class _TerminalDebuggerHandler implements EscapeHandler {
   }
 
   @override
+  void fullReset() {
+    onCommand('fullReset');
+  }
+
+  @override
+  void softReset() {
+    onCommand('softReset');
+  }
+
+  @override
   void unkownEscape(int char) {
     onCommand('unkownEscape(${String.fromCharCode(char)})', error: true);
   }

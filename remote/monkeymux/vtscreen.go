@@ -252,8 +252,8 @@ func (s *terminalScreen) Reset() {
 	s.main = newVTGrid(s.width, s.height)
 	s.alt = newVTGrid(s.width, s.height)
 	s.altActive = false
-	s.kittyPlaceholderIDs = nil
-	s.kittyPlaceholderOrder = nil
+	// The placeholder id set is kept with the scrollback that references it;
+	// a frame rendered after RIS still reproduces those cells.
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
 	s.resetState()
@@ -1271,9 +1271,10 @@ func (s *terminalScreen) recordKittyPlaceholderID(id string) {
 
 // PlaceholderImageIDs returns the Kitty image ids the model has seen unicode
 // placeholder cells refer to, oldest first, as the decimal strings the retained
-// transmissions are keyed by. The set survives alternate-screen switches and
-// screen clears, because a placeholder can still sit in the main-screen
-// scrollback a rendered frame reproduces; only RIS clears it.
+// transmissions are keyed by. The set survives alternate-screen switches,
+// screen clears and RIS, because a placeholder can still sit in the main-screen
+// scrollback a rendered frame reproduces; it is bounded by
+// vtKittyPlaceholderIDLimit instead.
 func (s *terminalScreen) PlaceholderImageIDs() []string {
 	if s == nil {
 		return nil
