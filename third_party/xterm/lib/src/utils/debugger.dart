@@ -108,6 +108,16 @@ class _TerminalDebuggerHandler implements EscapeHandler {
   }
 
   @override
+  void cursorForwardTab(int amount) {
+    onCommand('cursorForwardTab($amount)');
+  }
+
+  @override
+  void cursorBackwardTab(int amount) {
+    onCommand('cursorBackwardTab($amount)');
+  }
+
+  @override
   void lineFeed() {
     onCommand('lineFeed');
   }
@@ -167,6 +177,16 @@ class _TerminalDebuggerHandler implements EscapeHandler {
   @override
   void designateCharset(int charset, int name) {
     onCommand('designateCharset($charset, $name)');
+  }
+
+  @override
+  void fullReset() {
+    onCommand('fullReset');
+  }
+
+  @override
+  void softReset() {
+    onCommand('softReset');
   }
 
   @override

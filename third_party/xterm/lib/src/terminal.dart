@@ -712,6 +712,34 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   @override
+  void cursorForwardTab(int amount) {
+    // CHT is defined as [amount] repetitions of a horizontal tab, so it reuses
+    // [tab] verbatim -- including this terminal's pending-wrap handling at the
+    // right margin.
+    for (var i = 0; i < amount; i++) {
+      tab();
+    }
+  }
+
+  @override
+  void cursorBackwardTab(int amount) {
+    // CBT walks back one tab stop at a time and stops at column 0 when fewer
+    // stops remain. nano emits it while repainting a syntax-highlighted line;
+    // when it is dropped nano's own cursor model diverges from the buffer by
+    // the skipped distance and the line renders garbled.
+    var x = _buffer.cursorX;
+    for (var i = 0; i < amount && x > 0; i++) {
+      final previous = _tabStops.findBackward(x - 1);
+      if (previous == null) {
+        x = 0;
+        break;
+      }
+      x = previous;
+    }
+    _buffer.setCursorX(x);
+  }
+
+  @override
   void lineFeed() {
     _buffer.lineFeed();
   }
@@ -772,6 +800,96 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   void designateCharset(int charset, int name) {
     _buffer.charset.designate(charset, name);
+  }
+
+  /// `CSI ! p` Soft Terminal Reset (DECSTR).
+  ///
+  /// Follows xterm / xterm.js: rendition, character sets, the DECSC saved
+  /// cursor, the scrolling margins and the modes DECSTR owns go back to their
+  /// power-up values, while the screen contents, the cursor position and the
+  /// tab stops are left exactly as they are.
+  ///
+  /// Deliberately narrower than [fullReset]. Mouse reporting, the Kitty
+  /// keyboard flags, DECSCNM, DECANM and cursor blink are *not* touched here:
+  /// neither xterm nor xterm.js resets them on DECSTR, and an application that
+  /// emits DECSTR mid-session with mouse tracking on would lose its input.
+  @override
+  void softReset() {
+    _cursorStyle.reset();
+
+    // Character sets, the saved cursor and the margins are per screen, and
+    // DECSTR resets the terminal rather than the visible screen, so both are
+    // reset even though only one is active.
+    for (final buffer in [_mainBuffer, _altBuffer]) {
+      buffer.charset.reset();
+      buffer.resetSavedCursor();
+      buffer.resetVerticalMargins();
+    }
+
+    _insertMode = false; // IRM
+    _originMode = false; // DECOM
+    _autoWrapMode = true; // DECAWM
+    _cursorKeysMode = false; // DECCKM
+    _appKeypadMode = false; // DECNKM / DECKPAM
+    _cursorVisibleMode = true; // DECTCEM
+    _lineFeedMode = false; // LNM
+    _bracketedPasteMode = false;
+    _reportFocusMode = false;
+
+    notifyListeners();
+  }
+
+  /// `ESC c` Reset to Initial State (RIS).
+  ///
+  /// Everything [softReset] does, plus the state DECSTR leaves alone: the
+  /// remaining modes, the tab stops, the alternate screen, both screens'
+  /// contents and the cursor position. The main-screen scrollback is kept, as
+  /// xterm keeps its saved lines on RIS and as the MonkeyMux screen model does,
+  /// so a fallback frame rendered after a `reset` matches what the client
+  /// shows; `CSI 3 J` remains the way to drop it. Kitty images follow the
+  /// same replay-safe rule as a screen clear: placements go, image bytes that
+  /// a surviving placeholder cell could still refer to stay.
+  ///
+  /// The MonkeyMux synchronized-redraw transaction (DEC private mode 9002) is
+  /// intentionally *not* cleared. It is transport framing written by the
+  /// MonkeyMux server around a redraw, not application state, and its begin and
+  /// end markers always arrive in the same write; clearing it because the
+  /// application happened to reset between them would paint a half-drawn frame.
+  @override
+  void fullReset() {
+    softReset();
+
+    // Modes DECSTR leaves alone.
+    _mouseMode = MouseMode.none;
+    _mouseReportMode = MouseReportMode.normal;
+    _altBufferMouseScrollMode = false;
+    _reverseDisplayMode = false; // DECSCNM
+    _cursorBlinkMode = false;
+    _ansiMode = true; // DECANM
+    _synchronizedOutput = false; // DEC mode 2026
+    _mainKittyKeyboardState.reset();
+    _altKittyKeyboardState.reset();
+
+    _tabStops.reset();
+
+    // Back to the main screen before wiping, so the visible screen afterwards
+    // is the main one, as xterm's RIS leaves it.
+    _buffer = _mainBuffer;
+    _precedingCodepoint = 0;
+    _pendingKittyPlaceholder = null;
+    _lastKittyPlaceholder = null;
+
+    // The main screen is erased in place so its scrollback survives; the
+    // alternate screen has none and is rebuilt.
+    _mainBuffer.eraseDisplay();
+    _mainBuffer.graphics.clear();
+    _altBuffer.clear();
+    for (final buffer in [_mainBuffer, _altBuffer]) {
+      buffer.setCursor(0, 0);
+      buffer.resetVerticalMargins();
+    }
+
+    notifyListeners();
   }
 
   @override
@@ -1434,7 +1552,19 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void graphicsCommandStart(Map<String, String> args) {
-    if (_graphicsActive) return; // continuation chunk; keep the first args
+    if (_graphicsActive) {
+      if (_isBareContinuationArgs(args)) {
+        return; // continuation chunk; keep the first args
+      }
+      // A first chunk (it carries the action/format/id keys) arrived while an
+      // `m=1` transmission was still open, so that transmission's final chunk
+      // was lost — e.g. the parse backlog was discarded by a reconnect or a
+      // native viewport pause mid-image. Treating this start as a no-op would
+      // append this image's payload to the truncated one and finalize it under
+      // the stale args, losing both. Drop the truncated transmission instead.
+      _graphicsActive = false;
+      _graphicsData.clear();
+    }
     if (_isBareContinuationArgs(args)) {
       // An orphaned continuation chunk: it carries only the `m` more-data flag,
       // so its first chunk (with the action/format/id) was never seen — e.g. a

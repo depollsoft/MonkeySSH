@@ -408,6 +408,14 @@ var kittyPlaceholderDiacritics = []rune{
 }
 
 func isKittyPlaceholderDiacritic(r rune) bool {
+	_, ok := kittyPlaceholderDiacriticValue(r)
+	return ok
+}
+
+// kittyPlaceholderDiacriticValue returns the row/column/high-byte value a
+// placeholder diacritic encodes: its index in kittyPlaceholderDiacritics, which
+// is what _kittyPlaceholderDiacriticIndex resolves on the client.
+func kittyPlaceholderDiacriticValue(r rune) (int, bool) {
 	lo, hi := 0, len(kittyPlaceholderDiacritics)-1
 	for lo <= hi {
 		mid := (lo + hi) / 2
@@ -417,8 +425,8 @@ func isKittyPlaceholderDiacritic(r rune) bool {
 		case r > kittyPlaceholderDiacritics[mid]:
 			lo = mid + 1
 		default:
-			return true
+			return mid, true
 		}
 	}
-	return false
+	return 0, false
 }

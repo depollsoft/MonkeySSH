@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"unicode/utf8"
 )
 
@@ -48,7 +49,44 @@ type terminalScreen struct {
 
 	lastPrinted rune
 
+	// Kitty unicode-placeholder bookkeeping. A rendered frame reproduces the
+	// placeholder cells but never the APC image transmissions that fill them
+	// (the parser skips APC strings), so a replay built from RenderFrame must
+	// re-send the images those cells point at. kittyPlaceholderOrder is the
+	// bounded, insertion-ordered set of ids, kittyPending is the placeholder
+	// cell still accepting diacritics, and kittyLast is the previous one, whose
+	// high byte a following cell with the same colours inherits.
+	kittyPlaceholderIDs   map[string]struct{}
+	kittyPlaceholderOrder []string
+	kittyPending          vtKittyPlaceholder
+	kittyLast             vtKittyPlaceholder
+
 	parser vtParser
+}
+
+// vtKittyPlaceholder is the state of one placeholder cell while its row,
+// column and high-byte diacritics arrive. Mirror of _PendingKittyPlaceholder in
+// third_party/xterm/lib/src/terminal.dart.
+type vtKittyPlaceholder struct {
+	valid      bool
+	fg         vtColor
+	ul         vtColor
+	highByte   uint32
+	diacritics int
+}
+
+// imageID derives the Kitty image id the placeholder refers to exactly as the
+// client does: a 24-bit RGB foreground carries the low 24 bits, an indexed
+// foreground the low 8, and the third diacritic supplies bits 24-31.
+func (p vtKittyPlaceholder) imageID() uint32 {
+	var low uint32
+	switch p.fg.kind {
+	case vtColorRGB:
+		low = uint32(p.fg.r)<<16 | uint32(p.fg.g)<<8 | uint32(p.fg.b)
+	case vtColorIndexed:
+		low = uint32(p.fg.index)
+	}
+	return low | p.highByte<<24
 }
 
 const (
@@ -64,6 +102,13 @@ const (
 	// Per-sequence parser bounds; longer input is ignored, never retained.
 	vtIntermediateLimit = 8
 	vtCombiningLimit    = 8
+	// kittyPlaceholderRune is the Kitty graphics unicode placeholder code
+	// point; a cell holding it displays part of an image instead of a glyph.
+	kittyPlaceholderRune = rune(0x10EEEE)
+	// vtKittyPlaceholderIDLimit bounds the retained placeholder id set: a
+	// frame can only reference so many images, and the ids are kept only so a
+	// replay can re-send the transmissions behind them.
+	vtKittyPlaceholderIDLimit = 256
 )
 
 // clampVTSize bounds a requested geometry to something a terminal can show.
@@ -207,6 +252,10 @@ func (s *terminalScreen) Reset() {
 	s.main = newVTGrid(s.width, s.height)
 	s.alt = newVTGrid(s.width, s.height)
 	s.altActive = false
+	// The placeholder id set is kept with the scrollback that references it;
+	// a frame rendered after RIS still reproduces those cells.
+	s.kittyPending = vtKittyPlaceholder{}
+	s.kittyLast = vtKittyPlaceholder{}
 	s.resetState()
 }
 
@@ -243,6 +292,13 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.scrollback = append([][]byte(nil), s.scrollback...)
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
+	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
+	if s.kittyPlaceholderIDs != nil {
+		c.kittyPlaceholderIDs = make(map[string]struct{}, len(s.kittyPlaceholderIDs))
+		for id := range s.kittyPlaceholderIDs {
+			c.kittyPlaceholderIDs[id] = struct{}{}
+		}
+	}
 	return &c
 }
 
@@ -520,6 +576,12 @@ func (s *terminalScreen) Write(data []byte) {
 // common case for transcript text, without the per-byte state machine. It
 // returns how many bytes it consumed.
 func (s *terminalScreen) printASCIIRun(data []byte) int {
+	if s.kittyPending.valid {
+		// Printable ASCII is never a placeholder diacritic, so the placeholder
+		// cell that was collecting them has ended. print() does this too; the
+		// fast path bypasses it.
+		s.flushKittyPlaceholder()
+	}
 	n := 0
 	for n < len(data) && data[n] >= 0x20 && data[n] < 0x7f {
 		n++
@@ -1042,6 +1104,9 @@ func (s *terminalScreen) print(r rune) {
 			r = mapped
 		}
 	}
+	if s.kittyPending.valid || r == kittyPlaceholderRune {
+		s.trackKittyPlaceholder(r)
+	}
 	if r >= 0x80 && r < 0xA0 {
 		// C1 controls arriving as UTF-8 are not glyphs; modern terminals
 		// ignore them in UTF-8 mode.
@@ -1131,6 +1196,94 @@ func (s *terminalScreen) attachCombining(r rune) {
 		return
 	}
 	row[col].comb = append(row[col].comb, r)
+}
+
+// trackKittyPlaceholder records which Kitty image a placeholder cell refers to.
+// It runs only for a placeholder cell or while one is still collecting
+// diacritics, so ordinary text pays one comparison and allocates nothing. The
+// rules mirror Terminal.writeChar in
+// third_party/xterm/lib/src/terminal.dart so both sides resolve the same id.
+func (s *terminalScreen) trackKittyPlaceholder(r rune) {
+	if s.kittyPending.valid {
+		if value, ok := kittyPlaceholderDiacriticValue(r); ok {
+			s.addKittyPlaceholderDiacritic(value)
+			return
+		}
+		s.flushKittyPlaceholder()
+	}
+	if r != kittyPlaceholderRune {
+		return
+	}
+	pending := vtKittyPlaceholder{valid: true, fg: s.attrs.fg, ul: s.attrs.ul}
+	// A run of placeholder cells with the same colours belongs to the same
+	// image, so the high byte carries over from the previous cell.
+	if s.kittyLast.valid &&
+		s.kittyLast.fg == pending.fg &&
+		s.kittyLast.ul == pending.ul {
+		pending.highByte = s.kittyLast.highByte
+	}
+	s.kittyPending = pending
+	s.kittyLast = pending
+}
+
+func (s *terminalScreen) addKittyPlaceholderDiacritic(value int) {
+	switch s.kittyPending.diacritics {
+	case 0, 1:
+		// Row and column: they place the cell within the image, not the image.
+		s.kittyPending.diacritics++
+	case 2:
+		s.kittyPending.highByte = uint32(value) & 0xFF
+		s.kittyPending.diacritics++
+		s.kittyLast.highByte = s.kittyPending.highByte
+	}
+}
+
+// flushKittyPlaceholder retains the id of the placeholder cell that just ended.
+// Recording is deferred to here because the third diacritic can still change
+// the id after the cell itself was printed.
+func (s *terminalScreen) flushKittyPlaceholder() {
+	if !s.kittyPending.valid {
+		return
+	}
+	id := s.kittyPending.imageID()
+	s.kittyPending = vtKittyPlaceholder{}
+	if id == 0 {
+		// Image id 0 is not a valid Kitty id: the cell has no image to fetch.
+		return
+	}
+	s.recordKittyPlaceholderID(strconv.FormatUint(uint64(id), 10))
+}
+
+func (s *terminalScreen) recordKittyPlaceholderID(id string) {
+	if _, ok := s.kittyPlaceholderIDs[id]; ok {
+		return
+	}
+	if s.kittyPlaceholderIDs == nil {
+		s.kittyPlaceholderIDs = make(map[string]struct{}, 8)
+	}
+	s.kittyPlaceholderIDs[id] = struct{}{}
+	s.kittyPlaceholderOrder = append(s.kittyPlaceholderOrder, id)
+	if len(s.kittyPlaceholderOrder) > vtKittyPlaceholderIDLimit {
+		delete(s.kittyPlaceholderIDs, s.kittyPlaceholderOrder[0])
+		s.kittyPlaceholderOrder = s.kittyPlaceholderOrder[1:]
+	}
+}
+
+// PlaceholderImageIDs returns the Kitty image ids the model has seen unicode
+// placeholder cells refer to, oldest first, as the decimal strings the retained
+// transmissions are keyed by. The set survives alternate-screen switches,
+// screen clears and RIS, because a placeholder can still sit in the main-screen
+// scrollback a rendered frame reproduces; it is bounded by
+// vtKittyPlaceholderIDLimit instead.
+func (s *terminalScreen) PlaceholderImageIDs() []string {
+	if s == nil {
+		return nil
+	}
+	s.flushKittyPlaceholder()
+	if len(s.kittyPlaceholderOrder) == 0 {
+		return nil
+	}
+	return append([]string(nil), s.kittyPlaceholderOrder...)
 }
 
 func (s *terminalScreen) moveCursor(row, col int) {

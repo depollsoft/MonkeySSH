@@ -187,8 +187,13 @@ const _monkeyMuxPostRedrawDisplayRefreshDelay = Duration(milliseconds: 120);
 // After the terminal settles, ask the MonkeyMux server to replay any Kitty
 // images referenced by on-screen placeholder cells that the client never
 // received. Debounced so an agent redrawing or scrolling many image cells sends
-// at most one request per settle rather than one per output frame.
+// at most one request per settle rather than one per output frame. An agent
+// CLI animating a spinner never settles, though: it repaints every 50-150 ms
+// for the whole time it works, so a pure trailing debounce would be re-armed
+// forever and the images it shows would stay blank. The max wait bounds how
+// long continuous output can postpone the scan.
 const _missingImageRecoveryDebounce = Duration(milliseconds: 350);
+const _missingImageRecoveryMaxWait = Duration(milliseconds: 1500);
 const _missingImageRecoveryRetryDelay = Duration(milliseconds: 750);
 const _missingImageRecoveryRetryLimit = 3;
 // After a multiplexer window switch, sample the live render object's paint/
@@ -1023,6 +1028,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // asked for this window visit are tracked so a genuinely-gone image is not
   // requested on every output frame; the set resets on each window change.
   Timer? _missingImageRequestTimer;
+  // Armed once when the debounce is first armed and not re-armed by later
+  // output, so continuous output can only push the scan back until
+  // [_missingImageRecoveryMaxWait] has elapsed.
+  Timer? _missingImageRequestDeadlineTimer;
   final Set<int> _requestedMissingImageIds = <int>{};
   DateTime? _missingImageRecoveryRetryNotBefore;
   int _missingImageRecoveryRetryCount = 0;
@@ -5436,10 +5445,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _missingImageRequestTimer?.cancel();
     _missingImageRequestTimer = Timer(delay, _requestMissingImagesNow);
+    if (_missingImageRecoveryRetryNotBefore == null) {
+      _missingImageRequestDeadlineTimer ??= Timer(
+        _missingImageRecoveryMaxWait,
+        _requestMissingImagesNow,
+      );
+    }
   }
 
   void _requestMissingImagesNow() {
+    _missingImageRequestTimer?.cancel();
     _missingImageRequestTimer = null;
+    _missingImageRequestDeadlineTimer?.cancel();
+    _missingImageRequestDeadlineTimer = null;
     if (!mounted || _activeMuxBackend != RemoteMuxBackend.monkeyMux) {
       return;
     }
@@ -5564,6 +5582,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _resetMissingImageRecoveryState() {
     _missingImageRequestTimer?.cancel();
     _missingImageRequestTimer = null;
+    _missingImageRequestDeadlineTimer?.cancel();
+    _missingImageRequestDeadlineTimer = null;
     _requestedMissingImageIds.clear();
     _missingImageRecoveryRetryNotBefore = null;
     _missingImageRecoveryRetryCount = 0;
@@ -10895,6 +10915,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _muxWindowRefreshProbeTimer?.cancel();
     _muxWindowRefreshSafetyNetTimer?.cancel();
     _missingImageRequestTimer?.cancel();
+    _missingImageRequestDeadlineTimer?.cancel();
     _pathVerifier.cancelPendingBatch();
     _terminalPathUnderlineScrollThrottleTimer?.cancel();
     _pathVerifier.disposeTerminalPathVerificationSftp();

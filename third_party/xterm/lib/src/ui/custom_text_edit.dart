@@ -160,6 +160,12 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       _connection!.show();
     } else {
       final config = TextInputConfiguration(
+        // Flutter 3.44+ embedders resolve the text input client against a
+        // view. The Windows embedder rejects `TextInput.setClient` outright
+        // when the configuration carries no view id ("Could not set client,
+        // view ID is null"), leaving the connection unattached and dropping
+        // every printable character typed into the terminal.
+        viewId: View.of(context).viewId,
         inputType: widget.inputType,
         inputAction: widget.inputAction,
         keyboardAppearance: widget.keyboardAppearance,

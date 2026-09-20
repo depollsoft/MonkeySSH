@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -865,5 +866,79 @@ func TestVTScreenScrollbackByteBudget(t *testing.T) {
 	s.Write([]byte("\x1b[3J"))
 	if s.scrollbackBytes != 0 {
 		t.Fatal("ED 3 must reset the byte accounting")
+	}
+}
+
+// TestVTScreenTracksKittyPlaceholderImageIDs covers the gap a rendered frame
+// leaves: the parser skips APC strings, so RenderFrame reproduces the unicode
+// placeholder cells but not the image transmissions that fill them. The model
+// therefore has to report which images the frame still needs.
+func TestVTScreenTracksKittyPlaceholderImageIDs(t *testing.T) {
+	s := newTerminalScreen(20, 3)
+	const transmit = "\x1b_Ga=T,f=100,c=2,r=1,q=2,i=4822;PAYLOADBYTES\x1b\\"
+	// An RGB foreground carries the low 24 bits of the image id:
+	// 0<<16 | 18<<8 | 214 == 4822.
+	s.Write([]byte(transmit + "\x1b[38;2;0;18;214m" +
+		"\U0010EEEE̅̅\U0010EEEE̅̍"))
+	if got := s.PlaceholderImageIDs(); len(got) != 1 || got[0] != "4822" {
+		t.Fatalf("RGB placeholder ids = %v, want [4822]", got)
+	}
+	frame := string(s.RenderFrame())
+	if !strings.Contains(frame, "\U0010EEEE") {
+		t.Fatal("frame lost the placeholder cells")
+	}
+	if strings.Contains(frame, "PAYLOADBYTES") {
+		t.Fatal("frame now carries the transmission; the id set is unnecessary")
+	}
+
+	// An indexed foreground carries only the low 8 bits.
+	s.Write([]byte("\r\n\x1b[38;5;42m\U0010EEEE̅̅"))
+	// A third diacritic supplies bits 24-31: index 1 in the diacritic table.
+	s.Write([]byte("\r\n\x1b[38;2;1;0;0m\U0010EEEE̅̅̍"))
+	want := []string{"4822", "42", "16842752"}
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("placeholder ids = %v, want %v", got, want)
+	}
+
+	// A following cell with the same colours belongs to the same image, so it
+	// inherits the high byte rather than resolving to the low id alone.
+	s.Write([]byte("\U0010EEEE̅̒ tail text"))
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("continuation cell changed the id set: %v", got)
+	}
+
+	clone := s.Clone()
+	clone.Write([]byte("\r\n\x1b[38;5;9m\U0010EEEE̅̅"))
+	if got := clone.PlaceholderImageIDs(); !reflect.DeepEqual(got, append(append([]string(nil), want...), "9")) {
+		t.Fatalf("clone placeholder ids = %v", got)
+	}
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("writing to the clone changed the original: %v", got)
+	}
+
+	// An erased screen, and even RIS, still reproduce the main-screen
+	// scrollback, so the ids stay with it.
+	s.Write([]byte("\x1b[2J\x1b[?1049h\x1b[?1049l"))
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("clearing the screen dropped the placeholder ids: %v", got)
+	}
+	s.Write([]byte("\x1bc"))
+	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RIS dropped the placeholder ids: %v", got)
+	}
+}
+
+func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {
+	s := newTerminalScreen(20, 2)
+	for i := 1; i <= vtKittyPlaceholderIDLimit+16; i++ {
+		s.Write([]byte(fmt.Sprintf("\x1b[38;2;%d;%d;%dm\U0010EEEE̅̅",
+			(i>>16)&0xFF, (i>>8)&0xFF, i&0xFF)))
+	}
+	got := s.PlaceholderImageIDs()
+	if len(got) != vtKittyPlaceholderIDLimit {
+		t.Fatalf("retained %d placeholder ids, want %d", len(got), vtKittyPlaceholderIDLimit)
+	}
+	if got[0] != "17" || got[len(got)-1] != fmt.Sprint(vtKittyPlaceholderIDLimit+16) {
+		t.Fatalf("oldest ids were not evicted first: %q..%q", got[0], got[len(got)-1])
 	}
 }

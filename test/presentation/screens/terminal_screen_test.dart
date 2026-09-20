@@ -6100,6 +6100,44 @@ void main() {
         expect(monkeyMuxService.imageReplayCalls.last.imageIds, <int>{
           59,
         }, reason: 'a stale window result cannot mutate the new visit');
+
+        // An agent CLI animating a spinner repaints every ~100 ms and never
+        // settles. The trailing debounce must still fire within the max wait
+        // instead of being re-armed on every frame while the image stays blank.
+        muxFixture.windowEvents.add(const TmuxWindowListEvent(initialWindows));
+        await tester.pump();
+        monkeyMuxService.imageReplayFutures.add(
+          Future.value(
+            MonkeyMuxImageReplayResult(
+              served: const {60},
+              retryableFailure: false,
+            ),
+          ),
+        );
+        final callsBeforeSpinner = monkeyMuxService.imageReplayCalls.length;
+        session.terminal!.write(
+          '\x1b[2J\x1b[H\x1b[38;5;60m$placeholder\x1b[39m',
+        );
+        for (var frame = 0; frame < 14; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 100));
+          session.terminal!.write('\x1b[s\x1b[10;1Hworking $frame\x1b[u');
+        }
+        expect(
+          monkeyMuxService.imageReplayCalls.length,
+          callsBeforeSpinner,
+          reason: 'continuous output still debounces within the max wait',
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        session.terminal!.write('\x1b[s\x1b[10;1Hworking 14\x1b[u');
+        await tester.pump(const Duration(milliseconds: 100));
+        session.terminal!.write('\x1b[s\x1b[10;1Hworking 15\x1b[u');
+        await tester.pump();
+        expect(
+          monkeyMuxService.imageReplayCalls.length,
+          callsBeforeSpinner + 1,
+          reason: 'the max wait bounds how long output can postpone the scan',
+        );
+        expect(monkeyMuxService.imageReplayCalls.last.imageIds, <int>{60});
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );

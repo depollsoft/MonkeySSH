@@ -55,6 +55,16 @@ class KittyKeyboardState {
     flags = requestedFlags;
   }
 
+  /// Clears the flags and the whole push/pop stack.
+  ///
+  /// RIS resets the progressive-enhancement state, as the Kitty keyboard
+  /// protocol requires; a program that dies with flags pushed would otherwise
+  /// leave the next program's keys encoded in a form it does not understand.
+  void reset() {
+    _stack.clear();
+    flags = 0;
+  }
+
   /// Restores [count] saved flag frames, or resets flags if the stack empties.
   void popFlags(int count) {
     final framesToPop = count <= 0 ? 1 : count;

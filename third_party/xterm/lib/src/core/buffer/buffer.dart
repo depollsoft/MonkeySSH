@@ -266,7 +266,15 @@ class Buffer {
   void index() {
     if (isInVerticalMargin) {
       if (_cursorY == _marginBottom) {
-        if (marginTop == 0 && !isAltBuffer) {
+        // Growing the scrollback -- inserting a line just below the last
+        // visible row so the top row is preserved as history -- is only
+        // correct for a *full-height* scroll region, one whose bottom margin
+        // is the last row of the screen. A partial region (top margin 0 but
+        // bottom margin above the last row, e.g. `CSI 1 ; 9 r`) must scroll
+        // its own rows instead; inserting below it shoves every row underneath
+        // out of place, which is what scrambled ratatui's inline viewport as
+        // used by the Codex CLI.
+        if (marginTop == 0 && _marginBottom == viewHeight - 1 && !isAltBuffer) {
           if (lines.isFull) {
             graphics.removeGraphicsAnchoredToLine(lines[0]);
           }
@@ -368,13 +376,33 @@ class Buffer {
 
   /// Restore cursor position, charmap and text attributes.
   void restoreCursor() {
-    _cursorX = _savedCursorX;
-    _cursorY = _savedCursorY;
+    // [resize] keeps the saved coordinates inside the grid, so these clamps are
+    // defensive: a saved position must never be able to put [absoluteCursorY]
+    // past the end of [lines], which would throw on the next write.
+    //
+    // The horizontal clamp deliberately allows [viewWidth] itself. That is this
+    // buffer's pending-wrap state (see [writeChar] and [cursorGoForward]), and
+    // DECRC restores it along with the column, so clamping to `viewWidth - 1`
+    // here would silently drop the deferred wrap.
+    _cursorX = _savedCursorX.clamp(0, viewWidth);
+    _cursorY = _savedCursorY.clamp(0, viewHeight - 1);
     terminal.cursor.foreground = _savedCursorStyle.foreground;
     terminal.cursor.background = _savedCursorStyle.background;
     terminal.cursor.attrs = _savedCursorStyle.attrs;
     terminal.cursor.underlineColor = _savedCursorStyle.underlineColor;
     charset.restore();
+  }
+
+  /// Returns the DECSC saved-cursor state to its power-up value: home position
+  /// and default rendition. Used by RIS and DECSTR, both of which reset the
+  /// saved cursor.
+  ///
+  /// The saved character set lives in [charset] and is reset by
+  /// [Charset.reset].
+  void resetSavedCursor() {
+    _savedCursorX = 0;
+    _savedCursorY = 0;
+    _savedCursorStyle.reset();
   }
 
   /// Sets the vertical scrolling margin to [top] and [bottom].

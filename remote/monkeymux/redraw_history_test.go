@@ -410,3 +410,292 @@ func TestSwitchRedrawPreservesScreenUnderIncrementalUpdates(t *testing.T) {
 		})
 	}
 }
+
+// TestOversizedRedrawReplaysEveryPlaceholderImage covers the other half of a
+// frame painted from the screen model: the model reproduces Kitty unicode
+// placeholder cells faithfully, but the parser skips the APC transmissions that
+// fill them, so the images have to travel with the frame. The recency-selected
+// replay only carries a handful, which left a frame referencing more images
+// than that showing blank image areas (Copilot CLI's inline screenshots).
+func TestOversizedRedrawReplaysEveryPlaceholderImage(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "pi"}
+	window.appendHistoryLocked([]byte("\x1b[2J\x1b[Hold frame"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 80, 24)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// More images than the recency replay carries, each big enough that the
+	// replay's byte budget is not what excludes them, and small enough that the
+	// whole set fits the repair budget.
+	const images = maxReplayedKittyImages + 2
+	payload := strings.Repeat("QUJD", 4096)
+	ids := make([]int, 0, images)
+	var repaint bytes.Buffer
+	repaint.WriteString("\x1b[2J\x1b[H")
+	for i := 0; i < images; i++ {
+		id := 0x010000*(i+1) + 0x0203
+		ids = append(ids, id)
+		fmt.Fprintf(
+			&repaint,
+			"\x1b_Ga=T,U=1,f=100,c=2,r=1,q=2,i=%d;%s\x1b\\",
+			id,
+			payload,
+		)
+		// The placeholder cells carry the image id in the foreground colour.
+		fmt.Fprintf(
+			&repaint,
+			"\x1b[38;2;%d;%d;%dm\U0010EEEE̅̅\U0010EEEE̅̍\x1b[0m\r\n",
+			(id>>16)&0xFF,
+			(id>>8)&0xFF,
+			id&0xFF,
+		)
+	}
+	// Push the redraw past the buffer budget so it is painted from the screen
+	// model instead of forwarded as bytes.
+	repaint.WriteString("\x1b[24;1H")
+	for repaint.Len() <= foregroundRedrawBufferLimitBytes+4096 {
+		repaint.WriteString("\x1b[2Ktail status ·\r")
+	}
+	server.handleWindowOutput(window.id, repaint.Bytes())
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	if len(got) > foregroundRedrawBufferLimitBytes {
+		t.Fatalf("client received %d bytes; the redraw was forwarded verbatim", len(got))
+	}
+	firstPlaceholder := strings.Index(got, "\U0010EEEE")
+	if firstPlaceholder < 0 {
+		t.Fatal("frame lost its placeholder cells")
+	}
+	for _, id := range ids {
+		marker := fmt.Sprintf("i=%d;", id)
+		switch count := strings.Count(got, marker); count {
+		case 1:
+		case 0:
+			t.Fatalf("image %d is referenced by the frame but was not replayed", id)
+		default:
+			t.Fatalf("image %d was replayed %d times", id, count)
+		}
+		if strings.Index(got, marker) > firstPlaceholder {
+			t.Fatalf("image %d was replayed after the cells that composite it", id)
+		}
+	}
+	if strings.Contains(got, "a=T") {
+		t.Fatalf("replayed transmissions were not store-only: %q", got[:256])
+	}
+}
+
+// seedPlaceholderImageWindow fills a window with count retained Kitty images,
+// each larger than 16 KiB and each followed by the unicode placeholder cells
+// that reference it, so the screen model tracks every id. It returns the ids in
+// transmission order (oldest first).
+func seedPlaceholderImageWindow(
+	t *testing.T,
+	server *muxServer,
+	window *muxWindow,
+	count int,
+) []string {
+	t.Helper()
+	// 20000 base64 bytes per image: comfortably above 16 KiB, and small enough
+	// that the whole set fits both the replay and the repair byte budgets, so
+	// only the replay's count cap can exclude one.
+	payload := strings.Repeat("QUJD", 5000)
+	ids := make([]string, 0, count)
+	var out bytes.Buffer
+	out.WriteString("\x1b[2J\x1b[H")
+	for i := 0; i < count; i++ {
+		id := 0x010000*(i+1) + 0x0203
+		ids = append(ids, fmt.Sprintf("%d", id))
+		fmt.Fprintf(
+			&out,
+			"\x1b_Ga=T,U=1,f=100,c=2,r=1,q=2,i=%d;%s\x1b\\",
+			id,
+			payload,
+		)
+		// The placeholder cells carry the image id in the foreground colour.
+		fmt.Fprintf(
+			&out,
+			"\x1b[38;2;%d;%d;%dm\U0010EEEE̅̅\U0010EEEE̅̍\x1b[0m\r\n",
+			(id>>16)&0xFF,
+			(id>>8)&0xFF,
+			id&0xFF,
+		)
+	}
+	server.handleWindowOutput(window.id, out.Bytes())
+	server.mu.Lock()
+	tracked := len(window.screenLocked().PlaceholderImageIDs())
+	retained := len(window.kittyImages)
+	server.mu.Unlock()
+	if tracked != count || retained != count {
+		t.Fatalf(
+			"seeded window tracks %d placeholder ids and %d images, want %d",
+			tracked,
+			retained,
+			count,
+		)
+	}
+	return ids
+}
+
+// TestAttachReplayFollowsUpWithPlaceholderImages covers the images a reattach or
+// window switch leaves blank. The synchronous replay carries only the newest few
+// roots so a phone can parse it before its readiness deadlines; everything else
+// the repainting app still references used to stay blank until the client's
+// missing-image request round trip. A separate write behind the replay now
+// carries exactly those images.
+func TestAttachReplayFollowsUpWithPlaceholderImages(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@1", agentTool: "copilot"}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	ids := seedPlaceholderImageWindow(t, server, window, maxReplayedKittyImages+2)
+	replayedIDs := ids[len(ids)-maxReplayedKittyImages:]
+	followUpIDs := ids[:len(ids)-maxReplayedKittyImages]
+
+	server.mu.Lock()
+	replay, followUp := server.replayBytesWithImageFollowUpLocked(window, nil)
+	held := map[string]uint32{
+		followUpIDs[0]: window.kittyImageToken[followUpIDs[0]],
+	}
+	_, heldFollowUp := server.replayBytesWithImageFollowUpLocked(window, held)
+	server.mu.Unlock()
+
+	marker := func(id string) string { return "i=" + id + ";" }
+	for _, id := range replayedIDs {
+		if got := strings.Count(string(replay), marker(id)); got != 1 {
+			t.Fatalf("image %s appears %d times in the replay, want 1", id, got)
+		}
+		if strings.Contains(string(followUp), marker(id)) {
+			t.Fatalf("image %s was sent twice: replay and follow-up", id)
+		}
+	}
+	for _, id := range followUpIDs {
+		if strings.Contains(string(replay), marker(id)) {
+			t.Fatalf("image %s must not grow the synchronous replay", id)
+		}
+		if got := strings.Count(string(followUp), marker(id)); got != 1 {
+			t.Fatalf("image %s appears %d times in the follow-up, want 1", id, got)
+		}
+	}
+	if strings.Contains(string(followUp), "a=T") {
+		t.Fatal("follow-up transmissions were not store-only")
+	}
+	if len(replay)+len(followUp) > maxKittyImageRepairBytes {
+		t.Fatalf(
+			"replay plus follow-up = %d bytes, over the repair budget",
+			len(replay)+len(followUp),
+		)
+	}
+	if strings.Contains(string(heldFollowUp), marker(followUpIDs[0])) {
+		t.Fatalf(
+			"image %s was re-sent although the client reported holding it",
+			followUpIDs[0],
+		)
+	}
+	if !strings.Contains(string(heldFollowUp), marker(followUpIDs[1])) {
+		t.Fatalf(
+			"image %s is still missing on the client and must be sent",
+			followUpIDs[1],
+		)
+	}
+
+	// The follow-up must actually reach the attach client, behind the replay.
+	primary := &recordingConn{}
+	client := registerTestAttachClient(t, server, primary, "phone", 80, 24)
+	server.replayActiveWindowToClient(client)
+	waitForTestAttachWrites(t, server)
+	got := primary.String()
+	if !strings.HasPrefix(got, string(replay)) {
+		t.Fatal("client did not receive the replay first")
+	}
+	for _, id := range ids {
+		if count := strings.Count(got, marker(id)); count != 1 {
+			t.Fatalf("client received image %s %d times, want once", id, count)
+		}
+	}
+	for _, id := range followUpIDs {
+		if strings.Index(got, marker(id)) < len(replay) {
+			t.Fatalf("image %s was folded into the replay write", id)
+		}
+	}
+}
+
+// TestPlaceholderImageFollowUpKeepsReplayBudget pins the synchronous replay to
+// exactly the bytes it carried before the follow-up existed: it is what the
+// client must parse before SSH and terminal readiness deadlines, so the repair
+// may only ever ride behind it.
+func TestPlaceholderImageFollowUpKeepsReplayBudget(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@1", agentTool: "copilot"}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	seedPlaceholderImageWindow(t, server, window, maxReplayedKittyImages+2)
+
+	server.mu.Lock()
+	// The pre-change foreground-redraw replay: the recency-selected images and
+	// nothing else.
+	want := buildWindowReplay(window, window.kittyImageReplayLocked(nil))
+	replay, followUp := server.replayBytesWithImageFollowUpLocked(window, nil)
+	active := server.activeReplayLocked()
+	server.mu.Unlock()
+
+	if !bytes.Equal(replay, want) {
+		t.Fatalf(
+			"replay grew from %d to %d bytes; readiness budget changed",
+			len(want),
+			len(replay),
+		)
+	}
+	if !bytes.Equal(active, want) {
+		t.Fatal("activeReplayLocked no longer matches the attach-safe replay")
+	}
+	if len(replay) > maxReplayedKittyImageBytes+4096 {
+		t.Fatalf("replay is %d bytes, well past the attach-safe budget", len(replay))
+	}
+	if len(followUp) == 0 {
+		t.Fatal("images the frame references were left for the repair round trip")
+	}
+}
+
+// TestWindowSelectDeliversPlaceholderImageFollowUp covers the switch path a
+// foreground-redraw pane actually takes: the replay is withheld until the
+// repaint it belongs with, so the image follow-up has to travel with it instead
+// of racing ahead of the clear.
+func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	ids := seedPlaceholderImageWindow(t, server, window, maxReplayedKittyImages+2)
+
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 80, 24)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+	server.handleWindowOutput(window.id, []byte("\x1b[2J\x1b[Hrepainted"))
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	for _, id := range ids {
+		if count := strings.Count(got, "i="+id+";"); count != 1 {
+			t.Fatalf("image %s was delivered %d times, want once", id, count)
+		}
+	}
+	if !strings.Contains(got, "repainted") {
+		t.Fatal("the repaint the replay belongs with was lost")
+	}
+}

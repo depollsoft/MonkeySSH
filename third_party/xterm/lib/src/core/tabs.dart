@@ -32,6 +32,20 @@ class TabStops {
     return null;
   }
 
+  /// Finds the closest tab stop at or before [start], or null when there is
+  /// none in `[0, start]`. Used by CBT (`CSI Ps Z`).
+  int? findBackward(int start) {
+    if (start < 0) {
+      return null;
+    }
+    for (var i = min(start, _stops.length - 1); i >= 0; i--) {
+      if (_stops[i]) {
+        return i;
+      }
+    }
+    return null;
+  }
+
   /// Sets the tab stop at [index]. If there is already a tab stop at [index],
   /// this method does nothing.
   ///

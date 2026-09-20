@@ -34,6 +34,12 @@ class KeyboardVisibilityState extends State<KeyboardVisibility>
 
   @override
   void didChangeMetrics() {
+    // A metrics change queued while the keyboard is hiding still arrives after
+    // this state is deactivated (for example when the terminal tab holding it
+    // is closed at that moment). `View.of(context)` throws once the element is
+    // defunct, so bail out instead.
+    if (!mounted) return;
+
     final bottomInset = View.of(context).viewInsets.bottom;
 
     if (bottomInset != _lastBottomInset) {
