@@ -266,7 +266,15 @@ class Buffer {
   void index() {
     if (isInVerticalMargin) {
       if (_cursorY == _marginBottom) {
-        if (marginTop == 0 && !isAltBuffer) {
+        // Growing the scrollback -- inserting a line just below the last
+        // visible row so the top row is preserved as history -- is only
+        // correct for a *full-height* scroll region, one whose bottom margin
+        // is the last row of the screen. A partial region (top margin 0 but
+        // bottom margin above the last row, e.g. `CSI 1 ; 9 r`) must scroll
+        // its own rows instead; inserting below it shoves every row underneath
+        // out of place, which is what scrambled ratatui's inline viewport as
+        // used by the Codex CLI.
+        if (marginTop == 0 && _marginBottom == viewHeight - 1 && !isAltBuffer) {
           if (lines.isFull) {
             graphics.removeGraphicsAnchoredToLine(lines[0]);
           }

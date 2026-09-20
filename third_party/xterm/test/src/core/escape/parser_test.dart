@@ -20,6 +20,93 @@ void main() {
       verify(parser.handler.resizeFromHost(80, 24));
     });
 
+    group('private-marker CSI sequences', () {
+      test('a prefixed sequence ending in m is not SGR', () {
+        // XTMODKEYS `CSI > 4 ; 2 m` (modifyOtherKeys) is emitted by xterm and
+        // by TUIs such as OpenCode on attach. Dispatching on the final byte
+        // alone read it as SGR 4 + 2 and underlined every cell drawn after.
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[>4;2m');
+        verifyNever(parser.handler.setCursorUnderline());
+        verifyNever(parser.handler.setCursorFaint());
+        verify(parser.handler.unknownCSI('m'.codeUnitAt(0)));
+      });
+
+      test('every private marker is excluded from SGR', () {
+        for (final prefix in ['<', '=', '>', '?']) {
+          final parser = EscapeParser(MockEscapeHandler());
+          parser.write('\x1b[${prefix}1m');
+          verifyNever(parser.handler.setCursorBold());
+        }
+      });
+
+      test('an unprefixed SGR still applies', () {
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[4m');
+        verify(parser.handler.setCursorUnderline());
+      });
+
+      test('a leading empty parameter is not a private marker', () {
+        // `;` is not in the private-marker range, so `CSI ; 1 m` -- legal SGR
+        // with an omitted first parameter -- must still be handled.
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[;1m');
+        verify(parser.handler.setCursorBold());
+      });
+
+      test('only the unprefixed, > and = forms are device attribute requests',
+          () {
+        final primary = EscapeParser(MockEscapeHandler())..write('\x1b[c');
+        verify(primary.handler.sendPrimaryDeviceAttributes());
+
+        final zero = EscapeParser(MockEscapeHandler())..write('\x1b[0c');
+        verify(zero.handler.sendPrimaryDeviceAttributes());
+
+        final secondary = EscapeParser(MockEscapeHandler())..write('\x1b[>c');
+        verify(secondary.handler.sendSecondaryDeviceAttributes());
+
+        final tertiary = EscapeParser(MockEscapeHandler())..write('\x1b[=c');
+        verify(tertiary.handler.sendTertiaryDeviceAttributes());
+      });
+
+      test('a DEC-private c sequence is ignored, not answered as DA1', () {
+        // `TERM=linux` appends the console cursor-size sequences `CSI ? 1 c` /
+        // `CSI ? 0 c` to civis/cnorm, so answering them turned every
+        // hide/show-cursor in vim or tmux into an echoed DA1 reply.
+        for (final request in ['\x1b[?1c', '\x1b[?0c']) {
+          final parser = EscapeParser(MockEscapeHandler());
+          parser.write(request);
+          verifyNever(parser.handler.sendPrimaryDeviceAttributes());
+          verify(parser.handler.unknownCSI('c'.codeUnitAt(0)));
+        }
+      });
+    });
+
+    group('CBT and CHT', () {
+      test('CSI Z dispatches a backward tab, defaulting to one stop', () {
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[Z');
+        verify(parser.handler.cursorBackwardTab(1));
+        parser.write('\x1b[3Z');
+        verify(parser.handler.cursorBackwardTab(3));
+      });
+
+      test('CSI I dispatches a forward tab, defaulting to one stop', () {
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[I');
+        verify(parser.handler.cursorForwardTab(1));
+        parser.write('\x1b[2I');
+        verify(parser.handler.cursorForwardTab(2));
+      });
+
+      test('a zero parameter still means one stop', () {
+        final parser = EscapeParser(MockEscapeHandler());
+        parser.write('\x1b[0Z\x1b[0I');
+        verify(parser.handler.cursorBackwardTab(1));
+        verify(parser.handler.cursorForwardTab(1));
+      });
+    });
+
     group('SGR extended color', () {
       test('legacy semicolon truecolor foreground', () {
         final parser = EscapeParser(MockEscapeHandler());

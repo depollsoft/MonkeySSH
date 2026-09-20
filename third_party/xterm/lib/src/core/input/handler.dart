@@ -77,6 +77,13 @@ class TerminalKeyboardEvent {
       platform: platform ?? this.platform,
     );
   }
+
+  @override
+  String toString() {
+    return 'TerminalKeyboardEvent(key: $key, shift: $shift, ctrl: $ctrl, '
+        'alt: $alt, meta: $meta, type: $type, altBuffer: $altBuffer, '
+        'platform: $platform)';
+  }
 }
 
 /// TerminalInputHandler contains the logic for translating a [TerminalKeyboardEvent]

@@ -424,6 +424,8 @@ class EscapeParser {
     'S'.codeUnitAt(0): _csiHandleScrollUp,
     'T'.codeUnitAt(0): _csiHandleScrollDown,
     'X'.codeUnitAt(0): _csiHandleEraseCharacters,
+    'I'.codeUnitAt(0): _csiHandleCursorForwardTab,
+    'Z'.codeUnitAt(0): _csiHandleCursorBackwardTab,
     '@'.codeUnitAt(0): _csiHandleInsertBlankCharacters,
   });
 
@@ -457,12 +459,21 @@ class EscapeParser {
   /// https://terminalguide.namepad.de/seq/csi_sc/
   void _csiHandleSendDeviceAttributes() {
     switch (_csi.prefix) {
+      case null:
+        return handler.sendPrimaryDeviceAttributes();
       case Ascii.greaterThan:
         return handler.sendSecondaryDeviceAttributes();
       case Ascii.equal:
         return handler.sendTertiaryDeviceAttributes();
       default:
-        handler.sendPrimaryDeviceAttributes();
+        // Only the unprefixed (DA1), `>` (DA2) and `=` (DA3) forms are device
+        // attribute requests. Other private prefixes share the `c` final byte
+        // and must not be answered: under `TERM=linux`, `tput civis`/`cnorm`
+        // append the Linux console cursor-size sequences `CSI ? 1 c` /
+        // `CSI ? 0 c` to every hide/show-cursor request, so replying turned
+        // each cursor toggle in vim/tmux into a stream of `?62;22c` echoed as
+        // literal text.
+        handler.unknownCSI(_csi.finalByte);
     }
   }
 
@@ -569,6 +580,20 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sm/
   void _csiHandleSgr() {
+    // Real SGR is `CSI Ps m` and never carries a private marker. Several
+    // sequences share the `m` final byte while carrying one and are not SGR --
+    // most notably XTMODKEYS `CSI > Ps ; Ps m` (modifyOtherKeys), which xterm,
+    // OpenCode and other TUIs emit on startup/attach. Dispatching on the final
+    // byte alone read `CSI > 4 ; 2 m` as SGR 4 (underline) + 2 (faint), and
+    // since nothing resets it every cell drawn afterwards stayed underlined.
+    //
+    // [_Csi.prefix] only ever holds `<`, `=`, `>` or `?` (see [_consumeCsi]),
+    // so a leading `;` for an omitted first parameter -- legal SGR, e.g.
+    // `CSI ; 1 m` -- still reaches the handler below.
+    if (_csi.prefix != null) {
+      return handler.unknownCSI(_csi.finalByte);
+    }
+
     final params = _csi.params;
 
     if (params.isEmpty) {
@@ -1154,6 +1179,34 @@ class EscapeParser {
     }
 
     handler.scrollDown(amount);
+  }
+
+  /// `ESC [ Ps I` Cursor Horizontal Forward Tabulation (CHT)
+  ///
+  /// Moves the cursor forward [Ps] tab stops (default 1).
+  ///
+  /// https://terminalguide.namepad.de/seq/csi_ci/
+  void _csiHandleCursorForwardTab() {
+    handler.cursorForwardTab(_tabAmount());
+  }
+
+  /// `ESC [ Ps Z` Cursor Backward Tabulation (CBT)
+  ///
+  /// Moves the cursor backward [Ps] tab stops (default 1). nano emits CBT
+  /// while redrawing a syntax-highlighted line; ignoring it leaves nano's
+  /// cursor model diverged from the buffer and the line renders garbled.
+  ///
+  /// https://terminalguide.namepad.de/seq/csi_cz/
+  void _csiHandleCursorBackwardTab() {
+    handler.cursorBackwardTab(_tabAmount());
+  }
+
+  /// The repeat count of a CHT/CBT sequence. Absent, zero and negative
+  /// parameters all mean one tab stop.
+  int _tabAmount() {
+    if (_csi.params.isEmpty) return 1;
+    final amount = _csi.params[0];
+    return amount > 0 ? amount : 1;
   }
 
   /// `ESC [ Ps X` Erase Character (ECH)

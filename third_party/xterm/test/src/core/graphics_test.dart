@@ -3240,6 +3240,37 @@ void main() {
   );
 
   test(
+    'a truncated multi-chunk transmission does not swallow the next image',
+    () {
+      // The first chunk of image 93 arrives with full args and `m=1`, but its
+      // remaining chunks are lost (a discarded parse backlog). The next image's
+      // first chunk carries its own action/format/id, so it is a new command,
+      // not a continuation: the truncated transmission must be dropped and the
+      // new image stored under its own args.
+      final rgba = _rawRgbaBase64(16, 16);
+
+      final terminal = Terminal();
+      terminal.write(
+          '\x1b_Ga=t,i=93,f=32,s=16,v=16,m=1;${rgba.substring(0, 64)}\x1b\\');
+      expect(terminal.heldImageSignatures().keys, isEmpty);
+
+      terminal.write('\x1b_Ga=t,i=94,f=32,s=16,v=16;$rgba\x1b\\');
+      expect(
+        terminal.heldImageSignatures().keys,
+        <int>[94],
+        reason: 'the next image must be stored under its own args, not 93',
+      );
+      final clean = Terminal();
+      clean.write('\x1b_Ga=t,i=94,f=32,s=16,v=16;$rgba\x1b\\');
+      expect(
+        terminal.heldImageSignatures()[94],
+        clean.heldImageSignatures()[94],
+        reason: 'the payload must not include the truncated chunk',
+      );
+    },
+  );
+
+  test(
     'multi-chunk image reassembles to one image with the full-payload signature',
     () {
       // Kitty caps each APC payload at 4096 base64 bytes, so any real image is

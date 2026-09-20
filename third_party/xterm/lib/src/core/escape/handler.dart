@@ -12,6 +12,14 @@ abstract class EscapeHandler {
 
   void tab();
 
+  /// `CSI Ps I` Cursor Horizontal Forward Tabulation (CHT): advance the cursor
+  /// by [amount] tab stops.
+  void cursorForwardTab(int amount);
+
+  /// `CSI Ps Z` Cursor Backward Tabulation (CBT): move the cursor back by
+  /// [amount] tab stops.
+  void cursorBackwardTab(int amount);
+
   void lineFeed();
 
   void carriageReturn();

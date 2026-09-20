@@ -712,6 +712,34 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   @override
+  void cursorForwardTab(int amount) {
+    // CHT is defined as [amount] repetitions of a horizontal tab, so it reuses
+    // [tab] verbatim -- including this terminal's pending-wrap handling at the
+    // right margin.
+    for (var i = 0; i < amount; i++) {
+      tab();
+    }
+  }
+
+  @override
+  void cursorBackwardTab(int amount) {
+    // CBT walks back one tab stop at a time and stops at column 0 when fewer
+    // stops remain. nano emits it while repainting a syntax-highlighted line;
+    // when it is dropped nano's own cursor model diverges from the buffer by
+    // the skipped distance and the line renders garbled.
+    var x = _buffer.cursorX;
+    for (var i = 0; i < amount && x > 0; i++) {
+      final previous = _tabStops.findBackward(x - 1);
+      if (previous == null) {
+        x = 0;
+        break;
+      }
+      x = previous;
+    }
+    _buffer.setCursorX(x);
+  }
+
+  @override
   void lineFeed() {
     _buffer.lineFeed();
   }
@@ -1434,7 +1462,19 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void graphicsCommandStart(Map<String, String> args) {
-    if (_graphicsActive) return; // continuation chunk; keep the first args
+    if (_graphicsActive) {
+      if (_isBareContinuationArgs(args)) {
+        return; // continuation chunk; keep the first args
+      }
+      // A first chunk (it carries the action/format/id keys) arrived while an
+      // `m=1` transmission was still open, so that transmission's final chunk
+      // was lost — e.g. the parse backlog was discarded by a reconnect or a
+      // native viewport pause mid-image. Treating this start as a no-op would
+      // append this image's payload to the truncated one and finalize it under
+      // the stale args, losing both. Drop the truncated transmission instead.
+      _graphicsActive = false;
+      _graphicsData.clear();
+    }
     if (_isBareContinuationArgs(args)) {
       // An orphaned continuation chunk: it carries only the `m` more-data flag,
       // so its first chunk (with the action/format/id) was never seen — e.g. a

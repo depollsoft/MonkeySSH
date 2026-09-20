@@ -420,6 +420,41 @@ void main() {
     });
   });
 
+  group('text input configuration', () {
+    testWidgets('carries the view id of the view it belongs to',
+        (tester) async {
+      // Flutter's Windows embedder rejects `TextInput.setClient` outright when
+      // the configuration carries no view id ("Could not set client, view ID
+      // is null"), leaving the connection unattached so printable characters
+      // typed into the terminal are dropped entirely.
+      final expected = tester.view.viewId;
+
+      int? actual;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.textInput,
+        (call) async {
+          if (call.method == 'TextInput.setClient') {
+            actual = ((call.arguments as List).last as Map)['viewId'] as int?;
+          }
+          return null;
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.textInput, null);
+      });
+
+      await tester.pumpWidget(MaterialApp(
+        home: TerminalView(Terminal(), autofocus: true),
+      ));
+
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(actual, expected);
+    });
+  });
+
   group('TerminalView.simulateScroll', () {
     testWidgets('works', (tester) async {
       final terminalOutput = <String>[];
