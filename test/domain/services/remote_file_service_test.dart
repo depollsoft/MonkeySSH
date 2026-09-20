@@ -211,8 +211,8 @@ void main() {
             '/home/u/b.png',
           ], bracketedPasteMode: true),
           [
-            '$start/home/u/.cache/monkeyssh/uploads/a.png$end ',
-            '$start/home/u/b.png$end ',
+            '$start/home/u/.cache/monkeyssh/uploads/a.png $end',
+            '$start/home/u/b.png $end',
           ],
         );
       });
@@ -237,7 +237,7 @@ void main() {
             bracketedPasteMode: true,
             windows: true,
           ),
-          ['$start${r'C:\Users\proof\.cache\monkeyssh\uploads\a.png'}$end '],
+          ['$start${r'C:\Users\proof\.cache\monkeyssh\uploads\a.png'} $end'],
         );
         expect(
           buildTerminalAttachmentPasteSegments(
@@ -245,7 +245,7 @@ void main() {
             bracketedPasteMode: true,
             windows: true,
           ),
-          ['$start${r'"C:\Users\John Smith\.cache\monkeyssh\uploads\a.png"'}$end '],
+          ['$start${r'"C:\Users\John Smith\.cache\monkeyssh\uploads\a.png"'} $end'],
         );
         expect(
           buildTerminalAttachmentPasteSegments(
@@ -254,7 +254,7 @@ void main() {
             windows: true,
             preferRawAgentPaths: true,
           ),
-          ['$start${r'C:\Users\John Smith\.cache\monkeyssh\uploads\a.png'}$end '],
+          ['$start${r'C:\Users\John Smith\.cache\monkeyssh\uploads\a.png'} $end'],
         );
       });
 
@@ -267,8 +267,8 @@ void main() {
             '/home/u/.cache/monkeyssh/uploads/b.png',
           ], bracketedPasteMode: true),
           [
-            "$start'/home/john smith/.cache/monkeyssh/uploads/a.png'$end ",
-            '$start/home/u/.cache/monkeyssh/uploads/b.png$end ',
+            "$start'/home/john smith/.cache/monkeyssh/uploads/a.png' $end",
+            '$start/home/u/.cache/monkeyssh/uploads/b.png $end',
           ],
         );
         expect(
@@ -277,14 +277,33 @@ void main() {
             bracketedPasteMode: true,
             preferRawAgentPaths: true,
           ),
-          ['$start/home/john smith/.cache/monkeyssh/uploads/a.png$end '],
+          ['$start/home/john smith/.cache/monkeyssh/uploads/a.png $end'],
         );
         expect(
           buildTerminalAttachmentPasteSegments([
             r'/home/u/$(reboot)/a.png',
           ], bracketedPasteMode: true),
-          ["$start'/home/u/\$(reboot)/a.png'$end "],
+          ["$start'/home/u/\$(reboot)/a.png' $end"],
         );
+      });
+
+      test('keeps the separating space inside the paste framing', () {
+        // Claude Code drops an entire bracketed paste when a printable byte
+        // follows the end marker in the same stdin read, which left only a
+        // space in its composer for paths it does not attach asynchronously
+        // (videos, plain files). The space must be part of the pasted payload.
+        final segments = buildTerminalAttachmentPasteSegments(
+          ['/home/u/.cache/monkeyssh/uploads/clipboard-1-0-clip.mov'],
+          bracketedPasteMode: true,
+          preferRawAgentPaths: true,
+        );
+        expect(segments, hasLength(1));
+        expect(
+          segments.single,
+          '\x1b[200~/home/u/.cache/monkeyssh/uploads/clipboard-1-0-clip.mov \x1b[201~',
+        );
+        expect(segments.single, endsWith('\x1b[201~'));
+        expect(segments.single, isNot(endsWith(' ')));
       });
 
       test('omits paths containing terminal control characters', () {
@@ -294,7 +313,7 @@ void main() {
             '/tmp/bad\x1b[201~\n.png',
             '/tmp/c1\u009b201~.png',
           ], bracketedPasteMode: true),
-          const ['\x1b[200~/tmp/safe.png\x1b[201~ '],
+          const ['\x1b[200~/tmp/safe.png \x1b[201~'],
         );
       });
 

@@ -1200,7 +1200,7 @@ void main() {
         installer: installer,
         agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
       )..watchWindowChanges(session, 'work');
-      const paste = '\x1b[200~/tmp/image.png\x1b[201~ ';
+      const paste = '\x1b[200~/tmp/image.png \x1b[201~';
 
       expect(
         service.supportsBracketedPasteControlInput(session, 'work'),

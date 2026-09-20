@@ -589,7 +589,7 @@ void registerTerminalScreenSelectionTests() {
           buildTerminalAttachmentPasteSegments(const [
             '/home/u/.cache/monkeyssh/uploads/a.png',
           ], bracketedPasteMode: terminal.bracketedPasteMode),
-          const ['\x1b[200~/home/u/.cache/monkeyssh/uploads/a.png\x1b[201~ '],
+          const ['\x1b[200~/home/u/.cache/monkeyssh/uploads/a.png \x1b[201~'],
         );
       });
     });
