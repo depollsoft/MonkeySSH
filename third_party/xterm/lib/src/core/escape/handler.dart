@@ -48,9 +48,10 @@ abstract class EscapeHandler {
 
   /// `ESC c` Reset to Initial State (RIS).
   ///
-  /// Returns the terminal to its power-up state: main screen, empty screen and
-  /// scrollback, home cursor, default rendition, character sets, tab stops,
-  /// margins and modes.
+  /// Returns the terminal to its power-up state: main screen, erased screen,
+  /// home cursor, default rendition, character sets, tab stops, margins and
+  /// modes. The main-screen scrollback is kept, as xterm keeps its saved lines
+  /// on RIS; `CSI 3 J` drops it.
   void fullReset();
 
   /// `CSI ! p` Soft Terminal Reset (DECSTR).

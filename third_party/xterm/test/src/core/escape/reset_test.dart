@@ -206,6 +206,24 @@ void main() {
   });
 
   group('DECSTR (CSI ! p)', () {
+    test('takes no parameters', () {
+      // DECSTR is exactly `CSI ! p`. A parameterised or prefixed `! p` is not
+      // DECSTR and must not reset anything.
+      final terminal = newTerminal();
+      terminal.write('\x1b[1m\x1b[4h'); // bold, IRM
+      expect(terminal.insertMode, isTrue);
+
+      terminal.write('\x1b[1!p');
+      terminal.write('\x1b[?!p');
+
+      expect(terminal.insertMode, isTrue);
+      expect(terminal.cursor.isBold, isTrue);
+
+      terminal.write('\x1b[!p');
+      expect(terminal.insertMode, isFalse);
+      expect(terminal.cursor.isBold, isFalse);
+    });
+
     test('keeps the screen, the cursor and the tab stops', () {
       final terminal = newTerminal();
       terminal.write('hello\r\nworld');

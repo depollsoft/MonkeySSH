@@ -253,8 +253,9 @@ func (s *terminalScreen) Reset() {
 	s.alt = newVTGrid(s.width, s.height)
 	s.altActive = false
 	// The placeholder id set is kept with the scrollback that references it;
-	// a frame rendered after RIS still reproduces those cells.
-	s.kittyPending = vtKittyPlaceholder{}
+	// a frame rendered after RIS still reproduces those cells. A placeholder
+	// still collecting diacritics is recorded first, or its id would be lost.
+	s.flushKittyPlaceholder()
 	s.kittyLast = vtKittyPlaceholder{}
 	s.resetState()
 }

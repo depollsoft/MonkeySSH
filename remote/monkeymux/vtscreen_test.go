@@ -926,6 +926,14 @@ func TestVTScreenTracksKittyPlaceholderImageIDs(t *testing.T) {
 	if got := s.PlaceholderImageIDs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("RIS dropped the placeholder ids: %v", got)
 	}
+
+	// A placeholder is still pending until the next printable rune. RIS
+	// arriving right after its diacritics must record it, not discard it.
+	s.Write([]byte("\x1b[38;2;9;8;7m\U0010EEEE\u0305\u0305\x1bc"))
+	if got := s.PlaceholderImageIDs(); len(got) == 0 ||
+		got[len(got)-1] != "591879" {
+		t.Fatalf("RIS lost the pending placeholder id: %v", got)
+	}
 }
 
 func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {

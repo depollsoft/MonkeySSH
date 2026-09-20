@@ -518,7 +518,7 @@ class EscapeParser {
     // `CSI ! p` is DECSTR, the second half of what `/usr/bin/reset` writes
     // (`rs2`). It takes no parameters and no private prefix.
     if (_csi.intermediate == Ascii.exclamationMark) {
-      if (_csi.prefix == null) {
+      if (_csi.prefix == null && _csi.params.isEmpty) {
         handler.softReset();
       } else {
         handler.unknownCSI(_csi.finalByte);
