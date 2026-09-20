@@ -1,5 +1,5 @@
 What's new in this beta
 
-- Fixed an extra space before punctuation in Pi when using the keyboard's double-space shortcut to type a period.
+- Fixed Copilot images rendering blank in MonkeyMux windows.
 
 Please report rough edges through the support link.
