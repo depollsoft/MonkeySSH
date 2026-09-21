@@ -155,21 +155,40 @@ TerminalCommandReview assessClipboardPasteCommand(
 );
 
 /// Assesses text inserted through the system keyboard.
+///
+/// [previewedByIme] marks a commit the IME showed as composing text before it
+/// landed, which is how dictation arrives. The user watched that text build
+/// up, so it is not a hidden clipboard handoff. When the terminal also has
+/// bracketed paste enabled ([bracketedPasteModeEnabled]), its line breaks
+/// travel inside one paste and the application decides what they mean, so
+/// they are not an unexpected run of commands either. Shell-reshaping content
+/// (chaining, redirection, command substitution, control characters) still
+/// deserves review.
 TerminalCommandReview assessKeyboardInsertedCommand(
   String command, {
   required String insertedText,
+  bool previewedByIme = false,
+  bool bracketedPasteModeEnabled = false,
 }) {
+  final skipMultiline = previewedByIme && bracketedPasteModeEnabled;
   final reasons = <TerminalCommandReviewReason>[
-    ..._collectPasteCommandReviewReasons(
+    for (final reason in _collectPasteCommandReviewReasons(
       command,
       bracketedPasteModeEnabled: false,
-    ),
+    ))
+      if (!skipMultiline || reason != TerminalCommandReviewReason.multiline)
+        reason,
   ];
-  if (insertedText.length > terminalKeyboardPasteLikeInsertionThreshold &&
+  if (!previewedByIme &&
+      insertedText.length > terminalKeyboardPasteLikeInsertionThreshold &&
       !reasons.contains(TerminalCommandReviewReason.largeKeyboardInsertion)) {
     reasons.add(TerminalCommandReviewReason.largeKeyboardInsertion);
   }
-  return TerminalCommandReview(command: command, reasons: reasons);
+  return TerminalCommandReview(
+    command: command,
+    reasons: reasons,
+    bracketedPasteModeEnabled: bracketedPasteModeEnabled,
+  );
 }
 
 /// Assesses a rendered snippet command before terminal insertion.
