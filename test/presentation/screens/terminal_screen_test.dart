@@ -592,6 +592,7 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
         ({
           int id,
           String title,
+          String? subtitle,
           String body,
           TmuxAlertNotificationPayload payload,
         })
@@ -603,6 +604,7 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
+    String? subtitle,
     TerminalNotificationUrgency? urgency,
     TerminalNotificationSound? sound,
     Duration? timeout,
@@ -611,6 +613,7 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
     shownTmuxAlerts.add((
       id: notificationId,
       title: title,
+      subtitle: subtitle,
       body: body,
       payload: payload,
     ));
@@ -8286,6 +8289,7 @@ void main() {
         expect(notifications.shownTmuxAlerts, hasLength(1));
         final shown = notifications.shownTmuxAlerts.single;
         expect(shown.title, 'Deploy done');
+        expect(shown.subtitle, '${host.label} · work · agent');
         expect(shown.body, 'All green');
         expect(shown.payload.hostId, host.id);
         expect(shown.payload.connectionId, session.connectionId);

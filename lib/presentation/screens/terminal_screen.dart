@@ -8534,6 +8534,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       key: _tmuxBarKey,
       session: session,
       tmuxSessionName: _tmuxSessionName!,
+      hostLabel: _host?.label,
       remoteMultiplexerService: _activeRemoteMultiplexerService,
       activeMuxBackend: _activeMuxBackend,
       tmuxExtraFlags: _activeTmuxExtraFlags,
@@ -8585,6 +8586,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// payload lets a tap return to the emitting window instead of whichever
   /// window happens to be active later. A missing active window clears the
   /// snapshot and taps fall back to session-level navigation.
+  ///
+  /// The window's navigator title and secondary title ride along, in memory
+  /// only, so the notification text can name the window the tap opens.
   void _publishActiveMuxWindowSnapshot(
     SshSession session,
     List<TmuxWindow> windows,
@@ -8597,6 +8601,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           sessionName: _tmuxSessionName,
           windowIndex: active?.index,
           windowId: active?.id,
+          windowTitle: active?.displayTitle,
+          windowSubtitle: active?.secondaryTitle,
         );
   }
 

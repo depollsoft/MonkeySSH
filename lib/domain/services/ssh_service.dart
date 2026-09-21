@@ -3845,6 +3845,16 @@ class SshSession {
   /// Stable ID (for example `@7`) of the foreground window, when reported.
   String? activeMuxWindowId;
 
+  /// Navigator title of the foreground window, for notification text only.
+  ///
+  /// Held in memory so a terminal notification can say which window the tap
+  /// opens; it is never written into a notification payload.
+  String? activeMuxWindowTitle;
+
+  /// Navigator secondary title of the foreground window, for notification
+  /// text only. See [activeMuxWindowTitle].
+  String? activeMuxWindowSubtitle;
+
   /// Whether the attached MonkeyMux server publishes its shared PTY grid size.
   bool monkeyMuxViewportClippingEnabled = false;
 
@@ -8918,6 +8928,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
         tmuxSessionName: session.activeMuxWindowSessionName,
         tmuxWindowIndex: session.activeMuxWindowIndex,
         tmuxWindowId: session.activeMuxWindowId,
+        tmuxWindowTitle: session.activeMuxWindowTitle,
+        tmuxWindowSubtitle: session.activeMuxWindowSubtitle,
       )
       ..isProcessing = true;
     if (!shouldStart) return;
@@ -8940,6 +8952,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
           tmuxSessionName: entry.tmuxSessionName,
           tmuxWindowIndex: entry.tmuxWindowIndex,
           tmuxWindowId: entry.tmuxWindowId,
+          tmuxWindowTitle: entry.tmuxWindowTitle,
+          tmuxWindowSubtitle: entry.tmuxWindowSubtitle,
         );
       } on Object catch (error, stackTrace) {
         FlutterError.reportError(
@@ -8967,6 +8981,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     required String? tmuxSessionName,
     required int? tmuxWindowIndex,
     required String? tmuxWindowId,
+    String? tmuxWindowTitle,
+    String? tmuxWindowSubtitle,
   }) async {
     if (!ref.mounted) return;
     if (request.action == TerminalNotificationAction.show &&
@@ -8993,16 +9009,32 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       }
       return;
     }
-    final title = request.title ?? await _resolveSessionLabel(session);
+    final hostLabel = await _resolveHostLabel(session);
     if (!ref.mounted ||
         _terminalNotificationGenerations[expiryKey] != generation) {
       return;
     }
+    // Title names where the tap lands: the remote program's own title, else
+    // the mux window, else the terminal title, else the host. The subtitle
+    // fills in whichever of host, session, and window the title leaves out.
+    final title =
+        request.title ??
+        _nonBlank(tmuxWindowTitle) ??
+        _nonBlank(session.windowTitle) ??
+        hostLabel ??
+        'Terminal';
+    final subtitle = buildNotificationSubtitle(<String?>[
+      hostLabel,
+      tmuxSessionName,
+      tmuxWindowTitle,
+      tmuxWindowSubtitle,
+    ], title: title);
     final bool didShow;
     try {
       didShow = await notificationService.showTerminalNotification(
         notificationId: notificationId,
         title: title,
+        subtitle: subtitle,
         body: request.body,
         urgency: request.urgency,
         sound: request.sound,
@@ -9081,22 +9113,22 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     }
   }
 
-  Future<String> _resolveSessionLabel(SshSession session) async {
-    final windowTitle = session.windowTitle;
-    if (windowTitle != null && windowTitle.trim().isNotEmpty) {
-      return windowTitle.trim();
-    }
+  /// Resolves the host's user-facing label for notification text, or `null`
+  /// when the host is gone or has no label.
+  Future<String?> _resolveHostLabel(SshSession session) async {
     try {
       final host = await ref
           .read(hostRepositoryProvider)
           .getById(session.hostId);
-      if (host != null && host.label.trim().isNotEmpty) {
-        return host.label.trim();
-      }
+      return _nonBlank(host?.label);
     } on Object {
-      // Fall through to the generic label below.
+      return null;
     }
-    return 'Terminal';
+  }
+
+  static String? _nonBlank(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
   }
 
   void _detachSessionListeners(int connectionId, {SshSession? session}) {
@@ -9379,6 +9411,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     required String? sessionName,
     required int? windowIndex,
     required String? windowId,
+    String? windowTitle,
+    String? windowSubtitle,
   }) {
     final session = getSession(connectionId);
     if (session == null) {
@@ -9397,15 +9431,21 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     final nextSessionName = hasTarget ? normalizedSessionName : null;
     final nextWindowIndex = hasTarget ? windowIndex : null;
     final nextWindowId = hasTarget ? normalizedWindowId : null;
+    final nextWindowTitle = hasTarget ? _nonBlank(windowTitle) : null;
+    final nextWindowSubtitle = hasTarget ? _nonBlank(windowSubtitle) : null;
     if (session.activeMuxWindowSessionName == nextSessionName &&
         session.activeMuxWindowIndex == nextWindowIndex &&
-        session.activeMuxWindowId == nextWindowId) {
+        session.activeMuxWindowId == nextWindowId &&
+        session.activeMuxWindowTitle == nextWindowTitle &&
+        session.activeMuxWindowSubtitle == nextWindowSubtitle) {
       return;
     }
     session
       ..activeMuxWindowSessionName = nextSessionName
       ..activeMuxWindowIndex = nextWindowIndex
-      ..activeMuxWindowId = nextWindowId;
+      ..activeMuxWindowId = nextWindowId
+      ..activeMuxWindowTitle = nextWindowTitle
+      ..activeMuxWindowSubtitle = nextWindowSubtitle;
   }
 
   /// Updates the bounded preview for the focused native ACP session.
@@ -9497,6 +9537,8 @@ typedef _QueuedTerminalNotification = ({
   String? tmuxSessionName,
   int? tmuxWindowIndex,
   String? tmuxWindowId,
+  String? tmuxWindowTitle,
+  String? tmuxWindowSubtitle,
 });
 
 class _TerminalNotificationQueue {
@@ -9510,6 +9552,8 @@ class _TerminalNotificationQueue {
     required String? tmuxSessionName,
     required int? tmuxWindowIndex,
     required String? tmuxWindowId,
+    String? tmuxWindowTitle,
+    String? tmuxWindowSubtitle,
   }) {
     final identity = request.platformIdentifier;
     if (identity != null) {
@@ -9525,6 +9569,8 @@ class _TerminalNotificationQueue {
       tmuxSessionName: tmuxSessionName,
       tmuxWindowIndex: tmuxWindowIndex,
       tmuxWindowId: tmuxWindowId,
+      tmuxWindowTitle: tmuxWindowTitle,
+      tmuxWindowSubtitle: tmuxWindowSubtitle,
     ));
   }
 }
