@@ -1006,8 +1006,8 @@ func (s *terminalScreen) reverseIndex() {
 	g.pendingWrap = false
 }
 
-// scrollUp scrolls the region up by n lines; lines leaving a full-screen main
-// region enter the scrollback.
+// scrollUp scrolls the region up by n lines; lines leaving a main-screen
+// region whose top margin is the first row enter the scrollback.
 func (s *terminalScreen) scrollUp(n int) {
 	s.scrollRegionUp(s.top, s.bottom, n)
 }
@@ -1021,7 +1021,13 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	if n > size {
 		n = size
 	}
-	if !s.altActive && top == 0 && bottom == s.height-1 {
+	// xterm saves the lines leaving a region whenever its top margin is the
+	// first row, whatever the bottom margin (top_marg == 0), and the client's
+	// buffer does the same. ratatui's inline viewport (the Codex CLI) relies
+	// on it: transcript lines are pushed out of a "CSI 1 ; N r" region above
+	// the viewport and must stay reachable by scrolling up, including in a
+	// frame rendered from this model. A region that starts lower drops them.
+	if !s.altActive && top == 0 {
 		for i := 0; i < n; i++ {
 			s.pushScrollback(g.rows[top+i])
 		}
