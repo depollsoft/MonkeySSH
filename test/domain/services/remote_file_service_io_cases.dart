@@ -256,5 +256,88 @@ void registerRemoteFileServiceIoTests() {
         verify(remoteFile.close).called(1);
       });
     }
+
+    group('upload progress', () {
+      setUpAll(() {
+        registerFallbackValue(SftpFileOpenMode.read);
+        registerFallbackValue(SftpFileAttrs());
+        registerFallbackValue(Uint8List(0));
+      });
+
+      setUp(() {
+        when(() => sftp.open('/remote/file', mode: any(named: 'mode')))
+            .thenAnswer((_) async => remoteFile);
+        when(() => remoteFile.writeBytes(any(), offset: any(named: 'offset')))
+            .thenAnswer((_) async {});
+        when(() => sftp.setStat('/remote/file', any()))
+            .thenAnswer((_) async {});
+      });
+
+      test('splits one oversized chunk and reports cumulative bytes', () async {
+        const chunk = RemoteFileService.uploadChunkBytes;
+        final bytes = Uint8List(chunk * 2 + 10);
+        final reported = <int>[];
+
+        await service.uploadBytes(
+          sftp: sftp,
+          remotePath: '/remote/file',
+          bytes: bytes,
+          onProgress: reported.add,
+        );
+
+        expect(reported, [chunk, chunk * 2, chunk * 2 + 10]);
+        final writes = verify(
+          () => remoteFile.writeBytes(
+            captureAny(),
+            offset: captureAny(named: 'offset'),
+          ),
+        ).captured;
+        expect(writes, hasLength(6));
+        expect(writes[1], 0);
+        expect(writes[3], chunk);
+        expect(writes[5], chunk * 2);
+        expect((writes[4] as Uint8List).length, 10);
+      });
+
+      test('reports each source chunk once when they are small', () async {
+        final reported = <int>[];
+
+        await service.uploadStream(
+          sftp: sftp,
+          remotePath: '/remote/file',
+          stream: Stream.fromIterable([
+            [1, 2, 3],
+            [4, 5],
+          ]),
+          onProgress: reported.add,
+        );
+
+        expect(reported, [3, 5]);
+        verify(() => remoteFile.close()).called(1);
+      });
+
+      test('awaits the progress callback before the next write', () async {
+        final order = <String>[];
+        when(() => remoteFile.writeBytes(any(), offset: any(named: 'offset')))
+            .thenAnswer((invocation) async {
+              order.add('write ${invocation.namedArguments[#offset]}');
+            });
+
+        await service.uploadStream(
+          sftp: sftp,
+          remotePath: '/remote/file',
+          stream: Stream.fromIterable([
+            [1],
+            [2],
+          ]),
+          onProgress: (uploadedBytes) async {
+            await Future<void>.delayed(Duration.zero);
+            order.add('progress $uploadedBytes');
+          },
+        );
+
+        expect(order, ['write 0', 'progress 1', 'write 1', 'progress 2']);
+      });
+    });
   });
 }

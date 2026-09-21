@@ -1376,6 +1376,16 @@ String resolvePickedTerminalUploadFileName(PlatformFile file, {int index = 0}) {
 Stream<List<int>> resolvePickedTerminalUploadReadStream(PlatformFile file) =>
     file.readAsByteStream().cast<List<int>>();
 
+/// Resolves the byte length of a picked upload file, or null when unknown.
+Future<int?> resolvePickedTerminalUploadLength(PlatformFile file) async {
+  try {
+    final length = await file.length();
+    return length != null && length > 0 ? length : null;
+  } on Object {
+    return null;
+  }
+}
+
 /// Resolves the picker request used for terminal uploads.
 ({
   String dialogTitle,

@@ -4039,6 +4039,7 @@ void main() {
             remotePath: any(named: 'remotePath'),
             stream: any(named: 'stream'),
             applyPrivateMode: any(named: 'applyPrivateMode'),
+            onProgress: any(named: 'onProgress'),
           ),
         ).thenAnswer((invocation) async {
           final stream =

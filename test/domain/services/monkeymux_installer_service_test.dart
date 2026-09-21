@@ -70,6 +70,7 @@ class _FakeRemoteFileService extends RemoteFileService {
     required String remotePath,
     required Uint8List bytes,
     bool applyPrivateMode = true,
+    FutureOr<void> Function(int uploadedBytes)? onProgress,
   }) async {
     uploaded = true;
     uploadCount++;

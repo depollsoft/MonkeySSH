@@ -101,6 +101,7 @@ import '../widgets/premium_badge.dart';
 import '../widgets/system_bottom_inset.dart';
 import '../widgets/terminal_menu_style.dart';
 import '../widgets/terminal_overlay_focus.dart';
+import '../widgets/terminal_paste_upload_strip.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_port_forwards_sheet.dart';
 import '../widgets/terminal_text_input_handler.dart';
@@ -838,6 +839,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isPinchZooming = false;
   bool _shouldFollowLiveOutput = true;
   bool _didPasteDemoImage = false;
+  final _pasteUploadProgress = ValueNotifier<TerminalPasteUploadProgress?>(
+    null,
+  );
+  int _pasteUploadGeneration = 0;
   double _lastTerminalScrollOffset = 0;
   bool _isTerminalScrollToBottomQueued = false;
   bool _isNavigatingCommandMarks = false;
@@ -8302,10 +8307,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     child: Column(
                       children: [
                         Expanded(
-                          child: _buildTerminalView(
-                            terminalTheme,
-                            isMobile,
-                            connectionState,
+                          child: _overlayPasteUploadStrip(
+                            _buildTerminalView(
+                              terminalTheme,
+                              isMobile,
+                              connectionState,
+                            ),
+                            applyBottomSafeArea: reservedBottomPadding <= 0,
                           ),
                         ),
                         SizedBox(height: reservedBottomPadding),
@@ -8385,16 +8393,97 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  /// Overlays the paste-upload progress line along the terminal's bottom edge.
+  ///
+  /// The line floats over the last row instead of taking layout space so the
+  /// viewport, and therefore the remote pty, keeps its size for the duration
+  /// of an upload. [applyBottomSafeArea] lifts it above the home indicator
+  /// when nothing else (keyboard toolbar, tmux handle) already reserves that
+  /// inset.
+  Widget _overlayPasteUploadStrip(
+    Widget terminalView, {
+    required bool applyBottomSafeArea,
+  }) => Stack(
+    fit: StackFit.expand,
+    children: [
+      terminalView,
+      Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: ValueListenableBuilder<TerminalPasteUploadProgress?>(
+          valueListenable: _pasteUploadProgress,
+          builder: (context, progress, _) {
+            final disableAnimations =
+                MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+            return AnimatedSwitcher(
+              duration: disableAnimations
+                  ? Duration.zero
+                  : const Duration(milliseconds: 150),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeOutCubic,
+              child: progress == null
+                  ? const SizedBox.shrink(
+                      key: ValueKey<String>('terminal-paste-upload-hidden'),
+                    )
+                  : SafeArea(
+                      key: const ValueKey<String>(
+                        'terminal-paste-upload-strip',
+                      ),
+                      top: false,
+                      left: false,
+                      right: false,
+                      bottom: applyBottomSafeArea,
+                      child: TerminalPasteUploadStrip(progress: progress),
+                    ),
+            );
+          },
+        ),
+      ),
+    ],
+  );
+
+  /// Shows the progress line for a new paste upload and returns a generation
+  /// that identifies it, so a later upload's completion cannot hide the line
+  /// of one that started after it.
+  int _beginPasteUpload(TerminalPasteUploadProgress progress) {
+    final generation = ++_pasteUploadGeneration;
+    if (mounted) {
+      _pasteUploadProgress.value = progress;
+    }
+    return generation;
+  }
+
+  void _updatePasteUpload(
+    int generation,
+    TerminalPasteUploadProgress Function(TerminalPasteUploadProgress current)
+    update,
+  ) {
+    if (!mounted || generation != _pasteUploadGeneration) {
+      return;
+    }
+    final current = _pasteUploadProgress.value;
+    if (current != null) {
+      _pasteUploadProgress.value = update(current);
+    }
+  }
+
+  /// Hides the progress line once the upload of [generation] has finished.
+  void _endPasteUpload(int generation) {
+    if (mounted && generation == _pasteUploadGeneration) {
+      _pasteUploadProgress.value = null;
+    }
+  }
+
   Widget _buildTerminalViewWithConsumedLeftSafeInset(
     TerminalThemeData terminalTheme,
     bool isMobile,
     SshConnectionState connectionState, {
     required double consumedLeftSafeInset,
   }) {
-    final terminalView = _buildTerminalView(
-      terminalTheme,
-      isMobile,
-      connectionState,
+    final terminalView = _overlayPasteUploadStrip(
+      _buildTerminalView(terminalTheme, isMobile, connectionState),
+      applyBottomSafeArea: false,
     );
     if (consumedLeftSafeInset <= 0) {
       return terminalView;
@@ -10893,6 +10982,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _pasteUploadProgress.dispose();
     // Provider notifications must wait until the widget tree finishes unmounting.
     // The owner check preserves any replacement terminal's override.
     scheduleMicrotask(_clearAppThemeOverride);
@@ -15471,26 +15561,41 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final inputGeneration = _terminalUserInputGeneration;
     final pasteMode = await _resolveSettledTerminalPasteMode();
-    final remotePath = await _withClipboardSftp((
-      sftp,
-      remoteFileService,
-      uploadTarget,
-    ) async {
-      final remotePath = joinRemotePath(
-        uploadTarget.sftpDirectory,
-        buildClipboardImageFileName(DateTime.now()),
-      );
-      await remoteFileService.uploadBytes(
-        sftp: sftp,
-        remotePath: remotePath,
-        bytes: imageBytes,
-        applyPrivateMode: uploadTarget.applyPrivateFileMode,
-      );
-      return (
-        path: uploadTarget.terminalPathForSftpPath(remotePath),
-        windows: uploadTarget.windows,
-      );
-    }, uploadBaseDirectory: uploadBaseDirectory);
+    final uploadGeneration = _beginPasteUpload(
+      TerminalPasteUploadProgress(
+        uploadedBytes: 0,
+        totalBytes: imageBytes.length,
+      ),
+    );
+    final ({String path, bool windows}) remotePath;
+    try {
+      remotePath = await _withClipboardSftp((
+        sftp,
+        remoteFileService,
+        uploadTarget,
+      ) async {
+        final remotePath = joinRemotePath(
+          uploadTarget.sftpDirectory,
+          buildClipboardImageFileName(DateTime.now()),
+        );
+        await remoteFileService.uploadBytes(
+          sftp: sftp,
+          remotePath: remotePath,
+          bytes: imageBytes,
+          applyPrivateMode: uploadTarget.applyPrivateFileMode,
+          onProgress: (uploadedBytes) => _updatePasteUpload(
+            uploadGeneration,
+            (current) => current.copyWith(uploadedBytes: uploadedBytes),
+          ),
+        );
+        return (
+          path: uploadTarget.terminalPathForSftpPath(remotePath),
+          windows: uploadTarget.windows,
+        );
+      }, uploadBaseDirectory: uploadBaseDirectory);
+    } finally {
+      _endPasteUpload(uploadGeneration);
+    }
     _followLiveOutput();
     final pasteResult = await _insertUploadedFileReferences(
       [remotePath.path],
@@ -15560,32 +15665,64 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final inputGeneration = _terminalUserInputGeneration;
     final pasteMode = await _resolveSettledTerminalPasteMode();
     final timestamp = DateTime.now();
-    final remotePaths = await _withClipboardSftp((
-      sftp,
-      remoteFileService,
-      uploadTarget,
-    ) async {
-      final remotePaths = <String>[];
-      for (var index = 0; index < selectedFiles.length; index++) {
-        final file = selectedFiles[index];
-        final sourceName = resolvePickedTerminalUploadFileName(
-          file,
-          index: index,
-        );
-        final remotePath = joinRemotePath(
-          uploadTarget.sftpDirectory,
-          buildClipboardUploadFileName(sourceName, timestamp, sequence: index),
-        );
-        await remoteFileService.uploadStream(
-          sftp: sftp,
-          remotePath: remotePath,
-          stream: resolvePickedTerminalUploadReadStream(file),
-          applyPrivateMode: uploadTarget.applyPrivateFileMode,
-        );
-        remotePaths.add(uploadTarget.terminalPathForSftpPath(remotePath));
-      }
-      return (paths: remotePaths, windows: uploadTarget.windows);
-    });
+    // Size the whole batch up front so the line reads as one upload rather
+    // than restarting per file; any unknown size makes it indeterminate.
+    final fileLengths = [
+      for (final file in selectedFiles)
+        await resolvePickedTerminalUploadLength(file),
+    ];
+    final batchTotalBytes = fileLengths.contains(null)
+        ? null
+        : fileLengths.fold<int>(0, (sum, length) => sum + length!);
+    final uploadGeneration = _beginPasteUpload(
+      TerminalPasteUploadProgress(
+        uploadedBytes: 0,
+        totalBytes: batchTotalBytes,
+      ),
+    );
+    var completedBytes = 0;
+    final ({List<String> paths, bool windows}) remotePaths;
+    try {
+      remotePaths = await _withClipboardSftp((
+        sftp,
+        remoteFileService,
+        uploadTarget,
+      ) async {
+        final remotePaths = <String>[];
+        for (var index = 0; index < selectedFiles.length; index++) {
+          final file = selectedFiles[index];
+          final sourceName = resolvePickedTerminalUploadFileName(
+            file,
+            index: index,
+          );
+          final remotePath = joinRemotePath(
+            uploadTarget.sftpDirectory,
+            buildClipboardUploadFileName(
+              sourceName,
+              timestamp,
+              sequence: index,
+            ),
+          );
+          await remoteFileService.uploadStream(
+            sftp: sftp,
+            remotePath: remotePath,
+            stream: resolvePickedTerminalUploadReadStream(file),
+            applyPrivateMode: uploadTarget.applyPrivateFileMode,
+            onProgress: (uploadedBytes) => _updatePasteUpload(
+              uploadGeneration,
+              (current) => current.copyWith(
+                uploadedBytes: completedBytes + uploadedBytes,
+              ),
+            ),
+          );
+          completedBytes += fileLengths[index] ?? 0;
+          remotePaths.add(uploadTarget.terminalPathForSftpPath(remotePath));
+        }
+        return (paths: remotePaths, windows: uploadTarget.windows);
+      });
+    } finally {
+      _endPasteUpload(uploadGeneration);
+    }
 
     _followLiveOutput();
     final pasteResult = await _insertUploadedFileReferences(
