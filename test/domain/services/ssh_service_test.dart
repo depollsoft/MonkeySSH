@@ -725,6 +725,8 @@ class _DelayedTerminalNotificationService extends LocalNotificationService {
   final releaseShow = Completer<void>();
   final calls = <String>[];
   TerminalNotificationPayload? lastPayload;
+  String? lastTitle;
+  String? lastSubtitle;
   bool throwOnShow = false;
   bool throwOnClear = false;
 
@@ -734,11 +736,14 @@ class _DelayedTerminalNotificationService extends LocalNotificationService {
     required String title,
     required String body,
     required TerminalNotificationPayload payload,
+    String? subtitle,
     TerminalNotificationUrgency urgency = TerminalNotificationUrgency.normal,
     TerminalNotificationSound sound = TerminalNotificationSound.silent,
     Duration? timeout,
   }) async {
     lastPayload = payload;
+    lastTitle = title;
+    lastSubtitle = subtitle;
     calls.add('show-start:$notificationId');
     if (!showStarted.isCompleted) showStarted.complete();
     if (throwOnShow) throw StateError('show failed');
@@ -4631,6 +4636,8 @@ LISTEN ::1:4201
     test(
       'terminal notification stamps the published mux window focus',
       () async {
+        when(() => container.read(hostRepositoryProvider).getById(42))
+            .thenAnswer((_) async => _automaticForwardHost(enabled: false));
         final notifier = container.read(activeSessionsProvider.notifier);
         final result = await notifier.connect(42, forceNew: true);
         final connectionId = result.connectionId!;
@@ -4641,6 +4648,8 @@ LISTEN ::1:4201
           sessionName: 'work',
           windowIndex: 3,
           windowId: '@9',
+          windowTitle: 'Fix login bug',
+          windowSubtitle: 'Claude Code',
         );
 
         session.debugHandlePrivateOsc('99', const ['w=60000', 'Windowed']);
@@ -4655,6 +4664,38 @@ LISTEN ::1:4201
         expect(payload.tmuxSessionName, 'work');
         expect(payload.tmuxWindowIndex, 3);
         expect(payload.tmuxWindowId, '@9');
+        // The window title names where the tap lands; the subtitle carries
+        // the rest of the route. Neither reaches the payload.
+        expect(notificationService.lastTitle, 'Fix login bug');
+        expect(
+          notificationService.lastSubtitle,
+          'Dev Box · work · Claude Code',
+        );
+        expect(payload.encode(), isNot(contains('Fix login bug')));
+        expect(payload.encode(), isNot(contains('Claude Code')));
+      },
+    );
+
+    test(
+      'terminal notification without a mux window is titled by the host',
+      () async {
+        when(() => container.read(hostRepositoryProvider).getById(42))
+            .thenAnswer((_) async => _automaticForwardHost(enabled: false));
+        final notifier = container.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        final session = notifier.getSession(result.connectionId!)!;
+        notificationService.releaseShow.complete();
+
+        session.debugHandlePrivateOsc('99', const ['w=60000', 'Plain']);
+        for (
+          var attempt = 0;
+          attempt < 20 && notificationService.lastPayload == null;
+          attempt += 1
+        ) {
+          await pumpEventQueue();
+        }
+        expect(notificationService.lastTitle, 'Dev Box');
+        expect(notificationService.lastSubtitle, isNull);
       },
     );
 

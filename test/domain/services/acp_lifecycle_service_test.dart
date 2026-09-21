@@ -26,7 +26,16 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import '../../support/fake_acp_session_manager.dart';
 
 class _RecordingAcpNotificationService extends LocalNotificationService {
-  final calls = <({int id, AcpNotificationPayload payload})>[];
+  final calls =
+      <
+        ({
+          int id,
+          String title,
+          String? subtitle,
+          String body,
+          AcpNotificationPayload payload,
+        })
+      >[];
 
   @override
   Future<void> showAcpNotification({
@@ -34,8 +43,15 @@ class _RecordingAcpNotificationService extends LocalNotificationService {
     required String title,
     required String body,
     required AcpNotificationPayload payload,
+    String? subtitle,
   }) async {
-    calls.add((id: notificationId, payload: payload));
+    calls.add((
+      id: notificationId,
+      title: title,
+      subtitle: subtitle,
+      body: body,
+      payload: payload,
+    ));
   }
 }
 
@@ -437,7 +453,105 @@ void main() {
       notifications.calls.single.id,
       acpNotificationIdFor(notifications.calls.single.payload),
     );
+    expect(notifications.calls.single.subtitle, isNull);
   });
+
+  test('background alerts name the host and session in the subtitle', () async {
+    final key = fakeAcpKey();
+    final initial = fakeAcpSession(key: key, title: 'Fix login bug');
+    final fakeManager = FakeAcpSessionManager(sessions: [initial]);
+    final notifications = _RecordingAcpNotificationService();
+    final testLifecycle = AcpLifecycleService(
+      sessionManager: fakeManager,
+      hasActiveSshSession: (_) => true,
+      notificationService: notifications,
+      resolveHostLabel: (hostId) async =>
+          hostId == key.hostId ? 'devbox' : null,
+      diagnostics: const NoopDiagnosticsLogger(),
+    )..start();
+    addTearDown(testLifecycle.dispose);
+    addTearDown(fakeManager.dispose);
+    addTearDown(notifications.dispose);
+
+    await _pump();
+    await testLifecycle.handleBackground();
+    fakeManager.emit(
+      AcpSessionManagerState(
+        sessions: [
+          initial.copyWith(
+            pendingWrites: [
+              AcpPendingWrite(
+                requestKey: 's:write-1',
+                sessionId: key.acpSessionId,
+                path: '/private/path-never-notified',
+                contentByteLength: 7,
+                requestedAt: DateTime(2026),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    await _pump();
+
+    expect(notifications.calls, hasLength(1));
+    final call = notifications.calls.single;
+    expect(call.title, 'Copilot CLI needs write approval');
+    expect(call.subtitle, 'devbox · Fix login bug');
+    expect(call.body, 'Open the app to review and respond.');
+    // The working directory and write path never reach the notification.
+    expect(call.subtitle, isNot(contains('/')));
+  });
+
+  test(
+    'returning to the foreground during the host lookup drops the alert',
+    () async {
+      final key = fakeAcpKey();
+      final initial = fakeAcpSession(key: key);
+      final fakeManager = FakeAcpSessionManager(sessions: [initial]);
+      final notifications = _RecordingAcpNotificationService();
+      final hostLookup = Completer<String?>();
+      final testLifecycle = AcpLifecycleService(
+        sessionManager: fakeManager,
+        hasActiveSshSession: (_) => true,
+        notificationService: notifications,
+        resolveHostLabel: (_) => hostLookup.future,
+        diagnostics: const NoopDiagnosticsLogger(),
+      )..start();
+      addTearDown(testLifecycle.dispose);
+      addTearDown(fakeManager.dispose);
+      addTearDown(notifications.dispose);
+
+      await _pump();
+      await testLifecycle.handleBackground();
+      fakeManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(
+              pendingWrites: [
+                AcpPendingWrite(
+                  requestKey: 's:write-1',
+                  sessionId: key.acpSessionId,
+                  path: '/private/path-never-notified',
+                  contentByteLength: 7,
+                  requestedAt: DateTime(2026),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      await _pump();
+      expect(notifications.calls, isEmpty);
+
+      // The user opens the app while the label is still resolving.
+      await testLifecycle.handleForeground();
+      hostLookup.complete('devbox');
+      await _pump();
+
+      expect(notifications.calls, isEmpty);
+    },
+  );
 
   group('notification gating', () {
     test('never notifies while the app is in the foreground', () async {

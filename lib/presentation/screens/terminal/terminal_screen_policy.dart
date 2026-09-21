@@ -15,6 +15,7 @@ import '../../../data/database/database.dart';
 import '../../../domain/models/agent_launch_preset.dart';
 import '../../../domain/models/remote_multiplexer.dart';
 import '../../../domain/models/tmux_state.dart';
+import '../../../domain/services/local_notification_service.dart';
 import '../../../domain/services/remote_file_service.dart';
 import '../../../domain/services/shell_completion_service.dart';
 import '../../../domain/services/ssh_service.dart';
@@ -83,36 +84,45 @@ String? formatTerminalConnectionIdentity({
   return '$hostWithPort · $sessionLabel';
 }
 
-/// Resolves the user-visible text for a tmux alert notification.
-({String title, String body}) resolveTmuxAlertNotificationContent({
+/// Resolves the user-visible text for a mux window notification.
+///
+/// The title is the window the tap lands on (its navigator title, or the
+/// server-forwarded [title] when the remote program supplied one), the
+/// subtitle is the route to it (host, mux session, then window context
+/// that the title does not already state), and the body says what
+/// happened: the forwarded [body], or the window number that needs
+/// attention for a bell or activity alert. The window number always lives
+/// in the body so windows sharing a title stay distinguishable without
+/// decorating the title.
+({String title, String? subtitle, String body})
+resolveTmuxAlertNotificationContent({
   required String tmuxSessionName,
   required TmuxWindow window,
-  required Iterable<TmuxWindow> windows,
+  String? hostLabel,
+  String? title,
+  String? body,
 }) {
-  final sessionName = _tmuxAlertNotificationLabel(tmuxSessionName);
-  final title = sessionName.isEmpty
-      ? 'tmux alert'
-      : 'tmux alert · $sessionName';
   final windowTitle = _tmuxAlertNotificationLabel(window.displayTitle);
-  if (windowTitle.isEmpty) {
-    return (title: title, body: 'Window #${window.index} needs attention');
-  }
-
-  final normalizedWindowTitle = windowTitle.toLowerCase();
-  var matchingTitleCount = 0;
-  for (final candidate in windows) {
-    final candidateTitle = _tmuxAlertNotificationLabel(candidate.displayTitle)
-        .toLowerCase();
-    if (candidateTitle != normalizedWindowTitle) {
-      continue;
-    }
-    matchingTitleCount += 1;
-    if (matchingTitleCount > 1) {
-      return (title: title, body: '$windowTitle (window #${window.index})');
-    }
-  }
-
-  return (title: title, body: windowTitle);
+  final forwardedTitle = _tmuxAlertNotificationLabel(title ?? '');
+  // Forwarded bodies keep their line breaks; only blank ones fall back.
+  final forwardedBody = (body?.trim().isEmpty ?? true) ? '' : body!;
+  final resolvedTitle = forwardedTitle.isNotEmpty
+      ? forwardedTitle
+      : windowTitle.isNotEmpty
+      ? windowTitle
+      : 'Window #${window.index}';
+  final subtitle = buildNotificationSubtitle(<String?>[
+    hostLabel,
+    tmuxSessionName,
+    windowTitle,
+    window.secondaryTitle,
+  ], title: resolvedTitle);
+  final resolvedBody = forwardedBody.isNotEmpty
+      ? forwardedBody
+      : windowTitle.isNotEmpty
+      ? 'Window #${window.index} needs attention'
+      : 'Needs attention';
+  return (title: resolvedTitle, subtitle: subtitle, body: resolvedBody);
 }
 
 String _tmuxAlertNotificationLabel(String value) =>

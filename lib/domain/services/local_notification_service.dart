@@ -40,10 +40,14 @@ const acpNotificationChannelId = 'acp-notifications';
 const _androidNotificationIcon = 'ic_notification_monkey';
 
 /// Builds native details for a terminal notification's protocol metadata.
+///
+/// [subtitle] is the routing context shown beneath the title: the Darwin
+/// subtitle line and the Android header sub-text.
 NotificationDetails buildTerminalNotificationDetails({
   required TerminalNotificationUrgency urgency,
   required TerminalNotificationSound sound,
   Duration? timeout,
+  String? subtitle,
 }) {
   final (
     systemChannelId,
@@ -91,12 +95,14 @@ NotificationDetails buildTerminalNotificationDetails({
     playSound: playsSound,
     silent: !playsSound,
     timeoutAfter: timeout?.inMilliseconds,
+    subText: subtitle,
   );
   final darwinDetails = DarwinNotificationDetails(
     presentAlert: true,
     presentBadge: false,
     presentSound: playsSound,
     interruptionLevel: interruptionLevel,
+    subtitle: subtitle,
   );
   return NotificationDetails(
     android: androidDetails,
@@ -108,6 +114,35 @@ NotificationDetails buildTerminalNotificationDetails({
 const _disableNotificationsForStoreScreenshots = bool.fromEnvironment(
   'STORE_SCREENSHOT_DISABLE_NOTIFICATIONS',
 );
+
+/// Separator between the context parts of a notification subtitle.
+const notificationSubtitleSeparator = ' · ';
+
+/// Joins the context shown under a notification title so the user can tell
+/// where a tap will land before tapping.
+///
+/// Blank parts, parts that repeat an earlier part, and parts that merely
+/// repeat [title] are dropped (case-insensitively, whitespace-collapsed) so
+/// the subtitle only ever adds information. Returns `null` when nothing is
+/// left, which leaves the platform subtitle slot unused.
+String? buildNotificationSubtitle(Iterable<String?> parts, {String? title}) {
+  final normalizedTitle = _normalizeNotificationLabel(title ?? '');
+  final seen = <String>{if (normalizedTitle.isNotEmpty) normalizedTitle};
+  final kept = <String>[];
+  for (final part in parts) {
+    final label = _collapseNotificationLabel(part ?? '');
+    if (label.isEmpty) continue;
+    if (!seen.add(_normalizeNotificationLabel(label))) continue;
+    kept.add(label);
+  }
+  return kept.isEmpty ? null : kept.join(notificationSubtitleSeparator);
+}
+
+String _collapseNotificationLabel(String value) =>
+    value.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+String _normalizeNotificationLabel(String value) =>
+    _collapseNotificationLabel(value).toLowerCase();
 
 /// Payload attached to a tmux alert notification.
 @immutable
@@ -735,22 +770,25 @@ class LocalNotificationService {
   /// Server-forwarded background notifications reuse this routing with
   /// their own title, body, and Kitty presentation (urgency, sound,
   /// timeout); plain bell/activity alerts omit those and keep alert
-  /// styling.
+  /// styling. [subtitle] carries the host, session, and window context the
+  /// tap navigates to; see [buildNotificationSubtitle].
   Future<void> showTmuxAlert({
     required int notificationId,
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
+    String? subtitle,
     TerminalNotificationUrgency? urgency,
     TerminalNotificationSound? sound,
     Duration? timeout,
   }) {
     final details = urgency == null && sound == null && timeout == null
-        ? _alertDetails(_tmuxAlertNotificationChannel)
+        ? _alertDetails(_tmuxAlertNotificationChannel, subtitle: subtitle)
         : buildTerminalNotificationDetails(
             urgency: urgency ?? TerminalNotificationUrgency.normal,
             sound: sound ?? TerminalNotificationSound.silent,
             timeout: timeout,
+            subtitle: subtitle,
           );
     return _showNotification(
       notificationId: notificationId,
@@ -768,12 +806,15 @@ class LocalNotificationService {
 
   /// Shows a terminal desktop notification emitted by the remote shell.
   ///
-  /// Returns whether the notification was handed to the platform plugin.
+  /// [subtitle] carries the host and window context the tap navigates to;
+  /// see [buildNotificationSubtitle]. Returns whether the notification was
+  /// handed to the platform plugin.
   Future<bool> showTerminalNotification({
     required int notificationId,
     required String title,
     required String body,
     required TerminalNotificationPayload payload,
+    String? subtitle,
     TerminalNotificationUrgency urgency = TerminalNotificationUrgency.normal,
     TerminalNotificationSound sound = TerminalNotificationSound.silent,
     Duration? timeout,
@@ -787,6 +828,7 @@ class LocalNotificationService {
       urgency: urgency,
       sound: sound,
       timeout: timeout,
+      subtitle: subtitle,
     ),
   );
 
@@ -840,26 +882,33 @@ class LocalNotificationService {
   /// Callers must only invoke this while the app is backgrounded and a
   /// network/SSH path to the host still exists: there is no push path when
   /// disconnected, so no notification can ever be delivered in that case.
-  /// [title] and [body] must never include prompt text, tool arguments or
-  /// output, paths, or commands.
+  /// [title], [subtitle], and [body] must never include prompt text, tool
+  /// arguments or output, paths, or commands. [subtitle] carries the host
+  /// and session context the tap navigates to; see
+  /// [buildNotificationSubtitle].
   Future<void> showAcpNotification({
     required int notificationId,
     required String title,
     required String body,
     required AcpNotificationPayload payload,
+    String? subtitle,
   }) => _showNotification(
     notificationId: notificationId,
     title: title,
     body: body,
     payload: payload.encode(),
-    details: _alertDetails(_acpNotificationChannel),
+    details: _alertDetails(_acpNotificationChannel, subtitle: subtitle),
   );
 
-  NotificationDetails _alertDetails(AndroidNotificationChannel channel) {
-    const darwinDetails = DarwinNotificationDetails(
+  NotificationDetails _alertDetails(
+    AndroidNotificationChannel channel, {
+    String? subtitle,
+  }) {
+    final darwinDetails = DarwinNotificationDetails(
       presentAlert: true,
       presentBadge: false,
       presentSound: false,
+      subtitle: subtitle,
     );
     return NotificationDetails(
       android: AndroidNotificationDetails(
@@ -870,6 +919,7 @@ class LocalNotificationService {
         priority: Priority.high,
         icon: _androidNotificationIcon,
         onlyAlertOnce: true,
+        subText: subtitle,
       ),
       iOS: darwinDetails,
       macOS: darwinDetails,

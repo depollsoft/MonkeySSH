@@ -395,6 +395,63 @@ void main() {
       });
     });
 
+    group('buildNotificationSubtitle', () {
+      test('joins context, dropping blanks and repeats of the title', () {
+        expect(
+          buildNotificationSubtitle(<String?>[
+            ' devbox ',
+            'work',
+            null,
+            '',
+            'Fix  login',
+            'Claude Code',
+          ], title: 'fix login'),
+          'devbox · work · Claude Code',
+        );
+      });
+
+      test('drops parts that repeat an earlier part', () {
+        expect(
+          buildNotificationSubtitle(const <String?>[
+            'devbox',
+            'Devbox',
+            'work',
+          ]),
+          'devbox · work',
+        );
+      });
+
+      test('returns null when nothing is left', () {
+        expect(
+          buildNotificationSubtitle(const <String?>[
+            null,
+            ' ',
+            'Title',
+          ], title: 'title'),
+          isNull,
+        );
+        expect(buildNotificationSubtitle(const <String?>[]), isNull);
+      });
+    });
+
+    test('subtitle reaches the Darwin subtitle and Android sub-text', () {
+      final terminal = buildTerminalNotificationDetails(
+        urgency: TerminalNotificationUrgency.normal,
+        sound: TerminalNotificationSound.silent,
+        subtitle: 'devbox · work',
+      );
+      expect(terminal.android?.subText, 'devbox · work');
+      expect(terminal.iOS?.subtitle, 'devbox · work');
+      expect(terminal.macOS?.subtitle, 'devbox · work');
+
+      final bare = buildTerminalNotificationDetails(
+        urgency: TerminalNotificationUrgency.normal,
+        sound: TerminalNotificationSound.silent,
+      );
+      expect(bare.android?.subText, isNull);
+      expect(bare.iOS?.subtitle, isNull);
+    });
+
     test('Kitty urgency and sound map to native notification details', () {
       final quiet = buildTerminalNotificationDetails(
         urgency: TerminalNotificationUrgency.low,

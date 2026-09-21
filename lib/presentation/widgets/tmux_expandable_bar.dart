@@ -122,6 +122,7 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
     this.tmuxExtraFlags,
+    this.hostLabel,
     this.scopeWorkingDirectory,
     this.activeNativeAcpSessionKey,
     this.onWindowsChanged,
@@ -137,6 +138,10 @@ class _TmuxExpandableBar extends StatefulWidget {
 
   /// The tmux session name.
   final String tmuxSessionName;
+
+  /// User-facing label of the host, shown in notification subtitles so the
+  /// user can tell which host a tap opens.
+  final String? hostLabel;
 
   /// Optional extra flags for tmux commands (e.g. custom socket path).
   final String? tmuxExtraFlags;
@@ -841,7 +846,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: widget.tmuxSessionName,
       window: window,
-      windows: windows,
+      hostLabel: widget.hostLabel,
     );
     final session = widget.session;
     final tmuxSessionName = widget.tmuxSessionName;
@@ -858,6 +863,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       _localNotifications.showTmuxAlert(
         notificationId: notificationId,
         title: content.title,
+        subtitle: content.subtitle,
         body: content.body,
         payload: payload,
       ),
@@ -966,18 +972,20 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       windowKey,
     );
     _forwardedNotificationIdsByWindowKey[windowKey] = notificationId;
-    final fallback = resolveTmuxAlertNotificationContent(
+    final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: tmuxSessionName,
       window: window,
-      windows: windows,
+      hostLabel: widget.hostLabel,
+      title: request.title,
+      body: request.body,
     );
-    final title = request.title;
     unawaited(HapticFeedback.mediumImpact());
     unawaited(
       _localNotifications.showTmuxAlert(
         notificationId: notificationId,
-        title: title == null || title.isEmpty ? fallback.title : title,
-        body: request.body.isEmpty ? fallback.body : request.body,
+        title: content.title,
+        subtitle: content.subtitle,
+        body: content.body,
         payload: TmuxAlertNotificationPayload(
           hostId: session.hostId,
           connectionId: session.connectionId,

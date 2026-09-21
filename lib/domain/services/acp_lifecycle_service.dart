@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:collection/collection.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/repositories/host_repository.dart';
 import '../models/acp_provider.dart';
 import '../models/acp_session_keys.dart';
 import '../models/acp_session_state.dart';
@@ -50,14 +51,19 @@ class AcpLifecycleService {
     required AcpSessionManager sessionManager,
     required bool Function(int hostId) hasActiveSshSession,
     required LocalNotificationService notificationService,
+    Future<String?> Function(int hostId)? resolveHostLabel,
     DiagnosticsLogger? diagnostics,
   }) : _sessionManager = sessionManager,
        _hasActiveSshSession = hasActiveSshSession,
        _notificationService = notificationService,
+       _resolveHostLabel = resolveHostLabel,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final AcpSessionManager _sessionManager;
   final bool Function(int hostId) _hasActiveSshSession;
+
+  /// Looks up the user-facing label of a host for notification subtitles.
+  final Future<String?> Function(int hostId)? _resolveHostLabel;
   final LocalNotificationService _notificationService;
 
   final DiagnosticsLogger _diagnostics;
@@ -189,13 +195,12 @@ class AcpLifecycleService {
     final previousCount = previous?.pendingPermissionCount ?? 0;
     if (session.pendingPermissions.length <= previousCount) return;
     if (!_canNotify(session.key.hostId)) return;
-    final payload = _payload(session, AcpNotificationKind.permission);
     unawaited(
-      _notificationService.showAcpNotification(
-        notificationId: acpNotificationIdFor(payload),
+      _notify(
+        session,
+        AcpNotificationKind.permission,
         title: '${acpSafeAgentDisplayLabel(session)} needs your permission',
         body: 'Open the app to review and respond.',
-        payload: payload,
       ),
     );
   }
@@ -207,13 +212,12 @@ class AcpLifecycleService {
     final previousCount = previous?.pendingWriteCount ?? 0;
     if (session.pendingWrites.length <= previousCount) return;
     if (!_canNotify(session.key.hostId)) return;
-    final payload = _payload(session, AcpNotificationKind.writeApproval);
     unawaited(
-      _notificationService.showAcpNotification(
-        notificationId: acpNotificationIdFor(payload),
+      _notify(
+        session,
+        AcpNotificationKind.writeApproval,
         title: '${acpSafeAgentDisplayLabel(session)} needs write approval',
         body: 'Open the app to review and respond.',
-        payload: payload,
       ),
     );
   }
@@ -230,15 +234,55 @@ class AcpLifecycleService {
     if (session.promptStatus != AcpPromptStatus.idle) return;
     if (session.lastStopReason == null) return;
     if (!_canNotify(session.key.hostId)) return;
-    final payload = _payload(session, AcpNotificationKind.completion);
     unawaited(
-      _notificationService.showAcpNotification(
-        notificationId: acpNotificationIdFor(payload),
+      _notify(
+        session,
+        AcpNotificationKind.completion,
         title: '${acpSafeAgentDisplayLabel(session)} finished',
         body: 'Open the app to see the result.',
-        payload: payload,
       ),
     );
+  }
+
+  /// Shows one ACP notification with a subtitle naming the host and the
+  /// agent-reported session title, so the user can tell which chat a tap
+  /// opens. The working directory is deliberately left out: paths never
+  /// appear in OS notifications.
+  ///
+  /// The host lookup is asynchronous, so [_canNotify] is re-checked after it
+  /// resolves: the app may have come back to the foreground, the host's SSH
+  /// path may have dropped, or this service may have been disposed while
+  /// the lookup was pending, and a notification for stale state must not
+  /// be shown.
+  Future<void> _notify(
+    AcpSessionState session,
+    AcpNotificationKind kind, {
+    required String title,
+    required String body,
+  }) async {
+    final hostLabel = await _hostLabelFor(session.key.hostId);
+    if (_disposed || !_canNotify(session.key.hostId)) return;
+    final payload = _payload(session, kind);
+    await _notificationService.showAcpNotification(
+      notificationId: acpNotificationIdFor(payload),
+      title: title,
+      subtitle: buildNotificationSubtitle(<String?>[
+        hostLabel,
+        session.title,
+      ], title: title),
+      body: body,
+      payload: payload,
+    );
+  }
+
+  Future<String?> _hostLabelFor(int hostId) async {
+    final resolve = _resolveHostLabel;
+    if (resolve == null) return null;
+    try {
+      return await resolve(hostId);
+    } on Object {
+      return null;
+    }
   }
 
   /// A local notification is only ever safe/useful while the app is
@@ -285,11 +329,14 @@ final class _AcpNotificationSnapshot {
 /// Provider for [AcpLifecycleService].
 final acpLifecycleServiceProvider = Provider<AcpLifecycleService>((ref) {
   final sshService = ref.watch(sshServiceProvider);
+  final hostRepository = ref.watch(hostRepositoryProvider);
   final service = AcpLifecycleService(
     sessionManager: ref.watch(acpSessionManagerProvider),
     hasActiveSshSession: (hostId) =>
         sshService.getSessionsForHost(hostId).isNotEmpty,
     notificationService: ref.watch(localNotificationServiceProvider),
+    resolveHostLabel: (hostId) async =>
+        (await hostRepository.getById(hostId))?.label,
   )..start();
   ref.onDispose(() => unawaited(service.dispose()));
   return service;
