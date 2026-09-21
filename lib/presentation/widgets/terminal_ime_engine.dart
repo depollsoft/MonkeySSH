@@ -875,7 +875,9 @@ class TerminalImeEngine {
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
       precedingGrapheme: retainedPrefix.isEmpty ? null : retainedPrefix.last,
-      hasVisiblePredecessor: retainedPrefix.string.trim().isNotEmpty,
+      hasVisiblePredecessor: _currentLineOf(retainedPrefix.string)
+          .trim()
+          .isNotEmpty,
       enterModifiers: enterModifiers,
       beforeEnter: beforeEnter,
     );
@@ -998,6 +1000,12 @@ class TerminalImeEngine {
       beforeEnter: beforeEnter,
     );
     return newlineCount;
+  }
+
+  /// The part of [text] after its last newline.
+  String _currentLineOf(String text) {
+    final lastNewline = text.lastIndexOf(_newlinePattern);
+    return lastNewline < 0 ? text : text.substring(lastNewline + 1);
   }
 
   /// Length of the leading whitespace of [text] up to and including the last

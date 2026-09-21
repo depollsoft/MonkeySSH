@@ -6432,6 +6432,25 @@ void _batchTests() {
     await _disposeImeHarness(driver, harness);
   });
 
+  test('judges visibility on the current line of a pasted block', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      initialEditingValue: _batchEditingValue('one\ntwo'),
+    );
+    driver.updateEditingValue(_batchEditingValue('one\n '));
+    await driver.flush();
+    harness.terminalOutput.clear();
+
+    driver.updateEditingValue(_batchEditingValue('one\n \ntext'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\r', '\x1b[200~text\x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
   test(
     'keeps only trailing newlines as Return after a paragraph block',
     () async {
