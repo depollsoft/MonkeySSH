@@ -254,6 +254,50 @@ func TestVTScreenScrollRegionAndOriginMode(t *testing.T) {
 	}
 }
 
+// A region whose top margin is the first row feeds the scrollback whatever
+// its bottom margin, as xterm does: ratatui's inline viewport (the Codex CLI)
+// pushes transcript lines out of a "CSI 1 ; N r" region above the viewport and
+// they must survive into a rendered frame so the client can scroll back to
+// them after a replay.
+func TestVTScreenTopAnchoredPartialRegionFeedsScrollback(t *testing.T) {
+	s := newTerminalScreen(10, 6)
+	s.Write([]byte("\x1b[4;1HV0\r\nV1\r\nV2"))
+	s.Write([]byte("\x1b7\x1b[1;3r\x1b[3;1H"))
+	for _, line := range []string{"T0", "T1", "T2", "T3", "T4"} {
+		s.Write([]byte("\r\n" + line))
+	}
+	s.Write([]byte("\x1b[r\x1b8"))
+	got := s.TextRows()
+	want := []string{"T2", "T3", "T4", "V0", "V1", "V2"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("inline viewport rows: %q", got)
+		}
+	}
+	if len(s.scrollback) != 5 {
+		t.Fatalf("scrollback: %d lines, want 5", len(s.scrollback))
+	}
+	for i, want := range []string{"", "", "", "T0", "T1"} {
+		if got := vtScrollbackText(s.scrollback[i]); got != want {
+			t.Fatalf("scrollback[%d] = %q, want %q", i, got, want)
+		}
+	}
+	if row, col := s.CursorPosition(); row != 5 || col != 2 {
+		t.Fatalf("cursor after DECRC: (%d,%d)", row, col)
+	}
+	vtRoundTrip(t, s)
+
+	// CSI S inside the same region saves lines too; a region that starts
+	// below the first row never does.
+	s.Write([]byte("\x1b[1;3r\x1b[S\x1b[2;3r\x1b[S\x1b[r"))
+	if len(s.scrollback) != 6 || vtScrollbackText(s.scrollback[5]) != "T2" {
+		t.Fatalf("scrollback after SU: %d lines", len(s.scrollback))
+	}
+	if got := s.TextRows(); got[0] != "T3" || got[1] != "" || got[2] != "" || got[3] != "V0" {
+		t.Fatalf("rows after SU: %q", got)
+	}
+}
+
 func TestVTScreenScrollbackAndClear(t *testing.T) {
 	s := newTerminalScreen(20, 3)
 	for i := 1; i <= 5; i++ {
