@@ -6415,6 +6415,23 @@ void _batchTests() {
     },
   );
 
+  test('sends a Return after already sent whitespace as Return', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      initialEditingValue: _batchEditingValue('  '),
+    );
+    harness.terminalOutput.clear();
+
+    driver.updateEditingValue(_batchEditingValue('  \ntext'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\r', '\x1b[200~text\x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
   test(
     'keeps only trailing newlines as Return after a paragraph block',
     () async {

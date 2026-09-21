@@ -184,7 +184,11 @@ TerminalCommandReview assessKeyboardInsertedCommand(
       !reasons.contains(TerminalCommandReviewReason.largeKeyboardInsertion)) {
     reasons.add(TerminalCommandReviewReason.largeKeyboardInsertion);
   }
-  return TerminalCommandReview(command: command, reasons: reasons);
+  return TerminalCommandReview(
+    command: command,
+    reasons: reasons,
+    bracketedPasteModeEnabled: bracketedPasteModeEnabled,
+  );
 }
 
 /// Assesses a rendered snippet command before terminal insertion.

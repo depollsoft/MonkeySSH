@@ -869,11 +869,13 @@ class TerminalImeEngine {
 
     final appendedText = delta.appendedText;
     final retainedPrefixLength = delta.deleteCursorOffset - deletedCount;
+    final retainedPrefix = retainedPrefixLength > 0
+        ? _lastSentText.characters.take(retainedPrefixLength)
+        : Characters.empty;
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
-      precedingGrapheme: retainedPrefixLength > 0
-          ? _lastSentText.characters.elementAt(retainedPrefixLength - 1)
-          : null,
+      precedingGrapheme: retainedPrefix.isEmpty ? null : retainedPrefix.last,
+      hasVisiblePredecessor: retainedPrefix.string.trim().isNotEmpty,
       enterModifiers: enterModifiers,
       beforeEnter: beforeEnter,
     );
@@ -909,6 +911,7 @@ class TerminalImeEngine {
   int _sendAppendedTerminalInput(
     String text, {
     String? precedingGrapheme,
+    bool hasVisiblePredecessor = false,
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
     bool beforeEnter = false,
   }) {
@@ -918,9 +921,9 @@ class TerminalImeEngine {
 
     // Nothing visible before a newline on the line means it is a Return
     // press, not a paragraph break inside a block.
-    final blockStart = precedingGrapheme == null
-        ? _leadingReturnRunLength(text)
-        : 0;
+    final blockStart = hasVisiblePredecessor
+        ? 0
+        : _leadingReturnRunLength(text);
     final activeModifiers =
         enterModifiers ?? effects.resolveTerminalKeyModifiers?.call();
     final hasActiveEnterModifier =

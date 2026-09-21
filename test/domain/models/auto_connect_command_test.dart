@@ -262,6 +262,7 @@ void main() {
       );
 
       expect(redirectionReview.requiresReview, isTrue);
+      expect(redirectionReview.bracketedPasteModeEnabled, isTrue);
       expect(
         redirectionReview.reasons,
         isNot(contains(TerminalCommandReviewReason.multiline)),
