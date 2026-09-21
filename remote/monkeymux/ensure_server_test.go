@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -786,10 +785,9 @@ func TestAcquireSessionLockIsExclusiveUnderContention(t *testing.T) {
 	}
 }
 
-func TestReclaimSessionFileWaitsForTakeoverGuard(t *testing.T) {
-	isolateTestRuntime(t)
-
-	session := fmt.Sprintf("lock-guard-%d", time.Now().UnixNano())
+func writeStaleSessionLock(t *testing.T) (session, path string) {
+	t.Helper()
+	session = fmt.Sprintf("lock-guard-%d", time.Now().UnixNano())
 	path, err := sessionLockPath(session)
 	if err != nil {
 		t.Fatalf("sessionLockPath: %v", err)
@@ -800,112 +798,79 @@ func TestReclaimSessionFileWaitsForTakeoverGuard(t *testing.T) {
 	if err := os.WriteFile(path, []byte("99999999\n"), 0o600); err != nil {
 		t.Fatalf("write stale lock: %v", err)
 	}
-	guard := sessionFileTakeoverGuardPath(path)
-	// Another goroutine of this live helper is mid-reclaim.
-	if err := os.WriteFile(guard, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
-		t.Fatalf("write guard: %v", err)
-	}
+	return session, path
+}
 
+func TestTakeoverGuardIsExclusive(t *testing.T) {
+	isolateTestRuntime(t)
+	_, path := writeStaleSessionLock(t)
+
+	release, acquired, err := acquireTakeoverGuard(path)
+	if err != nil || !acquired {
+		t.Fatalf("first acquire: acquired=%v err=%v", acquired, err)
+	}
+	if _, again, err := acquireTakeoverGuard(path); err != nil || again {
+		t.Fatalf("a held guard was acquired again: acquired=%v err=%v", again, err)
+	}
+	release()
+	release2, acquired, err := acquireTakeoverGuard(path)
+	if err != nil || !acquired {
+		t.Fatalf("acquire after release: acquired=%v err=%v", acquired, err)
+	}
+	release2()
+	if _, err := os.Stat(takeoverGuardPath(path)); err != nil {
+		t.Fatalf("the guard file must stay in place: %v", err)
+	}
+}
+
+func TestReclaimSessionFileWaitsForTakeoverGuard(t *testing.T) {
+	isolateTestRuntime(t)
+	_, path := writeStaleSessionLock(t)
+
+	// Another helper is mid-reclaim.
+	release, acquired, err := acquireTakeoverGuard(path)
+	if err != nil || !acquired {
+		t.Fatalf("acquire guard: acquired=%v err=%v", acquired, err)
+	}
 	if clearStalePIDFile(path, "") {
 		t.Fatal("a stale lock was reclaimed while another helper held the takeover guard")
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("stale lock removed under a foreign guard: %v", err)
 	}
-	if _, err := os.Stat(guard); err != nil {
-		t.Fatalf("a live helper's guard was removed: %v", err)
-	}
 
 	// A guard released while the reclaim is waiting for it is picked up
 	// without a further retry.
-	released := make(chan error, 1)
+	released := make(chan struct{})
 	go func() {
 		time.Sleep(3 * takeoverGuardWaitInterval)
-		released <- os.Remove(guard)
+		release()
+		close(released)
 	}()
 	if !clearStalePIDFile(path, "") {
 		t.Fatal("the stale lock was not reclaimed once the guard was free")
 	}
-	if err := <-released; err != nil {
-		t.Fatalf("release guard: %v", err)
-	}
+	<-released
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale lock still present: %v", err)
 	}
-	if _, err := os.Stat(guard); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the guard was not released after the reclaim: %v", err)
+	if _, again, err := acquireTakeoverGuard(path); err != nil || !again {
+		t.Fatalf("the guard was not released after the reclaim: acquired=%v err=%v", again, err)
 	}
 }
 
-func TestReclaimSessionFileClearsAbandonedTakeoverGuard(t *testing.T) {
-	for _, test := range []struct {
-		name, contents string
-		aged, cleared  bool
-	}{
-		{"dead holder", "99999999\n", false, true},
-		{"unparseable and young", "   \n", false, false},
-		{"unparseable and aged", "   \n", true, true},
-		{"live holder outliving any reclaim", strconv.Itoa(os.Getpid()) + "\n", true, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			isolateTestRuntime(t)
-
-			session := fmt.Sprintf("lock-guard-%d", time.Now().UnixNano())
-			path, err := sessionLockPath(session)
-			if err != nil {
-				t.Fatalf("sessionLockPath: %v", err)
-			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-			if err := os.WriteFile(path, []byte("99999999\n"), 0o600); err != nil {
-				t.Fatalf("write stale lock: %v", err)
-			}
-			guard := sessionFileTakeoverGuardPath(path)
-			if err := os.WriteFile(guard, []byte(test.contents), 0o600); err != nil {
-				t.Fatalf("write guard: %v", err)
-			}
-			if test.aged {
-				old := time.Now().Add(-time.Hour)
-				if err := os.Chtimes(guard, old, old); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			// An abandoned guard is cleared and taken over within the same
-			// reclaim; one that may still be live blocks it.
-			if got := clearStalePIDFile(path, ""); got != test.cleared {
-				t.Fatalf("reclaim = %v, want %v", got, test.cleared)
-			}
-			_, guardErr := os.Stat(guard)
-			if test.cleared != errors.Is(guardErr, os.ErrNotExist) {
-				t.Fatalf("guard cleared = %v, want %v (%v)", errors.Is(guardErr, os.ErrNotExist), test.cleared, guardErr)
-			}
-			_, lockErr := os.Stat(path)
-			if test.cleared != errors.Is(lockErr, os.ErrNotExist) {
-				t.Fatalf("stale lock removed = %v, want %v (%v)", errors.Is(lockErr, os.ErrNotExist), test.cleared, lockErr)
-			}
-		})
-	}
-}
-
-func TestAcquireSessionLockRecoversFromAbandonedTakeoverGuard(t *testing.T) {
+func TestAcquireSessionLockIgnoresUnlockedGuardFile(t *testing.T) {
 	isolateTestRuntime(t)
-
-	session := fmt.Sprintf("lock-guard-%d", time.Now().UnixNano())
-	path, err := sessionLockPath(session)
-	if err != nil {
-		t.Fatalf("sessionLockPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("99999999\n"), 0o600); err != nil {
-		t.Fatalf("write stale lock: %v", err)
-	}
-	guard := sessionFileTakeoverGuardPath(path)
-	if err := os.WriteFile(guard, []byte("99999999\n"), 0o600); err != nil {
+	session, path := writeStaleSessionLock(t)
+	// The guard file of a helper that died mid-reclaim: the operating system
+	// dropped its lock, so the file itself means nothing.
+	guard := takeoverGuardPath(path)
+	if err := os.WriteFile(guard, []byte("residue"), 0o600); err != nil {
 		t.Fatalf("write guard: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(guard, old, old); err != nil {
+		t.Fatal(err)
 	}
 
 	unlock, err := acquireSessionLock(session)
@@ -915,43 +880,29 @@ func TestAcquireSessionLockRecoversFromAbandonedTakeoverGuard(t *testing.T) {
 	defer unlock()
 	record, err := readPIDRecord(path)
 	if err != nil || record.pid != os.Getpid() {
-		t.Fatalf("lock after recovery: %+v, %v", record, err)
-	}
-	if _, err := os.Stat(guard); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the dead helper's guard was kept: %v", err)
+		t.Fatalf("lock after reclaim: %+v, %v", record, err)
 	}
 }
 
-func TestGCClearsAbandonedTakeoverGuards(t *testing.T) {
+func TestGCKeepsTakeoverGuard(t *testing.T) {
 	isolateTestRuntime(t)
-
-	livePath, err := sessionLockPath(fmt.Sprintf("gc-guard-live-%d", time.Now().UnixNano()))
-	if err != nil {
-		t.Fatalf("sessionLockPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(livePath), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	liveGuard := sessionFileTakeoverGuardPath(livePath)
-	if err := os.WriteFile(liveGuard, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	_, path := writeStaleSessionLock(t)
+	guard := takeoverGuardPath(path)
+	if err := os.WriteFile(guard, []byte("residue"), 0o600); err != nil {
 		t.Fatalf("write guard: %v", err)
 	}
-	deadPath, err := sessionLockPath(fmt.Sprintf("gc-guard-dead-%d", time.Now().UnixNano()))
-	if err != nil {
-		t.Fatalf("sessionLockPath: %v", err)
-	}
-	deadGuard := sessionFileTakeoverGuardPath(deadPath)
-	if err := os.WriteFile(deadGuard, []byte("99999999\n"), 0o600); err != nil {
-		t.Fatalf("write guard: %v", err)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(guard, old, old); err != nil {
+		t.Fatal(err)
 	}
 
 	gcCommand()
 
-	if _, err := os.Stat(liveGuard); err != nil {
-		t.Fatalf("gc removed a live helper's takeover guard: %v", err)
+	if _, err := os.Stat(guard); err != nil {
+		t.Fatalf("gc removed the takeover guard: %v", err)
 	}
-	if _, err := os.Stat(deadGuard); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("gc kept a dead helper's takeover guard: %v", err)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("gc kept the stale lock: %v", err)
 	}
 }
 

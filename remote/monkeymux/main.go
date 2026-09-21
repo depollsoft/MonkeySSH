@@ -110,9 +110,9 @@ const (
 	// how many times a freed lock may be claimed before the wait deadline wins.
 	sessionLockStaleCheckInterval = 250 * time.Millisecond
 	ensureServerLockClearRetries  = 8
-	// How long a reclaim waits for another helper's takeover guard. A live
-	// reclaim holds it for microseconds, so a short wait almost always ends
-	// with the guard free and the file either gone or live.
+	// How long a reclaim waits for another helper's takeover guard. A reclaim
+	// holds it for microseconds, so a short wait almost always ends with the
+	// guard free and the file either gone or live.
 	takeoverGuardWaitAttempts = 20
 	takeoverGuardWaitInterval = 5 * time.Millisecond
 	// How long a session file that cannot be parsed at all must sit untouched
@@ -1817,9 +1817,9 @@ func gcCommand() {
 			// Residue of a helper that died while installing a lock file.
 			removeAbandonedStagingFile(path)
 			continue
-		case ".takeover":
-			// Residue of a helper that died while reclaiming a session file.
-			clearAbandonedTakeoverGuard(path)
+		case ".guard":
+			// The reclaim guard is locked, never removed: another helper may
+			// hold it open, and a fresh file would let two helpers hold it.
 			continue
 		case ".sock":
 		default:
@@ -2755,45 +2755,45 @@ func clearStalePIDFile(path string, session string) bool {
 	return reclaimPIDFileIfUnchanged(path, record)
 }
 
-// sessionFileTakeoverGuardPath names the file that serialises reclaiming the
-// session file at path.
-func sessionFileTakeoverGuardPath(path string) string {
-	return path + ".takeover"
+// takeoverGuardFileName is the file whose OS lock serialises every reclaim of
+// a session file in a runtime directory. It is created once and never removed:
+// unlinking a lock file that another process may have open would let a later
+// opener lock a fresh inode and hold the guard alongside the old one.
+const takeoverGuardFileName = "monkeymux-reclaim.guard"
+
+func takeoverGuardPath(path string) string {
+	return filepath.Join(filepath.Dir(path), takeoverGuardFileName)
 }
 
 // reclaimSessionFile runs remove, which unlinks path only while it still holds
-// the residue it was validated against, under the takeover guard for path, and
-// reports whether the file was removed.
+// the residue it was validated against, under the runtime directory's takeover
+// guard, and reports whether the file was removed.
 //
 // The re-check inside remove and the unlink are two steps by name, so on their
 // own two helpers that both judged the same residue stale can interleave: the
 // first unlinks it and installs its own live file, and the second, whose
 // re-check passed a moment earlier, unlinks that live file and installs a
 // second holder for the same session. Under the guard only one helper reclaims
-// at a time, so the other's re-check sees the live file and declines. A helper
-// that finds the guard taken reports no removal and retries later, by which
-// time the file is either gone or live.
+// at a time, so the other's re-check sees the live file and declines.
 //
-// The guard is itself a pid-bearing lock file, so one left by a helper that
-// died mid-reclaim is cleared as soon as its holder is gone, and one whose
-// holder cannot be resolved is cleared once it has outlived any live reclaim,
-// which takes microseconds. A taken guard is waited for briefly rather than
-// reported at once: callers that resolve an owner retry only a few times
-// back to back, and would otherwise report an unresolved owner for a file
-// that a moment later is plainly gone or live.
+// The guard is an OS file lock rather than another pid file: the kernel
+// releases it when its holder exits, however it exits, so a helper that dies
+// mid-reclaim leaves nothing to detect or expire, and a helper that is merely
+// slow keeps the guard for as long as it needs it. Reclaims are rare and take
+// microseconds, so one guard per runtime directory costs nothing. A taken
+// guard is waited for briefly rather than reported at once: callers that
+// resolve an owner retry only a few times back to back, and would otherwise
+// report an unresolved owner for a file that a moment later is plainly gone
+// or live.
 func reclaimSessionFile(path string, remove func() bool) bool {
-	guard := sessionFileTakeoverGuardPath(path)
 	for attempt := 0; ; attempt++ {
-		record, acquired, err := installSessionLockFile(guard)
+		release, acquired, err := acquireTakeoverGuard(path)
 		if err != nil {
 			return false
 		}
 		if acquired {
-			defer func() { _ = removePIDFileIfUnchanged(guard, record) }()
+			defer release()
 			return remove()
-		}
-		if attempt == 0 {
-			clearAbandonedTakeoverGuard(guard)
 		}
 		if attempt >= takeoverGuardWaitAttempts {
 			return false
@@ -2802,34 +2802,32 @@ func reclaimSessionFile(path string, remove func() bool) bool {
 	}
 }
 
+// acquireTakeoverGuard takes the takeover guard for path's runtime directory
+// without waiting. The guard is held until release is called; it is also
+// released by the operating system if the process exits first.
+func acquireTakeoverGuard(path string) (release func(), acquired bool, err error) {
+	file, err := os.OpenFile(
+		takeoverGuardPath(path),
+		os.O_CREATE|os.O_RDWR,
+		sessionLockFileMode,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	locked, err := lockTakeoverGuardFile(file)
+	if err != nil || !locked {
+		_ = file.Close()
+		return nil, false, err
+	}
+	return func() { _ = file.Close() }, true, nil
+}
+
 // reclaimPIDFileIfUnchanged is removePIDFileIfUnchanged for a file another
-// helper wrote: the removal is serialised by the file's takeover guard.
+// helper wrote: the removal is serialised by the takeover guard.
 func reclaimPIDFileIfUnchanged(path string, record pidRecord) bool {
 	return reclaimSessionFile(path, func() bool {
 		return removePIDFileIfUnchanged(path, record)
 	})
-}
-
-// clearAbandonedTakeoverGuard removes a takeover guard whose holder is gone,
-// or which is old enough that no live reclaim can still be holding it. This
-// is the one removal that has no guard of its own; the window it leaves is a
-// reclaim racing the residue of a dead helper, never a live holder's file.
-func clearAbandonedTakeoverGuard(guard string) {
-	record, err := readPIDRecord(guard)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		if info, statErr := os.Stat(guard); statErr == nil &&
-			time.Since(info.ModTime()) >= abandonedPIDFileAge {
-			_ = removeUnparseablePIDFileIfUnchanged(guard, info.ModTime())
-		}
-		return
-	}
-	if time.Since(record.writtenAt) >= abandonedPIDFileAge ||
-		pidRecordOwnership(record, "") == pidOwnershipGone {
-		_ = removePIDFileIfUnchanged(guard, record)
-	}
 }
 
 // removePIDFileIfUnchanged deletes path only while it still holds the record
