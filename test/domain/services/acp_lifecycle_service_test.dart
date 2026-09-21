@@ -503,6 +503,56 @@ void main() {
     expect(call.subtitle, isNot(contains('/')));
   });
 
+  test(
+    'returning to the foreground during the host lookup drops the alert',
+    () async {
+      final key = fakeAcpKey();
+      final initial = fakeAcpSession(key: key);
+      final fakeManager = FakeAcpSessionManager(sessions: [initial]);
+      final notifications = _RecordingAcpNotificationService();
+      final hostLookup = Completer<String?>();
+      final testLifecycle = AcpLifecycleService(
+        sessionManager: fakeManager,
+        hasActiveSshSession: (_) => true,
+        notificationService: notifications,
+        resolveHostLabel: (_) => hostLookup.future,
+        diagnostics: const NoopDiagnosticsLogger(),
+      )..start();
+      addTearDown(testLifecycle.dispose);
+      addTearDown(fakeManager.dispose);
+      addTearDown(notifications.dispose);
+
+      await _pump();
+      await testLifecycle.handleBackground();
+      fakeManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(
+              pendingWrites: [
+                AcpPendingWrite(
+                  requestKey: 's:write-1',
+                  sessionId: key.acpSessionId,
+                  path: '/private/path-never-notified',
+                  contentByteLength: 7,
+                  requestedAt: DateTime(2026),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      await _pump();
+      expect(notifications.calls, isEmpty);
+
+      // The user opens the app while the label is still resolving.
+      await testLifecycle.handleForeground();
+      hostLookup.complete('devbox');
+      await _pump();
+
+      expect(notifications.calls, isEmpty);
+    },
+  );
+
   group('notification gating', () {
     test('never notifies while the app is in the foreground', () async {
       final key = await startSession(hostId: 1);

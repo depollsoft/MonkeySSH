@@ -122,6 +122,7 @@ class _NoOpLocalNotificationService extends LocalNotificationService {
     required String title,
     required String body,
     required TmuxAlertNotificationPayload payload,
+    String? subtitle,
     TerminalNotificationUrgency? urgency,
     TerminalNotificationSound? sound,
     Duration? timeout,

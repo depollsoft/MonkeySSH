@@ -248,18 +248,26 @@ class AcpLifecycleService {
   /// agent-reported session title, so the user can tell which chat a tap
   /// opens. The working directory is deliberately left out: paths never
   /// appear in OS notifications.
+  ///
+  /// The host lookup is asynchronous, so [_canNotify] is re-checked after it
+  /// resolves: the app may have come back to the foreground, the host's SSH
+  /// path may have dropped, or this service may have been disposed while
+  /// the lookup was pending, and a notification for stale state must not
+  /// be shown.
   Future<void> _notify(
     AcpSessionState session,
     AcpNotificationKind kind, {
     required String title,
     required String body,
   }) async {
+    final hostLabel = await _hostLabelFor(session.key.hostId);
+    if (_disposed || !_canNotify(session.key.hostId)) return;
     final payload = _payload(session, kind);
     await _notificationService.showAcpNotification(
       notificationId: acpNotificationIdFor(payload),
       title: title,
       subtitle: buildNotificationSubtitle(<String?>[
-        await _hostLabelFor(session.key.hostId),
+        hostLabel,
         session.title,
       ], title: title),
       body: body,
