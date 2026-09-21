@@ -17,6 +17,8 @@ const _deleteDetectionMarker = '\u200B\u200B';
 final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
 final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
+final _newlinePattern = RegExp(r'[\r\n]');
+bool _isNewlineCodeUnit(int codeUnit) => codeUnit == 0x0A || codeUnit == 0x0D;
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
 bool _isAsciiLetterOrDigitCodeUnit(int codeUnit) =>
     (codeUnit >= 0x30 && codeUnit <= 0x39) ||
@@ -909,12 +911,31 @@ class TerminalImeEngine {
       return 0;
     }
 
-    final modifierNewlineIndex = enterModifiers == null
-        ? -1
-        : _terminalNewlineSequenceCount(text) - 1;
-    var newlineCount = 0;
     var segmentStart = 0;
     var index = 0;
+    final embeddedNewlineBlockLength = _embeddedNewlineBlockLength(text);
+    if (embeddedNewlineBlockLength > 0) {
+      // Dictation commits several paragraphs in one editing update. Those
+      // newlines were never Return presses: a bracketed-paste application
+      // decides what a pasted line break means (agent composers insert a
+      // line break; shells keep the block on the command line), exactly as it
+      // does for a clipboard paste. Splitting them into separate pastes with
+      // Enter in between submits the first paragraph on its own or drops it.
+      // Only newlines after the last visible character remain Return.
+      _sendTerminalTextSegment(
+        text.substring(0, embeddedNewlineBlockLength),
+        precedingGrapheme: precedingGrapheme,
+        beforeEnter: beforeEnter || embeddedNewlineBlockLength < text.length,
+        embedsNewlines: true,
+      );
+      segmentStart = embeddedNewlineBlockLength;
+      index = embeddedNewlineBlockLength;
+    }
+
+    final modifierNewlineIndex = enterModifiers == null
+        ? -1
+        : _terminalNewlineSequenceCount(text.substring(segmentStart)) - 1;
+    var newlineCount = 0;
     while (index < text.length) {
       final codeUnit = text.codeUnitAt(index);
       final newlineLength = codeUnit == 0x0D
@@ -950,19 +971,46 @@ class TerminalImeEngine {
     return newlineCount;
   }
 
+  /// Length of the leading part of [text] that ends at its last visible
+  /// character and holds newlines in between, when that block can travel as
+  /// one bracketed paste. Returns 0 when [text] has no such newline or the
+  /// block must stay on the key input path.
+  int _embeddedNewlineBlockLength(String text) {
+    if (!terminal.bracketedPasteMode) {
+      return 0;
+    }
+    var end = text.length;
+    while (end > 0 && _isNewlineCodeUnit(text.codeUnitAt(end - 1))) {
+      end--;
+    }
+    final block = text.substring(0, end);
+    if (!_newlinePattern.hasMatch(block) ||
+        _terminalTextControlPattern.hasMatch(
+          block.replaceAll(_newlinePattern, ''),
+        ) ||
+        _applyTerminalTextInputModifiers(block) != block) {
+      return 0;
+    }
+    return end;
+  }
+
   void _sendTerminalTextSegment(
     String text, {
     String? precedingGrapheme,
     bool beforeEnter = false,
+    bool embedsNewlines = false,
   }) {
     if (text.isEmpty) {
       return;
     }
     final input = _applyTerminalTextInputModifiers(text);
+    final controlCheckText = embedsNewlines
+        ? text.replaceAll(_newlinePattern, '')
+        : text;
     if (terminal.bracketedPasteMode &&
         input == text &&
         (_isFramingImeText || beforeEnter || text.runes.length > 1) &&
-        !_terminalTextControlPattern.hasMatch(text)) {
+        !_terminalTextControlPattern.hasMatch(controlCheckText)) {
       // IMEs commit whole words at once. Without explicit batch boundaries,
       // prompt TUIs such as Codex infer a paste from the rapid characters and
       // absorb the following Return as a pasted newline. Keep Enter outside

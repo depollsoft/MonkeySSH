@@ -6118,12 +6118,126 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('hello.\n. '));
     await driver.flush();
 
-    expect(harness.terminalOutput, [
-      '\x7f',
-      '\x1b[200~o.\x1b[201~',
-      '\r',
-      '\x1b[200~. \x1b[201~',
-    ]);
+    expect(harness.terminalOutput, ['\x7f', '\x1b[200~o.\r. \x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    test(
+      'keeps dictated paragraphs inside one bracketed paste on $platform',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialTerminalOutput: '\x1b[?2004h',
+        );
+        const phrase = 'Para one.\n\nPara two.';
+
+        driver.updateEditingValue(
+          _batchEditingValue('Para one.', composing: true),
+        );
+        await driver.flush();
+        driver.updateEditingValue(_batchEditingValue(phrase, composing: true));
+        await driver.flush();
+        expect(harness.terminalOutput, isEmpty);
+
+        driver.updateEditingValue(_batchEditingValue(phrase));
+        await driver.flush();
+        expect(harness.terminalOutput, [
+          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+        ]);
+
+        // The IME may repeat its final result after the buffer is repaired.
+        driver.updateEditingValue(_batchEditingValue(phrase));
+        await driver.flush();
+        expect(harness.terminalOutput, [
+          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+        ]);
+
+        driver.engine.performAction(TextInputAction.newline);
+        await driver.flush();
+        expect(harness.terminalOutput, [
+          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+          '\r',
+        ]);
+        await _disposeImeHarness(driver, harness);
+      },
+    );
+  }
+
+  test(
+    'keeps only trailing newlines as Return after a paragraph block',
+    () async {
+      final driver = _ImeDriver(platform: TargetPlatform.iOS);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+
+      driver.updateEditingValue(_batchEditingValue('Para one.\nPara two.\n'));
+      await driver.flush();
+
+      expect(harness.terminalOutput, [
+        '\x1b[200~Para one.\rPara two.\x1b[201~',
+        '\r',
+      ]);
+      driver.engine.performAction(TextInputAction.newline);
+      await driver.flush();
+      expect(harness.terminalOutput, [
+        '\x1b[200~Para one.\rPara two.\x1b[201~',
+        '\r',
+      ]);
+      await _disposeImeHarness(driver, harness);
+    },
+  );
+
+  test('pastes a paragraph appended to an earlier dictation commit', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      initialEditingValue: _batchEditingValue('Para one.'),
+    );
+    harness.terminalOutput.clear();
+
+    driver.updateEditingValue(_batchEditingValue('Para one.\n\nPara two.'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\x1b[200~\r\rPara two.\x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test(
+    'sends dictated paragraphs line by line without bracketed paste',
+    () async {
+      final driver = _ImeDriver(platform: TargetPlatform.iOS);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(driver);
+
+      driver.updateEditingValue(_batchEditingValue('Para one.\n\nPara two.'));
+      await driver.flush();
+
+      expect(harness.terminalOutput, ['Para one.', '\r', '\r', 'Para two.']);
+      await _disposeImeHarness(driver, harness);
+    },
+  );
+
+  test('keeps modified paragraphs off the bracketed paste path', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.android);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      applyTerminalTextInputModifiers: (text) => '\x1b$text',
+    );
+
+    driver.updateEditingValue(_batchEditingValue('one\ntwo'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\x1bone', '\r', '\x1btwo']);
     await _disposeImeHarness(driver, harness);
   });
 
