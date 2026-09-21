@@ -258,6 +258,12 @@ void registerRemoteFileServiceIoTests() {
     }
 
     group('upload progress', () {
+      setUpAll(() {
+        registerFallbackValue(SftpFileOpenMode.read);
+        registerFallbackValue(SftpFileAttrs());
+        registerFallbackValue(Uint8List(0));
+      });
+
       setUp(() {
         when(() => sftp.open('/remote/file', mode: any(named: 'mode')))
             .thenAnswer((_) async => remoteFile);
