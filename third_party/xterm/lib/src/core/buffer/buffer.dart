@@ -239,6 +239,20 @@ class Buffer {
     this.lines.reassignRange(top, reordered);
   }
 
+  /// Scrolls the region up by [lines] rows. On the main screen a region whose
+  /// top margin is the first row feeds the scrollback, exactly as xterm does
+  /// (top_marg == 0) for both IND and `CSI S`: each row leaving the region is
+  /// kept as history by inserting a blank line just below the bottom margin,
+  /// which shifts the region's rows up by one while every row underneath
+  /// keeps its screen position, because the viewport is the last [viewHeight]
+  /// lines of the buffer. The bottom margin does not matter: ratatui's inline
+  /// viewport (the Codex CLI) pushes transcript lines out of a `CSI 1 ; N r`
+  /// region above the viewport and relies on them landing in the scrollback.
+  /// Scrolling that region in place instead discards them, so the transcript
+  /// can never be scrolled back to. A region that starts below the first row,
+  /// and the alternate screen, scroll their own rows and nothing enters the
+  /// scrollback. The MonkeyMux screen model applies the same rule so a frame
+  /// it renders carries the same history.
   void scrollUp(int lines) {
     final top = absoluteMarginTop;
     final bottom = absoluteMarginBottom;
@@ -246,6 +260,15 @@ class Buffer {
     if (regionHeight <= 0) return;
     final count = lines < regionHeight ? lines : regionHeight;
     if (count <= 0) return;
+    if (_marginTop == 0 && !isAltBuffer) {
+      for (var i = 0; i < count; i++) {
+        if (this.lines.isFull) {
+          graphics.removeGraphicsAnchoredToLine(this.lines[0]);
+        }
+        this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
+      }
+      return;
+    }
     for (var i = top; i < top + count; i++) {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
@@ -266,26 +289,8 @@ class Buffer {
   void index() {
     if (isInVerticalMargin) {
       if (_cursorY == _marginBottom) {
-        // A main-screen region whose top margin is the first row feeds the
-        // scrollback, exactly as xterm does (top_marg == 0): the row leaving
-        // the region is kept as history by inserting a blank line just below
-        // the bottom margin. That shifts the region's rows up by one while
-        // every row underneath keeps its screen position, because the
-        // viewport is the last [viewHeight] lines of the buffer. The bottom
-        // margin does not matter: ratatui's inline viewport (the Codex CLI)
-        // pushes transcript lines out of a `CSI 1 ; N r` region above the
-        // viewport and relies on them landing in the scrollback. Scrolling
-        // the region in place instead discards them, so the transcript can
-        // never be scrolled back to. A region that starts below the first
-        // row scrolls its own rows and nothing enters the scrollback.
-        if (marginTop == 0 && !isAltBuffer) {
-          if (lines.isFull) {
-            graphics.removeGraphicsAnchoredToLine(lines[0]);
-          }
-          lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
-        } else {
-          scrollUp(1);
-        }
+        // [scrollUp] decides whether the departing row becomes history.
+        scrollUp(1);
       } else {
         moveCursorY(1);
       }

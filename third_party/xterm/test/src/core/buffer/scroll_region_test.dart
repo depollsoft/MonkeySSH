@@ -97,6 +97,38 @@ void main() {
       expect(visible(terminal), ['L36', 'A', '', 'L37', 'L38', 'L39']);
     });
 
+    test('CSI S on a top-anchored region feeds the scrollback like IND', () {
+      // The MonkeyMux screen model records history for an explicit Scroll Up
+      // too, so the client must match or a replayed frame would carry lines
+      // the live terminal never kept.
+      final terminal = sixRowTerminal();
+
+      terminal.write('\x1b[1;3r');
+      terminal.write('\x1b[6;1H'); // the cursor may sit outside the region
+      terminal.write('\x1b[2S');
+
+      expect(terminal.buffer.lines.length, 8);
+      expect(rows(terminal), ['L0', 'L1', 'L2', '', '', 'L3', 'L4', 'L5']);
+      expect(visible(terminal), ['L2', '', '', 'L3', 'L4', 'L5']);
+      expect(terminal.buffer.cursorY, 5,
+          reason: 'CSI S leaves the cursor where it was');
+
+      // A count larger than the region scrolls the whole region once.
+      terminal.write('\x1b[9S');
+      expect(terminal.buffer.lines.length, 11);
+      expect(visible(terminal), ['', '', '', 'L3', 'L4', 'L5']);
+    });
+
+    test('CSI S on a region that does not start at the top scrolls in place',
+        () {
+      final terminal = sixRowTerminal();
+
+      terminal.write('\x1b[2;4r\x1b[S');
+
+      expect(terminal.buffer.lines.length, 6);
+      expect(rows(terminal), ['L0', 'L2', 'L3', '', 'L4', 'L5']);
+    });
+
     test('a full-height region still grows the scrollback', () {
       final terminal = sixRowTerminal();
 
@@ -138,7 +170,7 @@ void main() {
       terminal.write('\x1b[?1049h');
       terminal.write('\x1b[1;3r');
       terminal.write('\x1b[3;1H');
-      terminal.write('\n');
+      terminal.write('\n\x1b[S');
 
       expect(terminal.buffer.lines.length, 6);
     });
