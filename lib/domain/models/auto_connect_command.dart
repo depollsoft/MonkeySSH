@@ -159,18 +159,20 @@ TerminalCommandReview assessClipboardPasteCommand(
 /// [previewedByIme] marks a commit the IME showed as composing text before it
 /// landed, which is how dictation arrives. The user watched that text build
 /// up, so it is neither a hidden clipboard handoff nor an unexpected block of
-/// lines: only shell-reshaping content such as command substitution or control
-/// characters still deserves review.
+/// lines. Shell-reshaping content (chaining, redirection, command
+/// substitution, control characters) still deserves review.
 TerminalCommandReview assessKeyboardInsertedCommand(
   String command, {
   required String insertedText,
   bool previewedByIme = false,
 }) {
   final reasons = <TerminalCommandReviewReason>[
-    ..._collectPasteCommandReviewReasons(
+    for (final reason in _collectPasteCommandReviewReasons(
       command,
-      bracketedPasteModeEnabled: previewedByIme,
-    ),
+      bracketedPasteModeEnabled: false,
+    ))
+      if (!previewedByIme || reason != TerminalCommandReviewReason.multiline)
+        reason,
   ];
   if (!previewedByIme &&
       insertedText.length > terminalKeyboardPasteLikeInsertionThreshold &&

@@ -241,6 +241,23 @@ void main() {
         substitutionReview.reasons,
         contains(TerminalCommandReviewReason.commandSubstitution),
       );
+
+      const redirected = 'cat /etc/passwd >\n/tmp/out.txt';
+      final redirectionReview = assessKeyboardInsertedCommand(
+        redirected,
+        insertedText: redirected,
+        previewedByIme: true,
+      );
+
+      expect(redirectionReview.requiresReview, isTrue);
+      expect(
+        redirectionReview.reasons,
+        isNot(contains(TerminalCommandReviewReason.multiline)),
+      );
+      expect(
+        redirectionReview.reasons,
+        contains(TerminalCommandReviewReason.redirection),
+      );
     });
 
     test('flags unbracketed multiline paste with shell reshaping', () {

@@ -18,6 +18,7 @@ final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
 final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
 final _newlinePattern = RegExp(r'[\r\n]');
+final _imeFinalisingSuffixPattern = RegExp(r'^[.,!?]{0,2}$');
 bool _isNewlineCodeUnit(int codeUnit) => codeUnit == 0x0A || codeUnit == 0x0D;
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
 bool _isAsciiLetterOrDigitCodeUnit(int codeUnit) =>
@@ -915,32 +916,53 @@ class TerminalImeEngine {
       return 0;
     }
 
-    var segmentStart = 0;
-    var index = 0;
-    final embeddedNewlineBlockLength = _embeddedNewlineBlockLength(text);
-    if (embeddedNewlineBlockLength > 0) {
-      // Dictation commits several paragraphs in one editing update. Those
-      // newlines were never Return presses: a bracketed-paste application
-      // decides what a pasted line break means (agent composers insert a
-      // line break; shells keep the block on the command line), exactly as it
-      // does for a clipboard paste. Splitting them into separate pastes with
-      // Enter in between submits the first paragraph on its own or drops it.
-      // Only newlines after the last visible character remain Return.
-      _sendTerminalTextSegment(
-        text.substring(0, embeddedNewlineBlockLength),
-        precedingGrapheme: precedingGrapheme,
-        beforeEnter: beforeEnter || embeddedNewlineBlockLength < text.length,
-        embedsNewlines: true,
-      );
-      segmentStart = embeddedNewlineBlockLength;
-      index = embeddedNewlineBlockLength;
-    }
-
+    // Nothing retained before this text on the line means leading newlines
+    // are Return presses, not paragraph breaks inside a block.
+    final blockStart = precedingGrapheme == null
+        ? _leadingNewlineRunLength(text)
+        : 0;
+    final activeModifiers =
+        enterModifiers ?? effects.resolveTerminalKeyModifiers?.call();
+    final hasActiveEnterModifier =
+        activeModifiers != null &&
+        (activeModifiers.ctrl || activeModifiers.alt || activeModifiers.shift);
+    // A one-shot toolbar modifier belongs to the next Enter, so modified
+    // newlines stay on the key path.
+    final blockEnd = hasActiveEnterModifier
+        ? 0
+        : _embeddedNewlineBlockEnd(text, start: blockStart);
     final modifierNewlineIndex = enterModifiers == null
         ? -1
-        : _terminalNewlineSequenceCount(text.substring(segmentStart)) - 1;
+        : _terminalNewlineSequenceCount(text) -
+              (blockEnd > 0
+                  ? _terminalNewlineSequenceCount(
+                      text.substring(blockStart, blockEnd),
+                    )
+                  : 0) -
+              1;
     var newlineCount = 0;
+    var segmentStart = 0;
+    var index = 0;
     while (index < text.length) {
+      if (blockEnd > 0 && index == blockStart) {
+        // Dictation commits several paragraphs in one editing update. Those
+        // newlines were never Return presses: a bracketed-paste application
+        // decides what a pasted line break means (agent composers insert a
+        // line break; shells keep the block on the command line), exactly as
+        // it does for a clipboard paste. Splitting them into separate pastes
+        // with Enter in between submits the first paragraph on its own or
+        // drops it. Only newlines after the last visible character remain
+        // Return.
+        _sendTerminalTextSegment(
+          text.substring(blockStart, blockEnd),
+          precedingGrapheme: blockStart == 0 ? precedingGrapheme : null,
+          beforeEnter: beforeEnter || blockEnd < text.length,
+          embedsNewlines: true,
+        );
+        index = blockEnd;
+        segmentStart = blockEnd;
+        continue;
+      }
       final codeUnit = text.codeUnitAt(index);
       final newlineLength = codeUnit == 0x0D
           ? (index + 1 < text.length && text.codeUnitAt(index + 1) == 0x0A
@@ -975,19 +997,33 @@ class TerminalImeEngine {
     return newlineCount;
   }
 
-  /// Length of the leading part of [text] that ends at its last visible
-  /// character and holds newlines in between, when that block can travel as
-  /// one bracketed paste. Returns 0 when [text] has no such newline or the
-  /// block must stay on the key input path.
-  int _embeddedNewlineBlockLength(String text) {
+  int _leadingNewlineRunLength(String text) {
+    var length = 0;
+    while (length < text.length &&
+        _isNewlineCodeUnit(text.codeUnitAt(length))) {
+      length++;
+    }
+    return length;
+  }
+
+  /// End index of the block of [text] from [start] that ends at its last
+  /// visible character and holds newlines in between, when that block can
+  /// travel as one bracketed paste. Returns 0 when there is no such newline
+  /// or the block must stay on the key input path.
+  int _embeddedNewlineBlockEnd(String text, {required int start}) {
     if (!terminal.bracketedPasteMode) {
       return 0;
     }
     var end = text.length;
-    while (end > 0 && _isNewlineCodeUnit(text.codeUnitAt(end - 1))) {
+    while (end > start &&
+        _isPromptWhitespaceCodeUnit(text.codeUnitAt(end - 1))) {
       end--;
     }
-    final block = text.substring(0, end);
+    if (!_newlinePattern.hasMatch(text.substring(end))) {
+      // Trailing spaces without a Return stay inside the block.
+      end = text.length;
+    }
+    final block = text.substring(start, end);
     if (!_newlinePattern.hasMatch(block) ||
         _terminalTextControlPattern.hasMatch(
           block.replaceAll(_newlinePattern, ''),
@@ -1841,7 +1877,9 @@ class TerminalImeEngine {
     final committed = _extractRawInputText(_currentEditingState.text)
         .trimRight();
     return committed.startsWith(preview) &&
-        committed.length - preview.length <= 2;
+        _imeFinalisingSuffixPattern.hasMatch(
+          committed.substring(preview.length),
+        );
   }
 
   String _insertedTextExcludingRetypedTail(String appendedText) {
@@ -2430,7 +2468,10 @@ class TerminalImeEngine {
 
     if (!value.composing.isCollapsed) {
       _sawImeComposition = true;
-      _composedPreviewText = _extractRawInputText(value.text);
+      final rawPreview = _extractRawInputText(value.text);
+      _composedPreviewText = rawPreview.substring(
+        _leadingIosBackspaceRunwaySentinelLength(rawPreview),
+      );
     }
 
     _currentEditingState = value;

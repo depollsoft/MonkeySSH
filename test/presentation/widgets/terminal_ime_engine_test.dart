@@ -6238,6 +6238,121 @@ void _batchTests() {
   });
 
   test(
+    'keeps embedded newlines on the key path while Shift is active',
+    () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      var shift = true;
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h\x1b[>1u',
+        resolveTerminalKeyModifiers: () =>
+            (ctrl: false, alt: false, shift: shift),
+        consumeTerminalKeyModifiers: () => shift = false,
+      );
+
+      driver.updateEditingValue(_batchEditingValue('one\ntwo'));
+      await driver.flush();
+
+      expect(harness.terminalOutput, [
+        '\x1b[200~one\x1b[201~',
+        '\x1b[13;2u',
+        '\x1b[200~two\x1b[201~',
+      ]);
+      expect(shift, isFalse);
+      await _disposeImeHarness(driver, harness);
+    },
+  );
+
+  test('sends a final Return hidden behind trailing whitespace', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+
+    driver.updateEditingValue(_batchEditingValue('one\ntwo\n '));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\x1b[200~one\rtwo\x1b[201~', '\r', ' ']);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test('keeps trailing spaces inside a paragraph block', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+
+    driver.updateEditingValue(_batchEditingValue('one\ntwo '));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\x1b[200~one\rtwo \x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test('sends a leading Return on an empty line as Return', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+
+    driver.updateEditingValue(_batchEditingValue('\n  text'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, ['\r', '\x1b[200~  text\x1b[201~']);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test('recognises previewed dictation after an iOS backspace runway', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final reviews = <TerminalCommandReview>[];
+    final harness = await _createImeHarness(
+      driver,
+      onReviewInsertedText: (review) async {
+        reviews.add(review);
+        return false;
+      },
+    );
+    driver.updateEditingValue(_dictationDictationValue('${_dictationMarker}x'));
+    await driver.flush();
+    driver.updateEditingValue(_dictationDictationValue(_dictationMarker));
+    await driver.flush();
+    final backspaceBuffer = driver.engine.editingValue.text;
+    expect(
+      backspaceBuffer.length,
+      _dictationMarker.length + terminalIosBackspaceRepeatRunwayLength,
+    );
+    harness.terminalOutput.clear();
+
+    final phrase =
+        '${List.filled(terminalKeyboardPasteLikeInsertionThreshold, 'a').join()}'
+        '\n\nsecond paragraph';
+    driver.updateEditingValue(
+      _dictationDictationValue('$backspaceBuffer$phrase', composing: true),
+    );
+    await driver.flush();
+    driver.updateEditingValue(
+      _dictationDictationValue('$backspaceBuffer$phrase.'),
+    );
+    await driver.flush();
+    await driver.flush();
+
+    expect(reviews, isEmpty);
+    expect(
+      terminalTextFromEvents(harness.terminalOutput),
+      '${phrase.replaceAll('\n', '\r')}.',
+    );
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test(
     'keeps only trailing newlines as Return after a paragraph block',
     () async {
       final driver = _ImeDriver(platform: TargetPlatform.iOS);
