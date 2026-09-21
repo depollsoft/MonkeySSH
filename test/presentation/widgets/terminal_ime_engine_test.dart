@@ -6167,7 +6167,7 @@ void _batchTests() {
   }
 
   for (final bracketed in [false, true]) {
-    test('does not review long multi-paragraph dictation the IME previewed, '
+    test('reviews long previewed dictation only where line breaks execute, '
         'bracketed: $bracketed', () async {
       final driver = _ImeDriver(platform: TargetPlatform.iOS);
       addTearDown(driver.dispose);
@@ -6194,13 +6194,17 @@ void _batchTests() {
       await driver.flush();
       await driver.flush();
 
-      expect(reviews, isEmpty);
-      expect(
-        harness.terminalOutput,
-        bracketed
-            ? ['\x1b[200~$paragraph\r\rsecond paragraph.\x1b[201~']
-            : [paragraph, '\r', '\r', 'second paragraph.'],
-      );
+      if (bracketed) {
+        expect(reviews, isEmpty);
+        expect(harness.terminalOutput, [
+          '\x1b[200~$paragraph\r\rsecond paragraph.\x1b[201~',
+        ]);
+      } else {
+        // Without bracketed paste every line break becomes a real Return.
+        expect(reviews, hasLength(1));
+        expect(reviews.single.reasons, [TerminalCommandReviewReason.multiline]);
+        expect(harness.terminalOutput, isEmpty);
+      }
       await _disposeImeHarness(driver, harness);
     });
   }
@@ -6315,6 +6319,7 @@ void _batchTests() {
     final reviews = <TerminalCommandReview>[];
     final harness = await _createImeHarness(
       driver,
+      initialTerminalOutput: '\x1b[?2004h',
       onReviewInsertedText: (review) async {
         reviews.add(review);
         return false;
@@ -6345,12 +6350,70 @@ void _batchTests() {
     await driver.flush();
 
     expect(reviews, isEmpty);
-    expect(
-      terminalTextFromEvents(harness.terminalOutput),
-      '${phrase.replaceAll('\n', '\r')}.',
-    );
+    expect(harness.terminalOutput, [
+      '\x1b[200~${phrase.replaceAll('\n', '\r')}.\x1b[201~',
+    ]);
     await _disposeImeHarness(driver, harness);
   });
+
+  test('sends a Return after leading whitespace as Return', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+
+    driver.updateEditingValue(_batchEditingValue('  \ntext'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, [
+      '\x1b[200~  \x1b[201~',
+      '\r',
+      '\x1b[200~text\x1b[201~',
+    ]);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test(
+    'does not let an abandoned composition vouch for a later commit',
+    () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final reviews = <TerminalCommandReview>[];
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h',
+        onReviewInsertedText: (review) async {
+          reviews.add(review);
+          return false;
+        },
+      );
+      final pasted = List.filled(
+        terminalKeyboardPasteLikeInsertionThreshold + 1,
+        'a',
+      ).join();
+
+      driver.updateEditingValue(_batchEditingValue('hi'));
+      await driver.flush();
+      driver.updateEditingValue(
+        _batchEditingValue('hi$pasted', composing: true),
+      );
+      await driver.flush();
+      await driver.hardwareKey(TerminalKey.arrowUp);
+      await driver.flush();
+      driver.updateEditingValue(_batchEditingValue('hi$pasted'));
+      await driver.flush();
+      await driver.flush();
+
+      expect(reviews, hasLength(1));
+      expect(
+        reviews.single.reasons,
+        contains(TerminalCommandReviewReason.largeKeyboardInsertion),
+      );
+      await _disposeImeHarness(driver, harness);
+    },
+  );
 
   test(
     'keeps only trailing newlines as Return after a paragraph block',

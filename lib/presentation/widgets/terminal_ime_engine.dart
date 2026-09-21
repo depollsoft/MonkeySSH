@@ -916,10 +916,10 @@ class TerminalImeEngine {
       return 0;
     }
 
-    // Nothing retained before this text on the line means leading newlines
-    // are Return presses, not paragraph breaks inside a block.
+    // Nothing visible before a newline on the line means it is a Return
+    // press, not a paragraph break inside a block.
     final blockStart = precedingGrapheme == null
-        ? _leadingNewlineRunLength(text)
+        ? _leadingReturnRunLength(text)
         : 0;
     final activeModifiers =
         enterModifiers ?? effects.resolveTerminalKeyModifiers?.call();
@@ -997,11 +997,17 @@ class TerminalImeEngine {
     return newlineCount;
   }
 
-  int _leadingNewlineRunLength(String text) {
+  /// Length of the leading whitespace of [text] up to and including the last
+  /// newline that precedes its first visible character.
+  int _leadingReturnRunLength(String text) {
     var length = 0;
-    while (length < text.length &&
-        _isNewlineCodeUnit(text.codeUnitAt(length))) {
-      length++;
+    var index = 0;
+    while (index < text.length &&
+        _isPromptWhitespaceCodeUnit(text.codeUnitAt(index))) {
+      if (_isNewlineCodeUnit(text.codeUnitAt(index))) {
+        length = index + 1;
+      }
+      index++;
     }
     return length;
   }
@@ -1110,6 +1116,8 @@ class TerminalImeEngine {
     cancelDeferredTrailingBackspaceImeClear();
     _lastSentText = '';
     _lastSentCursorOffset = 0;
+    // A composition abandoned by a reset must not vouch for a later commit.
+    _composedPreviewText = null;
     _clearPendingComposingEnterAction();
     if (clearPendingPerformedEnterText) {
       _pendingPerformedEnterText = null;
@@ -1842,6 +1850,7 @@ class TerminalImeEngine {
       reviewText,
       insertedText: insertedText,
       previewedByIme: _commitMatchesComposedPreview(),
+      bracketedPasteModeEnabled: terminal.bracketedPasteMode,
     );
     if (review.requiresReview) {
       DiagnosticsLogService.instance.debug(

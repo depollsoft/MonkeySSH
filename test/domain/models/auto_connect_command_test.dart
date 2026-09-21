@@ -227,9 +227,20 @@ void main() {
         dictated,
         insertedText: dictated,
         previewedByIme: true,
+        bracketedPasteModeEnabled: true,
       );
 
       expect(keyboardReview.requiresReview, isFalse);
+
+      final unbracketedReview = assessKeyboardInsertedCommand(
+        dictated,
+        insertedText: dictated,
+        previewedByIme: true,
+      );
+
+      expect(unbracketedReview.reasons, [
+        TerminalCommandReviewReason.multiline,
+      ]);
 
       final substitutionReview = assessKeyboardInsertedCommand(
         r'echo $(id)',
@@ -247,6 +258,7 @@ void main() {
         redirected,
         insertedText: redirected,
         previewedByIme: true,
+        bracketedPasteModeEnabled: true,
       );
 
       expect(redirectionReview.requiresReview, isTrue);

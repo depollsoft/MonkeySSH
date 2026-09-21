@@ -158,20 +158,25 @@ TerminalCommandReview assessClipboardPasteCommand(
 ///
 /// [previewedByIme] marks a commit the IME showed as composing text before it
 /// landed, which is how dictation arrives. The user watched that text build
-/// up, so it is neither a hidden clipboard handoff nor an unexpected block of
-/// lines. Shell-reshaping content (chaining, redirection, command
-/// substitution, control characters) still deserves review.
+/// up, so it is not a hidden clipboard handoff. When the terminal also has
+/// bracketed paste enabled ([bracketedPasteModeEnabled]), its line breaks
+/// travel inside one paste and the application decides what they mean, so
+/// they are not an unexpected run of commands either. Shell-reshaping content
+/// (chaining, redirection, command substitution, control characters) still
+/// deserves review.
 TerminalCommandReview assessKeyboardInsertedCommand(
   String command, {
   required String insertedText,
   bool previewedByIme = false,
+  bool bracketedPasteModeEnabled = false,
 }) {
+  final skipMultiline = previewedByIme && bracketedPasteModeEnabled;
   final reasons = <TerminalCommandReviewReason>[
     for (final reason in _collectPasteCommandReviewReasons(
       command,
       bracketedPasteModeEnabled: false,
     ))
-      if (!previewedByIme || reason != TerminalCommandReviewReason.multiline)
+      if (!skipMultiline || reason != TerminalCommandReviewReason.multiline)
         reason,
   ];
   if (!previewedByIme &&
