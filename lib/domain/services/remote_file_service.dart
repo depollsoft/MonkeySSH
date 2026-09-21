@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -586,12 +587,22 @@ class RemoteFileService {
     cancelToken?.throwIfCancelled();
   }
 
+  /// Largest single SFTP write issued by [uploadStream].
+  ///
+  /// Source chunks larger than this are split so the progress callback keeps
+  /// ticking during a one-chunk upload such as a pasted clipboard image.
+  static const uploadChunkBytes = 256 * 1024;
+
   /// Uploads a stream into a remote file path.
+  ///
+  /// [onProgress] receives the cumulative bytes written after each SFTP write
+  /// and is awaited before the next write, mirroring [downloadFile].
   Future<void> uploadStream({
     required SftpClient sftp,
     required String remotePath,
     required Stream<List<int>> stream,
     bool applyPrivateMode = true,
+    FutureOr<void> Function(int uploadedBytes)? onProgress,
   }) async {
     final remoteFile = await sftp.open(
       remotePath,
@@ -605,8 +616,17 @@ class RemoteFileService {
       // chunk-write failures to .done. Own both futures here instead.
       var offset = 0;
       await for (final chunk in _normalizeByteStream(stream)) {
-        await remoteFile.writeBytes(chunk, offset: offset);
-        offset += chunk.length;
+        var chunkOffset = 0;
+        do {
+          final end = min(chunkOffset + uploadChunkBytes, chunk.length);
+          final slice = chunkOffset == 0 && end == chunk.length
+              ? chunk
+              : Uint8List.sublistView(chunk, chunkOffset, end);
+          await remoteFile.writeBytes(slice, offset: offset);
+          offset += slice.length;
+          chunkOffset = end;
+          await onProgress?.call(offset);
+        } while (chunkOffset < chunk.length);
       }
     } on Object catch (error, stackTrace) {
       try {
@@ -633,11 +653,13 @@ class RemoteFileService {
     required String remotePath,
     required Uint8List bytes,
     bool applyPrivateMode = true,
+    FutureOr<void> Function(int uploadedBytes)? onProgress,
   }) => uploadStream(
     sftp: sftp,
     remotePath: remotePath,
     stream: Stream<List<int>>.value(bytes),
     applyPrivateMode: applyPrivateMode,
+    onProgress: onProgress,
   );
 
   Stream<Uint8List> _normalizeByteStream(Stream<List<int>> stream) => stream
