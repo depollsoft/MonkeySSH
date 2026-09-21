@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.214"
+	monkeyMuxVersion                  = "0.1.215"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -110,6 +110,11 @@ const (
 	// how many times a freed lock may be claimed before the wait deadline wins.
 	sessionLockStaleCheckInterval = 250 * time.Millisecond
 	ensureServerLockClearRetries  = 8
+	// How long a reclaim waits for another helper's takeover guard. A live
+	// reclaim holds it for microseconds, so a short wait almost always ends
+	// with the guard free and the file either gone or live.
+	takeoverGuardWaitAttempts = 20
+	takeoverGuardWaitInterval = 5 * time.Millisecond
 	// How long a session file that cannot be parsed at all must sit untouched
 	// before it is treated as abandoned. Kept well under the lock timeout so a
 	// waiter can still reclaim it, and well over the gap between creating a
@@ -1812,6 +1817,10 @@ func gcCommand() {
 			// Residue of a helper that died while installing a lock file.
 			removeAbandonedStagingFile(path)
 			continue
+		case ".takeover":
+			// Residue of a helper that died while reclaiming a session file.
+			clearAbandonedTakeoverGuard(path)
+			continue
 		case ".sock":
 		default:
 			continue
@@ -2509,7 +2518,7 @@ func sessionServerOwner(session string) (pidRecord, pidOwnership) {
 		if ownership != pidOwnershipGone {
 			return record, ownership
 		}
-		if removePIDFileIfUnchanged(path, record) {
+		if reclaimPIDFileIfUnchanged(path, record) {
 			return pidRecord{}, pidOwnershipGone
 		}
 	}
@@ -2743,14 +2752,93 @@ func clearStalePIDFile(path string, session string) bool {
 	if pidRecordOwnership(record, session) != pidOwnershipGone {
 		return false
 	}
-	return removePIDFileIfUnchanged(path, record)
+	return reclaimPIDFileIfUnchanged(path, record)
+}
+
+// sessionFileTakeoverGuardPath names the file that serialises reclaiming the
+// session file at path.
+func sessionFileTakeoverGuardPath(path string) string {
+	return path + ".takeover"
+}
+
+// reclaimSessionFile runs remove, which unlinks path only while it still holds
+// the residue it was validated against, under the takeover guard for path, and
+// reports whether the file was removed.
+//
+// The re-check inside remove and the unlink are two steps by name, so on their
+// own two helpers that both judged the same residue stale can interleave: the
+// first unlinks it and installs its own live file, and the second, whose
+// re-check passed a moment earlier, unlinks that live file and installs a
+// second holder for the same session. Under the guard only one helper reclaims
+// at a time, so the other's re-check sees the live file and declines. A helper
+// that finds the guard taken reports no removal and retries later, by which
+// time the file is either gone or live.
+//
+// The guard is itself a pid-bearing lock file, so one left by a helper that
+// died mid-reclaim is cleared as soon as its holder is gone, and one whose
+// holder cannot be resolved is cleared once it has outlived any live reclaim,
+// which takes microseconds. A taken guard is waited for briefly rather than
+// reported at once: callers that resolve an owner retry only a few times
+// back to back, and would otherwise report an unresolved owner for a file
+// that a moment later is plainly gone or live.
+func reclaimSessionFile(path string, remove func() bool) bool {
+	guard := sessionFileTakeoverGuardPath(path)
+	for attempt := 0; ; attempt++ {
+		record, acquired, err := installSessionLockFile(guard)
+		if err != nil {
+			return false
+		}
+		if acquired {
+			defer func() { _ = removePIDFileIfUnchanged(guard, record) }()
+			return remove()
+		}
+		if attempt == 0 {
+			clearAbandonedTakeoverGuard(guard)
+		}
+		if attempt >= takeoverGuardWaitAttempts {
+			return false
+		}
+		time.Sleep(takeoverGuardWaitInterval)
+	}
+}
+
+// reclaimPIDFileIfUnchanged is removePIDFileIfUnchanged for a file another
+// helper wrote: the removal is serialised by the file's takeover guard.
+func reclaimPIDFileIfUnchanged(path string, record pidRecord) bool {
+	return reclaimSessionFile(path, func() bool {
+		return removePIDFileIfUnchanged(path, record)
+	})
+}
+
+// clearAbandonedTakeoverGuard removes a takeover guard whose holder is gone,
+// or which is old enough that no live reclaim can still be holding it. This
+// is the one removal that has no guard of its own; the window it leaves is a
+// reclaim racing the residue of a dead helper, never a live holder's file.
+func clearAbandonedTakeoverGuard(guard string) {
+	record, err := readPIDRecord(guard)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if info, statErr := os.Stat(guard); statErr == nil &&
+			time.Since(info.ModTime()) >= abandonedPIDFileAge {
+			_ = removeUnparseablePIDFileIfUnchanged(guard, info.ModTime())
+		}
+		return
+	}
+	if time.Since(record.writtenAt) >= abandonedPIDFileAge ||
+		pidRecordOwnership(record, "") == pidOwnershipGone {
+		_ = removePIDFileIfUnchanged(guard, record)
+	}
 }
 
 // removePIDFileIfUnchanged deletes path only while it still holds the record
 // that was validated. Resolving an owner can take a process lookup, and in that
 // window another helper may have reclaimed the file and become its live owner;
 // unlinking by name alone would delete that helper's file and let two helpers
-// hold the same session at once.
+// hold the same session at once. The re-read and the unlink are still two
+// steps, so a holder uses this on its own file, and anything reclaiming
+// another helper's file goes through reclaimPIDFileIfUnchanged.
 func removePIDFileIfUnchanged(path string, record pidRecord) bool {
 	current, err := readPIDRecord(path)
 	if err != nil ||
@@ -2774,6 +2862,14 @@ func clearAbandonedPIDFile(path string) bool {
 		return false
 	}
 	modTime := info.ModTime()
+	return reclaimSessionFile(path, func() bool {
+		return removeUnparseablePIDFileIfUnchanged(path, modTime)
+	})
+}
+
+// removeUnparseablePIDFileIfUnchanged deletes path while it is still the
+// unparseable file of the given modification time.
+func removeUnparseablePIDFileIfUnchanged(path string, modTime time.Time) bool {
 	if _, err := readPIDRecord(path); err == nil {
 		return false
 	}
