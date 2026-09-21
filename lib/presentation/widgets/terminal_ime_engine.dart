@@ -189,6 +189,10 @@ class TerminalImeEngine {
   }
 
   bool _sawImeComposition = false;
+
+  /// Raw user text of the latest composing update, so a commit that matches
+  /// it (dictation, a long composition) is recognised as previewed by the IME.
+  String? _composedPreviewText;
   bool _isProcessingEditingValue = false;
   bool _lastProcessedUserSelectionWasValid = false;
   bool _lastProcessedSelectionWasCollapsed = true;
@@ -1801,6 +1805,7 @@ class TerminalImeEngine {
     final review = assessKeyboardInsertedCommand(
       reviewText,
       insertedText: insertedText,
+      previewedByIme: _commitMatchesComposedPreview(),
     );
     if (review.requiresReview) {
       DiagnosticsLogService.instance.debug(
@@ -1823,6 +1828,20 @@ class TerminalImeEngine {
       );
     }
     return review.requiresReview ? review : null;
+  }
+
+  /// Whether the editing value being committed is the text the IME was just
+  /// composing, allowing for trailing whitespace and up to two characters of
+  /// punctuation the IME may add when it finalises dictation.
+  bool _commitMatchesComposedPreview() {
+    final preview = _composedPreviewText?.trimRight();
+    if (!_sawImeComposition || preview == null || preview.isEmpty) {
+      return false;
+    }
+    final committed = _extractRawInputText(_currentEditingState.text)
+        .trimRight();
+    return committed.startsWith(preview) &&
+        committed.length - preview.length <= 2;
   }
 
   String _insertedTextExcludingRetypedTail(String appendedText) {
@@ -2411,6 +2430,7 @@ class TerminalImeEngine {
 
     if (!value.composing.isCollapsed) {
       _sawImeComposition = true;
+      _composedPreviewText = _extractRawInputText(value.text);
     }
 
     _currentEditingState = value;
