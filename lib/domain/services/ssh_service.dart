@@ -3102,8 +3102,12 @@ Future<void> _relayForward(
         // Let its observer run before writing queued socket bytes.
         await Future<void>.value();
         if (channel == null || finished || forwardSinkClosed) return;
+        // SSHForwardChannel.flush() flushes the shared SSH transport, not
+        // this channel. Dart's Socket.flush() temporarily binds its sink;
+        // concurrent shell/forward/control packets then throw while writing
+        // to it and can corrupt the encrypted packet stream. The channel's
+        // upload loop sends queued data without an explicit transport flush.
         channel.sink.add(source.current);
-        await channel.flush();
       }
       final channel = forward;
       if (channel != null && !finished && !forwardSinkClosed) {
