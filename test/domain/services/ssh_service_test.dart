@@ -637,7 +637,7 @@ class _SingleCloseForwardChannel implements SSHForwardChannel {
   final _streamController = StreamController<Uint8List>();
   final _sinkController = StreamController<List<int>>.broadcast();
   int destroyCalls = 0;
-  Future<void> Function()? onFlush;
+  int flushCalls = 0;
 
   @override
   // ignore: close_sinks
@@ -659,7 +659,9 @@ class _SingleCloseForwardChannel implements SSHForwardChannel {
   }
 
   @override
-  Future<void> flush() async => onFlush?.call();
+  Future<void> flush() async {
+    flushCalls++;
+  }
 
   @override
   Future<void> get done async {}
@@ -5851,6 +5853,7 @@ LISTEN ::1:4201
             }
             await _waitForCondition(() => forward.destroyCalls > 0);
             expect(forward.destroyCalls, 1);
+            expect(forward.flushCalls, 0);
             if (ending == 'channel error') {
               expect(forward.sink.closeAttempts, 0);
             }
@@ -5861,7 +5864,7 @@ LISTEN ::1:4201
 
     for (final scenario in [
       'closed sink',
-      'sink closes during flush',
+      'sink closes during upload',
       'remote EOF',
       'socket EOF',
       'stop',
@@ -5875,13 +5878,13 @@ LISTEN ::1:4201
         final forward = _SingleCloseForwardChannel();
         final opening = Completer<SSHForwardChannel>();
         final requested = Completer<void>();
-        final flushing = Completer<void>();
-        final releaseFlush = Completer<void>();
-        if (scenario == 'sink closes during flush') {
-          forward.onFlush = () {
-            flushing.complete();
-            return releaseFlush.future;
-          };
+        final uploaded = Completer<void>();
+        if (scenario == 'sink closes during upload') {
+          forward._sinkController.stream.listen((_) {
+            if (uploaded.isCompleted) return;
+            unawaited(forward._sinkController.close());
+            uploaded.complete();
+          });
         }
         final session = _testSession(client);
         when(() => client.forwardLocal('remote.example.com', 80))
@@ -5890,7 +5893,6 @@ LISTEN ::1:4201
               return opening.future;
             });
         addTearDown(() async {
-          if (!releaseFlush.isCompleted) releaseFlush.complete();
           await session.stopAllForwards();
           if (scenario == 'refused' ||
               scenario == 'late refusal' ||
@@ -5960,12 +5962,11 @@ LISTEN ::1:4201
           } else if (scenario != 'closed sink') {
             socket.add([1, 2, 3]);
             await socket.flush();
-            if (scenario == 'sink closes during flush') {
-              await flushing.future.timeout(const Duration(seconds: 1));
+            if (scenario == 'sink closes during upload') {
+              await uploaded.future.timeout(const Duration(seconds: 1));
+              await forward.sink.done;
               socket.add([4, 5, 6]);
               await socket.flush();
-              await forward._sinkController.close();
-              releaseFlush.complete();
             }
           }
         }
@@ -5973,7 +5974,7 @@ LISTEN ::1:4201
         await socket.close().then<void>((_) {}, onError: socketErrors.add);
         await socketDone;
         if (scenario == 'closed sink' ||
-            scenario == 'sink closes during flush') {
+            scenario == 'sink closes during upload') {
           // All writes precede remote closure. The server may still have
           // unread request bytes when it closes, which can produce a reset
           // (macOS) or a broken pipe (Linux) even after its write side has
@@ -5997,13 +5998,14 @@ LISTEN ::1:4201
         }
         if (scenario == 'remote EOF') expect(bytes, [4, 5, 6]);
         if (scenario == 'closed sink') expect(forward.sink.addAttempts, 0);
-        if (scenario == 'sink closes during flush') {
+        if (scenario == 'sink closes during upload') {
           expect(forward.sink.addAttempts, 1);
         }
+        expect(forward.flushCalls, 0);
         expect(forward.sink.addStreamAttempts, 0);
         if (scenario == 'stop' ||
             scenario == 'closed sink' ||
-            scenario == 'sink closes during flush') {
+            scenario == 'sink closes during upload') {
           expect(forward.sink.closeAttempts, 0);
         }
         await _waitForCondition(
