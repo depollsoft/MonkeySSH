@@ -1,9 +1,5 @@
 What's new in this beta
 
-- Codex transcripts in MonkeyMux windows can be scrolled back again once they grow past the top of the screen.
-- Dictating several paragraphs keeps them in one message instead of sending each paragraph on its own, and no longer asks you to review the paste.
-- Notifications now say where they lead: host, session, and window.
-- Pasting an uploaded file into Claude Code keeps its path, and a thin progress line shows while a pasted image or file uploads.
-- MonkeyMux no longer lets two helpers claim the same session when a stale lock is cleared. Update MonkeyMux on your hosts to pick this up.
+- Fixed an issue where opening a forwarded service in the in-app browser could disconnect the entire SSH session.
 
 Please report rough edges through the support link.

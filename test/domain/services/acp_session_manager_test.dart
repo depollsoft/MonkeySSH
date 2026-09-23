@@ -921,6 +921,17 @@ void main() {
       final key = await startCopilot();
       final server = connector.servers[key.bridgeId]!;
       final id = key.acpSessionId;
+      // The update pump can yield under load. Wait for the final notification,
+      // rather than assuming all four updates are published within 20 ms.
+      final updatesApplied = manager.states.firstWhere((state) {
+        final timeline = state.byKeyValue(key.value)!.timeline;
+        return timeline.entries.whereType<AcpToolCallEntry>().any(
+          (entry) =>
+              entry.toolCallId == 't1' && entry.status?.value == 'completed',
+        );
+      });
+      // states yields its initial snapshot before subscribing to live updates.
+      await pumpEventQueue();
       server
         ..pushUpdate(id, {
           'sessionUpdate': 'agent_message_chunk',
@@ -943,8 +954,8 @@ void main() {
           'toolCallId': 't1',
           'status': 'completed',
         });
-      await _pump();
-      final timeline = manager.state.byKeyValue(key.value)!.timeline;
+      final updated = await updatesApplied.timeout(const Duration(seconds: 5));
+      final timeline = updated.byKeyValue(key.value)!.timeline;
       expect(timeline.entries, hasLength(2));
       final message = timeline.entries.whereType<AcpMessageEntry>().single;
       expect(message.content, hasLength(2));
