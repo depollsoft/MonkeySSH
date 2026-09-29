@@ -3,7 +3,7 @@
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
@@ -867,6 +867,55 @@ void registerKeyboardToolbarTests() {
 
         await gesture.cancel();
         await tester.pump();
+      });
+
+      testWidgets('Ctrl shortcuts column fits large accessibility text', (
+        tester,
+      ) async {
+        // The menu lives in the app overlay, above any MediaQuery in `home`.
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          for (final text in [shortcut.symbol, shortcut.description]) {
+            final paragraph = tester.renderObject<RenderParagraph>(
+              find.text(text),
+            );
+            expect(
+              paragraph.textSize.height,
+              lessThanOrEqualTo(TerminalMenuStyles.itemHeight),
+            );
+          }
+        }
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('Ctrl shortcut rows are labels, not buttons', (tester) async {
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+
+        expect(
+          tester.getSemantics(find.bySemanticsLabel('Ctrl+C, Interrupt')),
+          isSemantics(isButton: false, isSelected: true),
+        );
+
+        await gesture.cancel();
+        await tester.pump();
+        semantics.dispose();
       });
 
       testWidgets('Ctrl long press released in place sends nothing', (

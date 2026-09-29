@@ -1639,10 +1639,13 @@ class _CtrlShortcutsLayout {
 class _CtrlShortcutsMenu extends StatelessWidget {
   const _CtrlShortcutsMenu({required this.layout, required this.highlighted});
 
-  /// The row stacks two lines in a fixed-height cell and only appears when
-  /// there is no vertical room to grow, so its text scaling stops where the
-  /// two lines still fit: (14 + 10) px x 1.4 x 1.2 line height is about 40 of
-  /// the 44 px row. Semantics labels still carry the full chord names.
+  /// Menu rows keep a fixed 44 px height so layout and hit testing need no
+  /// text metrics, so text scaling stops where the content still fits with a
+  /// 1.2 line height. A column row holds one 14 px line (14 x 2.0 x 1.2 is
+  /// about 34 px). A row cell stacks two lines, and the row only appears when
+  /// there is no vertical room to grow ((14 + 10) x 1.4 x 1.2 is about 40 px).
+  /// Screen readers get the full chord names from the Ctrl key's actions.
+  static const _columnMaxTextScale = 2.0;
   static const _rowMaxTextScale = 1.4;
 
   final _CtrlShortcutsLayout layout;
@@ -1661,7 +1664,10 @@ class _CtrlShortcutsMenu extends StatelessWidget {
     return TerminalMenuStyles.surface(
       context,
       child: layout.axis == Axis.vertical
-          ? Column(mainAxisSize: MainAxisSize.min, children: items)
+          ? MediaQuery.withClampedTextScaling(
+              maxScaleFactor: _columnMaxTextScale,
+              child: Column(mainAxisSize: MainAxisSize.min, children: items),
+            )
           : MediaQuery.withClampedTextScaling(
               maxScaleFactor: _rowMaxTextScale,
               child: Row(
@@ -1694,7 +1700,7 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
     final labelStyle = TerminalMenuStyles.itemTextStyle(
       context,
       emphasized: highlighted,
-    ).copyWith(color: foregroundColor, height: compact ? 1.2 : null);
+    ).copyWith(color: foregroundColor, height: 1.2);
     final descriptionStyle = labelStyle.copyWith(
       fontSize: compact ? 10 : 12,
       fontWeight: FontWeight.w400,
@@ -1708,8 +1714,9 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
       style: descriptionStyle,
     );
 
+    // A label, not a button: the menu exists only while a finger holds it,
+    // and screen readers send chords through the Ctrl key's custom actions.
     return Semantics(
-      button: true,
       selected: highlighted,
       label: '${shortcut.label}, ${shortcut.description}',
       excludeSemantics: true,
