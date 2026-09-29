@@ -251,8 +251,11 @@ enum KeyboardToolbarCtrlShortcut {
   /// Short description of the chord's usual shell meaning.
   final String description;
 
-  /// User-visible chord name, such as `Ctrl+C`.
+  /// Spoken chord name, such as `Ctrl+C`, for semantics.
   String get label => 'Ctrl+$letter';
+
+  /// Displayed chord, such as `⌃C`, matching the Ctrl key's glyph.
+  String get symbol => '\u2303$letter';
 }
 
 /// Compact keyboard toolbar for terminal input.
@@ -471,12 +474,17 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       state: _controller.ctrlState,
       onTap: _toggleCtrl,
       onDoubleTap: _lockCtrl,
-      longPressIndicatorIcon: Icons.more_horiz_rounded,
-      onLongPressStart: _ctrlShortcutsEnabled ? _showCtrlShortcuts : null,
-      onLongPressMoveUpdate: _updateCtrlShortcutHighlight,
-      onLongPressEnd: _chooseHighlightedCtrlShortcut,
-      onLongPressCancel: _hideCtrlShortcuts,
-      semanticsHint: 'Press and hold for Ctrl shortcuts',
+      menuGesture: _ctrlShortcutsEnabled
+          ? _KeyMenuGesture(
+              onOpen: _showCtrlShortcuts,
+              onMove: _updateCtrlShortcutHighlight,
+              onRelease: _chooseHighlightedCtrlShortcut,
+              onCancel: _hideCtrlShortcuts,
+            )
+          : null,
+      semanticsHint: _ctrlShortcutsEnabled
+          ? 'Press and hold or swipe up for Ctrl shortcuts'
+          : null,
       customSemanticsActions: _ctrlShortcutsEnabled
           ? {
               for (final shortcut in KeyboardToolbarCtrlShortcut.values)
@@ -509,13 +517,14 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       key: _pasteButtonKey,
       icon: Icons.paste_rounded,
       label: 'Paste',
-      longPressIndicatorIcon: Icons.more_horiz_rounded,
       onTap: _pasteClipboard,
-      onLongPressStartWithDetails: _showPasteOptions,
-      onLongPressMoveUpdate: _updatePasteOptionsHighlight,
-      onLongPressEnd: _chooseHighlightedPasteOption,
-      onLongPressCancel: _hidePasteOptionsMenu,
-      semanticsHint: 'Press and hold for paste options',
+      menuGesture: _KeyMenuGesture(
+        onOpen: _showPasteOptions,
+        onMove: _updatePasteOptionsHighlight,
+        onRelease: _chooseHighlightedPasteOption,
+        onCancel: _hidePasteOptionsMenu,
+      ),
+      semanticsHint: 'Press and hold or swipe up for paste options',
       tooltip: 'Paste',
     ),
   ];
@@ -619,11 +628,11 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     unawaited(_runToolbarAction(widget.onPasteRequested));
   }
 
-  void _showPasteOptions(LongPressStartDetails details) {
+  void _showPasteOptions(Offset globalPosition) {
     HapticFeedback.mediumImpact();
     widget.onKeyPressed?.call();
     _consumeOneShot();
-    _showPasteOptionsMenu(details.globalPosition);
+    _showPasteOptionsMenu(globalPosition);
     final onPasteMenuOpened = widget.onPasteMenuOpened;
     if (onPasteMenuOpened != null) {
       unawaited(Future<void>.sync(onPasteMenuOpened));
@@ -716,8 +725,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     return renderObject.localToGlobal(Offset.zero) & renderObject.size;
   }
 
-  void _updatePasteOptionsHighlight(LongPressMoveUpdateDetails details) {
-    final hit = _pasteMenuHitAtGlobalPosition(details.globalPosition);
+  void _updatePasteOptionsHighlight(Offset globalPosition) {
+    final hit = _pasteMenuHitAtGlobalPosition(globalPosition);
     if (hit == null &&
         _highlightedPasteAction == _PasteToolbarAction.snippets) {
       if (_highlightedSnippet == null) {
@@ -957,8 +966,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       a?.folder?.id == b?.folder?.id &&
       a?.snippet?.id == b?.snippet?.id;
 
-  void _chooseHighlightedPasteOption(LongPressEndDetails details) {
-    final hit = _pasteMenuHitAtGlobalPosition(details.globalPosition);
+  void _chooseHighlightedPasteOption(Offset globalPosition) {
+    final hit = _pasteMenuHitAtGlobalPosition(globalPosition);
     final action = hit?.action ?? _highlightedPasteAction;
     final snippet = hit?.snippet;
     _hidePasteOptionsMenu();
@@ -986,9 +995,11 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _highlightedSnippet = null;
   }
 
-  void _showCtrlShortcuts(LongPressStartDetails details) {
+  void _showCtrlShortcuts(Offset globalPosition) {
     _hideCtrlShortcuts();
     HapticFeedback.mediumImpact();
+    // A fast swipe can already be over the lowest row when the menu opens.
+    _highlightedCtrlShortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
     _ctrlShortcutsOverlay = OverlayEntry(builder: _buildCtrlShortcutsOverlay);
     Overlay.of(context).insert(_ctrlShortcutsOverlay!);
   }
@@ -1071,8 +1082,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     return layout.shortcutAt(overlayBox.globalToLocal(globalPosition));
   }
 
-  void _updateCtrlShortcutHighlight(LongPressMoveUpdateDetails details) {
-    final shortcut = _ctrlShortcutAtGlobalPosition(details.globalPosition);
+  void _updateCtrlShortcutHighlight(Offset globalPosition) {
+    final shortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
     if (shortcut == _highlightedCtrlShortcut) {
       return;
     }
@@ -1086,9 +1097,10 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
 
   /// Sends the chord under the finger on release. Unlike the Paste menu there
   /// is no fallback to the last highlight: releasing off the menu cancels, so
-  /// a slow tap or a slide away never sends an unintended Ctrl+C.
-  void _chooseHighlightedCtrlShortcut(LongPressEndDetails details) {
-    final shortcut = _ctrlShortcutAtGlobalPosition(details.globalPosition);
+  /// a slow tap, an overshooting swipe or a slide away never sends an
+  /// unintended Ctrl+C.
+  void _chooseHighlightedCtrlShortcut(Offset globalPosition) {
+    final shortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
     _hideCtrlShortcuts();
     if (shortcut == null) {
       _refocusTerminal();
@@ -1691,7 +1703,7 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
                 children: [
                   FittedBox(
                     fit: BoxFit.scaleDown,
-                    child: Text(shortcut.label, style: labelStyle),
+                    child: Text(shortcut.symbol, style: labelStyle),
                   ),
                   description,
                 ],
@@ -1700,7 +1712,7 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
                 children: [
                   // The chord leads because its meaning depends on the
                   // program; the description is the usual shell meaning.
-                  Text(shortcut.label, style: labelStyle),
+                  Text(shortcut.symbol, style: labelStyle),
                   const SizedBox(width: TerminalMenuStyles.iconLabelGap),
                   Expanded(child: description),
                 ],
@@ -1729,6 +1741,131 @@ class _KeyRow extends StatelessWidget {
   );
 }
 
+/// Callbacks for a key whose menu is chosen by sliding and releasing.
+class _KeyMenuGesture {
+  const _KeyMenuGesture({
+    required this.onOpen,
+    required this.onMove,
+    required this.onRelease,
+    required this.onCancel,
+  });
+
+  /// Opens the menu with the finger at a global position.
+  final ValueChanged<Offset> onOpen;
+
+  /// Tracks the finger while the menu is open.
+  final ValueChanged<Offset> onMove;
+
+  /// Chooses from the menu where the finger lifted.
+  final ValueChanged<Offset> onRelease;
+
+  /// Closes the menu without choosing.
+  final VoidCallback onCancel;
+}
+
+/// Opens a key's menu on press-and-hold, or as soon as the finger swipes up
+/// past the touch slop, then tracks the finger until it lifts.
+///
+/// Both recognizers share the key's gesture arena with its tap: moving the
+/// finger hands the pointer to the vertical drag, holding still hands it to
+/// the long press, and a quick lift is still a tap.
+class _KeyMenuGestureDetector extends StatefulWidget {
+  const _KeyMenuGestureDetector({required this.gesture, required this.child});
+
+  final _KeyMenuGesture gesture;
+  final Widget child;
+
+  @override
+  State<_KeyMenuGestureDetector> createState() =>
+      _KeyMenuGestureDetectorState();
+}
+
+enum _KeyMenuOpenedBy { longPress, swipe }
+
+class _KeyMenuGestureDetectorState extends State<_KeyMenuGestureDetector> {
+  _KeyMenuOpenedBy? _openedBy;
+  Offset? _swipeOrigin;
+  Offset? _swipePosition;
+
+  void _open(_KeyMenuOpenedBy source, Offset globalPosition) {
+    _openedBy = source;
+    widget.gesture.onOpen(globalPosition);
+  }
+
+  void _release(_KeyMenuOpenedBy source, Offset globalPosition) {
+    if (_openedBy != source) {
+      return;
+    }
+    _openedBy = null;
+    widget.gesture.onRelease(globalPosition);
+  }
+
+  /// Each recognizer also reports a cancel when it loses the arena to the
+  /// other, so only the one that opened the menu may close it.
+  void _cancel(_KeyMenuOpenedBy source) {
+    if (_openedBy != source) {
+      return;
+    }
+    _openedBy = null;
+    widget.gesture.onCancel();
+  }
+
+  void _startSwipe(DragStartDetails details) {
+    final origin = _swipeOrigin ?? details.globalPosition;
+    final delta = details.globalPosition - origin;
+    // Only a mostly upward swipe opens the menu.
+    if (delta.dy >= 0 || -delta.dy < delta.dx.abs()) {
+      return;
+    }
+    _swipePosition = details.globalPosition;
+    _open(_KeyMenuOpenedBy.swipe, details.globalPosition);
+  }
+
+  void _updateSwipe(DragUpdateDetails details) {
+    if (_openedBy != _KeyMenuOpenedBy.swipe) {
+      return;
+    }
+    _swipePosition = details.globalPosition;
+    widget.gesture.onMove(details.globalPosition);
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    // An accepted drag reports a pointer cancel as a drag end, which would
+    // choose the row under the finger. The listener sees the cancel first.
+    onPointerCancel: (_) {
+      if (_openedBy case final source?) {
+        _cancel(source);
+      }
+    },
+    child: GestureDetector(
+      onLongPressStart: (details) =>
+          _open(_KeyMenuOpenedBy.longPress, details.globalPosition),
+      onLongPressMoveUpdate: (details) {
+        if (_openedBy == _KeyMenuOpenedBy.longPress) {
+          widget.gesture.onMove(details.globalPosition);
+        }
+      },
+      onLongPressEnd: (details) =>
+          _release(_KeyMenuOpenedBy.longPress, details.globalPosition),
+      onLongPressCancel: () => _cancel(_KeyMenuOpenedBy.longPress),
+      onVerticalDragDown: (details) {
+        _swipeOrigin = details.globalPosition;
+        _swipePosition = null;
+      },
+      onVerticalDragStart: _startSwipe,
+      onVerticalDragUpdate: _updateSwipe,
+      onVerticalDragEnd: (_) {
+        if (_swipePosition case final position?) {
+          _release(_KeyMenuOpenedBy.swipe, position);
+        }
+      },
+      onVerticalDragCancel: () => _cancel(_KeyMenuOpenedBy.swipe),
+      child: widget.child,
+    ),
+  );
+}
+
 class _ToolbarButton extends StatefulWidget {
   const _ToolbarButton({
     required this.label,
@@ -1736,38 +1873,32 @@ class _ToolbarButton extends StatefulWidget {
     this.icon,
     this.mirrorIcon = false,
     this.onLongPressStart,
-    this.onLongPressStartWithDetails,
-    this.onLongPressMoveUpdate,
-    this.onLongPressEnd,
-    this.onLongPressCancel,
     this.onLongPressRepeat,
+    this.menuGesture,
     this.tooltip,
     this.semanticsHint,
-    this.longPressIndicatorIcon,
     super.key,
-  });
+  }) : assert(
+         menuGesture == null ||
+             (onLongPressStart == null && onLongPressRepeat == null),
+         'A menu key owns its long press.',
+       );
 
   final String label;
   final IconData? icon;
   final bool mirrorIcon;
   final VoidCallback onTap;
   final VoidCallback? onLongPressStart;
-  final GestureLongPressStartCallback? onLongPressStartWithDetails;
-  final GestureLongPressMoveUpdateCallback? onLongPressMoveUpdate;
-  final GestureLongPressEndCallback? onLongPressEnd;
-  final VoidCallback? onLongPressCancel;
   final VoidCallback? onLongPressRepeat;
+
+  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
+  /// indicator in the key's corner.
+  final _KeyMenuGesture? menuGesture;
   final String? tooltip;
   final String? semanticsHint;
-  final IconData? longPressIndicatorIcon;
 
   bool get hasLongPressHandler =>
-      onLongPressStart != null ||
-      onLongPressStartWithDetails != null ||
-      onLongPressMoveUpdate != null ||
-      onLongPressEnd != null ||
-      onLongPressCancel != null ||
-      onLongPressRepeat != null;
+      onLongPressStart != null || onLongPressRepeat != null;
 
   @override
   State<_ToolbarButton> createState() => _ToolbarButtonState();
@@ -1860,27 +1991,15 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
       onTapCancel: _stopRepeat,
       onTap: widget.onTap,
       onLongPressStart: widget.hasLongPressHandler
-          ? (details) {
+          ? (_) {
               widget.onLongPressStart?.call();
-              widget.onLongPressStartWithDetails?.call(details);
               if (widget.onLongPressRepeat != null) {
                 _startRepeat();
               }
             }
           : null,
-      onLongPressMoveUpdate: widget.onLongPressMoveUpdate,
-      onLongPressEnd: widget.hasLongPressHandler
-          ? (details) {
-              widget.onLongPressEnd?.call(details);
-              _stopRepeat();
-            }
-          : null,
-      onLongPressCancel: widget.hasLongPressHandler
-          ? () {
-              widget.onLongPressCancel?.call();
-              _stopRepeat();
-            }
-          : null,
+      onLongPressEnd: widget.hasLongPressHandler ? (_) => _stopRepeat() : null,
+      onLongPressCancel: widget.hasLongPressHandler ? _stopRepeat : null,
       child: Container(
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
@@ -1902,12 +2021,12 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
                 ),
               ),
             ),
-            if (widget.longPressIndicatorIcon case final indicatorIcon?)
+            if (widget.menuGesture != null)
               Positioned(
                 top: 2,
                 right: 2,
                 child: Icon(
-                  indicatorIcon,
+                  Icons.more_horiz_rounded,
                   size: 11,
                   color: colorScheme.primary,
                 ),
@@ -1916,6 +2035,10 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
         ),
       ),
     );
+
+    if (widget.menuGesture case final menuGesture?) {
+      button = _KeyMenuGestureDetector(gesture: menuGesture, child: button);
+    }
 
     if (widget.tooltip case final tooltip?) {
       button = Tooltip(message: tooltip, child: button);
@@ -1938,11 +2061,7 @@ class _ModifierButton extends StatefulWidget {
     required this.onDoubleTap,
     this.icon,
     this.tooltip,
-    this.onLongPressStart,
-    this.onLongPressMoveUpdate,
-    this.onLongPressEnd,
-    this.onLongPressCancel,
-    this.longPressIndicatorIcon,
+    this.menuGesture,
     this.semanticsHint,
     this.customSemanticsActions,
     super.key,
@@ -1955,17 +2074,11 @@ class _ModifierButton extends StatefulWidget {
   final VoidCallback onDoubleTap;
   final String? tooltip;
 
-  /// Enables the long-press gesture. The move, end and cancel callbacks, the
-  /// indicator and the semantics hint only apply while this is non-null.
-  final GestureLongPressStartCallback? onLongPressStart;
-  final GestureLongPressMoveUpdateCallback? onLongPressMoveUpdate;
-  final GestureLongPressEndCallback? onLongPressEnd;
-  final VoidCallback? onLongPressCancel;
-  final IconData? longPressIndicatorIcon;
+  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
+  /// indicator in the key's corner.
+  final _KeyMenuGesture? menuGesture;
   final String? semanticsHint;
   final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
-
-  bool get hasLongPressHandler => onLongPressStart != null;
 
   @override
   State<_ModifierButton> createState() => _ModifierButtonState();
@@ -2012,13 +2125,8 @@ class _ModifierButtonState extends State<_ModifierButton> {
       lockIcon = Icons.lock;
     }
 
-    final hasLongPress = widget.hasLongPressHandler;
     Widget button = GestureDetector(
       onTap: _handleTap,
-      onLongPressStart: widget.onLongPressStart,
-      onLongPressMoveUpdate: hasLongPress ? widget.onLongPressMoveUpdate : null,
-      onLongPressEnd: hasLongPress ? widget.onLongPressEnd : null,
-      onLongPressCancel: hasLongPress ? widget.onLongPressCancel : null,
       child: Container(
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
@@ -2057,13 +2165,12 @@ class _ModifierButtonState extends State<_ModifierButton> {
                 ),
               ),
             ),
-            if (widget.longPressIndicatorIcon case final indicatorIcon?
-                when hasLongPress)
+            if (widget.menuGesture != null)
               Positioned(
                 top: 2,
                 right: 2,
                 child: Icon(
-                  indicatorIcon,
+                  Icons.more_horiz_rounded,
                   size: 11,
                   // Armed and locked states fill the key with a primary tint,
                   // so switch to the label color to keep the dots visible.
@@ -2075,6 +2182,10 @@ class _ModifierButtonState extends State<_ModifierButton> {
       ),
     );
 
+    if (widget.menuGesture case final menuGesture?) {
+      button = _KeyMenuGestureDetector(gesture: menuGesture, child: button);
+    }
+
     if (widget.tooltip case final tooltip?) {
       button = Tooltip(message: tooltip, child: button);
     }
@@ -2082,7 +2193,7 @@ class _ModifierButtonState extends State<_ModifierButton> {
     return Semantics(
       button: true,
       label: widget.tooltip ?? widget.label,
-      hint: hasLongPress ? widget.semanticsHint : null,
+      hint: widget.semanticsHint,
       customSemanticsActions: widget.customSemanticsActions,
       toggled: widget.state != null,
       value: switch (widget.state) {

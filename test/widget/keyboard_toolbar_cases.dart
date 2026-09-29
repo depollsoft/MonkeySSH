@@ -659,14 +659,14 @@ void registerKeyboardToolbarTests() {
         final ctrlRect = tester.getRect(find.byTooltip('Ctrl'));
         final gesture = await longPressCtrl(tester);
 
-        final interrupt = find.text('Ctrl+C');
+        final interrupt = find.text('\u2303C');
         expect(interrupt, findsOneWidget);
         expect(find.text('Interrupt'), findsOneWidget);
         expect(tester.getCenter(interrupt).dy, lessThan(ctrlRect.top));
         // Ctrl+C is the row nearest the finger.
         for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
           expect(
-            tester.getCenter(find.text(shortcut.label)).dy,
+            tester.getCenter(find.text(shortcut.symbol)).dy,
             lessThanOrEqualTo(tester.getCenter(interrupt).dy),
           );
         }
@@ -678,7 +678,7 @@ void registerKeyboardToolbarTests() {
 
         expect(output, ['\x03']);
         expect(keyPressedCount, 1);
-        expect(find.text('Ctrl+C'), findsNothing);
+        expect(find.text('\u2303C'), findsNothing);
       });
 
       testWidgets('Ctrl long press released off the menu sends nothing', (
@@ -696,10 +696,10 @@ void registerKeyboardToolbarTests() {
         );
 
         final gesture = await longPressCtrl(tester);
-        expect(find.text('Ctrl+C'), findsOneWidget);
+        expect(find.text('\u2303C'), findsOneWidget);
 
         // Slide over Ctrl+C, then away before releasing.
-        await gesture.moveTo(tester.getCenter(find.text('Ctrl+C')));
+        await gesture.moveTo(tester.getCenter(find.text('\u2303C')));
         await tester.pump();
         await gesture.moveTo(tester.getCenter(find.byTooltip('Ctrl')));
         await tester.pump();
@@ -708,7 +708,7 @@ void registerKeyboardToolbarTests() {
 
         expect(output, isEmpty);
         expect(controller.isCtrlActive, isFalse);
-        expect(find.text('Ctrl+C'), findsNothing);
+        expect(find.text('\u2303C'), findsNothing);
       });
 
       testWidgets('Ctrl shortcuts become one row when a column cannot fit', (
@@ -744,7 +744,7 @@ void registerKeyboardToolbarTests() {
         final interruptRect = tester.getRect(
           find
               .ancestor(
-                of: find.text('Ctrl+C'),
+                of: find.text('\u2303C'),
                 matching: find.byType(Container),
               )
               .first,
@@ -753,11 +753,11 @@ void registerKeyboardToolbarTests() {
         expect(interruptRect.left, lessThanOrEqualTo(ctrlRect.center.dx));
         expect(interruptRect.right, greaterThan(ctrlRect.center.dx));
         for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
-          final center = tester.getCenter(find.text(shortcut.label));
-          expect(center.dy, tester.getCenter(find.text('Ctrl+C')).dy);
+          final center = tester.getCenter(find.text(shortcut.symbol));
+          expect(center.dy, tester.getCenter(find.text('\u2303C')).dy);
           expect(
             center.dx,
-            greaterThanOrEqualTo(tester.getCenter(find.text('Ctrl+C')).dx),
+            greaterThanOrEqualTo(tester.getCenter(find.text('\u2303C')).dx),
           );
         }
 
@@ -797,12 +797,12 @@ void registerKeyboardToolbarTests() {
         );
 
         final gesture = await longPressCtrl(tester);
-        expect(find.text('Ctrl+C'), findsOneWidget);
+        expect(find.text('\u2303C'), findsOneWidget);
         await gesture.up();
         await tester.pump();
 
         expect(output, isEmpty);
-        expect(find.text('Ctrl+C'), findsNothing);
+        expect(find.text('\u2303C'), findsNothing);
       });
 
       testWidgets('Ctrl long press menu hides when the gesture is cancelled', (
@@ -813,12 +813,190 @@ void registerKeyboardToolbarTests() {
         );
 
         final gesture = await longPressCtrl(tester);
-        expect(find.text('Ctrl+C'), findsOneWidget);
+        expect(find.text('\u2303C'), findsOneWidget);
 
         await gesture.cancel();
         await tester.pump();
 
-        expect(find.text('Ctrl+C'), findsNothing);
+        expect(find.text('\u2303C'), findsNothing);
+      });
+
+      testWidgets('swiping up from Ctrl opens the menu without holding', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+
+        expect(find.text('⌃C'), findsOneWidget);
+
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+        expect(controller.isCtrlActive, isFalse);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('a fast swipe from Ctrl chooses the row it lands on', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        // One move event lands straight on the lowest row.
+        final ctrlRect = tester.getRect(find.byTooltip('Ctrl'));
+        final gesture = await tester.startGesture(ctrlRect.center);
+        await gesture.moveTo(
+          Offset(
+            ctrlRect.center.dx,
+            ctrlRect.top - 8 - TerminalMenuStyles.itemHeight / 2,
+          ),
+        );
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+      });
+
+      testWidgets('a swipe past the top of the Ctrl menu sends nothing', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        final menuTop = tester.getTopLeft(find.text('⌃R')).dy;
+        await gesture.moveTo(
+          Offset(tester.getCenter(find.text('⌃R')).dx, menuTop - 60),
+        );
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('swiping down from Ctrl neither opens the menu nor toggles', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Column(
+                children: [
+                  KeyboardToolbar(terminal: terminal, controller: controller),
+                  const Spacer(),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, 30));
+        await tester.pump();
+
+        expect(find.text('⌃C'), findsNothing);
+
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(controller.isCtrlActive, isFalse);
+      });
+
+      testWidgets('a cancelled swipe from Ctrl sends nothing', (tester) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+        await gesture.cancel();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('swiping up from Paste opens its menu without holding', (
+        tester,
+      ) async {
+        var mediaPasteCount = 0;
+        var clipboardPasteCount = 0;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onPasteRequested: () async => clipboardPasteCount++,
+              onPasteMediaRequested: () async => mediaPasteCount++,
+              onPasteFilesRequested: () async {},
+            ),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Paste')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+
+        expect(find.text('Paste Media'), findsOneWidget);
+
+        await gesture.moveTo(tester.getCenter(find.text('Paste Media')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(mediaPasteCount, 1);
+        expect(clipboardPasteCount, 0);
+        expect(find.text('Paste Media'), findsNothing);
       });
 
       testWidgets('Ctrl shortcuts are not offered for custom input sinks', (
@@ -843,7 +1021,7 @@ void registerKeyboardToolbarTests() {
         );
 
         final gesture = await longPressCtrl(tester);
-        expect(find.text('Ctrl+C'), findsNothing);
+        expect(find.text('\u2303C'), findsNothing);
         await gesture.up();
         await tester.pump();
       });
