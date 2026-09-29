@@ -460,8 +460,230 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('Not installed · latest v1.0.0'), findsOneWidget);
     expect(find.text('Installed v1.0.0'), findsOneWidget);
+    expect(find.text('Not installed · latest v1.0.0'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('agent-absent-toggle-cli')));
+    await tester.pumpAndSettle();
+    expect(find.text('Not installed · latest v1.0.0'), findsOneWidget);
+  });
+
+  testWidgets('folds agents missing from the host behind each section', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    AgentRuntimeDefinition cli(String id) =>
+        agentCliRuntimeDefinitions.singleWhere((d) => d.id == id);
+    runtimes = [
+      AgentRuntimeInfo(
+        definition: cli('cli:claude'),
+        status: AgentRuntimeStatus.installed,
+        installedVersion: '2.1.0',
+      ),
+      AgentRuntimeInfo(
+        definition: cli('cli:copilot'),
+        status: AgentRuntimeStatus.notInstalled,
+      ),
+      AgentRuntimeInfo(
+        definition: cli('cli:codex'),
+        status: AgentRuntimeStatus.unavailable,
+      ),
+      AgentRuntimeInfo(
+        definition: cli('cli:opencode'),
+        status: AgentRuntimeStatus.failed,
+        message: 'probe timed out',
+      ),
+      AgentRuntimeInfo(
+        definition: agentStandaloneAcpRuntimeDefinitions.first,
+        status: AgentRuntimeStatus.notInstalled,
+      ),
+    ];
+    await pumpScreen(tester);
+
+    final cliToggle = find.byKey(const ValueKey('agent-absent-toggle-cli'));
+    final acpToggle = find.byKey(
+      const ValueKey('agent-absent-toggle-acpAdapter'),
+    );
+    bool? toggleExpanded(Finder toggle) => tester
+        .widget<Semantics>(
+          find.descendant(of: toggle, matching: find.byType(Semantics)).first,
+        )
+        .properties
+        .expanded;
+
+    expect(find.text('Installed versions and account usage'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:claude')),
+      findsOneWidget,
+    );
+    // A failed probe proves nothing about the install, so it stays visible.
+    expect(inRow('cli:opencode', find.text('Check failed')), findsOneWidget);
+    for (final id in ['cli:copilot', 'cli:codex', 'acp:claude']) {
+      expect(find.byKey(ValueKey('agent-runtime-$id')), findsNothing);
+    }
+    expect(find.text('1/4'), findsOneWidget);
+    expect(find.text('0/1'), findsOneWidget);
+    expect(find.bySemanticsLabel('1 of 4 installed'), findsOneWidget);
+    expect(
+      find.descendant(of: cliToggle, matching: find.text('2 not installed')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: cliToggle, matching: find.text('Copilot CLI, Codex')),
+      findsOneWidget,
+    );
+    // The section already says ACP, so the preview drops the suffix.
+    expect(
+      find.descendant(of: acpToggle, matching: find.text('Claude Agent')),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('2 agent CLIs not installed: Copilot CLI, Codex'),
+      findsOneWidget,
+    );
+    expect(toggleExpanded(cliToggle), isFalse);
+    expect(tester.getSize(cliToggle).height, greaterThanOrEqualTo(48));
+
+    await tester.tap(cliToggle);
+    await tester.pumpAndSettle();
+
+    expect(toggleExpanded(cliToggle), isTrue);
+    expect(find.text('Copilot CLI, Codex'), findsNothing);
+    expect(inRow('cli:copilot', find.text('Not installed')), findsOneWidget);
+    expect(inRow('cli:codex', find.text('Unavailable')), findsOneWidget);
+    expect(
+      tester
+          .getTopLeft(find.byKey(const ValueKey('agent-runtime-cli:copilot')))
+          .dy,
+      greaterThan(tester.getBottomLeft(cliToggle).dy - 1),
+    );
+    expect(
+      find.byKey(const ValueKey('agent-runtime-acp:claude')),
+      findsNothing,
+    );
+
+    await tester.tap(cliToggle);
+    await tester.pumpAndSettle();
+
+    expect(toggleExpanded(cliToggle), isFalse);
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:copilot')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+    semantics.dispose();
+  });
+
+  testWidgets('an empty host lists every agent and keeps them listed after '
+      'the first install', (tester) async {
+    final claude = AgentRuntimeInfo(
+      definition: agentCliRuntimeDefinitions.first,
+      status: AgentRuntimeStatus.notInstalled,
+    );
+    runtimes = [
+      claude,
+      AgentRuntimeInfo(
+        definition: agentCliRuntimeDefinitions[1],
+        status: AgentRuntimeStatus.notInstalled,
+      ),
+      AgentRuntimeInfo(
+        definition: agentStandaloneAcpRuntimeDefinitions.first,
+        status: AgentRuntimeStatus.notInstalled,
+      ),
+    ];
+    when(
+      () => service.installOrUpdate(
+        session,
+        claude.definition,
+        update: false,
+        current: claude,
+        onOutput: any(named: 'onOutput'),
+      ),
+    ).thenAnswer((_) async {
+      runtimes[0] = AgentRuntimeInfo(
+        definition: claude.definition,
+        status: AgentRuntimeStatus.installed,
+        installedVersion: '2.1.0',
+      );
+      return const AgentRuntimeActionResult(succeeded: true, output: 'ok');
+    });
+    await pumpScreen(tester);
+
+    expect(
+      find.text('No agents on this host yet. Install one below.'),
+      findsOneWidget,
+    );
+    expect(find.text('0/2'), findsOneWidget);
+    for (final id in ['cli:claude', 'cli:copilot', 'acp:claude']) {
+      expect(find.byKey(ValueKey('agent-runtime-$id')), findsOneWidget);
+    }
+    expect(find.byKey(const ValueKey('agent-absent-toggle-cli')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('agent-action-cli:claude')));
+    await tester.pumpAndSettle();
+
+    expect(inRow('cli:claude', find.text('Installed v2.1.0')), findsOneWidget);
+    expect(find.text('Installed versions and account usage'), findsOneWidget);
+    expect(find.text('1/2'), findsOneWidget);
+    // The rest of the catalog stays open under the new disclosure.
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:copilot')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-runtime-acp:claude')),
+      findsOneWidget,
+    );
+    final toggle = find.byKey(const ValueKey('agent-absent-toggle-cli'));
+    expect(
+      find.descendant(of: toggle, matching: find.text('1 not installed')),
+      findsOneWidget,
+    );
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:copilot')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('discovery holds one checking line per section', (tester) async {
+    final discovery = Completer<List<AgentRuntimeInfo>>();
+    when(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).thenAnswer((_) => discovery.future);
+    await pumpScreen(tester, settle: false);
+    await pumpFrames(tester);
+
+    expect(
+      find.text('Checking ${agentCliRuntimeDefinitions.length} agent CLIs…'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'Checking ${agentStandaloneAcpRuntimeDefinitions.length} ACP adapters…',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:claude')),
+      findsNothing,
+    );
+
+    discovery.complete(runtimes);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('agent-checking-cli')), findsNothing);
+    expect(find.text('Checking installed agents…'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:claude')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:copilot')),
+      findsNothing,
+    );
   });
 
   testWidgets('compact rows avoid overflow on narrow phones', (tester) async {
@@ -1124,6 +1346,13 @@ void main() {
               'Required setup scripts did not run because the package '
               'was installed with --ignore-scripts.',
         );
+        runtimes.insert(
+          2,
+          AgentRuntimeInfo(
+            definition: agentCliRuntimeDefinitions[2],
+            status: AgentRuntimeStatus.notInstalled,
+          ),
+        );
 
         await pumpScreen(
           tester,
@@ -1175,6 +1404,22 @@ void main() {
           tester.getRect(updateAll).bottom,
           lessThanOrEqualTo(size.height),
         );
+
+        final toggle = find.byKey(const ValueKey('agent-absent-toggle-cli'));
+        await tester.scrollUntilVisible(
+          toggle,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        expect(toggle.hitTestable(), findsOneWidget);
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        final revealed = find.byKey(const ValueKey('agent-action-cli:codex'));
+        await tester.ensureVisible(revealed);
+        await tester.pumpAndSettle();
+        expect(revealed.hitTestable(), findsOneWidget);
       });
     }
   }

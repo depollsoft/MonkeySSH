@@ -59,6 +59,17 @@ AgentStatusPresentation agentStatusPresentation(
   ),
 };
 
+/// Nothing of this runtime exists on the host, so its row waits behind the
+/// section's "not installed" disclosure.
+bool isAgentRuntimeAbsent(AgentRuntimeInfo runtime) =>
+    runtime.status == AgentRuntimeStatus.notInstalled ||
+    runtime.status == AgentRuntimeStatus.unavailable;
+
+bool isAgentRuntimeInstalled(AgentRuntimeInfo runtime) =>
+    runtime.status == AgentRuntimeStatus.installed ||
+    runtime.status == AgentRuntimeStatus.updateAvailable ||
+    runtime.status == AgentRuntimeStatus.needsRepair;
+
 String? agentSourceLine(AgentRuntimeInfo runtime) {
   final path = runtime.executablePath;
   if (path == null) return null;

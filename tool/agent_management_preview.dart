@@ -75,6 +75,8 @@ class _PreviewManagement extends Fake implements AgentManagementService {
     final id = definition.id;
     final status = switch (id) {
       'cli:claude' || 'cli:codex' => AgentRuntimeStatus.updateAvailable,
+      // Leaves a folded "not installed" group in the CLI section too.
+      'cli:openclaw' || 'cli:muse' => AgentRuntimeStatus.notInstalled,
       _ when definition.kind == AgentRuntimeKind.cli =>
         AgentRuntimeStatus.installed,
       _ => AgentRuntimeStatus.notInstalled,

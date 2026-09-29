@@ -44,6 +44,7 @@ class AgentManagementScreen extends ConsumerStatefulWidget {
 
 class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
   late final AgentManagementViewModel _model;
+  final Set<AgentRuntimeKind> _absentExpanded = <AgentRuntimeKind>{};
 
   @override
   void initState() {
@@ -63,7 +64,14 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
     _model.initialize();
   }
 
-  void _modelChanged() => setState(() {});
+  bool get _nothingInstalled =>
+      _model.runtimes.isNotEmpty && _model.runtimes.every(isAgentRuntimeAbsent);
+
+  // An empty host lists every agent. Keep that catalog open after the first
+  // install instead of folding it away under the user's thumb.
+  void _modelChanged() => setState(() {
+    if (_nothingInstalled) _absentExpanded.addAll(AgentRuntimeKind.values);
+  });
 
   @override
   void dispose() {
@@ -204,13 +212,20 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
         _model.runtimes.every(
           (runtime) => runtime.status == AgentRuntimeStatus.checking,
         );
+    final nothingInstalled = _nothingInstalled;
     Widget section(AgentRuntimeKind kind, String title, String subtitle) =>
         _RuntimeSection(
+          kind: kind,
           title: title,
           subtitle: subtitle,
           runtimes: _model.runtimes
               .where((runtime) => runtime.definition.kind == kind)
               .toList(),
+          showAbsentInline: nothingInstalled,
+          absentExpanded: _absentExpanded.contains(kind),
+          onToggleAbsent: () => setState(() {
+            if (!_absentExpanded.remove(kind)) _absentExpanded.add(kind);
+          }),
           runningActions: _model.runningActions,
           queuedActions: _model.queuedActions,
           recheckingActions: _model.recheckingActions,
@@ -321,6 +336,8 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                                     ? 'Checking installed agents…'
                                     : _model.refreshing
                                     ? 'Refreshing versions…'
+                                    : nothingInstalled
+                                    ? 'No agents on this host yet. Install one below.'
                                     : 'Installed versions and account usage',
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: scheme.onSurfaceVariant,
@@ -472,9 +489,13 @@ class _UpdateBar extends StatelessWidget {
 
 class _RuntimeSection extends StatelessWidget {
   const _RuntimeSection({
+    required this.kind,
     required this.title,
     required this.subtitle,
     required this.runtimes,
+    required this.showAbsentInline,
+    required this.absentExpanded,
+    required this.onToggleAbsent,
     required this.runningActions,
     required this.queuedActions,
     required this.recheckingActions,
@@ -485,9 +506,13 @@ class _RuntimeSection extends StatelessWidget {
     required this.onAction,
     required this.onRecheck,
   });
+  final AgentRuntimeKind kind;
   final String title;
   final String subtitle;
   final List<AgentRuntimeInfo> runtimes;
+  final bool showAbsentInline;
+  final bool absentExpanded;
+  final VoidCallback onToggleAbsent;
   final Set<String> runningActions;
   final Set<String> queuedActions;
   final Set<String> recheckingActions;
@@ -502,6 +527,113 @@ class _RuntimeSection extends StatelessWidget {
   Widget build(BuildContext context) {
     if (runtimes.isEmpty) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
+    final checking = runtimes.every(
+      (runtime) => runtime.status == AgentRuntimeStatus.checking,
+    );
+    final installed = runtimes.where(isAgentRuntimeInstalled).length;
+    final shown = [
+      for (final runtime in runtimes)
+        if (showAbsentInline || !isAgentRuntimeAbsent(runtime)) runtime,
+    ];
+    final absent = [
+      for (final runtime in runtimes)
+        if (!showAbsentInline && isAgentRuntimeAbsent(runtime)) runtime,
+    ];
+    Widget divider() => Divider(
+      height: 1,
+      indent: 12,
+      endIndent: 12,
+      color: scheme.outlineVariant,
+    );
+    Widget row(AgentRuntimeInfo runtime) {
+      final id = runtime.definition.id;
+      return _RuntimeRow(
+        key: ValueKey(id),
+        runtime: runtime,
+        usage: usage[id],
+        checkingUsage: checkingUsage,
+        busy: runningActions.contains(id),
+        queued: queuedActions.contains(id),
+        rechecking: recheckingActions.contains(id),
+        locked: locked,
+        actionOutput: actionOutput[id],
+        onAction: () => onAction(runtime),
+        onRecheck: () => onRecheck(runtime),
+      );
+    }
+
+    final List<Widget> rows;
+    if (checking) {
+      // Row-per-agent placeholders would shrink to the installed few once
+      // discovery lands; one line keeps the section steady until then.
+      rows = [
+        _GroupRow(
+          key: ValueKey('agent-checking-${kind.name}'),
+          icon: Icons.sync_rounded,
+          label: 'Checking ${runtimes.length} $title…',
+        ),
+      ];
+    } else {
+      final names = absent
+          .map(
+            (runtime) =>
+                kind == AgentRuntimeKind.acpAdapter &&
+                    runtime.definition.label.endsWith(' ACP')
+                ? runtime.definition.label.substring(
+                    0,
+                    runtime.definition.label.length - 4,
+                  )
+                : runtime.definition.label,
+          )
+          .join(', ');
+      rows = [
+        for (var index = 0; index < shown.length; index++) ...[
+          if (index > 0) divider(),
+          row(shown[index]),
+        ],
+        if (absent.isNotEmpty) ...[
+          if (shown.isNotEmpty) divider(),
+          _GroupRow(
+            key: ValueKey('agent-absent-toggle-${kind.name}'),
+            icon: Icons.download_rounded,
+            label: '${absent.length} not installed',
+            detail: absentExpanded ? null : names,
+            expanded: absentExpanded,
+            onTap: onToggleAbsent,
+            semanticsLabel: absentExpanded
+                ? '${absent.length} $title not installed'
+                : '${absent.length} $title not installed: $names',
+          ),
+          AnimatedSwitcher(
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 200),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) => SizeTransition(
+              sizeFactor: animation,
+              alignment: Alignment.topCenter,
+              child: child,
+            ),
+            layoutBuilder: (current, previous) => Stack(
+              alignment: Alignment.topCenter,
+              children: [...previous, ?current],
+            ),
+            child: absentExpanded
+                ? Column(
+                    key: ValueKey('agent-absent-list-${kind.name}'),
+                    children: [
+                      for (final runtime in absent) ...[
+                        divider(),
+                        row(runtime),
+                      ],
+                    ],
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
+        ],
+      ];
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -518,10 +650,19 @@ class _RuntimeSection extends StatelessWidget {
                       style: FluttyTheme.displayMono(fontSize: 15),
                     ),
                   ),
-                  Text(
-                    '${runtimes.length}',
-                    style: FluttyTheme.monoStyle.copyWith(
-                      color: scheme.onSurfaceVariant,
+                  Semantics(
+                    container: true,
+                    label: checking
+                        ? '${runtimes.length} $title'
+                        : '$installed of ${runtimes.length} installed',
+                    excludeSemantics: true,
+                    child: Text(
+                      checking
+                          ? '${runtimes.length}'
+                          : '$installed/${runtimes.length}',
+                      style: FluttyTheme.monoStyle.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
                 ],
@@ -542,36 +683,96 @@ class _RuntimeSection extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             side: BorderSide(color: scheme.outlineVariant),
           ),
-          child: Column(
-            children: [
-              for (var index = 0; index < runtimes.length; index++) ...[
-                _RuntimeRow(
-                  key: ValueKey(runtimes[index].definition.id),
-                  runtime: runtimes[index],
-                  usage: usage[runtimes[index].definition.id],
-                  checkingUsage: checkingUsage,
-                  busy: runningActions.contains(runtimes[index].definition.id),
-                  queued: queuedActions.contains(runtimes[index].definition.id),
-                  rechecking: recheckingActions.contains(
-                    runtimes[index].definition.id,
-                  ),
-                  locked: locked,
-                  actionOutput: actionOutput[runtimes[index].definition.id],
-                  onAction: () => onAction(runtimes[index]),
-                  onRecheck: () => onRecheck(runtimes[index]),
-                ),
-                if (index != runtimes.length - 1)
-                  Divider(
-                    height: 1,
-                    indent: 12,
-                    endIndent: 12,
-                    color: scheme.outlineVariant,
-                  ),
-              ],
-            ],
-          ),
+          child: Column(children: rows),
         ),
       ],
+    );
+  }
+}
+
+/// A non-agent line inside a section card: the discovery placeholder, or the
+/// disclosure that folds away agents missing from the host.
+class _GroupRow extends StatelessWidget {
+  const _GroupRow({
+    required this.icon,
+    required this.label,
+    this.detail,
+    this.expanded,
+    this.onTap,
+    this.semanticsLabel,
+    super.key,
+  });
+
+  final IconData icon;
+  final String label;
+  final String? detail;
+  final bool? expanded;
+  final VoidCallback? onTap;
+  final String? semanticsLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final content = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: FluttyTheme.monoStyle.copyWith(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                  if (detail case final detail?) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      detail,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // Same 48px column as the rows' re-check buttons.
+            if (expanded case final expanded?)
+              SizedBox(
+                width: 48,
+                child: Icon(
+                  expanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (onTap == null) return content;
+    return Semantics(
+      container: true,
+      button: true,
+      expanded: expanded,
+      label: semanticsLabel,
+      excludeSemantics: true,
+      child: InkWell(onTap: onTap, child: content),
     );
   }
 }
