@@ -1024,54 +1024,67 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   }
 
   /// The Ctrl shortcuts menu geometry in overlay coordinates, opening upward
-  /// from the Ctrl key and left-aligned with it.
+  /// from the Ctrl key.
   ///
-  /// The menu is a column when it fits above the key. A landscape phone with
-  /// the keyboard up has too little room, so it becomes a single row there
-  /// instead of being clamped down over the key, where the finger would start
-  /// inside it and a plain release would send a chord.
+  /// The menu is a column, left-aligned with the key, when it fits above it.
+  /// A phone with the keyboard up can lack that room, so the menu becomes a
+  /// single row instead of being clamped down over the key, where the finger
+  /// would start inside it and a plain release would send a chord.
   _CtrlShortcutsLayout? _ctrlShortcutsLayout() {
     final button = _ctrlButtonKey.currentContext?.findRenderObject();
     final overlayBox = Overlay.of(context).context.findRenderObject();
     if (button is! RenderBox || overlayBox is! RenderBox) {
       return null;
     }
-    final buttonTopLeft = overlayBox.globalToLocal(
-      button.localToGlobal(Offset.zero),
-    );
+    final buttonRect =
+        overlayBox.globalToLocal(button.localToGlobal(Offset.zero)) &
+        button.size;
     final overlaySize = overlayBox.size;
+    const margin = _pasteOptionsScreenMargin;
     final count = KeyboardToolbarCtrlShortcut.values.length;
     final columnHeight = count * TerminalMenuStyles.itemHeight;
-    final axis =
-        buttonTopLeft.dy - _pasteOptionsGap - columnHeight >=
-            _pasteOptionsScreenMargin
-        ? Axis.vertical
-        : Axis.horizontal;
-    final size = axis == Axis.vertical
-        ? Size(_ctrlShortcutsWidth, columnHeight)
-        : Size(
-            // A narrow window shares the width rather than clipping chords.
-            math.min(
-              count * _ctrlShortcutsRowItemWidth,
-              overlaySize.width - 2 * _pasteOptionsScreenMargin,
-            ),
-            TerminalMenuStyles.itemHeight,
-          );
+    final columnTop = buttonRect.top - _pasteOptionsGap - columnHeight;
+    if (columnTop >= margin) {
+      return _CtrlShortcutsLayout(
+        axis: Axis.vertical,
+        rect: Rect.fromLTWH(
+          _clampDouble(
+            buttonRect.left,
+            margin,
+            overlaySize.width - _ctrlShortcutsWidth - margin,
+          ),
+          columnTop,
+          _ctrlShortcutsWidth,
+          columnHeight,
+        ),
+      );
+    }
+
+    // Ctrl+C's cell is centered over the key so a straight swipe up lands on
+    // it. When the window is narrow the cells shrink so the rest still fit to
+    // its right, rather than the row sliding left and putting Ctrl+D there.
+    final itemWidth = [
+      _ctrlShortcutsRowItemWidth,
+      (overlaySize.width - margin - buttonRect.center.dx) / (count - 0.5),
+      (overlaySize.width - 2 * margin) / count,
+    ].reduce(math.min);
+    final rowWidth = count * itemWidth;
+    const rowHeight = TerminalMenuStyles.itemHeight;
     return _CtrlShortcutsLayout(
-      axis: axis,
+      axis: Axis.horizontal,
       rect: Rect.fromLTWH(
         _clampDouble(
-          buttonTopLeft.dx,
-          _pasteOptionsScreenMargin,
-          overlaySize.width - size.width - _pasteOptionsScreenMargin,
+          buttonRect.center.dx - itemWidth / 2,
+          margin,
+          overlaySize.width - rowWidth - margin,
         ),
         _clampDouble(
-          buttonTopLeft.dy - _pasteOptionsGap - size.height,
-          _pasteOptionsScreenMargin,
-          overlaySize.height - size.height - _pasteOptionsScreenMargin,
+          buttonRect.top - _pasteOptionsGap - rowHeight,
+          margin,
+          overlaySize.height - rowHeight - margin,
         ),
-        size.width,
-        size.height,
+        rowWidth,
+        rowHeight,
       ),
     );
   }

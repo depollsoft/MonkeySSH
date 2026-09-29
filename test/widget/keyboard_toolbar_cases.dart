@@ -771,43 +771,62 @@ void registerKeyboardToolbarTests() {
         expect(output, ['\x03']);
       });
 
-      testWidgets('Ctrl shortcuts row fits a narrow window', (tester) async {
-        const size = Size(360, 200);
-        await tester.binding.setSurfaceSize(size);
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        final output = <String>[];
-        terminal.onOutput = output.add;
+      for (final (name, surface, layoutSize) in const [
+        ('a narrow landscape window', Size(360, 200), Size(360, 200)),
+        // Two toolbar rows with the keyboard up leave no room for a column.
+        (
+          'a portrait phone with the keyboard up',
+          Size(375, 300),
+          Size(375, 667),
+        ),
+      ]) {
+        testWidgets('Ctrl shortcuts row keeps Ctrl+C above Ctrl in $name', (
+          tester,
+        ) async {
+          await tester.binding.setSurfaceSize(surface);
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final output = <String>[];
+          terminal.onOutput = output.add;
 
-        await tester.pumpWidget(
-          MaterialApp(
-            home: MediaQuery(
-              data: const MediaQueryData(size: size),
-              child: Scaffold(
-                body: Column(
-                  children: [
-                    const Spacer(),
-                    KeyboardToolbar(terminal: terminal),
-                  ],
+          await tester.pumpWidget(
+            MaterialApp(
+              home: MediaQuery(
+                data: MediaQueryData(size: layoutSize),
+                child: Scaffold(
+                  body: Column(
+                    children: [
+                      const Spacer(),
+                      KeyboardToolbar(terminal: terminal),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        );
+          );
 
-        final gesture = await longPressCtrl(tester);
-        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
-          final rect = tester.getRect(find.text(shortcut.symbol));
-          expect(rect.left, greaterThanOrEqualTo(0));
-          expect(rect.right, lessThanOrEqualTo(size.width));
-        }
+          final ctrlCenter = tester.getCenter(find.byTooltip('Ctrl'));
+          final gesture = await tester.startGesture(ctrlCenter);
+          await gesture.moveBy(const Offset(0, -30));
+          await tester.pump();
 
-        await gesture.moveTo(tester.getCenter(find.text('\u2303R')));
-        await tester.pump();
-        await gesture.up();
-        await tester.pump();
+          for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+            final rect = tester.getRect(find.text(shortcut.symbol));
+            expect(rect.left, greaterThanOrEqualTo(0));
+            expect(rect.right, lessThanOrEqualTo(surface.width));
+            expect(rect.center.dy, tester.getCenter(find.text('\u2303C')).dy);
+          }
 
-        expect(output, ['\x12']);
-      });
+          // Straight up from the key, no sideways drift.
+          await gesture.moveTo(
+            Offset(ctrlCenter.dx, tester.getCenter(find.text('\u2303C')).dy),
+          );
+          await tester.pump();
+          await gesture.up();
+          await tester.pump();
+
+          expect(output, ['\x03']);
+        });
+      }
 
       testWidgets('Ctrl shortcuts row fits large accessibility text', (
         tester,
