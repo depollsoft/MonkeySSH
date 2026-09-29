@@ -569,6 +569,17 @@ void main() {
       find.byKey(const ValueKey('agent-runtime-cli:copilot')),
       findsNothing,
     );
+
+    // Screen readers activate the disclosure through its semantics node.
+    tester.semantics.tap(
+      find.semantics.byLabel('2 agent CLIs not installed: Copilot CLI, Codex'),
+    );
+    await tester.pumpAndSettle();
+    expect(toggleExpanded(cliToggle), isTrue);
+    expect(
+      find.byKey(const ValueKey('agent-runtime-cli:copilot')),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
     semantics.dispose();
   });

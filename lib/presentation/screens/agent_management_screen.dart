@@ -771,6 +771,9 @@ class _GroupRow extends StatelessWidget {
       button: true,
       expanded: expanded,
       label: semanticsLabel,
+      // excludeSemantics drops the InkWell's own tap action, so the node
+      // must carry it for VoiceOver and TalkBack to activate the toggle.
+      onTap: onTap,
       excludeSemantics: true,
       child: InkWell(onTap: onTap, child: content),
     );
