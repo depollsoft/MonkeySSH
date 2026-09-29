@@ -1,5 +1,7 @@
 What's new in this beta
 
-- Fixed an issue where opening a forwarded service in the in-app browser could disconnect the entire SSH session.
+- Agent Management puts installed tools first. Expand the not-installed section to find more agents and adapters.
+- Reduced layout jumps while versions, updates, and usage load or refresh.
+- Fixed freshness checks for cached agent usage.
 
 Please report rough edges through the support link.
