@@ -20,6 +20,24 @@ class MediaProbeTest(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs['check'])
         self.assertNotIn('stderr', run.call_args.kwargs)  # Swift diagnostics remain visible.
 
+    def test_ocr_keeps_raw_and_language_corrected_passes(self):
+        scripts = []
+
+        def run(command, **kwargs):
+            scripts.append(Path(command[1]).read_text())
+            return Mock(stdout='FILE\t/hosts.png\nAda Host Add Host\nEND_FILE\n')
+
+        with patch.object(store_media.subprocess, 'run', side_effect=run):
+            result = store_media._ocr_texts([Path('/hosts.png')])
+
+        self.assertIn('for correction in [false, true]', scripts[0])
+        self.assertIn('request.usesLanguageCorrection = correction', scripts[0])
+        self.assertIn('let text = passes.joined', scripts[0])
+        self.assertEqual(result[Path('/hosts.png')], 'Ada Host Add Host')
+        screenshots._require_ocr_markers('/hosts.png', result[Path('/hosts.png')], ['Add Host'])
+        with self.assertRaisesRegex(ValueError, 'Add Host'):
+            screenshots._require_ocr_markers('/hosts.png', 'Ada Host', ['Add Host'])
+
     def test_screenshot_ocr_requires_macos_and_swift(self):
         with patch.object(screenshots.platform, 'system', return_value='Linux'):
             with self.assertRaisesRegex(RuntimeError, 'macOS with Swift/Vision'):

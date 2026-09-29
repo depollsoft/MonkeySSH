@@ -86,10 +86,17 @@ for url in urls {
         continue
     }
     let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-    try handler.perform([request])
-    let text = (request.results ?? [])
-        .compactMap { $0.topCandidates(1).first?.string }
-        .joined(separator: " ")
+    // Keep raw recognition for paths, keys, and CLI names. A second pass
+    // resolves ordinary UI words such as "Add Host" misread as "Ada Host".
+    var passes: [String] = []
+    for correction in [false, true] {
+        request.usesLanguageCorrection = correction
+        try handler.perform([request])
+        passes.append((request.results ?? [])
+            .compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: " "))
+    }
+    let text = passes.joined(separator: " ")
         .replacingOccurrences(of: "\n", with: " ")
     print("FILE\t\(url.path)")
     print(text)
