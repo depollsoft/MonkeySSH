@@ -50,7 +50,8 @@ BAD_OCR_PATTERNS = {
     ),
     'Claude plan-mode footer': re.compile(r'plan mode on', re.IGNORECASE),
     'Claude unavailable model notice': re.compile(
-        r'Fable\s+\d+|currently unavailable|fable-mythos-access',
+        # A usage label such as "Fable 100% remaining" is not a model notice.
+        r'Fable\s+\d+(?!\d|\s*%)|currently unavailable|fable-mythos-access',
         re.IGNORECASE,
     ),
     'Claude setup warning': re.compile(
