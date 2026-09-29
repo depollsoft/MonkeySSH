@@ -1704,7 +1704,8 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
     final descriptionStyle = labelStyle.copyWith(
       fontSize: compact ? 10 : 12,
       fontWeight: FontWeight.w400,
-      color: foregroundColor.withAlpha(170),
+      // Muting on the highlight fill would drop below 4.5:1 contrast.
+      color: highlighted ? foregroundColor : foregroundColor.withAlpha(170),
     );
     final description = Text(
       shortcut.description,
@@ -1799,10 +1800,17 @@ class _KeyMenuGesture {
 /// finger hands the pointer to the vertical drag, holding still hands it to
 /// the long press, and a quick lift is still a tap.
 class _KeyMenuGestureDetector extends StatefulWidget {
-  const _KeyMenuGestureDetector({required this.gesture, required this.child});
+  const _KeyMenuGestureDetector({
+    required this.gesture,
+    required this.child,
+    this.onOpened,
+  });
 
   final _KeyMenuGesture gesture;
   final Widget child;
+
+  /// Lets the key reset its own tap state once the gesture became a menu.
+  final VoidCallback? onOpened;
 
   @override
   State<_KeyMenuGestureDetector> createState() =>
@@ -1818,6 +1826,7 @@ class _KeyMenuGestureDetectorState extends State<_KeyMenuGestureDetector> {
 
   void _open(_KeyMenuOpenedBy source, Offset globalPosition) {
     _openedBy = source;
+    widget.onOpened?.call();
     widget.gesture.onOpen(globalPosition);
   }
 
@@ -1860,8 +1869,15 @@ class _KeyMenuGestureDetectorState extends State<_KeyMenuGestureDetector> {
 
   @override
   Widget build(BuildContext context) => Listener(
-    // An accepted drag reports a pointer cancel as a drag end, which would
-    // choose the row under the finger. The listener sees the cancel first.
+    // The listener sees raw pointer events before the recognizers do. An
+    // accepted drag reports a pointer cancel as a drag end, which would choose
+    // the row under the finger, and a drag end reports the last move position
+    // rather than where the finger lifted, so the lift point comes from here.
+    onPointerUp: (event) {
+      if (_openedBy == _KeyMenuOpenedBy.swipe) {
+        _swipePosition = event.position;
+      }
+    },
     onPointerCancel: (_) {
       if (_openedBy case final source?) {
         _cancel(source);
@@ -2212,7 +2228,13 @@ class _ModifierButtonState extends State<_ModifierButton> {
     );
 
     if (widget.menuGesture case final menuGesture?) {
-      button = _KeyMenuGestureDetector(gesture: menuGesture, child: button);
+      button = _KeyMenuGestureDetector(
+        gesture: menuGesture,
+        // A menu interrupts the tap sequence, so a tap right after choosing a
+        // chord must not count as the second tap of a double-tap lock.
+        onOpened: () => _lastTapTime = null,
+        child: button,
+      );
     }
 
     if (widget.tooltip case final tooltip?) {

@@ -918,6 +918,87 @@ void registerKeyboardToolbarTests() {
         semantics.dispose();
       });
 
+      testWidgets('a swipe lifting off the Ctrl menu without a move cancels', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.createGesture(pointer: 7);
+        await gesture.down(tester.getCenter(find.byTooltip('Ctrl')));
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        final interrupt = tester.getCenter(find.text('⌃C'));
+        await gesture.moveTo(interrupt);
+        await tester.pump();
+        // The lift lands above the menu with no move event before it.
+        await tester.sendEventToBinding(
+          PointerUpEvent(pointer: 7, position: Offset(interrupt.dx, 4)),
+        );
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('a tap after a Ctrl swipe chord does not lock Ctrl', (
+        tester,
+      ) async {
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Ctrl'));
+        await tester.pump();
+        expect(controller.ctrlState, isFalse);
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        await gesture.moveTo(tester.getCenter(find.text('⌃D')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+        expect(controller.isCtrlActive, isFalse);
+
+        // Within the 300 ms double-tap window of the first tap.
+        await tester.tap(find.byTooltip('Ctrl'));
+        await tester.pump();
+
+        expect(controller.ctrlState, isFalse);
+      });
+
+      testWidgets('the highlighted Ctrl shortcut keeps a full-opacity hint', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+
+        Color hintColor(String text) =>
+            tester.widget<Text>(find.text(text)).style!.color!;
+        expect(hintColor('Interrupt').a, 1);
+        expect(hintColor('End of input').a, lessThan(1));
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
       testWidgets('Ctrl long press released in place sends nothing', (
         tester,
       ) async {
