@@ -540,6 +540,10 @@ void main() {
       find.bySemanticsLabel('2 agent CLIs not installed: Copilot CLI, Codex'),
       findsOneWidget,
     );
+    expect(
+      find.bySemanticsLabel('1 ACP adapter not installed: Claude Agent'),
+      findsOneWidget,
+    );
     expect(toggleExpanded(cliToggle), isFalse);
     expect(tester.getSize(cliToggle).height, greaterThanOrEqualTo(48));
 
@@ -656,6 +660,101 @@ void main() {
       find.byKey(const ValueKey('agent-runtime-cli:copilot')),
       findsNothing,
     );
+  });
+
+  testWidgets('opens on the cached state and refreshes it in place', (
+    tester,
+  ) async {
+    final usage = {
+      'cli:claude': AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [
+          AgentUsageWindow(
+            label: 'Weekly',
+            usedPercent: 25,
+            resetsAt: DateTime.now().add(const Duration(days: 3)),
+          ),
+        ],
+      ),
+    };
+    when(() => service.cachedState(session))
+        .thenReturn((runtimes: runtimes, usage: usage));
+    when(() => service.readUsage(session, any()))
+        .thenAnswer((_) async => usage);
+    final metadata = Completer<List<AgentRuntimeInfo>>();
+    when(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).thenAnswer((invocation) {
+      // Discovery knows nothing about registry versions yet.
+      (invocation.namedArguments[#onDiscovered]
+          as void Function(List<AgentRuntimeInfo>))([
+        for (final runtime in runtimes)
+          AgentRuntimeInfo(
+            definition: runtime.definition,
+            status: runtime.hasUpdate
+                ? AgentRuntimeStatus.installed
+                : runtime.status,
+            installedVersion: runtime.installedVersion,
+            executablePath: runtime.executablePath,
+            detectionSource: runtime.detectionSource,
+            managedByPackageManager: runtime.managedByPackageManager,
+          ),
+      ]);
+      return metadata.future;
+    });
+
+    await pumpScreen(tester, settle: false);
+
+    expect(find.byKey(const ValueKey('agent-checking-cli')), findsNothing);
+    expect(
+      inRow('cli:claude', find.text('Update v1.0.0 → v1.1.0')),
+      findsOneWidget,
+    );
+    expect(find.text('Weekly · 75% remaining'), findsOneWidget);
+    expect(find.byKey(const ValueKey('agent-update-all')), findsOneWidget);
+    Rect at(String key) => tester.getRect(find.byKey(ValueKey(key)));
+    final toggle = at('agent-absent-toggle-cli');
+    final acp = at('agent-runtime-acp:claude');
+
+    await pumpFrames(tester);
+    expect(find.text('Refreshing versions…'), findsOneWidget);
+    // Discovery must not turn the known update back into a plain install.
+    expect(
+      inRow('cli:claude', find.text('Update v1.0.0 → v1.1.0')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('agent-update-all')), findsOneWidget);
+
+    metadata.complete(runtimes);
+    await tester.pumpAndSettle();
+    expect(find.text('Installed versions and account usage'), findsOneWidget);
+    expect(at('agent-absent-toggle-cli'), toggle);
+    expect(at('agent-runtime-acp:claude'), acp);
+  });
+
+  testWidgets('a single quota fills the checking space without moving rows', (
+    tester,
+  ) async {
+    final pending = Completer<Map<String, AgentUsage>>();
+    when(() => service.readUsage(session, any()))
+        .thenAnswer((_) => pending.future);
+    await pumpScreen(tester);
+    final toggle = find.byKey(const ValueKey('agent-absent-toggle-cli'));
+    final before = tester.getRect(toggle);
+    expect(inRow('cli:claude', find.text('Checking usage…')), findsOneWidget);
+
+    // No reset time: a dated reset line wraps in the square test font.
+    pending.complete({
+      'cli:claude': const AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [AgentUsageWindow(label: 'Weekly', usedPercent: 25)],
+      ),
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('Weekly · 75% remaining'), findsOneWidget);
+    expect(tester.getRect(toggle), before);
   });
 
   testWidgets('discovery holds one checking line per section', (tester) async {

@@ -213,37 +213,44 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           (runtime) => runtime.status == AgentRuntimeStatus.checking,
         );
     final nothingInstalled = _nothingInstalled;
-    Widget section(AgentRuntimeKind kind, String title, String subtitle) =>
-        _RuntimeSection(
-          kind: kind,
-          title: title,
-          subtitle: subtitle,
-          runtimes: _model.runtimes
-              .where((runtime) => runtime.definition.kind == kind)
-              .toList(),
-          showAbsentInline: nothingInstalled,
-          absentExpanded: _absentExpanded.contains(kind),
-          onToggleAbsent: () => setState(() {
-            if (!_absentExpanded.remove(kind)) _absentExpanded.add(kind);
-          }),
-          runningActions: _model.runningActions,
-          queuedActions: _model.queuedActions,
-          recheckingActions: _model.recheckingActions,
-          actionOutput: _model.actionOutput,
-          usage: _model.usage,
-          checkingUsage: _model.checkingUsage,
-          locked: _model.busy || _model.refreshing,
-          onAction: _model.runAction,
-          onRecheck: _model.recheck,
-        );
+    Widget section(
+      AgentRuntimeKind kind,
+      String title,
+      String singular,
+      String subtitle,
+    ) => _RuntimeSection(
+      kind: kind,
+      title: title,
+      singular: singular,
+      subtitle: subtitle,
+      runtimes: _model.runtimes
+          .where((runtime) => runtime.definition.kind == kind)
+          .toList(),
+      showAbsentInline: nothingInstalled,
+      absentExpanded: _absentExpanded.contains(kind),
+      onToggleAbsent: () => setState(() {
+        if (!_absentExpanded.remove(kind)) _absentExpanded.add(kind);
+      }),
+      runningActions: _model.runningActions,
+      queuedActions: _model.queuedActions,
+      recheckingActions: _model.recheckingActions,
+      actionOutput: _model.actionOutput,
+      usage: _model.usage,
+      checkingUsage: _model.checkingUsage,
+      locked: _model.busy || _model.refreshing,
+      onAction: _model.runAction,
+      onRecheck: _model.recheck,
+    );
     final cliSection = section(
       AgentRuntimeKind.cli,
       'agent CLIs',
+      'agent CLI',
       'Launch and resume tools available on this host',
     );
     final acpSection = section(
       AgentRuntimeKind.acpAdapter,
       'ACP adapters',
+      'ACP adapter',
       'Providers available to native agent windows',
     );
     return Scaffold(
@@ -270,19 +277,29 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
           ),
         ),
       ),
-      bottomNavigationBar: updates.isNotEmpty || _model.updatingAll
-          ? _UpdateBar(
-              label: _model.updatingAll
-                  ? 'Updating ${_model.completedUpdates + 1 > _model.totalUpdates ? _model.totalUpdates : _model.completedUpdates + 1} of ${_model.totalUpdates}'
-                  : '${updates.length} ${updates.length == 1 ? 'update' : 'updates'} available',
-              busy: _model.updatingAll,
-              managedCount: managedUpdates,
-              manualCount: updates.length - managedUpdates,
-              onUpdate: _model.busy || _model.refreshing
-                  ? null
-                  : _model.updateAll,
-            )
-          : null,
+      // Always present so the bar can ease in and out; the empty state only
+      // holds the bottom inset the body gives up to a bottom bar.
+      bottomNavigationBar: AnimatedSize(
+        duration: _layoutMotion(context),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topCenter,
+        child: updates.isNotEmpty || _model.updatingAll
+            ? _UpdateBar(
+                label: _model.updatingAll
+                    ? 'Updating ${_model.completedUpdates + 1 > _model.totalUpdates ? _model.totalUpdates : _model.completedUpdates + 1} of ${_model.totalUpdates}'
+                    : '${updates.length} ${updates.length == 1 ? 'update' : 'updates'} available',
+                busy: _model.updatingAll,
+                managedCount: managedUpdates,
+                manualCount: updates.length - managedUpdates,
+                onUpdate: _model.busy || _model.refreshing
+                    ? null
+                    : _model.updateAll,
+              )
+            : const SafeArea(
+                top: false,
+                child: SizedBox(width: double.infinity),
+              ),
+      ),
       body: SafeArea(
         top: false,
         child: RefreshIndicator(
@@ -312,39 +329,44 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                   else
                     Padding(
                       padding: const EdgeInsets.only(bottom: 20),
-                      child: Semantics(
-                        key: const ValueKey('agent-usage-announcement'),
-                        liveRegion: true,
-                        label: _model.checkingUsage
-                            ? 'Checking account usage.'
-                            : _model.usageGeneration > 0
-                            ? 'Account usage checks complete. Review each agent for results.'
-                            : null,
-                        child: Row(
-                          children: [
-                            Icon(
-                              initiallyChecking
-                                  ? Icons.sync_rounded
-                                  : Icons.dns_outlined,
-                              size: 18,
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
+                      child: AnimatedSize(
+                        duration: _layoutMotion(context),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.topCenter,
+                        child: Semantics(
+                          key: const ValueKey('agent-usage-announcement'),
+                          liveRegion: true,
+                          label: _model.checkingUsage
+                              ? 'Checking account usage.'
+                              : _model.usageGeneration > 0
+                              ? 'Account usage checks complete. Review each agent for results.'
+                              : null,
+                          child: Row(
+                            children: [
+                              Icon(
                                 initiallyChecking
-                                    ? 'Checking installed agents…'
-                                    : _model.refreshing
-                                    ? 'Refreshing versions…'
-                                    : nothingInstalled
-                                    ? 'No agents on this host yet. Install one below.'
-                                    : 'Installed versions and account usage',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
+                                    ? Icons.sync_rounded
+                                    : Icons.dns_outlined,
+                                size: 18,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  initiallyChecking
+                                      ? 'Checking installed agents…'
+                                      : _model.refreshing
+                                      ? 'Refreshing versions…'
+                                      : nothingInstalled
+                                      ? 'No agents on this host yet. Install one below.'
+                                      : 'Installed versions and account usage',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -491,6 +513,7 @@ class _RuntimeSection extends StatelessWidget {
   const _RuntimeSection({
     required this.kind,
     required this.title,
+    required this.singular,
     required this.subtitle,
     required this.runtimes,
     required this.showAbsentInline,
@@ -508,6 +531,7 @@ class _RuntimeSection extends StatelessWidget {
   });
   final AgentRuntimeKind kind;
   final String title;
+  final String singular;
   final String subtitle;
   final List<AgentRuntimeInfo> runtimes;
   final bool showAbsentInline;
@@ -539,6 +563,7 @@ class _RuntimeSection extends StatelessWidget {
       for (final runtime in runtimes)
         if (!showAbsentInline && isAgentRuntimeAbsent(runtime)) runtime,
     ];
+    String count(int value) => '$value ${value == 1 ? singular : title}';
     Widget divider() => Divider(
       height: 1,
       indent: 12,
@@ -570,7 +595,7 @@ class _RuntimeSection extends StatelessWidget {
         _GroupRow(
           key: ValueKey('agent-checking-${kind.name}'),
           icon: Icons.sync_rounded,
-          label: 'Checking ${runtimes.length} $title…',
+          label: 'Checking ${count(runtimes.length)}…',
         ),
       ];
     } else {
@@ -601,24 +626,10 @@ class _RuntimeSection extends StatelessWidget {
             expanded: absentExpanded,
             onTap: onToggleAbsent,
             semanticsLabel: absentExpanded
-                ? '${absent.length} $title not installed'
-                : '${absent.length} $title not installed: $names',
+                ? '${count(absent.length)} not installed'
+                : '${count(absent.length)} not installed: $names',
           ),
-          AnimatedSwitcher(
-            duration: MediaQuery.disableAnimationsOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 200),
-            switchInCurve: Curves.easeOutCubic,
-            switchOutCurve: Curves.easeInCubic,
-            transitionBuilder: (child, animation) => SizeTransition(
-              sizeFactor: animation,
-              alignment: Alignment.topCenter,
-              child: child,
-            ),
-            layoutBuilder: (current, previous) => Stack(
-              alignment: Alignment.topCenter,
-              children: [...previous, ?current],
-            ),
+          _Reveal(
             child: absentExpanded
                 ? Column(
                     key: ValueKey('agent-absent-list-${kind.name}'),
@@ -653,7 +664,7 @@ class _RuntimeSection extends StatelessWidget {
                   Semantics(
                     container: true,
                     label: checking
-                        ? '${runtimes.length} $title'
+                        ? count(runtimes.length)
                         : '$installed of ${runtimes.length} installed',
                     excludeSemantics: true,
                     child: Text(
@@ -683,11 +694,45 @@ class _RuntimeSection extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             side: BorderSide(color: scheme.outlineVariant),
           ),
-          child: Column(children: rows),
+          // Discovery replaces the placeholder with however many rows the
+          // host has; grow into them rather than jumping.
+          child: _Reveal(
+            child: Column(key: ValueKey(checking), children: rows),
+          ),
         ),
       ],
     );
   }
+}
+
+Duration _layoutMotion(BuildContext context) =>
+    MediaQuery.disableAnimationsOf(context)
+    ? Duration.zero
+    : const Duration(milliseconds: 200);
+
+/// Swaps [child] by growing the new content in from the top while the old
+/// content fades and folds away, so neighbours slide instead of jump.
+class _Reveal extends StatelessWidget {
+  const _Reveal({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => AnimatedSwitcher(
+    duration: _layoutMotion(context),
+    switchInCurve: Curves.easeOutCubic,
+    switchOutCurve: Curves.easeInCubic,
+    transitionBuilder: (child, animation) => SizeTransition(
+      sizeFactor: animation,
+      alignment: Alignment.topCenter,
+      child: FadeTransition(opacity: animation, child: child),
+    ),
+    layoutBuilder: (current, previous) => Stack(
+      alignment: Alignment.topCenter,
+      children: [...previous, ?current],
+    ),
+    child: child,
+  );
 }
 
 /// A non-agent line inside a section card: the discovery placeholder, or the
@@ -902,148 +947,158 @@ class _RuntimeRowState extends State<_RuntimeRow> {
     return Padding(
       key: ValueKey('agent-runtime-${runtime.definition.id}'),
       padding: const EdgeInsets.all(12),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final stacked =
-              constraints.maxWidth < 300 ||
-              MediaQuery.textScalerOf(context).scale(14) > 20;
-          final heading = Semantics(
-            button: true,
-            expanded: _expanded,
-            label: '${runtime.definition.label} details',
-            child: InkWell(
-              key: ValueKey('agent-details-${runtime.definition.id}'),
-              onTap: () => setState(() => _expanded = !_expanded),
-              borderRadius: BorderRadius.circular(8),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 48),
-                child: Row(
-                  children: [
-                    AgentToolIcon(
-                      tool: runtime.definition.tool,
-                      color: scheme.onSurfaceVariant,
-                      fallbackIcon: Icons.hub_outlined,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        runtime.definition.label,
-                        style: Theme.of(context).textTheme.titleSmall
-                            ?.copyWith(fontWeight: FontWeight.w600),
+      // Usage, status, and details arrive after the row; ease each height
+      // change so rows below slide instead of jump.
+      child: AnimatedSize(
+        duration: _layoutMotion(context),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topCenter,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final stacked =
+                constraints.maxWidth < 300 ||
+                MediaQuery.textScalerOf(context).scale(14) > 20;
+            final heading = Semantics(
+              button: true,
+              expanded: _expanded,
+              label: '${runtime.definition.label} details',
+              child: InkWell(
+                key: ValueKey('agent-details-${runtime.definition.id}'),
+                onTap: () => setState(() => _expanded = !_expanded),
+                borderRadius: BorderRadius.circular(8),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 48),
+                  child: Row(
+                    children: [
+                      AgentToolIcon(
+                        tool: runtime.definition.tool,
+                        color: scheme.onSurfaceVariant,
+                        fallbackIcon: Icons.hub_outlined,
                       ),
-                    ),
-                    Icon(
-                      _expanded
-                          ? Icons.expand_less_rounded
-                          : Icons.expand_more_rounded,
-                      size: 18,
-                      color: scheme.onSurfaceVariant,
-                    ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          runtime.definition.label,
+                          style: Theme.of(context).textTheme.titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      Icon(
+                        _expanded
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        size: 18,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: heading),
+                    if (!stacked) ...[const SizedBox(width: 8), action],
                   ],
                 ),
-              ),
-            ),
-          );
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(child: heading),
-                  if (!stacked) ...[const SizedBox(width: 8), action],
-                ],
-              ),
-              const SizedBox(height: 4),
-              Semantics(
-                liveRegion: widget.busy || widget.queued,
-                child: _StatusLabel(presentation: status),
-              ),
-              if (agentSourceLine(runtime) case final String source
-                  when !_expanded) ...[
                 const SizedBox(height: 4),
-                Text(
-                  source,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: FluttyTheme.monoStyle.copyWith(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
-                  ),
+                Semantics(
+                  liveRegion: widget.busy || widget.queued,
+                  child: _StatusLabel(presentation: status),
                 ),
-              ],
-              if (runtime.message case final message?) ...[
-                const SizedBox(height: 6),
-                Text(
-                  message,
-                  maxLines: _expanded ? null : 2,
-                  overflow: _expanded ? null : TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall
-                      ?.copyWith(color: scheme.onSurfaceVariant),
-                ),
-              ],
-              if (runtime.definition.kind == AgentRuntimeKind.cli &&
-                  (runtime.status == AgentRuntimeStatus.installed ||
-                      runtime.status ==
-                          AgentRuntimeStatus.updateAvailable)) ...[
-                const SizedBox(height: 8),
-                AgentUsageSummary(
-                  usage: widget.usage,
-                  checking: widget.checkingUsage,
-                  expanded: _expanded,
-                ),
-              ],
-              if (stacked)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Align(alignment: Alignment.centerRight, child: action),
-                ),
-              if (_expanded) ...[
-                const SizedBox(height: 12),
-                if (runtime.installedVersion case final value?)
-                  _DetailLine(label: 'Installed version', value: value),
-                if (runtime.latestVersion case final value?)
-                  _DetailLine(label: 'Latest version', value: value),
-                if (runtime.detectionSource case final value?)
-                  _DetailLine(label: 'Install source', value: value),
-                if (runtime.executablePath case final value?)
-                  _DetailLine(
-                    label: 'Executable',
-                    value: displayAgentExecutablePath(value),
-                  ),
-                if (runtime.hasUpdate && !runtime.managedByPackageManager)
-                  const Text(
-                    'Update this installation on the host, then re-check its version.',
-                  ),
-                if (runtime.status == AgentRuntimeStatus.notInstalled &&
-                    !runtime.definition.supportsManagedInstall)
-                  const Text(
-                    'Install this agent on the host, then re-check its version.',
-                  ),
-                if (runtime.executablePath == null &&
-                    runtime.installedVersion == null &&
-                    runtime.latestVersion == null)
-                  const Text('No installation details detected yet.'),
-              ],
-              if (widget.busy &&
-                  widget.actionOutput != null &&
-                  widget.actionOutput!.trim().isNotEmpty) ...[
-                const SizedBox(height: 12),
-                const Divider(height: 1),
-                const SizedBox(height: 8),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 88),
-                  child: SingleChildScrollView(
-                    reverse: true,
-                    child: SelectableText(
-                      widget.actionOutput!.trim(),
-                      style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
+                if (agentSourceLine(runtime) case final String source
+                    when !_expanded) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    source,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: FluttyTheme.monoStyle.copyWith(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
                     ),
                   ),
-                ),
+                ],
+                if (runtime.message case final message?) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    message,
+                    maxLines: _expanded ? null : 2,
+                    overflow: _expanded ? null : TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+                if (runtime.definition.kind == AgentRuntimeKind.cli &&
+                    (runtime.status == AgentRuntimeStatus.installed ||
+                        runtime.status ==
+                            AgentRuntimeStatus.updateAvailable)) ...[
+                  const SizedBox(height: 8),
+                  AgentUsageSummary(
+                    usage: widget.usage,
+                    checking: widget.checkingUsage,
+                    expanded: _expanded,
+                  ),
+                ],
+                if (stacked)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: action,
+                    ),
+                  ),
+                if (_expanded) ...[
+                  const SizedBox(height: 12),
+                  if (runtime.installedVersion case final value?)
+                    _DetailLine(label: 'Installed version', value: value),
+                  if (runtime.latestVersion case final value?)
+                    _DetailLine(label: 'Latest version', value: value),
+                  if (runtime.detectionSource case final value?)
+                    _DetailLine(label: 'Install source', value: value),
+                  if (runtime.executablePath case final value?)
+                    _DetailLine(
+                      label: 'Executable',
+                      value: displayAgentExecutablePath(value),
+                    ),
+                  if (runtime.hasUpdate && !runtime.managedByPackageManager)
+                    const Text(
+                      'Update this installation on the host, then re-check its version.',
+                    ),
+                  if (runtime.status == AgentRuntimeStatus.notInstalled &&
+                      !runtime.definition.supportsManagedInstall)
+                    const Text(
+                      'Install this agent on the host, then re-check its version.',
+                    ),
+                  if (runtime.executablePath == null &&
+                      runtime.installedVersion == null &&
+                      runtime.latestVersion == null)
+                    const Text('No installation details detected yet.'),
+                ],
+                if (widget.busy &&
+                    widget.actionOutput != null &&
+                    widget.actionOutput!.trim().isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  const Divider(height: 1),
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 88),
+                    child: SingleChildScrollView(
+                      reverse: true,
+                      child: SelectableText(
+                        widget.actionOutput!.trim(),
+                        style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
+                      ),
+                    ),
+                  ),
+                ],
               ],
-            ],
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }

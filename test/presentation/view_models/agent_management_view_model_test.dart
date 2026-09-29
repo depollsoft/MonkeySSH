@@ -91,6 +91,113 @@ void main() {
     verify(() => service.readUsage(session, any())).called(1);
   });
 
+  test(
+    'opens on the cached probe and quotas instead of placeholders',
+    () async {
+      final usage = {
+        runtimes.first.definition.id: const AgentUsage(
+          status: AgentUsageStatus.available,
+        ),
+      };
+      final pending = Completer<List<AgentRuntimeInfo>>();
+      when(() => service.cachedState(session))
+          .thenReturn((runtimes: runtimes, usage: usage));
+      when(
+        () => service.refreshAll(
+          session,
+          onDiscovered: any(named: 'onDiscovered'),
+        ),
+      ).thenAnswer((_) => pending.future);
+
+      model.initialize();
+
+      expect(model.runtimes, runtimes);
+      expect(model.runtimes, isNot(same(runtimes)));
+      expect(model.usage, usage);
+      pending.complete(runtimes);
+      await pumpEventQueue();
+    },
+  );
+
+  test('a cached probe that failed everywhere is not shown', () async {
+    when(() => service.cachedState(session)).thenReturn((
+      runtimes: [
+        for (final runtime in runtimes)
+          AgentRuntimeInfo(
+            definition: runtime.definition,
+            status: AgentRuntimeStatus.failed,
+          ),
+      ],
+      usage: const {},
+    ));
+    final pending = Completer<List<AgentRuntimeInfo>>();
+    when(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).thenAnswer((_) => pending.future);
+
+    model.initialize();
+
+    expect(
+      model.runtimes.map((runtime) => runtime.status),
+      everyElement(AgentRuntimeStatus.checking),
+    );
+    pending.complete(runtimes);
+    await pumpEventQueue();
+  });
+
+  test(
+    'discovery keeps known updates until the full result replaces them',
+    () async {
+      await model.refresh();
+      final unchanged = runtimes.first;
+      final changed = runtimes[1];
+      final metadata = Completer<List<AgentRuntimeInfo>>();
+      when(
+        () => service.refreshAll(
+          session,
+          onDiscovered: any(named: 'onDiscovered'),
+        ),
+      ).thenAnswer((invocation) {
+        (invocation.namedArguments[#onDiscovered]
+            as void Function(List<AgentRuntimeInfo>))([
+          // Registry metadata is not known yet, so discovery says "installed".
+          AgentRuntimeInfo(
+            definition: unchanged.definition,
+            status: AgentRuntimeStatus.installed,
+            installedVersion: unchanged.installedVersion,
+          ),
+          AgentRuntimeInfo(
+            definition: changed.definition,
+            status: AgentRuntimeStatus.installed,
+            installedVersion: '2.0',
+          ),
+        ]);
+        return metadata.future;
+      });
+
+      final refresh = model.refresh();
+      await pumpEventQueue();
+
+      expect(model.runtimes.first, same(unchanged));
+      expect(model.runtimes[1].installedVersion, '2.0');
+      expect(model.runtimes[1].hasUpdate, isFalse);
+
+      final result = [
+        AgentRuntimeInfo(
+          definition: unchanged.definition,
+          status: AgentRuntimeStatus.installed,
+          installedVersion: unchanged.installedVersion,
+        ),
+        model.runtimes[1],
+      ];
+      metadata.complete(result);
+      await refresh;
+      // The full result is authoritative, even when it drops a known update.
+      expect(model.runtimes, result);
+    },
+  );
+
   test('revoked access prevents probing and stale actions', () async {
     await model.refresh();
     permitted = false;

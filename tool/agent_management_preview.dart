@@ -192,6 +192,11 @@ class _PreviewManagement extends Fake implements AgentManagementService {
     );
   }
 
+  // Always open cold so the preview shows the discovery sequence.
+  @override
+  ({List<AgentRuntimeInfo> runtimes, Map<String, AgentUsage> usage})?
+  cachedState(SshSession session) => null;
+
   @override
   Future<List<AgentRuntimeInfo>> refreshAll(
     SshSession session, {

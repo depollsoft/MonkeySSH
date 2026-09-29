@@ -103,6 +103,38 @@ void main() {
     const quota =
         '__monkeyssh_usage__={"id":"claude","status":"available","windows":[{"label":"Weekly","usedPercent":25}]}';
 
+    test(
+      'cachedState returns the last probe with its session quotas',
+      () async {
+        final client = _MockSshClient();
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((call) async {
+              final command = call.positionalArguments.first as String;
+              if (command.contains('__monkeyssh_agent_path__')) {
+                return _execOutput(pathReply(installed: true));
+              }
+              if (command.contains('MONKEYSSH_USAGE_PROBE')) {
+                return _execOutput(quota);
+              }
+              return _execOutput(metadata);
+            });
+        final service = _unlockedManagementService(_MockDiscovery());
+        final session = _remoteSession(client);
+        expect(service.cachedState(session), isNull);
+
+        final runtimes = await service.refreshAll(session);
+        expect(service.cachedState(session)!.runtimes, runtimes);
+        expect(service.cachedState(session)!.usage, isEmpty);
+
+        await service.readUsage(session, runtimes);
+        final usage = service.cachedState(session)!.usage;
+        expect(usage.keys, ['cli:claude']);
+        expect(usage['cli:claude']!.windows.single.usedPercent, 25);
+        // Quotas stay bound to the SSH session that read them.
+        expect(service.cachedState(_remoteSession(client))!.usage, isEmpty);
+      },
+    );
+
     for (final action in ['inspect', 'refreshAll', 'install']) {
       test('missing CLI becomes readable immediately after $action', () async {
         var installed = false;

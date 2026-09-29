@@ -57,6 +57,47 @@ class AgentUsageSummary extends StatelessWidget {
           : '${localizations.formatShortDate(local)}, $time';
       retryLabel = 'Next usage check after $when';
     }
+    if (checking && snapshot == null) {
+      // Same metrics as one quota window below, so the most common result
+      // fills this space instead of pushing every later row down.
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Checking usage…',
+              style: FluttyTheme.monoStyle.copyWith(
+                fontSize: 12,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            ExcludeSemantics(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: SizedBox(
+                        height: 4,
+                        width: double.infinity,
+                        child: ColoredBox(
+                          color: scheme.onSurface.withValues(alpha: 0.16),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Holds the reset line's height; an empty Text lays out at 0.
+                  Text(' ', style: style),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     if (snapshot == null || snapshot.status != AgentUsageStatus.available) {
       final notices = snapshot?.notices ?? const <AgentUsageNotice>[];
       final visible = expanded ? notices : notices.take(1);

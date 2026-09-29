@@ -53,13 +53,24 @@ class AgentManagementViewModel extends ChangeNotifier {
   bool get busy => updatingAll || runningActions.isNotEmpty;
 
   void initialize() {
-    runtimes = [
-      for (final definition in agentRuntimeDefinitions)
-        AgentRuntimeInfo(
-          definition: definition,
-          status: AgentRuntimeStatus.checking,
-        ),
-    ];
+    // Open on the last probe of this connection when there is one, so the
+    // refresh below updates rows in place instead of replacing placeholders.
+    final cached = service().cachedState(session());
+    if (cached != null &&
+        !cached.runtimes.every(
+          (runtime) => runtime.status == AgentRuntimeStatus.failed,
+        )) {
+      runtimes = List.of(cached.runtimes);
+      usage = Map.of(cached.usage);
+    } else {
+      runtimes = [
+        for (final definition in agentRuntimeDefinitions)
+          AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.checking,
+          ),
+      ];
+    }
     _usageClock = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && usage.isNotEmpty) notifyListeners();
     });
@@ -116,7 +127,7 @@ class AgentManagementViewModel extends ChangeNotifier {
         session(),
         onDiscovered: (discovered) {
           if (!mounted) return;
-          _change(() => this.runtimes = discovered);
+          _change(() => this.runtimes = _keepKnownVersions(discovered));
           usageStarted = true;
           unawaited(_refreshUsage());
         },
@@ -132,6 +143,29 @@ class AgentManagementViewModel extends ChangeNotifier {
     } finally {
       if (mounted) _change(() => refreshing = false);
     }
+  }
+
+  // Discovery lands before registry metadata, so on its own it would turn
+  // every known update back into a plain install until the full result
+  // arrives. Keep what is known about an installation that has not changed.
+  List<AgentRuntimeInfo> _keepKnownVersions(List<AgentRuntimeInfo> discovered) {
+    final known = {
+      for (final runtime in runtimes) runtime.definition.id: runtime,
+    };
+    return [
+      for (final fresh in discovered)
+        switch (known[fresh.definition.id]) {
+          final previous?
+              when fresh.status == AgentRuntimeStatus.installed &&
+                  (previous.status == AgentRuntimeStatus.installed ||
+                      previous.status == AgentRuntimeStatus.updateAvailable) &&
+                  previous.executablePath == fresh.executablePath &&
+                  (fresh.installedVersion == null ||
+                      fresh.installedVersion == previous.installedVersion) =>
+            previous,
+          _ => fresh,
+        },
+    ];
   }
 
   Future<void> updateAll() async {
