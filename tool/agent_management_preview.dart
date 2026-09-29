@@ -75,6 +75,8 @@ class _PreviewManagement extends Fake implements AgentManagementService {
     final id = definition.id;
     final status = switch (id) {
       'cli:claude' || 'cli:codex' => AgentRuntimeStatus.updateAvailable,
+      // Leaves a folded "not installed" group in the CLI section too.
+      'cli:openclaw' || 'cli:muse' => AgentRuntimeStatus.notInstalled,
       _ when definition.kind == AgentRuntimeKind.cli =>
         AgentRuntimeStatus.installed,
       _ => AgentRuntimeStatus.notInstalled,
@@ -189,6 +191,11 @@ class _PreviewManagement extends Fake implements AgentManagementService {
       },
     );
   }
+
+  // Always open cold so the preview shows the discovery sequence.
+  @override
+  ({List<AgentRuntimeInfo> runtimes, Map<String, AgentUsage> usage})?
+  cachedState(SshSession session) => null;
 
   @override
   Future<List<AgentRuntimeInfo>> refreshAll(

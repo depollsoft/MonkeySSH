@@ -392,6 +392,22 @@ final agentRuntimeDefinitions = List<AgentRuntimeDefinition>.unmodifiable([
   ...agentStandaloneAcpRuntimeDefinitions,
 ]);
 
+/// Key of [tool] in usage probes, cooldowns, and the usage cache.
+String? _usageIdForTool(AgentLaunchTool? tool) => switch (tool) {
+  AgentLaunchTool.claudeCode => 'claude',
+  AgentLaunchTool.codex => 'codex',
+  AgentLaunchTool.copilotCli => 'copilot',
+  AgentLaunchTool.openCode => 'opencode',
+  AgentLaunchTool.antigravity => 'antigravity',
+  AgentLaunchTool.cursorAgent => 'cursor',
+  AgentLaunchTool.pi => 'pi',
+  AgentLaunchTool.hermes => 'hermes',
+  AgentLaunchTool.openclaw => 'openclaw',
+  AgentLaunchTool.grokBuild => 'grok',
+  AgentLaunchTool.museCode => 'muse',
+  null => null,
+};
+
 /// Extracts a normalized version from common CLI output.
 String? parseAgentVersion(String output) {
   // Muse prints the marketing version first and its actual release in brackets.
@@ -661,6 +677,7 @@ class AgentManagementService {
 
   static const _updateCheckTtl = Duration(minutes: 15);
   static const _maxRuntimeCacheEntries = 32;
+  static const _usageSnapshotTtl = Duration(hours: 1);
 
   final AgentSessionDiscoveryService _discovery;
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
@@ -747,6 +764,41 @@ class AgentManagementService {
   /// Number of retained connection snapshots.
   @visibleForTesting
   int get cachedConnectionCount => _runtimeCache.length;
+
+  /// The last full probe of [session] and any quotas read for it, while both
+  /// are fresh enough to show. The manager opens on this and re-checks in
+  /// place instead of rebuilding from placeholders.
+  ({List<AgentRuntimeInfo> runtimes, Map<String, AgentUsage> usage})?
+  cachedState(SshSession session) {
+    _pruneRuntimeCache();
+    final cached = _runtimeCache[session.connectionId];
+    if (cached == null) return null;
+    final snapshot = _usageCache[session.connectionId];
+    final sameSession =
+        snapshot != null && identical(snapshot.session, session);
+    // Any agent's read moves the entry's timestamp and carries the others
+    // forward, so judge each quota by its own read time. A cooldown that is
+    // still running stays worth showing, as it does in the cache prune.
+    bool current(AgentUsage usage) {
+      final checkedAt = usage.checkedAt;
+      return (checkedAt != null &&
+              _now().difference(checkedAt) < _usageSnapshotTtl) ||
+          (usage.retryAt?.isAfter(_now()) ?? false);
+    }
+
+    return (
+      runtimes: List.unmodifiable(cached.runtimes),
+      usage: {
+        if (sameSession)
+          for (final runtime in cached.runtimes)
+            if (_usageIdForTool(runtime.definition.tool) case final id?
+                when runtime.executablePath != null &&
+                    snapshot.paths[id] == runtime.executablePath)
+              if (snapshot.values[id] case final usage? when current(usage))
+                runtime.definition.id: usage,
+      },
+    );
+  }
 
   /// Returns cached update information or probes the active host.
   /// Periodic checks bypass the cache with [forceRefresh], but share in-flight work.
@@ -1181,20 +1233,7 @@ class AgentManagementService {
         continue;
       }
       final tool = runtime.definition.tool;
-      final id = switch (tool) {
-        AgentLaunchTool.claudeCode => 'claude',
-        AgentLaunchTool.codex => 'codex',
-        AgentLaunchTool.copilotCli => 'copilot',
-        AgentLaunchTool.openCode => 'opencode',
-        AgentLaunchTool.antigravity => 'antigravity',
-        AgentLaunchTool.cursorAgent => 'cursor',
-        AgentLaunchTool.pi => 'pi',
-        AgentLaunchTool.hermes => 'hermes',
-        AgentLaunchTool.openclaw => 'openclaw',
-        AgentLaunchTool.grokBuild => 'grok',
-        AgentLaunchTool.museCode => 'muse',
-        null => null,
-      };
+      final id = _usageIdForTool(tool);
       if (id != null && runtime.executablePath != null) {
         selected[id] = runtime.executablePath!;
         refreshIntervals[id] = agentUsageRefreshInterval(tool);
@@ -1208,7 +1247,7 @@ class AgentManagementService {
     if (selected.isEmpty) return result;
     _usageCache.removeWhere(
       (_, entry) =>
-          _now().difference(entry.at) >= const Duration(hours: 1) &&
+          _now().difference(entry.at) >= _usageSnapshotTtl &&
           !entry.values.values.any(
             (usage) => usage.retryAt?.isAfter(_now()) ?? false,
           ),
@@ -1370,20 +1409,7 @@ class AgentManagementService {
   ) {
     for (final runtime in runtimes) {
       if (!result.containsKey(runtime.definition.id)) continue;
-      final id = switch (runtime.definition.tool) {
-        AgentLaunchTool.claudeCode => 'claude',
-        AgentLaunchTool.codex => 'codex',
-        AgentLaunchTool.copilotCli => 'copilot',
-        AgentLaunchTool.openCode => 'opencode',
-        AgentLaunchTool.antigravity => 'antigravity',
-        AgentLaunchTool.cursorAgent => 'cursor',
-        AgentLaunchTool.pi => 'pi',
-        AgentLaunchTool.hermes => 'hermes',
-        AgentLaunchTool.openclaw => 'openclaw',
-        AgentLaunchTool.grokBuild => 'grok',
-        AgentLaunchTool.museCode => 'muse',
-        null => null,
-      };
+      final id = _usageIdForTool(runtime.definition.tool);
       if (selected.containsKey(id)) {
         result[runtime.definition.id] =
             parsed[id] ??
