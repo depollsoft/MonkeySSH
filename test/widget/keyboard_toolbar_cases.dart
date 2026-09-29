@@ -3,6 +3,7 @@
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
@@ -606,6 +607,758 @@ void registerKeyboardToolbarTests() {
         expect(selectedSnippet?.id, 2);
         expect(selectedSnippet?.command, 'systemctl restart api');
         expect(find.text('Restart API'), findsNothing);
+      });
+
+      Future<TestGesture> longPressCtrl(WidgetTester tester) async {
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+        await tester.pump();
+        return gesture;
+      }
+
+      Widget bottomAnchoredToolbar(KeyboardToolbar toolbar) => MaterialApp(
+        home: Scaffold(body: Column(children: [const Spacer(), toolbar])),
+      );
+
+      testWidgets('Ctrl shows a long-press shortcuts indicator', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
+          ),
+        );
+
+        expect(
+          find.descendant(
+            of: find.byTooltip('Ctrl'),
+            matching: find.byIcon(Icons.more_horiz_rounded),
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('Ctrl long press sends the chord released over', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        var keyPressedCount = 0;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onKeyPressed: () => keyPressedCount++,
+            ),
+          ),
+        );
+
+        final ctrlRect = tester.getRect(find.byTooltip('Ctrl'));
+        final gesture = await longPressCtrl(tester);
+
+        final interrupt = find.text('\u2303C');
+        expect(interrupt, findsOneWidget);
+        expect(find.text('Interrupt'), findsOneWidget);
+        expect(tester.getCenter(interrupt).dy, lessThan(ctrlRect.top));
+        // Ctrl+C is the row nearest the finger.
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          expect(
+            tester.getCenter(find.text(shortcut.symbol)).dy,
+            lessThanOrEqualTo(tester.getCenter(interrupt).dy),
+          );
+        }
+
+        await gesture.moveTo(tester.getCenter(interrupt));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+        expect(keyPressedCount, 1);
+        expect(find.text('\u2303C'), findsNothing);
+      });
+
+      testWidgets('Ctrl long press released off the menu sends nothing', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        expect(find.text('\u2303C'), findsOneWidget);
+
+        // Slide over Ctrl+C, then away before releasing.
+        await gesture.moveTo(tester.getCenter(find.text('\u2303C')));
+        await tester.pump();
+        await gesture.moveTo(tester.getCenter(find.byTooltip('Ctrl')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(controller.isCtrlActive, isFalse);
+        expect(find.text('\u2303C'), findsNothing);
+      });
+
+      testWidgets('Ctrl shortcuts become one row when a column cannot fit', (
+        tester,
+      ) async {
+        // A landscape phone with the keyboard up leaves little room above the
+        // toolbar; clamping the column down would put the finger inside it.
+        const size = Size(844, 200);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final ctrlRect = tester.getRect(find.byTooltip('Ctrl'));
+        final gesture = await longPressCtrl(tester);
+
+        final interruptRect = tester.getRect(
+          find
+              .ancestor(
+                of: find.text('\u2303C'),
+                matching: find.byType(Container),
+              )
+              .first,
+        );
+        expect(interruptRect.bottom, lessThan(ctrlRect.top));
+        expect(interruptRect.left, lessThanOrEqualTo(ctrlRect.center.dx));
+        expect(interruptRect.right, greaterThan(ctrlRect.center.dx));
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          final center = tester.getCenter(find.text(shortcut.symbol));
+          expect(center.dy, tester.getCenter(find.text('\u2303C')).dy);
+          expect(
+            center.dx,
+            greaterThanOrEqualTo(tester.getCenter(find.text('\u2303C')).dx),
+          );
+        }
+
+        await gesture.moveTo(
+          Offset(ctrlRect.center.dx, interruptRect.center.dy),
+        );
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+      });
+
+      for (final (name, surface, layoutSize) in const [
+        ('a narrow landscape window', Size(360, 200), Size(360, 200)),
+        // Two toolbar rows with the keyboard up leave no room for a column.
+        (
+          'a portrait phone with the keyboard up',
+          Size(375, 300),
+          Size(375, 667),
+        ),
+      ]) {
+        testWidgets('Ctrl shortcuts row keeps Ctrl+C above Ctrl in $name', (
+          tester,
+        ) async {
+          await tester.binding.setSurfaceSize(surface);
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final output = <String>[];
+          terminal.onOutput = output.add;
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: MediaQuery(
+                data: MediaQueryData(size: layoutSize),
+                child: Scaffold(
+                  body: Column(
+                    children: [
+                      const Spacer(),
+                      KeyboardToolbar(terminal: terminal),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          final ctrlCenter = tester.getCenter(find.byTooltip('Ctrl'));
+          final gesture = await tester.startGesture(ctrlCenter);
+          await gesture.moveBy(const Offset(0, -30));
+          await tester.pump();
+
+          for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+            final rect = tester.getRect(find.text(shortcut.symbol));
+            expect(rect.left, greaterThanOrEqualTo(0));
+            expect(rect.right, lessThanOrEqualTo(surface.width));
+            expect(rect.center.dy, tester.getCenter(find.text('\u2303C')).dy);
+          }
+
+          // Straight up from the key, no sideways drift.
+          await gesture.moveTo(
+            Offset(ctrlCenter.dx, tester.getCenter(find.text('\u2303C')).dy),
+          );
+          await tester.pump();
+          await gesture.up();
+          await tester.pump();
+
+          expect(output, ['\x03']);
+        });
+      }
+
+      testWidgets('Ctrl shortcuts row fits large accessibility text', (
+        tester,
+      ) async {
+        const size = Size(844, 200);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        // The menu lives in the app overlay, above any MediaQuery in `home`.
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await longPressCtrl(tester);
+
+        expect(tester.takeException(), isNull);
+        final ctrlTop = tester.getRect(find.byTooltip('Ctrl')).top;
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          expect(
+            tester.getRect(find.text(shortcut.symbol)).bottom,
+            lessThan(ctrlTop),
+          );
+        }
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('Ctrl shortcuts column fits large accessibility text', (
+        tester,
+      ) async {
+        // The menu lives in the app overlay, above any MediaQuery in `home`.
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          for (final text in [shortcut.symbol, shortcut.description]) {
+            final paragraph = tester.renderObject<RenderParagraph>(
+              find.text(text),
+            );
+            expect(
+              paragraph.textSize.height,
+              lessThanOrEqualTo(TerminalMenuStyles.itemHeight),
+            );
+          }
+        }
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('Ctrl shortcut rows are labels, not buttons', (tester) async {
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+
+        expect(
+          tester.getSemantics(find.bySemanticsLabel('Ctrl+C, Interrupt')),
+          isSemantics(isButton: false, isSelected: true),
+        );
+
+        await gesture.cancel();
+        await tester.pump();
+        semantics.dispose();
+      });
+
+      testWidgets('a swipe lifting off the Ctrl menu without a move cancels', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.createGesture(pointer: 7);
+        await gesture.down(tester.getCenter(find.byTooltip('Ctrl')));
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        final interrupt = tester.getCenter(find.text('⌃C'));
+        await gesture.moveTo(interrupt);
+        await tester.pump();
+        // The lift lands above the menu with no move event before it.
+        await tester.sendEventToBinding(
+          PointerUpEvent(pointer: 7, position: Offset(interrupt.dx, 4)),
+        );
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('a tap after a Ctrl swipe chord does not lock Ctrl', (
+        tester,
+      ) async {
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Ctrl'));
+        await tester.pump();
+        expect(controller.ctrlState, isFalse);
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        await gesture.moveTo(tester.getCenter(find.text('⌃D')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+        expect(controller.isCtrlActive, isFalse);
+
+        // Within the 300 ms double-tap window of the first tap.
+        await tester.tap(find.byTooltip('Ctrl'));
+        await tester.pump();
+
+        expect(controller.ctrlState, isFalse);
+      });
+
+      testWidgets('the highlighted Ctrl shortcut keeps a full-opacity hint', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+
+        Color hintColor(String text) =>
+            tester.widget<Text>(find.text(text)).style!.color!;
+        expect(hintColor('Interrupt').a, 1);
+        expect(hintColor('End of input').a, lessThan(1));
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('Ctrl long press released in place sends nothing', (
+        tester,
+      ) async {
+        const size = Size(844, 200);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        expect(find.text('\u2303C'), findsOneWidget);
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('\u2303C'), findsNothing);
+      });
+
+      testWidgets('Ctrl long press menu hides when the gesture is cancelled', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        expect(find.text('\u2303C'), findsOneWidget);
+
+        await gesture.cancel();
+        await tester.pump();
+
+        expect(find.text('\u2303C'), findsNothing);
+      });
+
+      testWidgets('swiping up from Ctrl opens the menu without holding', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+
+        expect(find.text('⌃C'), findsOneWidget);
+
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+        expect(controller.isCtrlActive, isFalse);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('a fast swipe from Ctrl chooses the row it lands on', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        // One move event lands straight on the lowest row.
+        final ctrlRect = tester.getRect(find.byTooltip('Ctrl'));
+        final gesture = await tester.startGesture(ctrlRect.center);
+        await gesture.moveTo(
+          Offset(
+            ctrlRect.center.dx,
+            ctrlRect.top - 8 - TerminalMenuStyles.itemHeight / 2,
+          ),
+        );
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x03']);
+      });
+
+      testWidgets('a swipe past the top of the Ctrl menu sends nothing', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        final menuTop = tester.getTopLeft(find.text('⌃R')).dy;
+        await gesture.moveTo(
+          Offset(tester.getCenter(find.text('⌃R')).dx, menuTop - 60),
+        );
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('swiping down from Ctrl neither opens the menu nor toggles', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Column(
+                children: [
+                  KeyboardToolbar(terminal: terminal, controller: controller),
+                  const Spacer(),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, 30));
+        await tester.pump();
+
+        expect(find.text('⌃C'), findsNothing);
+
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(controller.isCtrlActive, isFalse);
+      });
+
+      testWidgets('a cancelled swipe from Ctrl sends nothing', (tester) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Ctrl')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        await gesture.moveTo(tester.getCenter(find.text('⌃C')));
+        await tester.pump();
+        await gesture.cancel();
+        await tester.pump();
+
+        expect(output, isEmpty);
+        expect(find.text('⌃C'), findsNothing);
+      });
+
+      testWidgets('swiping up from Paste opens its menu without holding', (
+        tester,
+      ) async {
+        var mediaPasteCount = 0;
+        var clipboardPasteCount = 0;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onPasteRequested: () async => clipboardPasteCount++,
+              onPasteMediaRequested: () async => mediaPasteCount++,
+              onPasteFilesRequested: () async {},
+            ),
+          ),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Paste')),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+
+        expect(find.text('Paste Media'), findsOneWidget);
+
+        await gesture.moveTo(tester.getCenter(find.text('Paste Media')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(mediaPasteCount, 1);
+        expect(clipboardPasteCount, 0);
+        expect(find.text('Paste Media'), findsNothing);
+      });
+
+      testWidgets('Ctrl shortcuts are not offered for custom input sinks', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onTextInput: (_) {},
+              onSpecialKey: (_) {},
+            ),
+          ),
+        );
+
+        expect(
+          find.descendant(
+            of: find.byTooltip('Ctrl'),
+            matching: find.byIcon(Icons.more_horiz_rounded),
+          ),
+          findsNothing,
+        );
+
+        final gesture = await longPressCtrl(tester);
+        expect(find.text('\u2303C'), findsNothing);
+        await gesture.up();
+        await tester.pump();
+      });
+
+      testWidgets('Ctrl exposes each shortcut as a semantics action', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final semantics = tester.ensureSemantics();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
+          ),
+        );
+
+        final node = tester.getSemantics(find.byTooltip('Ctrl'));
+        final data = node.getSemanticsData();
+        const interruptAction = CustomSemanticsAction(label: 'Send Ctrl+C');
+        final interruptId = CustomSemanticsAction.getIdentifier(
+          interruptAction,
+        );
+        expect(data.customSemanticsActionIds, contains(interruptId));
+
+        node.owner!.performAction(
+          node.id,
+          SemanticsAction.customAction,
+          interruptId,
+        );
+        await tester.pump();
+
+        expect(output, ['\x03']);
+        semantics.dispose();
+      });
+
+      test('Ctrl shortcuts send legacy control bytes', () {
+        fakeAsync((async) {
+          final output = <String>[];
+          terminal.onOutput = output.add;
+
+          final controller = KeyboardToolbarController();
+          addTearDown(controller.dispose);
+          final dispatcher = TerminalToolbarDispatcher(
+            terminal: terminal,
+            controller: controller,
+            refocusTerminal: () {},
+            lightImpact: () async {},
+          );
+
+          for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+            dispatcher.sendCtrlShortcut(shortcut);
+          }
+          async.flushMicrotasks();
+
+          expect(output, ['\x12', '\x0c', '\x1a', '\x04', '\x03']);
+        });
+      });
+
+      for (final (mode, expected) in const [
+        ('', '\x03'),
+        ('\x1b[>1u', '\x1b[99;5u'),
+      ]) {
+        test('Ctrl shortcuts send only the named chord (mode "$mode")', () {
+          fakeAsync((async) {
+            final output = <String>[];
+            terminal
+              ..onOutput = output.add
+              ..write(mode);
+
+            // Armed Alt and Shift would turn the named chord into a
+            // different one, so they are consumed but not applied.
+            final controller = KeyboardToolbarController()
+              ..toggleAlt()
+              ..toggleShift();
+            addTearDown(controller.dispose);
+            TerminalToolbarDispatcher(
+              terminal: terminal,
+              controller: controller,
+              refocusTerminal: () {},
+              lightImpact: () async {},
+            ).sendCtrlShortcut(KeyboardToolbarCtrlShortcut.interrupt);
+            async.flushMicrotasks();
+
+            expect(output, [expected]);
+            expect(controller.isAltActive, isFalse);
+            expect(controller.isShiftActive, isFalse);
+          });
+        });
+      }
+
+      test('Ctrl shortcuts consume an armed one-shot Ctrl', () {
+        fakeAsync((async) {
+          final output = <String>[];
+          terminal.onOutput = output.add;
+
+          final controller = KeyboardToolbarController()..toggleCtrl();
+          addTearDown(controller.dispose);
+          TerminalToolbarDispatcher(
+            terminal: terminal,
+            controller: controller,
+            refocusTerminal: () {},
+            lightImpact: () async {},
+          ).sendCtrlShortcut(KeyboardToolbarCtrlShortcut.endOfInput);
+          async.flushMicrotasks();
+
+          expect(output, ['\x04']);
+          expect(controller.isCtrlActive, isFalse);
+        });
       });
 
       testWidgets('Enter button renders and triggers callback', (tester) async {
