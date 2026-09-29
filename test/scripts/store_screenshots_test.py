@@ -291,6 +291,18 @@ class ProCaptionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'OCR did not return text for .*08_iphone_6_9.png'):
                 validate._validate_ocr_content([path])
 
+    def test_manager_usage_percentages_are_not_unavailable_models(self):
+        path = ROOT / 'android/fastlane/metadata-production/android/en-US/images/phoneScreenshots/8.png'
+        labels = 'Agent Management PRO Copilot CLI Claude Code '
+        for usage in ('Weekly Fable 100% remaining', 'Fable 94 % remaining', 'Fable 0% remaining'):
+            with self.subTest(usage=usage), patch.object(validate, '_ocr_texts', return_value={path: labels + usage}):
+                validate._validate_ocr_content([path])
+        for notice in ('Fable 5', 'Fable 5.5', 'currently unavailable', 'fable-mythos-access',
+                       'Fable 100% remaining currently unavailable'):
+            with self.subTest(notice=notice), patch.object(validate, '_ocr_texts', return_value={path: labels + notice}):
+                with self.assertRaisesRegex(ValueError, 'Claude unavailable model notice'):
+                    validate._validate_ocr_content([path])
+
     def test_manager_scene_requires_real_app_labels_and_badge(self):
         path = ROOT / 'ios/fastlane/screenshots/en-US/08_iphone_6_9.png'
         valid = 'Agent Management PRO Copilot CLI Claude Code'
