@@ -771,6 +771,85 @@ void registerKeyboardToolbarTests() {
         expect(output, ['\x03']);
       });
 
+      testWidgets('Ctrl shortcuts row fits a narrow window', (tester) async {
+        const size = Size(360, 200);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await longPressCtrl(tester);
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          final rect = tester.getRect(find.text(shortcut.symbol));
+          expect(rect.left, greaterThanOrEqualTo(0));
+          expect(rect.right, lessThanOrEqualTo(size.width));
+        }
+
+        await gesture.moveTo(tester.getCenter(find.text('\u2303R')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x12']);
+      });
+
+      testWidgets('Ctrl shortcuts row fits large accessibility text', (
+        tester,
+      ) async {
+        const size = Size(844, 200);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        // The menu lives in the app overlay, above any MediaQuery in `home`.
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await longPressCtrl(tester);
+
+        expect(tester.takeException(), isNull);
+        final ctrlTop = tester.getRect(find.byTooltip('Ctrl')).top;
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
+          expect(
+            tester.getRect(find.text(shortcut.symbol)).bottom,
+            lessThan(ctrlTop),
+          );
+        }
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
       testWidgets('Ctrl long press released in place sends nothing', (
         tester,
       ) async {
@@ -1058,7 +1137,7 @@ void registerKeyboardToolbarTests() {
         semantics.dispose();
       });
 
-      test('Ctrl shortcuts send legacy control bytes and honor Alt', () {
+      test('Ctrl shortcuts send legacy control bytes', () {
         fakeAsync((async) {
           final output = <String>[];
           terminal.onOutput = output.add;
@@ -1075,35 +1154,43 @@ void registerKeyboardToolbarTests() {
           for (final shortcut in KeyboardToolbarCtrlShortcut.values) {
             dispatcher.sendCtrlShortcut(shortcut);
           }
-          controller.toggleAlt();
-          dispatcher.sendCtrlShortcut(KeyboardToolbarCtrlShortcut.interrupt);
           async.flushMicrotasks();
 
-          expect(output, ['\x12', '\x0c', '\x1a', '\x04', '\x03', '\x1b\x03']);
-          expect(controller.isAltActive, isFalse);
+          expect(output, ['\x12', '\x0c', '\x1a', '\x04', '\x03']);
         });
       });
 
-      test('Ctrl shortcuts use Kitty encoding when enabled', () {
-        fakeAsync((async) {
-          final output = <String>[];
-          terminal
-            ..onOutput = output.add
-            ..write('\x1b[>1u');
+      for (final (mode, expected) in const [
+        ('', '\x03'),
+        ('\x1b[>1u', '\x1b[99;5u'),
+      ]) {
+        test('Ctrl shortcuts send only the named chord (mode "$mode")', () {
+          fakeAsync((async) {
+            final output = <String>[];
+            terminal
+              ..onOutput = output.add
+              ..write(mode);
 
-          final controller = KeyboardToolbarController();
-          addTearDown(controller.dispose);
-          TerminalToolbarDispatcher(
-            terminal: terminal,
-            controller: controller,
-            refocusTerminal: () {},
-            lightImpact: () async {},
-          ).sendCtrlShortcut(KeyboardToolbarCtrlShortcut.interrupt);
-          async.flushMicrotasks();
+            // Armed Alt and Shift would turn the named chord into a
+            // different one, so they are consumed but not applied.
+            final controller = KeyboardToolbarController()
+              ..toggleAlt()
+              ..toggleShift();
+            addTearDown(controller.dispose);
+            TerminalToolbarDispatcher(
+              terminal: terminal,
+              controller: controller,
+              refocusTerminal: () {},
+              lightImpact: () async {},
+            ).sendCtrlShortcut(KeyboardToolbarCtrlShortcut.interrupt);
+            async.flushMicrotasks();
 
-          expect(output, ['\x1b[99;5u']);
+            expect(output, [expected]);
+            expect(controller.isAltActive, isFalse);
+            expect(controller.isShiftActive, isFalse);
+          });
         });
-      });
+      }
 
       test('Ctrl shortcuts consume an armed one-shot Ctrl', () {
         fakeAsync((async) {

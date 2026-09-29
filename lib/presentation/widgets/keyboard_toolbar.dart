@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -1049,7 +1050,11 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     final size = axis == Axis.vertical
         ? Size(_ctrlShortcutsWidth, columnHeight)
         : Size(
-            count * _ctrlShortcutsRowItemWidth,
+            // A narrow window shares the width rather than clipping chords.
+            math.min(
+              count * _ctrlShortcutsRowItemWidth,
+              overlaySize.width - 2 * _pasteOptionsScreenMargin,
+            ),
             TerminalMenuStyles.itemHeight,
           );
     return _CtrlShortcutsLayout(
@@ -1300,27 +1305,20 @@ class TerminalToolbarDispatcher {
     _consumeOneShot();
   }
 
-  /// Sends a Ctrl chord from the Ctrl key's long-press menu.
+  /// Sends a Ctrl chord from the Ctrl key's menu.
   ///
-  /// Kitty keyboard mode gets the same CSI-u encoding as a hardware keyboard.
-  /// Otherwise the chord is the legacy control byte, with the ESC prefix when
-  /// Alt is armed. Always writes to [terminal]; custom sinks cannot carry a
-  /// control chord.
+  /// The menu names an exact chord, so armed Alt and Shift are not added to
+  /// it; one-shot modifiers are still consumed like any other key press.
+  /// Kitty keyboard mode gets the same CSI-u encoding as a hardware keyboard,
+  /// otherwise the legacy control byte. Always writes to [terminal]; custom
+  /// sinks cannot carry a control chord.
   void sendCtrlShortcut(KeyboardToolbarCtrlShortcut shortcut) {
     lightImpact();
     if (_shouldUseKittyKeyboardEncoding()) {
-      terminal.keyInput(
-        shortcut.key,
-        ctrl: true,
-        alt: controller.isAltActive,
-        shift: controller.isShiftActive,
-      );
+      terminal.keyInput(shortcut.key, ctrl: true);
     } else {
-      final controlCode = String.fromCharCode(
-        _ctrlCodeForCharacter(shortcut.letter)!,
-      );
       terminal.textInput(
-        controller.isAltActive ? '\x1b$controlCode' : controlCode,
+        String.fromCharCode(_ctrlCodeForCharacter(shortcut.letter)!),
       );
     }
     onKeyPressed?.call();
@@ -1628,6 +1626,12 @@ class _CtrlShortcutsLayout {
 class _CtrlShortcutsMenu extends StatelessWidget {
   const _CtrlShortcutsMenu({required this.layout, required this.highlighted});
 
+  /// The row stacks two lines in a fixed-height cell and only appears when
+  /// there is no vertical room to grow, so its text scaling stops where the
+  /// two lines still fit: (14 + 10) px x 1.4 x 1.2 line height is about 40 of
+  /// the 44 px row. Semantics labels still carry the full chord names.
+  static const _rowMaxTextScale = 1.4;
+
   final _CtrlShortcutsLayout layout;
   final KeyboardToolbarCtrlShortcut? highlighted;
 
@@ -1645,7 +1649,12 @@ class _CtrlShortcutsMenu extends StatelessWidget {
       context,
       child: layout.axis == Axis.vertical
           ? Column(mainAxisSize: MainAxisSize.min, children: items)
-          : Row(children: [for (final item in items) Expanded(child: item)]),
+          : MediaQuery.withClampedTextScaling(
+              maxScaleFactor: _rowMaxTextScale,
+              child: Row(
+                children: [for (final item in items) Expanded(child: item)],
+              ),
+            ),
     );
   }
 }
@@ -1672,7 +1681,7 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
     final labelStyle = TerminalMenuStyles.itemTextStyle(
       context,
       emphasized: highlighted,
-    ).copyWith(color: foregroundColor);
+    ).copyWith(color: foregroundColor, height: compact ? 1.2 : null);
     final descriptionStyle = labelStyle.copyWith(
       fontSize: compact ? 10 : 12,
       fontWeight: FontWeight.w400,
