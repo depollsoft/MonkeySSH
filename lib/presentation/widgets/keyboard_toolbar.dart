@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
@@ -218,10 +219,47 @@ class KeyboardToolbarSnippetFolder {
   final String name;
 }
 
+/// Ctrl chords offered by pressing and holding the toolbar's Ctrl key.
+///
+/// Declaration order is the column menu's top-to-bottom order, so the last
+/// entry sits closest to the finger holding Ctrl. The single-row fallback
+/// reverses it so that entry sits leftmost, directly above the key.
+enum KeyboardToolbarCtrlShortcut {
+  /// Ctrl+R, reverse history search in most shells.
+  historySearch('R', TerminalKey.keyR, 'History search'),
+
+  /// Ctrl+L, clear or redraw the screen.
+  clearScreen('L', TerminalKey.keyL, 'Clear screen'),
+
+  /// Ctrl+Z, suspend the foreground job.
+  suspend('Z', TerminalKey.keyZ, 'Suspend'),
+
+  /// Ctrl+D, end of input.
+  endOfInput('D', TerminalKey.keyD, 'End of input'),
+
+  /// Ctrl+C, interrupt the foreground job.
+  interrupt('C', TerminalKey.keyC, 'Interrupt');
+
+  const KeyboardToolbarCtrlShortcut(this.letter, this.key, this.description);
+
+  /// Letter pressed together with Ctrl.
+  final String letter;
+
+  /// Key sent with Ctrl through the terminal key encoder.
+  final TerminalKey key;
+
+  /// Short description of the chord's usual shell meaning.
+  final String description;
+
+  /// User-visible chord name, such as `Ctrl+C`.
+  String get label => 'Ctrl+$letter';
+}
+
 /// Compact keyboard toolbar for terminal input.
 ///
 /// Features:
 /// - Modifier keys (Ctrl, Alt, Shift) with toggle/lock functionality
+/// - Common Ctrl chords (Ctrl+C, Ctrl+D, ...) by holding Ctrl
 /// - Navigation keys (arrows, Home, End, PgUp, PgDn)
 /// - Special keys (Esc, Tab, Enter, pipe, etc.)
 /// - Haptic feedback
@@ -295,16 +333,26 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   static const _pasteSnippetMenuWidth = 180.0;
   static const _pasteOptionsGap = TerminalMenuStyles.cascadeGap;
   static const _pasteOptionsScreenMargin = TerminalMenuStyles.screenMargin;
+  static const _ctrlShortcutsWidth = 200.0;
+  static const _ctrlShortcutsRowItemWidth = 88.0;
 
   late final KeyboardToolbarController _fallbackController;
   final _pasteButtonKey = GlobalKey();
+  final _ctrlButtonKey = GlobalKey();
   OverlayEntry? _pasteOptionsOverlay;
   _PasteToolbarAction? _highlightedPasteAction;
   KeyboardToolbarSnippetFolder? _highlightedSnippetFolder;
   KeyboardToolbarSnippet? _highlightedSnippet;
+  OverlayEntry? _ctrlShortcutsOverlay;
+  KeyboardToolbarCtrlShortcut? _highlightedCtrlShortcut;
 
   KeyboardToolbarController get _controller =>
       widget.controller ?? _fallbackController;
+
+  /// Ctrl chords are terminal control codes, so they are only offered when the
+  /// toolbar writes to [KeyboardToolbar.terminal] rather than a custom sink.
+  bool get _ctrlShortcutsEnabled =>
+      widget.onTextInput == null && widget.onSpecialKey == null;
 
   @override
   void initState() {
@@ -326,11 +374,15 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         !identical(oldWidget.snippetFolders, widget.snippetFolders)) {
       _pasteOptionsOverlay?.markNeedsBuild();
     }
+    if (!_ctrlShortcutsEnabled) {
+      _hideCtrlShortcuts();
+    }
   }
 
   @override
   void dispose() {
     _hidePasteOptionsMenu();
+    _hideCtrlShortcuts();
     _controller.removeListener(_handleControllerChanged);
     _fallbackController.dispose();
     super.dispose();
@@ -413,11 +465,25 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       tooltip: 'Tab',
     ),
     _ModifierButton(
+      key: _ctrlButtonKey,
       icon: Icons.keyboard_control_key_rounded,
       label: 'Ctrl',
       state: _controller.ctrlState,
       onTap: _toggleCtrl,
       onDoubleTap: _lockCtrl,
+      longPressIndicatorIcon: Icons.more_horiz_rounded,
+      onLongPressStart: _ctrlShortcutsEnabled ? _showCtrlShortcuts : null,
+      onLongPressMoveUpdate: _updateCtrlShortcutHighlight,
+      onLongPressEnd: _chooseHighlightedCtrlShortcut,
+      onLongPressCancel: _hideCtrlShortcuts,
+      semanticsHint: 'Press and hold for Ctrl shortcuts',
+      customSemanticsActions: _ctrlShortcutsEnabled
+          ? {
+              for (final shortcut in KeyboardToolbarCtrlShortcut.values)
+                CustomSemanticsAction(label: 'Send ${shortcut.label}'): () =>
+                    _dispatcher.sendCtrlShortcut(shortcut),
+            }
+          : null,
       tooltip: 'Ctrl',
     ),
     _ModifierButton(
@@ -920,6 +986,123 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _highlightedSnippet = null;
   }
 
+  void _showCtrlShortcuts(LongPressStartDetails details) {
+    _hideCtrlShortcuts();
+    HapticFeedback.mediumImpact();
+    _ctrlShortcutsOverlay = OverlayEntry(builder: _buildCtrlShortcutsOverlay);
+    Overlay.of(context).insert(_ctrlShortcutsOverlay!);
+  }
+
+  Widget _buildCtrlShortcutsOverlay(BuildContext context) {
+    final layout = _ctrlShortcutsLayout();
+    if (layout == null) {
+      return const SizedBox.shrink();
+    }
+    return Stack(
+      children: [
+        Positioned.fromRect(
+          rect: layout.rect,
+          child: _CtrlShortcutsMenu(
+            layout: layout,
+            highlighted: _highlightedCtrlShortcut,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// The Ctrl shortcuts menu geometry in overlay coordinates, opening upward
+  /// from the Ctrl key and left-aligned with it.
+  ///
+  /// The menu is a column when it fits above the key. A landscape phone with
+  /// the keyboard up has too little room, so it becomes a single row there
+  /// instead of being clamped down over the key, where the finger would start
+  /// inside it and a plain release would send a chord.
+  _CtrlShortcutsLayout? _ctrlShortcutsLayout() {
+    final button = _ctrlButtonKey.currentContext?.findRenderObject();
+    final overlayBox = Overlay.of(context).context.findRenderObject();
+    if (button is! RenderBox || overlayBox is! RenderBox) {
+      return null;
+    }
+    final buttonTopLeft = overlayBox.globalToLocal(
+      button.localToGlobal(Offset.zero),
+    );
+    final overlaySize = overlayBox.size;
+    final count = KeyboardToolbarCtrlShortcut.values.length;
+    final columnHeight = count * TerminalMenuStyles.itemHeight;
+    final axis =
+        buttonTopLeft.dy - _pasteOptionsGap - columnHeight >=
+            _pasteOptionsScreenMargin
+        ? Axis.vertical
+        : Axis.horizontal;
+    final size = axis == Axis.vertical
+        ? Size(_ctrlShortcutsWidth, columnHeight)
+        : Size(
+            count * _ctrlShortcutsRowItemWidth,
+            TerminalMenuStyles.itemHeight,
+          );
+    return _CtrlShortcutsLayout(
+      axis: axis,
+      rect: Rect.fromLTWH(
+        _clampDouble(
+          buttonTopLeft.dx,
+          _pasteOptionsScreenMargin,
+          overlaySize.width - size.width - _pasteOptionsScreenMargin,
+        ),
+        _clampDouble(
+          buttonTopLeft.dy - _pasteOptionsGap - size.height,
+          _pasteOptionsScreenMargin,
+          overlaySize.height - size.height - _pasteOptionsScreenMargin,
+        ),
+        size.width,
+        size.height,
+      ),
+    );
+  }
+
+  KeyboardToolbarCtrlShortcut? _ctrlShortcutAtGlobalPosition(
+    Offset globalPosition,
+  ) {
+    final layout = _ctrlShortcutsLayout();
+    final overlayBox = Overlay.of(context).context.findRenderObject();
+    if (layout == null || overlayBox is! RenderBox) {
+      return null;
+    }
+    return layout.shortcutAt(overlayBox.globalToLocal(globalPosition));
+  }
+
+  void _updateCtrlShortcutHighlight(LongPressMoveUpdateDetails details) {
+    final shortcut = _ctrlShortcutAtGlobalPosition(details.globalPosition);
+    if (shortcut == _highlightedCtrlShortcut) {
+      return;
+    }
+    if (shortcut != null) {
+      // The finger covers the lowest rows, so tick each row it crosses.
+      HapticFeedback.selectionClick();
+    }
+    _highlightedCtrlShortcut = shortcut;
+    _ctrlShortcutsOverlay?.markNeedsBuild();
+  }
+
+  /// Sends the chord under the finger on release. Unlike the Paste menu there
+  /// is no fallback to the last highlight: releasing off the menu cancels, so
+  /// a slow tap or a slide away never sends an unintended Ctrl+C.
+  void _chooseHighlightedCtrlShortcut(LongPressEndDetails details) {
+    final shortcut = _ctrlShortcutAtGlobalPosition(details.globalPosition);
+    _hideCtrlShortcuts();
+    if (shortcut == null) {
+      _refocusTerminal();
+      return;
+    }
+    _dispatcher.sendCtrlShortcut(shortcut);
+  }
+
+  void _hideCtrlShortcuts() {
+    _ctrlShortcutsOverlay?.remove();
+    _ctrlShortcutsOverlay = null;
+    _highlightedCtrlShortcut = null;
+  }
+
   Future<void> _runToolbarAction(FutureOr<void> Function()? action) async {
     if (action == null) {
       _refocusTerminal();
@@ -1101,6 +1284,33 @@ class TerminalToolbarDispatcher {
     }
 
     terminal.textInput(output);
+    onKeyPressed?.call();
+    _consumeOneShot();
+  }
+
+  /// Sends a Ctrl chord from the Ctrl key's long-press menu.
+  ///
+  /// Kitty keyboard mode gets the same CSI-u encoding as a hardware keyboard.
+  /// Otherwise the chord is the legacy control byte, with the ESC prefix when
+  /// Alt is armed. Always writes to [terminal]; custom sinks cannot carry a
+  /// control chord.
+  void sendCtrlShortcut(KeyboardToolbarCtrlShortcut shortcut) {
+    lightImpact();
+    if (_shouldUseKittyKeyboardEncoding()) {
+      terminal.keyInput(
+        shortcut.key,
+        ctrl: true,
+        alt: controller.isAltActive,
+        shift: controller.isShiftActive,
+      );
+    } else {
+      final controlCode = String.fromCharCode(
+        _ctrlCodeForCharacter(shortcut.letter)!,
+      );
+      terminal.textInput(
+        controller.isAltActive ? '\x1b$controlCode' : controlCode,
+      );
+    }
     onKeyPressed?.call();
     _consumeOneShot();
   }
@@ -1379,6 +1589,127 @@ class _PasteOptionsMenuItem extends StatelessWidget {
   }
 }
 
+class _CtrlShortcutsLayout {
+  const _CtrlShortcutsLayout({required this.axis, required this.rect});
+
+  final Axis axis;
+  final Rect rect;
+
+  /// Shortcuts in display order, nearest the Ctrl key last in a column and
+  /// first in a row.
+  List<KeyboardToolbarCtrlShortcut> get shortcuts => axis == Axis.vertical
+      ? KeyboardToolbarCtrlShortcut.values
+      : KeyboardToolbarCtrlShortcut.values.reversed.toList(growable: false);
+
+  KeyboardToolbarCtrlShortcut? shortcutAt(Offset localPosition) {
+    if (!rect.contains(localPosition)) {
+      return null;
+    }
+    final entries = shortcuts;
+    final index = axis == Axis.vertical
+        ? (localPosition.dy - rect.top) ~/ TerminalMenuStyles.itemHeight
+        : (localPosition.dx - rect.left) * entries.length ~/ rect.width;
+    return entries.elementAtOrNull(index);
+  }
+}
+
+class _CtrlShortcutsMenu extends StatelessWidget {
+  const _CtrlShortcutsMenu({required this.layout, required this.highlighted});
+
+  final _CtrlShortcutsLayout layout;
+  final KeyboardToolbarCtrlShortcut? highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      for (final shortcut in layout.shortcuts)
+        _CtrlShortcutMenuItem(
+          shortcut: shortcut,
+          highlighted: shortcut == highlighted,
+          compact: layout.axis == Axis.horizontal,
+        ),
+    ];
+    return TerminalMenuStyles.surface(
+      context,
+      child: layout.axis == Axis.vertical
+          ? Column(mainAxisSize: MainAxisSize.min, children: items)
+          : Row(children: [for (final item in items) Expanded(child: item)]),
+    );
+  }
+}
+
+class _CtrlShortcutMenuItem extends StatelessWidget {
+  const _CtrlShortcutMenuItem({
+    required this.shortcut,
+    required this.highlighted,
+    required this.compact,
+  });
+
+  final KeyboardToolbarCtrlShortcut shortcut;
+  final bool highlighted;
+
+  /// Stacks the chord over its description for the single-row menu.
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final foregroundColor = highlighted
+        ? colorScheme.onPrimaryContainer
+        : colorScheme.onSurfaceVariant;
+    final labelStyle = TerminalMenuStyles.itemTextStyle(
+      context,
+      emphasized: highlighted,
+    ).copyWith(color: foregroundColor);
+    final descriptionStyle = labelStyle.copyWith(
+      fontSize: compact ? 10 : 12,
+      fontWeight: FontWeight.w400,
+      color: foregroundColor.withAlpha(170),
+    );
+    final description = Text(
+      shortcut.description,
+      textAlign: compact ? TextAlign.center : TextAlign.end,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: descriptionStyle,
+    );
+
+    return Semantics(
+      button: true,
+      selected: highlighted,
+      label: '${shortcut.label}, ${shortcut.description}',
+      excludeSemantics: true,
+      child: Container(
+        height: TerminalMenuStyles.itemHeight,
+        color: highlighted ? colorScheme.primaryContainer : Colors.transparent,
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 4 : TerminalMenuStyles.itemHorizontalPadding,
+        ),
+        child: compact
+            ? Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(shortcut.label, style: labelStyle),
+                  ),
+                  description,
+                ],
+              )
+            : Row(
+                children: [
+                  // The chord leads because its meaning depends on the
+                  // program; the description is the usual shell meaning.
+                  Text(shortcut.label, style: labelStyle),
+                  const SizedBox(width: TerminalMenuStyles.iconLabelGap),
+                  Expanded(child: description),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
 class _KeyRow extends StatelessWidget {
   const _KeyRow({required this.children});
 
@@ -1607,6 +1938,14 @@ class _ModifierButton extends StatefulWidget {
     required this.onDoubleTap,
     this.icon,
     this.tooltip,
+    this.onLongPressStart,
+    this.onLongPressMoveUpdate,
+    this.onLongPressEnd,
+    this.onLongPressCancel,
+    this.longPressIndicatorIcon,
+    this.semanticsHint,
+    this.customSemanticsActions,
+    super.key,
   });
 
   final String label;
@@ -1615,6 +1954,18 @@ class _ModifierButton extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
   final String? tooltip;
+
+  /// Enables the long-press gesture. The move, end and cancel callbacks, the
+  /// indicator and the semantics hint only apply while this is non-null.
+  final GestureLongPressStartCallback? onLongPressStart;
+  final GestureLongPressMoveUpdateCallback? onLongPressMoveUpdate;
+  final GestureLongPressEndCallback? onLongPressEnd;
+  final VoidCallback? onLongPressCancel;
+  final IconData? longPressIndicatorIcon;
+  final String? semanticsHint;
+  final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
+
+  bool get hasLongPressHandler => onLongPressStart != null;
 
   @override
   State<_ModifierButton> createState() => _ModifierButtonState();
@@ -1661,42 +2012,65 @@ class _ModifierButtonState extends State<_ModifierButton> {
       lockIcon = Icons.lock;
     }
 
+    final hasLongPress = widget.hasLongPressHandler;
     Widget button = GestureDetector(
       onTap: _handleTap,
+      onLongPressStart: widget.onLongPressStart,
+      onLongPressMoveUpdate: hasLongPress ? widget.onLongPressMoveUpdate : null,
+      onLongPressEnd: hasLongPress ? widget.onLongPressEnd : null,
+      onLongPressCancel: hasLongPress ? widget.onLongPressCancel : null,
       child: Container(
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(6),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Center(
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (widget.icon != null) ...[
-                    Icon(widget.icon, size: 14, color: textColor),
-                    const SizedBox(width: 3),
-                  ],
-                  Text(
-                    widget.label,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                      color: textColor,
-                    ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Center(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.icon != null) ...[
+                        Icon(widget.icon, size: 14, color: textColor),
+                        const SizedBox(width: 3),
+                      ],
+                      Text(
+                        widget.label,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: textColor,
+                        ),
+                      ),
+                      if (lockIcon != null) ...[
+                        const SizedBox(width: 2),
+                        Icon(lockIcon, size: 10, color: textColor),
+                      ],
+                    ],
                   ),
-                  if (lockIcon != null) ...[
-                    const SizedBox(width: 2),
-                    Icon(lockIcon, size: 10, color: textColor),
-                  ],
-                ],
+                ),
               ),
             ),
-          ),
+            if (widget.longPressIndicatorIcon case final indicatorIcon?
+                when hasLongPress)
+              Positioned(
+                top: 2,
+                right: 2,
+                child: Icon(
+                  indicatorIcon,
+                  size: 11,
+                  // Armed and locked states fill the key with a primary tint,
+                  // so switch to the label color to keep the dots visible.
+                  color: widget.state == null ? colorScheme.primary : textColor,
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -1708,6 +2082,8 @@ class _ModifierButtonState extends State<_ModifierButton> {
     return Semantics(
       button: true,
       label: widget.tooltip ?? widget.label,
+      hint: hasLongPress ? widget.semanticsHint : null,
+      customSemanticsActions: widget.customSemanticsActions,
       toggled: widget.state != null,
       value: switch (widget.state) {
         null => 'off',
