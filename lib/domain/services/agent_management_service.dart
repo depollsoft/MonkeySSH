@@ -677,6 +677,7 @@ class AgentManagementService {
 
   static const _updateCheckTtl = Duration(minutes: 15);
   static const _maxRuntimeCacheEntries = 32;
+  static const _usageSnapshotTtl = Duration(hours: 1);
 
   final AgentSessionDiscoveryService _discovery;
   final Map<int, ({DateTime checkedAt, List<AgentRuntimeInfo> runtimes})>
@@ -773,19 +774,28 @@ class AgentManagementService {
     final cached = _runtimeCache[session.connectionId];
     if (cached == null) return null;
     final snapshot = _usageCache[session.connectionId];
-    final fresh =
-        snapshot != null &&
-        identical(snapshot.session, session) &&
-        _now().difference(snapshot.at) < const Duration(hours: 1);
+    final sameSession =
+        snapshot != null && identical(snapshot.session, session);
+    // Any agent's read moves the entry's timestamp and carries the others
+    // forward, so judge each quota by its own read time. A cooldown that is
+    // still running stays worth showing, as it does in the cache prune.
+    bool current(AgentUsage usage) {
+      final checkedAt = usage.checkedAt;
+      return (checkedAt != null &&
+              _now().difference(checkedAt) < _usageSnapshotTtl) ||
+          (usage.retryAt?.isAfter(_now()) ?? false);
+    }
+
     return (
       runtimes: List.unmodifiable(cached.runtimes),
       usage: {
-        if (fresh)
+        if (sameSession)
           for (final runtime in cached.runtimes)
             if (_usageIdForTool(runtime.definition.tool) case final id?
                 when runtime.executablePath != null &&
                     snapshot.paths[id] == runtime.executablePath)
-              runtime.definition.id: ?snapshot.values[id],
+              if (snapshot.values[id] case final usage? when current(usage))
+                runtime.definition.id: usage,
       },
     );
   }
@@ -1237,7 +1247,7 @@ class AgentManagementService {
     if (selected.isEmpty) return result;
     _usageCache.removeWhere(
       (_, entry) =>
-          _now().difference(entry.at) >= const Duration(hours: 1) &&
+          _now().difference(entry.at) >= _usageSnapshotTtl &&
           !entry.values.values.any(
             (usage) => usage.retryAt?.isAfter(_now()) ?? false,
           ),
