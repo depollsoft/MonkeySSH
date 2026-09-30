@@ -138,6 +138,37 @@ Future<Map<String, String>> _loadAcpRemoteExecutables(
   }
 }
 
+/// Resolves OpenCode sign-in using the same executable probe as native launch.
+Future<AcpLaunchCommand?> resolveAcpTerminalAuthCommand({
+  required String providerId,
+  SshSession? session,
+}) async {
+  final provider = acpBuiltinProviders
+      .where((candidate) => candidate.id == providerId)
+      .firstOrNull;
+  final command = provider?.terminalAuthCommand;
+  if (command == null ||
+      providerId != AcpBuiltinProviderIds.openCode ||
+      session == null) {
+    return command;
+  }
+  try {
+    final found = await _loadAcpRemoteExecutables(session);
+    for (final candidate
+        in provider!.executableProbe.candidateExecutableNames) {
+      if (found.containsKey(candidate)) {
+        return AcpLaunchCommand(
+          executable: candidate,
+          arguments: command.arguments,
+        );
+      }
+    }
+  } on Object {
+    // Keep the normal recovery action available if the probe cannot complete.
+  }
+  return command;
+}
+
 /// Warms approved ACP executable paths while the terminal is already usable.
 ///
 /// This is best-effort and never blocks shell startup. The launch path awaits

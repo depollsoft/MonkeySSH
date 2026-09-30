@@ -57,6 +57,7 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 		{"'/opt/agent tools/claude' --resume X", invocation + " agent-launch claude --executable " + shellQuote("/opt/agent tools/claude") + " --resume X"},
 		{"/opt/bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("/opt/bin/codex") + " --yolo"},
 		{"claude-code --resume X", invocation + " agent-launch claude --executable " + shellQuote("claude-code") + " --resume X"},
+		{"opencode2 --session ses_123", invocation + " agent-launch opencode --executable " + shellQuote("opencode2") + " --session ses_123"},
 		{"./bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("./bin/codex") + " --yolo"},
 		{"pi --session saved", invocation + " pi-agent --session saved"},
 		{"pi", invocation + " pi-agent"},
@@ -192,7 +193,16 @@ func TestPrepareAgentLaunch(t *testing.T) {
 			case "claude":
 				wantEnv = append(append([]string(nil), env...), "CLAUDE_CODE_SCROLL_SPEED=1")
 			}
-			if !reflect.DeepEqual(launch.env, wantEnv) || launch.replacedTUIConfig != (tool == "opencode") {
+			compareEnv := launch.env
+			if tool == "opencode" {
+				compareEnv = nil
+				for _, entry := range launch.env {
+					if !strings.HasPrefix(entry, "OPENCODE_CLI_CONFIG_CONTENT=") {
+						compareEnv = append(compareEnv, entry)
+					}
+				}
+			}
+			if !reflect.DeepEqual(compareEnv, wantEnv) || launch.replacedTUIConfig != (tool == "opencode") {
 				t.Errorf("%s environment = %q, replacement = %v", tool, launch.env, launch.replacedTUIConfig)
 			}
 			if !reflect.DeepEqual(args, originalArgs) || !reflect.DeepEqual(env, originalEnv) {
@@ -231,6 +241,7 @@ func TestAgentLaunchGeneratedFiles(t *testing.T) {
 		"monkeymux-cursor-plugin/.cursor-plugin/plugin.json": `{"name":"monkeymux-identity","version":"1.0.0"}`,
 		"monkeymux-cursor-plugin/hooks/hooks.json":           `{"version":1,"hooks":{"sessionStart":[{"command":` + commandJSON("cursor-agent") + `,"timeout":5}]}}`,
 		"monkeymux-opencode-tui.json":                        `{"plugin":[` + string(urlJSON) + `],"scroll_acceleration":{"enabled":false},"scroll_speed":1}`,
+		"monkeymux-opencode-identity/package.json":           `{"name":"monkeymux-identity","version":"1.0.0","type":"module"}`,
 	} {
 		data, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(relative)))
 		if err != nil {
@@ -418,7 +429,7 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	}
 	bin := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", bin)
 	t.Setenv("MONKEYMUX_PANE_TTY", "/dev/test-pane")
 	// The wrapper only defaults this for Claude and passes an inherited value
 	// through for every tool, so a test run from inside a MonkeyMux-launched
@@ -429,7 +440,7 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	t.Setenv("OPENCODE_TUI_CONFIG", "custom")
 	stub := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$$\" \"$MONKEYMUX_AGENT_PID\" \"$MONKEYMUX_PANE_TTY\" \"$OPENCODE_TUI_CONFIG\" \"${CLAUDE_CODE_SCROLL_SPEED-unset}\" \"$@\"\n" +
-		"cat\nexit 23\n"
+		"/bin/cat\nexit 23\n"
 	for _, tool := range []string{"claude", "codex", "opencode", "copilot", "cursor-agent", "unknown"} {
 		if err := os.WriteFile(filepath.Join(bin, tool), []byte(stub), 0o700); err != nil {
 			t.Fatal(err)

@@ -1422,6 +1422,48 @@ void main() {
     );
   });
 
+  group('OpenCode V2 packages', () {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (definition) => definition.id == 'cli:opencode',
+    );
+
+    for (final windows in [false, true]) {
+      test(
+        'installs V2 and leaves V1 migration explicit, windows=$windows',
+        () {
+          expect(definition.packageName, '@opencode/cli');
+          final install = buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: false,
+          )!;
+          final script = windows ? decodeEncodedPowerShell(install) : install;
+          expect(script, contains('@opencode/cli'));
+          expect(
+            buildAgentInstallCommand(
+              definition,
+              windows: windows,
+              update: true,
+              executablePath: '/tools/opencode',
+              installedVersion: '1.18.33',
+            ),
+            isNull,
+          );
+          expect(
+            buildAgentInstallCommand(
+              definition,
+              windows: windows,
+              update: true,
+              executablePath: '/tools/opencode',
+              installedVersion: '2.0.19',
+            ),
+            isNotNull,
+          );
+        },
+      );
+    }
+  });
+
   group('Pi package migration', () {
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (definition) => definition.id == 'cli:pi',
@@ -1876,11 +1918,11 @@ esac
         update: false,
         repair: true,
       );
-      expect(posix, contains("npm uninstall -g 'opencode-ai'"));
+      expect(posix, contains("npm uninstall -g '@opencode/cli'"));
       expect(
         posix,
         endsWith(
-          "npm install -g --foreground-scripts --ignore-scripts=false 'opencode-ai'@latest",
+          "npm install -g --foreground-scripts --ignore-scripts=false '@opencode/cli'@latest",
         ),
       );
 
@@ -1892,7 +1934,7 @@ esac
           repair: true,
         )!,
       );
-      expect(windows, contains("npm uninstall -g 'opencode-ai'"));
+      expect(windows, contains("npm uninstall -g '@opencode/cli'"));
       expect(
         windows,
         contains('npm install -g --foreground-scripts --ignore-scripts=false'),
@@ -2045,7 +2087,7 @@ exit "$result"
           update: true,
           detectionSource: 'Homebrew',
         ),
-        endsWith("brew upgrade 'opencode'"),
+        endsWith("brew upgrade 'opencode-v2'"),
       );
     });
 
@@ -2511,83 +2553,93 @@ exit "$result"
       },
     );
 
-    test('repairs the detected Bun package without touching another npm copy', () async {
-      final root = await Directory.systemTemp.createTemp('agent-repair-');
-      addTearDown(() => root.delete(recursive: true));
-      final bin = Directory('${root.path}/.bun/bin')
-        ..createSync(recursive: true);
-      final package = Directory(
-        '${root.path}/.bun/install/global/node_modules/opencode-ai',
-      )..createSync(recursive: true);
-      final packageBin = Directory('${package.path}/bin')..createSync();
-      final executable = File('${packageBin.path}/opencode.exe');
-      const broken =
-          '#!/bin/sh\necho "postinstall script was not run due to --ignore-scripts" >&2\nexit 1\n';
-      File('${package.path}/package.json')
-          .writeAsStringSync('{"name":"opencode-ai"}');
-      File('${package.path}/postinstall.mjs').writeAsStringSync(
-        "import fs from 'node:fs';\n"
-        'fs.writeFileSync("bin/opencode.exe", ${jsonEncode('#!/bin/sh\necho 1.2.3\n')});\n'
-        'fs.chmodSync("bin/opencode.exe", 0o755);\n',
+    for (final packageName in [
+      'opencode-ai',
+      '@opencode/cli',
+      '@opencode-ai/cli',
+    ]) {
+      test(
+        'repairs the detected $packageName Bun package without touching another npm copy',
+        () async {
+          final root = await Directory.systemTemp.createTemp('agent-repair-');
+          addTearDown(() => root.delete(recursive: true));
+          final bin = Directory('${root.path}/.bun/bin')
+            ..createSync(recursive: true);
+          final package = Directory(
+            '${root.path}/.bun/install/global/node_modules/$packageName',
+          )..createSync(recursive: true);
+          final packageBin = Directory('${package.path}/bin')..createSync();
+          final executable = File('${packageBin.path}/opencode.exe');
+          const broken =
+              '#!/bin/sh\necho "postinstall script was not run due to --ignore-scripts" >&2\nexit 1\n';
+          File('${package.path}/package.json')
+              .writeAsStringSync(jsonEncode({'name': packageName}));
+          File('${package.path}/postinstall.mjs').writeAsStringSync(
+            "import fs from 'node:fs';\n"
+            'fs.writeFileSync("bin/opencode.exe", ${jsonEncode('#!/bin/sh\necho 1.2.3\n')});\n'
+            'fs.chmodSync("bin/opencode.exe", 0o755);\n',
+          );
+          final launcher = Link('${bin.path}/opencode')
+            ..createSync(executable.path);
+          final node = await Process.run('which', ['node']);
+          Link('${bin.path}/node').createSync((node.stdout as String).trim());
+          final definition = agentCliRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'cli:opencode',
+          );
+          final command = buildAgentInstallCommand(
+            definition,
+            windows: false,
+            update: false,
+            repair: true,
+            executablePath: launcher.path,
+          )!;
+          final script = File('${root.path}/repair.sh')
+            ..writeAsStringSync(command);
+          final probe = File('${root.path}/probe.sh')
+            ..writeAsStringSync(
+              buildAgentBatchProbeCommand([definition], windows: false),
+            );
+          for (final shell in [
+            'bash',
+            if (File('/bin/zsh').existsSync()) '/bin/zsh',
+          ]) {
+            executable.writeAsStringSync(broken);
+            await Process.run('chmod', ['+x', executable.path]);
+            final environment = {
+              'HOME': root.path,
+              'PATH': '/usr/bin:/bin',
+              'TMPDIR': root.path,
+            };
+            final before = await Process.run(shell, [
+              probe.path,
+            ], environment: environment);
+            expect(before.stdout, contains('__monkeyssh_agent_repair__'));
+            final result = await Process.run(shell, [
+              script.path,
+            ], environment: environment);
+            expect(result.exitCode, 0, reason: '${result.stderr}');
+            final after = await Process.run(shell, [
+              probe.path,
+            ], environment: environment);
+            expect(
+              after.stdout,
+              contains('__monkeyssh_agent_version__=1.2.3'),
+              reason: shell,
+            );
+            expect(after.stdout, isNot(contains('__monkeyssh_agent_repair__')));
+          }
+          // Refuse an unrelated package rather than reporting a repair elsewhere.
+          File('${package.path}/package.json')
+              .writeAsStringSync('{"name":"other"}');
+          final refused = await Process.run(
+            'bash',
+            [script.path],
+            environment: {'HOME': root.path},
+          );
+          expect(refused.exitCode, isNot(0));
+        },
       );
-      final launcher = Link('${bin.path}/opencode')
-        ..createSync(executable.path);
-      final node = await Process.run('which', ['node']);
-      Link('${bin.path}/node').createSync((node.stdout as String).trim());
-      final definition = agentCliRuntimeDefinitions.firstWhere(
-        (d) => d.id == 'cli:opencode',
-      );
-      final command = buildAgentInstallCommand(
-        definition,
-        windows: false,
-        update: false,
-        repair: true,
-        executablePath: launcher.path,
-      )!;
-      final script = File('${root.path}/repair.sh')..writeAsStringSync(command);
-      final probe = File('${root.path}/probe.sh')
-        ..writeAsStringSync(
-          buildAgentBatchProbeCommand([definition], windows: false),
-        );
-      for (final shell in [
-        'bash',
-        if (File('/bin/zsh').existsSync()) '/bin/zsh',
-      ]) {
-        executable.writeAsStringSync(broken);
-        await Process.run('chmod', ['+x', executable.path]);
-        final environment = {
-          'HOME': root.path,
-          'PATH': '/usr/bin:/bin',
-          'TMPDIR': root.path,
-        };
-        final before = await Process.run(shell, [
-          probe.path,
-        ], environment: environment);
-        expect(before.stdout, contains('__monkeyssh_agent_repair__'));
-        final result = await Process.run(shell, [
-          script.path,
-        ], environment: environment);
-        expect(result.exitCode, 0, reason: '${result.stderr}');
-        final after = await Process.run(shell, [
-          probe.path,
-        ], environment: environment);
-        expect(
-          after.stdout,
-          contains('__monkeyssh_agent_version__=1.2.3'),
-          reason: shell,
-        );
-        expect(after.stdout, isNot(contains('__monkeyssh_agent_repair__')));
-      }
-      // Refuse an unrelated package rather than reporting a repair elsewhere.
-      File('${package.path}/package.json')
-          .writeAsStringSync('{"name":"other"}');
-      final refused = await Process.run(
-        'bash',
-        [script.path],
-        environment: {'HOME': root.path},
-      );
-      expect(refused.exitCode, isNot(0));
-    });
+    }
 
     test('zero exit does not mean a broken CLI was repaired', () async {
       final client = _MockSshClient();

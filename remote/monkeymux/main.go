@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.216"
+	monkeyMuxVersion                  = "0.1.217"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -5401,7 +5401,18 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 	if err != nil {
 		return nil
 	}
-	dbPath := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	dbName := os.Getenv("OPENCODE_DB")
+	if dbName == "" {
+		dbName = "opencode.db"
+	}
+	dbPath := dbName
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(dataHome, "opencode", dbName)
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil
 	}
@@ -5410,7 +5421,7 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 		return nil
 	}
 	const separator = "\x1f"
-	query := "SELECT id, directory, time_updated FROM session " +
+	query := "SELECT id, directory, time_updated FROM session_v2 " +
 		"WHERE parent_id IS NULL AND time_archived IS NULL " +
 		"ORDER BY time_updated DESC LIMIT 200;"
 	ctx, cancel := context.WithTimeout(context.Background(), processMetadataTimeout)
@@ -5423,6 +5434,12 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 		dbPath,
 		query,
 	).Output()
+	if err != nil && ctx.Err() == nil {
+		output, err = exec.CommandContext(ctx, sqlitePath,
+			"-readonly", "-separator", separator, dbPath,
+			strings.Replace(query, "FROM session_v2 ", "FROM session ", 1),
+		).Output()
+	}
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}
@@ -6291,13 +6308,20 @@ func createWindowOptionsForRestore(
 	}
 	command := ""
 	if agentTool != "" {
-		launch := agentLaunchCommand(agentTool, startInYoloMode)
+		executable := ""
+		if agentTool == "opencode" {
+			name := cleanProcessCommandName(state.CurrentCommand)
+			if name == "opencode2" || name == "open-code" {
+				executable = name
+			}
+		}
+		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
 		if agentTool == "pi" {
 			launch = piLaunchCommand(state.AgentSessionDir)
 		}
 		command = launch
 		if sessionID := strings.TrimSpace(state.AgentSessionID); sessionID != "" {
-			resume := agentResumeCommand(agentTool, sessionID, startInYoloMode)
+			resume := agentResumeCommand(agentTool, sessionID, startInYoloMode, executable)
 			if agentTool == "pi" {
 				resume = piResumeCommand(
 					sessionID,
@@ -15851,7 +15875,7 @@ func agentToolFromCommandName(command string) string {
 		return "copilot"
 	case "codex", "codex-cli":
 		return "codex"
-	case "opencode", "open-code":
+	case "opencode", "opencode2", "open-code":
 		return "opencode"
 	case "agy", "antigravity", "antigravity-cli":
 		return "antigravity"
@@ -15895,20 +15919,27 @@ var agentCommands = map[string]struct {
 	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
 	"copilot":      {"copilot", "--yolo", "--resume", false},
 	"codex":        {"codex", "--yolo", "resume", false},
-	"opencode":     {"opencode", "", "--session", true},
+	"opencode":     {"opencode", "--auto", "--session", true},
 	"antigravity":  {"agy", "--dangerously-skip-permissions", "--conversation", true},
 	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
 }
 
-func agentLaunchCommand(tool string, startInYoloMode bool) string {
+func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string) string {
 	if tool == "pi" {
 		return monkeyMuxPiAgentLaunchCommand()
 	}
 	descriptor := agentCommands[tool]
 	command := descriptor.executable
+	if len(executables) > 0 && executables[0] != "" {
+		var ok bool
+		command, ok = shellArgument(executables[0])
+		if !ok {
+			return ""
+		}
+	}
 	if startInYoloMode {
 		if tool == "opencode" {
-			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command
+			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command + " --auto"
 		}
 		if descriptor.permissionFlags != "" {
 			command += " " + descriptor.permissionFlags
@@ -15947,7 +15978,7 @@ func piResumeCommand(sessionID string, sessionDir string, sessionPath string) st
 	return launch + " --session " + sessionID
 }
 
-func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) string {
+func agentResumeCommand(tool string, sessionID string, startInYoloMode bool, executables ...string) string {
 	quotedSessionID, ok := shellArgument(sessionID)
 	if !ok {
 		return ""
@@ -15958,7 +15989,7 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 		}
 		return piResumeCommand(sessionID, "", "")
 	}
-	launch := agentLaunchCommand(tool, startInYoloMode)
+	launch := agentLaunchCommand(tool, startInYoloMode, executables...)
 	if launch == "" {
 		return ""
 	}
@@ -15973,6 +16004,11 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 }
 
 func canonicalAgentCommandName(command string) string {
+	if agentToolFromCommandName(command) == "opencode" {
+		// CurrentCommand is also serialized into restore state. Keep the alias
+		// so a resumed pane launches the same CLI as its fresh fallback.
+		return cleanProcessCommandName(command)
+	}
 	return firstNonEmptyString(agentToolFromCommandName(command), cleanProcessCommandName(command))
 }
 

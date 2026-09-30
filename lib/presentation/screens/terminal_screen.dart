@@ -6338,7 +6338,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final resolvedStoredCommand = _resolveStoredAutoConnectCommand(host);
+    var resolvedStoredCommand = _resolveStoredAutoConnectCommand(host);
     final mode = resolveAutoConnectCommandMode(
       command: resolvedStoredCommand,
       snippetId: host.autoConnectSnippetId,
@@ -6383,6 +6383,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
       }
       return;
+    }
+
+    if (agentPreset?.tool == AgentLaunchTool.openCode &&
+        host.autoConnectSnippetId == null &&
+        resolvedStoredCommand != null) {
+      final executable = await _tmuxService.resolveAgentToolExecutable(
+        session,
+        AgentLaunchTool.openCode,
+      );
+      resolvedStoredCommand = buildAgentLaunchCommand(
+        agentPreset!,
+        startInYoloMode: _startClisInYoloMode,
+        windows: session.remoteIsWindows,
+        executable: executable == AgentLaunchTool.openCode.commandName
+            ? null
+            : executable,
+      );
+      if (!mounted || !identical(_shell, shell)) return;
     }
 
     String? snippetCommand;
@@ -7203,10 +7221,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return null;
     }
 
+    final executable =
+        session.remoteIsWindows && preset.tool == AgentLaunchTool.openCode
+        ? await _tmuxService.resolveAgentToolExecutable(session, preset.tool)
+        : null;
     final launchCommand = buildAgentToolCommand(
       preset.tool,
       additionalArguments: preset.additionalArguments,
       startInYoloMode: _startClisInYoloMode,
+      windows: session.remoteIsWindows,
+      executable: executable,
     );
     DiagnosticsLogService.instance.info(
       'terminal.agent_launch',
@@ -9278,7 +9302,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case AcpSessionLaunchStarted(:final key):
         _openNativeAcpSession(key);
       case AcpSessionLaunchFailed(:final error):
-        final authCommand = acpTerminalAuthCommandFor(providerId);
+        final authCommand = await resolveAcpTerminalAuthCommand(
+          providerId: providerId,
+          session: session,
+        );
+        if (!mounted) return;
         final unlocksCursorKeychain =
             providerId == AcpBuiltinProviderIds.cursorAgent &&
             error.kind == AcpSessionErrorKind.authenticationRequired;

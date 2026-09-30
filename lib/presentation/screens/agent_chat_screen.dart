@@ -53,7 +53,6 @@ import '../widgets/acp_config_option_controls.dart';
 import '../widgets/acp_connection_support.dart';
 import '../widgets/acp_inline_image.dart';
 import '../widgets/acp_message_thread.dart';
-import '../widgets/acp_new_session_sheet.dart';
 import '../widgets/acp_permission_surface.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
@@ -1424,8 +1423,18 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     context.go(buildAcpSessionFallbackLocation());
   }
 
-  void _openTerminalForAuth() {
-    final authCommand = acpTerminalAuthCommandFor(widget.providerId);
+  Future<void> _openTerminalForAuth() async {
+    final session = widget.providerId == AcpBuiltinProviderIds.openCode
+        ? ref
+              .read(sshServiceProvider)
+              .getSessionsForHost(widget.hostId)
+              .firstOrNull
+        : null;
+    final authCommand = await resolveAcpTerminalAuthCommand(
+      providerId: widget.providerId,
+      session: session,
+    );
+    if (!mounted) return;
     if (authCommand != null) {
       unawaited(
         Clipboard.setData(ClipboardData(text: authCommand.argv.join(' '))),
@@ -1439,7 +1448,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     if (widget.embedded) {
       widget.onExitEmbedded?.call();
     } else {
-      context.push<void>('/terminal/${widget.hostId}');
+      unawaited(context.push<void>('/terminal/${widget.hostId}'));
     }
   }
 

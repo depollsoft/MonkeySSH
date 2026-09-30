@@ -1621,7 +1621,7 @@ cwd: /tmp/demo
 
         _stubDiscoveryExec(client, (command) async {
           final script = decodeEncodedPowerShell(command);
-          if (script.contains('opencode session list --format json')) {
+          if (script.contains('session list --format json')) {
             return _buildExecSession();
           }
           if (script.contains('.local/share/opencode/storage/session') &&
@@ -1892,6 +1892,70 @@ branch refs/heads/main
       );
     });
 
+    for (final windows in [false, true]) {
+      test('OpenCode V2 discovers API sessions, windows=$windows', () async {
+        final client = _MockSshClient();
+        if (windows) {
+          when(() => client.remoteVersion)
+              .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+        }
+        final commands = <String>[];
+        _stubDiscoveryExec(client, (command) async {
+          final script = windows ? decodeEncodedPowerShell(command) : command;
+          commands.add(script);
+          if (script.contains('api v2.session.list')) {
+            return _buildExecSession(
+              stdout: jsonEncode({
+                'data': [
+                  {
+                    'id': 'ses_v2',
+                    'title': 'V2 session',
+                    'location': {'directory': '/project'},
+                    'time': {'updated': 1783405351000},
+                  },
+                  {
+                    'id': 'ses_child',
+                    'parentID': 'ses_v2',
+                    'location': {'directory': '/project'},
+                    'time': {'updated': 1783405352000},
+                  },
+                  {
+                    'id': 'ses_archived',
+                    'location': {'directory': '/project'},
+                    'time': {
+                      'updated': 1783405353000,
+                      'archived': 1783405353000,
+                    },
+                  },
+                ],
+                'cursor': {},
+              }),
+            );
+          }
+          return _buildExecSession();
+        });
+        final discovery = AgentSessionDiscoveryService();
+        final result = await discovery
+            .discoverSessionsStream(
+              _buildDiscoverySession(client),
+              toolName: 'OpenCode',
+            )
+            .last;
+        expect(result.sessions, hasLength(1));
+        expect(result.sessions.single.sessionId, 'ses_v2');
+        expect(result.sessions.single.summary, 'V2 session');
+        expect(result.sessions.single.workingDirectory, '/project');
+        expect(
+          result.sessions.single.lastActive,
+          DateTime.fromMillisecondsSinceEpoch(1783405351000),
+        );
+        expect(
+          commands.any((command) => command.contains('api v2.session.list')),
+          isTrue,
+        );
+      });
+    }
+
     test('OpenCode discovery uses ACP session/list when available', () async {
       final client = _MockSshClient();
       final commands = <String>[];
@@ -1907,7 +1971,7 @@ branch refs/heads/main
 ''',
           );
         }
-        if (command.contains('opencode acp')) {
+        if (command.contains(r'"$__fl_opencode" acp')) {
           return _buildAcpSessionListExecSession(
             sessions: const [
               {
@@ -1937,12 +2001,12 @@ branch refs/heads/main
       expect(result.sessions.single.sessionId, 'ses_123');
       expect(result.sessions.single.summary, 'Review tmux panel');
       expect(
-        commands.where((command) => command.contains('opencode acp')),
+        commands.where((command) => command.contains(r'"$__fl_opencode" acp')),
         hasLength(1),
       );
       expect(
         commands.where(
-          (command) => command.contains('opencode session list --format json'),
+          (command) => command.contains('session list --format json'),
         ),
         isEmpty,
       );
@@ -2226,7 +2290,7 @@ branch refs/heads/main
 ''',
             );
           }
-          if (command.contains('~/.local/share/opencode/opencode.db')) {
+          if (command.contains('opencode.db')) {
             return _buildExecSession(
               stdout: 'session-1\x1fOpenCode fast path\x1f/Users/depoll/Code/flutty\x1f1770000000\n',
             );
@@ -2249,10 +2313,7 @@ branch refs/heads/main
         );
         expect(commands.where((command) => command.contains(' acp')), isEmpty);
         expect(
-          commands.where(
-            (command) =>
-                command.contains('~/.local/share/opencode/opencode.db'),
-          ),
+          commands.where((command) => command.contains('opencode.db')),
           isNotEmpty,
         );
       },
@@ -2283,7 +2344,7 @@ branch refs/heads/main
         ).thenAnswer((invocation) async {
           final command = invocation.positionalArguments.first as String;
           commands.add(command);
-          final output = command.contains('~/.local/share/opencode/opencode.db')
+          final output = command.contains('opencode.db')
               ? 'session-1\x1fOpenCode mmux\x1f/Users/depoll/Code/flutty\x1f1770000000\n'
               : '';
           return TerminalClientCommandResult(
@@ -2307,14 +2368,13 @@ branch refs/heads/main
           'session-1',
         ]);
         expect(
-          commands.where((command) => command.contains('opencode acp')),
+          commands.where(
+            (command) => command.contains(r'"$__fl_opencode" acp'),
+          ),
           isEmpty,
         );
         expect(
-          commands.where(
-            (command) =>
-                command.contains('~/.local/share/opencode/opencode.db'),
-          ),
+          commands.where((command) => command.contains('opencode.db')),
           hasLength(1),
         );
         verifyNever(() => client.execute(any()));
@@ -2402,7 +2462,7 @@ branch refs/heads/main
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
-        if (command.contains('~/.local/share/opencode/opencode.db')) {
+        if (command.contains('opencode.db')) {
           return _buildExecSession(
             stdout: List<String>.generate(
               4,
@@ -3425,7 +3485,7 @@ HEAD b
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
-        if (command.contains('opencode session list --format json')) {
+        if (command.contains('session list --format json')) {
           return _buildExecSession(
             stdout: '[{"id":"session-1","title":"OpenCode only","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
           );
@@ -3448,7 +3508,7 @@ HEAD b
       ]);
       expect(
         commands.where(
-          (command) => command.contains('opencode session list --format json'),
+          (command) => command.contains('session list --format json'),
         ),
         hasLength(1),
       );
@@ -3465,7 +3525,7 @@ HEAD b
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
-          if (command.contains('opencode session list --format json')) {
+          if (command.contains('session list --format json')) {
             return _buildExecSession(
               stdout: '[{"id":"session-1","title":"Prefetched result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
             );
@@ -3492,7 +3552,7 @@ HEAD b
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
-        if (command.contains('opencode session list --format json')) {
+        if (command.contains('session list --format json')) {
           return _buildExecSession(
             stdout: '[{"id":"session-1","title":"Cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
           );
@@ -3631,7 +3691,7 @@ HEAD b
       final finishOldProbe = Completer<void>();
       var probes = 0;
       _stubDiscoveryExec(client, (command) async {
-        if (command.contains('opencode session list --format json')) {
+        if (command.contains('session list --format json')) {
           final probe = ++probes;
           if (probe == 1) {
             oldProbeStarted.complete();
@@ -3689,7 +3749,7 @@ branch refs/heads/main
 ''',
             );
           }
-          if (command.contains('opencode session list --format json')) {
+          if (command.contains('session list --format json')) {
             return _buildExecSession(
               stdout: '[{"id":"session-1","title":"Scoped cache result","directory":"/Users/depoll/Code/flutty","updated":"2026-04-21T20:00:00.000Z"}]',
             );
@@ -3729,8 +3789,7 @@ branch refs/heads/main
         );
         expect(
           commands.where(
-            (command) =>
-                command.contains('opencode session list --format json'),
+            (command) => command.contains('session list --format json'),
           ),
           hasLength(2),
         );

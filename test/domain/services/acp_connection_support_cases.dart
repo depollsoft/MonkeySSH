@@ -20,6 +20,60 @@ void registerAcpConnectionSupportTests() {
   group('acp_connection_support', () {
     tearDown(resetQueuedSshExecsForTesting);
     for (final windows in [false, true]) {
+      for (final executable in ['opencode2', 'opencode', 'open-code']) {
+        test(
+          'OpenCode sign-in uses cached launch probe: windows=$windows executable=$executable',
+          () async {
+            final client = _MockSshClient();
+            when(() => client.remoteVersion).thenReturn(
+              windows
+                  ? 'SSH-2.0-OpenSSH_for_Windows_9.5'
+                  : 'SSH-2.0-OpenSSH_9.6',
+            );
+            final prefix = windows ? 'C:/tools' : '/opt/tools';
+            var probes = 0;
+            when(
+              () => client.execute(any(), pty: any(named: 'pty')),
+            ).thenAnswer((_) async {
+              probes++;
+              final channel = _MockExecChannel();
+              final output =
+                  '$executable\u001f$prefix/$executable\n'
+                  '${executable == 'opencode2' ? 'opencode\u001f$prefix/opencode\n' : ''}';
+              when(() => channel.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.value(
+                  Uint8List.fromList(utf8.encode(output)),
+                ),
+              );
+              when(() => channel.stderr)
+                  .thenAnswer((_) => const Stream<Uint8List>.empty());
+              when(() => channel.done).thenAnswer((_) async {});
+              when(() => channel.exitCode).thenReturn(0);
+              when(channel.close).thenReturn(null);
+              return channel;
+            });
+            final session = SshSession(
+              connectionId: 92,
+              hostId: 3,
+              client: client,
+              config: const SshConnectionConfig(
+                hostname: 'example.test',
+                port: 22,
+                username: 'dev',
+              ),
+            );
+            await prewarmAcpRemoteExecutables(session);
+            final command = await resolveAcpTerminalAuthCommand(
+              providerId: AcpBuiltinProviderIds.openCode,
+              session: session,
+            );
+            expect(command?.argv, [executable, 'auth', 'login']);
+            expect(probes, 1);
+          },
+        );
+      }
+    }
+    for (final windows in [false, true]) {
       for (final installedAdapter in [false, true]) {
         for (final installedMuse in [false, true]) {
           testWidgets(

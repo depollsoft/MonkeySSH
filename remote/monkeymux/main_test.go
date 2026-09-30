@@ -10037,7 +10037,7 @@ func TestFirstShellWordSkipsWrappers(t *testing.T) {
 		{command: "cd ~/repo && codex resume abc", want: "codex"},
 		{command: "cd ~/repo && npx @anthropic-ai/claude-code --resume abc", want: "claude"},
 		{command: `CODEX_HOME=/tmp/codex codex --yolo`, want: "codex"},
-		{command: `OPENCODE_PERMISSION='{"*":"allow"}' opencode`, want: "opencode"},
+		{command: `OPENCODE_PERMISSION='{"*":"allow"}' opencode --auto`, want: "opencode"},
 		{command: "cd ~/repo && cursor-agent --resume abc", want: "cursor-agent"},
 		// Gemini CLI support was dropped: the npx wrapper is just npx now.
 		{command: "cd ~/repo && npx @google/gemini-cli --yolo", want: "npx"},
@@ -11651,7 +11651,7 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 				AgentTool:      "opencode",
 				AgentSessionID: "_continue",
 			},
-			want:      `OPENCODE_PERMISSION='{"*":"allow"}' opencode --continue || OPENCODE_PERMISSION='{"*":"allow"}' opencode`,
+			want:      `OPENCODE_PERMISSION='{"*":"allow"}' opencode --auto --continue || OPENCODE_PERMISSION='{"*":"allow"}' opencode --auto`,
 			agentTool: "opencode",
 		},
 		{
@@ -11662,7 +11662,7 @@ func TestCreateWindowOptionsForRestoreBuildsYoloAgentCommands(t *testing.T) {
 				AgentTool:      "opencode",
 				AgentSessionID: "ses_abc",
 			},
-			want:      `OPENCODE_PERMISSION='{"*":"allow"}' opencode --session 'ses_abc' || OPENCODE_PERMISSION='{"*":"allow"}' opencode`,
+			want:      `OPENCODE_PERMISSION='{"*":"allow"}' opencode --auto --session 'ses_abc' || OPENCODE_PERMISSION='{"*":"allow"}' opencode --auto`,
 			agentTool: "opencode",
 		},
 		{

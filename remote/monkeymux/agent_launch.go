@@ -18,9 +18,7 @@ import (
 )
 
 const openCodeIdentityPluginSource = `import { openSync, writeSync, closeSync, constants } from "node:fs";
-export default {
-  id: "monkeymux-identity",
-  async tui(api) {
+function trackSession(getRoute, getSession) {
     const expectedPid = Number(process.env.MONKEYMUX_AGENT_PID || 0);
     if (expectedPid && expectedPid !== process.pid) return; // nested opencode inside an agent pane
     let last = "";
@@ -36,16 +34,25 @@ export default {
       }
     };
     const check = () => {
-      let route; try { route = api.route.current; } catch { return; }
-      if (!route || route.name !== "session") return;
-      let info = api.state.session.get(route.params.sessionID);
+      let route; try { route = getRoute(); } catch { return; }
+      if (!route || (route.type || route.name) !== "session") return;
+      let info = getSession(route.sessionID || route.params.sessionID);
       const seen = new Set();
-      while (info && info.parentID && !seen.has(info.id)) { seen.add(info.id); info = api.state.session.get(info.parentID); }
+      while (info && info.parentID && !seen.has(info.id)) { seen.add(info.id); info = getSession(info.parentID); }
       if (info && typeof info.id === "string") publish(info.id);
     };
     const timer = setInterval(check, 250);
-    try { api.lifecycle.onDispose(() => clearInterval(timer)); } catch {}
     check();
+    return () => clearInterval(timer);
+}
+export default {
+  id: "monkeymux-identity",
+  async tui(api) {
+    const cleanup = trackSession(() => api.route.current, (id) => api.state.session.get(id));
+    if (cleanup) { try { api.lifecycle.onDispose(cleanup); } catch {} }
+  },
+  setup(api) {
+    return trackSession(() => api.ui.router.current(), (id) => api.data.session.get(id));
   },
 };
 `
@@ -57,17 +64,23 @@ func runAgentLaunchWrapper(args []string) {
 	}
 	tool, original := args[0], args[1:]
 	commandName := tool
+	explicitExecutable := false
 	if len(original) > 0 && original[0] == "--executable" {
 		if len(original) < 2 || original[1] == "" {
 			fmt.Fprintln(os.Stderr, "monkeymux: --executable requires a command")
 			os.Exit(2)
 		}
 		commandName, original = original[1], original[2:]
+		explicitExecutable = true
 	}
 	executable := commandName
 	if !filepath.IsAbs(executable) && !strings.ContainsRune(filepath.ToSlash(executable), '/') {
 		var err error
-		executable, err = exec.LookPath(commandName)
+		if tool == "opencode" && !explicitExecutable {
+			commandName, executable, err = resolveOpenCodeExecutable()
+		} else {
+			executable, err = exec.LookPath(commandName)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(127)
@@ -107,6 +120,15 @@ func runAgentLaunchWrapper(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(126)
 	}
+}
+
+func resolveOpenCodeExecutable() (string, string, error) {
+	for _, name := range []string{"opencode2", "opencode", "open-code"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return name, path, nil
+		}
+	}
+	return "opencode", "", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}
 }
 
 type preparedAgentLaunch struct {
@@ -240,6 +262,61 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 				return launch, err
 			}
 			launch.env = withAgentLaunchEnvironment(env, "OPENCODE_TUI_CONFIG", path)
+			// V2 loads a package's tui entrypoint and merges an inline client
+			// config over cli.json. Keep the V1 config too; each version ignores
+			// the other version's environment variable.
+			v2Directory := filepath.Join(directory, "monkeymux-opencode-identity")
+			if _, err := writeJSON(filepath.Join("monkeymux-opencode-identity", "package.json"), map[string]any{
+				"name": "monkeymux-identity", "version": "1.0.0", "type": "module",
+			}); err != nil {
+				return launch, err
+			}
+			if _, err := writeAgentLaunchFile(v2Directory, "tui.js", openCodeIdentityPluginSource); err != nil {
+				return launch, err
+			}
+			v2Config := map[string]json.RawMessage{}
+			for _, value := range env {
+				if content, ok := strings.CutPrefix(value, "OPENCODE_CLI_CONFIG_CONTENT="); ok {
+					if json.Unmarshal(normalizeOpenCodeJSONC([]byte(content)), &v2Config) != nil || v2Config == nil {
+						return launch, fmt.Errorf("invalid OPENCODE_CLI_CONFIG_CONTENT")
+					}
+					break
+				}
+			}
+			var v2Plugins []json.RawMessage
+			pluginConfig, ok := v2Config["plugins"]
+			if !ok {
+				pluginConfig, err = openCodeGlobalCLIPlugins(env)
+				if err != nil {
+					return launch, err
+				}
+			}
+			_ = json.Unmarshal(pluginConfig, &v2Plugins)
+			v2URL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(v2Directory)}).String()
+			found = false
+			for _, plugin := range v2Plugins {
+				var value string
+				if json.Unmarshal(plugin, &value) == nil && value == v2URL {
+					found = true
+				}
+			}
+			if !found {
+				plugin, _ := json.Marshal(v2URL)
+				v2Plugins = append(v2Plugins, plugin)
+			}
+			v2Config["plugins"], _ = json.Marshal(v2Plugins)
+			scroll := map[string]json.RawMessage{}
+			_ = json.Unmarshal(v2Config["scroll"], &scroll)
+			if scroll == nil {
+				scroll = map[string]json.RawMessage{}
+			}
+			scroll["acceleration"] = json.RawMessage("false")
+			v2Config["scroll"], _ = json.Marshal(scroll)
+			v2Content, err := json.Marshal(v2Config)
+			if err != nil {
+				return launch, err
+			}
+			launch.env = withAgentLaunchEnvironment(launch.env, "OPENCODE_CLI_CONFIG_CONTENT", string(v2Content))
 		}
 	}
 	if flag := agentLaunchSessionIDFlag(tool, args); flag != "" {

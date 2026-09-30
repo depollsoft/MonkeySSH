@@ -6,6 +6,17 @@ import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 
 void main() {
   group('buildAgentToolCommand', () {
+    test('OpenCode YOLO normalizes approval aliases to one --auto flag', () {
+      expect(
+        buildAgentToolCommand(
+          AgentLaunchTool.openCode,
+          startInYoloMode: true,
+          additionalArguments:
+              '--auto --yolo --dangerously-skip-permissions --session ses_123',
+        ),
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto --session ses_123',
+      );
+    });
     for (final (tool, yolo, expected) in const [
       (
         AgentLaunchTool.claudeCode,
@@ -17,7 +28,7 @@ void main() {
       (
         AgentLaunchTool.openCode,
         true,
-        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode',
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto',
       ),
       (AgentLaunchTool.antigravity, true, 'agy --dangerously-skip-permissions'),
       (AgentLaunchTool.cursorAgent, true, 'cursor-agent --force'),
@@ -89,7 +100,7 @@ void main() {
         AgentLaunchTool.openCode,
         'opencode-session',
         true,
-        r"""OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --session 'opencode-session'""",
+        r"""OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto --session 'opencode-session'""",
       ),
       (
         AgentLaunchTool.antigravity,
@@ -107,7 +118,7 @@ void main() {
         AgentLaunchTool.openCode,
         '_continue',
         true,
-        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --continue',
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto --continue',
       ),
       (
         AgentLaunchTool.antigravity,
@@ -167,6 +178,7 @@ void main() {
         AgentLaunchTool.openCode,
       ),
       ('cd ~/repo && codex resume abc', AgentLaunchTool.codex),
+      ('/opt/bin/opencode2 --session ses_123', AgentLaunchTool.openCode),
       ('cursor-agent --resume abc', AgentLaunchTool.cursorAgent),
       ('cd ~/repo && cursor-agent --force', AgentLaunchTool.cursorAgent),
       ('node ./script.js', null),
@@ -391,7 +403,7 @@ void main() {
 
         expect(
           buildAgentLaunchCommand(preset, startInYoloMode: true),
-          r'cd "$HOME/project" && OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode',
+          r'cd "$HOME/project" && OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto',
         );
       },
     );
