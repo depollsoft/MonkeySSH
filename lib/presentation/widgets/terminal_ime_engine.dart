@@ -180,7 +180,7 @@ class TerminalImeEngine {
     if (_pendingEnterActionSuppressions < 1) {
       _pendingEnterActionSuppressions = 1;
     }
-    _pendingPerformedEnterText = _lastSentText;
+    _pendingPerformedEnterText = _hardwareEnterSubmittedText ?? _lastSentText;
   }
 
   void dispose() {
@@ -212,6 +212,9 @@ class TerminalImeEngine {
   int? _pendingDeleteResetBaselineCursorOffset;
   String? _pendingDeleteResetDeletedSuffixText;
   String _lastSentText = '';
+
+  /// The IME text a hardware Enter just submitted, for [recordHardwareEnter].
+  String? _hardwareEnterSubmittedText;
   bool _isFramingImeText = false;
   int _lastSentCursorOffset = 0;
 
@@ -314,9 +317,25 @@ class TerminalImeEngine {
         key,
         hasShortcutModifier: hasShortcutModifier,
       );
+      _hardwareEnterSubmittedText = null;
+      if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
+          type == TerminalKeyEventType.press) {
+        _resetAfterHardwareEnter();
+      }
     }
 
     return handled;
+  }
+
+  /// Gboard delivers its Return key as a key event rather than an IME action,
+  /// as does any hardware keyboard. The line it submitted is gone from the
+  /// terminal, so the IME buffer must start over like after an IME Enter;
+  /// otherwise later caret moves and edits are computed against stale text.
+  void _resetAfterHardwareEnter() {
+    _hardwareEnterSubmittedText = _lastSentText;
+    _resetCommittedInputState();
+    _trimLeadingSuggestionSpaceAfterDelete = true;
+    _sawImeComposition = false;
   }
 
   void handleAndroidImeBackspace(
@@ -1404,7 +1423,10 @@ class TerminalImeEngine {
   }
 
   ({String? currentText, bool strippedPendingEnter, bool ignored})
-  _normalizePendingPerformedEnterText(String currentText) {
+  _normalizePendingPerformedEnterText(
+    String currentText, {
+    required String echoText,
+  }) {
     final pendingPerformedEnterText = _pendingPerformedEnterText;
     if (pendingPerformedEnterText == null) {
       return (
@@ -1414,23 +1436,35 @@ class TerminalImeEngine {
       );
     }
 
-    if (currentText.isEmpty || currentText == pendingPerformedEnterText) {
+    if (currentText.isEmpty ||
+        currentText == pendingPerformedEnterText ||
+        echoText == pendingPerformedEnterText) {
       return (currentText: null, strippedPendingEnter: false, ignored: true);
     }
 
-    for (final newlineSequence in _enterCommitNewlineSequences) {
-      final prefix = '$pendingPerformedEnterText$newlineSequence';
-      if (currentText == prefix) {
-        _pendingPerformedEnterText = null;
-        return (currentText: null, strippedPendingEnter: false, ignored: false);
-      }
-      if (currentText.startsWith(prefix)) {
-        _pendingPerformedEnterText = null;
-        return (
-          currentText: currentText.substring(prefix.length),
-          strippedPendingEnter: true,
-          ignored: false,
-        );
+    // The IME echoes the submitted line exactly as its field held it, but
+    // [currentText] has already had fresh-input trims applied (such as the
+    // leading swipe space armed by the Enter itself). Match the untrimmed
+    // echo first so a line starting with a space is not resent as new input.
+    for (final candidate in {echoText, currentText}) {
+      for (final newlineSequence in _enterCommitNewlineSequences) {
+        final prefix = '$pendingPerformedEnterText$newlineSequence';
+        if (candidate == prefix) {
+          _pendingPerformedEnterText = null;
+          return (
+            currentText: null,
+            strippedPendingEnter: false,
+            ignored: false,
+          );
+        }
+        if (candidate.startsWith(prefix)) {
+          _pendingPerformedEnterText = null;
+          return (
+            currentText: candidate.substring(prefix.length),
+            strippedPendingEnter: true,
+            ignored: false,
+          );
+        }
       }
     }
 
@@ -2271,9 +2305,20 @@ class TerminalImeEngine {
         sourceValue != null &&
         sourceValue.selection.isValid &&
         !sourceValue.selection.isCollapsed;
+    // A collapsed caret inside or before the delete markers (Gboard's
+    // space-bar cursor swipe parks it there) leaves nothing for iOS to
+    // delete, and the next typed text lands in front of the markers and
+    // sends them to the terminal. Move it back even when the text matches.
+    final caretStrandedBeforeMarkers =
+        options.deleteDetection &&
+        sourceValue != null &&
+        sourceValue.selection.isValid &&
+        sourceValue.selection.isCollapsed &&
+        sourceValue.selection.extentOffset < initEditingState.text.length;
     final shouldResyncText =
         forceResyncState ||
         sourceValue == null ||
+        caretStrandedBeforeMarkers ||
         (sourceValue.text != nextState.text &&
             !(trimmedLeadingCharacters > 0 && hasActiveReplacementSelection));
     _currentEditingState = nextState;
@@ -2590,8 +2635,39 @@ class TerminalImeEngine {
         return;
       }
 
+      // With the caret at the start of the buffered text, Backspace deletes a
+      // marker and leaves that text intact. The terminal still has a
+      // character before its cursor to delete; restore the marker in place.
+      final remainingPrefixLength = _editingPrefixLength(value.text);
+      if (remainingPrefixLength < initEditingState.text.length &&
+          _lastSentText.isNotEmpty &&
+          _lastSentCursorOffset == 0 &&
+          value.selection.isCollapsed &&
+          value.selection.extentOffset == remainingPrefixLength &&
+          _extractRawInputText(value.text) == _lastSentText) {
+        _isFramingImeText = false;
+        if (_pendingAndroidHardwareBackspaces > 0) {
+          _pendingAndroidHardwareBackspaces--;
+        } else {
+          _notifyUserInput();
+          terminal.keyInput(TerminalKey.backspace);
+        }
+        _currentEditingState = _editingStateForUserText(
+          userText: _lastSentText,
+          userSelection: const TextSelection.collapsed(offset: 0),
+        );
+        if (effects.canSyncEditingState?.call() ?? true) {
+          effects.onEditingState?.call(_currentEditingState);
+        }
+        _sawImeComposition = false;
+        return;
+      }
+
       final normalizedPendingEnter = _normalizePendingPerformedEnterText(
         _extractInputText(value.text),
+        echoText: _stripLeakedDeleteSentinelPrefix(
+          _extractRawInputText(value.text),
+        ),
       );
       if (normalizedPendingEnter.ignored) {
         cancelDeferredTrailingBackspaceImeClear();
