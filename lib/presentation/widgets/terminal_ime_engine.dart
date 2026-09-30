@@ -357,8 +357,11 @@ class TerminalImeEngine {
         hasShortcutModifier: hasShortcutModifier,
       );
       _hardwareEnterSubmittedText = null;
+      // Shortcut chords can reach here mid-composition; the IME still owns
+      // that uncommitted text, so leave its buffer alone.
       if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
-          type == TerminalKeyEventType.press) {
+          type == TerminalKeyEventType.press &&
+          _currentEditingState.composing.isCollapsed) {
         _resetAfterHardwareEnter();
       }
     }

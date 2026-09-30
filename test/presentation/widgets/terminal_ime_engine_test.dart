@@ -3083,6 +3083,27 @@ void main() {
         await _disposeImeHarness(driver, harness);
       });
 
+      test('leaves an active composition alone on a shortcut Enter key '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('ls ', selectionOffset: 3));
+        await driver.flush();
+        final composing = _editingValue(
+          'ls wor',
+          selectionOffset: 6,
+          composing: const TextRange(start: 3, end: 6),
+        );
+        driver.updateEditingValue(composing);
+        await driver.flush();
+        // Shortcut chords reach the terminal while the IME is composing.
+        await driver.hardwareKey(TerminalKey.enter, ctrl: true);
+
+        expect(driver.engine.editingValue, composing);
+      });
+
       test('accepts the same line later after a toolbar-modified Enter '
           '(${platform.name})', () async {
         final driver = _ImeDriver(platform: platform);
