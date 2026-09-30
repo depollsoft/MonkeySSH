@@ -1777,6 +1777,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     button: button,
     position: position,
     forceSgr: widget.forceSgrTouchScroll,
+    fromTouch: true,
     repeatCount: repeatCount,
   );
 

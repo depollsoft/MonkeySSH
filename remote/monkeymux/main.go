@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.215"
+	monkeyMuxVersion                  = "0.1.216"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -1131,6 +1131,32 @@ func usageAndExit() {
 }
 
 const piIdentityExtensionSource = `export default function (pi) {
+  // MonkeySSH turns touch drags into wheel reports and measures how many rows
+  // one report moves, so for touch the client owns the scroll distance. Pi's
+  // default "auto" fullscreenWheelScrollLines speeds up fast wheel spins on
+  // every terminal except a local macOS one, which makes a quick drag
+  // overshoot. The client writes a touch report's column with a leading
+  // zero; those reports get the one line per report that Pi already uses for
+  // terminals that accelerate their own wheel input, and mouse wheel notches
+  // keep Pi's own behaviour. Pi has no flag or environment variable for this,
+  // so its fullscreen screen is patched; an explicit line count from the user
+  // still applies unchanged.
+  import("@earendil-works/pi-tui").then(({ TuiAltScreen }) => {
+    const screen = TuiAltScreen?.prototype;
+    const parse = screen?.parseWheelEvent;
+    if (typeof parse !== "function" || parse.monkeyMux) return;
+    const accelerates = new WeakMap();
+    const patched = function (data) {
+      const wheel = this.wheelScroll;
+      if (typeof wheel?.accelerate === "boolean") {
+        if (!accelerates.has(wheel)) accelerates.set(wheel, wheel.accelerate);
+        wheel.accelerate = accelerates.get(wheel) && !/^\x1b\[<\d+;0/.test(data);
+      }
+      return parse.call(this, data);
+    };
+    patched.monkeyMux = true;
+    screen.parseWheelEvent = patched;
+  }).catch(() => {});
   const publish = (ctx, model) => {
     const id = ctx.sessionManager.getSessionId();
     const file = ctx.sessionManager.getSessionFile();

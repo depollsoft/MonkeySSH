@@ -8754,6 +8754,67 @@ handlers.session_shutdown({}, ctx);
 	}
 }
 
+func TestPiIdentityExtensionDisablesWheelAccelerationForTouch(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required to exercise the Pi extension")
+	}
+	// A stand-in for the pi-tui module Pi hands its extensions, shaped like
+	// Pi 0.99: TuiAltScreen parses each wheel report, then asks its
+	// WheelScrollAccelerator how many lines to move. The accelerator's
+	// accelerate flag is Pi's own choice for the terminal it runs in.
+	directory := t.TempDir()
+	module := filepath.Join(directory, "node_modules", "@earendil-works", "pi-tui")
+	if err := os.MkdirAll(module, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, source := range map[string]string{
+		filepath.Join(module, "package.json"): `{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}`,
+		filepath.Join(module, "index.js"): `export class TuiAltScreen {
+  constructor(accelerate) { this.wheelScroll = { lines: "auto", accelerate }; }
+  parseWheelEvent(data) { return data.startsWith("\x1b[<") ? { direction: 1 } : undefined; }
+}
+`,
+		filepath.Join(directory, "extension.mjs"): piIdentityExtensionSource,
+		filepath.Join(directory, "driver.mjs"): `import install from "./extension.mjs";
+import { TuiAltScreen } from "@earendil-works/pi-tui";
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+install({ on() {} });
+await settle();
+const patched = TuiAltScreen.prototype.parseWheelEvent;
+install({ on() {} }); // /reload loads the extension again
+await settle();
+const touch = "\x1b[<65;010;5M";
+const wheel = "\x1b[<65;10;5M";
+const accelerates = (screen, data) => (screen.parseWheelEvent(data), screen.wheelScroll.accelerate);
+const remote = new TuiAltScreen(true);
+const local = new TuiAltScreen(false); // Pi's choice in a local macOS terminal
+console.log(JSON.stringify({
+  wrappedOnce: TuiAltScreen.prototype.parseWheelEvent === patched,
+  event: remote.parseWheelEvent(touch),
+  other: remote.parseWheelEvent("x") ?? null,
+  remote: [touch, wheel, touch, wheel].map((data) => accelerates(remote, data)),
+  local: [wheel, touch].map((data) => accelerates(local, data)),
+}));
+`,
+	} {
+		if err := os.WriteFile(name, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command(node, "driver.mjs")
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("extension failed: %v: %s", err, output)
+	}
+	want := `{"wrappedOnce":true,"event":{"direction":1},"other":null,` +
+		`"remote":[false,true,false,true],"local":[false,false]}`
+	if got := strings.TrimSpace(string(output)); got != want {
+		t.Fatalf("wheel state = %s, want %s", got, want)
+	}
+}
+
 func TestPiProviderChangesBroadcastWithoutTitleChange(t *testing.T) {
 	server := newMuxServer("test")
 	control := &recordingConn{}
