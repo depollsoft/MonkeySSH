@@ -6144,11 +6144,7 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('hello.\n. '));
     await driver.flush();
 
-    expect(harness.terminalOutput, [
-      '\x7f',
-      '\x1b[200~o.\x1b[201~',
-      '\x1b[200~\r. \x1b[201~',
-    ]);
+    expect(harness.terminalOutput, ['\x7f', '\x1b[200~o.\r. \x1b[201~']);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6242,7 +6238,7 @@ void _batchTests() {
     });
   }
 
-  test('does not review a long commit the IME never previewed', () async {
+  test('sends a long commit the IME never composed as one paste', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);
     addTearDown(driver.dispose);
     final reviews = <TerminalCommandReview>[];
@@ -6254,18 +6250,19 @@ void _batchTests() {
         return false;
       },
     );
-    final dictated = List.filled(40, 'dictated words; a > b').join(' ');
+    // A keyboard clipboard insert arrives as one commit with no composition.
+    final pasted = List.filled(40, 'pasted words; a > b').join(' ');
 
-    driver.updateEditingValue(_batchEditingValue('hi', composing: true));
+    driver.updateEditingValue(_batchEditingValue('hi'));
     await driver.flush();
-    driver.updateEditingValue(_batchEditingValue('hi $dictated'));
+    driver.updateEditingValue(_batchEditingValue('hi $pasted\n\nmore'));
     await driver.flush();
     await driver.flush();
 
     expect(reviews, isEmpty);
     expect(harness.terminalOutput, [
-      for (final chunk in splitTerminalImePaste('hi $dictated'))
-        '\x1b[200~$chunk\x1b[201~',
+      '\x1b[200~hi\x1b[201~',
+      '\x1b[200~ $pasted\r\rmore\x1b[201~',
     ]);
     await _disposeImeHarness(driver, harness);
   });
@@ -6308,12 +6305,7 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('one\ntwo\n '));
     await driver.flush();
 
-    expect(harness.terminalOutput, [
-      '\x1b[200~one\x1b[201~',
-      '\x1b[200~\rtwo\x1b[201~',
-      '\r',
-      ' ',
-    ]);
+    expect(harness.terminalOutput, ['\x1b[200~one\rtwo\x1b[201~', '\r', ' ']);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6328,10 +6320,7 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('one\ntwo '));
     await driver.flush();
 
-    expect(harness.terminalOutput, [
-      '\x1b[200~one\x1b[201~',
-      '\x1b[200~\rtwo \x1b[201~',
-    ]);
+    expect(harness.terminalOutput, ['\x1b[200~one\rtwo \x1b[201~']);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6464,15 +6453,13 @@ void _batchTests() {
       await driver.flush();
 
       expect(harness.terminalOutput, [
-        '\x1b[200~Para one.\x1b[201~',
-        '\x1b[200~\rPara two.\x1b[201~',
+        '\x1b[200~Para one.\rPara two.\x1b[201~',
         '\r',
       ]);
       driver.engine.performAction(TextInputAction.newline);
       await driver.flush();
       expect(harness.terminalOutput, [
-        '\x1b[200~Para one.\x1b[201~',
-        '\x1b[200~\rPara two.\x1b[201~',
+        '\x1b[200~Para one.\rPara two.\x1b[201~',
         '\r',
       ]);
       await _disposeImeHarness(driver, harness);

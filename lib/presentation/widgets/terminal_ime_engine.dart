@@ -1208,7 +1208,26 @@ class TerminalImeEngine {
         terminal.keyInput(TerminalKey.backspace);
         pasteText = '$precedingGrapheme$text';
       }
-      splitTerminalImePaste(pasteText).forEach(terminal.paste);
+      // Text the IME composed first (dictation, a long composition) is the
+      // user's own writing, so split it for composers to show as text. A
+      // long commit without composition is the keyboard's clipboard or
+      // autofill: keep it one paste that composers collapse like any paste.
+      final pastes = _sawImeComposition
+          ? splitTerminalImePaste(pasteText)
+          : [pasteText];
+      if (pasteText.length > terminalImePasteChunkLength ||
+          _newlinePattern.hasMatch(pasteText)) {
+        DiagnosticsLogService.instance.debug(
+          'terminal.keyboard',
+          'ime_paste',
+          fields: {
+            'length': pasteText.length,
+            'composed': _sawImeComposition,
+            'pasteCount': pastes.length,
+          },
+        );
+      }
+      pastes.forEach(terminal.paste);
     } else {
       _isFramingImeText = false;
       terminal.textInput(input);
