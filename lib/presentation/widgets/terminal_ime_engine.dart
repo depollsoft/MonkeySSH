@@ -207,8 +207,9 @@ class TerminalImeEngine {
     if (_pendingEnterActionSuppressions < 1) {
       _pendingEnterActionSuppressions = 1;
     }
+    // The key already reset the buffer: only its newline echo stays stale
+    // after the stale window, so the same line typed later is new input.
     _pendingPerformedEnterText = _hardwareEnterSubmittedText ?? _lastSentText;
-    _pendingPerformedEnterNeedsNewline = false;
   }
 
   void dispose() {

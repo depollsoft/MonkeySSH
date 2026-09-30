@@ -3083,6 +3083,28 @@ void main() {
         await _disposeImeHarness(driver, harness);
       });
 
+      test('accepts the same line later after a toolbar-modified Enter '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+        await driver.flush();
+        await driver.hardwareKey(TerminalKey.enter, shift: true);
+        driver.engine.recordHardwareEnter();
+        await driver.flush(hardwareEnterStaleEditWindow);
+        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+        await driver.flush();
+
+        expect(
+          harness.terminalOutput.join(),
+          'hello${_terminalKeyOutput(TerminalKey.enter, shift: true)}hello',
+        );
+
+        await _disposeImeHarness(driver, harness);
+      });
+
       test('ignores a late newline commit after a toolbar-modified Enter '
           '(${platform.name})', () async {
         final driver = _ImeDriver(platform: platform);
