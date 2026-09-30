@@ -11563,6 +11563,50 @@ void main() {
       );
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets(
+      'a tap forwarded as a mouse click clears the screen IME buffer',
+      (tester) async {
+        await pumpScreen(tester);
+        // Fullscreen TUIs such as Claude Code enable SGR mouse tracking and
+        // move their own cursor to a clicked cell.
+        session.terminal!.write('\x1b[?1000h\x1b[?1006h');
+        await tester.pumpAndSettle();
+
+        tester.testTextInput.updateEditingValue(
+          _editingValue('hello', selectionOffset: 5),
+        );
+        await tester.pump();
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        shellWrites.clear();
+        await tester.tapAt(
+          render.localToGlobal(
+            render.getOffset(const CellOffset(2, 0)) +
+                render.cellSize.center(Offset.zero),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          shellWrites.map(String.fromCharCodes).join(),
+          contains('\x1b[<'),
+        );
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
+        expect(
+          client.currentTextEditingValue,
+          const TextEditingValue(
+            text: _deleteDetectionMarker,
+            selection: TextSelection.collapsed(offset: 2),
+          ),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
     testWidgets('toolbar Ctrl state flows into the screen IME handler', (
       tester,
     ) async {
