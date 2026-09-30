@@ -5,7 +5,36 @@ import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 
+import '../../helpers/powershell_test_helpers.dart';
+
 void main() {
+  test('Windows OpenCode presets use PowerShell paths, argv and environment', () {
+    final command = buildAgentLaunchCommand(
+      const AgentLaunchPreset(
+        tool: AgentLaunchTool.openCode,
+        workingDirectory: r"C:\project's folder",
+        additionalArguments: '--session ses_saved',
+      ),
+      executable: 'opencode2',
+      startInYoloMode: true,
+      windows: true,
+    );
+    final script = decodeEncodedPowerShell(command);
+    expect(
+      script,
+      startsWith(
+        r"Set-Location -LiteralPath 'C:\project''s folder' -ErrorAction Stop; ",
+      ),
+    );
+    final launch = decodeEncodedPowerShell(
+      script.substring(script.indexOf('; ') + 2),
+    );
+    expect(
+      launch,
+      r'''$env:OPENCODE_PERMISSION='{"*":"allow"}'; & 'opencode2' --auto --session ses_saved''',
+    );
+  });
+
   test('launch and resume keep arguments when selecting an OpenCode alias', () {
     final launch = buildAgentLaunchCommand(
       const AgentLaunchPreset(

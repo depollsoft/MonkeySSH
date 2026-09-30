@@ -241,6 +241,7 @@ func TestAgentLaunchGeneratedFiles(t *testing.T) {
 		"monkeymux-cursor-plugin/.cursor-plugin/plugin.json": `{"name":"monkeymux-identity","version":"1.0.0"}`,
 		"monkeymux-cursor-plugin/hooks/hooks.json":           `{"version":1,"hooks":{"sessionStart":[{"command":` + commandJSON("cursor-agent") + `,"timeout":5}]}}`,
 		"monkeymux-opencode-tui.json":                        `{"plugin":[` + string(urlJSON) + `],"scroll_acceleration":{"enabled":false},"scroll_speed":1}`,
+		"monkeymux-opencode-identity/package.json":           `{"name":"monkeymux-identity","version":"1.0.0","type":"module"}`,
 	} {
 		data, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(relative)))
 		if err != nil {

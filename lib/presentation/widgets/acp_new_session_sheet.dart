@@ -404,7 +404,14 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     if (hostId == null) {
       return;
     }
-    final authCommand = acpTerminalAuthCommandFor(providerId);
+    final session = providerId == AcpBuiltinProviderIds.openCode
+        ? ref.read(sshServiceProvider).getSessionsForHost(hostId).firstOrNull
+        : null;
+    final authCommand = await resolveAcpTerminalAuthCommand(
+      providerId: providerId,
+      session: session,
+    );
+    if (!mounted) return;
     final navigator = Navigator.of(context);
     final router = GoRouter.of(context);
     final messenger = ScaffoldMessenger.of(context);

@@ -1,3 +1,4 @@
+import '../services/windows_remote_powershell.dart';
 import 'remote_multiplexer.dart';
 import 'tmux_state.dart';
 
@@ -450,12 +451,14 @@ String buildAgentLaunchCommand(
   AgentLaunchPreset preset, {
   bool startInYoloMode = false,
   String? executable,
+  bool windows = false,
 }) {
   final baseCommand = buildAgentToolCommand(
     preset.tool,
     additionalArguments: preset.additionalArguments,
     startInYoloMode: startInYoloMode,
     executable: executable,
+    windows: windows,
   );
 
   final tmuxSessionName = preset.tmuxSessionName?.trim();
@@ -477,6 +480,16 @@ String buildAgentLaunchCommand(
   }
 
   if (workingDirectory != null && workingDirectory.isNotEmpty) {
+    if (windows) {
+      final directory = workingDirectory == '~'
+          ? r'$env:USERPROFILE'
+          : workingDirectory.startsWith('~/')
+          ? '(Join-Path \$env:USERPROFILE ${powerShellSingleQuote(workingDirectory.substring(2))})'
+          : powerShellSingleQuote(workingDirectory);
+      return buildWindowsPowerShellCommand(
+        'Set-Location -LiteralPath $directory -ErrorAction Stop; $baseCommand',
+      );
+    }
     return 'cd ${_quoteShellPath(workingDirectory)} && $baseCommand';
   }
 
@@ -521,11 +534,14 @@ String buildAgentToolCommand(
   String? executable,
 }) {
   final commandParts = <String>[
-    ..._buildAgentToolEnvironmentAssignments(
-      tool,
-      startInYoloMode: startInYoloMode,
-    ),
-    if (executable == null)
+    if (!(windows && tool == AgentLaunchTool.openCode))
+      ..._buildAgentToolEnvironmentAssignments(
+        tool,
+        startInYoloMode: startInYoloMode,
+      ),
+    if (windows && tool == AgentLaunchTool.openCode)
+      '& ${powerShellSingleQuote(executable ?? tool.commandName)}'
+    else if (executable == null)
       tool.commandName
     else if (windows)
       _quoteWindowsShellArgument(executable)
@@ -547,7 +563,19 @@ String buildAgentToolCommand(
   if (normalizedArguments != null && normalizedArguments.isNotEmpty) {
     commandParts.add(normalizedArguments);
   }
-  return commandParts.join(' ');
+  final command = commandParts.join(' ');
+  if (windows && tool == AgentLaunchTool.openCode) {
+    final environment = startInYoloMode
+        ? tool.yoloEnvironment.entries
+              .map(
+                (entry) =>
+                    '\$env:${entry.key}=${powerShellSingleQuote(entry.value)}; ',
+              )
+              .join()
+        : '';
+    return buildWindowsPowerShellCommand('$environment$command');
+  }
+  return command;
 }
 
 /// Substitutes a detected executable in a generated agent command.

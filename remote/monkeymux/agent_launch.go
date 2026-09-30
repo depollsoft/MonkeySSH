@@ -266,7 +266,7 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 			// config over cli.json. Keep the V1 config too; each version ignores
 			// the other version's environment variable.
 			v2Directory := filepath.Join(directory, "monkeymux-opencode-identity")
-			if _, err := writeJSON(filepath.Join(v2Directory, "package.json"), map[string]any{
+			if _, err := writeJSON(filepath.Join("monkeymux-opencode-identity", "package.json"), map[string]any{
 				"name": "monkeymux-identity", "version": "1.0.0", "type": "module",
 			}); err != nil {
 				return launch, err
