@@ -43,6 +43,17 @@ bool _isPromptWhitespaceCodeUnit(int codeUnit) =>
 @visibleForTesting
 const terminalTrailingSuffixRewriteLimit = 4;
 
+/// How long after an IME batch is framed as a bracketed paste a separate
+/// single-character commit still joins that framing.
+///
+/// Prompt TUIs only absorb Return into a lone keystroke that lands within a few
+/// milliseconds of it (Codex holds one character for 8 ms), so framing matters
+/// for commits the IME emits together with the batch. Keystrokes typed after
+/// it are ordinary input; framing each one makes shells such as zsh highlight
+/// every character as pasted text, which reads as a second, lagging cursor.
+@visibleForTesting
+const terminalImeFramingContinuationWindow = Duration(milliseconds: 150);
+
 /// Maximum delay between a modifier chord and its follow-up character for the
 /// follow-up to be treated as part of the chord (e.g. tmux's Ctrl+b, c).
 @visibleForTesting
@@ -213,6 +224,9 @@ class TerminalImeEngine {
   String? _pendingDeleteResetDeletedSuffixText;
   String _lastSentText = '';
   bool _isFramingImeText = false;
+
+  /// When the latest multi-character IME batch was framed as a paste.
+  DateTime? _framedImeBatchTime;
   int _lastSentCursorOffset = 0;
 
   /// Graphemes at the end of the most recent computed delta's appended text
@@ -1064,9 +1078,10 @@ class TerminalImeEngine {
     final controlCheckText = embedsNewlines
         ? text.replaceAll(_newlinePattern, '')
         : text;
+    final isBatch = beforeEnter || text.runes.length > 1;
     if (terminal.bracketedPasteMode &&
         input == text &&
-        (_isFramingImeText || beforeEnter || text.runes.length > 1) &&
+        (isBatch || _continuesFramedImeBatch()) &&
         !_terminalTextControlPattern.hasMatch(controlCheckText)) {
       // IMEs commit whole words at once. Without explicit batch boundaries,
       // prompt TUIs such as Codex infer a paste from the rapid characters and
@@ -1074,9 +1089,13 @@ class TerminalImeEngine {
       // the batch, and keep shortcuts/control input on the key input path.
       // Even a single character can be held by the TUI's paste detector when
       // an IME commits it together with Return.
-      // Keep framing later commits too: a separately typed question mark
-      // after a swiped word can restart paste detection before Return.
+      // Keep framing commits that follow the batch closely too: a question
+      // mark committed right after a swiped word can restart paste detection
+      // before Return.
       _isFramingImeText = true;
+      if (isBatch) {
+        _framedImeBatchTime = now();
+      }
       var pasteText = text;
       if ((text.startsWith('.') ||
               text.startsWith('/') ||
@@ -1098,6 +1117,16 @@ class TerminalImeEngine {
       _isFramingImeText = false;
       terminal.textInput(input);
     }
+  }
+
+  bool _continuesFramedImeBatch() {
+    final batchTime = _framedImeBatchTime;
+    if (!_isFramingImeText || batchTime == null) {
+      return false;
+    }
+    final elapsed = now().difference(batchTime);
+    return !elapsed.isNegative &&
+        elapsed <= terminalImeFramingContinuationWindow;
   }
 
   void _sendTerminalEnterFromTextInput({
