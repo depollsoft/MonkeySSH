@@ -2961,6 +2961,168 @@ void main() {
         await _disposeImeHarness(driver, harness);
       });
 
+      test('swallows the newline echo of a key-event Enter '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('ls', selectionOffset: 2));
+        await driver.flush();
+        await driver.hardwareKey(TerminalKey.enter);
+        // Some keyboards also commit the Return into their stale field.
+        driver.updateEditingValue(_editingValue('ls\n', selectionOffset: 3));
+        await driver.flush();
+        driver.updateEditingValue(_editingValue('c', selectionOffset: 1));
+        await driver.flush();
+
+        expect(harness.terminalOutput.join(), 'ls\rc');
+
+        // The echo can also arrive together with the next character.
+        harness.terminalOutput.clear();
+        await driver.hardwareKey(TerminalKey.enter);
+        driver.updateEditingValue(_editingValue('c\nd', selectionOffset: 3));
+        await driver.flush();
+
+        expect(harness.terminalOutput.join(), '\rd');
+
+        await _disposeImeHarness(driver, harness);
+      });
+
+      test('accepts the same text again after a key-event Enter '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        // Answering "y" to two prompts in a row.
+        for (var round = 0; round < 2; round++) {
+          driver.updateEditingValue(_editingValue('y', selectionOffset: 1));
+          await driver.flush();
+          await driver.hardwareKey(TerminalKey.enter);
+          await driver.flush(hardwareEnterStaleEditWindow);
+        }
+
+        expect(harness.terminalOutput.join(), 'y\ry\r');
+
+        await _disposeImeHarness(driver, harness);
+      });
+
+      test('drops keyboard updates that predate a key-event Enter reset '
+          '(${platform.name})', () async {
+        for (final (late, expected) in [
+          // The platform still held the submitted line.
+          ('hello', 'hello\r'),
+          // The next key landed in the old line before the reset.
+          ('hello?', 'hello\r?'),
+        ]) {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(driver);
+
+          driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+          await driver.flush();
+          await driver.hardwareKey(TerminalKey.enter);
+          driver.updateEditingValue(
+            _editingValue(late, selectionOffset: late.length),
+          );
+          await driver.flush();
+          // The engine resynced the field to what it kept of the update.
+          final kept = late.substring('hello'.length);
+          driver.updateEditingValue(
+            _editingValue('${kept}x', selectionOffset: kept.length + 1),
+          );
+          await driver.flush();
+
+          expect(harness.terminalOutput.join(), '${expected}x', reason: late);
+
+          await _disposeImeHarness(driver, harness);
+        }
+      });
+
+      test('drops the deferred IME deletion of a Backspace before Enter '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+        await driver.flush();
+        driver.engine
+          ..handleAndroidImeBackspace(
+            TerminalKeyEventType.press,
+            toolbarModifiers: null,
+          )
+          ..handleAndroidImeBackspace(
+            TerminalKeyEventType.release,
+            toolbarModifiers: null,
+          );
+        await driver.hardwareKey(TerminalKey.enter);
+        // The IME reports the Backspace's deletion only after Enter.
+        driver.updateEditingValue(_editingValue('hell', selectionOffset: 4));
+        await driver.flush();
+
+        expect(harness.terminalOutput.join(), 'hello\x7f\r');
+
+        await _disposeImeHarness(driver, harness);
+      });
+
+      test('ignores a late newline commit after a toolbar-modified Enter '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+        await driver.flush();
+        await driver.hardwareKey(TerminalKey.enter, shift: true);
+        driver.engine.recordHardwareEnter();
+        // The keyboard commits its Return after applying the reset.
+        driver.updateEditingValue(_editingValue('\n', selectionOffset: 1));
+        await driver.flush();
+
+        expect(
+          harness.terminalOutput.join(),
+          'hello${_terminalKeyOutput(TerminalKey.enter, shift: true)}',
+        );
+
+        await _disposeImeHarness(driver, harness);
+      });
+
+      test('keeps an uncommitted composition across a forwarded click '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        driver.updateEditingValue(_editingValue('ls ', selectionOffset: 3));
+        await driver.flush();
+        driver.updateEditingValue(
+          _editingValue(
+            'ls wor',
+            selectionOffset: 6,
+            composing: const TextRange(start: 3, end: 6),
+          ),
+        );
+        await driver.flush();
+        driver.engine.resetForExternalCursorMove();
+        driver.updateEditingValue(
+          _editingValue('ls world ', selectionOffset: 9),
+        );
+        await driver.flush();
+
+        expect(harness.terminalOutput.join(), 'ls world ');
+
+        // Without a composition the click starts a fresh buffer.
+        driver.engine.resetForExternalCursorMove();
+        expect(
+          driver.engine.editingValue,
+          _editingValue('', selectionOffset: 0),
+        );
+
+        await _disposeImeHarness(driver, harness);
+      });
+
       test('starts a fresh IME buffer after a key-event Enter '
           '(${platform.name})', () async {
         final driver = _ImeDriver(platform: platform);
@@ -3041,6 +3203,28 @@ void main() {
           driver.engine.editingValue,
           _editingValue('ab', selectionOffset: 0),
         );
+
+        await _disposeImeHarness(driver, harness);
+      });
+
+      test('drops the swipe separator after an empty-line Enter echo '
+          '(${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+
+        for (final echo in ['\n hello', '\r\n hello', '\n\nhello']) {
+          harness.terminalOutput.clear();
+          driver.engine.performAction(TextInputAction.newline);
+          await driver.flush();
+          driver.updateEditingValue(
+            _editingValue(echo, selectionOffset: echo.length),
+          );
+          await driver.flush();
+
+          expect(harness.terminalOutput.join(), '\rhello', reason: echo);
+          driver.engine.clearImeBufferForFreshInput();
+        }
 
         await _disposeImeHarness(driver, harness);
       });

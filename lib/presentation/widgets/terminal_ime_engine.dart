@@ -43,6 +43,12 @@ bool _isPromptWhitespaceCodeUnit(int codeUnit) =>
 @visibleForTesting
 const terminalTrailingSuffixRewriteLimit = 4;
 
+/// How long after a key-event Enter a keyboard update that still carries the
+/// submitted line is treated as stale: the keyboard produced it before it
+/// applied the reset that Enter pushed.
+@visibleForTesting
+const hardwareEnterStaleEditWindow = Duration(milliseconds: 250);
+
 /// Maximum delay between a modifier chord and its follow-up character for the
 /// follow-up to be treated as part of the chord (e.g. tmux's Ctrl+b, c).
 @visibleForTesting
@@ -169,6 +175,16 @@ class TerminalImeEngine {
   /// Records a touch that may move the terminal caret independently of the IME.
   void prepareForTouchCursorMove() => _clearImeAfterNextTouchCursorMove = true;
 
+  /// Starts a fresh buffer after the terminal app moved its own cursor, such
+  /// as for a forwarded mouse click. An active composition has not reached
+  /// the terminal yet, so it is left for the IME to commit.
+  void resetForExternalCursorMove() {
+    if (!_currentEditingState.composing.isCollapsed) {
+      return;
+    }
+    clearImeBufferForFreshInput();
+  }
+
   /// Ends the current IME paste framing before a hardware paste shortcut.
   void endFraming() => _isFramingImeText = false;
 
@@ -181,6 +197,7 @@ class TerminalImeEngine {
       _pendingEnterActionSuppressions = 1;
     }
     _pendingPerformedEnterText = _hardwareEnterSubmittedText ?? _lastSentText;
+    _pendingPerformedEnterNeedsNewline = false;
   }
 
   void dispose() {
@@ -215,6 +232,8 @@ class TerminalImeEngine {
 
   /// The IME text a hardware Enter just submitted, for [recordHardwareEnter].
   String? _hardwareEnterSubmittedText;
+  DateTime? _hardwareEnterAt;
+  List<String> _hardwareEnterStaleLines = const [];
   bool _isFramingImeText = false;
   int _lastSentCursorOffset = 0;
 
@@ -232,6 +251,11 @@ class TerminalImeEngine {
   bool _acceptNextPendingComposingEnterCommit = false;
   TextEditingValue? _pendingComposingEnterFollowUp;
   String? _pendingPerformedEnterText;
+
+  /// Whether only a newline-terminated echo of [_pendingPerformedEnterText]
+  /// is stale. A key-event Enter usually has no echo at all, so the same text
+  /// typed again afterwards is new input.
+  bool _pendingPerformedEnterNeedsNewline = false;
   int _pendingEnterActionSuppressions = 0;
   int _latestEditingValueRevision = 0;
   TextEditingValue? _queuedEditingValue;
@@ -332,10 +356,48 @@ class TerminalImeEngine {
   /// terminal, so the IME buffer must start over like after an IME Enter;
   /// otherwise later caret moves and edits are computed against stale text.
   void _resetAfterHardwareEnter() {
-    _hardwareEnterSubmittedText = _lastSentText;
+    final submittedText = _lastSentText;
+    _hardwareEnterSubmittedText = submittedText;
+    _hardwareEnterStaleLines =
+        {
+            submittedText,
+            _lastSentTextAfterPendingAndroidBackspaces(),
+          }.where((line) => line.isNotEmpty).toList()
+          ..sort((a, b) => b.length.compareTo(a.length));
     _resetCommittedInputState();
+    // Some keyboards also commit the Return into their field; that echo of
+    // the submitted line must not run it again.
+    _pendingPerformedEnterText = submittedText;
+    _pendingPerformedEnterNeedsNewline = true;
+    _hardwareEnterAt = now();
     _trimLeadingSuggestionSpaceAfterDelete = true;
     _sawImeComposition = false;
+  }
+
+  /// [_lastSentText] without the characters that key-event Backspaces have
+  /// already deleted from the terminal but the IME has not yet reported.
+  String _lastSentTextAfterPendingAndroidBackspaces() {
+    if (_pendingAndroidHardwareBackspaces == 0) {
+      return _lastSentText;
+    }
+    final graphemes = _lastSentText.characters.toList(growable: true);
+    final end = _clampTextOffset(_lastSentCursorOffset, graphemes.length);
+    final start = _clampTextOffset(
+      end - _pendingAndroidHardwareBackspaces,
+      end,
+    );
+    graphemes.removeRange(start, end);
+    return graphemes.join();
+  }
+
+  /// Lines a key-event Enter submitted moments ago, longest first; empty once
+  /// [hardwareEnterStaleEditWindow] has passed.
+  List<String> _recentHardwareEnterStaleLines() {
+    final at = _hardwareEnterAt;
+    if (at == null || now().difference(at) >= hardwareEnterStaleEditWindow) {
+      return const [];
+    }
+    return _hardwareEnterStaleLines;
   }
 
   void handleAndroidImeBackspace(
@@ -651,6 +713,7 @@ class TerminalImeEngine {
     _iosBackspaceRunwayLength = 0;
     _clearPendingComposingEnterAction();
     _pendingPerformedEnterText = null;
+    _hardwareEnterAt = null;
     _pendingEnterActionSuppressions = 0;
     _pendingAndroidHardwareBackspaces = 0;
     _activeAndroidImeBackspace = null;
@@ -787,10 +850,13 @@ class TerminalImeEngine {
     return text.substring(prefixLength);
   }
 
-  String _extractInputText(String text) {
-    final extractedText = _stripLeakedDeleteSentinelPrefix(
-      _extractRawInputText(text),
-    );
+  String _extractInputText(String text) => _normalizeFreshInputText(
+    _stripLeakedDeleteSentinelPrefix(_extractRawInputText(text)),
+  );
+
+  /// Drops IME artifacts that lead fresh input: a newline left by a swipe
+  /// after Return, and a single separator space before a swiped word.
+  String _normalizeFreshInputText(String extractedText) {
     final sanitizedText = extractedText.replaceFirst(
       _leadingSwipeNewlineArtifactPattern,
       '',
@@ -1436,9 +1502,15 @@ class TerminalImeEngine {
       );
     }
 
+    // Right after a key-event Enter, the keyboard can still report the line
+    // it submitted, alone or followed by the next key, from before it
+    // applied the reset.
+    final staleLines = _recentHardwareEnterStaleLines();
     if (currentText.isEmpty ||
-        currentText == pendingPerformedEnterText ||
-        echoText == pendingPerformedEnterText) {
+        ((!_pendingPerformedEnterNeedsNewline || staleLines.isNotEmpty) &&
+            (currentText == pendingPerformedEnterText ||
+                echoText == pendingPerformedEnterText)) ||
+        staleLines.contains(echoText)) {
       return (currentText: null, strippedPendingEnter: false, ignored: true);
     }
 
@@ -1446,25 +1518,52 @@ class TerminalImeEngine {
     // [currentText] has already had fresh-input trims applied (such as the
     // leading swipe space armed by the Enter itself). Match the untrimmed
     // echo first so a line starting with a space is not resent as new input.
-    for (final candidate in {echoText, currentText}) {
-      for (final newlineSequence in _enterCommitNewlineSequences) {
-        final prefix = '$pendingPerformedEnterText$newlineSequence';
-        if (candidate == prefix) {
-          _pendingPerformedEnterText = null;
-          return (
-            currentText: null,
-            strippedPendingEnter: false,
-            ignored: false,
-          );
+    // An empty line has no such space, and its echo is only the newline that
+    // fresh-input normalization already drops.
+    // Within the stale window a bare newline is the key-event Enter's own
+    // echo, committed after the keyboard applied the reset.
+    for (final line in {
+      pendingPerformedEnterText,
+      if (staleLines.isNotEmpty) '',
+    }) {
+      for (final candidate in {if (line.isNotEmpty) echoText, currentText}) {
+        for (final newlineSequence in _enterCommitNewlineSequences) {
+          final prefix = '$line$newlineSequence';
+          if (candidate == prefix) {
+            _pendingPerformedEnterText = null;
+            return (
+              currentText: null,
+              strippedPendingEnter: false,
+              ignored: false,
+            );
+          }
+          if (candidate.startsWith(prefix)) {
+            _pendingPerformedEnterText = null;
+            final suffix = candidate.substring(prefix.length);
+            return (
+              // Text after the echo is fresh input; the untrimmed echo still
+              // carries its leading artifacts.
+              currentText: identical(candidate, echoText)
+                  ? _normalizeFreshInputText(suffix)
+                  : suffix,
+              strippedPendingEnter: true,
+              ignored: false,
+            );
+          }
         }
-        if (candidate.startsWith(prefix)) {
-          _pendingPerformedEnterText = null;
-          return (
-            currentText: candidate.substring(prefix.length),
-            strippedPendingEnter: true,
-            ignored: false,
-          );
-        }
+      }
+    }
+
+    for (final line in staleLines) {
+      if (echoText.startsWith(line)) {
+        _pendingPerformedEnterText = null;
+        return (
+          currentText: _normalizeFreshInputText(
+            echoText.substring(line.length),
+          ),
+          strippedPendingEnter: true,
+          ignored: false,
+        );
       }
     }
 
@@ -3017,6 +3116,8 @@ class TerminalImeEngine {
       ctrlActive: modifiers.ctrl,
     );
     _pendingPerformedEnterText = _lastSentText;
+    _pendingPerformedEnterNeedsNewline = false;
+    _hardwareEnterAt = null;
     _resetCommittedInputState(clearPendingPerformedEnterText: false);
     _trimLeadingSuggestionSpaceAfterDelete = true;
     _sawImeComposition = false;

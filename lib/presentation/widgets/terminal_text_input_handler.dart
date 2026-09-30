@@ -234,6 +234,12 @@ class TerminalTextInputHandlerController extends ChangeNotifier {
     _state?._ime.clearImeBufferForFreshInput();
   }
 
+  /// Clears the IME buffer after the terminal app moved its own cursor, such
+  /// as for a forwarded mouse click, keeping any uncommitted composition.
+  void resetImeForExternalCursorMove() {
+    _state?._ime.resetForExternalCursorMove();
+  }
+
   /// Resets platform IME completions after switching terminal contexts.
   void resetImeCompletions() {
     _state?._ime.resetImeCompletions();

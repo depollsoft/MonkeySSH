@@ -13761,7 +13761,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // A clicked TUI such as Claude Code moves its own cursor, so the IME's
       // copy of the text before the cursor no longer applies; later edits and
       // suggestions would otherwise replace the wrong characters.
-      _terminalTextInputController.clearImeBuffer();
+      _terminalTextInputController.resetImeForExternalCursorMove();
     }
   }
 
