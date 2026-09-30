@@ -1005,6 +1005,7 @@ void main() {
     );
   });
   _batchTests();
+  _pasteSplitTests();
   _dictationTests();
   _unicodeTests();
 
@@ -3043,7 +3044,7 @@ void main() {
             return decision.future;
           },
         );
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
 
         driver.updateEditingValue(
           _editingValue(
@@ -3107,7 +3108,7 @@ void main() {
             shiftActive = false;
           },
         );
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
 
         driver.updateEditingValue(
           _editingValue(
@@ -3157,7 +3158,7 @@ void main() {
           return decision.future;
         },
       );
-      const command = r'echo $(id)';
+      const command = 'echo \x07(id)';
 
       driver.updateEditingValue(
         _editingValue(command, selectionOffset: command.length),
@@ -3202,7 +3203,7 @@ void main() {
             return decision.future;
           },
         );
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
 
         driver.updateEditingValue(
           _editingValue(command, selectionOffset: command.length),
@@ -3250,8 +3251,8 @@ void main() {
             shiftActive = false;
           },
         );
-        const staleCommand = r'echo $(id)';
-        const currentCommand = r'printf $(pwd)';
+        const staleCommand = 'echo \x07(id)';
+        const currentCommand = 'printf \x07(pwd)';
 
         driver.updateEditingValue(
           _editingValue(staleCommand, selectionOffset: staleCommand.length),
@@ -3317,7 +3318,7 @@ void main() {
             shiftActive = false;
           },
         );
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
 
         driver.updateEditingValue(
           _editingValue('$command\n', selectionOffset: command.length + 1),
@@ -3358,7 +3359,7 @@ void main() {
         driver,
         onReviewInsertedText: (_) => decision.future,
       );
-      const command = r'echo $(id)';
+      const command = 'echo \x07(id)';
       const followUpText = 'next';
 
       driver.updateEditingValue(
@@ -3425,7 +3426,7 @@ void main() {
           },
         );
         const previousCommand = 'echo ready';
-        const currentCommand = r'echo $(id)';
+        const currentCommand = 'echo \x07(id)';
         const stalePrefix = '$previousCommand\n';
 
         driver.updateEditingValue(
@@ -3529,7 +3530,7 @@ void main() {
           return decision.future;
         },
       );
-      const command = r'echo $(id)';
+      const command = 'echo \x07(id)';
       const followUpText = 'next';
 
       driver.updateEditingValue(
@@ -3638,7 +3639,7 @@ void main() {
             return decision.future;
           },
         );
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
         const followUpText = 'next';
 
         driver.updateEditingValue(
@@ -3852,34 +3853,34 @@ void main() {
 
       driver.updateEditingValue(
         const TextEditingValue(
-          text: '\u200B\u200Becho \$(id)',
+          text: '\u200B\u200Becho \x07(id)',
           selection: TextSelection.collapsed(offset: 12),
         ),
       );
       await driver.flush();
 
       expect(reviews, hasLength(1));
-      expect(reviews.single.command, r'echo $(id)');
+      expect(reviews.single.command, 'echo \x07(id)');
       expect(
         reviews.single.reasons,
-        contains(TerminalCommandReviewReason.commandSubstitution),
+        contains(TerminalCommandReviewReason.controlCharacters),
       );
       expect(terminalOutput, isEmpty);
-      expect(driver.effects, [('review', r'echo $(id)')]);
+      expect(driver.effects, [('review', 'echo \x07(id)')]);
 
       decision.complete(true);
       await driver.flush();
       await driver.flush();
 
       expect(terminalStateFromEvents(terminalOutput), (
-        text: r'echo $(id)',
-        cursorOffset: r'echo $(id)'.length,
+        text: 'echo \x07(id)',
+        cursorOffset: 'echo \x07(id)'.length,
       ));
 
       expect(driver.effects, [
-        ('review', r'echo $(id)'),
+        ('review', 'echo \x07(id)'),
         'user input',
-        ('output', r'echo $(id)'),
+        ('output', 'echo \x07(id)'),
       ]);
       await _disposeImeHarness(driver, harness);
     });
@@ -3957,14 +3958,11 @@ void main() {
       await _disposeImeHarness(driver, harness);
     });
 
-    test('reviews paste-like keyboard payloads', () async {
+    test('does not review a long keyboard payload', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);
       addTearDown(driver.dispose);
       final reviews = <TerminalCommandReview>[];
-      final insertedText = List.filled(
-        terminalKeyboardPasteLikeInsertionThreshold + 1,
-        'a',
-      ).join();
+      final insertedText = List.filled(1000, 'a').join();
       final harness = await _createImeHarness(
         driver,
         onReviewInsertedText: (review) async {
@@ -3985,25 +3983,15 @@ void main() {
       await driver.flush();
       await driver.flush();
 
-      expect(reviews, hasLength(1));
-      expect(
-        reviews.single.reasons,
-        contains(TerminalCommandReviewReason.largeKeyboardInsertion),
-      );
-      expect(terminalOutput, isEmpty);
-      expect(
-        driver.engine.editingValue,
-        const TextEditingValue(
-          text: _deleteDetectionMarker,
-          selection: TextSelection.collapsed(offset: 2),
-        ),
-      );
+      expect(reviews, isEmpty);
+      expect(terminalOutput.join(), insertedText);
 
       await _disposeImeHarness(driver, harness);
     });
 
     test(
-      'reviews a high-risk committed IME payload after composition ends',
+      'reviews a committed IME payload that presses Return after composition '
+      'ends',
       () async {
         final driver = _ImeDriver(platform: TargetPlatform.android);
         addTearDown(driver.dispose);
@@ -4032,24 +4020,21 @@ void main() {
 
         driver.updateEditingValue(
           const TextEditingValue(
-            text: '\u200B\u200Becho \$(id)',
-            selection: TextSelection.collapsed(offset: 12),
+            text: '\u200B\u200Becho \$(id)\n',
+            selection: TextSelection.collapsed(offset: 13),
           ),
         );
         await driver.flush();
 
         expect(reviews, hasLength(1));
-        expect(reviews.single.command, r'echo $(id)');
+        expect(reviews.single.command, 'echo \$(id)\n');
         expect(terminalOutput, isEmpty);
 
         decision.complete(true);
         await driver.flush();
         await driver.flush();
 
-        expect(terminalStateFromEvents(terminalOutput), (
-          text: r'echo $(id)',
-          cursorOffset: r'echo $(id)'.length,
-        ));
+        expect(terminalOutput, [r'echo $(id)', '\r']);
 
         await _disposeImeHarness(driver, harness);
       },
@@ -4101,8 +4086,8 @@ void main() {
         );
         final terminalOutput = harness.terminalOutput;
 
-        const suspiciousUserText = r'echo $(id)';
-        const suspiciousText = '\u200B\u200Becho \$(id)';
+        const suspiciousUserText = 'echo \x07(id)';
+        const suspiciousText = '\u200B\u200Becho \x07(id)';
         const suspiciousSelection = TextSelection(
           baseOffset: _deleteDetectionMarker.length,
           extentOffset: suspiciousText.length,
@@ -4121,7 +4106,7 @@ void main() {
         expect(reviews.single.command, suspiciousUserText);
         expect(
           reviews.single.reasons,
-          contains(TerminalCommandReviewReason.commandSubstitution),
+          contains(TerminalCommandReviewReason.controlCharacters),
         );
         expect(terminalOutput, isEmpty);
         expect(
@@ -4167,7 +4152,7 @@ void main() {
 
       driver.updateEditingValue(
         const TextEditingValue(
-          text: '\u200B\u200Becho \$(id)',
+          text: '\u200B\u200Becho \x07(id)',
           selection: TextSelection.collapsed(offset: 12),
         ),
       );
@@ -4182,7 +4167,7 @@ void main() {
     });
 
     test(
-      'reviews high-risk IME insertions against the full terminal line context',
+      'reviews IME text that presses Return against the full terminal line',
       () async {
         final driver = _ImeDriver(platform: TargetPlatform.android);
         addTearDown(driver.dispose);
@@ -4212,7 +4197,7 @@ void main() {
 
         reviews.clear();
 
-        const combinedCommand = '${existingCommand}id)';
+        const combinedCommand = '${existingCommand}id)\n';
         driver.updateEditingValue(
           const TextEditingValue(
             text: '$_deleteDetectionMarker$combinedCommand',
@@ -4254,7 +4239,7 @@ void main() {
 
         driver.updateEditingValue(
           const TextEditingValue(
-            text: '\u200B\u200Becho \$(id)',
+            text: '\u200B\u200Becho \x07(id)',
             selection: TextSelection.collapsed(offset: 12),
           ),
         );
@@ -4306,7 +4291,7 @@ void main() {
 
         driver.updateEditingValue(
           const TextEditingValue(
-            text: '\u200B\u200Becho \$(id)',
+            text: '\u200B\u200Becho \x07(id)',
             selection: TextSelection.collapsed(offset: 12),
           ),
         );
@@ -4344,7 +4329,7 @@ void main() {
 
       driver.updateEditingValue(
         const TextEditingValue(
-          text: '\u200B\u200Becho \$(id)',
+          text: '\u200B\u200Becho \x07(id)',
           selection: TextSelection.collapsed(offset: 12),
         ),
       );
@@ -4382,7 +4367,7 @@ void main() {
       await _disposeImeHarness(driver, harness);
     });
 
-    test('reviews high-risk IME insertions after input resets', () async {
+    test('reviews IME text that presses Return after input resets', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);
       addTearDown(driver.dispose);
       final terminalOutput = <String>[];
@@ -4441,15 +4426,15 @@ void main() {
 
       driver.updateEditingValue(
         const TextEditingValue(
-          text: '$_deleteDetectionMarker id)',
-          selection: TextSelection.collapsed(offset: 6),
+          text: '$_deleteDetectionMarker id)\n',
+          selection: TextSelection.collapsed(offset: 7),
         ),
       );
       await driver.flush();
       await driver.flush();
 
       expect(reviews, hasLength(1));
-      expect(reviews.single.command, r'echo $( id)');
+      expect(reviews.single.command, 'echo \$( id)\n');
       expect(
         reviews.single.reasons,
         contains(TerminalCommandReviewReason.commandSubstitution),
@@ -6041,6 +6026,47 @@ TextEditingValue _batchEditingValue(String text, {bool composing = false}) =>
           : TextRange.empty,
     );
 
+void _pasteSplitTests() {
+  group('splitTerminalImePaste', () {
+    test('keeps short single-line text in one paste', () {
+      expect(splitTerminalImePaste('hello world'), ['hello world']);
+    });
+
+    test('starts each paste with its line breaks', () {
+      expect(splitTerminalImePaste('Para one.\r\rPara two.\rLine three.'), [
+        'Para one.',
+        '\r\rPara two.',
+        '\rLine three.',
+      ]);
+      expect(splitTerminalImePaste('\r\rtext'), ['\r\rtext']);
+    });
+
+    test('breaks long lines before a space', () {
+      final words = List.filled(40, 'dictated').join(' ');
+      final chunks = splitTerminalImePaste(words);
+
+      expect(chunks.join(), words);
+      expect(chunks.first, List.filled(16, 'dictated').join(' '));
+      for (final chunk in chunks) {
+        expect(chunk.length, lessThanOrEqualTo(terminalImePasteChunkLength));
+        expect(chunk.trim(), isNotEmpty);
+      }
+      for (final chunk in chunks.skip(1)) {
+        expect(chunk, startsWith(' '));
+      }
+    });
+
+    test('splits a word longer than a paste between graphemes', () {
+      final word = List.filled(terminalImePasteChunkLength, '👍').join();
+      final chunks = splitTerminalImePaste(word);
+
+      expect(chunks.join(), word);
+      expect(chunks, hasLength(2));
+      expect(chunks.first.length, terminalImePasteChunkLength);
+    });
+  });
+}
+
 void _batchTests() {
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     for (final kitty in [false, true]) {
@@ -6118,13 +6144,17 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('hello.\n. '));
     await driver.flush();
 
-    expect(harness.terminalOutput, ['\x7f', '\x1b[200~o.\r. \x1b[201~']);
+    expect(harness.terminalOutput, [
+      '\x7f',
+      '\x1b[200~o.\x1b[201~',
+      '\x1b[200~\r. \x1b[201~',
+    ]);
     await _disposeImeHarness(driver, harness);
   });
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     test(
-      'keeps dictated paragraphs inside one bracketed paste on $platform',
+      'keeps dictated paragraph breaks inside bracketed pastes on $platform',
       () async {
         final driver = _ImeDriver(platform: platform);
         addTearDown(driver.dispose);
@@ -6145,20 +6175,23 @@ void _batchTests() {
         driver.updateEditingValue(_batchEditingValue(phrase));
         await driver.flush();
         expect(harness.terminalOutput, [
-          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+          '\x1b[200~Para one.\x1b[201~',
+          '\x1b[200~\r\rPara two.\x1b[201~',
         ]);
 
         // The IME may repeat its final result after the buffer is repaired.
         driver.updateEditingValue(_batchEditingValue(phrase));
         await driver.flush();
         expect(harness.terminalOutput, [
-          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+          '\x1b[200~Para one.\x1b[201~',
+          '\x1b[200~\r\rPara two.\x1b[201~',
         ]);
 
         driver.engine.performAction(TextInputAction.newline);
         await driver.flush();
         expect(harness.terminalOutput, [
-          '\x1b[200~Para one.\r\rPara two.\x1b[201~',
+          '\x1b[200~Para one.\x1b[201~',
+          '\x1b[200~\r\rPara two.\x1b[201~',
           '\r',
         ]);
         await _disposeImeHarness(driver, harness);
@@ -6167,7 +6200,7 @@ void _batchTests() {
   }
 
   for (final bracketed in [false, true]) {
-    test('reviews long previewed dictation only where line breaks execute, '
+    test('reviews long dictation only where line breaks execute, '
         'bracketed: $bracketed', () async {
       final driver = _ImeDriver(platform: TargetPlatform.iOS);
       addTearDown(driver.dispose);
@@ -6180,10 +6213,7 @@ void _batchTests() {
           return false;
         },
       );
-      final paragraph = List.filled(
-        terminalKeyboardPasteLikeInsertionThreshold,
-        'a',
-      ).join();
+      final paragraph = List.filled(30, 'dictated words').join(' ');
       final phrase = '$paragraph\n\nsecond paragraph';
 
       driver.updateEditingValue(_batchEditingValue(paragraph, composing: true));
@@ -6197,7 +6227,10 @@ void _batchTests() {
       if (bracketed) {
         expect(reviews, isEmpty);
         expect(harness.terminalOutput, [
-          '\x1b[200~$paragraph\r\rsecond paragraph.\x1b[201~',
+          for (final chunk in splitTerminalImePaste(
+            '$paragraph\r\rsecond paragraph.',
+          ))
+            '\x1b[200~$chunk\x1b[201~',
         ]);
       } else {
         // Without bracketed paste every line break becomes a real Return.
@@ -6209,7 +6242,7 @@ void _batchTests() {
     });
   }
 
-  test('still reviews a long commit the IME never previewed', () async {
+  test('does not review a long commit the IME never previewed', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);
     addTearDown(driver.dispose);
     final reviews = <TerminalCommandReview>[];
@@ -6221,23 +6254,19 @@ void _batchTests() {
         return false;
       },
     );
-    final pasted = List.filled(
-      terminalKeyboardPasteLikeInsertionThreshold + 1,
-      'a',
-    ).join();
+    final dictated = List.filled(40, 'dictated words; a > b').join(' ');
 
     driver.updateEditingValue(_batchEditingValue('hi', composing: true));
     await driver.flush();
-    driver.updateEditingValue(_batchEditingValue('hi$pasted'));
+    driver.updateEditingValue(_batchEditingValue('hi $dictated'));
     await driver.flush();
     await driver.flush();
 
-    expect(reviews, hasLength(1));
-    expect(
-      reviews.single.reasons,
-      contains(TerminalCommandReviewReason.largeKeyboardInsertion),
-    );
-    expect(harness.terminalOutput, isEmpty);
+    expect(reviews, isEmpty);
+    expect(harness.terminalOutput, [
+      for (final chunk in splitTerminalImePaste('hi $dictated'))
+        '\x1b[200~$chunk\x1b[201~',
+    ]);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6279,7 +6308,12 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('one\ntwo\n '));
     await driver.flush();
 
-    expect(harness.terminalOutput, ['\x1b[200~one\rtwo\x1b[201~', '\r', ' ']);
+    expect(harness.terminalOutput, [
+      '\x1b[200~one\x1b[201~',
+      '\x1b[200~\rtwo\x1b[201~',
+      '\r',
+      ' ',
+    ]);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6294,7 +6328,10 @@ void _batchTests() {
     driver.updateEditingValue(_batchEditingValue('one\ntwo '));
     await driver.flush();
 
-    expect(harness.terminalOutput, ['\x1b[200~one\rtwo \x1b[201~']);
+    expect(harness.terminalOutput, [
+      '\x1b[200~one\x1b[201~',
+      '\x1b[200~\rtwo \x1b[201~',
+    ]);
     await _disposeImeHarness(driver, harness);
   });
 
@@ -6313,7 +6350,7 @@ void _batchTests() {
     await _disposeImeHarness(driver, harness);
   });
 
-  test('recognises previewed dictation after an iOS backspace runway', () async {
+  test('keeps iOS backspace runway sentinels out of dictation', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);
     addTearDown(driver.dispose);
     final reviews = <TerminalCommandReview>[];
@@ -6337,8 +6374,7 @@ void _batchTests() {
     harness.terminalOutput.clear();
 
     final phrase =
-        '${List.filled(terminalKeyboardPasteLikeInsertionThreshold, 'a').join()}'
-        '\n\nsecond paragraph';
+        '${List.filled(30, 'dictated words').join(' ')}\n\nsecond paragraph';
     driver.updateEditingValue(
       _dictationDictationValue('$backspaceBuffer$phrase', composing: true),
     );
@@ -6351,7 +6387,10 @@ void _batchTests() {
 
     expect(reviews, isEmpty);
     expect(harness.terminalOutput, [
-      '\x1b[200~${phrase.replaceAll('\n', '\r')}.\x1b[201~',
+      for (final chunk in splitTerminalImePaste(
+        '${phrase.replaceAll('\n', '\r')}.',
+      ))
+        '\x1b[200~$chunk\x1b[201~',
     ]);
     await _disposeImeHarness(driver, harness);
   });
@@ -6374,46 +6413,6 @@ void _batchTests() {
     ]);
     await _disposeImeHarness(driver, harness);
   });
-
-  test(
-    'does not let an abandoned composition vouch for a later commit',
-    () async {
-      final driver = _ImeDriver(platform: TargetPlatform.android);
-      addTearDown(driver.dispose);
-      final reviews = <TerminalCommandReview>[];
-      final harness = await _createImeHarness(
-        driver,
-        initialTerminalOutput: '\x1b[?2004h',
-        onReviewInsertedText: (review) async {
-          reviews.add(review);
-          return false;
-        },
-      );
-      final pasted = List.filled(
-        terminalKeyboardPasteLikeInsertionThreshold + 1,
-        'a',
-      ).join();
-
-      driver.updateEditingValue(_batchEditingValue('hi'));
-      await driver.flush();
-      driver.updateEditingValue(
-        _batchEditingValue('hi$pasted', composing: true),
-      );
-      await driver.flush();
-      await driver.hardwareKey(TerminalKey.arrowUp);
-      await driver.flush();
-      driver.updateEditingValue(_batchEditingValue('hi$pasted'));
-      await driver.flush();
-      await driver.flush();
-
-      expect(reviews, hasLength(1));
-      expect(
-        reviews.single.reasons,
-        contains(TerminalCommandReviewReason.largeKeyboardInsertion),
-      );
-      await _disposeImeHarness(driver, harness);
-    },
-  );
 
   test('sends a Return after already sent whitespace as Return', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);
@@ -6465,13 +6464,15 @@ void _batchTests() {
       await driver.flush();
 
       expect(harness.terminalOutput, [
-        '\x1b[200~Para one.\rPara two.\x1b[201~',
+        '\x1b[200~Para one.\x1b[201~',
+        '\x1b[200~\rPara two.\x1b[201~',
         '\r',
       ]);
       driver.engine.performAction(TextInputAction.newline);
       await driver.flush();
       expect(harness.terminalOutput, [
-        '\x1b[200~Para one.\rPara two.\x1b[201~',
+        '\x1b[200~Para one.\x1b[201~',
+        '\x1b[200~\rPara two.\x1b[201~',
         '\r',
       ]);
       await _disposeImeHarness(driver, harness);
@@ -7096,7 +7097,7 @@ void _dictationTests() {
         final driver = _ImeDriver(platform: platform);
         addTearDown(driver.dispose);
         var reviewCount = 0;
-        const command = r'echo $(id)';
+        const command = 'echo \x07(id)';
         final harness = await _createImeHarness(
           driver,
           onReviewInsertedText: (review) async {

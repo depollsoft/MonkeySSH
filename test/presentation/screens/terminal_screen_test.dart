@@ -28,7 +28,6 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
-import 'package:monkeyssh/domain/models/auto_connect_command.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -11775,7 +11774,7 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
-      'running shell commands still review paste-like keyboard payloads',
+      'running commands take long dictation without a keyboard paste review',
       (tester) async {
         await pumpScreen(tester);
 
@@ -11785,25 +11784,15 @@ void main() {
         expect(session.shellStatus, TerminalShellStatus.runningCommand);
 
         shellWrites.clear();
-        final insertedText = List.filled(
-          terminalKeyboardPasteLikeInsertionThreshold + 1,
-          'a',
-        ).join();
+        final insertedText = List.filled(40, 'dictated words').join(' ');
         tester.testTextInput.updateEditingValue(
           _editingValue(insertedText, selectionOffset: insertedText.length),
         );
         await tester.pump();
         await tester.pump();
 
-        expect(find.text('Review keyboard paste'), findsOneWidget);
-        expect(
-          find.text('The keyboard inserted a paste-like amount of text.'),
-          findsOneWidget,
-        );
-        expect(shellWrites, isEmpty);
-
-        await tester.tap(find.text('Cancel'));
-        await tester.pumpAndSettle();
+        expect(find.text('Review keyboard paste'), findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), insertedText);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );

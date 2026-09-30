@@ -15763,11 +15763,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   Future<bool> _confirmKeyboardInsertion(TerminalCommandReview review) async {
-    final requiresReviewEvenInRunningShell = review.reasons.contains(
-      TerminalCommandReviewReason.largeKeyboardInsertion,
-    );
-    if (!_shouldReviewTerminalCommandInsertion &&
-        !requiresReviewEvenInRunningShell) {
+    if (!_shouldReviewTerminalCommandInsertion) {
       return true;
     }
     final shouldInsert = await _confirmCommandInsertion(

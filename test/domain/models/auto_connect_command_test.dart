@@ -202,75 +202,48 @@ void main() {
       );
     });
 
-    test('flags paste-like keyboard insertions for confirmation', () {
-      final insertedText = List.filled(
-        terminalKeyboardPasteLikeInsertionThreshold + 1,
-        'a',
-      ).join();
-      final keyboardReview = assessKeyboardInsertedCommand(
-        insertedText,
-        insertedText: insertedText,
-      );
+    test('does not review keyboard text that stays on the line', () {
+      final dictated =
+          '${List.filled(40, 'dictated words').join(' ')}\n\n'
+          r'then run echo $(id) > out.txt; ls | wc -l';
+      for (final bracketed in [false, true]) {
+        final review = assessKeyboardInsertedCommand(
+          dictated,
+          insertedText: dictated,
+          sendsReturn: false,
+          bracketedPasteModeEnabled: bracketed,
+        );
 
-      expect(keyboardReview.requiresReview, isTrue);
-      expect(
-        keyboardReview.reasons,
-        contains(TerminalCommandReviewReason.largeKeyboardInsertion),
-      );
+        expect(review.requiresReview, isFalse, reason: 'bracketed: $bracketed');
+      }
     });
 
-    test('does not flag IME-previewed dictation as paste-like', () {
-      final dictated =
-          '${List.filled(terminalKeyboardPasteLikeInsertionThreshold, 'a').join()}\n\n'
-          'second paragraph';
-      final keyboardReview = assessKeyboardInsertedCommand(
-        dictated,
-        insertedText: dictated,
-        previewedByIme: true,
+    test('reviews keyboard text that presses Return', () {
+      const command = 'cat /etc/passwd > /tmp/out.txt\n';
+      final review = assessKeyboardInsertedCommand(
+        command,
+        insertedText: command,
+        sendsReturn: true,
         bracketedPasteModeEnabled: true,
       );
 
-      expect(keyboardReview.requiresReview, isFalse);
-
-      final unbracketedReview = assessKeyboardInsertedCommand(
-        dictated,
-        insertedText: dictated,
-        previewedByIme: true,
-      );
-
-      expect(unbracketedReview.reasons, [
+      expect(review.requiresReview, isTrue);
+      expect(review.bracketedPasteModeEnabled, isTrue);
+      expect(review.reasons, [
         TerminalCommandReviewReason.multiline,
+        TerminalCommandReviewReason.redirection,
       ]);
+    });
 
-      final substitutionReview = assessKeyboardInsertedCommand(
-        r'echo $(id)',
-        insertedText: r'echo $(id)',
-        previewedByIme: true,
-      );
-
-      expect(
-        substitutionReview.reasons,
-        contains(TerminalCommandReviewReason.commandSubstitution),
+    test('reviews control characters from the keyboard', () {
+      const inserted = 'ls\x1b[2J';
+      final review = assessKeyboardInsertedCommand(
+        inserted,
+        insertedText: inserted,
+        sendsReturn: false,
       );
 
-      const redirected = 'cat /etc/passwd >\n/tmp/out.txt';
-      final redirectionReview = assessKeyboardInsertedCommand(
-        redirected,
-        insertedText: redirected,
-        previewedByIme: true,
-        bracketedPasteModeEnabled: true,
-      );
-
-      expect(redirectionReview.requiresReview, isTrue);
-      expect(redirectionReview.bracketedPasteModeEnabled, isTrue);
-      expect(
-        redirectionReview.reasons,
-        isNot(contains(TerminalCommandReviewReason.multiline)),
-      );
-      expect(
-        redirectionReview.reasons,
-        contains(TerminalCommandReviewReason.redirection),
-      );
+      expect(review.reasons, [TerminalCommandReviewReason.controlCharacters]);
     });
 
     test('flags unbracketed multiline paste with shell reshaping', () {
