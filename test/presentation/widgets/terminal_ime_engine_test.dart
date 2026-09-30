@@ -6056,6 +6056,20 @@ void _pasteSplitTests() {
       }
     });
 
+    test('does not start a paste with a path prefix after a word', () {
+      for (final prefix in ['.', '/', '~']) {
+        final word =
+            '${List.filled(terminalImePasteChunkLength, 'a').join()}${prefix}txt';
+        final chunks = splitTerminalImePaste(word);
+
+        expect(chunks.join(), word);
+        expect(chunks, [
+          List.filled(terminalImePasteChunkLength - 1, 'a').join(),
+          'a${prefix}txt',
+        ]);
+      }
+    });
+
     test('splits a word longer than a paste between graphemes', () {
       final word = List.filled(terminalImePasteChunkLength, '👍').join();
       final chunks = splitTerminalImePaste(word);
@@ -6269,6 +6283,33 @@ void _batchTests() {
       await _disposeImeHarness(driver, harness);
     });
   }
+
+  test(
+    'does not treat a paste after an abandoned composition as composed',
+    () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+      final pasted = List.filled(40, 'pasted words').join(' ');
+
+      driver.updateEditingValue(_batchEditingValue('hi'));
+      await driver.flush();
+      driver.updateEditingValue(
+        _batchEditingValue('hi there', composing: true),
+      );
+      await driver.flush();
+      await driver.hardwareKey(TerminalKey.arrowUp);
+      harness.terminalOutput.clear();
+      driver.updateEditingValue(_batchEditingValue(pasted));
+      await driver.flush();
+
+      expect(harness.terminalOutput, ['\x1b[200~$pasted\x1b[201~']);
+      await _disposeImeHarness(driver, harness);
+    },
+  );
 
   test('sends a long commit the IME never composed as one paste', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);

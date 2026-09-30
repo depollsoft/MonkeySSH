@@ -118,8 +118,24 @@ int _terminalImePasteChunkEnd(String body) {
     }
     end += grapheme.length;
   }
-  return end;
+  // Pi reads a paste that starts with '.', '/' or '~' right after a word
+  // character as a file path and inserts a space before it. Break before the
+  // word character instead; it is ASCII, so that is a grapheme boundary.
+  var pathSafeEnd = end;
+  while (pathSafeEnd > 1 &&
+      pathSafeEnd < body.length &&
+      _startsPathLikePaste(body.codeUnitAt(pathSafeEnd)) &&
+      _isPasteWordCodeUnit(body.codeUnitAt(pathSafeEnd - 1))) {
+    pathSafeEnd--;
+  }
+  return pathSafeEnd;
 }
+
+bool _startsPathLikePaste(int codeUnit) =>
+    codeUnit == 0x2E || codeUnit == 0x2F || codeUnit == 0x7E;
+
+bool _isPasteWordCodeUnit(int codeUnit) =>
+    _isAsciiLetterOrDigitCodeUnit(codeUnit) || codeUnit == 0x5F;
 
 /// Maximum delay between a modifier chord and its follow-up character for the
 /// follow-up to be treated as part of the chord (e.g. tmux's Ctrl+b, c).
@@ -1102,6 +1118,7 @@ class TerminalImeEngine {
   bool _appendedTextSendsReturn(
     String text, {
     required bool hasVisiblePredecessor,
+    ({bool ctrl, bool alt, bool shift})? enterModifiers,
   }) {
     final newlineCount = _terminalNewlineSequenceCount(text);
     if (newlineCount == 0) {
@@ -1110,6 +1127,7 @@ class TerminalImeEngine {
     final block = _embeddedNewlineBlock(
       text,
       hasVisiblePredecessor: hasVisiblePredecessor,
+      enterModifiers: enterModifiers,
     );
     final embeddedCount = block.end > 0
         ? _terminalNewlineSequenceCount(text.substring(block.start, block.end))
@@ -1280,6 +1298,9 @@ class TerminalImeEngine {
     cancelDeferredTrailingBackspaceImeClear();
     _lastSentText = '';
     _lastSentCursorOffset = 0;
+    // A composition abandoned by a reset must not mark a later commit, such
+    // as a keyboard clipboard insert, as composed text.
+    _sawImeComposition = false;
     _clearPendingComposingEnterAction();
     if (clearPendingPerformedEnterText) {
       _pendingPerformedEnterText = null;
@@ -1993,6 +2014,7 @@ class TerminalImeEngine {
     String currentText,
     ({int deletedCount, String appendedText, int deleteCursorOffset}) delta, {
     required String previousText,
+    ({bool ctrl, bool alt, bool shift})? enterModifiers,
   }) {
     if (effects.onReviewInsertedText == null) {
       return null;
@@ -2011,6 +2033,7 @@ class TerminalImeEngine {
       hasVisiblePredecessor: _currentLineOf(retainedPrefix.string)
           .trim()
           .isNotEmpty,
+      enterModifiers: enterModifiers,
     );
     final reviewText =
         effects.buildReviewTextForInsertedText?.call((
@@ -2885,6 +2908,7 @@ class TerminalImeEngine {
         effectiveCurrentText,
         delta,
         previousText: deltaPreviousText,
+        enterModifiers: _payloadEnterModifiers(revision),
       );
       if (review != null) {
         final shouldInsert = await effects.onReviewInsertedText!(review);
@@ -2924,18 +2948,14 @@ class TerminalImeEngine {
       final pendingEnterActionArrived =
           pendingEnterActionOwnsRevision &&
           _pendingComposingEnterModifiers != null;
+      final payloadEnterModifiers = _payloadEnterModifiers(revision);
       final pendingEnterRepresentedByPayloadNewline =
-          pendingEnterActionArrived &&
-          _pendingComposingEnterMayBeInText &&
-          _pendingComposingEnterText != null &&
-          _textEndsWithEnterSequence(_pendingComposingEnterText!);
+          payloadEnterModifiers != null;
       final newlineCount = _sendInputDelta(
         effectiveCurrentText,
         delta,
         beforeEnter: pendingEnterActionArrived,
-        enterModifiers: pendingEnterRepresentedByPayloadNewline
-            ? _pendingComposingEnterModifiers
-            : null,
+        enterModifiers: payloadEnterModifiers,
       );
       if (newlineCount > 0) {
         if (pendingEnterActionArrived &&
@@ -3072,6 +3092,18 @@ class TerminalImeEngine {
       _lastProcessedSelectionWasCollapsed = processedUserSelection.isCollapsed;
     }
   }
+
+  /// Modifiers of the pending Enter that a newline in [revision]'s payload
+  /// stands for, captured when Enter was pressed. Null means the payload's
+  /// newlines use the live toolbar state. Review and sending both use this so
+  /// they agree on which newlines go out as Enter.
+  ({bool ctrl, bool alt, bool shift})? _payloadEnterModifiers(int revision) =>
+      revision == _pendingComposingEnterRevision &&
+          _pendingComposingEnterMayBeInText &&
+          _pendingComposingEnterText != null &&
+          _textEndsWithEnterSequence(_pendingComposingEnterText!)
+      ? _pendingComposingEnterModifiers
+      : null;
 
   void _sendPerformedEnter(({bool ctrl, bool alt, bool shift}) modifiers) {
     _hasPendingPromptOutputImeReset = true;
