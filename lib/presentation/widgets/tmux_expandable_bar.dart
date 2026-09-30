@@ -557,7 +557,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           shouldRefreshTmuxThemeAfterWindowChange(currentWindows, windows);
       final activeWindowChanged =
           currentWindows != null &&
-          _didDisplayedTmuxWindowChange(currentWindows, windows);
+          didDisplayedMuxWindowChange(
+            currentWindows,
+            windows,
+            backend: widget.activeMuxBackend,
+          );
       _applyWindows(windows);
       if (shouldNotifyWindowStateChanged) {
         _notifyWindowStateChanged(activeWindowChanged: activeWindowChanged);
@@ -578,9 +582,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final windows = applyTmuxWindowChangeEvent(currentWindows, event);
     final shouldNotifyWindowStateChanged =
         shouldRefreshTmuxThemeAfterWindowChange(currentWindows, windows);
-    final activeWindowChanged = _didDisplayedTmuxWindowChange(
+    final activeWindowChanged = didDisplayedMuxWindowChange(
       currentWindows,
       windows,
+      backend: widget.activeMuxBackend,
     );
     DiagnosticsLogService.instance.debug(
       'tmux.ui',
@@ -602,26 +607,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       widget.session,
       widget.tmuxSessionName,
       activeWindowChanged: activeWindowChanged,
-    );
-  }
-
-  bool _didDisplayedTmuxWindowChange(
-    List<TmuxWindow> previousWindows,
-    List<TmuxWindow> nextWindows,
-  ) =>
-      _displayedTmuxWindowContext(previousWindows) !=
-      _displayedTmuxWindowContext(nextWindows);
-
-  ({String key, int? panePid})? _displayedTmuxWindowContext(
-    List<TmuxWindow> windows,
-  ) {
-    final activeWindow = windows.where((window) => window.isActive).firstOrNull;
-    if (activeWindow == null) {
-      return null;
-    }
-    return (
-      key: activeWindow.id ?? '#${activeWindow.index}',
-      panePid: activeWindow.panePid,
     );
   }
 

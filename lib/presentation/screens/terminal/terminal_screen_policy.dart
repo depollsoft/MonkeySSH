@@ -2832,6 +2832,37 @@ bool shouldRefreshTmuxThemeAfterWindowChange(
   return false;
 }
 
+/// Whether a window snapshot switched the window the terminal displays.
+///
+/// A switch resets IME completions and refreshes the terminal, so it must not
+/// fire for activity inside the same window. tmux's pane PID identifies the
+/// pane and only changes when the pane is respawned. MonkeyMux reports the
+/// foreground process group instead, which changes whenever a command starts
+/// or exits; it can arrive with the echo of the next typed character.
+bool didDisplayedMuxWindowChange(
+  List<TmuxWindow> previousWindows,
+  List<TmuxWindow> nextWindows, {
+  required RemoteMuxBackend backend,
+}) =>
+    _displayedMuxWindowIdentity(previousWindows, backend: backend) !=
+    _displayedMuxWindowIdentity(nextWindows, backend: backend);
+
+({String key, int? panePid})? _displayedMuxWindowIdentity(
+  List<TmuxWindow> windows, {
+  required RemoteMuxBackend backend,
+}) {
+  final activeWindow = windows.where((window) => window.isActive).firstOrNull;
+  if (activeWindow == null) {
+    return null;
+  }
+  return (
+    key: activeWindow.id ?? '#${activeWindow.index}',
+    panePid: backend == RemoteMuxBackend.monkeyMux
+        ? null
+        : activeWindow.panePid,
+  );
+}
+
 ({
   String? currentCommand,
   AgentLaunchTool? foregroundAgentTool,

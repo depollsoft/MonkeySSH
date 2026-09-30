@@ -4716,6 +4716,83 @@ void main() {
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]4;')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    testWidgets(
+      'keeps IME text when a MonkeyMux command exits in the active window',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        const sessionName = 'work';
+        // MonkeyMux reports the foreground process group as the pane PID.
+        const initialWindows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            id: '@0',
+            name: 'shell',
+            isActive: true,
+            currentCommand: 'pi',
+            panePid: 200,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => initialWindows)
+              ..stubWindowEvents()
+              ..stubPaneContext()
+              ..stubThemeRefresh();
+
+        await muxFixture.pump(tester);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+
+        tester.testTextInput.updateEditingValue(
+          _editingValue('p', selectionOffset: 1),
+        );
+        await tester.pump();
+        tester.testTextInput.log.clear();
+
+        // The echo of the first typed character refreshes MonkeyMux process
+        // metadata, which then reports that the previous command has exited.
+        muxFixture.windowEvents.add(
+          const TmuxWindowSnapshotEvent(
+            TmuxWindow(
+              index: 0,
+              id: '@0',
+              name: 'shell',
+              isActive: true,
+              currentCommand: 'zsh',
+              panePid: 100,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
+        expect(
+          client.currentTextEditingValue,
+          _editingValue('p', selectionOffset: 1),
+        );
+        expect(
+          tester.testTextInput.log.where(
+            (call) => call.method == 'TextInput.setEditingState',
+          ),
+          isEmpty,
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('MonkeyMux theme change forces a foreground redraw resize', (
       tester,
     ) async {
