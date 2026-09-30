@@ -5401,7 +5401,18 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 	if err != nil {
 		return nil
 	}
-	dbPath := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	dbName := os.Getenv("OPENCODE_DB")
+	if dbName == "" {
+		dbName = "opencode.db"
+	}
+	dbPath := dbName
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(dataHome, "opencode", dbName)
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil
 	}
@@ -5410,7 +5421,7 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 		return nil
 	}
 	const separator = "\x1f"
-	query := "SELECT id, directory, time_updated FROM session " +
+	query := "SELECT id, directory, time_updated FROM session_v2 " +
 		"WHERE parent_id IS NULL AND time_archived IS NULL " +
 		"ORDER BY time_updated DESC LIMIT 200;"
 	ctx, cancel := context.WithTimeout(context.Background(), processMetadataTimeout)
@@ -5423,6 +5434,12 @@ func defaultOpenCodeSessionEntries() []openCodeSessionEntry {
 		dbPath,
 		query,
 	).Output()
+	if err != nil && ctx.Err() == nil {
+		output, err = exec.CommandContext(ctx, sqlitePath,
+			"-readonly", "-separator", separator, dbPath,
+			strings.Replace(query, "FROM session_v2 ", "FROM session ", 1),
+		).Output()
+	}
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}
@@ -15851,7 +15868,7 @@ func agentToolFromCommandName(command string) string {
 		return "copilot"
 	case "codex", "codex-cli":
 		return "codex"
-	case "opencode", "open-code":
+	case "opencode", "opencode2", "open-code":
 		return "opencode"
 	case "agy", "antigravity", "antigravity-cli":
 		return "antigravity"
@@ -15895,7 +15912,7 @@ var agentCommands = map[string]struct {
 	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
 	"copilot":      {"copilot", "--yolo", "--resume", false},
 	"codex":        {"codex", "--yolo", "resume", false},
-	"opencode":     {"opencode", "", "--session", true},
+	"opencode":     {"opencode", "--auto", "--session", true},
 	"antigravity":  {"agy", "--dangerously-skip-permissions", "--conversation", true},
 	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
 }
@@ -15908,7 +15925,7 @@ func agentLaunchCommand(tool string, startInYoloMode bool) string {
 	command := descriptor.executable
 	if startInYoloMode {
 		if tool == "opencode" {
-			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command
+			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command + " --auto"
 		}
 		if descriptor.permissionFlags != "" {
 			command += " " + descriptor.permissionFlags

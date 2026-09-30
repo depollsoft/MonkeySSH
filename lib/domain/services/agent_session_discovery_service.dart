@@ -3439,29 +3439,30 @@ class AgentSessionDiscoveryService {
         }
       }
 
-      if (workingDirectory != null && workingDirectory.isNotEmpty) {
-        final scopedDbOutput = await _queryOpenCodeDb(
-          session,
-          scanLimit,
-          scopedDirectories: relatedWorkingDirectories,
+      // V2's CLI list is project-scoped. The database also covers the global
+      // recent-session picker when there is no selected working directory.
+      final dbOutput = await _queryOpenCodeDb(
+        session,
+        scanLimit,
+        scopedDirectories: relatedWorkingDirectories,
+      );
+      if (dbOutput.trim().isNotEmpty) {
+        return _ToolDiscoveryResult.success(
+          'OpenCode',
+          sortAndLimitDiscoveredSessions(_parseOpenCodeDbOutput(dbOutput), max),
         );
-        if (scopedDbOutput.trim().isNotEmpty) {
-          return _ToolDiscoveryResult.success(
-            'OpenCode',
-            sortAndLimitDiscoveredSessions(
-              _parseOpenCodeDbOutput(scopedDbOutput),
-              max,
-            ),
-          );
-        }
       }
 
       // Preferred: use the CLI's own JSON output.
       final cliOutput = await _exec(
         session,
-        'opencode session list --format json -n $scanLimit 2>/dev/null',
+        r'__fl_opencode_sessions=$(opencode api session.list '
+        '--param parentID=null --param order=desc --param limit=$scanLimit 2>/dev/null); '
+        r'if [ $? -eq 0 ]; then printf "%s\n" "$__fl_opencode_sessions"; else '
+        '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
+        'opencode session list --format json -n $scanLimit 2>/dev/null; fi',
       );
-      if (cliOutput.trim().startsWith('[')) {
+      if (_isOpenCodeSessionJson(cliOutput)) {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
           return _ToolDiscoveryResult.success(
@@ -3477,24 +3478,6 @@ class AgentSessionDiscoveryService {
           hadError = true;
           // Fall through to the SQLite fallback.
         }
-      }
-
-      // Fallback: query the SQLite database directly.
-      // Use ASCII Unit Separator (\x1f) to avoid collision with pipes
-      // in session titles or directory paths.
-      final dbOutput = await _queryOpenCodeDb(session, scanLimit);
-      if (dbOutput.trim().isNotEmpty) {
-        final sessions = _parseOpenCodeDbOutput(dbOutput);
-        return _ToolDiscoveryResult.success(
-          'OpenCode',
-          _scopeSessions(
-            sessions,
-            workingDirectory,
-            relatedWorkingDirectories,
-            max,
-          ),
-          hadError: hadError,
-        );
       }
 
       return _ToolDiscoveryResult.success('OpenCode', [], hadError: hadError);
@@ -3525,9 +3508,12 @@ class AgentSessionDiscoveryService {
 
       final cliOutput = await _execWindowsPowerShell(
         session,
-        windowsOpenCodeSessionListScript(scanLimit),
+        windowsOpenCodeSessionListScript(
+          scanLimit,
+          workingDirectory: workingDirectory,
+        ),
       );
-      if (cliOutput.trim().startsWith('[')) {
+      if (_isOpenCodeSessionJson(cliOutput)) {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
           return _ToolDiscoveryResult.success(
@@ -3643,31 +3629,48 @@ class AgentSessionDiscoveryService {
     );
   }
 
+  bool _isOpenCodeSessionJson(String raw) =>
+      raw.trimLeft().startsWith('[') || raw.trimLeft().startsWith('{');
+
   List<ToolSessionInfo> _parseOpenCodeCliJson(String raw) {
     final decoded = jsonDecode(raw.trim());
-    if (decoded is! List) return const [];
+    final entries = decoded is Map<String, dynamic> ? decoded['data'] : decoded;
+    if (entries is! List) return const [];
 
-    return decoded.whereType<Map<String, dynamic>>().map((entry) {
-      final id = entry['id'] as String? ?? '';
-      final title = entry['title'] as String? ?? '';
-      final directory = entry['directory'] as String?;
+    return entries
+        .whereType<Map<String, dynamic>>()
+        .where((entry) {
+          final time = entry['time'];
+          return entry['parentID'] == null &&
+              (time is! Map || time['archived'] == null);
+        })
+        .map((entry) {
+          final id = entry['id'] as String? ?? '';
+          final title = entry['title'] as String? ?? '';
+          final location = entry['location'];
+          final directory =
+              entry['directory'] as String? ??
+              (location is Map ? location['directory'] as String? : null);
 
-      DateTime? lastActive;
-      final updated = entry['updated'];
-      if (updated is int) {
-        lastActive = _dateTimeFromEpoch(updated);
-      } else if (updated is String) {
-        lastActive = DateTime.tryParse(updated);
-      }
+          DateTime? lastActive;
+          final time = entry['time'];
+          final updated =
+              entry['updated'] ?? (time is Map ? time['updated'] : null);
+          if (updated is int) {
+            lastActive = _dateTimeFromEpoch(updated);
+          } else if (updated is String) {
+            lastActive = DateTime.tryParse(updated);
+          }
 
-      return ToolSessionInfo(
-        toolName: 'OpenCode',
-        sessionId: id,
-        workingDirectory: directory,
-        lastActive: lastActive,
-        summary: title.isNotEmpty ? title : _truncateId(id),
-      );
-    }).toList();
+          return ToolSessionInfo(
+            toolName: 'OpenCode',
+            sessionId: id,
+            workingDirectory: directory,
+            lastActive: lastActive,
+            summary: title.isNotEmpty ? title : _truncateId(id),
+          );
+        })
+        .toList();
   }
 
   List<ToolSessionInfo> _parseOpenCodeDbOutput(String output) {
@@ -3712,7 +3715,7 @@ class AgentSessionDiscoveryService {
     );
     final sql = StringBuffer()
       ..write('SELECT id, title, directory, time_updated ')
-      ..write('FROM session ')
+      ..write('FROM __OPENCODE_SESSION_TABLE__ ')
       ..write('WHERE parent_id IS NULL ')
       ..write('AND time_archived IS NULL ');
     if (directoryScopeClause != null) {
@@ -3722,11 +3725,26 @@ class AgentSessionDiscoveryService {
       ..write('ORDER BY time_updated DESC ')
       ..write('LIMIT $scanLimit;');
 
+    final v2Sql = sql.toString().replaceFirst(
+      '__OPENCODE_SESSION_TABLE__',
+      'session_v2',
+    );
+    final v1Sql = sql.toString().replaceFirst(
+      '__OPENCODE_SESSION_TABLE__',
+      'session',
+    );
+    // V2 keeps the V1 session table in the same database. Prefer V2 even
+    // when it is empty so stale V1 rows do not reappear after migration.
     return _exec(
       session,
-      r'SEP=$(printf "\037"); sqlite3 -separator "$SEP" '
-      '~/.local/share/opencode/opencode.db '
-      '${shellEscapePosix(sql.toString())} 2>/dev/null',
+      r'SEP=$(printf "\037"); '
+      r'__fl_opencode_db="${OPENCODE_DB:-opencode.db}"; '
+      r'case "$__fl_opencode_db" in /*) ;; *) '
+      r'__fl_opencode_db="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/$__fl_opencode_db";; esac; '
+      r'[ -f "$__fl_opencode_db" ] && { sqlite3 -readonly -separator "$SEP" "$__fl_opencode_db" '
+      '${shellEscapePosix(v2Sql)} 2>/dev/null || '
+      r'sqlite3 -readonly -separator "$SEP" "$__fl_opencode_db" '
+      '${shellEscapePosix(v1Sql)} 2>/dev/null; }',
     );
   }
 
@@ -3854,8 +3872,8 @@ class AgentSessionDiscoveryService {
     _AcpSessionProvider.copilot =>
       'copilot --acp --no-color --no-auto-update --log-level error',
     _AcpSessionProvider.openCode =>
-      'opencode acp --log-level ERROR'
-          '${workingDirectory == null || workingDirectory.isEmpty ? '' : ' --cwd ${shellEscapePosix(workingDirectory)}'}',
+      '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
+          'opencode acp',
   };
 
   Future<_AcpSessionListResult?> _discoverAcpSessions(
@@ -4825,12 +4843,21 @@ String windowsTailFileScript({
 /// Builds a PowerShell script that invokes OpenCode's native session-list
 /// command when the CLI is available on a Windows remote.
 @visibleForTesting
-String windowsOpenCodeSessionListScript(int limit) {
+String windowsOpenCodeSessionListScript(int limit, {String? workingDirectory}) {
   final body = StringBuffer()
     ..write('if(Get-Command opencode -ErrorAction SilentlyContinue){')
+    ..write(r'$__flLines=@(& opencode api session.list ')
+    ..write('--param parentID=null --param order=desc --param limit=$limit')
+    ..write(r' 2>$null);if($LASTEXITCODE -ne 0){');
+  if (workingDirectory != null && workingDirectory.isNotEmpty) {
+    body.write(
+      'Set-Location -LiteralPath ${powerShellSingleQuote(workingDirectory)} -ErrorAction Stop;',
+    );
+  }
+  body
     ..write(r'$__flLines=@(& opencode session list --format json -n ')
     ..write('$limit')
-    ..write(r' 2>$null);')
+    ..write(r' 2>$null);}')
     ..write(r'if($LASTEXITCODE -eq 0 -or $__flLines.Count -gt 0){')
     ..write(r'foreach($__flL in $__flLines){')
     ..write(r'[void]$__flOut.Append([string]$__flL);')

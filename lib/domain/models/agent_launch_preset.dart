@@ -102,7 +102,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.claudeCode => const ['claude', 'claude-code'],
     AgentLaunchTool.copilotCli => const ['copilot', 'github-copilot'],
     AgentLaunchTool.codex => const ['codex', 'codex-cli'],
-    AgentLaunchTool.openCode => const ['opencode', 'open-code'],
+    AgentLaunchTool.openCode => const ['opencode', 'opencode2', 'open-code'],
     AgentLaunchTool.antigravity => const [
       'agy',
       'antigravity',
@@ -147,7 +147,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.claudeCode => const ['--dangerously-skip-permissions'],
     AgentLaunchTool.copilotCli => const ['--yolo'],
     AgentLaunchTool.codex => const ['--yolo'],
-    AgentLaunchTool.openCode => const [],
+    AgentLaunchTool.openCode => const ['--auto'],
     AgentLaunchTool.antigravity => const ['--dangerously-skip-permissions'],
     AgentLaunchTool.cursorAgent => const ['--force'],
     // Pi has no approval layer to bypass: it acts with the permissions of the
@@ -202,7 +202,7 @@ AgentLaunchTool? agentLaunchToolForCommandName(String? commandName) {
     'claude-agent-acp' => AgentLaunchTool.claudeCode,
     'copilot' || 'github-copilot' => AgentLaunchTool.copilotCli,
     'codex' || 'codex-cli' || 'codex-acp' => AgentLaunchTool.codex,
-    'opencode' || 'open-code' => AgentLaunchTool.openCode,
+    'opencode' || 'opencode2' || 'open-code' => AgentLaunchTool.openCode,
     'agy' ||
     'antigravity' ||
     'antigravity-cli' ||
@@ -430,8 +430,8 @@ final _copilotAllowAllUrlsPattern = RegExp(r'(?<!\S)--allow-all-urls(?=\s|$)');
 final _antigravityDangerouslySkipPermissionsPattern = RegExp(
   r'(?<!\S)--dangerously-skip-permissions(?=\s|$)',
 );
-final _openCodeDangerouslySkipPermissionsPattern = RegExp(
-  r'(?<!\S)--dangerously-skip-permissions(?=\s|$)',
+final _openCodeAutoApprovalPattern = RegExp(
+  r'(?<!\S)--(?:auto|yolo|dangerously-skip-permissions)(?=\s|$)',
 );
 final _cursorForcePattern = RegExp(r'(?<!\S)(?:--force|--yolo|-f)(?=\s|$)');
 final _hermesYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
@@ -638,7 +638,7 @@ String? _normalizeAgentToolArguments({
     ),
     AgentLaunchTool.openCode => _stripArgumentPatterns(
       trimmedAdditionalArguments,
-      [_openCodeDangerouslySkipPermissionsPattern],
+      [_openCodeAutoApprovalPattern],
     ),
     AgentLaunchTool.antigravity => _stripArgumentPatterns(
       trimmedAdditionalArguments,

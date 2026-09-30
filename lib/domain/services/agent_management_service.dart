@@ -190,10 +190,10 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     label: 'OpenCode',
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.openCode,
-    executableNames: ['opencode', 'open-code'],
+    executableNames: ['opencode', 'opencode2', 'open-code'],
     registry: AgentPackageRegistry.npm,
-    packageName: 'opencode-ai',
-    homebrewFormula: 'opencode',
+    packageName: '@opencode/cli',
+    homebrewFormula: 'opencode-v2',
     selfUpdateArguments: ['upgrade'],
   ),
   AgentRuntimeDefinition(
@@ -303,10 +303,10 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     label: 'OpenCode ACP',
     kind: AgentRuntimeKind.acpAdapter,
     tool: AgentLaunchTool.openCode,
-    executableNames: ['opencode', 'open-code'],
+    executableNames: ['opencode', 'opencode2', 'open-code'],
     registry: AgentPackageRegistry.npm,
-    packageName: 'opencode-ai',
-    homebrewFormula: 'opencode',
+    packageName: '@opencode/cli',
+    homebrewFormula: 'opencode-v2',
     sharesCliInstallation: true,
   ),
   AgentRuntimeDefinition(
@@ -479,11 +479,15 @@ let dir = path.dirname(launcher);
 let root;
 while (true) {
   const candidates = [dir];
-  if (process.platform === 'win32') candidates.push(path.join(dir, 'node_modules', 'opencode-ai'));
+  if (process.platform === 'win32') {
+    for (const name of ['@opencode/cli', '@opencode-ai/cli', 'opencode-ai']) {
+      candidates.push(path.join(dir, 'node_modules', name));
+    }
+  }
   for (const candidate of candidates) {
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(candidate, 'package.json'), 'utf8'));
-      if (pkg.name === 'opencode-ai' && fs.existsSync(path.join(candidate, 'postinstall.mjs'))) {
+      if (['@opencode/cli', '@opencode-ai/cli', 'opencode-ai'].includes(pkg.name) && fs.existsSync(path.join(candidate, 'postinstall.mjs'))) {
         root = candidate;
         break;
       }
@@ -510,7 +514,16 @@ String? buildAgentInstallCommand(
   bool repair = false,
   String? detectionSource,
   String? executablePath,
+  String? installedVersion,
 }) {
+  // V1's updater targets opencode-ai and cannot move to V2's package.
+  // Keep working V1 installations intact until the user installs V2.
+  if (update &&
+      definition.tool == AgentLaunchTool.openCode &&
+      installedVersion != null &&
+      compareAgentVersions(installedVersion, '2.0.0') < 0) {
+    return null;
+  }
   if (repair && definition.id == 'cli:opencode' && executablePath != null) {
     if (windows) {
       return buildCompactWindowsPowerShellCommand(
@@ -1039,12 +1052,17 @@ class AgentManagementService {
         installed != null &&
         latest != null &&
         compareAgentVersions(installed, latest) < 0;
+    final needsOpenCodeMigration =
+        definition.tool == AgentLaunchTool.openCode &&
+        installed != null &&
+        compareAgentVersions(installed, '2.0.0') < 0;
     final managed =
-        definition.supportsSelfUpdate ||
-        definition.id == 'cli:muse' ||
-        source == 'Homebrew' ||
-        source == 'npm global' ||
-        source == 'pipx';
+        !needsOpenCodeMigration &&
+        (definition.supportsSelfUpdate ||
+            definition.id == 'cli:muse' ||
+            source == 'Homebrew' ||
+            source == 'npm global' ||
+            source == 'pipx');
     return AgentRuntimeInfo(
       definition: definition,
       status: hasUpdate
@@ -1056,7 +1074,9 @@ class AgentManagementService {
       detectionSource: source,
       managedByPackageManager: managed,
       message: hasUpdate && !managed
-          ? 'Update this PATH installation with its original installer, then re-check.'
+          ? needsOpenCodeMigration
+                ? 'OpenCode 2 uses a new package. Install it from https://opencode.ai/v2/docs, then re-check.'
+                : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
   }
@@ -1440,6 +1460,7 @@ class AgentManagementService {
       repair: current?.status == AgentRuntimeStatus.needsRepair,
       detectionSource: current?.detectionSource,
       executablePath: current?.executablePath,
+      installedVersion: current?.installedVersion,
     );
     if (command == null) {
       return const AgentRuntimeActionResult(

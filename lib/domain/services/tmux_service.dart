@@ -3016,7 +3016,7 @@ String buildTmuxRefreshTerminalThemeCommand(
       'claude|claude-*) agent_tool=claude ;; '
       'copilot|copilot-*) agent_tool=copilot ;; '
       'codex|codex-*) agent_tool=codex ;; '
-      'opencode|opencode-*) agent_tool=opencode ;; '
+      'opencode|opencode2|opencode-*) agent_tool=opencode ;; '
       'agy|agy-*|antigravity|antigravity-*) agent_tool=antigravity ;; '
       'esac; }; '
       'flutty_is_generic_runtime_command_name() { '
@@ -4981,7 +4981,7 @@ END {
     if (is_codex(raw_command[pid])) tool = "codex"
     else if (command[pid] ~ /(^|[\\/@[:space:]])claude([\\/._[:space:]-]|\$)/) tool = "claude"
     else if (command[pid] ~ /(^|[\\/@[:space:]])copilot([\\/._[:space:]-]|\$)/) tool = "copilot"
-    else if (command[pid] ~ /(^|[\\/@[:space:]])opencode([\\/._[:space:]-]|\$)/) tool = "opencode"
+    else if (command[pid] ~ /(^|[\\/@[:space:]])opencode2?([\\/._[:space:]-]|\$)/) tool = "opencode"
     else if (command[pid] ~ /(^|[\\/@[:space:]])(agy|antigravity|antigravity-cli)([\\/._[:space:]-]|\$)/) tool = "antigravity"
     if (tool == "") continue
     current = pid

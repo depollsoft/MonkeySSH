@@ -57,6 +57,7 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 		{"'/opt/agent tools/claude' --resume X", invocation + " agent-launch claude --executable " + shellQuote("/opt/agent tools/claude") + " --resume X"},
 		{"/opt/bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("/opt/bin/codex") + " --yolo"},
 		{"claude-code --resume X", invocation + " agent-launch claude --executable " + shellQuote("claude-code") + " --resume X"},
+		{"opencode2 --session ses_123", invocation + " agent-launch opencode --executable " + shellQuote("opencode2") + " --session ses_123"},
 		{"./bin/codex --yolo", invocation + " agent-launch codex --executable " + shellQuote("./bin/codex") + " --yolo"},
 		{"pi --session saved", invocation + " pi-agent --session saved"},
 		{"pi", invocation + " pi-agent"},
@@ -192,7 +193,16 @@ func TestPrepareAgentLaunch(t *testing.T) {
 			case "claude":
 				wantEnv = append(append([]string(nil), env...), "CLAUDE_CODE_SCROLL_SPEED=1")
 			}
-			if !reflect.DeepEqual(launch.env, wantEnv) || launch.replacedTUIConfig != (tool == "opencode") {
+			compareEnv := launch.env
+			if tool == "opencode" {
+				compareEnv = nil
+				for _, entry := range launch.env {
+					if !strings.HasPrefix(entry, "OPENCODE_CLI_CONFIG_CONTENT=") {
+						compareEnv = append(compareEnv, entry)
+					}
+				}
+			}
+			if !reflect.DeepEqual(compareEnv, wantEnv) || launch.replacedTUIConfig != (tool == "opencode") {
 				t.Errorf("%s environment = %q, replacement = %v", tool, launch.env, launch.replacedTUIConfig)
 			}
 			if !reflect.DeepEqual(args, originalArgs) || !reflect.DeepEqual(env, originalEnv) {

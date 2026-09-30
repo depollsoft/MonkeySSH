@@ -623,6 +623,7 @@ class StoreDemoEnvironment:
         opencode_home = self._tmpdir / 'opencode-home'
         (opencode_home / '.config/opencode').mkdir(parents=True, exist_ok=True)
         (opencode_home / '.config/opencode/tui.json').write_text('{"theme":"system"}\n')
+        (opencode_home / '.config/opencode/cli.json').write_text('{"theme":{"mode":"system"}}\n')
         self._write_pane_script(
             'opencode',
             f"""
@@ -631,7 +632,6 @@ class StoreDemoEnvironment:
               PATH={self._shell_quote(os.environ.get('PATH', ''))} \\
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
-              --pure --log-level ERROR \\
               --prompt 'Explain in two short bullets how a persistent SSH workspace helps when switching between phone and desktop. Keep the answer under 40 words. Do not use tools, read files, or search for images.'
             """,
         )
