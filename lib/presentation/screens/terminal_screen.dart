@@ -6338,7 +6338,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final resolvedStoredCommand = _resolveStoredAutoConnectCommand(host);
+    var resolvedStoredCommand = _resolveStoredAutoConnectCommand(host);
     final mode = resolveAutoConnectCommandMode(
       command: resolvedStoredCommand,
       snippetId: host.autoConnectSnippetId,
@@ -6383,6 +6383,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
       }
       return;
+    }
+
+    if (agentPreset?.tool == AgentLaunchTool.openCode &&
+        host.autoConnectSnippetId == null &&
+        resolvedStoredCommand != null) {
+      final executable = await _tmuxService.resolveAgentToolExecutable(
+        session,
+        AgentLaunchTool.openCode,
+      );
+      resolvedStoredCommand = buildAgentLaunchCommand(
+        agentPreset!,
+        startInYoloMode: _startClisInYoloMode,
+        executable: executable == AgentLaunchTool.openCode.commandName
+            ? null
+            : executable,
+      );
+      if (!mounted || !identical(_shell, shell)) return;
     }
 
     String? snippetCommand;

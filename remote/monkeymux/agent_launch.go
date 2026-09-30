@@ -64,17 +64,23 @@ func runAgentLaunchWrapper(args []string) {
 	}
 	tool, original := args[0], args[1:]
 	commandName := tool
+	explicitExecutable := false
 	if len(original) > 0 && original[0] == "--executable" {
 		if len(original) < 2 || original[1] == "" {
 			fmt.Fprintln(os.Stderr, "monkeymux: --executable requires a command")
 			os.Exit(2)
 		}
 		commandName, original = original[1], original[2:]
+		explicitExecutable = true
 	}
 	executable := commandName
 	if !filepath.IsAbs(executable) && !strings.ContainsRune(filepath.ToSlash(executable), '/') {
 		var err error
-		executable, err = exec.LookPath(commandName)
+		if tool == "opencode" && !explicitExecutable {
+			commandName, executable, err = resolveOpenCodeExecutable()
+		} else {
+			executable, err = exec.LookPath(commandName)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(127)
@@ -114,6 +120,15 @@ func runAgentLaunchWrapper(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(126)
 	}
+}
+
+func resolveOpenCodeExecutable() (string, string, error) {
+	for _, name := range []string{"opencode2", "opencode", "open-code"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return name, path, nil
+		}
+	}
+	return "opencode", "", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}
 }
 
 type preparedAgentLaunch struct {

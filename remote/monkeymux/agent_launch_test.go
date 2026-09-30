@@ -428,7 +428,7 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	}
 	bin := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", bin)
 	t.Setenv("MONKEYMUX_PANE_TTY", "/dev/test-pane")
 	// The wrapper only defaults this for Claude and passes an inherited value
 	// through for every tool, so a test run from inside a MonkeyMux-launched
@@ -439,7 +439,7 @@ func TestAgentLaunchWrapperExec(t *testing.T) {
 	t.Setenv("OPENCODE_TUI_CONFIG", "custom")
 	stub := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$$\" \"$MONKEYMUX_AGENT_PID\" \"$MONKEYMUX_PANE_TTY\" \"$OPENCODE_TUI_CONFIG\" \"${CLAUDE_CODE_SCROLL_SPEED-unset}\" \"$@\"\n" +
-		"cat\nexit 23\n"
+		"/bin/cat\nexit 23\n"
 	for _, tool := range []string{"claude", "codex", "opencode", "copilot", "cursor-agent", "unknown"} {
 		if err := os.WriteFile(filepath.Join(bin, tool), []byte(stub), 0o700); err != nil {
 			t.Fatal(err)

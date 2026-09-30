@@ -648,7 +648,7 @@ final acpOpenCodeProvider = AcpBuiltinProvider(
     arguments: const ['acp'],
   ),
   executableProbe: AcpExecutableProbe(
-    candidateExecutableNames: const ['opencode', 'opencode2', 'open-code'],
+    candidateExecutableNames: const ['opencode2', 'opencode', 'open-code'],
   ),
   terminalAuthCommand: AcpLaunchCommand(
     executable: 'opencode',

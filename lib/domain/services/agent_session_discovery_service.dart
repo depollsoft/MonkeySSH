@@ -3392,9 +3392,8 @@ class AgentSessionDiscoveryService {
   }
 
   // ── OpenCode ───────────────────────────────────────────────────────────
-  // `opencode session list --format json` is the cleanest source of truth.
-  // It returns renamed titles, directory, and timestamps. Falls back to
-  // the SQLite database or JSON files if the CLI is unavailable.
+  // SQLite and V2's global API cover sessions outside the current project.
+  // Legacy installations also expose JSON through the session-list CLI.
 
   Future<_ToolDiscoveryResult> _discoverOpenCodeSessions(
     SshSession session,
@@ -3453,14 +3452,13 @@ class AgentSessionDiscoveryService {
         );
       }
 
-      // Preferred: use the CLI's own JSON output.
+      // The CLI is a fallback when SQLite is unavailable on the remote host.
       final cliOutput = await _exec(
         session,
-        r'__fl_opencode_sessions=$(opencode api session.list '
-        '--param parentID=null --param order=desc --param limit=$scanLimit 2>/dev/null); '
-        r'if [ $? -eq 0 ]; then printf "%s\n" "$__fl_opencode_sessions"; else '
-        '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
-        'opencode session list --format json -n $scanLimit 2>/dev/null; fi',
+        buildOpenCodeSessionListCommand(
+          scanLimit,
+          workingDirectory: workingDirectory,
+        ),
       );
       if (_isOpenCodeSessionJson(cliOutput)) {
         try {
@@ -3872,8 +3870,9 @@ class AgentSessionDiscoveryService {
     _AcpSessionProvider.copilot =>
       'copilot --acp --no-color --no-auto-update --log-level error',
     _AcpSessionProvider.openCode =>
-      '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
-          'opencode acp',
+      '$_openCodeExecutableResolutionCommand '
+          '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
+          r'"$__fl_opencode" acp',
   };
 
   Future<_AcpSessionListResult?> _discoverAcpSessions(
@@ -4845,17 +4844,30 @@ String windowsTailFileScript({
 @visibleForTesting
 String windowsOpenCodeSessionListScript(int limit, {String? workingDirectory}) {
   final body = StringBuffer()
-    ..write('if(Get-Command opencode -ErrorAction SilentlyContinue){')
-    ..write(r'$__flLines=@(& opencode api session.list ')
+    ..write(powerShellProfilePathPreamble)
+    ..write(r'$__fl_opencode=$null;foreach($__flCandidate in @(')
+    ..write(
+      AgentLaunchTool.openCode.candidateCommandNames
+          .map(powerShellSingleQuote)
+          .join(','),
+    )
+    ..write(
+      r')){$__fl_opencode=Get-Command -Name $__flCandidate -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;if($__fl_opencode){break}}',
+    )
+    ..write(r'if($__fl_opencode){$__fl_opencode=$__fl_opencode.Path;')
+    ..write(r'$__flLines=@(& $__fl_opencode api v2.session.list ')
     ..write('--param parentID=null --param order=desc --param limit=$limit')
-    ..write(r' 2>$null);if($LASTEXITCODE -ne 0){');
+    ..write(r' 2>$null);if($LASTEXITCODE -ne 0){')
+    ..write(r'$__flLines=@(& $__fl_opencode api session.list ')
+    ..write('--param parentID=null --param order=desc --param limit=$limit')
+    ..write(r' 2>$null);}if($LASTEXITCODE -ne 0){');
   if (workingDirectory != null && workingDirectory.isNotEmpty) {
     body.write(
       'Set-Location -LiteralPath ${powerShellSingleQuote(workingDirectory)} -ErrorAction Stop;',
     );
   }
   body
-    ..write(r'$__flLines=@(& opencode session list --format json -n ')
+    ..write(r'$__flLines=@(& $__fl_opencode session list --format json -n ')
     ..write('$limit')
     ..write(r' 2>$null);}')
     ..write(r'if($LASTEXITCODE -eq 0 -or $__flLines.Count -gt 0){')
@@ -4864,6 +4876,24 @@ String windowsOpenCodeSessionListScript(int limit, {String? workingDirectory}) {
     ..write(r'[void]$__flOut.Append([char]10)}}}');
   return powerShellUtf8OutputScript(body.toString());
 }
+
+final _openCodeExecutableResolutionCommand =
+    '__fl_opencode=; for __fl_candidate in '
+    '${AgentLaunchTool.openCode.candidateCommandNames.join(' ')}; do '
+    r'__fl_opencode=$(command -v "$__fl_candidate" 2>/dev/null) && break; done;';
+
+/// Lists global sessions with the API operation available in that CLI release.
+@visibleForTesting
+String buildOpenCodeSessionListCommand(int limit, {String? workingDirectory}) =>
+    '$_openCodeExecutableResolutionCommand '
+    r'__fl_opencode_sessions=$("$__fl_opencode" api v2.session.list '
+    '--param parentID=null --param order=desc --param limit=$limit 2>/dev/null) || '
+    r'__fl_opencode_sessions=$("$__fl_opencode" api session.list '
+    '--param parentID=null --param order=desc --param limit=$limit 2>/dev/null); '
+    r'if [ $? -eq 0 ]; then printf "%s\n" "$__fl_opencode_sessions"; else '
+    '${workingDirectory == null || workingDirectory.isEmpty ? '' : 'cd ${shellEscapePosix(workingDirectory)} && '}'
+    r'"$__fl_opencode" session list --format json -n '
+    '$limit 2>/dev/null; fi';
 
 /// Splits [paths] into snapshot batches whose generated PowerShell stays well
 /// under cmd.exe's ~8191-character command-line limit once wrapped as

@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.216"
+	monkeyMuxVersion                  = "0.1.217"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -6308,13 +6308,20 @@ func createWindowOptionsForRestore(
 	}
 	command := ""
 	if agentTool != "" {
-		launch := agentLaunchCommand(agentTool, startInYoloMode)
+		executable := ""
+		if agentTool == "opencode" {
+			name := cleanProcessCommandName(state.CurrentCommand)
+			if name == "opencode2" || name == "open-code" {
+				executable = name
+			}
+		}
+		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
 		if agentTool == "pi" {
 			launch = piLaunchCommand(state.AgentSessionDir)
 		}
 		command = launch
 		if sessionID := strings.TrimSpace(state.AgentSessionID); sessionID != "" {
-			resume := agentResumeCommand(agentTool, sessionID, startInYoloMode)
+			resume := agentResumeCommand(agentTool, sessionID, startInYoloMode, executable)
 			if agentTool == "pi" {
 				resume = piResumeCommand(
 					sessionID,
@@ -15917,12 +15924,19 @@ var agentCommands = map[string]struct {
 	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
 }
 
-func agentLaunchCommand(tool string, startInYoloMode bool) string {
+func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string) string {
 	if tool == "pi" {
 		return monkeyMuxPiAgentLaunchCommand()
 	}
 	descriptor := agentCommands[tool]
 	command := descriptor.executable
+	if len(executables) > 0 && executables[0] != "" {
+		var ok bool
+		command, ok = shellArgument(executables[0])
+		if !ok {
+			return ""
+		}
+	}
 	if startInYoloMode {
 		if tool == "opencode" {
 			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command + " --auto"
@@ -15964,7 +15978,7 @@ func piResumeCommand(sessionID string, sessionDir string, sessionPath string) st
 	return launch + " --session " + sessionID
 }
 
-func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) string {
+func agentResumeCommand(tool string, sessionID string, startInYoloMode bool, executables ...string) string {
 	quotedSessionID, ok := shellArgument(sessionID)
 	if !ok {
 		return ""
@@ -15975,7 +15989,7 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 		}
 		return piResumeCommand(sessionID, "", "")
 	}
-	launch := agentLaunchCommand(tool, startInYoloMode)
+	launch := agentLaunchCommand(tool, startInYoloMode, executables...)
 	if launch == "" {
 		return ""
 	}
@@ -15990,6 +16004,11 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool) str
 }
 
 func canonicalAgentCommandName(command string) string {
+	if agentToolFromCommandName(command) == "opencode" {
+		// CurrentCommand is also serialized into restore state. Keep the alias
+		// so a resumed pane launches the same CLI as its fresh fallback.
+		return cleanProcessCommandName(command)
+	}
 	return firstNonEmptyString(agentToolFromCommandName(command), cleanProcessCommandName(command))
 }
 

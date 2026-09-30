@@ -102,7 +102,7 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.claudeCode => const ['claude', 'claude-code'],
     AgentLaunchTool.copilotCli => const ['copilot', 'github-copilot'],
     AgentLaunchTool.codex => const ['codex', 'codex-cli'],
-    AgentLaunchTool.openCode => const ['opencode', 'opencode2', 'open-code'],
+    AgentLaunchTool.openCode => const ['opencode2', 'opencode', 'open-code'],
     AgentLaunchTool.antigravity => const [
       'agy',
       'antigravity',
@@ -449,11 +449,13 @@ final _grokPermissionModeSeparatedPattern = RegExp(
 String buildAgentLaunchCommand(
   AgentLaunchPreset preset, {
   bool startInYoloMode = false,
+  String? executable,
 }) {
   final baseCommand = buildAgentToolCommand(
     preset.tool,
     additionalArguments: preset.additionalArguments,
     startInYoloMode: startInYoloMode,
+    executable: executable,
   );
 
   final tmuxSessionName = preset.tmuxSessionName?.trim();
@@ -516,13 +518,19 @@ String buildAgentToolCommand(
   bool startInYoloMode = false,
   String? launchProfile,
   bool windows = false,
+  String? executable,
 }) {
   final commandParts = <String>[
     ..._buildAgentToolEnvironmentAssignments(
       tool,
       startInYoloMode: startInYoloMode,
     ),
-    tool.commandName,
+    if (executable == null)
+      tool.commandName
+    else if (windows)
+      _quoteWindowsShellArgument(executable)
+    else
+      _quoteShellArgument(executable),
     ...buildAgentGlobalLaunchArguments(
       tool,
       startInYoloMode: startInYoloMode,
@@ -540,6 +548,34 @@ String buildAgentToolCommand(
     commandParts.add(normalizedArguments);
   }
   return commandParts.join(' ');
+}
+
+/// Substitutes a detected executable in a generated agent command.
+///
+/// An explicitly chosen executable or path is left intact.
+String replaceDefaultAgentExecutable(
+  String command,
+  AgentLaunchTool tool,
+  String executable,
+) {
+  var offset = 0;
+  while (true) {
+    final rest = command.substring(offset);
+    final trimmed = rest.trimLeft();
+    offset += rest.length - trimmed.length;
+    final prefix =
+        _leadingCdCommandPattern.firstMatch(trimmed) ??
+        _leadingEnvironmentAssignmentPattern.firstMatch(trimmed);
+    if (prefix == null) break;
+    offset += prefix.end;
+  }
+  final name = RegExp.escape(tool.commandName);
+  final token = RegExp('^(?:$name|\'$name\'|"$name")(?=\\s|\$)')
+      .firstMatch(command.substring(offset));
+  if (token == null || executable == tool.commandName) return command;
+  return command.substring(0, offset) +
+      _quoteShellArgument(executable) +
+      command.substring(offset + token.end);
 }
 
 /// Builds the base shell command for resuming a saved [tool] session.

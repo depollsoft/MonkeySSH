@@ -309,8 +309,8 @@ exit 7;
     test('runs the native CLI session list command when available', () {
       final script = windowsOpenCodeSessionListScript(12);
 
-      expect(script, contains('Get-Command opencode'));
-      expect(script, contains('opencode session list --format json -n 12'));
+      expect(script, contains("'opencode2','opencode','open-code'"));
+      expect(script, contains('session list --format json -n 12'));
       expect(script, contains(r'$__flOut.Append([string]$__flL)'));
     });
   });

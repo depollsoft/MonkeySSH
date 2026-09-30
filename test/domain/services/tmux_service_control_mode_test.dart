@@ -256,7 +256,7 @@ void main() {
       expect(command, contains('claude|claude-*'));
       expect(command, contains('copilot|copilot-*'));
       expect(command, contains('codex|codex-*'));
-      expect(command, contains('opencode|opencode-*'));
+      expect(command, contains('opencode|opencode2|opencode-*'));
       expect(command, contains('agy|agy-*|antigravity|antigravity-*'));
       // Gemini CLI is unsupported: it must not be classified as an agent
       // pane nor receive focus-transition injections.

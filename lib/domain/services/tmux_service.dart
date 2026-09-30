@@ -416,6 +416,24 @@ class TmuxService implements RemoteMultiplexerService {
     return _refreshInstalledAgentTools(session);
   }
 
+  /// Resolves the preferred installed command name in the remote user's PATH.
+  Future<String> resolveAgentToolExecutable(
+    SshSession session,
+    AgentLaunchTool tool,
+  ) async {
+    try {
+      final output = session.remoteIsWindows
+          ? await _execWindowsPowerShell(
+              session,
+              buildWindowsAgentToolDetectionScript(tool: tool),
+            )
+          : await _exec(session, buildAgentToolDetectionCommand(tool: tool));
+      return preferredInstalledAgentExecutable(tool, output);
+    } on Object {
+      return tool.commandName;
+    }
+  }
+
   /// Warms the installed agent CLI cache in the background.
   Future<void> prefetchInstalledAgentTools(SshSession session) async {
     final state = _stateFor(session.connectionId);
@@ -1685,11 +1703,24 @@ class TmuxService implements RemoteMultiplexerService {
     // This ensures the command runs inside the login shell environment
     // where CLI tools installed via Homebrew/nvm/etc. are available.
     if (command != null && command.trim().isNotEmpty) {
+      var launchCommand = command;
+      if (agentTool == AgentLaunchTool.openCode) {
+        final executable = await resolveAgentToolExecutable(
+          session,
+          agentTool!,
+        );
+        _requireState(session.connectionId, state);
+        launchCommand = replaceDefaultAgentExecutable(
+          command,
+          agentTool,
+          executable,
+        );
+      }
       _execTmuxCommandFireAndForget(
         session,
         sessionName,
         'send-keys -t ${shellEscapePosix(target)} '
-        '${shellEscapePosix(command.trim())} Enter',
+        '${shellEscapePosix(launchCommand.trim())} Enter',
         extraFlags: extraFlags,
       );
       DiagnosticsLogService.instance.info(
@@ -4416,9 +4447,9 @@ AgentLaunchTool? agentToolForBinaryName(String binaryName) {
 /// - Falls back to `/bin/sh` if `$SHELL` is unset, and tolerates the
 ///   inner `command -v` exiting non-zero when a binary is missing.
 @visibleForTesting
-String buildAgentToolDetectionCommand() {
+String buildAgentToolDetectionCommand({AgentLaunchTool? tool}) {
   final binaries =
-      AgentLaunchTool.values
+      (tool == null ? AgentLaunchTool.values : [tool])
           .expand((t) => t.candidateCommandNames)
           .toSet()
           .toList()
@@ -4448,9 +4479,9 @@ String buildAgentToolDetectionCommand() {
 /// It only accepts external commands (`Application` or `ExternalScript`) so
 /// aliases, functions, and cmdlets are not mistaken for installed CLIs.
 @visibleForTesting
-String buildWindowsAgentToolDetectionScript() {
+String buildWindowsAgentToolDetectionScript({AgentLaunchTool? tool}) {
   final names =
-      AgentLaunchTool.values
+      (tool == null ? AgentLaunchTool.values : [tool])
           .expand((t) => t.candidateCommandNames)
           .toSet()
           .toList()
@@ -4489,6 +4520,22 @@ Set<AgentLaunchTool> parseInstalledAgentTools(String output) {
     if (tool != null) installed.add(tool);
   }
   return installed;
+}
+
+/// Selects a supported executable from detection output in candidate order.
+@visibleForTesting
+String preferredInstalledAgentExecutable(AgentLaunchTool tool, String output) {
+  final installed = output
+      .split('\n')
+      .map((line) => line.trim())
+      .where(_looksLikeResolvedAgentToolPath)
+      .map((path) => path.replaceAll(r'\', '/').split('/').last)
+      .map((name) => name.replaceFirst(_windowsExecutableExtensionPattern, ''))
+      .toSet();
+  return tool.candidateCommandNames.firstWhere(
+    installed.contains,
+    orElse: () => tool.commandName,
+  );
 }
 
 final _windowsAbsolutePathPattern = RegExp(r'^(?:[A-Za-z]:[\\/]|\\\\)');
