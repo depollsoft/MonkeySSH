@@ -6625,6 +6625,88 @@ void _batchTests() {
     }
   }
 
+  for (final (delay, framed) in [
+    (Duration.zero, true),
+    (terminalImeFramingContinuationWindow, true),
+    (
+      terminalImeFramingContinuationWindow + const Duration(milliseconds: 1),
+      false,
+    ),
+  ]) {
+    test('frames a commit ${delay.inMilliseconds} ms after a batch: '
+        '$framed', () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h',
+      );
+      driver.updateEditingValue(_batchEditingValue('hello'));
+      await driver.flush(delay);
+      driver.updateEditingValue(_batchEditingValue('hello?'));
+      await driver.flush();
+
+      expect(harness.terminalOutput, [
+        '\x1b[200~hello\x1b[201~',
+        if (framed) '\x1b[200~?\x1b[201~' else '?',
+      ]);
+      await _disposeImeHarness(driver, harness);
+    });
+  }
+
+  test('types keystrokes after an autocorrected word as plain input', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.android);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+    // Gboard autocorrects a lone "i" to "I " when space is pressed.
+    driver.updateEditingValue(_batchEditingValue('i'));
+    await driver.flush();
+    driver.updateEditingValue(_batchEditingValue('I '));
+    await driver.flush();
+    for (final text in ['I u', 'I un', 'I uni']) {
+      await driver.flush(const Duration(milliseconds: 250));
+      driver.updateEditingValue(_batchEditingValue(text));
+      await driver.flush();
+    }
+
+    // Each later keystroke framed as its own paste would make zsh highlight
+    // the last character next to the cursor.
+    expect(harness.terminalOutput, [
+      'i',
+      '\x7f',
+      '\x1b[200~I \x1b[201~',
+      'u',
+      'n',
+      'i',
+    ]);
+    await _disposeImeHarness(driver, harness);
+  });
+
+  test('a new batch restarts the framing window', () async {
+    final driver = _ImeDriver(platform: TargetPlatform.android);
+    addTearDown(driver.dispose);
+    final harness = await _createImeHarness(
+      driver,
+      initialTerminalOutput: '\x1b[?2004h',
+    );
+    driver.updateEditingValue(_batchEditingValue('hello'));
+    await driver.flush(const Duration(seconds: 1));
+    driver.updateEditingValue(_batchEditingValue('hello world'));
+    await driver.flush(terminalImeFramingContinuationWindow);
+    driver.updateEditingValue(_batchEditingValue('hello world?'));
+    await driver.flush();
+
+    expect(harness.terminalOutput, [
+      '\x1b[200~hello\x1b[201~',
+      '\x1b[200~ world\x1b[201~',
+      '\x1b[200~?\x1b[201~',
+    ]);
+    await _disposeImeHarness(driver, harness);
+  });
+
   for (final reset in ['Return', 'toolbar key', 'connection']) {
     test('restores standalone shortcuts after $reset resets a batch', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);

@@ -110,6 +110,46 @@ void registerTerminalScreenSelectionTests() {
           isTrue,
         );
       });
+      test('a MonkeyMux foreground change keeps the displayed window', () {
+        // MonkeyMux reports the foreground process group as the pane PID, so
+        // a command exiting changes it without switching windows.
+        final commandExited = [
+          first.copyWith(panePid: 11, currentCommand: 'zsh'),
+          second,
+        ];
+        expect(
+          didDisplayedMuxWindowChange(
+            [first, second],
+            commandExited,
+            backend: RemoteMuxBackend.monkeyMux,
+          ),
+          isFalse,
+        );
+        expect(
+          didDisplayedMuxWindowChange(
+            [first, second],
+            commandExited,
+            backend: RemoteMuxBackend.tmux,
+          ),
+          isTrue,
+        );
+      });
+      test('selecting another window changes the displayed window', () {
+        for (final backend in RemoteMuxBackend.values) {
+          expect(
+            didDisplayedMuxWindowChange(
+              [first, second],
+              [
+                first.copyWith(isActive: false),
+                second.copyWith(isActive: true),
+              ],
+              backend: backend,
+            ),
+            isTrue,
+            reason: '$backend',
+          );
+        }
+      });
     });
 
     group('trimTerminalSelectionText', () {
