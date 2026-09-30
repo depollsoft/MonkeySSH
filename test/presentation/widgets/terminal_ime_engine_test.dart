@@ -3046,23 +3046,39 @@ void main() {
         addTearDown(driver.dispose);
         final harness = await _createImeHarness(driver);
 
-        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
-        await driver.flush();
-        driver.engine
-          ..handleAndroidImeBackspace(
-            TerminalKeyEventType.press,
-            toolbarModifiers: null,
-          )
-          ..handleAndroidImeBackspace(
-            TerminalKeyEventType.release,
-            toolbarModifiers: null,
+        // The IME reports the Backspace's deletion only after Enter, alone,
+        // with its own newline echo, or with the next key.
+        for (final (late, expected) in [
+          ('hell', ''),
+          ('hell\n', ''),
+          ('hell\nx', 'x'),
+        ]) {
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+          await driver.flush();
+          driver.engine
+            ..handleAndroidImeBackspace(
+              TerminalKeyEventType.press,
+              toolbarModifiers: null,
+            )
+            ..handleAndroidImeBackspace(
+              TerminalKeyEventType.release,
+              toolbarModifiers: null,
+            );
+          await driver.hardwareKey(TerminalKey.enter);
+          driver.updateEditingValue(
+            _editingValue(late, selectionOffset: late.length),
           );
-        await driver.hardwareKey(TerminalKey.enter);
-        // The IME reports the Backspace's deletion only after Enter.
-        driver.updateEditingValue(_editingValue('hell', selectionOffset: 4));
-        await driver.flush();
+          await driver.flush();
 
-        expect(harness.terminalOutput.join(), 'hello\x7f\r');
+          expect(
+            harness.terminalOutput.join(),
+            'hello\x7f\r$expected',
+            reason: late,
+          );
+          driver.engine.clearImeBufferForFreshInput();
+          await driver.flush(hardwareEnterStaleEditWindow);
+        }
 
         await _disposeImeHarness(driver, harness);
       });

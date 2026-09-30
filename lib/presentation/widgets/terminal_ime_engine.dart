@@ -1549,10 +1549,12 @@ class TerminalImeEngine {
     // echo first so a line starting with a space is not resent as new input.
     // An empty line has no such space, and its echo is only the newline that
     // fresh-input normalization already drops.
-    // Within the stale window a bare newline is the key-event Enter's own
-    // echo, committed after the keyboard applied the reset.
+    // Within the stale window every stale line can carry the echo too, and a
+    // bare newline is the key-event Enter's own echo, committed after the
+    // keyboard applied the reset.
     for (final line in {
       pendingPerformedEnterText,
+      ...staleLines,
       if (staleLines.isNotEmpty) '',
     }) {
       for (final candidate in {if (line.isNotEmpty) echoText, currentText}) {
