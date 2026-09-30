@@ -31,7 +31,7 @@ void main() {
         tester.state(find.byType(TerminalTextInputHandler)) as TextInputClient;
     tester.testTextInput.updateEditingValue(
       const TextEditingValue(
-        text: '${_marker}echo \$(id)',
+        text: '${_marker}echo \x07(id)',
         selection: TextSelection.collapsed(offset: 12),
       ),
     );
@@ -92,7 +92,7 @@ void main() {
     final originalState = tester.state(find.byType(TerminalTextInputHandler));
     tester.testTextInput.updateEditingValue(
       const TextEditingValue(
-        text: '${_marker}echo \$(id)',
+        text: '${_marker}echo \x07(id)',
         selection: TextSelection.collapsed(offset: 12),
       ),
     );

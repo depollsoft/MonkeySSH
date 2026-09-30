@@ -18,13 +18,6 @@ final _disallowedCommandControlCharacters = RegExp(
 );
 final _multilinePattern = RegExp(r'[\r\n]');
 
-/// Keyboard insertions longer than this are treated as paste-like.
-///
-/// Normal swipe commits are short words or phrases. Larger payloads can come
-/// from iOS clipboard/autofill handoff paths and should be reviewed before the
-/// terminal receives them.
-const terminalKeyboardPasteLikeInsertionThreshold = 256;
-
 /// Reasons a terminal command should be reviewed before it is inserted or run.
 enum TerminalCommandReviewReason {
   /// The command came from imported auto-connect configuration.
@@ -47,9 +40,6 @@ enum TerminalCommandReviewReason {
 
   /// The command was rendered from snippet variables.
   variableSubstitution,
-
-  /// The keyboard supplied a paste-like amount of text in one update.
-  largeKeyboardInsertion,
 }
 
 /// Review metadata for a terminal command before insertion or execution.
@@ -154,36 +144,28 @@ TerminalCommandReview assessClipboardPasteCommand(
   bracketedPasteModeEnabled: bracketedPasteModeEnabled,
 );
 
-/// Assesses text inserted through the system keyboard.
+/// Assesses text inserted through the system keyboard, including dictation
+/// and keyboard suggestions.
 ///
-/// [previewedByIme] marks a commit the IME showed as composing text before it
-/// landed, which is how dictation arrives. The user watched that text build
-/// up, so it is not a hidden clipboard handoff. When the terminal also has
-/// bracketed paste enabled ([bracketedPasteModeEnabled]), its line breaks
-/// travel inside one paste and the application decides what they mean, so
-/// they are not an unexpected run of commands either. Shell-reshaping content
-/// (chaining, redirection, command substitution, control characters) still
-/// deserves review.
+/// Keyboard text lands on the command line for the user to read before they
+/// press Return, so its length and shell syntax need no review. It only acts
+/// on its own when a line break in it is sent as Return ([sendsReturn]),
+/// running the line before it, or when it carries control characters.
 TerminalCommandReview assessKeyboardInsertedCommand(
   String command, {
   required String insertedText,
-  bool previewedByIme = false,
+  required bool sendsReturn,
   bool bracketedPasteModeEnabled = false,
 }) {
-  final skipMultiline = previewedByIme && bracketedPasteModeEnabled;
-  final reasons = <TerminalCommandReviewReason>[
-    for (final reason in _collectPasteCommandReviewReasons(
-      command,
-      bracketedPasteModeEnabled: false,
-    ))
-      if (!skipMultiline || reason != TerminalCommandReviewReason.multiline)
-        reason,
-  ];
-  if (!previewedByIme &&
-      insertedText.length > terminalKeyboardPasteLikeInsertionThreshold &&
-      !reasons.contains(TerminalCommandReviewReason.largeKeyboardInsertion)) {
-    reasons.add(TerminalCommandReviewReason.largeKeyboardInsertion);
-  }
+  final reasons = sendsReturn
+      ? _collectPasteCommandReviewReasons(
+          command,
+          bracketedPasteModeEnabled: false,
+        )
+      : [
+          if (_disallowedCommandControlCharacters.hasMatch(insertedText))
+            TerminalCommandReviewReason.controlCharacters,
+        ];
   return TerminalCommandReview(
     command: command,
     reasons: reasons,
@@ -389,8 +371,6 @@ String _describeReviewReason(TerminalCommandReviewReason reason) =>
         'This command uses shell command substitution.',
       TerminalCommandReviewReason.variableSubstitution =>
         'Snippet variables were substituted into the final command.',
-      TerminalCommandReviewReason.largeKeyboardInsertion =>
-        'The keyboard inserted a paste-like amount of text.',
     };
 
 bool _hasVisibleContent(String? value) =>

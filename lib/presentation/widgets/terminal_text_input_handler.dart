@@ -294,6 +294,7 @@ class TerminalTextInputHandler extends StatefulWidget {
     this.consumeTerminalKeyModifiers,
     this.applyTerminalTextInputModifiers,
     this.hasActiveToolbarModifier,
+    this.isShellPromptActive,
     this.sensitiveInput = false,
     this.readOnly = false,
     this.tapToShowKeyboard = true,
@@ -354,6 +355,14 @@ class TerminalTextInputHandler extends StatefulWidget {
   /// the input so that stale suggestions don't accumulate from non-text input.
   final ValueGetter<bool>? hasActiveToolbarModifier;
 
+  /// Whether a shell prompt, rather than a program such as a coding agent,
+  /// owns the input line.
+  ///
+  /// Dictation reaches an agent as several short pastes so its composer shows
+  /// the text instead of a paste placeholder. At a shell prompt it stays one
+  /// paste.
+  final ValueGetter<bool>? isShellPromptActive;
+
   /// Whether the terminal appears to be accepting sensitive text.
   ///
   /// When true, the platform keyboard is configured like a password field so
@@ -407,6 +416,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     consumeTerminalKeyModifiers: widget.consumeTerminalKeyModifiers,
     applyTerminalTextInputModifiers: widget.applyTerminalTextInputModifiers,
     hasActiveToolbarModifier: widget.hasActiveToolbarModifier,
+    isShellPromptActive: widget.isShellPromptActive,
     canSyncEditingState: () => hasInputConnection,
     onEditingState: (value) => _connection!.setEditingState(value),
   );
