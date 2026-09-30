@@ -151,7 +151,14 @@ class MainActivity : FlutterFragmentActivity() {
             )
         keyboardVisibilityMethodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
-                "getVisibility" -> result.success(keyboardVisible)
+                "getVisibility" -> result.success(currentKeyboardVisibility())
+                "refreshInsets" -> {
+                    // Flutter defers IME insets while the keyboard animates and
+                    // can be left holding a stale keyboard inset. A fresh
+                    // dispatch hands FlutterView the current window insets.
+                    ViewCompat.requestApplyInsets(window.decorView)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -401,6 +408,16 @@ class MainActivity : FlutterFragmentActivity() {
             insets
         }
         ViewCompat.requestApplyInsets(window.decorView)
+    }
+
+    /** Reads the live IME state instead of the last dispatched listener event. */
+    private fun currentKeyboardVisibility(): Boolean {
+        val visible =
+            ViewCompat.getRootWindowInsets(window.decorView)
+                ?.isVisible(WindowInsetsCompat.Type.ime())
+                ?: return keyboardVisible
+        keyboardVisible = visible
+        return visible
     }
 
     private fun notifyIncomingTransferPayload() {

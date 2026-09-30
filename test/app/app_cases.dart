@@ -22,6 +22,7 @@ import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 
 class _Notifications extends Mock implements LocalNotificationService {}
 
@@ -141,6 +142,14 @@ void registerAppTests() {
             ),
           );
           await tester.pumpAndSettle();
+          // Every route inherits the stale keyboard-inset correction.
+          expect(
+            find.ancestor(
+              of: find.byType(Navigator),
+              matching: find.byType(PlatformKeyboardInsetMediaQuery),
+            ),
+            findsOneWidget,
+          );
           expect(calls, [
             'listen:notifications',
             if (platform == TargetPlatform.android) 'listen:shortcuts',

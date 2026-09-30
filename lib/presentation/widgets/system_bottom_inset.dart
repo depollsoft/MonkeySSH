@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
+import '../../domain/services/diagnostics_log_service.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 
 /// Resolves the bottom system inset (gesture handle or navigation bar) that
@@ -23,21 +25,27 @@ double resolveSystemBottomInset(MediaQueryData mediaQuery) {
   return math.max(mediaQuery.padding.bottom, unliftedInset);
 }
 
-/// Resolves an IME inset using native keyboard visibility when available.
+/// How long a hidden-keyboard report must disagree with an unchanging IME inset
+/// before that inset is treated as stale.
 ///
-/// Android can keep [MediaQueryData.viewInsets] after the IME closes. A native
-/// hidden report therefore clears that stale geometry. Before the native channel
-/// responds, the reported inset preserves Flutter's normal keyboard avoidance.
-double resolvePlatformKeyboardInset({
-  required double bottomInset,
-  required bool? platformKeyboardVisible,
-}) {
-  if (bottomInset <= 0 || platformKeyboardVisible == false) return 0;
-  return bottomInset;
-}
+/// An ordinary dismissal shrinks the inset every frame until it reaches zero,
+/// so this only matches geometry the platform stopped updating. It is longer
+/// than the platform's keyboard hide animation, and it restarts whenever the
+/// inset moves, so slow animations are never cut short.
+const staleKeyboardInsetDelay = Duration(milliseconds: 500);
 
 /// Replaces stale keyboard geometry with the platform-authoritative IME state.
-class PlatformKeyboardInsetMediaQuery extends StatelessWidget {
+///
+/// Installed once above the app's navigator, so every route, sheet, and dialog
+/// inherits the corrected [MediaQueryData.viewInsets]. Android's embedding can
+/// keep reporting a keyboard-sized bottom inset after the IME closes, and every
+/// [Scaffold] would then reserve an empty keyboard-sized gap. When the native channel reports the
+/// keyboard hidden and the inset has not moved for [staleKeyboardInsetDelay],
+/// the inset is dropped, the uncovered navigation-bar padding is restored, and
+/// the platform is asked to dispatch fresh insets. Before the native channel
+/// responds, or while it reports the keyboard visible, geometry passes through
+/// unchanged.
+class PlatformKeyboardInsetMediaQuery extends StatefulWidget {
   /// Creates a platform-aware keyboard-inset boundary for [child].
   const PlatformKeyboardInsetMediaQuery({required this.child, super.key});
 
@@ -45,35 +53,108 @@ class PlatformKeyboardInsetMediaQuery extends StatelessWidget {
   final Widget child;
 
   @override
+  State<PlatformKeyboardInsetMediaQuery> createState() =>
+      _PlatformKeyboardInsetMediaQueryState();
+}
+
+class _PlatformKeyboardInsetMediaQueryState
+    extends State<PlatformKeyboardInsetMediaQuery> {
+  Timer? _staleTimer;
+  double? _pendingInset;
+  bool _insetIsStale = false;
+  Stopwatch? _staleStopwatch;
+
+  final _controller = SystemKeyboardVisibilityController.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_handleVisibilityChanged);
+    unawaited(_controller.initialize());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _evaluate();
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_handleVisibilityChanged);
+    _staleTimer?.cancel();
+    super.dispose();
+  }
+
+  void _handleVisibilityChanged() => setState(_evaluate);
+
+  void _evaluate() {
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset <= 0 || _controller.visible != false) {
+      _resetStaleTracking(recovered: inset <= 0);
+      return;
+    }
+    if (_insetIsStale || (_staleTimer != null && _pendingInset == inset)) {
+      return;
+    }
+    // Hidden per the platform, but the inset is new or still moving: wait for
+    // it to settle. Re-read the live state once meanwhile in case the cached
+    // report predates a missed show event.
+    if (_staleTimer == null) unawaited(_controller.refresh());
+    _pendingInset = inset;
+    _staleTimer?.cancel();
+    _staleTimer = Timer(staleKeyboardInsetDelay, _confirmStaleInset);
+  }
+
+  void _confirmStaleInset() {
+    _staleTimer = null;
+    if (!mounted) return;
+    final inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset <= 0 || _controller.visible != false || inset != _pendingInset) {
+      setState(_evaluate);
+      return;
+    }
+    setState(() => _insetIsStale = true);
+    _staleStopwatch = Stopwatch()..start();
+    DiagnosticsLogService.instance.warning(
+      'keyboard.inset',
+      'stale_cleared',
+      fields: {'insetDp': inset.round()},
+    );
+    unawaited(_controller.requestInsetsRefresh());
+  }
+
+  void _resetStaleTracking({required bool recovered}) {
+    _staleTimer?.cancel();
+    _staleTimer = null;
+    _pendingInset = null;
+    if (!_insetIsStale) return;
+    _insetIsStale = false;
+    DiagnosticsLogService.instance.info(
+      'keyboard.inset',
+      recovered ? 'stale_recovered' : 'stale_superseded',
+      fields: {'durationMs': _staleStopwatch?.elapsedMilliseconds},
+    );
+    _staleStopwatch = null;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final keyboardVisibility = SystemKeyboardVisibilityController.instance;
-    return ListenableBuilder(
-      listenable: keyboardVisibility,
-      child: child,
-      builder: (context, child) {
-        final mediaQuery = MediaQuery.of(context);
-        final keyboardInset = resolvePlatformKeyboardInset(
-          bottomInset: mediaQuery.viewInsets.bottom,
-          platformKeyboardVisible: keyboardVisibility.visible,
-        );
-        return MediaQuery(
-          data: mediaQuery.copyWith(
-            viewInsets: mediaQuery.viewInsets.copyWith(bottom: keyboardInset),
-            // Flutter derives padding from viewPadding minus viewInsets. When
-            // clearing stale geometry, restore the uncovered navigation bar
-            // without reviving padding already consumed by an ancestor.
-            padding: keyboardInset == mediaQuery.viewInsets.bottom
-                ? mediaQuery.padding
-                : mediaQuery.padding.copyWith(
-                    bottom: math.max(
-                      0,
-                      mediaQuery.viewPadding.bottom - keyboardInset,
-                    ),
-                  ),
-          ),
-          child: child!,
-        );
-      },
+    final mediaQuery = MediaQuery.of(context);
+    // Always build the same MediaQuery so toggling the correction never
+    // remounts the navigator below.
+    return MediaQuery(
+      data: _insetIsStale
+          ? mediaQuery.copyWith(
+              viewInsets: mediaQuery.viewInsets.copyWith(bottom: 0),
+              // Flutter derives padding from viewPadding minus viewInsets, so
+              // the navigation bar the stale inset hid is uncovered again.
+              padding: mediaQuery.padding.copyWith(
+                bottom: mediaQuery.viewPadding.bottom,
+              ),
+            )
+          : mediaQuery,
+      child: widget.child,
     );
   }
 }

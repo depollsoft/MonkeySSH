@@ -32,6 +32,7 @@ import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_permission_surface.dart';
 import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
+import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
 import '../support/fake_acp_session_manager.dart';
@@ -105,23 +106,26 @@ Widget _wrap(
           viewPadding: mediaPadding,
           viewInsets: mediaViewInsets,
         ),
-        child: AgentChatScreen(
-          hostId: key.hostId,
-          providerId: key.providerId,
-          bridgeId: key.bridgeId,
-          acpSessionId: key.acpSessionId,
-          attachmentActionsBuilder:
-              attachmentActionsBuilder ??
-              (_, _) => const AcpComposerAttachmentActions(),
-          embedded: embedded,
-          connectOnMount: connectOnMount,
-          preferredFontSize: preferredFontSize,
-          preferredFontFamily: preferredFontFamily,
-          onFontSizeCommitted: onFontSizeCommitted,
-          onPreviewChanged: onPreviewChanged,
-          onNativePreviewChanged: onNativePreviewChanged,
-          initialScrollState: initialScrollState,
-          onScrollChanged: onScrollChanged,
+        // The app installs this guard above its navigator.
+        child: PlatformKeyboardInsetMediaQuery(
+          child: AgentChatScreen(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: key.acpSessionId,
+            attachmentActionsBuilder:
+                attachmentActionsBuilder ??
+                (_, _) => const AcpComposerAttachmentActions(),
+            embedded: embedded,
+            connectOnMount: connectOnMount,
+            preferredFontSize: preferredFontSize,
+            preferredFontFamily: preferredFontFamily,
+            onFontSizeCommitted: onFontSizeCommitted,
+            onPreviewChanged: onPreviewChanged,
+            onNativePreviewChanged: onNativePreviewChanged,
+            initialScrollState: initialScrollState,
+            onScrollChanged: onScrollChanged,
+          ),
         ),
       ),
     ),
@@ -166,7 +170,11 @@ void main() {
         expect(tester.getBottomLeft(composer).dy, 500);
 
         // System Back can hide the IME without clearing focus or its old inset.
+        // The inset is only dropped once it has stopped moving.
         keyboard.debugSetVisible(visible: false);
+        await tester.pumpAndSettle();
+        expect(tester.getBottomLeft(composer).dy, 500);
+        await tester.pump(staleKeyboardInsetDelay);
         await tester.pumpAndSettle();
         expect(tester.getBottomLeft(composer).dy, 766);
         expect(

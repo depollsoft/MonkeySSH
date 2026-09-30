@@ -88,37 +88,6 @@ void registerTmuxToolPickerSheetTests() {
     });
 
     group('TmuxToolPickerSheet', () {
-      test('uses native visibility before inset geometry', () {
-        expect(
-          resolvePlatformKeyboardInset(
-            bottomInset: 300,
-            platformKeyboardVisible: null,
-          ),
-          300,
-        );
-        expect(
-          resolvePlatformKeyboardInset(
-            bottomInset: 300,
-            platformKeyboardVisible: true,
-          ),
-          300,
-        );
-        expect(
-          resolvePlatformKeyboardInset(
-            bottomInset: 300,
-            platformKeyboardVisible: false,
-          ),
-          0,
-        );
-        expect(
-          resolvePlatformKeyboardInset(
-            bottomInset: 0,
-            platformKeyboardVisible: true,
-          ),
-          0,
-        );
-      });
-
       testWidgets(
         'new-window route tracks native visibility with stale geometry',
         (tester) async {
@@ -138,6 +107,8 @@ void registerTmuxToolPickerSheetTests() {
 
           await tester.pumpWidget(
             MaterialApp(
+              builder: (context, child) =>
+                  PlatformKeyboardInsetMediaQuery(child: child!),
               home: Builder(
                 builder: (context) => Scaffold(
                   resizeToAvoidBottomInset: false,
@@ -155,6 +126,7 @@ void registerTmuxToolPickerSheetTests() {
               ),
             ),
           );
+          await tester.pump(staleKeyboardInsetDelay);
           await tester.tap(find.text('Open picker'));
           await tester.pumpAndSettle();
 
