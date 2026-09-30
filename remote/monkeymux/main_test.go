@@ -8754,14 +8754,15 @@ handlers.session_shutdown({}, ctx);
 	}
 }
 
-func TestPiIdentityExtensionDisablesWheelAcceleration(t *testing.T) {
+func TestPiIdentityExtensionDisablesWheelAccelerationForTouch(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node is required to exercise the Pi extension")
 	}
 	// A stand-in for the pi-tui module Pi hands its extensions, shaped like
 	// Pi 0.99: TuiAltScreen parses each wheel report, then asks its
-	// WheelScrollAccelerator how many lines to move.
+	// WheelScrollAccelerator how many lines to move. The accelerator's
+	// accelerate flag is Pi's own choice for the terminal it runs in.
 	directory := t.TempDir()
 	module := filepath.Join(directory, "node_modules", "@earendil-works", "pi-tui")
 	if err := os.MkdirAll(module, 0o755); err != nil {
@@ -8770,8 +8771,8 @@ func TestPiIdentityExtensionDisablesWheelAcceleration(t *testing.T) {
 	for name, source := range map[string]string{
 		filepath.Join(module, "package.json"): `{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}`,
 		filepath.Join(module, "index.js"): `export class TuiAltScreen {
-  constructor(lines) { this.wheelScroll = { lines, accelerate: true }; }
-  parseWheelEvent(data) { return data === "wheel" ? { direction: 1 } : undefined; }
+  constructor(accelerate) { this.wheelScroll = { lines: "auto", accelerate }; }
+  parseWheelEvent(data) { return data.startsWith("\x1b[<") ? { direction: 1 } : undefined; }
 }
 `,
 		filepath.Join(directory, "extension.mjs"): piIdentityExtensionSource,
@@ -8783,16 +8784,17 @@ await settle();
 const patched = TuiAltScreen.prototype.parseWheelEvent;
 install({ on() {} }); // /reload loads the extension again
 await settle();
-const auto = new TuiAltScreen("auto");
-const fixed = new TuiAltScreen(3);
-const idle = new TuiAltScreen("auto");
+const touch = "\x1b[<65;010;5M";
+const wheel = "\x1b[<65;10;5M";
+const accelerates = (screen, data) => (screen.parseWheelEvent(data), screen.wheelScroll.accelerate);
+const remote = new TuiAltScreen(true);
+const local = new TuiAltScreen(false); // Pi's choice in a local macOS terminal
 console.log(JSON.stringify({
   wrappedOnce: TuiAltScreen.prototype.parseWheelEvent === patched,
-  event: auto.parseWheelEvent("wheel"),
-  other: auto.parseWheelEvent("x") ?? null,
-  auto: auto.wheelScroll,
-  fixed: (fixed.parseWheelEvent("wheel"), fixed.wheelScroll),
-  idle: idle.wheelScroll,
+  event: remote.parseWheelEvent(touch),
+  other: remote.parseWheelEvent("x") ?? null,
+  remote: [touch, wheel, touch, wheel].map((data) => accelerates(remote, data)),
+  local: [wheel, touch].map((data) => accelerates(local, data)),
 }));
 `,
 	} {
@@ -8807,9 +8809,7 @@ console.log(JSON.stringify({
 		t.Fatalf("extension failed: %v: %s", err, output)
 	}
 	want := `{"wrappedOnce":true,"event":{"direction":1},"other":null,` +
-		`"auto":{"lines":"auto","accelerate":false},` +
-		`"fixed":{"lines":3,"accelerate":false},` +
-		`"idle":{"lines":"auto","accelerate":true}}`
+		`"remote":[false,true,false,true],"local":[false,false]}`
 	if got := strings.TrimSpace(string(output)); got != want {
 		t.Fatalf("wheel state = %s, want %s", got, want)
 	}

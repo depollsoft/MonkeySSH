@@ -331,7 +331,8 @@ void registerMonkeyTerminalScrollGestureHandlerTests() {
       await tester.pump();
 
       expect(output, hasLength(1));
-      expect(output.single, startsWith('\x1b[<64;'));
+      // Only touch drags pad the column; wheel and trackpad reports do not.
+      expect(output.single, '\x1b[<64;2;2M');
     });
 
     // --- Line coalescing / remainder tests ---

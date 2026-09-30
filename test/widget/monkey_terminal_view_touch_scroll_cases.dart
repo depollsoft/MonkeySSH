@@ -852,6 +852,12 @@ void registerMonkeyTerminalViewTouchScrollTests() {
 
       expect(output, hasLength(1));
       expect(_countOccurrences(output.single, '\u001b[<65;'), 1);
+      // Touch reports pad the column with a zero so the MonkeyMux Pi
+      // extension can exempt them from Pi's wheel acceleration.
+      expect(
+        output.single,
+        matches(RegExp(r'^\x1b\[<65;0[1-9]\d*;[1-9]\d*M$')),
+      );
     });
 
     testWidgets(
