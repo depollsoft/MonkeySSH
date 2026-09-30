@@ -1635,6 +1635,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         isUsingAltBuffer: _isUsingAltBuffer,
       );
 
+  /// Whether a shell prompt owns the input line. A mux window can run an
+  /// agent without a shell reporting it as a running command.
+  bool get _isTerminalShellPromptActive =>
+      _shouldReviewTerminalCommandInsertion && !_isAgentToolActive;
+
   String _terminalCommandAfterInsertion(String insertedText) {
     final snapshot = _buildWrappedTerminalCommandSnapshot();
     if (snapshot == null) {
@@ -12619,6 +12624,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _toolbarController.applySystemKeyboardModifiers,
       hasActiveToolbarModifier: () =>
           _toolbarController.isCtrlActive || _toolbarController.isAltActive,
+      isShellPromptActive: () => _isTerminalShellPromptActive,
       sensitiveInput: _detectedSensitiveKeyboardPrompt,
       readOnly: _isNativeSelectionMode || overlayMessage != null,
       tapToShowKeyboard:

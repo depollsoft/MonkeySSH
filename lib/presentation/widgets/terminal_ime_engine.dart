@@ -194,6 +194,7 @@ class TerminalImeEffects {
     this.consumeTerminalKeyModifiers,
     this.applyTerminalTextInputModifiers,
     this.hasActiveToolbarModifier,
+    this.isShellPromptActive,
     this.canSyncEditingState,
     this.onEditingState,
   });
@@ -205,6 +206,10 @@ class TerminalImeEffects {
   final VoidCallback? consumeTerminalKeyModifiers;
   final TerminalTextInputModifierApplier? applyTerminalTextInputModifiers;
   final ValueGetter<bool>? hasActiveToolbarModifier;
+
+  /// Whether a shell prompt, rather than a program such as a coding agent,
+  /// owns the input line.
+  final ValueGetter<bool>? isShellPromptActive;
   final bool Function()? canSyncEditingState;
   final void Function(TextEditingValue)? onEditingState;
 }
@@ -1209,10 +1214,13 @@ class TerminalImeEngine {
         pasteText = '$precedingGrapheme$text';
       }
       // Text the IME composed first (dictation, a long composition) is the
-      // user's own writing, so split it for composers to show as text. A
-      // long commit without composition is the keyboard's clipboard or
+      // user's own writing, so split it for agent composers to show as text.
+      // A long commit without composition is the keyboard's clipboard or
       // autofill: keep it one paste that composers collapse like any paste.
-      final pastes = _sawImeComposition
+      // A shell prompt collapses nothing and highlights and undoes a paste as
+      // a whole, so it gets one paste either way.
+      final atShellPrompt = effects.isShellPromptActive?.call() ?? false;
+      final pastes = _sawImeComposition && !atShellPrompt
           ? splitTerminalImePaste(pasteText)
           : [pasteText];
       if (pasteText.length > terminalImePasteChunkLength ||
@@ -1223,6 +1231,7 @@ class TerminalImeEngine {
           fields: {
             'length': pasteText.length,
             'composed': _sawImeComposition,
+            'shellPrompt': atShellPrompt,
             'pasteCount': pastes.length,
           },
         );

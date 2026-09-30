@@ -4792,6 +4792,76 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets(
+      'splits dictation into pastes for an agent a MonkeyMux window runs',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        const sessionName = 'work';
+        // No shell reports a running command when the window runs the agent.
+        const initialWindows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            id: '@0',
+            name: 'claude',
+            isActive: true,
+            currentCommand: 'claude',
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => initialWindows)
+              ..stubWindowEvents()
+              ..stubPaneContext()
+              ..stubThemeRefresh();
+
+        await muxFixture.pump(tester);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+        expect(session.shellStatus, isNot(TerminalShellStatus.runningCommand));
+
+        session.terminal!.write('\u001b[?2004h');
+        await tester.pump();
+        shellWrites.clear();
+        final dictated =
+            '${List.filled(30, 'dictated words').join(' ')}\n\nmore';
+        final end = _deleteDetectionMarker.length + dictated.length;
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '$_deleteDetectionMarker$dictated',
+            selection: TextSelection.collapsed(offset: end),
+            composing: TextRange(
+              start: _deleteDetectionMarker.length,
+              end: end,
+            ),
+          ),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          _editingValue(dictated, selectionOffset: dictated.length),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        final written = shellWrites.map(utf8.decode).join();
+        expect('\u001b[200~'.allMatches(written).length, greaterThan(1));
+        expect(
+          written.replaceAll('\u001b[200~', '').replaceAll('\u001b[201~', ''),
+          dictated.replaceAll('\n', '\r'),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('MonkeyMux theme change forces a foreground redraw resize', (
       tester,
     ) async {
@@ -11796,6 +11866,50 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
+
+    for (final runningCommand in [false, true]) {
+      testWidgets('splits dictation into pastes only while a command runs, '
+          'running: $runningCommand', (tester) async {
+        await pumpScreen(tester);
+
+        session.terminal!.write(
+          '\u001b[?2004h${runningCommand ? '\u001b]133;C\u0007' : ''}',
+        );
+        await tester.pump();
+
+        shellWrites.clear();
+        final dictated =
+            '${List.filled(30, 'dictated words').join(' ')}\n\nmore';
+        final end = _deleteDetectionMarker.length + dictated.length;
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '$_deleteDetectionMarker$dictated',
+            selection: TextSelection.collapsed(offset: end),
+            composing: TextRange(
+              start: _deleteDetectionMarker.length,
+              end: end,
+            ),
+          ),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          _editingValue(dictated, selectionOffset: dictated.length),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        final written = shellWrites.map(utf8.decode).join();
+        expect(find.text('Review keyboard paste'), findsNothing);
+        expect(
+          written.replaceAll('\u001b[200~', '').replaceAll('\u001b[201~', ''),
+          dictated.replaceAll('\n', '\r'),
+        );
+        expect(
+          '\u001b[200~'.allMatches(written).length,
+          runningCommand ? greaterThan(1) : 1,
+        );
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
 
     testWidgets(
       'non-prompt shell output does not reconnect the IME input client',

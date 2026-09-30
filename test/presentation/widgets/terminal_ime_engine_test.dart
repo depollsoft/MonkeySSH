@@ -6238,6 +6238,38 @@ void _batchTests() {
     });
   }
 
+  for (final shellPrompt in [false, true]) {
+    test('splits composed dictation only away from a shell prompt, '
+        'shell prompt: $shellPrompt', () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(
+        driver,
+        initialTerminalOutput: '\x1b[?2004h',
+        isShellPromptActive: () => shellPrompt,
+      );
+      final dictated = '${List.filled(30, 'dictated words').join(' ')}\n\nmore';
+
+      driver.updateEditingValue(_batchEditingValue(dictated, composing: true));
+      await driver.flush();
+      driver.updateEditingValue(_batchEditingValue(dictated));
+      await driver.flush();
+
+      final sent = dictated.replaceAll('\n', '\r');
+      expect(harness.terminalOutput, [
+        if (shellPrompt)
+          '\x1b[200~$sent\x1b[201~'
+        else
+          for (final chunk in splitTerminalImePaste(sent))
+            '\x1b[200~$chunk\x1b[201~',
+      ]);
+      if (!shellPrompt) {
+        expect(harness.terminalOutput.length, greaterThan(2));
+      }
+      await _disposeImeHarness(driver, harness);
+    });
+  }
+
   test('sends a long commit the IME never composed as one paste', () async {
     final driver = _ImeDriver(platform: TargetPlatform.iOS);
     addTearDown(driver.dispose);
@@ -7261,6 +7293,7 @@ class _ImeDriver {
     VoidCallback? consumeTerminalKeyModifiers,
     TerminalTextInputModifierApplier? applyTerminalTextInputModifiers,
     ValueGetter<bool>? hasActiveToolbarModifier,
+    ValueGetter<bool>? isShellPromptActive,
   }) async {
     engine = TerminalImeEngine(
       terminal: terminal,
@@ -7291,6 +7324,7 @@ class _ImeDriver {
         consumeTerminalKeyModifiers: consumeTerminalKeyModifiers,
         applyTerminalTextInputModifiers: applyTerminalTextInputModifiers,
         hasActiveToolbarModifier: hasActiveToolbarModifier,
+        isShellPromptActive: isShellPromptActive,
         onEditingState: (value) {
           effects.add(('editing state', value));
           log.add(MethodCall('TextInput.setEditingState', value.toJSON()));
@@ -7379,6 +7413,7 @@ Future<_ImeHarness> _createImeHarness(
   VoidCallback? consumeTerminalKeyModifiers,
   TerminalTextInputModifierApplier? applyTerminalTextInputModifiers,
   ValueGetter<bool>? hasActiveToolbarModifier,
+  ValueGetter<bool>? isShellPromptActive,
   _ImeController? controller,
 }) async {
   final terminalOutput = <String>[];
@@ -7401,6 +7436,7 @@ Future<_ImeHarness> _createImeHarness(
     consumeTerminalKeyModifiers: consumeTerminalKeyModifiers,
     applyTerminalTextInputModifiers: applyTerminalTextInputModifiers,
     hasActiveToolbarModifier: hasActiveToolbarModifier,
+    isShellPromptActive: isShellPromptActive,
   );
   if (initialEditingValue != null) {
     driver.updateEditingValue(initialEditingValue);
