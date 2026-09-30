@@ -13754,7 +13754,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     _clearPendingTerminalMouseTap(event.pointer);
-    _terminalViewKey.currentState?.sendTerminalPrimaryTap(event.position);
+    final forwarded =
+        _terminalViewKey.currentState?.sendTerminalPrimaryTap(event.position) ??
+        false;
+    if (forwarded) {
+      // A clicked TUI such as Claude Code moves its own cursor, so the IME's
+      // copy of the text before the cursor no longer applies; later edits and
+      // suggestions would otherwise replace the wrong characters.
+      _terminalTextInputController.resetImeForExternalCursorMove();
+    }
   }
 
   void _clearPendingTerminalMouseTap([int? pointer]) {

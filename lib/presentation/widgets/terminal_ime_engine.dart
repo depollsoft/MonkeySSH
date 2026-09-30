@@ -43,6 +43,12 @@ bool _isPromptWhitespaceCodeUnit(int codeUnit) =>
 @visibleForTesting
 const terminalTrailingSuffixRewriteLimit = 4;
 
+/// How long after a key-event Enter a keyboard update that still carries the
+/// submitted line is treated as stale: the keyboard produced it before it
+/// applied the reset that Enter pushed.
+@visibleForTesting
+const hardwareEnterStaleEditWindow = Duration(milliseconds: 250);
+
 /// How long after an IME batch is framed as a bracketed paste a separate
 /// single-character commit still joins that framing.
 ///
@@ -180,6 +186,16 @@ class TerminalImeEngine {
   /// Records a touch that may move the terminal caret independently of the IME.
   void prepareForTouchCursorMove() => _clearImeAfterNextTouchCursorMove = true;
 
+  /// Starts a fresh buffer after the terminal app moved its own cursor, such
+  /// as for a forwarded mouse click. An active composition has not reached
+  /// the terminal yet, so it is left for the IME to commit.
+  void resetForExternalCursorMove() {
+    if (!_currentEditingState.composing.isCollapsed) {
+      return;
+    }
+    clearImeBufferForFreshInput();
+  }
+
   /// Ends the current IME paste framing before a hardware paste shortcut.
   void endFraming() => _isFramingImeText = false;
 
@@ -191,7 +207,9 @@ class TerminalImeEngine {
     if (_pendingEnterActionSuppressions < 1) {
       _pendingEnterActionSuppressions = 1;
     }
-    _pendingPerformedEnterText = _lastSentText;
+    // The key already reset the buffer: only its newline echo stays stale
+    // after the stale window, so the same line typed later is new input.
+    _pendingPerformedEnterText = _hardwareEnterSubmittedText ?? _lastSentText;
   }
 
   void dispose() {
@@ -223,6 +241,11 @@ class TerminalImeEngine {
   int? _pendingDeleteResetBaselineCursorOffset;
   String? _pendingDeleteResetDeletedSuffixText;
   String _lastSentText = '';
+
+  /// The IME text a hardware Enter just submitted, for [recordHardwareEnter].
+  String? _hardwareEnterSubmittedText;
+  DateTime? _hardwareEnterAt;
+  List<String> _hardwareEnterStaleLines = const [];
   bool _isFramingImeText = false;
 
   /// When the latest multi-character IME batch was framed as a paste.
@@ -243,6 +266,11 @@ class TerminalImeEngine {
   bool _acceptNextPendingComposingEnterCommit = false;
   TextEditingValue? _pendingComposingEnterFollowUp;
   String? _pendingPerformedEnterText;
+
+  /// Whether only a newline-terminated echo of [_pendingPerformedEnterText]
+  /// is stale. A key-event Enter usually has no echo at all, so the same text
+  /// typed again afterwards is new input.
+  bool _pendingPerformedEnterNeedsNewline = false;
   int _pendingEnterActionSuppressions = 0;
   int _latestEditingValueRevision = 0;
   TextEditingValue? _queuedEditingValue;
@@ -328,9 +356,66 @@ class TerminalImeEngine {
         key,
         hasShortcutModifier: hasShortcutModifier,
       );
+      _hardwareEnterSubmittedText = null;
+      // Shortcut chords can reach here mid-composition; the IME still owns
+      // that uncommitted text, so leave its buffer alone.
+      if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
+          type == TerminalKeyEventType.press &&
+          _currentEditingState.composing.isCollapsed) {
+        _resetAfterHardwareEnter();
+      }
     }
 
     return handled;
+  }
+
+  /// Gboard delivers its Return key as a key event rather than an IME action,
+  /// as does any hardware keyboard. The line it submitted is gone from the
+  /// terminal, so the IME buffer must start over like after an IME Enter;
+  /// otherwise later caret moves and edits are computed against stale text.
+  void _resetAfterHardwareEnter() {
+    final submittedText = _lastSentText;
+    _hardwareEnterSubmittedText = submittedText;
+    _hardwareEnterStaleLines =
+        {
+            submittedText,
+            _lastSentTextAfterPendingAndroidBackspaces(),
+          }.where((line) => line.isNotEmpty).toList()
+          ..sort((a, b) => b.length.compareTo(a.length));
+    _resetCommittedInputState();
+    // Some keyboards also commit the Return into their field; that echo of
+    // the submitted line must not run it again.
+    _pendingPerformedEnterText = submittedText;
+    _pendingPerformedEnterNeedsNewline = true;
+    _hardwareEnterAt = now();
+    _trimLeadingSuggestionSpaceAfterDelete = true;
+    _sawImeComposition = false;
+  }
+
+  /// [_lastSentText] without the characters that key-event Backspaces have
+  /// already deleted from the terminal but the IME has not yet reported.
+  String _lastSentTextAfterPendingAndroidBackspaces() {
+    if (_pendingAndroidHardwareBackspaces == 0) {
+      return _lastSentText;
+    }
+    final graphemes = _lastSentText.characters.toList(growable: true);
+    final end = _clampTextOffset(_lastSentCursorOffset, graphemes.length);
+    final start = _clampTextOffset(
+      end - _pendingAndroidHardwareBackspaces,
+      end,
+    );
+    graphemes.removeRange(start, end);
+    return graphemes.join();
+  }
+
+  /// Lines a key-event Enter submitted moments ago, longest first; empty once
+  /// [hardwareEnterStaleEditWindow] has passed.
+  List<String> _recentHardwareEnterStaleLines() {
+    final at = _hardwareEnterAt;
+    if (at == null || now().difference(at) >= hardwareEnterStaleEditWindow) {
+      return const [];
+    }
+    return _hardwareEnterStaleLines;
   }
 
   void handleAndroidImeBackspace(
@@ -646,6 +731,7 @@ class TerminalImeEngine {
     _iosBackspaceRunwayLength = 0;
     _clearPendingComposingEnterAction();
     _pendingPerformedEnterText = null;
+    _hardwareEnterAt = null;
     _pendingEnterActionSuppressions = 0;
     _pendingAndroidHardwareBackspaces = 0;
     _activeAndroidImeBackspace = null;
@@ -782,10 +868,13 @@ class TerminalImeEngine {
     return text.substring(prefixLength);
   }
 
-  String _extractInputText(String text) {
-    final extractedText = _stripLeakedDeleteSentinelPrefix(
-      _extractRawInputText(text),
-    );
+  String _extractInputText(String text) => _normalizeFreshInputText(
+    _stripLeakedDeleteSentinelPrefix(_extractRawInputText(text)),
+  );
+
+  /// Drops IME artifacts that lead fresh input: a newline left by a swipe
+  /// after Return, and a single separator space before a swiped word.
+  String _normalizeFreshInputText(String extractedText) {
     final sanitizedText = extractedText.replaceFirst(
       _leadingSwipeNewlineArtifactPattern,
       '',
@@ -1433,7 +1522,10 @@ class TerminalImeEngine {
   }
 
   ({String? currentText, bool strippedPendingEnter, bool ignored})
-  _normalizePendingPerformedEnterText(String currentText) {
+  _normalizePendingPerformedEnterText(
+    String currentText, {
+    required String echoText,
+  }) {
     final pendingPerformedEnterText = _pendingPerformedEnterText;
     if (pendingPerformedEnterText == null) {
       return (
@@ -1443,20 +1535,67 @@ class TerminalImeEngine {
       );
     }
 
-    if (currentText.isEmpty || currentText == pendingPerformedEnterText) {
+    // Right after a key-event Enter, the keyboard can still report the line
+    // it submitted, alone or followed by the next key, from before it
+    // applied the reset.
+    final staleLines = _recentHardwareEnterStaleLines();
+    if (currentText.isEmpty ||
+        ((!_pendingPerformedEnterNeedsNewline || staleLines.isNotEmpty) &&
+            (currentText == pendingPerformedEnterText ||
+                echoText == pendingPerformedEnterText)) ||
+        staleLines.contains(echoText)) {
       return (currentText: null, strippedPendingEnter: false, ignored: true);
     }
 
-    for (final newlineSequence in _enterCommitNewlineSequences) {
-      final prefix = '$pendingPerformedEnterText$newlineSequence';
-      if (currentText == prefix) {
-        _pendingPerformedEnterText = null;
-        return (currentText: null, strippedPendingEnter: false, ignored: false);
+    // The IME echoes the submitted line exactly as its field held it, but
+    // [currentText] has already had fresh-input trims applied (such as the
+    // leading swipe space armed by the Enter itself). Match the untrimmed
+    // echo first so a line starting with a space is not resent as new input.
+    // An empty line has no such space, and its echo is only the newline that
+    // fresh-input normalization already drops.
+    // Within the stale window every stale line can carry the echo too, and a
+    // bare newline is the key-event Enter's own echo, committed after the
+    // keyboard applied the reset.
+    for (final line in {
+      pendingPerformedEnterText,
+      ...staleLines,
+      if (staleLines.isNotEmpty) '',
+    }) {
+      for (final candidate in {if (line.isNotEmpty) echoText, currentText}) {
+        for (final newlineSequence in _enterCommitNewlineSequences) {
+          final prefix = '$line$newlineSequence';
+          if (candidate == prefix) {
+            _pendingPerformedEnterText = null;
+            return (
+              currentText: null,
+              strippedPendingEnter: false,
+              ignored: false,
+            );
+          }
+          if (candidate.startsWith(prefix)) {
+            _pendingPerformedEnterText = null;
+            final suffix = candidate.substring(prefix.length);
+            return (
+              // Text after the echo is fresh input; the untrimmed echo still
+              // carries its leading artifacts.
+              currentText: identical(candidate, echoText)
+                  ? _normalizeFreshInputText(suffix)
+                  : suffix,
+              strippedPendingEnter: true,
+              ignored: false,
+            );
+          }
+        }
       }
-      if (currentText.startsWith(prefix)) {
+    }
+
+    for (final line in staleLines) {
+      if (echoText.startsWith(line)) {
         _pendingPerformedEnterText = null;
         return (
-          currentText: currentText.substring(prefix.length),
+          currentText: _normalizeFreshInputText(
+            echoText.substring(line.length),
+          ),
           strippedPendingEnter: true,
           ignored: false,
         );
@@ -2300,9 +2439,20 @@ class TerminalImeEngine {
         sourceValue != null &&
         sourceValue.selection.isValid &&
         !sourceValue.selection.isCollapsed;
+    // A collapsed caret inside or before the delete markers (Gboard's
+    // space-bar cursor swipe parks it there) leaves nothing for iOS to
+    // delete, and the next typed text lands in front of the markers and
+    // sends them to the terminal. Move it back even when the text matches.
+    final caretStrandedBeforeMarkers =
+        options.deleteDetection &&
+        sourceValue != null &&
+        sourceValue.selection.isValid &&
+        sourceValue.selection.isCollapsed &&
+        sourceValue.selection.extentOffset < initEditingState.text.length;
     final shouldResyncText =
         forceResyncState ||
         sourceValue == null ||
+        caretStrandedBeforeMarkers ||
         (sourceValue.text != nextState.text &&
             !(trimmedLeadingCharacters > 0 && hasActiveReplacementSelection));
     _currentEditingState = nextState;
@@ -2619,8 +2769,39 @@ class TerminalImeEngine {
         return;
       }
 
+      // With the caret at the start of the buffered text, Backspace deletes a
+      // marker and leaves that text intact. The terminal still has a
+      // character before its cursor to delete; restore the marker in place.
+      final remainingPrefixLength = _editingPrefixLength(value.text);
+      if (remainingPrefixLength < initEditingState.text.length &&
+          _lastSentText.isNotEmpty &&
+          _lastSentCursorOffset == 0 &&
+          value.selection.isCollapsed &&
+          value.selection.extentOffset == remainingPrefixLength &&
+          _extractRawInputText(value.text) == _lastSentText) {
+        _isFramingImeText = false;
+        if (_pendingAndroidHardwareBackspaces > 0) {
+          _pendingAndroidHardwareBackspaces--;
+        } else {
+          _notifyUserInput();
+          terminal.keyInput(TerminalKey.backspace);
+        }
+        _currentEditingState = _editingStateForUserText(
+          userText: _lastSentText,
+          userSelection: const TextSelection.collapsed(offset: 0),
+        );
+        if (effects.canSyncEditingState?.call() ?? true) {
+          effects.onEditingState?.call(_currentEditingState);
+        }
+        _sawImeComposition = false;
+        return;
+      }
+
       final normalizedPendingEnter = _normalizePendingPerformedEnterText(
         _extractInputText(value.text),
+        echoText: _stripLeakedDeleteSentinelPrefix(
+          _extractRawInputText(value.text),
+        ),
       );
       if (normalizedPendingEnter.ignored) {
         cancelDeferredTrailingBackspaceImeClear();
@@ -2970,6 +3151,8 @@ class TerminalImeEngine {
       ctrlActive: modifiers.ctrl,
     );
     _pendingPerformedEnterText = _lastSentText;
+    _pendingPerformedEnterNeedsNewline = false;
+    _hardwareEnterAt = null;
     _resetCommittedInputState(clearPendingPerformedEnterText: false);
     _trimLeadingSuggestionSpaceAfterDelete = true;
     _sawImeComposition = false;
