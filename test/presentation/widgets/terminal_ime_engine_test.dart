@@ -983,6 +983,103 @@ _LoggedEditingState _loggedTerminalClientState(TextEditingValue value) {
 }
 
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final hardwareEnter in [false, true]) {
+      test(
+        '${platform.name} shell completion allows the same next command after Enter, hardware=$hardwareEnter',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          if (hardwareEnter) {
+            await driver.hardwareKey(TerminalKey.enter);
+          } else {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          driver.updateEditingValue(_editingValue('pi\n', selectionOffset: 3));
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            _terminalKeyOutput(TerminalKey.enter),
+          );
+          await driver.flush(hardwareEnterStaleEditWindow);
+          driver.updateEditingValue(_editingValue('pi', selectionOffset: 2));
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            '${_terminalKeyOutput(TerminalKey.enter)}pi',
+          );
+        },
+      );
+    }
+
+    test(
+      '${platform.name} shell completion discards uncommitted composition',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialEditingValue: _editingValue('pi', selectionOffset: 2),
+        );
+        // The keyboard starts a suggestion after the prefix reached the shell.
+        driver.updateEditingValue(
+          _editingValue(
+            'pip',
+            selectionOffset: 3,
+            composing: const TextRange(start: 0, end: 3),
+          ),
+        );
+        await driver.flush();
+        driver.engine.resetAfterShellCompletion();
+        harness.terminalOutput.clear();
+        driver.updateEditingValue(_editingValue('pip', selectionOffset: 3));
+        await driver.flush();
+        driver.updateEditingValue(_editingValue('pi', selectionOffset: 2));
+        await driver.flush();
+        expect(harness.terminalOutput, isEmpty);
+        expect(driver.engine.editingValue, driver.engine.initEditingState);
+        await driver.receiveAction(TextInputAction.done);
+        await driver.flush();
+        expect(
+          harness.terminalOutput.join(),
+          _terminalKeyOutput(TerminalKey.enter),
+        );
+      },
+    );
+
+    test(
+      '${platform.name} shell completion preserves fresh arguments and backspace',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialEditingValue: _editingValue('pi', selectionOffset: 2),
+        );
+        driver.engine.resetAfterShellCompletion();
+        harness.terminalOutput.clear();
+        driver.updateEditingValue(_editingValue('x', selectionOffset: 1));
+        await driver.flush();
+        driver.updateEditingValue(_editingValue('xpi', selectionOffset: 3));
+        await driver.flush();
+        expect(harness.terminalOutput.join(), 'xpi');
+        driver.updateEditingValue(_editingValue('xp', selectionOffset: 2));
+        await driver.flush();
+        expect(
+          harness.terminalOutput.join(),
+          'xpi${_terminalKeyOutput(TerminalKey.backspace)}',
+        );
+      },
+    );
+  }
+
   test('generated emoji scenarios use UTF-16 selection boundaries', () {
     final scenarios = _buildGeneratedComparisonScenarios().where(
       (scenario) => scenario.name.startsWith('emoji-boundary:'),

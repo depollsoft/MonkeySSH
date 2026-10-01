@@ -6816,6 +6816,48 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets(
+        'shell completion tap discards stale IME text on ${platform.name}',
+        (tester) async {
+          final completionService = _TestShellCompletionService(
+            cachedSuggestions: const [
+              ShellCompletionSuggestion(
+                label: 'checkout',
+                replacement: 'checkout',
+                replacementStart: 4,
+                replacementEnd: 6,
+                kind: ShellCompletionSuggestionKind.history,
+                commitSuffix: ' ',
+              ),
+            ],
+          );
+          session.terminal!.write('root@host ~ % git c');
+          await pumpScreen(tester, shellCompletionService: completionService);
+          tester.testTextInput.updateEditingValue(
+            _editingValue('h', selectionOffset: 1),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('checkout'), findsOneWidget);
+          shellWrites.clear();
+          await tester.tap(find.text('checkout'));
+          await tester.pump();
+          tester.testTextInput.updateEditingValue(
+            _editingValue('h', selectionOffset: 1),
+          );
+          await tester.pump();
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pump();
+          expect(
+            shellWrites.map(String.fromCharCodes).join(),
+            '\x7f\x7fcheckout \r',
+          );
+        },
+        variant: TargetPlatformVariant.only(platform),
+      );
+    }
+
     testWidgets('overflow menu toggles shell completion popups', (
       tester,
     ) async {

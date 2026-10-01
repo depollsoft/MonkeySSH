@@ -707,6 +707,8 @@ class TerminalImeEngine {
     bool armIosBackspaceRunway = false,
   }) {
     cancelDeferredTrailingBackspaceImeClear();
+    _shellCompletionObsoleteTexts = const {};
+    _shellCompletionSubmittedAt = null;
     if (flushPlatformContext && (effects.canSyncEditingState?.call() ?? true)) {
       // Reset the editing state in-place rather than closing/reopening
       // the input connection. Closing triggers a keyboard dismiss+reshow
@@ -733,6 +735,60 @@ class TerminalImeEngine {
     _trimLeadingSwipeSpaceAfterBufferClear = false;
     _allowSplitLeadingTokenNormalization = armSplitLeadingTokenNormalization;
     _modifierChordResetTime = armModifierChordWindow ? now() : null;
+  }
+
+  /// Discards keyboard text replaced directly by a shell completion.
+  ///
+  /// Android and iOS may still deliver the old composing word after the reset,
+  /// especially when Return commits a keyboard suggestion. Keep that obsolete
+  /// buffer until fresh input starts or Return's queued echoes settle.
+  void resetAfterShellCompletion() {
+    final obsoleteTexts = <String>{
+      _extractRawInputText(_currentEditingState.text),
+      _lastSentText,
+    }..removeWhere((text) => text.isEmpty);
+    clearImeBufferForFreshInput(flushPlatformContext: true);
+    _shellCompletionObsoleteTexts = obsoleteTexts;
+  }
+
+  Set<String> _shellCompletionObsoleteTexts = const {};
+  DateTime? _shellCompletionSubmittedAt;
+
+  TextEditingValue _normalizeShellCompletionEcho(TextEditingValue value) {
+    final submittedAt = _shellCompletionSubmittedAt;
+    if (submittedAt != null &&
+        now().difference(submittedAt) >= hardwareEnterStaleEditWindow) {
+      // Once Enter's queued echoes settle, an identical keyboard suggestion
+      // or dictated command on the next line is fresh input again.
+      _shellCompletionObsoleteTexts = const {};
+      _shellCompletionSubmittedAt = null;
+    }
+    if (_shellCompletionObsoleteTexts.isEmpty) {
+      return value;
+    }
+    final text = _extractRawInputText(value.text);
+    if (text.isEmpty) {
+      // Acknowledging the reset does not guarantee an already queued commit
+      // has arrived. Keep the obsolete buffer until genuinely new text arrives.
+      return value;
+    }
+    for (final obsolete in _shellCompletionObsoleteTexts) {
+      if (!text.startsWith(obsolete)) {
+        continue;
+      }
+      final suffix = text.substring(obsolete.length);
+      if (suffix.isEmpty || suffix == ' ') {
+        _syncEditingStateWithUserText('');
+        return initEditingState;
+      }
+      final enterSuffix = suffix.startsWith(' ') ? suffix.substring(1) : suffix;
+      if (_enterCommitNewlineSequences.contains(enterSuffix)) {
+        return _editingStateForUserText(userText: enterSuffix);
+      }
+    }
+    _shellCompletionObsoleteTexts = const {};
+    _shellCompletionSubmittedAt = null;
+    return value;
   }
 
   void resetImeCompletions() {
@@ -799,6 +855,8 @@ class TerminalImeEngine {
         enableIMEPersonalizedLearning: !options.sensitiveInput,
       );
   void resetConnectionEditingState() {
+    _shellCompletionObsoleteTexts = const {};
+    _shellCompletionSubmittedAt = null;
     _isFramingImeText = false;
     _invalidatePendingEditingUpdates();
     _sawImeComposition = false;
@@ -1385,6 +1443,9 @@ class TerminalImeEngine {
   }) {
     _isFramingImeText = false;
     cancelDeferredTrailingBackspaceImeClear();
+    if (_shellCompletionObsoleteTexts.isNotEmpty) {
+      _shellCompletionSubmittedAt ??= now();
+    }
     _lastSentText = '';
     _lastSentCursorOffset = 0;
     // A composition abandoned by a reset must not mark a later commit, such
@@ -2786,10 +2847,12 @@ class TerminalImeEngine {
     updateEditingValue(value);
   }
 
-  void updateEditingValue(TextEditingValue value) {
+  void updateEditingValue(TextEditingValue incomingValue) {
     if (!_active || options.readOnly) {
       return;
     }
+
+    final value = _normalizeShellCompletionEcho(incomingValue);
 
     if (_acceptNextPendingComposingEnterCommit) {
       _acceptNextPendingComposingEnterCommit = false;
