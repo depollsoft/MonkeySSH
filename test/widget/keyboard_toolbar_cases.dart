@@ -1663,6 +1663,168 @@ void registerKeyboardToolbarTests() {
         }
       });
 
+      Finder loupe() => find.byKey(const ValueKey('keyMenuLoupe'));
+      String loupeText(WidgetTester tester) => tester
+          .widget<RichText>(
+            find.descendant(of: loupe(), matching: find.byType(RichText)),
+          )
+          .text
+          .toPlainText();
+      Rect menuRow(WidgetTester tester, String symbol) => tester.getRect(
+        find
+            .ancestor(of: find.text(symbol), matching: find.byType(Container))
+            .first,
+      );
+
+      Future<void> pumpPhoneToolbar(WidgetTester tester, Size size) async {
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      testWidgets('a loupe shows the item under the thumb beside its row', (
+        tester,
+      ) async {
+        await pumpPhoneToolbar(tester, const Size(390, 844));
+
+        final tilde = tester.getCenter(find.byTooltip('Tilde'));
+        final gesture = await swipeUpFrom(tester, 'Tilde');
+        final finger = Offset(tilde.dx, menuRow(tester, '=').center.dy);
+        await gesture.moveTo(finger);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(loupeText(tester), '=');
+        final bubble = tester.getRect(loupe());
+        final row = menuRow(tester, '=');
+        // Level with the row, and on the side facing the middle of the
+        // screen, clear of a thumb holding a key near the edge.
+        expect(bubble.center.dy, moreOrLessEquals(row.center.dy));
+        expect(bubble.right, lessThan(row.left));
+        expect(bubble.contains(finger), isFalse);
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('the loupe follows the finger and leaves with it', (
+        tester,
+      ) async {
+        await pumpPhoneToolbar(tester, const Size(390, 844));
+
+        final gesture = await swipeUpFrom(tester, 'Slash');
+        await gesture.moveTo(tester.getCenter(find.text('*')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        final first = tester.getRect(loupe());
+
+        await gesture.moveTo(tester.getCenter(find.text(':')));
+        await tester.pump();
+        expect(loupeText(tester), ':');
+        // Partway through the glide it is between the two rows.
+        await tester.pump(const Duration(milliseconds: 40));
+        final gliding = tester.getRect(loupe()).center.dy;
+        final target = menuRow(tester, ':').center.dy;
+        expect(gliding, lessThan(first.center.dy));
+        expect(gliding, greaterThan(target));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(tester.getRect(loupe()).center.dy, moreOrLessEquals(target));
+
+        // Sliding off the menu retracts it.
+        await gesture.moveTo(tester.getCenter(find.byTooltip('Slash')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(loupe(), findsNothing);
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('the function key loupe sits beside the grid', (
+        tester,
+      ) async {
+        await pumpPhoneToolbar(tester, const Size(390, 844));
+
+        final gesture = await swipeUpFrom(tester, 'Escape');
+        await gesture.moveTo(tester.getCenter(find.text('F6')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(loupeText(tester), 'F6');
+        final bubble = tester.getRect(loupe());
+        expect(bubble.left, greaterThan(menuRow(tester, 'F8').right));
+        expect(
+          bubble.center.dy,
+          moreOrLessEquals(menuRow(tester, 'F6').center.dy),
+        );
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('a single-row menu raises its loupe above the item', (
+        tester,
+      ) async {
+        await pumpPhoneToolbar(tester, const Size(844, 200));
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('⌃D')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(loupeText(tester), '⌃D');
+        final bubble = tester.getRect(loupe());
+        final cell = menuRow(tester, '⌃D');
+        expect(bubble.bottom, lessThan(cell.top));
+        expect(bubble.center.dx, moreOrLessEquals(cell.center.dx));
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
+      testWidgets('with reduced motion the loupe appears in place', (
+        tester,
+      ) async {
+        tester.platformDispatcher.accessibilityFeaturesTestValue =
+            const FakeAccessibilityFeatures(disableAnimations: true);
+        addTearDown(
+          tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+        );
+        await pumpPhoneToolbar(tester, const Size(390, 844));
+
+        final gesture = await swipeUpFrom(tester, 'Slash');
+        await gesture.moveTo(tester.getCenter(find.text('*')));
+        await tester.pump();
+        await tester.pump();
+
+        expect(loupeText(tester), '*');
+        final opacity = tester.widget<Opacity>(
+          find.ancestor(of: loupe(), matching: find.byType(Opacity)).first,
+        );
+        expect(opacity.opacity, 1);
+        expect(
+          tester.getRect(loupe()).center.dy,
+          moreOrLessEquals(menuRow(tester, '*').center.dy),
+        );
+
+        await gesture.cancel();
+        await tester.pump();
+      });
+
       testWidgets('symbol menus apply armed modifiers like their keys', (
         tester,
       ) async {

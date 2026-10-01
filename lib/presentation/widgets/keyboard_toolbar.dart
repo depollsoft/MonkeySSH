@@ -1210,6 +1210,9 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     if (menu == null || layout == null) {
       return const SizedBox.shrink();
     }
+    final highlighted = _highlightedKeyMenuItem;
+    final overlayBox = Overlay.of(context).context.findRenderObject();
+    final colorScheme = Theme.of(context).colorScheme;
     return Stack(
       children: [
         Positioned.fromRect(
@@ -1217,10 +1220,105 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
           child: _KeyMenuView(
             menu: menu,
             layout: layout,
-            highlighted: _highlightedKeyMenuItem,
+            highlighted: highlighted,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            // The highlighted row is already announced as selected.
+            child: ExcludeSemantics(
+              child: _KeyMenuLoupe(
+                target: highlighted == null || overlayBox is! RenderBox
+                    ? null
+                    : _loupeTarget(
+                        layout,
+                        highlighted,
+                        menu.items[highlighted].symbol,
+                        overlayBox.size,
+                      ),
+                color: colorScheme.primaryContainer,
+                symbolColor: colorScheme.onPrimaryContainer,
+              ),
+            ),
           ),
         ),
       ],
+    );
+  }
+
+  /// Where the loupe repeats the highlighted item, magnified, since the thumb
+  /// choosing it covers it.
+  ///
+  /// It pulls out beside the item's row, toward the middle of the screen: a
+  /// thumb holding a key at either end of the toolbar reaches up and in from
+  /// its own edge, so the side facing the middle stays clear. A single-row
+  /// menu has no rows to keep clear above it, so its loupe rises above the
+  /// item instead. Returns null when neither fits on screen.
+  _LoupeTarget? _loupeTarget(
+    _KeyMenuLayout layout,
+    int item,
+    String symbol,
+    Size overlaySize,
+  ) {
+    const margin = _menuScreenMargin;
+    const gap = _KeyMenuLoupe.gap;
+    const extent = _KeyMenuLoupe.extent;
+    final cell = layout.cellRect(item);
+    final symbolWidth = _KeyMenuLoupe.measure(symbol);
+    final menuRect = layout.rect;
+
+    if (layout.isList || layout.rows > 1) {
+      final width = math.max(extent, symbolWidth + 2 * _KeyMenuLoupe.padding);
+      final top = _clampDouble(
+        cell.center.dy - extent / 2,
+        margin,
+        overlaySize.height - extent - margin,
+      );
+      final towardRight = menuRect.center.dx < overlaySize.width / 2;
+      for (final right in [towardRight, !towardRight]) {
+        final left = right ? menuRect.right + gap : menuRect.left - gap - width;
+        if (left < margin || left + width > overlaySize.width - margin) {
+          continue;
+        }
+        final edge = right ? menuRect.right : menuRect.left;
+        return _LoupeTarget(
+          item: item,
+          symbol: symbol,
+          geometry: _LoupeGeometry(
+            direction: right ? AxisDirection.right : AxisDirection.left,
+            anchor: Rect.fromLTRB(edge, cell.top, edge, cell.bottom),
+            bubble: Rect.fromLTWH(left, top, width, extent),
+            // In a grid the neck would join the bubble to whichever cell sits
+            // at the edge, so it only joins a cell that is at the edge.
+            attached: ((right ? cell.right : cell.left) - edge).abs() < 0.5,
+          ),
+        );
+      }
+    }
+
+    final top = menuRect.top - gap - extent;
+    if (top < margin) {
+      return null;
+    }
+    final width = math.max(cell.width, symbolWidth + 2 * _KeyMenuLoupe.padding);
+    return _LoupeTarget(
+      item: item,
+      symbol: symbol,
+      geometry: _LoupeGeometry(
+        direction: AxisDirection.up,
+        attached: true,
+        anchor: Rect.fromLTRB(cell.left, cell.top, cell.right, cell.top),
+        bubble: Rect.fromLTWH(
+          _clampDouble(
+            cell.center.dx - width / 2,
+            margin,
+            overlaySize.width - width - margin,
+          ),
+          top,
+          width,
+          extent,
+        ),
+      ),
     );
   }
 
@@ -1975,6 +2073,347 @@ class _KeyMenuLayout {
     final column = (localPosition.dx - rect.left) * columns ~/ rect.width;
     return itemAtCell(math.min(row, rows - 1), math.min(column, columns - 1));
   }
+
+  /// The cell [item] is drawn in, the inverse of [itemAtCell].
+  Rect cellRect(int item) {
+    final fromKey = item % columns;
+    final cellWidth = rect.width / columns;
+    return Rect.fromLTWH(
+      rect.left + (isMirrored ? columns - 1 - fromKey : fromKey) * cellWidth,
+      rect.top + (rows - 1 - item ~/ columns) * TerminalMenuStyles.itemHeight,
+      cellWidth,
+      TerminalMenuStyles.itemHeight,
+    );
+  }
+}
+
+/// Where a loupe sits: the edge of the highlighted row (or cell) it pulls
+/// out of, the direction it pulls, and its bubble.
+@immutable
+class _LoupeGeometry {
+  const _LoupeGeometry({
+    required this.direction,
+    required this.anchor,
+    required this.bubble,
+    required this.attached,
+  });
+
+  /// [AxisDirection.left], [AxisDirection.right] or [AxisDirection.up].
+  final AxisDirection direction;
+
+  /// The edge segment the loupe leaves the menu from, as a zero-thickness
+  /// rect: a row's side, or a cell's top.
+  final Rect anchor;
+  final Rect bubble;
+
+  /// Whether a neck joins the bubble to the highlighted cell, which it does
+  /// only when that cell lies on the menu's edge.
+  final bool attached;
+
+  /// The geometry [t] of the way to [other]; a change of direction jumps.
+  _LoupeGeometry lerpTo(_LoupeGeometry other, double t) =>
+      direction != other.direction
+      ? other
+      : _LoupeGeometry(
+          direction: other.direction,
+          anchor: Rect.lerp(anchor, other.anchor, t)!,
+          bubble: Rect.lerp(bubble, other.bubble, t)!,
+          attached: other.attached,
+        );
+}
+
+/// The item a loupe shows and where.
+@immutable
+class _LoupeTarget {
+  const _LoupeTarget({
+    required this.item,
+    required this.symbol,
+    required this.geometry,
+  });
+
+  final int item;
+  final String symbol;
+  final _LoupeGeometry geometry;
+}
+
+/// The highlighted item, magnified, pulled out of its row beside the thumb.
+///
+/// It is drawn in the highlight's own fill, so it reads as the row sliding
+/// out from under the finger. It pulls out when an item is first
+/// highlighted, glides from row to row as the finger moves, and slides back
+/// when the finger leaves the menu. With reduced motion it appears and
+/// disappears in place.
+class _KeyMenuLoupe extends StatefulWidget {
+  const _KeyMenuLoupe({
+    required this.target,
+    required this.color,
+    required this.symbolColor,
+  });
+
+  /// Gap between the menu and the bubble, bridged by the neck.
+  static const gap = 10.0;
+
+  /// The bubble's height beside a row (taller than the row, so it reads as
+  /// magnified), or its height above a cell.
+  static const extent = 56.0;
+
+  /// Space on each side of the symbol in the bubble.
+  static const padding = 14.0;
+
+  static const _symbolSize = 28.0;
+  static const _pullOut = Duration(milliseconds: 140);
+  static const _retract = Duration(milliseconds: 90);
+  static const _glide = Duration(milliseconds: 110);
+
+  static TextStyle _symbolStyle(Color color) => FluttyTheme.monoStyle.copyWith(
+    fontSize: _symbolSize,
+    fontWeight: FontWeight.w600,
+    height: 1,
+    color: color,
+  );
+
+  /// The width [symbol] takes in the bubble.
+  static double measure(String symbol) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: symbol,
+        style: _symbolStyle(const Color(0xFF000000)),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
+  final _LoupeTarget? target;
+  final Color color;
+  final Color symbolColor;
+
+  @override
+  State<_KeyMenuLoupe> createState() => _KeyMenuLoupeState();
+}
+
+class _KeyMenuLoupeState extends State<_KeyMenuLoupe>
+    with TickerProviderStateMixin {
+  late final AnimationController _presence = AnimationController(
+    vsync: this,
+    duration: _KeyMenuLoupe._pullOut,
+    reverseDuration: _KeyMenuLoupe._retract,
+  );
+  late final CurvedAnimation _presenceCurve = CurvedAnimation(
+    parent: _presence,
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeInCubic,
+  );
+  late final AnimationController _glide = AnimationController(
+    vsync: this,
+    duration: _KeyMenuLoupe._glide,
+    value: 1,
+  );
+
+  /// Where a glide started, or null when the loupe is not gliding.
+  _LoupeGeometry? _from;
+
+  /// The last item shown, kept while the loupe slides back.
+  _LoupeTarget? _shown;
+
+  @override
+  void initState() {
+    super.initState();
+    _show(widget.target);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _presence
+      ..duration = reduceMotion ? Duration.zero : _KeyMenuLoupe._pullOut
+      ..reverseDuration = reduceMotion ? Duration.zero : _KeyMenuLoupe._retract;
+    _glide.duration = reduceMotion ? Duration.zero : _KeyMenuLoupe._glide;
+  }
+
+  @override
+  void didUpdateWidget(covariant _KeyMenuLoupe oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _show(widget.target);
+  }
+
+  void _show(_LoupeTarget? target) {
+    if (target == null) {
+      unawaited(_presence.reverse());
+      return;
+    }
+    final shown = _shown;
+    if (shown != null && !_presence.isDismissed && shown.item != target.item) {
+      // Glide from wherever the loupe is now, even mid-glide.
+      _from = _geometry;
+      unawaited(_glide.forward(from: 0));
+    } else if (shown == null || _presence.isDismissed) {
+      _from = null;
+      _glide.value = 1;
+    }
+    _shown = target;
+    unawaited(_presence.forward());
+  }
+
+  _LoupeGeometry get _geometry {
+    final to = _shown!.geometry;
+    final from = _from;
+    if (from == null || _glide.isCompleted) {
+      return to;
+    }
+    return from.lerpTo(to, Curves.easeOutCubic.transform(_glide.value));
+  }
+
+  @override
+  void dispose() {
+    _presenceCurve.dispose();
+    _presence.dispose();
+    _glide.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([_presence, _glide]),
+    builder: (context, _) {
+      final shown = _shown;
+      if (shown == null || _presence.isDismissed) {
+        return const SizedBox.shrink();
+      }
+      final geometry = _geometry;
+      final presence = _presenceCurve.value;
+      final pivot = geometry.anchor.center;
+      // Pulled out of the row: it grows from the row's edge rather than
+      // popping up in place.
+      final scale = 0.6 + 0.4 * presence;
+      return Opacity(
+        opacity: presence,
+        child: Transform(
+          transform: Matrix4.identity()
+            ..translateByDouble(pivot.dx, pivot.dy, 0, 1)
+            ..scaleByDouble(scale, scale, 1, 1)
+            ..translateByDouble(-pivot.dx, -pivot.dy, 0, 1),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _LoupePainter(
+                    geometry: geometry,
+                    color: widget.color,
+                  ),
+                ),
+              ),
+              Positioned.fromRect(
+                rect: geometry.bubble,
+                child: Center(
+                  key: const ValueKey('keyMenuLoupe'),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: RichText(
+                      maxLines: 1,
+                      text: TextSpan(
+                        text: shown.symbol,
+                        style: _KeyMenuLoupe._symbolStyle(widget.symbolColor),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Paints a loupe's bubble and the neck joining it to its row, in one fill.
+///
+/// The neck runs from the row's edge, slightly into the menu so it squares
+/// off the menu's rounded corner there, and flares in an S-curve to the
+/// bubble's height, so the row and bubble read as one shape.
+class _LoupePainter extends CustomPainter {
+  const _LoupePainter({required this.geometry, required this.color});
+
+  final _LoupeGeometry geometry;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    const radius = TerminalMenuStyles.borderRadius;
+    final anchor = geometry.anchor;
+    final bubble = geometry.bubble;
+    final bubbleShape = RRect.fromRectAndRadius(
+      bubble,
+      const Radius.circular(radius),
+    );
+    if (!geometry.attached) {
+      canvas.drawRRect(bubbleShape, paint);
+      return;
+    }
+
+    // Points are written as (distance out from the row's edge, position
+    // across it) and mapped to the pull direction.
+    final double edge;
+    final double gap;
+    final (double, double) anchorSpan;
+    final (double, double) bubbleSpan;
+    final Offset Function(double out, double across) at;
+    switch (geometry.direction) {
+      case AxisDirection.right:
+        edge = anchor.left;
+        gap = bubble.left - edge;
+        anchorSpan = (anchor.top, anchor.bottom);
+        bubbleSpan = (bubble.top, bubble.bottom);
+        at = (out, across) => Offset(edge + out, across);
+      case AxisDirection.left:
+        edge = anchor.left;
+        gap = edge - bubble.right;
+        anchorSpan = (anchor.top, anchor.bottom);
+        bubbleSpan = (bubble.top, bubble.bottom);
+        at = (out, across) => Offset(edge - out, across);
+      case AxisDirection.up:
+      case AxisDirection.down:
+        edge = anchor.top;
+        gap = edge - bubble.bottom;
+        anchorSpan = (anchor.left, anchor.right);
+        bubbleSpan = (bubble.left, bubble.right);
+        at = (out, across) => Offset(across, edge - out);
+    }
+    final (a0, a1) = anchorSpan;
+    final (b0, b1) = bubbleSpan;
+    final mid = gap / 2;
+
+    final neck = Path()..moveTo(at(-radius, a0).dx, at(-radius, a0).dy);
+    void lineTo(Offset point) => neck.lineTo(point.dx, point.dy);
+    void curveTo(Offset c1, Offset c2, Offset end) =>
+        neck.cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, end.dx, end.dy);
+    lineTo(at(0, a0));
+    curveTo(at(mid, a0), at(mid, b0), at(gap, b0));
+    lineTo(at(gap + radius, b0));
+    lineTo(at(gap + radius, b1));
+    lineTo(at(gap, b1));
+    curveTo(at(mid, b1), at(mid, a1), at(0, a1));
+    lineTo(at(-radius, a1));
+    neck.close();
+
+    canvas
+      ..drawPath(neck, paint)
+      ..drawRRect(bubbleShape, paint);
+  }
+
+  @override
+  bool shouldRepaint(_LoupePainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.geometry.attached != geometry.attached ||
+      oldDelegate.geometry.direction != geometry.direction ||
+      oldDelegate.geometry.anchor != geometry.anchor ||
+      oldDelegate.geometry.bubble != geometry.bubble;
 }
 
 class _KeyMenuView extends StatelessWidget {
