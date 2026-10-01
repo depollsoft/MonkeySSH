@@ -98,19 +98,23 @@ class _PlatformKeyboardInsetMediaQueryState
       return;
     }
     // Hidden per the platform, but the inset is new or still moving: wait for
-    // it to settle. Re-read the live state once meanwhile in case the cached
-    // report predates a missed show event.
-    if (_staleTimer == null) unawaited(_controller.refresh());
+    // it to settle.
     _pendingInset = inset;
     _staleTimer?.cancel();
     _staleTimer = Timer(staleKeyboardInsetDelay, _confirmStaleInset);
   }
 
-  void _confirmStaleInset() {
+  Future<void> _confirmStaleInset() async {
     _staleTimer = null;
-    if (!mounted) return;
+    final pendingInset = _pendingInset;
+    // Decide on the live platform state, not a cached report that may predate
+    // a missed show event.
+    await _controller.refresh();
+    // The inset moved or the keyboard state changed while the platform
+    // answered, so a new wait is already running or none is needed.
+    if (!mounted || _staleTimer != null || _insetIsStale) return;
     final inset = MediaQuery.viewInsetsOf(context).bottom;
-    if (inset <= 0 || _controller.visible != false || inset != _pendingInset) {
+    if (inset <= 0 || _controller.visible != false || inset != pendingInset) {
       setState(_evaluate);
       return;
     }

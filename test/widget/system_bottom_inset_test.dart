@@ -1,36 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 
-const _keyboardChannel = MethodChannel(
-  'xyz.depollsoft.monkeyssh/keyboard_visibility',
-);
-
-/// Records native keyboard channel calls; `getVisibility` answers [live].
-List<String> _mockKeyboardChannel(
-  WidgetTester tester, {
-  bool? Function()? live,
-}) {
-  final calls = <String>[];
-  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-    _keyboardChannel,
-    (call) async {
-      calls.add(call.method);
-      return call.method == 'getVisibility' ? live?.call() : null;
-    },
-  );
-  addTearDown(
-    () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      _keyboardChannel,
-      null,
-    ),
-  );
-  return calls;
-}
+import '../helpers/keyboard_visibility_channel.dart';
 
 SystemKeyboardVisibilityController _keyboard({required bool? visible}) {
   final keyboard = SystemKeyboardVisibilityController.instance
@@ -66,7 +43,7 @@ void main() {
     testWidgets('drops a settled stale inset and restores bottom padding', (
       tester,
     ) async {
-      final calls = _mockKeyboardChannel(tester);
+      final calls = mockKeyboardVisibilityChannel(tester);
       final keyboard = _keyboard(visible: true);
       final inset = ValueNotifier<double>(300);
       addTearDown(inset.dispose);
@@ -100,7 +77,7 @@ void main() {
     testWidgets('lets an ordinary keyboard dismissal animate to zero', (
       tester,
     ) async {
-      final calls = _mockKeyboardChannel(tester);
+      final calls = mockKeyboardVisibilityChannel(tester);
       final keyboard = _keyboard(visible: true);
       final inset = ValueNotifier<double>(300);
       addTearDown(inset.dispose);
@@ -128,7 +105,7 @@ void main() {
     testWidgets('leaves geometry alone until the platform reports', (
       tester,
     ) async {
-      final calls = _mockKeyboardChannel(tester);
+      final calls = mockKeyboardVisibilityChannel(tester);
       _keyboard(visible: null);
       final inset = ValueNotifier<double>(300);
       addTearDown(inset.dispose);
@@ -140,11 +117,16 @@ void main() {
       expect(calls, isNot(contains('refreshInsets')));
     });
 
-    testWidgets('rechecks live visibility before dropping an inset', (
+    testWidgets('waits for the live platform answer before dropping', (
       tester,
     ) async {
-      // A missed show event leaves the cached state hidden while the IME is up.
-      final calls = _mockKeyboardChannel(tester, live: () => true);
+      // A missed show event leaves the cached state hidden while the IME is
+      // up, and the platform answers the live query only after the delay.
+      final answer = Completer<bool?>();
+      final calls = mockKeyboardVisibilityChannel(
+        tester,
+        live: () => answer.future,
+      );
       final keyboard = _keyboard(visible: false);
       final inset = ValueNotifier<double>(300);
       addTearDown(inset.dispose);
@@ -153,13 +135,17 @@ void main() {
 
       await tester.pump(staleKeyboardInsetDelay * 2);
       expect(calls, contains('getVisibility'));
+      expect(resolved.viewInsets.bottom, 300);
+
+      answer.complete(true);
+      await tester.pump();
       expect(keyboard.visible, isTrue);
       expect(resolved.viewInsets.bottom, 300);
       expect(calls, isNot(contains('refreshInsets')));
     });
 
     testWidgets('corrects every route below the app navigator', (tester) async {
-      _mockKeyboardChannel(tester);
+      mockKeyboardVisibilityChannel(tester);
       tester.view
         ..physicalSize = const Size(390, 844)
         ..devicePixelRatio = 1

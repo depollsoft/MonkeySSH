@@ -35,6 +35,7 @@ import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
+import '../helpers/keyboard_visibility_channel.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _MockSshService extends Mock implements SshService {}
@@ -141,6 +142,7 @@ void main() {
         tester.view
           ..physicalSize = size
           ..devicePixelRatio = 1;
+        mockKeyboardVisibilityChannel(tester);
         final keyboard = SystemKeyboardVisibilityController.instance
           ..debugSetVisible(visible: null);
         final manager = FakeAcpSessionManager(sessions: [fakeAcpSession()]);

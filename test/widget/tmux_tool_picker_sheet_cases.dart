@@ -9,6 +9,8 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/tmux_window_navigator.dart';
 
+import '../helpers/keyboard_visibility_channel.dart';
+
 Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void registerTmuxToolPickerSheetTests() {
@@ -91,6 +93,7 @@ void registerTmuxToolPickerSheetTests() {
       testWidgets(
         'new-window route tracks native visibility with stale geometry',
         (tester) async {
+          mockKeyboardVisibilityChannel(tester);
           tester.view
             ..physicalSize = const Size(390, 844)
             ..devicePixelRatio = 1
