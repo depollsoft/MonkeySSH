@@ -50,6 +50,9 @@ class _FakeRemoteFileService extends RemoteFileService {
   final String homeDirectory;
   final bool writeUploads;
   final Exception? uploadError;
+
+  /// When set, the upload pauses here after reporting half its bytes.
+  Future<void>? midUploadPause;
   Uint8List? uploadedBytes;
   String? uploadedPath;
   bool uploaded = false;
@@ -77,6 +80,7 @@ class _FakeRemoteFileService extends RemoteFileService {
     uploadCount++;
     uploadedPath = remotePath;
     await onProgress?.call(bytes.length ~/ 2);
+    await midUploadPause;
     final uploadError = this.uploadError;
     if (uploadError != null) {
       throw uploadError;
@@ -404,6 +408,54 @@ void main() {
       );
     });
   }
+
+  test(
+    'a superseded probe finishing mid-upload keeps the upload progress',
+    () async {
+      final harness = _InstallHarness();
+      final connectionId = harness.session.connectionId;
+      final total = harness.binary.length;
+      final probeSftpMayOpen = Completer<void>();
+      final uploadMayFinish = Completer<void>();
+      harness.remote.midUploadPause = uploadMayFinish.future;
+      var sftpOpenCount = 0;
+      var sftpCloseCount = 0;
+      when(harness.client.sftp).thenAnswer((_) {
+        sftpOpenCount += 1;
+        return sftpOpenCount == 1
+            ? probeSftpMayOpen.future.then((_) => harness.sftp)
+            : Future<SftpClient>.value(harness.sftp);
+      });
+      when(harness.sftp.close).thenAnswer((_) async => sftpCloseCount++);
+      MonkeyMuxInstallProgress? progress() =>
+          harness.installer.uploadProgress.value[connectionId];
+
+      final probeOnlyInstall = harness.installer.ensureInstalled(
+        harness.session,
+      );
+      await _waitUntil(() => sftpOpenCount == 1);
+      final approvedInstall = harness.installer.ensureInstalled(
+        harness.session,
+        confirmInstall: (_) async => true,
+      );
+      await _waitUntil(() => progress()?.uploadedBytes == total ~/ 2);
+
+      // The probe finds no helper and fails while the approved call uploads.
+      probeSftpMayOpen.complete();
+      await _waitUntil(() => sftpCloseCount == 1);
+      expect(
+        progress(),
+        MonkeyMuxInstallProgress(uploadedBytes: total ~/ 2, totalBytes: total),
+      );
+
+      uploadMayFinish.complete();
+      final installation = await approvedInstall;
+      expect(installation.installedDuringCall, isTrue);
+      expect((await probeOnlyInstall).installedDuringCall, isTrue);
+      expect(sftpCloseCount, 2);
+      expect(progress(), isNull);
+    },
+  );
 
   test('reports no upload progress when the helper is reused', () async {
     final harness = _InstallHarness();
