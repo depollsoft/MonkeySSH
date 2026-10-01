@@ -1361,6 +1361,593 @@ void registerKeyboardToolbarTests() {
         });
       });
 
+      Future<TestGesture> swipeUpFrom(
+        WidgetTester tester,
+        String tooltip,
+      ) async {
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip(tooltip)),
+        );
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        return gesture;
+      }
+
+      /// The center of the menu cell directly above a key, where a straight
+      /// swipe up lands.
+      Offset aboveKey(WidgetTester tester, String tooltip) {
+        final rect = tester.getRect(find.byTooltip(tooltip));
+        return Offset(
+          rect.center.dx,
+          rect.top -
+              TerminalMenuStyles.cascadeGap -
+              TerminalMenuStyles.itemHeight / 2,
+        );
+      }
+
+      Finder menuHint(String tooltip, String hint) => find.descendant(
+        of: find.byTooltip(tooltip),
+        matching: find.text(hint),
+      );
+
+      testWidgets('menu keys show what a swipe up offers', (tester) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        expect(menuHint('Escape', 'Fn'), findsOneWidget);
+        expect(menuHint('Pipe', r'\'), findsOneWidget);
+        expect(menuHint('Slash', '-'), findsOneWidget);
+        expect(menuHint('Tilde', '`'), findsOneWidget);
+        for (final tooltip in ['Tab', 'Ctrl', 'Paste']) {
+          expect(
+            find.descendant(
+              of: find.byTooltip(tooltip),
+              matching: find.byIcon(Icons.more_horiz_rounded),
+            ),
+            findsOneWidget,
+          );
+        }
+      });
+
+      testWidgets('swiping up from Esc opens a grid of function keys', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final escapeRect = tester.getRect(find.byTooltip('Escape'));
+        final gesture = await swipeUpFrom(tester, 'Escape');
+
+        // F1-F4 sit in the row nearest Esc with F1 above it, then F5-F8 and
+        // F9-F12, the groups of a physical keyboard.
+        Offset center(String label) => tester.getCenter(find.text(label));
+        expect(center('F1').dy, lessThan(escapeRect.top));
+        expect(
+          center('F1').dx,
+          inInclusiveRange(escapeRect.left, escapeRect.right),
+        );
+        expect(center('F4').dy, center('F1').dy);
+        expect(center('F4').dx, greaterThan(center('F1').dx));
+        expect(center('F5').dx, center('F1').dx);
+        expect(center('F5').dy, lessThan(center('F1').dy));
+        expect(center('F9').dx, center('F1').dx);
+        expect(center('F9').dy, lessThan(center('F5').dy));
+
+        await gesture.moveTo(center('F5'));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x1b[15~']);
+        expect(find.text('F5'), findsNothing);
+      });
+
+      for (final (height, rows) in const [(150.0, 2), (120.0, 1)]) {
+        testWidgets(
+          'the function key grid gives up rows to fit above Esc ($rows)',
+          (tester) async {
+            final size = Size(844, height);
+            await tester.binding.setSurfaceSize(size);
+            addTearDown(() => tester.binding.setSurfaceSize(null));
+
+            await tester.pumpWidget(
+              MaterialApp(
+                home: MediaQuery(
+                  data: MediaQueryData(size: size),
+                  child: Scaffold(
+                    body: Column(
+                      children: [
+                        const Spacer(),
+                        KeyboardToolbar(terminal: terminal),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+            final escapeTop = tester.getRect(find.byTooltip('Escape')).top;
+            final gesture = await swipeUpFrom(tester, 'Escape');
+
+            final rects = [
+              for (var number = 1; number <= 12; number += 1)
+                tester.getRect(find.text('F$number')),
+            ];
+            for (final rect in rects) {
+              expect(rect.top, greaterThanOrEqualTo(0));
+              expect(rect.bottom, lessThan(escapeTop));
+              expect(rect.right, lessThanOrEqualTo(size.width));
+            }
+            expect(
+              rects.map((rect) => rect.center.dy).toSet(),
+              hasLength(rows),
+            );
+
+            await gesture.cancel();
+            await tester.pump();
+          },
+        );
+      }
+
+      testWidgets('Esc and Tab menus released in place send nothing', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        for (final (tooltip, item) in const [
+          ('Escape', 'F1'),
+          ('Tab', '⇧Tab'),
+        ]) {
+          final gesture = await tester.startGesture(
+            tester.getCenter(find.byTooltip(tooltip)),
+          );
+          await tester.pump(
+            kLongPressTimeout + const Duration(milliseconds: 1),
+          );
+          await tester.pump();
+          expect(find.text(item), findsOneWidget);
+
+          await gesture.up();
+          await tester.pump();
+          expect(find.text(item), findsNothing);
+        }
+
+        expect(output, isEmpty);
+      });
+
+      testWidgets('Esc still sends Escape on a tap', (tester) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        await tester.tap(find.byTooltip('Escape'));
+        // Escape refocuses the terminal after a short delay.
+        await tester.pump(const Duration(milliseconds: 150));
+
+        expect(output, ['\x1b']);
+      });
+
+      testWidgets('swiping up from Tab sends Shift+Tab', (tester) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Tab')),
+        );
+        await gesture.moveTo(aboveKey(tester, 'Tab'));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\x1b[Z']);
+      });
+
+      testWidgets('a straight swipe up from Slash types a dash', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Slash')),
+        );
+        await gesture.moveTo(aboveKey(tester, 'Slash'));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['-']);
+      });
+
+      testWidgets('symbol menus grow away from the screen edge', (
+        tester,
+      ) async {
+        const size = Size(390, 844);
+        await tester.binding.setSurfaceSize(size);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: size),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final tildeRect = tester.getRect(find.byTooltip('Tilde'));
+        final gesture = await swipeUpFrom(tester, 'Tilde');
+
+        // The backtick is directly above the key and the rest run leftward,
+        // since there is no room for them on its right.
+        final menuCells = {
+          for (final symbol in ['`', r'$', '@', '#', '%', '^'])
+            symbol: tester.getRect(find.text(symbol).hitTestable().last),
+        };
+        final backtick = menuCells['`']!;
+        expect(backtick.bottom, lessThan(tildeRect.top));
+        expect(
+          tildeRect.center.dx,
+          inInclusiveRange(backtick.left - 22, backtick.right + 22),
+        );
+        for (final rect in menuCells.values) {
+          expect(rect.left, greaterThanOrEqualTo(0));
+          expect(rect.right, lessThanOrEqualTo(size.width));
+          expect(rect.center.dy, backtick.center.dy);
+          expect(rect.center.dx, lessThanOrEqualTo(backtick.center.dx));
+        }
+
+        await gesture.moveTo(tester.getCenter(find.text(r'$')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, [r'$']);
+      });
+
+      testWidgets('symbol menus apply armed modifiers like their keys', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final controller = KeyboardToolbarController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(terminal: terminal, controller: controller),
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Ctrl'));
+        await tester.pump();
+
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Pipe')),
+        );
+        await gesture.moveTo(aboveKey(tester, 'Pipe'));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        // Ctrl+\ is the terminal's quit character.
+        expect(output, ['\x1c']);
+        expect(controller.isCtrlActive, isFalse);
+      });
+
+      testWidgets('custom input sinks keep symbol menus only', (tester) async {
+        final textInput = <String>[];
+        final specialKeys = <TerminalKey>[];
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onTextInput: textInput.add,
+              onSpecialKey: specialKeys.add,
+            ),
+          ),
+        );
+
+        expect(menuHint('Escape', 'Fn'), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byTooltip('Tab'),
+            matching: find.byIcon(Icons.more_horiz_rounded),
+          ),
+          findsNothing,
+        );
+
+        // Without a menu, holding Esc still sends it once.
+        final hold = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Escape')),
+        );
+        await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+        expect(find.text('F1'), findsNothing);
+        await hold.up();
+        await tester.pump();
+        expect(specialKeys, [TerminalKey.escape]);
+
+        final swipe = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Slash')),
+        );
+        await swipe.moveTo(aboveKey(tester, 'Slash'));
+        await tester.pump();
+        await swipe.up();
+        await tester.pump();
+
+        expect(textInput, ['-']);
+      });
+
+      testWidgets('menu keys expose their items as semantics actions', (
+        tester,
+      ) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+        final semantics = tester.ensureSemantics();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: KeyboardToolbar(terminal: terminal)),
+          ),
+        );
+
+        for (final (tooltip, action) in const [
+          ('Slash', 'Send Dash'),
+          ('Escape', 'Send F5'),
+          ('Tab', 'Send Shift+Tab'),
+        ]) {
+          final node = tester.getSemantics(find.byTooltip(tooltip));
+          final id = CustomSemanticsAction.getIdentifier(
+            CustomSemanticsAction(label: action),
+          );
+          expect(
+            node.getSemanticsData().customSemanticsActionIds,
+            contains(id),
+          );
+          node.owner!.performAction(node.id, SemanticsAction.customAction, id);
+          await tester.pump();
+        }
+
+        expect(output, ['-', '\x1b[15~', '\x1b[Z']);
+        semantics.dispose();
+      });
+
+      for (final (tooltip, first, second) in const [
+        ('Paste', 'Paste Media', 'Paste Files'),
+        ('Ctrl', '⌃D', '⌃C'),
+        ('Escape', 'F2', 'F3'),
+        ('Slash', '_', '='),
+      ]) {
+        testWidgets('the $tooltip menu ticks each item the finger crosses', (
+          tester,
+        ) async {
+          final haptics = <String>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'HapticFeedback.vibrate') {
+                haptics.add(call.arguments as String);
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
+
+          await tester.pumpWidget(
+            bottomAnchoredToolbar(
+              KeyboardToolbar(
+                terminal: terminal,
+                onPasteMediaRequested: () async {},
+                onPasteFilesRequested: () async {},
+              ),
+            ),
+          );
+
+          final gesture = await swipeUpFrom(tester, tooltip);
+          await gesture.moveTo(tester.getCenter(find.text(first)));
+          await tester.pump();
+          // Moving within an item does not tick again.
+          await gesture.moveBy(const Offset(1, 1));
+          await tester.pump();
+          await gesture.moveTo(tester.getCenter(find.text(second)));
+          await tester.pump();
+          await gesture.up();
+          await tester.pump();
+
+          expect(haptics, [
+            'HapticFeedbackType.mediumImpact',
+            'HapticFeedbackType.selectionClick',
+            'HapticFeedbackType.selectionClick',
+            'HapticFeedbackType.lightImpact',
+          ]);
+        });
+      }
+
+      testWidgets('a swipe lifting off the Paste menu without a move cancels', (
+        tester,
+      ) async {
+        var mediaPasteCount = 0;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onPasteMediaRequested: () async => mediaPasteCount++,
+              onPasteFilesRequested: () async {},
+            ),
+          ),
+        );
+
+        final gesture = await tester.createGesture(pointer: 7);
+        await gesture.down(tester.getCenter(find.byTooltip('Paste')));
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump();
+        final media = tester.getCenter(find.text('Paste Media'));
+        await gesture.moveTo(media);
+        await tester.pump();
+        // The lift lands above the menu with no move event before it.
+        await tester.sendEventToBinding(
+          PointerUpEvent(pointer: 7, position: Offset(media.dx, 4)),
+        );
+        await tester.pump();
+
+        expect(mediaPasteCount, 0);
+        expect(find.text('Paste Media'), findsNothing);
+      });
+
+      testWidgets(
+        'the Paste menu opens beside the key when it cannot fit above',
+        (tester) async {
+          const size = Size(844, 120);
+          await tester.binding.setSurfaceSize(size);
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          var mediaPasteCount = 0;
+          var filePasteCount = 0;
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: MediaQuery(
+                data: const MediaQueryData(size: size),
+                child: Scaffold(
+                  body: Column(
+                    children: [
+                      const Spacer(),
+                      KeyboardToolbar(
+                        terminal: terminal,
+                        onPasteMediaRequested: () async => mediaPasteCount++,
+                        onPasteFilesRequested: () async => filePasteCount++,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          final pasteRect = tester.getRect(find.byTooltip('Paste'));
+          Future<TestGesture> holdPaste() async {
+            final gesture = await tester.startGesture(pasteRect.center);
+            await tester.pump(
+              kLongPressTimeout + const Duration(milliseconds: 1),
+            );
+            await tester.pump();
+            return gesture;
+          }
+
+          var gesture = await holdPaste();
+          for (final label in ['Snippets', 'Paste Media', 'Paste Files']) {
+            final row = tester.getRect(
+              find
+                  .ancestor(
+                    of: find.text(label),
+                    matching: find.byType(Container),
+                  )
+                  .first,
+            );
+            expect(row.overlaps(pasteRect), isFalse);
+          }
+          // Released in place, the finger was never over the menu.
+          await gesture.up();
+          await tester.pump();
+          expect(filePasteCount, 0);
+          expect(find.text('Paste Media'), findsNothing);
+
+          gesture = await holdPaste();
+          await gesture.moveTo(tester.getCenter(find.text('Paste Media')));
+          await tester.pump();
+          await gesture.up();
+          await tester.pump();
+          expect(mediaPasteCount, 1);
+        },
+      );
+
+      test('function keys carry armed modifiers', () {
+        fakeAsync((async) {
+          final output = <String>[];
+          terminal.onOutput = output.add;
+
+          final controller = KeyboardToolbarController();
+          addTearDown(controller.dispose);
+          final dispatcher = TerminalToolbarDispatcher(
+            terminal: terminal,
+            controller: controller,
+            refocusTerminal: () {},
+            lightImpact: () async {},
+          )..sendFunctionKey(TerminalKey.f1);
+          controller.toggleShift();
+          dispatcher.sendFunctionKey(TerminalKey.f5);
+          async.flushMicrotasks();
+
+          expect(output, [
+            '\x1bOP',
+            _terminalKeyOutput(TerminalKey.f5, shift: true),
+          ]);
+          expect(output.last, '\x1b[15;2~');
+          expect(controller.isShiftActive, isFalse);
+        });
+      });
+
+      for (final (mode, expected) in const [
+        ('', '\x1b[Z'),
+        ('\x1b[>1u', '\x1b[9;2u'),
+      ]) {
+        test('Shift+Tab sends only the named chord (mode "$mode")', () {
+          fakeAsync((async) {
+            final output = <String>[];
+            terminal
+              ..onOutput = output.add
+              ..write(mode);
+
+            final controller = KeyboardToolbarController()..toggleCtrl();
+            addTearDown(controller.dispose);
+            TerminalToolbarDispatcher(
+              terminal: terminal,
+              controller: controller,
+              refocusTerminal: () {},
+              lightImpact: () async {},
+            ).sendBackTab();
+            async.flushMicrotasks();
+
+            expect(output, [expected]);
+            expect(controller.isCtrlActive, isFalse);
+          });
+        });
+      }
+
       testWidgets('Enter button renders and triggers callback', (tester) async {
         var callCount = 0;
         final output = <String>[];
