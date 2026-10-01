@@ -109,7 +109,7 @@ class _PlatformKeyboardInsetMediaQueryState
     final pendingInset = _pendingInset;
     // Decide on the live platform state, not a cached report that may predate
     // a missed show event.
-    await _controller.refresh();
+    final liveVisible = await _controller.refresh();
     // The inset moved or the keyboard state changed while the platform
     // answered, so a new wait is already running or none is needed.
     if (!mounted || _staleTimer != null || _insetIsStale) return;
@@ -118,6 +118,9 @@ class _PlatformKeyboardInsetMediaQueryState
       setState(_evaluate);
       return;
     }
+    // Without a fresh "hidden" answer the inset may belong to a real keyboard.
+    // Leave it until the next inset or visibility change asks again.
+    if (liveVisible != false) return;
     setState(() => _insetIsStale = true);
     _staleStopwatch = Stopwatch()..start();
     DiagnosticsLogService.instance.warning(

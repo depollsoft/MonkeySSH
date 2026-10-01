@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
@@ -140,6 +141,23 @@ void main() {
       answer.complete(true);
       await tester.pump();
       expect(keyboard.visible, isTrue);
+      expect(resolved.viewInsets.bottom, 300);
+      expect(calls, isNot(contains('refreshInsets')));
+    });
+
+    testWidgets('keeps the inset when the live query fails', (tester) async {
+      final calls = mockKeyboardVisibilityChannel(
+        tester,
+        live: () => throw PlatformException(code: 'unavailable'),
+      );
+      _keyboard(visible: false);
+      final inset = ValueNotifier<double>(300);
+      addTearDown(inset.dispose);
+      late MediaQueryData resolved;
+      await tester.pumpWidget(_guarded(inset, (data) => resolved = data));
+
+      await tester.pump(staleKeyboardInsetDelay * 4);
+      expect(calls, contains('getVisibility'));
       expect(resolved.viewInsets.bottom, 300);
       expect(calls, isNot(contains('refreshInsets')));
     });

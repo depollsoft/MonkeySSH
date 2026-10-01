@@ -36,14 +36,19 @@ class SystemKeyboardVisibilityController extends ChangeNotifier {
   }
 
   /// Re-reads the live platform state in case a change event was missed.
-  Future<void> refresh() async {
+  ///
+  /// Returns the platform's answer, or `null` when it could not be read.
+  Future<bool?> refresh() async {
     try {
-      _setVisible(await _channel.invokeMethod<bool>('getVisibility'));
+      final visible = await _channel.invokeMethod<bool>('getVisibility');
+      _setVisible(visible);
+      return visible;
     } on MissingPluginException {
       // Desktop/web and older native shells use the input-owner fallback.
     } on PlatformException {
       // Visibility is advisory; layout remains functional via the fallback.
     }
+    return null;
   }
 
   /// Asks the platform to dispatch its current window insets to Flutter again.
