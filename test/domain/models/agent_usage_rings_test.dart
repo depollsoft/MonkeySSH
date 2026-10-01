@@ -126,6 +126,17 @@ void main() {
         expect(pi(usage, null), isNull);
         expect(pi(usage, 'custom'), isNull);
         expect(pi(usage, 'openai'), isNull);
+        // Pi 0.99+ Sign in with ChatGPT stays apart from the legacy provider.
+        final chatGPT = snapshot([
+          ...usage.windows,
+          const AgentUsageWindow(label: 'OpenAI · Weekly', usedPercent: 26),
+        ]);
+        expect(pi(chatGPT, 'openai')!.segments, [
+          (label: 'weekly', remaining: 74.0),
+        ]);
+        expect(pi(chatGPT, 'openai-codex')!.segments, [
+          (label: '5-hour', remaining: 20.0),
+        ]);
       },
     );
 
