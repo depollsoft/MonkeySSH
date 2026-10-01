@@ -33,7 +33,6 @@ import 'acp_session_presentation.dart';
 import 'agent_tool_icon.dart';
 import 'ai_session_picker.dart';
 import 'premium_badge.dart';
-import 'system_bottom_inset.dart';
 import 'terminal_overlay_focus.dart';
 import 'tmux_window_policy.dart';
 import 'tmux_window_status_badge.dart';
@@ -332,32 +331,30 @@ Future<TmuxNavigatorAction?> showTmuxNewWindowPicker({
   context: context,
   isScrollControlled: true,
   requestFocus: terminalOverlayRouteRequestFocus(context),
-  builder: (context) => PlatformKeyboardInsetMediaQuery(
-    child: TmuxToolPickerSheet(
-      installedToolsFuture: installedToolsFuture,
-      preferredTool: preferredTool,
-      nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
-      onToolSelected: (tool) => _selectAgentLaunchMode(
-        context: context,
-        tool: tool,
-        isProUser: isProUser,
-        startClisInYoloMode: startClisInYoloMode,
-        nativeAcpProviderIds: nativeAcpProviderIds,
-        preference: agentWindowModePreference,
-      ),
-      onToolLongPressed: (tool) => _selectAgentLaunchMode(
-        context: context,
-        tool: tool,
-        isProUser: isProUser,
-        startClisInYoloMode: startClisInYoloMode,
-        nativeAcpProviderIds: nativeAcpProviderIds,
-        preference: agentWindowModePreference,
-        forcePicker: true,
-      ),
-      onEmptyWindow: () {
-        Navigator.pop(context, const TmuxNewWindowAction());
-      },
+  builder: (context) => TmuxToolPickerSheet(
+    installedToolsFuture: installedToolsFuture,
+    preferredTool: preferredTool,
+    nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
+    onToolSelected: (tool) => _selectAgentLaunchMode(
+      context: context,
+      tool: tool,
+      isProUser: isProUser,
+      startClisInYoloMode: startClisInYoloMode,
+      nativeAcpProviderIds: nativeAcpProviderIds,
+      preference: agentWindowModePreference,
     ),
+    onToolLongPressed: (tool) => _selectAgentLaunchMode(
+      context: context,
+      tool: tool,
+      isProUser: isProUser,
+      startClisInYoloMode: startClisInYoloMode,
+      nativeAcpProviderIds: nativeAcpProviderIds,
+      preference: agentWindowModePreference,
+      forcePicker: true,
+    ),
+    onEmptyWindow: () {
+      Navigator.pop(context, const TmuxNewWindowAction());
+    },
   ),
 );
 
@@ -460,9 +457,8 @@ Future<AgentWindowMode?> showAgentWindowModePicker({
   showDragHandle: true,
   isScrollControlled: true,
   requestFocus: terminalOverlayRouteRequestFocus(context),
-  builder: (context) => PlatformKeyboardInsetMediaQuery(
-    child: _AgentWindowModePickerSheet(tool: tool, isProUser: isProUser),
-  ),
+  builder: (context) =>
+      _AgentWindowModePickerSheet(tool: tool, isProUser: isProUser),
 );
 
 class _AgentWindowModePickerSheet extends StatefulWidget {

@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../../domain/services/diagnostics_log_service.dart';
+
 /// Platform-authoritative soft-keyboard visibility shared by every text input.
 ///
 /// `MediaQuery.viewInsets` is primarily layout geometry and can remain stale
 /// after the IME closes. Android reports `WindowInsetsCompat.Type.ime()`
 /// visibility and iOS reports keyboard lifecycle notifications over this
-/// channel, giving terminal and native composer layouts one common authority.
+/// channel, giving the app-wide inset guard and the terminal one authority.
 class SystemKeyboardVisibilityController extends ChangeNotifier {
   SystemKeyboardVisibilityController._();
 
@@ -30,12 +32,36 @@ class SystemKeyboardVisibilityController extends ChangeNotifier {
     if (_initialized) return;
     _initialized = true;
     _channel.setMethodCallHandler(_handleMethodCall);
+    await refresh();
+  }
+
+  /// Re-reads the live platform state in case a change event was missed.
+  ///
+  /// Returns the platform's answer, or `null` when it could not be read.
+  Future<bool?> refresh() async {
     try {
-      _setVisible(await _channel.invokeMethod<bool>('getVisibility'));
+      final visible = await _channel.invokeMethod<bool>('getVisibility');
+      _setVisible(visible);
+      return visible;
     } on MissingPluginException {
       // Desktop/web and older native shells use the input-owner fallback.
     } on PlatformException {
       // Visibility is advisory; layout remains functional via the fallback.
+    }
+    return null;
+  }
+
+  /// Asks the platform to dispatch its current window insets to Flutter again.
+  ///
+  /// Android's embedding can hold on to a keyboard inset after the IME hides;
+  /// a fresh dispatch replaces it. Platforms without that problem ignore this.
+  Future<void> requestInsetsRefresh() async {
+    try {
+      await _channel.invokeMethod<void>('refreshInsets');
+    } on MissingPluginException {
+      // Only Android needs to re-dispatch insets.
+    } on PlatformException {
+      // Best effort: the layout already ignores the stale inset.
     }
   }
 
@@ -49,6 +75,11 @@ class SystemKeyboardVisibilityController extends ChangeNotifier {
   void _setVisible(bool? value) {
     if (value == null || value == _visible) return;
     _visible = value;
+    DiagnosticsLogService.instance.debug(
+      'keyboard.visibility',
+      'changed',
+      fields: {'visible': value},
+    );
     notifyListeners();
   }
 

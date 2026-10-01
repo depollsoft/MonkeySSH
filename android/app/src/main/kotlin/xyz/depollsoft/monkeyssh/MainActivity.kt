@@ -151,7 +151,18 @@ class MainActivity : FlutterFragmentActivity() {
             )
         keyboardVisibilityMethodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
-                "getVisibility" -> result.success(keyboardVisible)
+                "getVisibility" -> {
+                    val visible = currentKeyboardVisibility()
+                    reportedKeyboardVisible = visible
+                    result.success(visible)
+                }
+                "refreshInsets" -> {
+                    // Flutter defers IME insets while the keyboard animates and
+                    // can be left holding a stale keyboard inset. A fresh
+                    // dispatch hands FlutterView the current window insets.
+                    ViewCompat.requestApplyInsets(window.decorView)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -386,22 +397,31 @@ class MainActivity : FlutterFragmentActivity() {
             output.toByteArray()
         }
 
-    private var keyboardVisible = false
+    // Last state delivered to Dart. The engine outlives this activity, so a new
+    // activity starts unknown and its first inset dispatch always reports,
+    // replacing whatever a previous activity left behind.
+    private var reportedKeyboardVisible: Boolean? = null
 
     private fun installKeyboardVisibilityListener() {
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
-            val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
-            if (visible != keyboardVisible) {
-                keyboardVisible = visible
-                keyboardVisibilityMethodChannel?.invokeMethod(
-                    "onVisibilityChanged",
-                    visible,
-                )
-            }
+            reportKeyboardVisibility(insets.isVisible(WindowInsetsCompat.Type.ime()))
             insets
         }
         ViewCompat.requestApplyInsets(window.decorView)
     }
+
+    private fun reportKeyboardVisibility(visible: Boolean) {
+        val channel = keyboardVisibilityMethodChannel ?: return
+        if (visible == reportedKeyboardVisible) return
+        reportedKeyboardVisible = visible
+        channel.invokeMethod("onVisibilityChanged", visible)
+    }
+
+    /** Reads the live IME state instead of the last dispatched listener event. */
+    private fun currentKeyboardVisibility(): Boolean =
+        ViewCompat.getRootWindowInsets(window.decorView)
+            ?.isVisible(WindowInsetsCompat.Type.ime())
+            ?: (reportedKeyboardVisible ?: false)
 
     private fun notifyIncomingTransferPayload() {
         val payload = pendingTransferPayload ?: return

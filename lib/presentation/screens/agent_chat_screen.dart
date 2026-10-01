@@ -58,7 +58,6 @@ import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
-import '../widgets/system_bottom_inset.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
@@ -972,32 +971,26 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
     if (isWide && !widget.embedded) {
-      return PlatformKeyboardInsetMediaQuery(
-        child: Scaffold(
-          body: Row(
-            children: [
-              AcpSessionRail(currentKey: _key),
-              Expanded(
-                child: _buildConversation(
-                  session,
-                  showBack: true,
-                  contentWrapper: wrapContent,
-                ),
+      return Scaffold(
+        body: Row(
+          children: [
+            AcpSessionRail(currentKey: _key),
+            Expanded(
+              child: _buildConversation(
+                session,
+                showBack: true,
+                contentWrapper: wrapContent,
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       );
     }
-    final conversation = _buildConversation(
+    return _buildConversation(
       session,
       showBack: !widget.embedded,
       contentWrapper: wrapContent,
     );
-    // Embedded chat inherits keyboard layout from its terminal shell.
-    return widget.embedded
-        ? conversation
-        : PlatformKeyboardInsetMediaQuery(child: conversation);
   }
 
   AcpNativePreviewSnapshot? _buildNativePreview(
