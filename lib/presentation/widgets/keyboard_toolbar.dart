@@ -1228,7 +1228,10 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
             // The highlighted row is already announced as selected.
             child: ExcludeSemantics(
               child: _KeyMenuLoupe(
-                target: highlighted == null || overlayBox is! RenderBox
+                target:
+                    highlighted == null ||
+                        !menu.hasLoupe ||
+                        overlayBox is! RenderBox
                     ? null
                     : _loupeTarget(
                         layout,
@@ -1251,9 +1254,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   ///
   /// It pulls out beside the item's row, toward the middle of the screen: a
   /// thumb holding a key at either end of the toolbar reaches up and in from
-  /// its own edge, so the side facing the middle stays clear. A single-row
-  /// menu has no rows to keep clear above it, so its loupe rises above the
-  /// item instead. Returns null when neither fits on screen.
+  /// its own edge, so the side facing the middle stays clear. Returns null
+  /// when neither side fits on screen.
   _LoupeTarget? _loupeTarget(
     _KeyMenuLayout layout,
     int item,
@@ -1264,62 +1266,37 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     const gap = _KeyMenuLoupe.gap;
     const extent = _KeyMenuLoupe.extent;
     final cell = layout.cellRect(item);
-    final symbolWidth = _KeyMenuLoupe.measure(symbol);
     final menuRect = layout.rect;
-
-    if (layout.isList || layout.rows > 1) {
-      final width = math.max(extent, symbolWidth + 2 * _KeyMenuLoupe.padding);
-      final top = _clampDouble(
-        cell.center.dy - extent / 2,
-        margin,
-        overlaySize.height - extent - margin,
-      );
-      final towardRight = menuRect.center.dx < overlaySize.width / 2;
-      for (final right in [towardRight, !towardRight]) {
-        final left = right ? menuRect.right + gap : menuRect.left - gap - width;
-        if (left < margin || left + width > overlaySize.width - margin) {
-          continue;
-        }
-        final edge = right ? menuRect.right : menuRect.left;
-        return _LoupeTarget(
-          item: item,
-          symbol: symbol,
-          geometry: _LoupeGeometry(
-            direction: right ? AxisDirection.right : AxisDirection.left,
-            anchor: Rect.fromLTRB(edge, cell.top, edge, cell.bottom),
-            bubble: Rect.fromLTWH(left, top, width, extent),
-            // In a grid the neck would join the bubble to whichever cell sits
-            // at the edge, so it only joins a cell that is at the edge.
-            attached: ((right ? cell.right : cell.left) - edge).abs() < 0.5,
-          ),
-        );
-      }
-    }
-
-    final top = menuRect.top - gap - extent;
-    if (top < margin) {
-      return null;
-    }
-    final width = math.max(cell.width, symbolWidth + 2 * _KeyMenuLoupe.padding);
-    return _LoupeTarget(
-      item: item,
-      symbol: symbol,
-      geometry: _LoupeGeometry(
-        direction: AxisDirection.up,
-        attached: true,
-        anchor: Rect.fromLTRB(cell.left, cell.top, cell.right, cell.top),
-        bubble: Rect.fromLTWH(
-          _clampDouble(
-            cell.center.dx - width / 2,
-            margin,
-            overlaySize.width - width - margin,
-          ),
-          top,
-          width,
-          extent,
-        ),
-      ),
+    final width = math.max(
+      extent,
+      _KeyMenuLoupe.measure(symbol) + 2 * _KeyMenuLoupe.padding,
     );
+    final top = _clampDouble(
+      cell.center.dy - extent / 2,
+      margin,
+      overlaySize.height - extent - margin,
+    );
+    final towardRight = menuRect.center.dx < overlaySize.width / 2;
+    for (final right in [towardRight, !towardRight]) {
+      final left = right ? menuRect.right + gap : menuRect.left - gap - width;
+      if (left < margin || left + width > overlaySize.width - margin) {
+        continue;
+      }
+      final edge = right ? menuRect.right : menuRect.left;
+      return _LoupeTarget(
+        item: item,
+        symbol: symbol,
+        geometry: _LoupeGeometry(
+          pullsRight: right,
+          anchor: Rect.fromLTRB(edge, cell.top, edge, cell.bottom),
+          bubble: Rect.fromLTWH(left, top, width, extent),
+          // In a grid the neck would join the bubble to whichever cell sits
+          // at the edge, so it only joins a cell that is at the edge.
+          attached: ((right ? cell.right : cell.left) - edge).abs() < 0.5,
+        ),
+      );
+    }
+    return null;
   }
 
   /// The geometry of [key]'s menu in overlay coordinates, opening upward from
@@ -1821,6 +1798,11 @@ class _KeyMenu {
   /// Size of a grid symbol shown without a description; null keeps the menu
   /// text size.
   final double? symbolFontSize;
+
+  /// Whether a loupe repeats the highlighted item beside the thumb. Only
+  /// menus of lone symbols get one: described rows are wide enough to hold
+  /// the finger away from the symbol.
+  bool get hasLoupe => items.every((item) => item.description == null);
 }
 
 enum _PasteToolbarAction { snippets, media, files }
@@ -2087,22 +2069,22 @@ class _KeyMenuLayout {
   }
 }
 
-/// Where a loupe sits: the edge of the highlighted row (or cell) it pulls
-/// out of, the direction it pulls, and its bubble.
+/// Where a loupe sits: the side of the highlighted row it pulls out of, and
+/// its bubble.
 @immutable
 class _LoupeGeometry {
   const _LoupeGeometry({
-    required this.direction,
+    required this.pullsRight,
     required this.anchor,
     required this.bubble,
     required this.attached,
   });
 
-  /// [AxisDirection.left], [AxisDirection.right] or [AxisDirection.up].
-  final AxisDirection direction;
+  /// Whether the loupe pulls out of the menu's right side, or its left.
+  final bool pullsRight;
 
-  /// The edge segment the loupe leaves the menu from, as a zero-thickness
-  /// rect: a row's side, or a cell's top.
+  /// The menu's side edge level with the highlighted row, as a zero-width
+  /// rect.
   final Rect anchor;
   final Rect bubble;
 
@@ -2110,12 +2092,12 @@ class _LoupeGeometry {
   /// only when that cell lies on the menu's edge.
   final bool attached;
 
-  /// The geometry [t] of the way to [other]; a change of direction jumps.
+  /// The geometry [t] of the way to [other]; a change of side jumps.
   _LoupeGeometry lerpTo(_LoupeGeometry other, double t) =>
-      direction != other.direction
+      pullsRight != other.pullsRight
       ? other
       : _LoupeGeometry(
-          direction: other.direction,
+          pullsRight: other.pullsRight,
           anchor: Rect.lerp(anchor, other.anchor, t)!,
           bubble: Rect.lerp(bubble, other.bubble, t)!,
           attached: other.attached,
@@ -2153,8 +2135,7 @@ class _KeyMenuLoupe extends StatefulWidget {
   /// Gap between the menu and the bubble, bridged by the neck.
   static const gap = 10.0;
 
-  /// The bubble's height beside a row (taller than the row, so it reads as
-  /// magnified), or its height above a cell.
+  /// The bubble's height, taller than the row so it reads as magnified.
   static const extent = 56.0;
 
   /// Space on each side of the symbol in the bubble.
@@ -2357,50 +2338,31 @@ class _LoupePainter extends CustomPainter {
       return;
     }
 
-    // Points are written as (distance out from the row's edge, position
-    // across it) and mapped to the pull direction.
-    final double edge;
-    final double gap;
-    final (double, double) anchorSpan;
-    final (double, double) bubbleSpan;
-    final Offset Function(double out, double across) at;
-    switch (geometry.direction) {
-      case AxisDirection.right:
-        edge = anchor.left;
-        gap = bubble.left - edge;
-        anchorSpan = (anchor.top, anchor.bottom);
-        bubbleSpan = (bubble.top, bubble.bottom);
-        at = (out, across) => Offset(edge + out, across);
-      case AxisDirection.left:
-        edge = anchor.left;
-        gap = edge - bubble.right;
-        anchorSpan = (anchor.top, anchor.bottom);
-        bubbleSpan = (bubble.top, bubble.bottom);
-        at = (out, across) => Offset(edge - out, across);
-      case AxisDirection.up:
-      case AxisDirection.down:
-        edge = anchor.top;
-        gap = edge - bubble.bottom;
-        anchorSpan = (anchor.left, anchor.right);
-        bubbleSpan = (bubble.left, bubble.right);
-        at = (out, across) => Offset(across, edge - out);
-    }
-    final (a0, a1) = anchorSpan;
-    final (b0, b1) = bubbleSpan;
+    // x positions are written as distance out from the menu's edge and
+    // mirrored for a loupe on the left.
+    final edge = anchor.left;
+    final sign = geometry.pullsRight ? 1.0 : -1.0;
+    final gap = geometry.pullsRight ? bubble.left - edge : edge - bubble.right;
+    double x(double out) => edge + sign * out;
     final mid = gap / 2;
 
-    final neck = Path()..moveTo(at(-radius, a0).dx, at(-radius, a0).dy);
-    void lineTo(Offset point) => neck.lineTo(point.dx, point.dy);
-    void curveTo(Offset c1, Offset c2, Offset end) =>
-        neck.cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, end.dx, end.dy);
-    lineTo(at(0, a0));
-    curveTo(at(mid, a0), at(mid, b0), at(gap, b0));
-    lineTo(at(gap + radius, b0));
-    lineTo(at(gap + radius, b1));
-    lineTo(at(gap, b1));
-    curveTo(at(mid, b1), at(mid, a1), at(0, a1));
-    lineTo(at(-radius, a1));
-    neck.close();
+    final neck = Path()
+      ..moveTo(x(-radius), anchor.top)
+      ..lineTo(x(0), anchor.top)
+      ..cubicTo(x(mid), anchor.top, x(mid), bubble.top, x(gap), bubble.top)
+      ..lineTo(x(gap + radius), bubble.top)
+      ..lineTo(x(gap + radius), bubble.bottom)
+      ..lineTo(x(gap), bubble.bottom)
+      ..cubicTo(
+        x(mid),
+        bubble.bottom,
+        x(mid),
+        anchor.bottom,
+        x(0),
+        anchor.bottom,
+      )
+      ..lineTo(x(-radius), anchor.bottom)
+      ..close();
 
     canvas
       ..drawPath(neck, paint)
@@ -2411,7 +2373,7 @@ class _LoupePainter extends CustomPainter {
   bool shouldRepaint(_LoupePainter oldDelegate) =>
       oldDelegate.color != color ||
       oldDelegate.geometry.attached != geometry.attached ||
-      oldDelegate.geometry.direction != geometry.direction ||
+      oldDelegate.geometry.pullsRight != geometry.pullsRight ||
       oldDelegate.geometry.anchor != geometry.anchor ||
       oldDelegate.geometry.bubble != geometry.bubble;
 }

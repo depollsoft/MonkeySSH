@@ -1776,24 +1776,24 @@ void registerKeyboardToolbarTests() {
         await tester.pump();
       });
 
-      testWidgets('a single-row menu raises its loupe above the item', (
-        tester,
-      ) async {
-        await pumpPhoneToolbar(tester, const Size(844, 200));
+      testWidgets('Ctrl and Tab menus show no loupe', (tester) async {
+        await pumpPhoneToolbar(tester, const Size(390, 844));
 
-        final gesture = await longPressCtrl(tester);
-        await gesture.moveTo(tester.getCenter(find.text('⌃D')));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 200));
+        // Their rows are wide enough to hold the finger off the symbol.
+        for (final (tooltip, item) in const [
+          ('Ctrl', '\u2303D'),
+          ('Tab', '\u21e7Tab'),
+        ]) {
+          final gesture = await swipeUpFrom(tester, tooltip);
+          await gesture.moveTo(tester.getCenter(find.text(item)));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 200));
 
-        expect(loupeText(tester), '⌃D');
-        final bubble = tester.getRect(loupe());
-        final cell = menuRow(tester, '⌃D');
-        expect(bubble.bottom, lessThan(cell.top));
-        expect(bubble.center.dx, moreOrLessEquals(cell.center.dx));
+          expect(loupe(), findsNothing, reason: tooltip);
 
-        await gesture.cancel();
-        await tester.pump();
+          await gesture.cancel();
+          await tester.pump();
+        }
       });
 
       testWidgets('with reduced motion the loupe appears in place', (
