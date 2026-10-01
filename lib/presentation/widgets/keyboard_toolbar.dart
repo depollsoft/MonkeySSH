@@ -1348,6 +1348,9 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       rows -= 1;
     }
     final columns = (count / rows).ceil();
+    // Spreading the items over whole columns can need fewer rows than fit:
+    // six symbols with room for four rows take two columns of three.
+    rows = (count / columns).ceil();
 
     // The first item's cell is centered over the key so a straight swipe up
     // lands on it, and the grid grows toward the side that leaves wider cells.

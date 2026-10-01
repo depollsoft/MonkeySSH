@@ -1593,7 +1593,7 @@ void registerKeyboardToolbarTests() {
         final tildeRect = tester.getRect(find.byTooltip('Tilde'));
         final gesture = await swipeUpFrom(tester, 'Tilde');
 
-        // The backtick is the row nearest the key and the rest stack upward
+        // The dash is the row nearest the key and the rest stack upward
         // in one column over the key, so a straight swipe up chooses by
         // distance.
         Rect row(String symbol) => tester.getRect(
@@ -2018,7 +2018,9 @@ void registerKeyboardToolbarTests() {
       testWidgets(
         'the Paste menu opens beside the key when it cannot fit above',
         (tester) async {
-          const size = Size(844, 120);
+          // Too short for the column above the key, though the overlay (which
+          // spans the whole window, keyboard included) still fits it beside.
+          const size = Size(844, 170);
           await tester.binding.setSurfaceSize(size);
           addTearDown(() => tester.binding.setSurfaceSize(null));
           var mediaPasteCount = 0;
@@ -2065,6 +2067,8 @@ void registerKeyboardToolbarTests() {
                   .first,
             );
             expect(row.overlaps(pasteRect), isFalse);
+            expect(row.top, greaterThanOrEqualTo(0));
+            expect(row.bottom, lessThanOrEqualTo(size.height));
           }
           // Released in place, the finger was never over the menu.
           await gesture.up();
@@ -2080,6 +2084,45 @@ void registerKeyboardToolbarTests() {
           expect(mediaPasteCount, 1);
         },
       );
+
+      testWidgets('a folded symbol stack has no empty rows', (tester) async {
+        // Room for four rows above the toolbar: six symbols fold into two
+        // columns, which need only three.
+        const surface = Size(375, 300);
+        await tester.binding.setSurfaceSize(surface);
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(375, 667)),
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Spacer(),
+                    KeyboardToolbar(terminal: terminal),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final gesture = await swipeUpFrom(tester, 'Tilde');
+        final rows = {
+          for (final symbol in ['-', '_', '=', '+', '^', '`'])
+            tester.getCenter(find.text(symbol)).dy,
+        };
+        final menu = tester.getRect(
+          find
+              .ancestor(of: find.text('-'), matching: find.byType(Material))
+              .first,
+        );
+        expect(rows, hasLength(3));
+        expect(menu.height, 3 * TerminalMenuStyles.itemHeight);
+
+        await gesture.cancel();
+        await tester.pump();
+      });
 
       test('function keys carry armed modifiers', () {
         fakeAsync((async) {
@@ -2104,6 +2147,30 @@ void registerKeyboardToolbarTests() {
           ]);
           expect(output.last, '\x1b[15;2~');
           expect(controller.isShiftActive, isFalse);
+        });
+      });
+
+      test('function keys use Kitty encoding when enabled', () {
+        fakeAsync((async) {
+          final output = <String>[];
+          terminal
+            ..onOutput = output.add
+            ..write('\x1b[>1u');
+
+          final controller = KeyboardToolbarController();
+          addTearDown(controller.dispose);
+          final dispatcher = TerminalToolbarDispatcher(
+            terminal: terminal,
+            controller: controller,
+            refocusTerminal: () {},
+            lightImpact: () async {},
+          )..sendFunctionKey(TerminalKey.f1);
+          controller.toggleShift();
+          dispatcher.sendFunctionKey(TerminalKey.f1);
+          async.flushMicrotasks();
+
+          // Legacy F1 is SS3 P; Kitty's disambiguated form is CSI P.
+          expect(output, ['\x1b[P', '\x1b[1;2P']);
         });
       });
 
