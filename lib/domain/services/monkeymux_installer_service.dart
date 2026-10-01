@@ -163,6 +163,32 @@ class MonkeyMuxInstallRequest {
   final int size;
 }
 
+/// Progress of an approved MonkeyMux helper upload on one SSH connection.
+@immutable
+class MonkeyMuxInstallProgress {
+  /// Creates a snapshot of an in-flight helper upload.
+  const MonkeyMuxInstallProgress({
+    required this.uploadedBytes,
+    required this.totalBytes,
+  });
+
+  /// Helper bytes written to the remote host so far.
+  final int uploadedBytes;
+
+  /// Helper binary size in bytes.
+  final int totalBytes;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MonkeyMuxInstallProgress &&
+          uploadedBytes == other.uploadedBytes &&
+          totalBytes == other.totalBytes;
+
+  @override
+  int get hashCode => Object.hash(uploadedBytes, totalBytes);
+}
+
 /// Confirms whether MonkeyMux may install its helper on the connected host.
 typedef MonkeyMuxInstallConfirmation = Future<bool> Function(
   MonkeyMuxInstallRequest request,
@@ -212,6 +238,17 @@ class MonkeyMuxInstallerService {
   static final _installCache = <int, MonkeyMuxInstallation>{};
   static final _installRequests = <int, _MonkeyMuxInstallInFlight>{};
   static final _passiveInstallFailures = <int, (Object, StackTrace)>{};
+  static final _uploadProgress =
+      ValueNotifier<Map<int, MonkeyMuxInstallProgress>>(const {});
+
+  /// Helper upload progress for installs in flight, keyed by connection ID.
+  ///
+  /// Callers that join an in-flight install share its single upload, so a
+  /// screen watches this instead of passing a progress callback that only the
+  /// first caller would receive. An entry appears once the install is
+  /// approved and is removed when the upload is verified or fails.
+  ValueListenable<Map<int, MonkeyMuxInstallProgress>> get uploadProgress =>
+      _uploadProgress;
 
   /// Installs the helper if needed and returns its executable path.
   Future<MonkeyMuxInstallation> ensureInstalled(
@@ -311,6 +348,26 @@ class MonkeyMuxInstallerService {
     _installCache.remove(connectionId);
     _installRequests.remove(connectionId);
     _passiveInstallFailures.remove(connectionId);
+    _setUploadProgress(connectionId, null);
+  }
+
+  static void _setUploadProgress(
+    int connectionId,
+    MonkeyMuxInstallProgress? progress,
+  ) {
+    final current = _uploadProgress.value;
+    if (progress == null) {
+      if (current.containsKey(connectionId)) {
+        _uploadProgress.value = Map.unmodifiable(
+          Map.of(current)..remove(connectionId),
+        );
+      }
+    } else if (current[connectionId] != progress) {
+      _uploadProgress.value = Map.unmodifiable({
+        ...current,
+        connectionId: progress,
+      });
+    }
   }
 
   Future<MonkeyMuxInstallation> _ensureInstalled(
@@ -327,6 +384,7 @@ class MonkeyMuxInstallerService {
       );
     }
     final sftp = await session.openStandaloneSftp();
+    var reportsUploadProgress = false;
     try {
       final homeDirectory = await _remoteFileService.resolveInitialDirectory(
         sftp,
@@ -408,6 +466,11 @@ class MonkeyMuxInstallerService {
           'confirmation_accepted',
           fields: {'connectionId': session.connectionId, 'platform': platform},
         );
+        reportsUploadProgress = true;
+        _setUploadProgress(
+          session.connectionId,
+          MonkeyMuxInstallProgress(uploadedBytes: 0, totalBytes: entry.size),
+        );
 
         final assetBytes = await _loadAssetBytes(entry);
         DiagnosticsLogService.instance.info(
@@ -434,6 +497,13 @@ class MonkeyMuxInstallerService {
             sftp: sftp,
             remotePath: temporaryExecutablePath,
             bytes: assetBytes,
+            onProgress: (uploadedBytes) => _setUploadProgress(
+              session.connectionId,
+              MonkeyMuxInstallProgress(
+                uploadedBytes: uploadedBytes,
+                totalBytes: assetBytes.length,
+              ),
+            ),
           );
           if (isWindows) {
             installStage = 'verify_upload';
@@ -511,6 +581,8 @@ class MonkeyMuxInstallerService {
           'upload_complete',
           fields: {'connectionId': session.connectionId, 'platform': platform},
         );
+        reportsUploadProgress = false;
+        _setUploadProgress(session.connectionId, null);
       }
       await _ensureDirectCommandLauncherBestEffort(
         session,
@@ -528,6 +600,11 @@ class MonkeyMuxInstallerService {
         installedDuringCall: !reused,
       );
     } finally {
+      // A probe-only call on the same connection can finish while an approved
+      // install is still uploading; only the uploading call clears the entry.
+      if (reportsUploadProgress) {
+        _setUploadProgress(session.connectionId, null);
+      }
       await sftp.close();
     }
   }

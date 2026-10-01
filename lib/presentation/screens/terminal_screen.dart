@@ -1116,6 +1116,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   late final RemoteMultiplexerService _tmuxMultiplexerService;
   late final MonkeyMuxService _monkeyMuxService;
   late final MonkeyMuxInstallerService _monkeyMuxInstallerService;
+  late final Listenable _uploadProgressListenable;
   late final TerminalConnectionBackendService _terminalBackendService;
   late final DeviceDebugSessionRegistry _deviceDebugSessionRegistry;
   DeviceDebugSessionController? _deviceDebugController;
@@ -1730,6 +1731,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _tmuxMultiplexerService = _tmuxService;
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);
     _monkeyMuxInstallerService = ref.read(monkeyMuxInstallerServiceProvider);
+    _uploadProgressListenable = Listenable.merge([
+      _pasteUploadProgress,
+      _monkeyMuxInstallerService.uploadProgress,
+    ]);
     _terminalBackendService = ref.read(
       terminalConnectionBackendServiceProvider,
     );
@@ -8336,7 +8341,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     child: Column(
                       children: [
                         Expanded(
-                          child: _overlayPasteUploadStrip(
+                          child: _overlayUploadProgressStrip(
                             _buildTerminalView(
                               terminalTheme,
                               isMobile,
@@ -8422,14 +8427,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  /// Overlays the paste-upload progress line along the terminal's bottom edge.
+  /// Overlays the upload progress line along the terminal's bottom edge.
+  ///
+  /// The line tracks a paste upload, or else a MonkeyMux helper upload on
+  /// this connection, which can start from the connect flow, an agent launch,
+  /// or a native agent session.
   ///
   /// The line floats over the last row instead of taking layout space so the
   /// viewport, and therefore the remote pty, keeps its size for the duration
   /// of an upload. [applyBottomSafeArea] lifts it above the home indicator
   /// when nothing else (keyboard toolbar, tmux handle) already reserves that
   /// inset.
-  Widget _overlayPasteUploadStrip(
+  Widget _overlayUploadProgressStrip(
     Widget terminalView, {
     required bool applyBottomSafeArea,
   }) => Stack(
@@ -8440,9 +8449,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         left: 0,
         right: 0,
         bottom: 0,
-        child: ValueListenableBuilder<TerminalPasteUploadProgress?>(
-          valueListenable: _pasteUploadProgress,
-          builder: (context, progress, _) {
+        child: ListenableBuilder(
+          listenable: _uploadProgressListenable,
+          builder: (context, _) {
+            final strip = _currentUploadProgressStrip();
             final disableAnimations =
                 MediaQuery.maybeOf(context)?.disableAnimations ?? false;
             return AnimatedSwitcher(
@@ -8451,7 +8461,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   : const Duration(milliseconds: 150),
               switchInCurve: Curves.easeOutCubic,
               switchOutCurve: Curves.easeOutCubic,
-              child: progress == null
+              child: strip == null
                   ? const SizedBox.shrink(
                       key: ValueKey<String>('terminal-paste-upload-hidden'),
                     )
@@ -8463,7 +8473,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       left: false,
                       right: false,
                       bottom: applyBottomSafeArea,
-                      child: TerminalPasteUploadStrip(progress: progress),
+                      child: strip,
                     ),
             );
           },
@@ -8471,6 +8481,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ),
     ],
   );
+
+  TerminalPasteUploadStrip? _currentUploadProgressStrip() {
+    final pasteProgress = _pasteUploadProgress.value;
+    if (pasteProgress != null) {
+      return TerminalPasteUploadStrip(progress: pasteProgress);
+    }
+    final connectionId = _connectionId;
+    final installProgress = connectionId == null
+        ? null
+        : _monkeyMuxInstallerService.uploadProgress.value[connectionId];
+    if (installProgress == null) {
+      return null;
+    }
+    return TerminalPasteUploadStrip(
+      progress: TerminalPasteUploadProgress(
+        uploadedBytes: installProgress.uploadedBytes,
+        totalBytes: installProgress.totalBytes,
+      ),
+      label: TerminalPasteUploadStrip.monkeyMuxInstallLabel,
+    );
+  }
 
   /// Shows the progress line for a new paste upload and returns a generation
   /// that identifies it, so a later upload's completion cannot hide the line
@@ -8510,7 +8541,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshConnectionState connectionState, {
     required double consumedLeftSafeInset,
   }) {
-    final terminalView = _overlayPasteUploadStrip(
+    final terminalView = _overlayUploadProgressStrip(
       _buildTerminalView(terminalTheme, isMobile, connectionState),
       applyBottomSafeArea: false,
     );
