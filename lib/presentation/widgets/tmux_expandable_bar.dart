@@ -1281,7 +1281,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               displayedWindows,
             ),
           )
-        : '${acpSessionDisplayTitle(activeNative)} · ${nativeActivity!.label}';
+        : '${_projection.sessionTitle(activeNative)} · ${nativeActivity!.label}';
     final activeWindowTool = activeNative == null
         ? resolveTmuxBarActiveWindowTool(displayedWindows)
         : null;
@@ -1371,7 +1371,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               displayedWindows,
             ),
           )
-        : '${acpSessionDisplayTitle(activeNative)} · ${nativeActivity!.label}';
+        : '${_projection.sessionTitle(activeNative)} · ${nativeActivity!.label}';
     final activeWindowTool = activeNative == null
         ? resolveTmuxBarActiveWindowTool(displayedWindows)
         : null;
@@ -1547,7 +1547,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         ? _storeScreenshotWindowTitle(window)
         : nativeSession == null
         ? window.displayTitle
-        : acpSessionDisplayTitle(nativeSession);
+        : acpSessionDisplayTitle(
+            nativeSession,
+            windowTitle: window.agentSessionDisplayTitle,
+          );
     final identityColor = agentWindowIdentityColor(
       theme.colorScheme,
       isActive: isActive,

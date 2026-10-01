@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.217"
+	monkeyMuxVersion                  = "0.1.218"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -582,6 +582,7 @@ type windowSnapshot struct {
 	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
 	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
 	AgentSessionIdentityExact bool                      `json:"agentSessionIdentityExact,omitempty"`
+	AgentSessionTitle         string                    `json:"agentSessionTitle,omitempty"`
 	NativeAcpBridgeID         string                    `json:"nativeAcpBridgeId,omitempty"`
 	NativeAcpProviderID       string                    `json:"nativeAcpProviderId,omitempty"`
 	LastActivityEpochSeconds  int64                     `json:"lastActivityEpochSeconds,omitempty"`
@@ -764,6 +765,12 @@ type muxWindow struct {
 	agentSessionAssigned        bool
 	agentIdentityServer         *muxServer
 	agentSessionIdentityExact   bool
+	agentSessionTitle           string
+	piTitleMu                   sync.Mutex
+	piTitleScan                 piSessionTitleScan
+	piNativeSessionBridgeID     string
+	piNativeSessionPath         string
+	piNativeSessionCheckedAt    time.Time
 	nativeAcpBridgeID           string
 	nativeAcpProviderID         string
 	foregroundPid               int
@@ -926,6 +933,7 @@ type windowBroadcastIdentity struct {
 	paneTitle             string
 	agentTool             string
 	agentModelProvider    string
+	agentSessionTitle     string
 	panePid               int
 	alert                 bool
 	progressActive        bool
@@ -6783,6 +6791,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	after := window.broadcastIdentityLocked()
+	piRetitled := after.agentTool == "pi" && after.paneTitle != before.paneTitle
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
@@ -6905,9 +6914,45 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			Window:  snapshot,
 		})
 	}
+	if piRetitled {
+		s.refreshPiSessionTitle(windowID)
+	}
 	if refreshPendingFocus || refreshPendingResize {
 		s.refreshPendingClientViewport(refreshPendingFocus, refreshPendingResize)
 	}
+}
+
+// refreshPiSessionTitle rereads a Pi window's session label outside the
+// metadata interval. Pi records a new session name before it retitles its
+// terminal, and an idle window would otherwise keep the old label until it
+// prints again.
+func (s *muxServer) refreshPiSessionTitle(windowID string) {
+	s.mu.Lock()
+	window := s.windowByIDLocked(windowID)
+	if window == nil || window.closed {
+		s.mu.Unlock()
+		return
+	}
+	sessionPath, bridgeID := window.agentSessionPath, window.nativeAcpBridgeID
+	s.mu.Unlock()
+	title := window.piSessionTitle(sessionPath, bridgeID, time.Now())
+	s.mu.Lock()
+	if s.windowByIDLocked(windowID) != window || window.closed ||
+		window.agentSessionPath != sessionPath ||
+		window.nativeAcpBridgeID != bridgeID ||
+		window.agentSessionTitle == title {
+		s.mu.Unlock()
+		return
+	}
+	window.agentSessionTitle = title
+	snapshot := s.snapshotLocked(window)
+	window.lastBroadcast = time.Now()
+	s.mu.Unlock()
+	s.broadcast(controlResponse{
+		Type:    "window_updated",
+		Session: s.session,
+		Window:  &snapshot,
+	})
 }
 
 // wrapSynchronizedTerminalOutput builds the resume write for one attach client.
@@ -9468,6 +9513,7 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		AgentSessionDir:           window.agentSessionDir,
 		AgentSessionPath:          window.agentSessionPath,
 		AgentSessionIdentityExact: window.agentSessionIdentityExact,
+		AgentSessionTitle:         window.agentSessionTitle,
 		NativeAcpBridgeID:         window.nativeAcpBridgeID,
 		NativeAcpProviderID:       window.nativeAcpProviderID,
 		LastActivityEpochSeconds:  window.lastActivity.Unix(),
@@ -15601,6 +15647,7 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 		paneTitle:          w.paneTitle,
 		agentTool:          w.agentToolLocked(),
 		agentModelProvider: w.agentModelProvider,
+		agentSessionTitle:  w.agentSessionTitle,
 		panePid:            w.metadataProcessIDLocked(),
 		alert:              w.alert,
 	}
@@ -15647,12 +15694,18 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 		paneTitle: w.paneTitle, name: w.name,
 	}).agentToolLocked()
 	sessionID := w.agentSessionID
+	sessionPath := w.agentSessionPath
+	bridgeID := w.nativeAcpBridgeID
 	s.mu.Unlock()
 
 	command := commandNameForProcessGroup(pgrp)
 	tool := identity.agentTool
 	if command != "" {
 		tool = firstNonEmptyString(agentToolFromCommandName(command), fallbackTool)
+	}
+	sessionTitle := ""
+	if tool == "pi" {
+		sessionTitle = w.piSessionTitle(sessionPath, bridgeID, now)
 	}
 	if sessionID == "" && tool == "cursor-agent" && pgrp > 0 {
 		if started := processStartedAtForMetadata(pgrp); !started.IsZero() {
@@ -15670,6 +15723,9 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	if command != "" {
 		w.foregroundCommand = command
 		w.resetWheelGovernorIfInactiveLocked()
+	}
+	if w.agentSessionPath == sessionPath && w.nativeAcpBridgeID == bridgeID {
+		w.agentSessionTitle = sessionTitle
 	}
 	if w.agentSessionID == "" && sessionID != "" && s.allowAgentSessionFallbackLocked(w, tool, sessionID) {
 		w.agentSessionID = sessionID
