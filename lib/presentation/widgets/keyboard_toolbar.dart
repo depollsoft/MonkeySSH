@@ -6,6 +6,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../app/theme.dart';
 import 'system_bottom_inset.dart';
 import 'terminal_key_input.dart';
 import 'terminal_menu_style.dart';
@@ -486,12 +487,14 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     );
   }
 
-  Widget _buildModifierRow() => _KeyRow(children: _buildModifierButtons());
+  Widget _buildModifierRow() =>
+      _KeyRow(hasFlickLabels: true, children: _buildModifierButtons());
 
   Widget _buildNavigationRow() =>
       _KeyRow(children: [..._buildNavigationButtons(), _buildEnterButton()]);
 
   Widget _buildLandscapeRow() => _KeyRow(
+    hasFlickLabels: true,
     children: [
       ..._buildModifierButtons(),
       ..._buildNavigationButtons(),
@@ -516,7 +519,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         onTap: _sendEscape,
         tooltip: 'Escape',
         menuName: 'function keys',
-        menuHint: 'Fn',
       ),
       _menuKeyButton(
         _MenuKey.tab,
@@ -535,6 +537,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         onTap: _toggleCtrl,
         onDoubleTap: _lockCtrl,
         menuGesture: _keyMenuGesture(_MenuKey.ctrl),
+        flickLabel: ctrlMenu?.flickLabel,
         semanticsHint: ctrlMenu == null
             ? null
             : 'Press and hold or swipe up for Ctrl shortcuts',
@@ -559,10 +562,10 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         onDoubleTap: _lockShift,
         tooltip: 'Shift',
       ),
-      for (final (menuKey, label, tooltip, symbols) in const [
-        (_MenuKey.pipe, '|', 'Pipe', _pipeSymbols),
-        (_MenuKey.slash, '/', 'Slash', _slashSymbols),
-        (_MenuKey.tilde, '~', 'Tilde', _tildeSymbols),
+      for (final (menuKey, label, tooltip) in const [
+        (_MenuKey.pipe, '|', 'Pipe'),
+        (_MenuKey.slash, '/', 'Slash'),
+        (_MenuKey.tilde, '~', 'Tilde'),
       ])
         _menuKeyButton(
           menuKey,
@@ -570,8 +573,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
           onTap: () => _sendText(label),
           tooltip: tooltip,
           menuName: 'more symbols',
-          // The symbol a straight swipe up types, like an iPad flick key.
-          menuHint: symbols.first.$1,
         ),
       _buildPasteButton(),
     ];
@@ -589,7 +590,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     required String menuName,
     IconData? icon,
     bool mirrorIcon = false,
-    String? menuHint,
   }) {
     final menu = _keyMenuFor(menuKey);
     return _ToolbarButton(
@@ -600,7 +600,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       onTap: onTap,
       onLongPressStart: menu == null ? onTap : null,
       menuGesture: _keyMenuGesture(menuKey),
-      menuHint: menuHint,
+      flickLabel: menu?.flickLabel,
       semanticsHint: menu == null
           ? null
           : 'Press and hold or swipe up for $menuName',
@@ -622,6 +622,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       onRelease: _chooseHighlightedPasteOption,
       onCancel: _hidePasteOptionsMenu,
     ),
+    // A list of unlike options, so no single item stands for it.
+    flickLabel: '\u2026',
     semanticsHint: 'Press and hold or swipe up for paste options',
     tooltip: 'Paste',
   );
@@ -1119,6 +1121,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       // F1-F4, F5-F8 and F9-F12 rows, grouped as on a physical keyboard.
       gridColumns: 4,
       cellWidth: 56,
+      flickLabel: 'F1\u201312',
     ),
     _MenuKey.tab when _sendsToTerminal => _KeyMenu(
       items: [
@@ -1700,7 +1703,8 @@ class _KeyMenu {
     required this.cellWidth,
     this.listWidth,
     this.symbolFontSize,
-  });
+    String? flickLabel,
+  }) : _flickLabel = flickLabel;
 
   /// Items nearest the key first, so a straight swipe up lands on the first.
   final List<_KeyMenuItem> items;
@@ -1718,6 +1722,12 @@ class _KeyMenu {
   /// Size of a grid symbol shown without a description; null keeps the menu
   /// text size.
   final double? symbolFontSize;
+
+  final String? _flickLabel;
+
+  /// The key's flick label: the first item, which a straight swipe up sends,
+  /// unless the menu names its whole range instead.
+  String get flickLabel => _flickLabel ?? items.first.symbol;
 }
 
 enum _PasteToolbarAction { snippets, media, files }
@@ -2051,10 +2061,15 @@ class _KeyMenuCell extends StatelessWidget {
     final foregroundColor = highlighted
         ? colorScheme.onPrimaryContainer
         : colorScheme.onSurfaceVariant;
-    final symbolStyle = TerminalMenuStyles.itemTextStyle(
+    // Symbols are what the terminal receives, so they are set in its voice;
+    // descriptions explain them in the menu's.
+    final textStyle = TerminalMenuStyles.itemTextStyle(
       context,
       emphasized: highlighted,
     ).copyWith(color: foregroundColor, height: 1.2);
+    final symbolStyle = textStyle.copyWith(
+      fontFamily: FluttyTheme.monoStyle.fontFamily,
+    );
     final description = item.description;
 
     final Widget content;
@@ -2074,7 +2089,7 @@ class _KeyMenuCell extends StatelessWidget {
         textAlign: isList ? TextAlign.end : TextAlign.center,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: symbolStyle.copyWith(
+        style: textStyle.copyWith(
           fontSize: isList ? 12 : 10,
           fontWeight: FontWeight.w400,
           // Muting on the highlight fill would drop below 4.5:1 contrast.
@@ -2123,21 +2138,119 @@ class _KeyMenuCell extends StatelessWidget {
 }
 
 class _KeyRow extends StatelessWidget {
-  const _KeyRow({required this.children});
+  const _KeyRow({required this.children, this.hasFlickLabels = false});
 
   static const height = 42.0;
 
   final List<Widget> children;
 
+  /// Some keys in the row show a flick label, so every key leaves room for
+  /// one and the labels stay aligned.
+  final bool hasFlickLabels;
+
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    child: Row(
-      children: children.map((c) {
-        if (c is Expanded) return c;
-        return Expanded(child: c);
-      }).toList(),
+  Widget build(BuildContext context) => _FlickLabelRow(
+    hasFlickLabels: hasFlickLabels,
+    child: SizedBox(
+      height: height,
+      child: Row(
+        children: children.map((c) {
+          if (c is Expanded) return c;
+          return Expanded(child: c);
+        }).toList(),
+      ),
     ),
+  );
+}
+
+class _FlickLabelRow extends InheritedWidget {
+  const _FlickLabelRow({required this.hasFlickLabels, required super.child});
+
+  final bool hasFlickLabels;
+
+  static bool of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_FlickLabelRow>()
+          ?.hasFlickLabels ??
+      false;
+
+  @override
+  bool updateShouldNotify(_FlickLabelRow oldWidget) =>
+      hasFlickLabels != oldWidget.hasFlickLabels;
+}
+
+/// A key's label, with the flick label above it on a key that has a menu.
+///
+/// As on an iPad flick key, the flick label names what a straight swipe up
+/// sends, and it sits above the label because that is where the swipe goes.
+/// It is muted so the key's own label still reads first.
+class _KeyFace extends StatelessWidget {
+  const _KeyFace({
+    required this.label,
+    required this.flickColor,
+    this.flickLabel,
+  });
+
+  /// The band the flick label fits into, at the top of the key face. Its
+  /// height is fixed, so large text scales the flick label down rather than
+  /// pushing it into the label below.
+  static const _flickTop = 4.0;
+  static const _flickHeight = 10.0;
+
+  /// How far a row with flick labels lowers every label, so labels stay
+  /// aligned across keys with and without a menu.
+  static const _labelTopInset = _flickTop + _flickHeight;
+
+  final Widget label;
+  final String? flickLabel;
+  final Color flickColor;
+
+  /// The secondary ink on a key, mixed from its fill and label colors the way
+  /// the theme derives secondary text, so it holds 4.5:1 in every theme.
+  static Color mutedInk(Color fill, Color label) =>
+      Color.lerp(fill, label, 0.64)!;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    fit: StackFit.expand,
+    children: [
+      Padding(
+        padding: EdgeInsets.fromLTRB(
+          4,
+          _FlickLabelRow.of(context) ? _labelTopInset : 0,
+          4,
+          0,
+        ),
+        child: Center(
+          child: FittedBox(fit: BoxFit.scaleDown, child: label),
+        ),
+      ),
+      if (flickLabel case final flickLabel?)
+        Positioned(
+          top: _flickTop,
+          height: _flickHeight,
+          left: 2,
+          right: 2,
+          // Screen readers hear the menu from the key's hint and actions.
+          child: ExcludeSemantics(
+            child: Center(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  flickLabel,
+                  maxLines: 1,
+                  style: FluttyTheme.monoStyle.copyWith(
+                    fontSize: 10,
+                    height: 1,
+                    fontWeight: FontWeight.w500,
+                    color: flickColor,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+    ],
   );
 }
 
@@ -2290,7 +2403,7 @@ class _ToolbarButton extends StatefulWidget {
     this.onLongPressStart,
     this.onLongPressRepeat,
     this.menuGesture,
-    this.menuHint,
+    this.flickLabel,
     this.tooltip,
     this.semanticsHint,
     this.customSemanticsActions,
@@ -2308,12 +2421,11 @@ class _ToolbarButton extends StatefulWidget {
   final VoidCallback? onLongPressStart;
   final VoidCallback? onLongPressRepeat;
 
-  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
-  /// indicator in the key's corner.
+  /// Opens a menu on press-and-hold or an upward swipe.
   final _KeyMenuGesture? menuGesture;
 
-  /// Short text shown in the corner instead of the generic menu indicator.
-  final String? menuHint;
+  /// What a straight swipe up sends, shown above the label.
+  final String? flickLabel;
   final String? tooltip;
   final String? semanticsHint;
   final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
@@ -2395,9 +2507,14 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
     if (widget.icon != null) {
       return _buildIcon(18, color);
     }
+    // A lone label is a literal character, set in the terminal's voice.
     return Text(
       widget.label,
-      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: color),
+      style: FluttyTheme.monoStyle.copyWith(
+        fontSize: 13,
+        fontWeight: FontWeight.w500,
+        color: color,
+      ),
     );
   }
 
@@ -2428,48 +2545,23 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
               ? colorScheme.primary.withAlpha(50)
               : colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(6),
-          border: _isPressed ? Border.all(color: colorScheme.primary) : null,
+          // A hairline keeps the key's edge visible where its fill matches
+          // the toolbar (the light theme), so a flick label reads as part of
+          // its key. It stays 1 px when pressed, so the face does not shift.
+          border: Border.all(
+            color: _isPressed
+                ? colorScheme.primary
+                : colorScheme.outlineVariant,
+          ),
         ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: _buildContent(foregroundColor),
-                ),
-              ),
-            ),
-            if (widget.menuGesture != null)
-              Positioned(
-                top: 2,
-                right: widget.menuHint == null ? 2 : 4,
-                child: switch (widget.menuHint) {
-                  final hint? => ExcludeSemantics(
-                    child: Text(
-                      hint,
-                      // Decorative, like the indicator icon, and kept small so
-                      // large text does not push it over the key's label.
-                      textScaler: MediaQuery.textScalerOf(context)
-                          .clamp(maxScaleFactor: 1.3),
-                      style: TextStyle(
-                        fontSize: 10,
-                        height: 1,
-                        fontWeight: FontWeight.w600,
-                        color: colorScheme.primary,
-                      ),
-                    ),
-                  ),
-                  null => Icon(
-                    Icons.more_horiz_rounded,
-                    size: 11,
-                    color: colorScheme.primary,
-                  ),
-                },
-              ),
-          ],
+        child: _KeyFace(
+          flickLabel: widget.flickLabel,
+          // Muted against the resting fill, so a press does not wash it out.
+          flickColor: _KeyFace.mutedInk(
+            colorScheme.surfaceContainerHighest,
+            foregroundColor,
+          ),
+          label: _buildContent(foregroundColor),
         ),
       ),
     );
@@ -2501,6 +2593,7 @@ class _ModifierButton extends StatefulWidget {
     this.icon,
     this.tooltip,
     this.menuGesture,
+    this.flickLabel,
     this.semanticsHint,
     this.customSemanticsActions,
     super.key,
@@ -2513,9 +2606,11 @@ class _ModifierButton extends StatefulWidget {
   final VoidCallback onDoubleTap;
   final String? tooltip;
 
-  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
-  /// indicator in the key's corner.
+  /// Opens a menu on press-and-hold or an upward swipe.
   final _KeyMenuGesture? menuGesture;
+
+  /// What a straight swipe up sends, shown above the label.
+  final String? flickLabel;
   final String? semanticsHint;
   final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
 
@@ -2571,52 +2666,38 @@ class _ModifierButtonState extends State<_ModifierButton> {
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: widget.state == null ? colorScheme.outlineVariant : bgColor,
+          ),
         ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (widget.icon != null) ...[
-                        Icon(widget.icon, size: 14, color: textColor),
-                        const SizedBox(width: 3),
-                      ],
-                      Text(
-                        widget.label,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: textColor,
-                        ),
-                      ),
-                      if (lockIcon != null) ...[
-                        const SizedBox(width: 2),
-                        Icon(lockIcon, size: 10, color: textColor),
-                      ],
-                    ],
-                  ),
+        child: _KeyFace(
+          flickLabel: widget.flickLabel,
+          // A muted label on the armed or locked fill would drop below 4.5:1
+          // contrast, and the fill already sets the key apart.
+          flickColor: widget.state == null
+              ? _KeyFace.mutedInk(bgColor, textColor)
+              : textColor,
+          label: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.icon != null) ...[
+                Icon(widget.icon, size: 14, color: textColor),
+                const SizedBox(width: 3),
+              ],
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: textColor,
                 ),
               ),
-            ),
-            if (widget.menuGesture != null)
-              Positioned(
-                top: 2,
-                right: 2,
-                child: Icon(
-                  Icons.more_horiz_rounded,
-                  size: 11,
-                  // Armed and locked states fill the key with a primary tint,
-                  // so switch to the label color to keep the dots visible.
-                  color: widget.state == null ? colorScheme.primary : textColor,
-                ),
-              ),
-          ],
+              if (lockIcon != null) ...[
+                const SizedBox(width: 2),
+                Icon(lockIcon, size: 10, color: textColor),
+              ],
+            ],
+          ),
         ),
       ),
     );
