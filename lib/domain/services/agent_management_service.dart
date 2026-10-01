@@ -687,6 +687,7 @@ class AgentManagementService {
   final AgentProbeTimeouts _timeouts;
   final Future<bool> Function() _canManageAgents;
   final DateTime Function() _now;
+  final _runningInstallations = Expando<Set<String>>();
 
   static const _updateCheckTtl = Duration(minutes: 15);
   static const _maxRuntimeCacheEntries = 32;
@@ -1453,6 +1454,37 @@ class AgentManagementService {
         output: 'Agent Management requires MonkeySSH Pro.',
       );
     }
+    // A reopened manager has its own view model. Protect the complete action,
+    // including verification and automatic repair, from a second mutation of
+    // the same installation through that new screen.
+    final running = _runningInstallations[session] ??= <String>{};
+    if (!running.add(definition.id)) {
+      return AgentRuntimeActionResult(
+        succeeded: false,
+        output:
+            'An installation or update for ${definition.label} is already running. Wait for it to finish, then tap Re-check.',
+      );
+    }
+    try {
+      return await _installOrUpdate(
+        session,
+        definition,
+        update: update,
+        current: current,
+        onOutput: onOutput,
+      );
+    } finally {
+      running.remove(definition.id);
+    }
+  }
+
+  Future<AgentRuntimeActionResult> _installOrUpdate(
+    SshSession session,
+    AgentRuntimeDefinition definition, {
+    required bool update,
+    AgentRuntimeInfo? current,
+    ValueChanged<String>? onOutput,
+  }) async {
     final command = buildAgentInstallCommand(
       definition,
       windows: session.remoteIsWindows,
@@ -1516,12 +1548,20 @@ class AgentManagementService {
             const message =
                 '\nRequired setup scripts did not run. Repairing OpenCode automatically.\n';
             onOutput?.call(message);
-            final repairResult = await _run(
-              session,
-              repairCommand,
-              onOutput: onOutput,
-              unlimitedTimeout: true,
-            );
+            late final AgentRuntimeActionResult repairResult;
+            try {
+              repairResult = await _run(
+                session,
+                repairCommand,
+                onOutput: onOutput,
+                unlimitedTimeout: true,
+              );
+            } on Object catch (error) {
+              repairResult = AgentRuntimeActionResult(
+                succeeded: false,
+                output: 'Required setup could not be completed. $error',
+              );
+            }
             result = AgentRuntimeActionResult(
               succeeded: repairResult.succeeded,
               exitCode: repairResult.exitCode,
