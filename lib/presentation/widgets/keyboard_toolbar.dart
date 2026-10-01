@@ -6,6 +6,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../app/theme.dart';
 import 'system_bottom_inset.dart';
 import 'terminal_key_input.dart';
 import 'terminal_menu_style.dart';
@@ -259,13 +260,68 @@ enum KeyboardToolbarCtrlShortcut {
   String get symbol => '\u2303$letter';
 }
 
+/// A character in a symbol key's menu and its spoken name.
+typedef _MenuSymbol = (String symbol, String name);
+
+/// Characters behind the `|`, `/` and `~` keys, nearest the key first.
+///
+/// Each key holds symbols like itself: `|` the shell's logic and plumbing,
+/// `/` slashes and the marks found in paths and references, and `~` dashes
+/// and the other accent marks. `-` leads `~` because command-line flags need
+/// it constantly and phone keyboards keep it off the letter layout. Each
+/// stack stays at six so it fits above the toolbar on a small phone with the
+/// keyboard up.
+const _pipeSymbols = <_MenuSymbol>[
+  ('&', 'Ampersand'),
+  ('!', 'Exclamation mark'),
+  (r'$', 'Dollar'),
+  ('>', 'Greater than'),
+  ('<', 'Less than'),
+  (';', 'Semicolon'),
+];
+const _slashSymbols = <_MenuSymbol>[
+  (r'\', 'Backslash'),
+  ('*', 'Asterisk'),
+  (':', 'Colon'),
+  ('@', 'At sign'),
+  ('%', 'Percent'),
+  ('#', 'Hash'),
+];
+const _tildeSymbols = <_MenuSymbol>[
+  ('-', 'Dash'),
+  ('_', 'Underscore'),
+  ('=', 'Equals'),
+  ('+', 'Plus'),
+  ('^', 'Caret'),
+  ('`', 'Backtick'),
+];
+
+/// Function keys behind Esc, which heads the function-key row on a physical
+/// keyboard.
+const _functionKeys = [
+  TerminalKey.f1,
+  TerminalKey.f2,
+  TerminalKey.f3,
+  TerminalKey.f4,
+  TerminalKey.f5,
+  TerminalKey.f6,
+  TerminalKey.f7,
+  TerminalKey.f8,
+  TerminalKey.f9,
+  TerminalKey.f10,
+  TerminalKey.f11,
+  TerminalKey.f12,
+];
+
 /// Compact keyboard toolbar for terminal input.
 ///
 /// Features:
 /// - Modifier keys (Ctrl, Alt, Shift) with toggle/lock functionality
-/// - Common Ctrl chords (Ctrl+C, Ctrl+D, ...) by holding Ctrl
 /// - Navigation keys (arrows, Home, End, PgUp, PgDn)
 /// - Special keys (Esc, Tab, Enter, pipe, etc.)
+/// - Menus opened by holding or swiping up on a key: F1-F12 on Esc,
+///   Shift+Tab on Tab, common Ctrl chords on Ctrl, more symbols on `|`, `/`
+///   and `~`, and paste options on Paste
 /// - Haptic feedback
 class KeyboardToolbar extends StatefulWidget {
   /// Creates a new [KeyboardToolbar].
@@ -335,27 +391,30 @@ class KeyboardToolbar extends StatefulWidget {
 class KeyboardToolbarState extends State<KeyboardToolbar> {
   static const _pasteOptionsWidth = 200.0;
   static const _pasteSnippetMenuWidth = 180.0;
-  static const _pasteOptionsGap = TerminalMenuStyles.cascadeGap;
-  static const _pasteOptionsScreenMargin = TerminalMenuStyles.screenMargin;
-  static const _ctrlShortcutsWidth = 200.0;
-  static const _ctrlShortcutsRowItemWidth = 88.0;
+  static const _menuGap = TerminalMenuStyles.cascadeGap;
+  static const _menuScreenMargin = TerminalMenuStyles.screenMargin;
+  static const _keyMenuListWidth = 200.0;
 
   late final KeyboardToolbarController _fallbackController;
   final _pasteButtonKey = GlobalKey();
-  final _ctrlButtonKey = GlobalKey();
+  final _menuKeyAnchors = <_MenuKey, GlobalKey>{
+    for (final key in _MenuKey.values) key: GlobalKey(),
+  };
   OverlayEntry? _pasteOptionsOverlay;
   _PasteToolbarAction? _highlightedPasteAction;
   KeyboardToolbarSnippetFolder? _highlightedSnippetFolder;
   KeyboardToolbarSnippet? _highlightedSnippet;
-  OverlayEntry? _ctrlShortcutsOverlay;
-  KeyboardToolbarCtrlShortcut? _highlightedCtrlShortcut;
+  OverlayEntry? _keyMenuOverlay;
+  _MenuKey? _openKeyMenu;
+  int? _highlightedKeyMenuItem;
 
   KeyboardToolbarController get _controller =>
       widget.controller ?? _fallbackController;
 
-  /// Ctrl chords are terminal control codes, so they are only offered when the
-  /// toolbar writes to [KeyboardToolbar.terminal] rather than a custom sink.
-  bool get _ctrlShortcutsEnabled =>
+  /// Function keys, Shift+Tab and Ctrl chords are terminal key sequences, so
+  /// their menus are only offered when the toolbar writes to
+  /// [KeyboardToolbar.terminal] rather than a custom sink.
+  bool get _sendsToTerminal =>
       widget.onTextInput == null && widget.onSpecialKey == null;
 
   @override
@@ -378,15 +437,15 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         !identical(oldWidget.snippetFolders, widget.snippetFolders)) {
       _pasteOptionsOverlay?.markNeedsBuild();
     }
-    if (!_ctrlShortcutsEnabled) {
-      _hideCtrlShortcuts();
+    if (_openKeyMenu case final key? when _keyMenuFor(key) == null) {
+      _hideKeyMenu();
     }
   }
 
   @override
   void dispose() {
     _hidePasteOptionsMenu();
-    _hideCtrlShortcuts();
+    _hideKeyMenu();
     _controller.removeListener(_handleControllerChanged);
     _fallbackController.dispose();
     super.dispose();
@@ -452,83 +511,120 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     tooltip: 'Enter',
   );
 
-  List<Widget> _buildModifierButtons() => [
-    _ToolbarButton(
-      icon: Icons.cancel_outlined,
-      label: 'Esc',
-      onTap: _sendEscape,
-      onLongPressStart: _sendEscape,
-      tooltip: 'Escape',
-    ),
-    _ToolbarButton(
-      icon: Icons.keyboard_tab_rounded,
-      mirrorIcon: _controller.isShiftActive,
-      label: 'Tab',
-      onTap: _sendTab,
-      onLongPressStart: _sendTab,
-      tooltip: 'Tab',
-    ),
-    _ModifierButton(
-      key: _ctrlButtonKey,
-      icon: Icons.keyboard_control_key_rounded,
-      label: 'Ctrl',
-      state: _controller.ctrlState,
-      onTap: _toggleCtrl,
-      onDoubleTap: _lockCtrl,
-      menuGesture: _ctrlShortcutsEnabled
-          ? _KeyMenuGesture(
-              onOpen: _showCtrlShortcuts,
-              onMove: _updateCtrlShortcutHighlight,
-              onRelease: _chooseHighlightedCtrlShortcut,
-              onCancel: _hideCtrlShortcuts,
-            )
-          : null,
-      semanticsHint: _ctrlShortcutsEnabled
-          ? 'Press and hold or swipe up for Ctrl shortcuts'
-          : null,
-      customSemanticsActions: _ctrlShortcutsEnabled
-          ? {
-              for (final shortcut in KeyboardToolbarCtrlShortcut.values)
-                CustomSemanticsAction(label: 'Send ${shortcut.label}'): () =>
-                    _dispatcher.sendCtrlShortcut(shortcut),
-            }
-          : null,
-      tooltip: 'Ctrl',
-    ),
-    _ModifierButton(
-      icon: Icons.keyboard_option_key_rounded,
-      label: 'Alt',
-      state: _controller.altState,
-      onTap: _toggleAlt,
-      onDoubleTap: _lockAlt,
-      tooltip: 'Alt',
-    ),
-    _ModifierButton(
-      icon: Icons.north_rounded,
-      label: 'Shift',
-      state: _controller.shiftState,
-      onTap: _toggleShift,
-      onDoubleTap: _lockShift,
-      tooltip: 'Shift',
-    ),
-    _ToolbarButton(label: '|', onTap: () => _sendText('|'), tooltip: 'Pipe'),
-    _ToolbarButton(label: '/', onTap: () => _sendText('/'), tooltip: 'Slash'),
-    _ToolbarButton(label: '~', onTap: () => _sendText('~'), tooltip: 'Tilde'),
-    _ToolbarButton(
-      key: _pasteButtonKey,
-      icon: Icons.paste_rounded,
-      label: 'Paste',
-      onTap: _pasteClipboard,
-      menuGesture: _KeyMenuGesture(
-        onOpen: _showPasteOptions,
-        onMove: _updatePasteOptionsHighlight,
-        onRelease: _chooseHighlightedPasteOption,
-        onCancel: _hidePasteOptionsMenu,
+  List<Widget> _buildModifierButtons() {
+    final ctrlMenu = _keyMenuFor(_MenuKey.ctrl);
+    return [
+      _menuKeyButton(
+        _MenuKey.escape,
+        icon: Icons.cancel_outlined,
+        label: 'Esc',
+        onTap: _sendEscape,
+        tooltip: 'Escape',
+        menuName: 'function keys',
       ),
-      semanticsHint: 'Press and hold or swipe up for paste options',
-      tooltip: 'Paste',
+      _menuKeyButton(
+        _MenuKey.tab,
+        icon: Icons.keyboard_tab_rounded,
+        mirrorIcon: _controller.isShiftActive,
+        label: 'Tab',
+        onTap: _sendTab,
+        tooltip: 'Tab',
+        menuName: 'Shift+Tab',
+      ),
+      _ModifierButton(
+        key: _menuKeyAnchors[_MenuKey.ctrl],
+        icon: Icons.keyboard_control_key_rounded,
+        label: 'Ctrl',
+        state: _controller.ctrlState,
+        onTap: _toggleCtrl,
+        onDoubleTap: _lockCtrl,
+        menuGesture: _keyMenuGesture(_MenuKey.ctrl),
+        semanticsHint: ctrlMenu == null
+            ? null
+            : 'Press and hold or swipe up for Ctrl shortcuts',
+        customSemanticsActions: ctrlMenu == null
+            ? null
+            : _keyMenuSemanticsActions(ctrlMenu),
+        tooltip: 'Ctrl',
+      ),
+      _ModifierButton(
+        icon: Icons.keyboard_option_key_rounded,
+        label: 'Alt',
+        state: _controller.altState,
+        onTap: _toggleAlt,
+        onDoubleTap: _lockAlt,
+        tooltip: 'Alt',
+      ),
+      _ModifierButton(
+        icon: Icons.north_rounded,
+        label: 'Shift',
+        state: _controller.shiftState,
+        onTap: _toggleShift,
+        onDoubleTap: _lockShift,
+        tooltip: 'Shift',
+      ),
+      for (final (menuKey, label, tooltip) in const [
+        (_MenuKey.pipe, '|', 'Pipe'),
+        (_MenuKey.slash, '/', 'Slash'),
+        (_MenuKey.tilde, '~', 'Tilde'),
+      ])
+        _menuKeyButton(
+          menuKey,
+          label: label,
+          onTap: () => _sendText(label),
+          tooltip: tooltip,
+          menuName: 'more symbols',
+        ),
+      _buildPasteButton(),
+    ];
+  }
+
+  /// A key that opens [menuKey]'s menu on press-and-hold or an upward swipe.
+  ///
+  /// When the key has no menu (Esc and Tab with a custom input sink), holding
+  /// it sends its tap once, so a slow press is not lost.
+  Widget _menuKeyButton(
+    _MenuKey menuKey, {
+    required String label,
+    required VoidCallback onTap,
+    required String tooltip,
+    required String menuName,
+    IconData? icon,
+    bool mirrorIcon = false,
+  }) {
+    final menu = _keyMenuFor(menuKey);
+    return _ToolbarButton(
+      key: _menuKeyAnchors[menuKey],
+      icon: icon,
+      mirrorIcon: mirrorIcon,
+      label: label,
+      onTap: onTap,
+      onLongPressStart: menu == null ? onTap : null,
+      menuGesture: _keyMenuGesture(menuKey),
+      semanticsHint: menu == null
+          ? null
+          : 'Press and hold or swipe up for $menuName',
+      customSemanticsActions: menu == null
+          ? null
+          : _keyMenuSemanticsActions(menu),
+      tooltip: tooltip,
+    );
+  }
+
+  Widget _buildPasteButton() => _ToolbarButton(
+    key: _pasteButtonKey,
+    icon: Icons.paste_rounded,
+    label: 'Paste',
+    onTap: _pasteClipboard,
+    menuGesture: _KeyMenuGesture(
+      onOpen: _showPasteOptions,
+      onMove: _updatePasteOptionsHighlight,
+      onRelease: _chooseHighlightedPasteOption,
+      onCancel: _hidePasteOptionsMenu,
     ),
-  ];
+    semanticsHint: 'Press and hold or swipe up for paste options',
+    tooltip: 'Paste',
+  );
 
   List<Widget> _buildNavigationButtons() => [
     for (final (key, icon, label, tooltip, sequence) in const [
@@ -630,6 +726,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   }
 
   void _showPasteOptions(Offset globalPosition) {
+    _hideKeyMenu();
     HapticFeedback.mediumImpact();
     widget.onKeyPressed?.call();
     _consumeOneShot();
@@ -651,25 +748,16 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       return;
     }
 
-    final overlaySize = overlayBox.size;
     final topLeft = overlayBox.globalToLocal(buttonRect.topLeft);
     final bottomRight = overlayBox.globalToLocal(buttonRect.bottomRight);
-    final targetRect = Rect.fromPoints(topLeft, bottomRight);
-    final menuHeight = _pasteOptionsMenuHeight;
-    final left = _clampDouble(
-      targetRect.right - _pasteOptionsWidth,
-      _pasteOptionsScreenMargin,
-      overlaySize.width - _pasteOptionsWidth - _pasteOptionsScreenMargin,
-    );
-    final top = _clampDouble(
-      targetRect.top - menuHeight - _pasteOptionsGap,
-      _pasteOptionsScreenMargin,
-      overlaySize.height - menuHeight - _pasteOptionsScreenMargin,
+    final origin = _pasteMainMenuOrigin(
+      Rect.fromPoints(topLeft, bottomRight),
+      overlayBox.size,
     );
     _hidePasteOptionsMenu();
     final hit = _pasteMenuHitAtGlobalPosition(
       globalPosition,
-      menuOrigin: overlayBox.localToGlobal(Offset(left, top)),
+      menuOrigin: overlayBox.localToGlobal(origin),
     );
     _applyPasteMenuHit(hit);
     _pasteOptionsOverlay = OverlayEntry(builder: _buildPasteOptionsOverlay);
@@ -740,6 +828,10 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     if (_isSamePasteMenuHit(hit, _currentPasteMenuHit)) {
       return;
     }
+    if (hit != null) {
+      // Tick each row the finger crosses, as the other key menus do.
+      HapticFeedback.selectionClick();
+    }
     _applyPasteMenuHit(hit);
     _pasteOptionsOverlay?.markNeedsBuild();
   }
@@ -808,6 +900,39 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     return _isPasteActionEnabled(action) ? _PasteMenuHit(action: action) : null;
   }
 
+  /// Top-left of the main Paste menu in overlay coordinates: above the key and
+  /// right-aligned with it.
+  ///
+  /// Like the other key menus it never opens over the key. Without room above
+  /// it (a landscape phone with the keyboard up), the menu sits beside the key
+  /// instead of being clamped down over it, where the finger would start
+  /// inside it and a plain release would choose an option.
+  Offset _pasteMainMenuOrigin(Rect targetRect, Size overlaySize) {
+    const margin = _menuScreenMargin;
+    final height = _pasteOptionsMenuHeight;
+    final maxLeft = overlaySize.width - _pasteOptionsWidth - margin;
+    final top = targetRect.top - _menuGap - height;
+    if (top >= margin) {
+      return Offset(
+        _clampDouble(targetRect.right - _pasteOptionsWidth, margin, maxLeft),
+        top,
+      );
+    }
+    final leftOfKey = targetRect.left - _menuGap - _pasteOptionsWidth;
+    return Offset(
+      _clampDouble(
+        leftOfKey >= margin ? leftOfKey : targetRect.right + _menuGap,
+        margin,
+        maxLeft,
+      ),
+      _clampDouble(
+        targetRect.bottom - height,
+        margin,
+        overlaySize.height - height - margin,
+      ),
+    );
+  }
+
   _PasteMenuLayout? _pasteMenuLayout(
     Size overlaySize, {
     Offset? mainMenuOrigin,
@@ -823,28 +948,9 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     final topLeft = overlayBox.globalToLocal(buttonRect.topLeft);
     final bottomRight = overlayBox.globalToLocal(buttonRect.bottomRight);
     final targetRect = Rect.fromPoints(topLeft, bottomRight);
-    final mainLeft =
-        mainMenuOrigin?.dx ??
-        _clampDouble(
-          targetRect.right - _pasteOptionsWidth,
-          _pasteOptionsScreenMargin,
-          overlaySize.width - _pasteOptionsWidth - _pasteOptionsScreenMargin,
-        );
-    final mainTop =
-        mainMenuOrigin?.dy ??
-        _clampDouble(
-          targetRect.top - _pasteOptionsMenuHeight - _pasteOptionsGap,
-          _pasteOptionsScreenMargin,
-          overlaySize.height -
-              _pasteOptionsMenuHeight -
-              _pasteOptionsScreenMargin,
-        );
-    final mainRect = Rect.fromLTWH(
-      mainLeft,
-      mainTop,
-      _pasteOptionsWidth,
-      _pasteOptionsMenuHeight,
-    );
+    final mainRect =
+        (mainMenuOrigin ?? _pasteMainMenuOrigin(targetRect, overlaySize)) &
+        Size(_pasteOptionsWidth, _pasteOptionsMenuHeight);
     final entries = _expandedSnippetMenuEntries;
     Rect? snippetMenuRect;
     var snippetMenuOpensLeft = true;
@@ -852,29 +958,27 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       final snippetMenuHeight = entries.length * TerminalMenuStyles.itemHeight;
       final canOpenLeft =
           mainRect.left -
-              _pasteOptionsGap -
+              _menuGap -
               _pasteSnippetMenuWidth -
-              _pasteOptionsScreenMargin >=
+              _menuScreenMargin >=
           0;
       snippetMenuOpensLeft =
           canOpenLeft ||
-          mainRect.right + _pasteOptionsGap + _pasteSnippetMenuWidth >
-              overlaySize.width - _pasteOptionsScreenMargin;
+          mainRect.right + _menuGap + _pasteSnippetMenuWidth >
+              overlaySize.width - _menuScreenMargin;
       final snippetLeft = snippetMenuOpensLeft
-          ? mainRect.left - _pasteOptionsGap - _pasteSnippetMenuWidth
-          : mainRect.right + _pasteOptionsGap;
+          ? mainRect.left - _menuGap - _pasteSnippetMenuWidth
+          : mainRect.right + _menuGap;
       snippetMenuRect = Rect.fromLTWH(
         _clampDouble(
           snippetLeft,
-          _pasteOptionsScreenMargin,
-          overlaySize.width -
-              _pasteSnippetMenuWidth -
-              _pasteOptionsScreenMargin,
+          _menuScreenMargin,
+          overlaySize.width - _pasteSnippetMenuWidth - _menuScreenMargin,
         ),
         _clampDouble(
           mainRect.top,
-          _pasteOptionsScreenMargin,
-          overlaySize.height - snippetMenuHeight - _pasteOptionsScreenMargin,
+          _menuScreenMargin,
+          overlaySize.height - snippetMenuHeight - _menuScreenMargin,
         ),
         _pasteSnippetMenuWidth,
         snippetMenuHeight,
@@ -967,23 +1071,25 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       a?.folder?.id == b?.folder?.id &&
       a?.snippet?.id == b?.snippet?.id;
 
+  /// Chooses the option under the finger where it lifted. As in the other key
+  /// menus there is no fallback to the last highlight: a swipe that lifts off
+  /// the menu without a final move over it cancels.
   void _chooseHighlightedPasteOption(Offset globalPosition) {
     final hit = _pasteMenuHitAtGlobalPosition(globalPosition);
-    final action = hit?.action ?? _highlightedPasteAction;
-    final snippet = hit?.snippet;
     _hidePasteOptionsMenu();
-    if (snippet != null) {
+    if (hit?.snippet case final snippet?) {
+      HapticFeedback.lightImpact();
       unawaited(_runSnippetPasteAction(snippet));
       return;
     }
-    switch (action) {
-      case _PasteToolbarAction.snippets:
-        _refocusTerminal();
+    switch (hit?.action) {
       case _PasteToolbarAction.media:
+        HapticFeedback.lightImpact();
         unawaited(_runToolbarAction(widget.onPasteMediaRequested));
       case _PasteToolbarAction.files:
+        HapticFeedback.lightImpact();
         unawaited(_runToolbarAction(widget.onPasteFilesRequested));
-      case null:
+      case _PasteToolbarAction.snippets || null:
         _refocusTerminal();
     }
   }
@@ -996,42 +1102,213 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _highlightedSnippet = null;
   }
 
-  void _showCtrlShortcuts(Offset globalPosition) {
-    _hideCtrlShortcuts();
+  /// The menu [key] opens, or null when it has none.
+  ///
+  /// Symbols are plain text and go to any sink; the other menus send terminal
+  /// key sequences (see [_sendsToTerminal]).
+  _KeyMenu? _keyMenuFor(_MenuKey key) => switch (key) {
+    _MenuKey.escape when _sendsToTerminal => _KeyMenu(
+      items: [
+        for (final (index, functionKey) in _functionKeys.indexed)
+          _KeyMenuItem(
+            symbol: 'F${index + 1}',
+            semanticsLabel: 'F${index + 1}',
+            onSelected: () => _dispatcher.sendFunctionKey(functionKey),
+          ),
+      ],
+      // F1-F4, F5-F8 and F9-F12 rows, grouped as on a physical keyboard.
+      gridColumns: 4,
+      cellWidth: 56,
+    ),
+    _MenuKey.tab when _sendsToTerminal => _KeyMenu(
+      items: [
+        _KeyMenuItem(
+          symbol: '⇧Tab',
+          description: 'Reverse tab',
+          semanticsLabel: 'Shift+Tab',
+          onSelected: () => _dispatcher.sendBackTab(),
+        ),
+      ],
+      listWidth: _keyMenuListWidth,
+      gridColumns: 1,
+      cellWidth: 88,
+    ),
+    _MenuKey.ctrl when _sendsToTerminal => _KeyMenu(
+      items: [
+        for (final shortcut in KeyboardToolbarCtrlShortcut.values.reversed)
+          _KeyMenuItem(
+            symbol: shortcut.symbol,
+            description: shortcut.description,
+            semanticsLabel: shortcut.label,
+            onSelected: () => _dispatcher.sendCtrlShortcut(shortcut),
+          ),
+      ],
+      listWidth: _keyMenuListWidth,
+      gridColumns: KeyboardToolbarCtrlShortcut.values.length,
+      cellWidth: 88,
+    ),
+    _MenuKey.pipe => _symbolMenu(_pipeSymbols),
+    _MenuKey.slash => _symbolMenu(_slashSymbols),
+    _MenuKey.tilde => _symbolMenu(_tildeSymbols),
+    _ => null,
+  };
+
+  /// A one-column stack of symbols centered over the key, so a straight
+  /// swipe up chooses by distance alone, with no sideways aim. Without room
+  /// above the key it folds into fewer, wider rows.
+  _KeyMenu _symbolMenu(List<_MenuSymbol> symbols) => _KeyMenu(
+    items: [
+      for (final (symbol, name) in symbols)
+        _KeyMenuItem(
+          symbol: symbol,
+          semanticsLabel: name,
+          onSelected: () => _sendText(symbol),
+        ),
+    ],
+    gridColumns: 1,
+    cellWidth: 52,
+    symbolFontSize: 20,
+  );
+
+  _KeyMenuGesture? _keyMenuGesture(_MenuKey key) => _keyMenuFor(key) == null
+      ? null
+      : _KeyMenuGesture(
+          onOpen: (position) => _showKeyMenu(key, position),
+          onMove: (position) => _updateKeyMenuHighlight(key, position),
+          onRelease: (position) => _chooseKeyMenuItem(key, position),
+          onCancel: () => _hideKeyMenu(key),
+        );
+
+  /// Lets screen readers send each menu item from the key itself, since the
+  /// menu exists only while a finger holds it.
+  Map<CustomSemanticsAction, VoidCallback> _keyMenuSemanticsActions(
+    _KeyMenu menu,
+  ) => {
+    for (final item in menu.items)
+      CustomSemanticsAction(label: 'Send ${item.semanticsLabel}'):
+          item.onSelected,
+  };
+
+  void _showKeyMenu(_MenuKey key, Offset globalPosition) {
+    _hideKeyMenu();
+    _hidePasteOptionsMenu();
+    if (_keyMenuFor(key) == null) {
+      return;
+    }
     HapticFeedback.mediumImpact();
-    // A fast swipe can already be over the lowest row when the menu opens.
-    _highlightedCtrlShortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
-    _ctrlShortcutsOverlay = OverlayEntry(builder: _buildCtrlShortcutsOverlay);
-    Overlay.of(context).insert(_ctrlShortcutsOverlay!);
+    _openKeyMenu = key;
+    // A fast swipe can already be over the nearest item when the menu opens.
+    _highlightedKeyMenuItem = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    _keyMenuOverlay = OverlayEntry(builder: _buildKeyMenuOverlay);
+    Overlay.of(context).insert(_keyMenuOverlay!);
   }
 
-  Widget _buildCtrlShortcutsOverlay(BuildContext context) {
-    final layout = _ctrlShortcutsLayout();
-    if (layout == null) {
+  Widget _buildKeyMenuOverlay(BuildContext context) {
+    final key = _openKeyMenu;
+    final menu = key == null ? null : _keyMenuFor(key);
+    final layout = menu == null ? null : _keyMenuLayout(key!, menu);
+    if (menu == null || layout == null) {
       return const SizedBox.shrink();
     }
+    final highlighted = _highlightedKeyMenuItem;
+    final overlayBox = Overlay.of(context).context.findRenderObject();
+    final colorScheme = Theme.of(context).colorScheme;
     return Stack(
       children: [
         Positioned.fromRect(
           rect: layout.rect,
-          child: _CtrlShortcutsMenu(
+          child: _KeyMenuView(
+            menu: menu,
             layout: layout,
-            highlighted: _highlightedCtrlShortcut,
+            highlighted: highlighted,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            // The highlighted row is already announced as selected.
+            child: ExcludeSemantics(
+              child: _KeyMenuLoupe(
+                target:
+                    highlighted == null ||
+                        !menu.hasLoupe ||
+                        overlayBox is! RenderBox
+                    ? null
+                    : _loupeTarget(
+                        layout,
+                        highlighted,
+                        menu.items[highlighted].symbol,
+                        overlayBox.size,
+                      ),
+                color: colorScheme.primaryContainer,
+                symbolColor: colorScheme.onPrimaryContainer,
+              ),
+            ),
           ),
         ),
       ],
     );
   }
 
-  /// The Ctrl shortcuts menu geometry in overlay coordinates, opening upward
-  /// from the Ctrl key.
+  /// Where the loupe repeats the highlighted item, magnified, since the thumb
+  /// choosing it covers it.
   ///
-  /// The menu is a column, left-aligned with the key, when it fits above it.
-  /// A phone with the keyboard up can lack that room, so the menu becomes a
-  /// single row instead of being clamped down over the key, where the finger
-  /// would start inside it and a plain release would send a chord.
-  _CtrlShortcutsLayout? _ctrlShortcutsLayout() {
-    final button = _ctrlButtonKey.currentContext?.findRenderObject();
+  /// It pulls out beside the item's row, toward the middle of the screen: a
+  /// thumb holding a key at either end of the toolbar reaches up and in from
+  /// its own edge, so the side facing the middle stays clear. Returns null
+  /// when neither side fits on screen.
+  _LoupeTarget? _loupeTarget(
+    _KeyMenuLayout layout,
+    int item,
+    String symbol,
+    Size overlaySize,
+  ) {
+    const margin = _menuScreenMargin;
+    const gap = _KeyMenuLoupe.gap;
+    const extent = _KeyMenuLoupe.extent;
+    final cell = layout.cellRect(item);
+    final menuRect = layout.rect;
+    final width = math.max(
+      extent,
+      _KeyMenuLoupe.measure(symbol) + 2 * _KeyMenuLoupe.padding,
+    );
+    final top = _clampDouble(
+      cell.center.dy - extent / 2,
+      margin,
+      overlaySize.height - extent - margin,
+    );
+    final towardRight = menuRect.center.dx < overlaySize.width / 2;
+    for (final right in [towardRight, !towardRight]) {
+      final left = right ? menuRect.right + gap : menuRect.left - gap - width;
+      if (left < margin || left + width > overlaySize.width - margin) {
+        continue;
+      }
+      final edge = right ? menuRect.right : menuRect.left;
+      return _LoupeTarget(
+        item: item,
+        symbol: symbol,
+        geometry: _LoupeGeometry(
+          pullsRight: right,
+          anchor: Rect.fromLTRB(edge, cell.top, edge, cell.bottom),
+          bubble: Rect.fromLTWH(left, top, width, extent),
+          // In a grid the neck would join the bubble to whichever cell sits
+          // at the edge, so it only joins a cell that is at the edge.
+          attached: ((right ? cell.right : cell.left) - edge).abs() < 0.5,
+        ),
+      );
+    }
+    return null;
+  }
+
+  /// The geometry of [key]'s menu in overlay coordinates, opening upward from
+  /// the key.
+  ///
+  /// A menu with a list width is a column of described rows, left-aligned with
+  /// the key, when it fits above it. Otherwise it is a grid that gives up rows,
+  /// down to a single row, until it fits: a phone with the keyboard up can lack
+  /// the room, and clamping the menu down over the key would start the finger
+  /// inside it, so a plain release would choose an item.
+  _KeyMenuLayout? _keyMenuLayout(_MenuKey key, _KeyMenu menu) {
+    final button = _menuKeyAnchors[key]!.currentContext?.findRenderObject();
     final overlayBox = Overlay.of(context).context.findRenderObject();
     if (button is! RenderBox || overlayBox is! RenderBox) {
       return null;
@@ -1040,97 +1317,133 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         overlayBox.globalToLocal(button.localToGlobal(Offset.zero)) &
         button.size;
     final overlaySize = overlayBox.size;
-    const margin = _pasteOptionsScreenMargin;
-    final count = KeyboardToolbarCtrlShortcut.values.length;
-    final columnHeight = count * TerminalMenuStyles.itemHeight;
-    final columnTop = buttonRect.top - _pasteOptionsGap - columnHeight;
-    if (columnTop >= margin) {
-      return _CtrlShortcutsLayout(
-        axis: Axis.vertical,
+    const margin = _menuScreenMargin;
+    const itemHeight = TerminalMenuStyles.itemHeight;
+    final count = menu.items.length;
+    final roomAbove = buttonRect.top - _menuGap - margin;
+
+    if (menu.listWidth case final listWidth?
+        when count * itemHeight <= roomAbove) {
+      final height = count * itemHeight;
+      return _KeyMenuLayout(
         rect: Rect.fromLTWH(
           _clampDouble(
             buttonRect.left,
             margin,
-            overlaySize.width - _ctrlShortcutsWidth - margin,
+            overlaySize.width - listWidth - margin,
           ),
-          columnTop,
-          _ctrlShortcutsWidth,
-          columnHeight,
+          buttonRect.top - _menuGap - height,
+          listWidth,
+          height,
         ),
+        rows: count,
+        columns: 1,
+        itemCount: count,
+        isList: true,
       );
     }
 
-    // Ctrl+C's cell is centered over the key so a straight swipe up lands on
-    // it. When the window is narrow the cells shrink so the rest still fit to
-    // its right, rather than the row sliding left and putting Ctrl+D there.
-    final itemWidth = [
-      _ctrlShortcutsRowItemWidth,
-      (overlaySize.width - margin - buttonRect.center.dx) / (count - 0.5),
-      (overlaySize.width - 2 * margin) / count,
+    var rows = (count / menu.gridColumns).ceil();
+    while (rows > 1 && rows * itemHeight > roomAbove) {
+      rows -= 1;
+    }
+    final columns = (count / rows).ceil();
+    // Spreading the items over whole columns can need fewer rows than fit:
+    // six symbols with room for four rows take two columns of three.
+    rows = (count / columns).ceil();
+
+    // The first item's cell is centered over the key so a straight swipe up
+    // lands on it, and the grid grows toward the side that leaves wider cells.
+    // When that side is short the cells shrink, rather than the grid sliding
+    // over and putting the second item above the key.
+    final center = buttonRect.center.dx;
+    double cellWidthFor(double room) => [
+      menu.cellWidth,
+      room / (columns - 0.5),
+      (overlaySize.width - 2 * margin) / columns,
     ].reduce(math.min);
-    final rowWidth = count * itemWidth;
-    const rowHeight = TerminalMenuStyles.itemHeight;
-    return _CtrlShortcutsLayout(
-      axis: Axis.horizontal,
+    final rightCellWidth = cellWidthFor(overlaySize.width - margin - center);
+    final leftCellWidth = cellWidthFor(center - margin);
+    final isMirrored = leftCellWidth > rightCellWidth;
+    final cellWidth = isMirrored ? leftCellWidth : rightCellWidth;
+    final width = columns * cellWidth;
+    final height = rows * itemHeight;
+    return _KeyMenuLayout(
       rect: Rect.fromLTWH(
         _clampDouble(
-          buttonRect.center.dx - itemWidth / 2,
+          isMirrored ? center + cellWidth / 2 - width : center - cellWidth / 2,
           margin,
-          overlaySize.width - rowWidth - margin,
+          overlaySize.width - width - margin,
         ),
         _clampDouble(
-          buttonRect.top - _pasteOptionsGap - rowHeight,
+          buttonRect.top - _menuGap - height,
           margin,
-          overlaySize.height - rowHeight - margin,
+          overlaySize.height - height - margin,
         ),
-        rowWidth,
-        rowHeight,
+        width,
+        height,
       ),
+      rows: rows,
+      columns: columns,
+      itemCount: count,
+      isMirrored: isMirrored,
     );
   }
 
-  KeyboardToolbarCtrlShortcut? _ctrlShortcutAtGlobalPosition(
-    Offset globalPosition,
-  ) {
-    final layout = _ctrlShortcutsLayout();
+  int? _keyMenuItemAtGlobalPosition(_MenuKey key, Offset globalPosition) {
+    final menu = _keyMenuFor(key);
+    final layout = menu == null ? null : _keyMenuLayout(key, menu);
     final overlayBox = Overlay.of(context).context.findRenderObject();
     if (layout == null || overlayBox is! RenderBox) {
       return null;
     }
-    return layout.shortcutAt(overlayBox.globalToLocal(globalPosition));
+    return layout.itemAt(overlayBox.globalToLocal(globalPosition));
   }
 
-  void _updateCtrlShortcutHighlight(Offset globalPosition) {
-    final shortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
-    if (shortcut == _highlightedCtrlShortcut) {
+  void _updateKeyMenuHighlight(_MenuKey key, Offset globalPosition) {
+    if (_openKeyMenu != key) {
       return;
     }
-    if (shortcut != null) {
-      // The finger covers the lowest rows, so tick each row it crosses.
+    final item = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    if (item == _highlightedKeyMenuItem) {
+      return;
+    }
+    if (item != null) {
+      // The finger covers the items nearest the key, so tick each one it
+      // crosses.
       HapticFeedback.selectionClick();
     }
-    _highlightedCtrlShortcut = shortcut;
-    _ctrlShortcutsOverlay?.markNeedsBuild();
+    _highlightedKeyMenuItem = item;
+    _keyMenuOverlay?.markNeedsBuild();
   }
 
-  /// Sends the chord under the finger on release. Unlike the Paste menu there
-  /// is no fallback to the last highlight: releasing off the menu cancels, so
-  /// a slow tap, an overshooting swipe or a slide away never sends an
-  /// unintended Ctrl+C.
-  void _chooseHighlightedCtrlShortcut(Offset globalPosition) {
-    final shortcut = _ctrlShortcutAtGlobalPosition(globalPosition);
-    _hideCtrlShortcuts();
-    if (shortcut == null) {
+  /// Sends the item under the finger where it lifted. There is no fallback to
+  /// the last highlight: releasing off the menu cancels, so a slow tap, an
+  /// overshooting swipe or a slide away never sends an unintended key.
+  void _chooseKeyMenuItem(_MenuKey key, Offset globalPosition) {
+    if (_openKeyMenu != key) {
+      return;
+    }
+    final menu = _keyMenuFor(key);
+    final item = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    _hideKeyMenu();
+    if (menu == null || item == null) {
       _refocusTerminal();
       return;
     }
-    _dispatcher.sendCtrlShortcut(shortcut);
+    menu.items[item].onSelected();
   }
 
-  void _hideCtrlShortcuts() {
-    _ctrlShortcutsOverlay?.remove();
-    _ctrlShortcutsOverlay = null;
-    _highlightedCtrlShortcut = null;
+  /// Closes the open key menu, or only [key]'s when given, so a gesture on one
+  /// key cannot close a menu another finger opened.
+  void _hideKeyMenu([_MenuKey? key]) {
+    if (key != null && key != _openKeyMenu) {
+      return;
+    }
+    _keyMenuOverlay?.remove();
+    _keyMenuOverlay = null;
+    _openKeyMenu = null;
+    _highlightedKeyMenuItem = null;
   }
 
   Future<void> _runToolbarAction(FutureOr<void> Function()? action) async {
@@ -1338,6 +1651,36 @@ class TerminalToolbarDispatcher {
     _consumeOneShot();
   }
 
+  /// Sends a function key from the Esc key's menu with any armed modifiers,
+  /// encoded as a hardware keyboard's function key would be. Always writes to
+  /// [terminal]; custom sinks cannot carry a function key.
+  void sendFunctionKey(TerminalKey key) {
+    lightImpact();
+    terminal.keyInput(
+      key,
+      shift: controller.isShiftActive,
+      alt: controller.isAltActive,
+      ctrl: controller.isCtrlActive,
+    );
+    onKeyPressed?.call();
+    _consumeOneShot();
+  }
+
+  /// Sends Shift+Tab from the Tab key's menu.
+  ///
+  /// Like a Ctrl chord the menu names an exact chord, so armed modifiers are
+  /// consumed but not added. Always writes to [terminal].
+  void sendBackTab() {
+    lightImpact();
+    if (_shouldUseKittyKeyboardEncoding()) {
+      terminal.keyInput(TerminalKey.tab, shift: true);
+    } else {
+      terminal.textInput(resolveTerminalTabInput(shiftActive: true));
+    }
+    onKeyPressed?.call();
+    _consumeOneShot();
+  }
+
   /// Sends a navigation key with optional feedback and modifier consumption.
   void sendNavigationKey(
     TerminalKey key,
@@ -1404,6 +1747,66 @@ class TerminalToolbarDispatcher {
 }
 
 enum _Modifier { ctrl, alt, shift }
+
+/// Toolbar keys with a slide-to-select menu, apart from Paste, whose menu
+/// cascades into snippet folders.
+enum _MenuKey { escape, tab, ctrl, pipe, slash, tilde }
+
+/// One choice in a key's slide-to-select menu.
+class _KeyMenuItem {
+  const _KeyMenuItem({
+    required this.symbol,
+    required this.semanticsLabel,
+    required this.onSelected,
+    this.description,
+  });
+
+  /// What the cell shows, such as `⌃C`, `-` or `F5`.
+  final String symbol;
+
+  /// The item's usual meaning, shown beside or below [symbol].
+  final String? description;
+
+  /// Spoken name, such as `Ctrl+C` or `Dash`.
+  final String semanticsLabel;
+
+  /// Sends the item.
+  final VoidCallback onSelected;
+}
+
+/// The items a key offers by holding or swiping up from it, and the shapes
+/// the menu may take.
+class _KeyMenu {
+  const _KeyMenu({
+    required this.items,
+    required this.gridColumns,
+    required this.cellWidth,
+    this.listWidth,
+    this.symbolFontSize,
+  });
+
+  /// Items nearest the key first, so a straight swipe up lands on the first.
+  final List<_KeyMenuItem> items;
+
+  /// Columns of the grid when all of its rows fit above the key.
+  final int gridColumns;
+
+  /// Widest a grid cell gets.
+  final double cellWidth;
+
+  /// Width of a one-column list with descriptions beside the symbols, used
+  /// when it fits above the key. Null for a menu that is always a grid.
+  final double? listWidth;
+
+  /// Size of a grid symbol shown without a description; null keeps the menu
+  /// text size.
+  final double? symbolFontSize;
+
+  /// Whether a loupe repeats the highlighted item beside the thumb. Only
+  /// menus of lone symbols get one: described rows are wide enough to hold
+  /// the finger away from the symbol.
+  bool get hasLoupe => items.every((item) => item.description == null);
+}
 
 enum _PasteToolbarAction { snippets, media, files }
 
@@ -1612,84 +2015,447 @@ class _PasteOptionsMenuItem extends StatelessWidget {
   }
 }
 
-class _CtrlShortcutsLayout {
-  const _CtrlShortcutsLayout({required this.axis, required this.rect});
+/// Where a key menu sits in overlay coordinates and which item each cell
+/// holds.
+class _KeyMenuLayout {
+  const _KeyMenuLayout({
+    required this.rect,
+    required this.rows,
+    required this.columns,
+    required this.itemCount,
+    this.isList = false,
+    this.isMirrored = false,
+  });
 
-  final Axis axis;
   final Rect rect;
+  final int rows;
+  final int columns;
+  final int itemCount;
 
-  /// Shortcuts in display order, nearest the Ctrl key last in a column and
-  /// first in a row.
-  List<KeyboardToolbarCtrlShortcut> get shortcuts => axis == Axis.vertical
-      ? KeyboardToolbarCtrlShortcut.values
-      : KeyboardToolbarCtrlShortcut.values.reversed.toList(growable: false);
+  /// One column of wide rows with each description beside its symbol.
+  final bool isList;
 
-  KeyboardToolbarCtrlShortcut? shortcutAt(Offset localPosition) {
+  /// The grid grows leftward from the key, so the first item is bottom-right.
+  final bool isMirrored;
+
+  /// The item in a cell, counting rows from the top, or null for an empty
+  /// cell of a partial row.
+  ///
+  /// Items fill rows upward from the key, each row starting on the key's
+  /// side, so the first item is nearest the finger.
+  int? itemAtCell(int row, int column) {
+    final index =
+        (rows - 1 - row) * columns +
+        (isMirrored ? columns - 1 - column : column);
+    return index < itemCount ? index : null;
+  }
+
+  int? itemAt(Offset localPosition) {
     if (!rect.contains(localPosition)) {
       return null;
     }
-    final entries = shortcuts;
-    final index = axis == Axis.vertical
-        ? (localPosition.dy - rect.top) ~/ TerminalMenuStyles.itemHeight
-        : (localPosition.dx - rect.left) * entries.length ~/ rect.width;
-    return entries.elementAtOrNull(index);
+    final row = (localPosition.dy - rect.top) ~/ TerminalMenuStyles.itemHeight;
+    final column = (localPosition.dx - rect.left) * columns ~/ rect.width;
+    return itemAtCell(math.min(row, rows - 1), math.min(column, columns - 1));
   }
-}
 
-class _CtrlShortcutsMenu extends StatelessWidget {
-  const _CtrlShortcutsMenu({required this.layout, required this.highlighted});
-
-  /// Menu rows keep a fixed 44 px height so layout and hit testing need no
-  /// text metrics, so text scaling stops where the content still fits with a
-  /// 1.2 line height. A column row holds one 14 px line (14 x 2.0 x 1.2 is
-  /// about 34 px). A row cell stacks two lines, and the row only appears when
-  /// there is no vertical room to grow ((14 + 10) x 1.4 x 1.2 is about 40 px).
-  /// Screen readers get the full chord names from the Ctrl key's actions.
-  static const _columnMaxTextScale = 2.0;
-  static const _rowMaxTextScale = 1.4;
-
-  final _CtrlShortcutsLayout layout;
-  final KeyboardToolbarCtrlShortcut? highlighted;
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      for (final shortcut in layout.shortcuts)
-        _CtrlShortcutMenuItem(
-          shortcut: shortcut,
-          highlighted: shortcut == highlighted,
-          compact: layout.axis == Axis.horizontal,
-        ),
-    ];
-    return TerminalMenuStyles.surface(
-      context,
-      child: layout.axis == Axis.vertical
-          ? MediaQuery.withClampedTextScaling(
-              maxScaleFactor: _columnMaxTextScale,
-              child: Column(mainAxisSize: MainAxisSize.min, children: items),
-            )
-          : MediaQuery.withClampedTextScaling(
-              maxScaleFactor: _rowMaxTextScale,
-              child: Row(
-                children: [for (final item in items) Expanded(child: item)],
-              ),
-            ),
+  /// The cell [item] is drawn in, the inverse of [itemAtCell].
+  Rect cellRect(int item) {
+    final fromKey = item % columns;
+    final cellWidth = rect.width / columns;
+    return Rect.fromLTWH(
+      rect.left + (isMirrored ? columns - 1 - fromKey : fromKey) * cellWidth,
+      rect.top + (rows - 1 - item ~/ columns) * TerminalMenuStyles.itemHeight,
+      cellWidth,
+      TerminalMenuStyles.itemHeight,
     );
   }
 }
 
-class _CtrlShortcutMenuItem extends StatelessWidget {
-  const _CtrlShortcutMenuItem({
-    required this.shortcut,
-    required this.highlighted,
-    required this.compact,
+/// Where a loupe sits: the side of the highlighted row it pulls out of, and
+/// its bubble.
+@immutable
+class _LoupeGeometry {
+  const _LoupeGeometry({
+    required this.pullsRight,
+    required this.anchor,
+    required this.bubble,
+    required this.attached,
   });
 
-  final KeyboardToolbarCtrlShortcut shortcut;
+  /// Whether the loupe pulls out of the menu's right side, or its left.
+  final bool pullsRight;
+
+  /// The menu's side edge level with the highlighted row, as a zero-width
+  /// rect.
+  final Rect anchor;
+  final Rect bubble;
+
+  /// Whether a neck joins the bubble to the highlighted cell, which it does
+  /// only when that cell lies on the menu's edge.
+  final bool attached;
+
+  /// The geometry [t] of the way to [other]; a change of side jumps.
+  _LoupeGeometry lerpTo(_LoupeGeometry other, double t) =>
+      pullsRight != other.pullsRight
+      ? other
+      : _LoupeGeometry(
+          pullsRight: other.pullsRight,
+          anchor: Rect.lerp(anchor, other.anchor, t)!,
+          bubble: Rect.lerp(bubble, other.bubble, t)!,
+          attached: other.attached,
+        );
+}
+
+/// The item a loupe shows and where.
+@immutable
+class _LoupeTarget {
+  const _LoupeTarget({
+    required this.item,
+    required this.symbol,
+    required this.geometry,
+  });
+
+  final int item;
+  final String symbol;
+  final _LoupeGeometry geometry;
+}
+
+/// The highlighted item, magnified, pulled out of its row beside the thumb.
+///
+/// It is drawn in the highlight's own fill, so it reads as the row sliding
+/// out from under the finger. It pulls out when an item is first
+/// highlighted, glides from row to row as the finger moves, and slides back
+/// when the finger leaves the menu. With reduced motion it appears and
+/// disappears in place.
+class _KeyMenuLoupe extends StatefulWidget {
+  const _KeyMenuLoupe({
+    required this.target,
+    required this.color,
+    required this.symbolColor,
+  });
+
+  /// Gap between the menu and the bubble, bridged by the neck.
+  static const gap = 10.0;
+
+  /// The bubble's height, taller than the row so it reads as magnified.
+  static const extent = 56.0;
+
+  /// Space on each side of the symbol in the bubble.
+  static const padding = 14.0;
+
+  static const _symbolSize = 28.0;
+  static const _pullOut = Duration(milliseconds: 140);
+  static const _retract = Duration(milliseconds: 90);
+  static const _glide = Duration(milliseconds: 110);
+
+  static TextStyle _symbolStyle(Color color) => FluttyTheme.monoStyle.copyWith(
+    fontSize: _symbolSize,
+    fontWeight: FontWeight.w600,
+    height: 1,
+    color: color,
+  );
+
+  /// The width [symbol] takes in the bubble.
+  static double measure(String symbol) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: symbol,
+        style: _symbolStyle(const Color(0xFF000000)),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
+  final _LoupeTarget? target;
+  final Color color;
+  final Color symbolColor;
+
+  @override
+  State<_KeyMenuLoupe> createState() => _KeyMenuLoupeState();
+}
+
+class _KeyMenuLoupeState extends State<_KeyMenuLoupe>
+    with TickerProviderStateMixin {
+  late final AnimationController _presence = AnimationController(
+    vsync: this,
+    duration: _KeyMenuLoupe._pullOut,
+    reverseDuration: _KeyMenuLoupe._retract,
+  );
+  late final CurvedAnimation _presenceCurve = CurvedAnimation(
+    parent: _presence,
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeInCubic,
+  );
+  late final AnimationController _glide = AnimationController(
+    vsync: this,
+    duration: _KeyMenuLoupe._glide,
+    value: 1,
+  );
+
+  /// Where a glide started, or null when the loupe is not gliding.
+  _LoupeGeometry? _from;
+
+  /// The last item shown, kept while the loupe slides back.
+  _LoupeTarget? _shown;
+
+  @override
+  void initState() {
+    super.initState();
+    _show(widget.target);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _presence
+      ..duration = reduceMotion ? Duration.zero : _KeyMenuLoupe._pullOut
+      ..reverseDuration = reduceMotion ? Duration.zero : _KeyMenuLoupe._retract;
+    _glide.duration = reduceMotion ? Duration.zero : _KeyMenuLoupe._glide;
+  }
+
+  @override
+  void didUpdateWidget(covariant _KeyMenuLoupe oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _show(widget.target);
+  }
+
+  void _show(_LoupeTarget? target) {
+    if (target == null) {
+      unawaited(_presence.reverse());
+      return;
+    }
+    final shown = _shown;
+    if (shown != null && !_presence.isDismissed && shown.item != target.item) {
+      // Glide from wherever the loupe is now, even mid-glide.
+      _from = _geometry;
+      unawaited(_glide.forward(from: 0));
+    } else if (shown == null || _presence.isDismissed) {
+      _from = null;
+      _glide.value = 1;
+    }
+    _shown = target;
+    unawaited(_presence.forward());
+  }
+
+  _LoupeGeometry get _geometry {
+    final to = _shown!.geometry;
+    final from = _from;
+    if (from == null || _glide.isCompleted) {
+      return to;
+    }
+    return from.lerpTo(to, Curves.easeOutCubic.transform(_glide.value));
+  }
+
+  @override
+  void dispose() {
+    _presenceCurve.dispose();
+    _presence.dispose();
+    _glide.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([_presence, _glide]),
+    builder: (context, _) {
+      final shown = _shown;
+      if (shown == null || _presence.isDismissed) {
+        return const SizedBox.shrink();
+      }
+      final geometry = _geometry;
+      final presence = _presenceCurve.value;
+      final pivot = geometry.anchor.center;
+      // Pulled out of the row: it grows from the row's edge rather than
+      // popping up in place.
+      final scale = 0.6 + 0.4 * presence;
+      return Opacity(
+        opacity: presence,
+        child: Transform(
+          transform: Matrix4.identity()
+            ..translateByDouble(pivot.dx, pivot.dy, 0, 1)
+            ..scaleByDouble(scale, scale, 1, 1)
+            ..translateByDouble(-pivot.dx, -pivot.dy, 0, 1),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _LoupePainter(
+                    geometry: geometry,
+                    color: widget.color,
+                  ),
+                ),
+              ),
+              Positioned.fromRect(
+                rect: geometry.bubble,
+                child: Center(
+                  key: const ValueKey('keyMenuLoupe'),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: RichText(
+                      maxLines: 1,
+                      text: TextSpan(
+                        text: shown.symbol,
+                        style: _KeyMenuLoupe._symbolStyle(widget.symbolColor),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Paints a loupe's bubble and the neck joining it to its row, in one fill.
+///
+/// The neck runs from the row's edge, slightly into the menu so it squares
+/// off the menu's rounded corner there, and flares in an S-curve to the
+/// bubble's height, so the row and bubble read as one shape.
+class _LoupePainter extends CustomPainter {
+  const _LoupePainter({required this.geometry, required this.color});
+
+  final _LoupeGeometry geometry;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    const radius = TerminalMenuStyles.borderRadius;
+    final anchor = geometry.anchor;
+    final bubble = geometry.bubble;
+    final bubbleShape = RRect.fromRectAndRadius(
+      bubble,
+      const Radius.circular(radius),
+    );
+    if (!geometry.attached) {
+      canvas.drawRRect(bubbleShape, paint);
+      return;
+    }
+
+    // x positions are written as distance out from the menu's edge and
+    // mirrored for a loupe on the left.
+    final edge = anchor.left;
+    final sign = geometry.pullsRight ? 1.0 : -1.0;
+    final gap = geometry.pullsRight ? bubble.left - edge : edge - bubble.right;
+    double x(double out) => edge + sign * out;
+    final mid = gap / 2;
+
+    final neck = Path()
+      ..moveTo(x(-radius), anchor.top)
+      ..lineTo(x(0), anchor.top)
+      ..cubicTo(x(mid), anchor.top, x(mid), bubble.top, x(gap), bubble.top)
+      ..lineTo(x(gap + radius), bubble.top)
+      ..lineTo(x(gap + radius), bubble.bottom)
+      ..lineTo(x(gap), bubble.bottom)
+      ..cubicTo(
+        x(mid),
+        bubble.bottom,
+        x(mid),
+        anchor.bottom,
+        x(0),
+        anchor.bottom,
+      )
+      ..lineTo(x(-radius), anchor.bottom)
+      ..close();
+
+    canvas
+      ..drawPath(neck, paint)
+      ..drawRRect(bubbleShape, paint);
+  }
+
+  @override
+  bool shouldRepaint(_LoupePainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.geometry.attached != geometry.attached ||
+      oldDelegate.geometry.pullsRight != geometry.pullsRight ||
+      oldDelegate.geometry.anchor != geometry.anchor ||
+      oldDelegate.geometry.bubble != geometry.bubble;
+}
+
+class _KeyMenuView extends StatelessWidget {
+  const _KeyMenuView({
+    required this.menu,
+    required this.layout,
+    required this.highlighted,
+  });
+
+  /// Menu cells keep a fixed 44 px height so layout and hit testing need no
+  /// text metrics, so text scaling stops where the content still fits with a
+  /// 1.2 line height. A list row holds one 14 px line (14 x 2.0 x 1.2 is about
+  /// 34 px), and a lone grid symbol scales down to fit its cell. A grid cell
+  /// with a description stacks two lines, and a described menu is only a grid
+  /// when there is no vertical room for its list ((14 + 10) x 1.4 x 1.2 is
+  /// about 40 px). Screen readers get the full names from the key's actions.
+  static const _maxTextScale = 2.0;
+  static const _stackedMaxTextScale = 1.4;
+
+  final _KeyMenu menu;
+  final _KeyMenuLayout layout;
+  final int? highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final isStacked =
+        !layout.isList && menu.items.any((item) => item.description != null);
+    return TerminalMenuStyles.surface(
+      context,
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: isStacked ? _stackedMaxTextScale : _maxTextScale,
+        child: Column(
+          children: [
+            for (var row = 0; row < layout.rows; row += 1)
+              SizedBox(
+                height: TerminalMenuStyles.itemHeight,
+                // Stretched so a highlight fills the whole row, not just the
+                // height of its text.
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var column = 0; column < layout.columns; column += 1)
+                      Expanded(
+                        child: switch (layout.itemAtCell(row, column)) {
+                          final index? => _KeyMenuCell(
+                            item: menu.items[index],
+                            highlighted: index == highlighted,
+                            isList: layout.isList,
+                            symbolFontSize: menu.symbolFontSize,
+                          ),
+                          null => const SizedBox.shrink(),
+                        },
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _KeyMenuCell extends StatelessWidget {
+  const _KeyMenuCell({
+    required this.item,
+    required this.highlighted,
+    required this.isList,
+    this.symbolFontSize,
+  });
+
+  final _KeyMenuItem item;
   final bool highlighted;
 
-  /// Stacks the chord over its description for the single-row menu.
-  final bool compact;
+  /// Puts the description beside the symbol rather than below it.
+  final bool isList;
+  final double? symbolFontSize;
 
   @override
   Widget build(BuildContext context) {
@@ -1697,56 +2463,77 @@ class _CtrlShortcutMenuItem extends StatelessWidget {
     final foregroundColor = highlighted
         ? colorScheme.onPrimaryContainer
         : colorScheme.onSurfaceVariant;
-    final labelStyle = TerminalMenuStyles.itemTextStyle(
+    // Symbols are what the terminal receives, so they are set in its voice;
+    // descriptions explain them in the menu's.
+    final textStyle = TerminalMenuStyles.itemTextStyle(
       context,
       emphasized: highlighted,
     ).copyWith(color: foregroundColor, height: 1.2);
-    final descriptionStyle = labelStyle.copyWith(
-      fontSize: compact ? 10 : 12,
-      fontWeight: FontWeight.w400,
-      // Muting on the highlight fill would drop below 4.5:1 contrast.
-      color: highlighted ? foregroundColor : foregroundColor.withAlpha(170),
+    final symbolStyle = textStyle.copyWith(
+      fontFamily: FluttyTheme.monoStyle.fontFamily,
     );
-    final description = Text(
-      shortcut.description,
-      textAlign: compact ? TextAlign.center : TextAlign.end,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: descriptionStyle,
-    );
+    final description = item.description;
+
+    final Widget content;
+    if (description == null) {
+      content = Center(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            item.symbol,
+            style: symbolStyle.copyWith(fontSize: symbolFontSize),
+          ),
+        ),
+      );
+    } else {
+      final descriptionText = Text(
+        description,
+        textAlign: isList ? TextAlign.end : TextAlign.center,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: textStyle.copyWith(
+          fontSize: isList ? 12 : 10,
+          fontWeight: FontWeight.w400,
+          // Muting on the highlight fill would drop below 4.5:1 contrast.
+          color: highlighted ? foregroundColor : foregroundColor.withAlpha(170),
+        ),
+      );
+      content = isList
+          ? Row(
+              children: [
+                // The symbol leads because its meaning depends on the
+                // program; the description is the usual shell meaning.
+                Text(item.symbol, style: symbolStyle),
+                const SizedBox(width: TerminalMenuStyles.iconLabelGap),
+                Expanded(child: descriptionText),
+              ],
+            )
+          : Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(item.symbol, style: symbolStyle),
+                ),
+                descriptionText,
+              ],
+            );
+    }
 
     // A label, not a button: the menu exists only while a finger holds it,
-    // and screen readers send chords through the Ctrl key's custom actions.
+    // and screen readers send items through the key's custom actions.
     return Semantics(
       selected: highlighted,
-      label: '${shortcut.label}, ${shortcut.description}',
+      label: description == null
+          ? item.semanticsLabel
+          : '${item.semanticsLabel}, $description',
       excludeSemantics: true,
       child: Container(
-        height: TerminalMenuStyles.itemHeight,
         color: highlighted ? colorScheme.primaryContainer : Colors.transparent,
         padding: EdgeInsets.symmetric(
-          horizontal: compact ? 4 : TerminalMenuStyles.itemHorizontalPadding,
+          horizontal: isList ? TerminalMenuStyles.itemHorizontalPadding : 4,
         ),
-        child: compact
-            ? Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(shortcut.symbol, style: labelStyle),
-                  ),
-                  description,
-                ],
-              )
-            : Row(
-                children: [
-                  // The chord leads because its meaning depends on the
-                  // program; the description is the usual shell meaning.
-                  Text(shortcut.symbol, style: labelStyle),
-                  const SizedBox(width: TerminalMenuStyles.iconLabelGap),
-                  Expanded(child: description),
-                ],
-              ),
+        child: content,
       ),
     );
   }
@@ -1768,6 +2555,43 @@ class _KeyRow extends StatelessWidget {
         return Expanded(child: c);
       }).toList(),
     ),
+  );
+}
+
+/// A key's label, with the menu indicator in the corner of a key that opens
+/// a menu. Every menu key shows the same indicator.
+class _KeyFace extends StatelessWidget {
+  const _KeyFace({
+    required this.label,
+    required this.hasMenu,
+    required this.indicatorColor,
+  });
+
+  final Widget label;
+  final bool hasMenu;
+  final Color indicatorColor;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    fit: StackFit.expand,
+    children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Center(
+          child: FittedBox(fit: BoxFit.scaleDown, child: label),
+        ),
+      ),
+      if (hasMenu)
+        Positioned(
+          top: 2,
+          right: 2,
+          child: Icon(
+            Icons.more_horiz_rounded,
+            size: 11,
+            color: indicatorColor,
+          ),
+        ),
+    ],
   );
 }
 
@@ -1922,6 +2746,7 @@ class _ToolbarButton extends StatefulWidget {
     this.menuGesture,
     this.tooltip,
     this.semanticsHint,
+    this.customSemanticsActions,
     super.key,
   }) : assert(
          menuGesture == null ||
@@ -1941,6 +2766,7 @@ class _ToolbarButton extends StatefulWidget {
   final _KeyMenuGesture? menuGesture;
   final String? tooltip;
   final String? semanticsHint;
+  final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
 
   bool get hasLongPressHandler =>
       onLongPressStart != null || onLongPressRepeat != null;
@@ -2019,9 +2845,14 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
     if (widget.icon != null) {
       return _buildIcon(18, color);
     }
+    // A lone label is a literal character, set in the terminal's voice.
     return Text(
       widget.label,
-      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: color),
+      style: FluttyTheme.monoStyle.copyWith(
+        fontSize: 13,
+        fontWeight: FontWeight.w500,
+        color: color,
+      ),
     );
   }
 
@@ -2054,29 +2885,10 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
           borderRadius: BorderRadius.circular(6),
           border: _isPressed ? Border.all(color: colorScheme.primary) : null,
         ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: _buildContent(foregroundColor),
-                ),
-              ),
-            ),
-            if (widget.menuGesture != null)
-              Positioned(
-                top: 2,
-                right: 2,
-                child: Icon(
-                  Icons.more_horiz_rounded,
-                  size: 11,
-                  color: colorScheme.primary,
-                ),
-              ),
-          ],
+        child: _KeyFace(
+          hasMenu: widget.menuGesture != null,
+          indicatorColor: colorScheme.primary,
+          label: _buildContent(foregroundColor),
         ),
       ),
     );
@@ -2093,6 +2905,7 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
       button: true,
       label: widget.tooltip ?? widget.label,
       hint: widget.semanticsHint,
+      customSemanticsActions: widget.customSemanticsActions,
       child: button,
     );
   }
@@ -2178,51 +2991,34 @@ class _ModifierButtonState extends State<_ModifierButton> {
           color: bgColor,
           borderRadius: BorderRadius.circular(6),
         ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (widget.icon != null) ...[
-                        Icon(widget.icon, size: 14, color: textColor),
-                        const SizedBox(width: 3),
-                      ],
-                      Text(
-                        widget.label,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: textColor,
-                        ),
-                      ),
-                      if (lockIcon != null) ...[
-                        const SizedBox(width: 2),
-                        Icon(lockIcon, size: 10, color: textColor),
-                      ],
-                    ],
-                  ),
+        child: _KeyFace(
+          hasMenu: widget.menuGesture != null,
+          // Armed and locked states fill the key with a primary tint, so
+          // switch to the label color to keep the dots visible.
+          indicatorColor: widget.state == null
+              ? colorScheme.primary
+              : textColor,
+          label: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.icon != null) ...[
+                Icon(widget.icon, size: 14, color: textColor),
+                const SizedBox(width: 3),
+              ],
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: textColor,
                 ),
               ),
-            ),
-            if (widget.menuGesture != null)
-              Positioned(
-                top: 2,
-                right: 2,
-                child: Icon(
-                  Icons.more_horiz_rounded,
-                  size: 11,
-                  // Armed and locked states fill the key with a primary tint,
-                  // so switch to the label color to keep the dots visible.
-                  color: widget.state == null ? colorScheme.primary : textColor,
-                ),
-              ),
-          ],
+              if (lockIcon != null) ...[
+                const SizedBox(width: 2),
+                Icon(lockIcon, size: 10, color: textColor),
+              ],
+            ],
+          ),
         ),
       ),
     );
