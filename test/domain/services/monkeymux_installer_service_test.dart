@@ -44,10 +44,12 @@ class _FakeRemoteFileService extends RemoteFileService {
   _FakeRemoteFileService({
     this.homeDirectory = '/home/proof',
     this.writeUploads = false,
+    this.uploadError,
   });
 
   final String homeDirectory;
   final bool writeUploads;
+  final Exception? uploadError;
   Uint8List? uploadedBytes;
   String? uploadedPath;
   bool uploaded = false;
@@ -72,10 +74,16 @@ class _FakeRemoteFileService extends RemoteFileService {
     bool applyPrivateMode = true,
     FutureOr<void> Function(int uploadedBytes)? onProgress,
   }) async {
-    uploaded = true;
     uploadCount++;
-    uploadedBytes = bytes;
     uploadedPath = remotePath;
+    await onProgress?.call(bytes.length ~/ 2);
+    final uploadError = this.uploadError;
+    if (uploadError != null) {
+      throw uploadError;
+    }
+    await onProgress?.call(bytes.length);
+    uploaded = true;
+    uploadedBytes = bytes;
     if (writeUploads) {
       final file = File(remotePath);
       await file.parent.create(recursive: true);
@@ -347,6 +355,72 @@ void main() {
       }
     });
   }
+
+  for (final outcome in ['verified', 'upload-failure']) {
+    test('reports helper upload progress until $outcome', () async {
+      final harness = _InstallHarness(
+        remote: _FakeRemoteFileService(
+          uploadError: outcome == 'upload-failure'
+              ? const SocketException('connection reset')
+              : null,
+        ),
+      );
+      final connectionId = harness.session.connectionId;
+      final total = harness.binary.length;
+      final reported = <MonkeyMuxInstallProgress?>[];
+      void record() =>
+          reported.add(harness.installer.uploadProgress.value[connectionId]);
+      harness.installer.uploadProgress.addListener(record);
+      addTearDown(
+        () => harness.installer.uploadProgress.removeListener(record),
+      );
+
+      final install = harness.installer.ensureInstalled(
+        harness.session,
+        confirmInstall: (_) async {
+          expect(
+            harness.installer.uploadProgress.value,
+            isNot(contains(connectionId)),
+          );
+          return true;
+        },
+      );
+      if (outcome == 'verified') {
+        await install;
+      } else {
+        await expectLater(install, throwsA(isA<SocketException>()));
+      }
+
+      expect(reported, [
+        MonkeyMuxInstallProgress(uploadedBytes: 0, totalBytes: total),
+        MonkeyMuxInstallProgress(uploadedBytes: total ~/ 2, totalBytes: total),
+        if (outcome == 'verified')
+          MonkeyMuxInstallProgress(uploadedBytes: total, totalBytes: total),
+        null,
+      ]);
+      expect(
+        harness.installer.uploadProgress.value,
+        isNot(contains(connectionId)),
+      );
+    });
+  }
+
+  test('reports no upload progress when the helper is reused', () async {
+    final harness = _InstallHarness();
+    harness.remote.uploaded = true;
+    var notifications = 0;
+    void record() => notifications++;
+    harness.installer.uploadProgress.addListener(record);
+    addTearDown(() => harness.installer.uploadProgress.removeListener(record));
+
+    final installation = await harness.installer.ensureInstalled(
+      harness.session,
+      confirmInstall: (_) async => fail('reused helper needs no approval'),
+    );
+
+    expect(installation.installedDuringCall, isFalse);
+    expect(notifications, 0);
+  });
 
   for (final encoding in ['gzip', 'invalid-gzip', 'gzip-mismatch', 'unknown']) {
     test('verifies bundled bytes in worker: $encoding', () async {

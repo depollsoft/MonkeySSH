@@ -48,6 +48,13 @@ void main() {
         ),
         'Uploading paste',
       );
+      expect(
+        describeTerminalPasteUploadProgress(
+          const TerminalPasteUploadProgress(uploadedBytes: 1, totalBytes: 2),
+          label: TerminalPasteUploadStrip.monkeyMuxInstallLabel,
+        ),
+        'Installing MonkeyMux, 50 percent',
+      );
     });
   });
 
@@ -56,6 +63,7 @@ void main() {
       WidgetTester tester,
       TerminalPasteUploadProgress progress, {
       bool disableAnimations = false,
+      String label = TerminalPasteUploadStrip.pasteLabel,
     }) => tester.pumpWidget(
       MaterialApp(
         home: MediaQuery(
@@ -63,7 +71,7 @@ void main() {
           child: Scaffold(
             body: Align(
               alignment: Alignment.bottomCenter,
-              child: TerminalPasteUploadStrip(progress: progress),
+              child: TerminalPasteUploadStrip(progress: progress, label: label),
             ),
           ),
         ),
@@ -133,6 +141,24 @@ void main() {
       expect(
         tester.getSemantics(find.byType(TerminalPasteUploadStrip)),
         matchesSemantics(label: 'Uploading paste, 25 percent', value: '25'),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('announces what is uploading', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpStrip(
+        tester,
+        const TerminalPasteUploadProgress(uploadedBytes: 3, totalBytes: 4),
+        label: TerminalPasteUploadStrip.monkeyMuxInstallLabel,
+      );
+
+      expect(
+        tester.getSemantics(find.byType(TerminalPasteUploadStrip)),
+        matchesSemantics(
+          label: 'Installing MonkeyMux, 75 percent',
+          value: '75',
+        ),
       );
       handle.dispose();
     });

@@ -49,17 +49,19 @@ class TerminalPasteUploadProgress {
 
 /// Accessibility label for the upload line.
 String describeTerminalPasteUploadProgress(
-  TerminalPasteUploadProgress progress,
-) {
+  TerminalPasteUploadProgress progress, {
+  String label = TerminalPasteUploadStrip.pasteLabel,
+}) {
   final fraction = progress.fraction;
   if (fraction == null) {
-    return 'Uploading paste';
+    return label;
   }
-  return 'Uploading paste, ${(fraction * 100).round()} percent';
+  return '$label, ${(fraction * 100).round()} percent';
 }
 
 /// A thin progress line that overlays the bottom edge of the terminal while
-/// a pasted image, video, or file uploads.
+/// a pasted image, video, or file uploads, or while the MonkeyMux helper
+/// uploads to the host.
 ///
 /// It shares the terminal task-progress bar's vocabulary (3px, accent on the
 /// raised surface) and adds nothing else: no caption, no control. The
@@ -67,13 +69,26 @@ String describeTerminalPasteUploadProgress(
 /// the existing "Uploaded ..." message still closes the loop.
 class TerminalPasteUploadStrip extends StatelessWidget {
   /// Creates the upload line.
-  const TerminalPasteUploadStrip({required this.progress, super.key});
+  const TerminalPasteUploadStrip({
+    required this.progress,
+    this.label = pasteLabel,
+    super.key,
+  });
 
   /// Height of the line.
   static const lineHeight = 3.0;
 
+  /// Accessibility label for a paste upload.
+  static const pasteLabel = 'Uploading paste';
+
+  /// Accessibility label for a MonkeyMux helper upload.
+  static const monkeyMuxInstallLabel = 'Installing MonkeyMux';
+
   /// Current upload progress.
   final TerminalPasteUploadProgress progress;
+
+  /// What is uploading, announced before the percentage.
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -84,7 +99,7 @@ class TerminalPasteUploadStrip extends StatelessWidget {
     final percentage = fraction == null ? null : (fraction * 100).round();
 
     return Semantics(
-      label: describeTerminalPasteUploadProgress(progress),
+      label: describeTerminalPasteUploadProgress(progress, label: label),
       value: percentage?.toString(),
       minValue: percentage == null ? null : '0',
       maxValue: percentage == null ? null : '100',

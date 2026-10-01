@@ -6,6 +6,7 @@ import 'dart:ui';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -474,15 +475,31 @@ class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
   }
 }
 
+final _noMonkeyMuxUploadProgress =
+    ValueNotifier<Map<int, MonkeyMuxInstallProgress>>(const {});
+
 class _MockMonkeyMuxInstallerService extends Mock
-    implements MonkeyMuxInstallerService {}
+    implements MonkeyMuxInstallerService {
+  @override
+  ValueListenable<Map<int, MonkeyMuxInstallProgress>> get uploadProgress =>
+      _noMonkeyMuxUploadProgress;
+}
 
 class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
-  _PromptingMonkeyMuxInstallerService({required this.request});
+  _PromptingMonkeyMuxInstallerService({required this.request, this.upload});
 
   final MonkeyMuxInstallRequest request;
+
+  /// When set, an approved install reports half its bytes uploaded and waits
+  /// for this to complete before finishing.
+  final Completer<void>? upload;
   final acceptedConfirmations = <bool>[];
+  final progress = ValueNotifier<Map<int, MonkeyMuxInstallProgress>>(const {});
   int ensureInstalledCalls = 0;
+
+  @override
+  ValueListenable<Map<int, MonkeyMuxInstallProgress>> get uploadProgress =>
+      progress;
 
   @override
   Future<MonkeyMuxInstallation> ensureInstalled(
@@ -498,6 +515,17 @@ class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
     acceptedConfirmations.add(accepted);
     if (!accepted) {
       throw const MonkeyMuxInstallDeclinedException();
+    }
+    final upload = this.upload;
+    if (upload != null) {
+      progress.value = {
+        session.connectionId: MonkeyMuxInstallProgress(
+          uploadedBytes: request.size ~/ 2,
+          totalBytes: request.size,
+        ),
+      };
+      await upload.future;
+      progress.value = const {};
     }
     return MonkeyMuxInstallation(
       executablePath: '/tmp/monkeymux',
@@ -10404,6 +10432,102 @@ void main() {
       expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
       verifyNever(() => sshClient.shell(pty: any(named: 'pty')));
       expect(monkeyMuxInstallerService.ensureInstalledCalls, 1);
+      expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[true]);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('shows MonkeyMux helper upload progress at the bottom edge', (
+      tester,
+    ) async {
+      final upload = Completer<void>();
+      final monkeyMuxInstallerService = _PromptingMonkeyMuxInstallerService(
+        request: const MonkeyMuxInstallRequest(
+          platform: 'darwin-arm64',
+          version: '0.1.14',
+          size: 1536,
+        ),
+        upload: upload,
+      );
+      addTearDown(monkeyMuxInstallerService.progress.dispose);
+      final monkeyMuxService = _MockMonkeyMuxService();
+      final tmuxService = _MockTmuxService();
+      const sessionName = 'work';
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: const SshConnectionConfig(
+          hostname: 'terminal.example.com',
+          port: 22,
+          username: 'root',
+        ),
+      );
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: sessionName,
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shellChannel);
+      when(
+        () => monkeyMuxService.hasForegroundClientOrThrow(session, sessionName),
+      ).thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, sessionName)).thenAnswer(
+        (_) async => const <TmuxWindow>[
+          TmuxWindow(index: 0, name: 'shell', isActive: true),
+        ],
+      );
+      when(() => monkeyMuxService.watchWindowChanges(session, sessionName))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+
+      await tester.pumpWidget(
+        buildScreen(
+          overrides: [
+            monkeyMuxInstallerServiceProvider.overrideWithValue(
+              monkeyMuxInstallerService,
+            ),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      const uploadLine = ValueKey<String>('terminal-paste-upload-line');
+      // Another connection's upload never reaches this terminal.
+      monkeyMuxInstallerService.progress.value = {
+        session.connectionId + 1: const MonkeyMuxInstallProgress(
+          uploadedBytes: 1,
+          totalBytes: 2,
+        ),
+      };
+      await tester.pump();
+      expect(find.byKey(uploadLine), findsNothing);
+
+      final handle = tester.ensureSemantics();
+      await tester.tap(find.widgetWithText(FilledButton, 'Install'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      final line = tester.widget<LinearProgressIndicator>(
+        find.byKey(uploadLine),
+      );
+      expect(line.value, 0.5);
+      expect(
+        find.bySemanticsLabel('Installing MonkeyMux, 50 percent'),
+        findsOneWidget,
+      );
+      handle.dispose();
+
+      upload.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(find.byKey(uploadLine), findsNothing);
       expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[true]);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
