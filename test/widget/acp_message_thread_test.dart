@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
+import 'package:monkeyssh/presentation/widgets/acp_markdown_paths.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown_virtualization.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_plan.dart';
@@ -45,6 +46,35 @@ Widget wrap(
 void main() {
   setUp(() => FluttyTheme.debugUseSystemFonts = true);
   tearDown(() => FluttyTheme.debugUseSystemFonts = false);
+
+  testWidgets('tool-result paths use the native thread link handler', (
+    tester,
+  ) async {
+    String? openedPath;
+    await tester.pumpWidget(
+      wrap(
+        AcpMessageThread(
+          entries: [
+            AcpToolCallEntry(
+              id: 'tool',
+              toolCall: AcpToolCall(
+                id: 'tool',
+                title: 'Read source',
+                status: AcpToolStatus.running,
+                rawOutput: '`lib/main.dart`',
+              ),
+            ),
+          ],
+          onTapLink: (_, href, _) => openedPath = resolveAcpMarkdownPath(href!),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('lib/main.dart', findRichText: true).first);
+    await tester.pump();
+    expect(openedPath, 'lib/main.dart');
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('uses a dense native transcript viewport', (tester) async {
     await tester.pumpWidget(

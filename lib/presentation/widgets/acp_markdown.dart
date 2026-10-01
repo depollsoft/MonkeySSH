@@ -11,6 +11,7 @@ import 'acp_chat_typography.dart';
 import 'acp_code_block.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown_data_images.dart';
+import 'acp_markdown_paths.dart';
 
 /// URL schemes that [AcpMarkdown] will open by default.
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel'};
@@ -203,6 +204,7 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
       selectable: widget.selectable,
       styleSheet: styleSheet,
       softLineBreak: true,
+      inlineSyntaxes: [if (widget.onTapLink != null) AcpMarkdownPathSyntax()],
       onTapLink: widget.onTapLink ?? _defaultOnTapLink,
       imageBuilder: _buildImage,
       builders: {

@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
@@ -134,6 +135,62 @@ Widget _wrap(
 }
 
 void main() {
+  for (final (markdown, path) in [
+    ('lib/main.dart:42', 'lib/main.dart'),
+    ('`lib/main.dart`', 'lib/main.dart'),
+    ('[source](lib/main.dart)', 'lib/main.dart'),
+    ('[source](file:///tmp/a%20b.txt)', '/tmp/a b.txt'),
+    (r'C:\Users\dev\main.dart', 'C:/Users/dev/main.dart'),
+  ]) {
+    testWidgets('native path $markdown opens SFTP with the session cwd', (
+      tester,
+    ) async {
+      FluttyTheme.debugUseSystemFonts = true;
+      final session = fakeAcpSession(timeline: fakeAcpTimeline(markdown));
+      final manager = FakeAcpSessionManager(sessions: [session]);
+      Uri? opened;
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (_, _) => _wrap(
+              manager,
+              connectOnMount: false,
+              hasActiveSshSession: true,
+            ),
+          ),
+          GoRoute(
+            path: '/sftp/:hostId',
+            builder: (_, state) {
+              opened = state.uri;
+              return const Scaffold(body: Text('SFTP browser'));
+            },
+          ),
+        ],
+      );
+      addTearDown(() {
+        router.dispose();
+        manager.dispose();
+        FluttyTheme.debugUseSystemFonts = false;
+      });
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      final label = markdown.startsWith('[source]')
+          ? 'source'
+          : markdown.replaceAll('`', '');
+      await tester.tap(find.text(label, findRichText: true).first);
+      await tester.pumpAndSettle();
+      expect(find.text('SFTP browser'), findsOneWidget);
+      expect(opened?.path, '/sftp/${session.key.hostId}');
+      expect(opened?.queryParameters, {
+        'path': path,
+        'cwd': session.cwd,
+        'connectionId': '7',
+      });
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final width in [390.0, 1100.0]) {
     testWidgets(
       'standalone chat clears a stale keyboard inset at width $width',

@@ -12,6 +12,7 @@ import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown.dart';
+import 'package:monkeyssh/presentation/widgets/acp_markdown_paths.dart';
 
 Widget wrap(Widget child) => MaterialApp(
   theme: FluttyTheme.dark,
@@ -167,6 +168,26 @@ void main() {
       null,
     );
   });
+
+  for (final source in ['lib/main.dart', '`lib/main.dart`']) {
+    testWidgets('tapping $source opens the remote path', (tester) async {
+      String? openedPath;
+      await tester.pumpWidget(
+        wrap(
+          AcpMarkdown(
+            data: source,
+            onTapLink: (_, href, _) =>
+                openedPath = resolveAcpMarkdownPath(href!),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('lib/main.dart', findRichText: true).first);
+      await tester.pump();
+      expect(openedPath, 'lib/main.dart');
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('wires custom link handler to MarkdownBody', (tester) async {
     var tappedHref = '';

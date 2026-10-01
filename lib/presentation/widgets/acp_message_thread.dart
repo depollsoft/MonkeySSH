@@ -712,6 +712,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         final tool = AcpToolCallView(
           toolCall: entry.toolCall,
           onOpenLocation: widget.onOpenLocation,
+          onTapLink: widget.onTapLink,
         );
         return entry.isSubagent ? _SubagentLaunchSurface(child: tool) : tool;
       case AcpSubagentTranscriptEntry():
