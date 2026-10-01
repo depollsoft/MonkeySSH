@@ -390,6 +390,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   static const _pasteSnippetMenuWidth = 180.0;
   static const _menuGap = TerminalMenuStyles.cascadeGap;
   static const _menuScreenMargin = TerminalMenuStyles.screenMargin;
+  static const _keyMenuListWidth = 200.0;
 
   late final KeyboardToolbarController _fallbackController;
   final _pasteButtonKey = GlobalKey();
@@ -487,14 +488,12 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     );
   }
 
-  Widget _buildModifierRow() =>
-      _KeyRow(hasFlickLabels: true, children: _buildModifierButtons());
+  Widget _buildModifierRow() => _KeyRow(children: _buildModifierButtons());
 
   Widget _buildNavigationRow() =>
       _KeyRow(children: [..._buildNavigationButtons(), _buildEnterButton()]);
 
   Widget _buildLandscapeRow() => _KeyRow(
-    hasFlickLabels: true,
     children: [
       ..._buildModifierButtons(),
       ..._buildNavigationButtons(),
@@ -537,7 +536,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         onTap: _toggleCtrl,
         onDoubleTap: _lockCtrl,
         menuGesture: _keyMenuGesture(_MenuKey.ctrl),
-        flickLabel: ctrlMenu?.flickLabel,
         semanticsHint: ctrlMenu == null
             ? null
             : 'Press and hold or swipe up for Ctrl shortcuts',
@@ -600,7 +598,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       onTap: onTap,
       onLongPressStart: menu == null ? onTap : null,
       menuGesture: _keyMenuGesture(menuKey),
-      flickLabel: menu?.flickLabel,
       semanticsHint: menu == null
           ? null
           : 'Press and hold or swipe up for $menuName',
@@ -622,8 +619,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       onRelease: _chooseHighlightedPasteOption,
       onCancel: _hidePasteOptionsMenu,
     ),
-    // A list of unlike options, so no single item stands for it.
-    flickLabel: '\u2026',
     semanticsHint: 'Press and hold or swipe up for paste options',
     tooltip: 'Paste',
   );
@@ -1121,18 +1116,19 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       // F1-F4, F5-F8 and F9-F12 rows, grouped as on a physical keyboard.
       gridColumns: 4,
       cellWidth: 56,
-      flickLabel: 'F1\u201312',
     ),
     _MenuKey.tab when _sendsToTerminal => _KeyMenu(
       items: [
         _KeyMenuItem(
           symbol: '⇧Tab',
+          description: 'Reverse tab',
           semanticsLabel: 'Shift+Tab',
           onSelected: () => _dispatcher.sendBackTab(),
         ),
       ],
+      listWidth: _keyMenuListWidth,
       gridColumns: 1,
-      cellWidth: 72,
+      cellWidth: 88,
     ),
     _MenuKey.ctrl when _sendsToTerminal => _KeyMenu(
       items: [
@@ -1144,7 +1140,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
             onSelected: () => _dispatcher.sendCtrlShortcut(shortcut),
           ),
       ],
-      listWidth: 200,
+      listWidth: _keyMenuListWidth,
       gridColumns: KeyboardToolbarCtrlShortcut.values.length,
       cellWidth: 88,
     ),
@@ -1154,18 +1150,22 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _ => null,
   };
 
+  /// A stack of symbols like the Ctrl menu: a straight swipe up chooses by
+  /// distance alone, with no sideways aim.
   _KeyMenu _symbolMenu(List<_MenuSymbol> symbols) => _KeyMenu(
     items: [
       for (final (symbol, name) in symbols)
         _KeyMenuItem(
           symbol: symbol,
+          description: name,
           semanticsLabel: name,
           onSelected: () => _sendText(symbol),
         ),
     ],
+    listWidth: _keyMenuListWidth,
     gridColumns: symbols.length,
-    cellWidth: 44,
-    symbolFontSize: 20,
+    cellWidth: 88,
+    symbolFontSize: 18,
   );
 
   _KeyMenuGesture? _keyMenuGesture(_MenuKey key) => _keyMenuFor(key) == null
@@ -1703,8 +1703,7 @@ class _KeyMenu {
     required this.cellWidth,
     this.listWidth,
     this.symbolFontSize,
-    String? flickLabel,
-  }) : _flickLabel = flickLabel;
+  });
 
   /// Items nearest the key first, so a straight swipe up lands on the first.
   final List<_KeyMenuItem> items;
@@ -1719,15 +1718,9 @@ class _KeyMenu {
   /// when it fits above the key. Null for a menu that is always a grid.
   final double? listWidth;
 
-  /// Size of a grid symbol shown without a description; null keeps the menu
-  /// text size.
+  /// Size of a symbol in a list row, or in a grid cell without a description;
+  /// null keeps the menu text size.
   final double? symbolFontSize;
-
-  final String? _flickLabel;
-
-  /// The key's flick label: the first item, which a straight swipe up sends,
-  /// unless the menu names its whole range instead.
-  String get flickLabel => _flickLabel ?? items.first.symbol;
 }
 
 enum _PasteToolbarAction { snippets, media, files }
@@ -1991,11 +1984,12 @@ class _KeyMenuView extends StatelessWidget {
 
   /// Menu cells keep a fixed 44 px height so layout and hit testing need no
   /// text metrics, so text scaling stops where the content still fits with a
-  /// 1.2 line height. A list row holds one 14 px line (14 x 2.0 x 1.2 is about
-  /// 34 px), and a lone grid symbol scales down to fit its cell. A grid cell
-  /// with a description stacks two lines, and a described menu is only a grid
-  /// when there is no vertical room for its list ((14 + 10) x 1.4 x 1.2 is
-  /// about 40 px). Screen readers get the full names from the key's actions.
+  /// 1.2 line height. A list row holds one line of at most 18 px (18 x 2.0 x
+  /// 1.2 is about 43 px), and a lone grid symbol scales down to fit its cell.
+  /// A grid cell with a description stacks two lines, and a described menu is
+  /// only a grid when there is no vertical room for its list ((14 + 10) x 1.4
+  /// x 1.2 is about 40 px). Screen readers get the full names from the key's
+  /// actions.
   static const _maxTextScale = 2.0;
   static const _stackedMaxTextScale = 1.4;
 
@@ -2099,9 +2093,12 @@ class _KeyMenuCell extends StatelessWidget {
       content = isList
           ? Row(
               children: [
-                // The symbol leads because its meaning depends on the
-                // program; the description is the usual shell meaning.
-                Text(item.symbol, style: symbolStyle),
+                // The symbol leads because it is what gets sent; the
+                // description names it or gives its usual shell meaning.
+                Text(
+                  item.symbol,
+                  style: symbolStyle.copyWith(fontSize: symbolFontSize),
+                ),
                 const SizedBox(width: TerminalMenuStyles.iconLabelGap),
                 Expanded(child: descriptionText),
               ],
@@ -2122,7 +2119,7 @@ class _KeyMenuCell extends StatelessWidget {
     // and screen readers send items through the key's custom actions.
     return Semantics(
       selected: highlighted,
-      label: description == null
+      label: description == null || description == item.semanticsLabel
           ? item.semanticsLabel
           : '${item.semanticsLabel}, $description',
       excludeSemantics: true,
@@ -2138,116 +2135,55 @@ class _KeyMenuCell extends StatelessWidget {
 }
 
 class _KeyRow extends StatelessWidget {
-  const _KeyRow({required this.children, this.hasFlickLabels = false});
+  const _KeyRow({required this.children});
 
   static const height = 42.0;
 
   final List<Widget> children;
 
-  /// Some keys in the row show a flick label, so every key leaves room for
-  /// one and the labels stay aligned.
-  final bool hasFlickLabels;
-
   @override
-  Widget build(BuildContext context) => _FlickLabelRow(
-    hasFlickLabels: hasFlickLabels,
-    child: SizedBox(
-      height: height,
-      child: Row(
-        children: children.map((c) {
-          if (c is Expanded) return c;
-          return Expanded(child: c);
-        }).toList(),
-      ),
+  Widget build(BuildContext context) => SizedBox(
+    height: height,
+    child: Row(
+      children: children.map((c) {
+        if (c is Expanded) return c;
+        return Expanded(child: c);
+      }).toList(),
     ),
   );
 }
 
-class _FlickLabelRow extends InheritedWidget {
-  const _FlickLabelRow({required this.hasFlickLabels, required super.child});
-
-  final bool hasFlickLabels;
-
-  static bool of(BuildContext context) =>
-      context
-          .dependOnInheritedWidgetOfExactType<_FlickLabelRow>()
-          ?.hasFlickLabels ??
-      false;
-
-  @override
-  bool updateShouldNotify(_FlickLabelRow oldWidget) =>
-      hasFlickLabels != oldWidget.hasFlickLabels;
-}
-
-/// A key's label, with the flick label above it on a key that has a menu.
-///
-/// As on an iPad flick key, the flick label names what a straight swipe up
-/// sends, and it sits above the label because that is where the swipe goes.
-/// It is muted so the key's own label still reads first.
+/// A key's label, with the menu indicator in the corner of a key that opens
+/// a menu. Every menu key shows the same indicator.
 class _KeyFace extends StatelessWidget {
   const _KeyFace({
     required this.label,
-    required this.flickColor,
-    this.flickLabel,
+    required this.hasMenu,
+    required this.indicatorColor,
   });
 
-  /// The band the flick label fits into, at the top of the key face. Its
-  /// height is fixed, so large text scales the flick label down rather than
-  /// pushing it into the label below.
-  static const _flickTop = 4.0;
-  static const _flickHeight = 10.0;
-
-  /// How far a row with flick labels lowers every label, so labels stay
-  /// aligned across keys with and without a menu.
-  static const _labelTopInset = _flickTop + _flickHeight;
-
   final Widget label;
-  final String? flickLabel;
-  final Color flickColor;
-
-  /// The secondary ink on a key, mixed from its fill and label colors the way
-  /// the theme derives secondary text, so it holds 4.5:1 in every theme.
-  static Color mutedInk(Color fill, Color label) =>
-      Color.lerp(fill, label, 0.64)!;
+  final bool hasMenu;
+  final Color indicatorColor;
 
   @override
   Widget build(BuildContext context) => Stack(
     fit: StackFit.expand,
     children: [
       Padding(
-        padding: EdgeInsets.fromLTRB(
-          4,
-          _FlickLabelRow.of(context) ? _labelTopInset : 0,
-          4,
-          0,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Center(
           child: FittedBox(fit: BoxFit.scaleDown, child: label),
         ),
       ),
-      if (flickLabel case final flickLabel?)
+      if (hasMenu)
         Positioned(
-          top: _flickTop,
-          height: _flickHeight,
-          left: 2,
+          top: 2,
           right: 2,
-          // Screen readers hear the menu from the key's hint and actions.
-          child: ExcludeSemantics(
-            child: Center(
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  flickLabel,
-                  maxLines: 1,
-                  style: FluttyTheme.monoStyle.copyWith(
-                    fontSize: 10,
-                    height: 1,
-                    fontWeight: FontWeight.w500,
-                    color: flickColor,
-                  ),
-                ),
-              ),
-            ),
+          child: Icon(
+            Icons.more_horiz_rounded,
+            size: 11,
+            color: indicatorColor,
           ),
         ),
     ],
@@ -2403,7 +2339,6 @@ class _ToolbarButton extends StatefulWidget {
     this.onLongPressStart,
     this.onLongPressRepeat,
     this.menuGesture,
-    this.flickLabel,
     this.tooltip,
     this.semanticsHint,
     this.customSemanticsActions,
@@ -2421,11 +2356,9 @@ class _ToolbarButton extends StatefulWidget {
   final VoidCallback? onLongPressStart;
   final VoidCallback? onLongPressRepeat;
 
-  /// Opens a menu on press-and-hold or an upward swipe.
+  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
+  /// indicator in the key's corner.
   final _KeyMenuGesture? menuGesture;
-
-  /// What a straight swipe up sends, shown above the label.
-  final String? flickLabel;
   final String? tooltip;
   final String? semanticsHint;
   final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
@@ -2546,8 +2479,8 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
               : colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(6),
           // A hairline keeps the key's edge visible where its fill matches
-          // the toolbar (the light theme), so a flick label reads as part of
-          // its key. It stays 1 px when pressed, so the face does not shift.
+          // the toolbar (the light theme). It stays 1 px when pressed, so the
+          // face does not shift.
           border: Border.all(
             color: _isPressed
                 ? colorScheme.primary
@@ -2555,12 +2488,8 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
           ),
         ),
         child: _KeyFace(
-          flickLabel: widget.flickLabel,
-          // Muted against the resting fill, so a press does not wash it out.
-          flickColor: _KeyFace.mutedInk(
-            colorScheme.surfaceContainerHighest,
-            foregroundColor,
-          ),
+          hasMenu: widget.menuGesture != null,
+          indicatorColor: colorScheme.primary,
           label: _buildContent(foregroundColor),
         ),
       ),
@@ -2593,7 +2522,6 @@ class _ModifierButton extends StatefulWidget {
     this.icon,
     this.tooltip,
     this.menuGesture,
-    this.flickLabel,
     this.semanticsHint,
     this.customSemanticsActions,
     super.key,
@@ -2606,11 +2534,9 @@ class _ModifierButton extends StatefulWidget {
   final VoidCallback onDoubleTap;
   final String? tooltip;
 
-  /// Opens a menu on press-and-hold or an upward swipe.
+  /// Opens a menu on press-and-hold or an upward swipe, and shows the menu
+  /// indicator in the key's corner.
   final _KeyMenuGesture? menuGesture;
-
-  /// What a straight swipe up sends, shown above the label.
-  final String? flickLabel;
   final String? semanticsHint;
   final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
 
@@ -2671,11 +2597,11 @@ class _ModifierButtonState extends State<_ModifierButton> {
           ),
         ),
         child: _KeyFace(
-          flickLabel: widget.flickLabel,
-          // A muted label on the armed or locked fill would drop below 4.5:1
-          // contrast, and the fill already sets the key apart.
-          flickColor: widget.state == null
-              ? _KeyFace.mutedInk(bgColor, textColor)
+          hasMenu: widget.menuGesture != null,
+          // Armed and locked states fill the key with a primary tint, so
+          // switch to the label color to keep the dots visible.
+          indicatorColor: widget.state == null
+              ? colorScheme.primary
               : textColor,
           label: Row(
             mainAxisSize: MainAxisSize.min,
