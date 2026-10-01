@@ -362,6 +362,49 @@ test('OpenRouter and Nous expose balances without inventing allowances', () => {
   assert.equal(r.windows[2].usedPercent, 20);
 });
 
+test('Pi Sign in with ChatGPT reads the plan through a Codex sign-in for the same user', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {providerUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const jwt = claims => ['e30', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'SIG'].join('.');
+  const codex = (user, exp) => jwt({exp, 'https://api.openai.com/auth': {chatgpt_account_id: `ACCOUNT_${user}`, user_id: user}});
+  const later = Math.floor(Date.now() / 1000) + 3600;
+  const direct = jwt({exp: later, scope: 'openid offline_access resource.invoke chatgpt.tokens.use.direct'});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-chatgpt-plan-'));
+  const previous = process.env.CODEX_HOME;
+  try {
+    process.env.CODEX_HOME = dir;
+    fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({tokens: {access_token: codex('user-me', later), account_id: 'CLI_ACCOUNT'}}));
+    const accounts = [['openai', {type: 'oauth', access: direct}],
+      ['openai-codex', {type: 'oauth', access: codex('user-other', later)}],
+      ['openai-codex', {type: 'oauth', access: codex('user-me', 1)}]];
+    const requests = [];
+    const fetch = async (url, options) => {
+      requests.push([url, options.token, options.headers?.['ChatGPT-Account-Id']]);
+      if (url === 'https://api.openai.com/v1/me') return {id: 'user-me', email: 'SECRET'};
+      return {rate_limit: {secondary_window: {used_percent: 26, limit_window_seconds: 604800}}};
+    };
+    const r = await providerUsage('openai', accounts[0][1], fetch, accounts);
+    assert.deepEqual(r.windows.map(w => [w.label, w.usedPercent]), [['Weekly', 26]]);
+    // Another user's sign-in and an expired one are skipped for Codex CLI's.
+    assert.deepEqual(requests, [['https://api.openai.com/v1/me', direct, undefined],
+      ['https://chatgpt.com/backend-api/wham/usage', codex('user-me', later), 'CLI_ACCOUNT']]);
+    assert.ok(!JSON.stringify(r).includes('SECRET'));
+
+    fs.rmSync(path.join(dir, 'auth.json'));
+    requests.length = 0;
+    assert.deepEqual(await providerUsage('openai', accounts[0][1], fetch, accounts), {windows: [], status: 'notReported'});
+    assert.equal(requests.length, 1);
+
+    // A Codex-style OpenAI sign-in still reads its own account.
+    requests.length = 0;
+    await providerUsage('openai', {type: 'oauth', access: codex('user-me', later)}, fetch, accounts);
+    assert.deepEqual(requests, [['https://chatgpt.com/backend-api/wham/usage', codex('user-me', later), 'ACCOUNT_user-me']]);
+  } finally {
+    previous == null ? delete process.env.CODEX_HOME : process.env.CODEX_HOME = previous;
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 for (const id of ['pi', 'opencode', 'hermes']) {
   test(`${id} reads each configured account and isolates failed provider checks`, async () => {
     const accounts = [['anthropic', {access: 'ONE'}], ['openai-codex', {access: 'TWO'}], ['custom-id-SECRET', {key: 'SECRET'}], ['anthropic', {access: 'THREE'}]];
