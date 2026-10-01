@@ -154,14 +154,19 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
       height: 1.45,
     );
     final body = machineContent ? mono() : prose();
-    final link = machineContent
-        ? mono(color: scheme.primary, decoration: TextDecoration.underline)
-        : prose(color: scheme.primary, decoration: TextDecoration.underline);
+    // Links inherit the surrounding prose/code face but always retain their
+    // underline, even when the configured terminal style clears decorations.
+    final link = TextStyle(
+      color: scheme.primary,
+      decoration: TextDecoration.underline,
+      decorationColor: scheme.primary,
+    );
     final styleSheet = base.copyWith(
       blockSpacing: FluttyTheme.spacingSm,
       p: body,
-      a: link.copyWith(decorationColor: scheme.primary),
+      a: link,
       code: mono().copyWith(
+        inherit: true,
         color: scheme.onSurface,
         backgroundColor: scheme.surfaceContainerHighest,
       ),
@@ -211,6 +216,7 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
         'pre': _AcpCodeBlockBuilder(
           syntaxTheme: widget.syntaxTheme,
           onCopy: widget.onCopyCode,
+          onTapLink: widget.onTapLink,
         ),
       },
     );
@@ -234,10 +240,11 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
 }
 
 class _AcpCodeBlockBuilder extends MarkdownElementBuilder {
-  _AcpCodeBlockBuilder({this.syntaxTheme, this.onCopy});
+  _AcpCodeBlockBuilder({this.syntaxTheme, this.onCopy, this.onTapLink});
 
   final Map<String, TextStyle>? syntaxTheme;
   final ValueChanged<String>? onCopy;
+  final MarkdownTapLinkCallback? onTapLink;
 
   @override
   bool isBlockElement() => true;
@@ -271,6 +278,9 @@ class _AcpCodeBlockBuilder extends MarkdownElementBuilder {
         language: language,
         syntaxTheme: syntaxTheme,
         onCopy: onCopy,
+        onTapPath: onTapLink == null
+            ? null
+            : (path) => onTapLink!(path, acpMarkdownPathHref(path), ''),
       ),
     );
   }

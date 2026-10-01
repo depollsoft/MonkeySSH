@@ -7,6 +7,8 @@ import 'acp_chat_typography.dart';
 import 'acp_diff.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
+import 'acp_markdown_paths.dart';
+import 'acp_path_text.dart';
 
 /// Presentation helpers for [AcpToolStatus].
 extension AcpToolStatusPresentation on AcpToolStatus {
@@ -340,6 +342,7 @@ class _ToolCallDetails extends StatelessWidget {
           input: input,
           output: richOutput ? null : output,
           active: active,
+          onTapLink: onTapLink,
         ),
       );
     }
@@ -428,11 +431,13 @@ class _ToolPayloadStream extends StatelessWidget {
     required this.input,
     required this.output,
     required this.active,
+    this.onTapLink,
   });
 
   final String? input;
   final String? output;
   final bool active;
+  final MarkdownTapLinkCallback? onTapLink;
 
   String get _text {
     final sections = <String>[];
@@ -501,8 +506,11 @@ class _ToolPayloadStream extends StatelessWidget {
         padding: const EdgeInsets.all(6),
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          child: SelectableText(
-            _text,
+          child: AcpPathText(
+            text: _text,
+            onTapPath: onTapLink == null
+                ? null
+                : (path) => onTapLink!(path, acpMarkdownPathHref(path), ''),
             style: AcpChatTypography.monoStyleOf(
               context,
             ).copyWith(fontSize: 11.5, color: scheme.onSurface, height: 1.35),
@@ -566,6 +574,8 @@ class _LocationRow extends StatelessWidget {
               style: AcpChatTypography.monoStyleOf(context).copyWith(
                 fontSize: 12,
                 color: onOpen != null ? scheme.primary : scheme.onSurface,
+                decoration: onOpen != null ? TextDecoration.underline : null,
+                decorationColor: scheme.primary,
               ),
             ),
           ),

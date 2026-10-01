@@ -4,6 +4,7 @@ import 'package:highlight/highlight.dart' show highlight;
 
 import '../../app/theme.dart';
 import 'acp_chat_typography.dart';
+import 'acp_path_text.dart';
 import 'highlight_nodes.dart';
 import 'syntax_highlight_theme.dart';
 
@@ -53,6 +54,7 @@ class AcpCodeBlock extends StatefulWidget {
     this.language,
     this.syntaxTheme,
     this.onCopy,
+    this.onTapPath,
   });
 
   /// The code to display.
@@ -66,6 +68,9 @@ class AcpCodeBlock extends StatefulWidget {
 
   /// Optional callback invoked (with the copied code) after a successful copy.
   final ValueChanged<String>? onCopy;
+
+  /// Opens detected remote paths within the literal block text.
+  final ValueChanged<String>? onTapPath;
 
   @override
   State<AcpCodeBlock> createState() => _AcpCodeBlockState();
@@ -126,15 +131,15 @@ class _AcpCodeBlockState extends State<AcpCodeBlock> {
               ),
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                child: SelectableText.rich(
-                  TextSpan(
-                    style: baseStyle,
-                    children: buildAcpHighlightSpans(
-                      widget.code,
-                      theme: syntaxTheme,
-                      language: language,
-                    ),
+                child: AcpPathText(
+                  text: widget.code,
+                  style: baseStyle,
+                  spans: buildAcpHighlightSpans(
+                    widget.code,
+                    theme: syntaxTheme,
+                    language: language,
                   ),
+                  onTapPath: widget.onTapPath,
                 ),
               ),
             ),

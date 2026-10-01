@@ -17,6 +17,8 @@ import 'package:monkeyssh/presentation/widgets/acp_tool_call.dart';
 import 'package:monkeyssh/presentation/widgets/acp_usage.dart';
 import 'package:monkeyssh/presentation/widgets/acp_user_prompt.dart';
 
+import '../helpers/tap_selectable_text.dart';
+
 // A tiny valid 1x1 PNG.
 final _pngBytes = Uint8List.fromList([
   0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
@@ -75,6 +77,42 @@ void main() {
     expect(openedPath, 'lib/main.dart');
     expect(tester.takeException(), isNull);
   });
+
+  for (final entry in [
+    AcpToolCallEntry(
+      id: 'tool-plain',
+      toolCall: AcpToolCall(
+        id: 'tool-plain',
+        title: 'Read source',
+        status: AcpToolStatus.running,
+        rawOutput: 'See lib/main.dart:42',
+      ),
+    ),
+    AcpUserPromptEntry(
+      id: 'user-path',
+      parts: const [AcpTextPart('Read lib/main.dart')],
+    ),
+  ]) {
+    testWidgets(
+      'literal text paths in ${entry.id} use the native link handler',
+      (tester) async {
+        String? opened;
+        await tester.pumpWidget(
+          wrap(
+            AcpMessageThread(
+              entries: [entry],
+              onTapLink: (_, href, _) => opened = resolveAcpMarkdownPath(href!),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tapSelectableSubstring(tester, 'lib/main.dart');
+        await tester.pump();
+        expect(opened, 'lib/main.dart');
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   testWidgets('uses a dense native transcript viewport', (tester) async {
     await tester.pumpWidget(

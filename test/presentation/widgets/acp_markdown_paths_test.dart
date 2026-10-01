@@ -37,12 +37,34 @@ void main() {
     });
   }
 
+  for (final newline in ['\n', '\r\n']) {
+    test(
+      'native line boundaries keep separate paths, CRLF: ${newline.length == 2}',
+      () {
+        final text = '/tmp/output.log:42${newline}lib/main.dart';
+        final paths = detectAcpFilePaths(text);
+        expect(paths.map((match) => match.path), [
+          '/tmp/output.log',
+          'lib/main.dart',
+        ]);
+        expect(paths.map((match) => text.substring(match.start, match.end)), [
+          '/tmp/output.log',
+          'lib/main.dart',
+        ]);
+        final links = elements(parse(text), 'a');
+        expect(
+          links.map((link) => resolveAcpMarkdownPath(link.attributes['href']!)),
+          ['/tmp/output.log', 'lib/main.dart'],
+        );
+      },
+    );
+  }
+
   test('retains inline code styling and line suffixes', () {
     final nodes = parse('Open `lib/main.dart:42` now.');
     final link = elements(nodes, 'a').single;
     expect(resolveAcpMarkdownPath(link.attributes['href']!), 'lib/main.dart');
-    expect(link.children!.single, isA<md.Element>());
-    expect((link.children!.single as md.Element).tag, 'code');
+    expect(elements(nodes, 'code').single.children!.single, same(link));
     expect(link.textContent, 'lib/main.dart:42');
   });
 

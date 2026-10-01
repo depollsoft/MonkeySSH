@@ -9,6 +9,7 @@ import '../models/acp_timeline.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
 import 'acp_markdown_data_images.dart';
+import 'acp_markdown_paths.dart';
 import 'acp_plan.dart';
 import 'acp_status_entry.dart';
 import 'acp_thought.dart';
@@ -682,6 +683,9 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
   }
 
+  void _openPath(String path) =>
+      widget.onTapLink?.call(path, acpMarkdownPathHref(path), '');
+
   Widget _buildEntry(BuildContext context, AcpTimelineEntry entry) {
     switch (entry) {
       case AcpUserPromptEntry():
@@ -691,6 +695,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           onTapImage: widget.onTapImage,
           onOpenResource: widget.onOpenResource,
           onCopyResource: widget.onCopyResource,
+          onTapPath: widget.onTapLink == null ? null : _openPath,
         );
       case AcpAssistantMessageEntry():
         return _AssistantMessage(
@@ -765,6 +770,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         onTapImage: widget.onTapImage,
         onOpenResource: widget.onOpenResource,
         onCopyResource: widget.onCopyResource,
+        onTapPath: widget.onTapLink == null ? null : _openPath,
       );
     } else if (entry is AcpAssistantMessageEntry &&
         threadChild.markdown != null) {

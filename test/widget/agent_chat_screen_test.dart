@@ -37,6 +37,7 @@ import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
 import '../helpers/keyboard_visibility_channel.dart';
+import '../helpers/tap_selectable_text.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _MockSshService extends Mock implements SshService {}
@@ -138,6 +139,7 @@ void main() {
   for (final (markdown, path) in [
     ('lib/main.dart:42', 'lib/main.dart'),
     ('`lib/main.dart`', 'lib/main.dart'),
+    ('```text\nlib/main.dart:42\n```', 'lib/main.dart'),
     ('[source](lib/main.dart)', 'lib/main.dart'),
     ('[source](file:///tmp/a%20b.txt)', '/tmp/a b.txt'),
     (r'C:\Users\dev\main.dart', 'C:/Users/dev/main.dart'),
@@ -177,8 +179,10 @@ void main() {
       await tester.pumpAndSettle();
       final label = markdown.startsWith('[source]')
           ? 'source'
+          : markdown.startsWith('```')
+          ? 'lib/main.dart'
           : markdown.replaceAll('`', '');
-      await tester.tap(find.text(label, findRichText: true).first);
+      await tapSelectableSubstring(tester, label);
       await tester.pumpAndSettle();
       expect(find.text('SFTP browser'), findsOneWidget);
       expect(opened?.path, '/sftp/${session.key.hostId}');

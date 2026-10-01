@@ -9,10 +9,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
+import 'package:monkeyssh/presentation/widgets/acp_chat_typography.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown_paths.dart';
+
+import '../helpers/tap_selectable_text.dart';
+
+Iterable<TextSpan> leafSpans(
+  TextSpan span, [
+  TextStyle parent = const TextStyle(),
+]) sync* {
+  final style = parent.merge(span.style);
+  if (span.text != null) {
+    yield TextSpan(text: span.text, style: style, recognizer: span.recognizer);
+  }
+  for (final child in span.children ?? const <InlineSpan>[]) {
+    if (child is TextSpan) yield* leafSpans(child, style);
+  }
+}
 
 Widget wrap(Widget child) => MaterialApp(
   theme: FluttyTheme.dark,
@@ -188,6 +204,112 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  for (final machineContent in [false, true]) {
+    testWidgets(
+      'path underlines survive terminal styling, machine: $machineContent',
+      (tester) async {
+        await tester.pumpWidget(
+          wrap(
+            AcpChatTypography(
+              monoStyle: const TextStyle(
+                inherit: false,
+                fontFamily: 'test-mono',
+                decoration: TextDecoration.none,
+              ),
+              child: AcpMarkdown(
+                data: 'lib/plain.dart and `lib/inline.dart`',
+                machineContent: machineContent,
+                onTapLink: (_, _, _) {},
+              ),
+            ),
+          ),
+        );
+        final links = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .expand((text) => leafSpans(text.textSpan!))
+            .where((span) => span.recognizer != null)
+            .toList();
+        expect(links, hasLength(2));
+        for (final link in links) {
+          expect(
+            link.style?.decoration?.contains(TextDecoration.underline),
+            isTrue,
+          );
+          expect(link.style?.color, FluttyTheme.dark.colorScheme.primary);
+        }
+        expect(links.last.style?.fontFamily, 'test-mono');
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final language in ['', 'text', 'plaintext', 'sh', 'dart']) {
+    testWidgets('fenced $language blocks have underlined tappable paths', (
+      tester,
+    ) async {
+      String? opened;
+      const code = 'open lib/main.dart:42';
+      await tester.pumpWidget(
+        wrap(
+          AcpMarkdown(
+            data: '```$language\n$code\n```',
+            onTapLink: (_, href, _) => opened = resolveAcpMarkdownPath(href!),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final selectable = tester.widget<SelectableText>(
+        find.byType(SelectableText),
+      );
+      expect(selectable.textSpan!.toPlainText(), code);
+      final links = leafSpans(selectable.textSpan!)
+          .where((span) => span.recognizer != null);
+      expect(links.map((span) => span.text).join(), 'lib/main.dart');
+      for (final link in links) {
+        expect(
+          link.style?.decoration?.contains(TextDecoration.underline),
+          isTrue,
+        );
+      }
+      await tapSelectableSubstring(tester, 'lib/main.dart');
+      await tester.pump();
+      expect(opened, 'lib/main.dart');
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('copying a linked text block preserves its literal contents', (
+    tester,
+  ) async {
+    const code = 'cat lib/main.dart:42\n/tmp/output.log';
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      wrap(
+        AcpMarkdown(
+          data: '```text\n$code\n```',
+          onTapLink: (_, _, _) {},
+          onCopyCode: (text) => copied = text,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.copy_rounded));
+    await tester.pump();
+    expect(copied, code);
+    await tester.pump(const Duration(seconds: 2));
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('wires custom link handler to MarkdownBody', (tester) async {
     var tappedHref = '';
