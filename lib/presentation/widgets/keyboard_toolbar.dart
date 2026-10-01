@@ -265,32 +265,35 @@ typedef _MenuSymbol = (String symbol, String name);
 
 /// Characters behind the `|`, `/` and `~` keys, nearest the key first.
 ///
-/// `-` sits behind `/` because command-line flags need it constantly and
-/// phone keyboards keep it off the letter layout. `\` pairs with `|` and the
-/// backtick with `~`, as they share a key on a physical keyboard.
+/// Each key holds symbols like itself: `|` the shell's logic and plumbing,
+/// `/` slashes and the marks found in paths and references, and `~` dashes
+/// and the other accent marks. `-` leads `~` because command-line flags need
+/// it constantly and phone keyboards keep it off the letter layout. Each
+/// stack stays at six so it fits above the toolbar on a small phone with the
+/// keyboard up.
 const _pipeSymbols = <_MenuSymbol>[
-  (r'\', 'Backslash'),
   ('&', 'Ampersand'),
-  (';', 'Semicolon'),
+  ('!', 'Exclamation mark'),
+  (r'$', 'Dollar'),
   ('>', 'Greater than'),
   ('<', 'Less than'),
-  ('!', 'Exclamation mark'),
+  (';', 'Semicolon'),
 ];
 const _slashSymbols = <_MenuSymbol>[
+  (r'\', 'Backslash'),
+  ('*', 'Asterisk'),
+  (':', 'Colon'),
+  ('@', 'At sign'),
+  ('%', 'Percent'),
+  ('#', 'Hash'),
+];
+const _tildeSymbols = <_MenuSymbol>[
   ('-', 'Dash'),
   ('_', 'Underscore'),
   ('=', 'Equals'),
-  (':', 'Colon'),
-  ('*', 'Asterisk'),
   ('+', 'Plus'),
-];
-const _tildeSymbols = <_MenuSymbol>[
-  ('`', 'Backtick'),
-  (r'$', 'Dollar'),
-  ('@', 'At sign'),
-  ('#', 'Hash'),
-  ('%', 'Percent'),
   ('^', 'Caret'),
+  ('`', 'Backtick'),
 ];
 
 /// Function keys behind Esc, which heads the function-key row on a physical

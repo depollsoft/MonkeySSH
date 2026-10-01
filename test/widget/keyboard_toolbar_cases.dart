@@ -1543,7 +1543,7 @@ void registerKeyboardToolbarTests() {
         expect(output, ['\x1b[Z']);
       });
 
-      testWidgets('a straight swipe up from Slash types a dash', (
+      testWidgets('a straight swipe up types the symbol nearest the key', (
         tester,
       ) async {
         final output = <String>[];
@@ -1553,15 +1553,18 @@ void registerKeyboardToolbarTests() {
           bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
         );
 
-        final gesture = await tester.startGesture(
-          tester.getCenter(find.byTooltip('Slash')),
-        );
-        await gesture.moveTo(aboveKey(tester, 'Slash'));
-        await tester.pump();
-        await gesture.up();
-        await tester.pump();
+        for (final tooltip in const ['Tilde', 'Slash', 'Pipe']) {
+          final gesture = await tester.startGesture(
+            tester.getCenter(find.byTooltip(tooltip)),
+          );
+          await gesture.moveTo(aboveKey(tester, tooltip));
+          await tester.pump();
+          await gesture.up();
+          await tester.pump();
+        }
 
-        expect(output, ['-']);
+        // A dash on ~, a backslash on /, and logic's & on |.
+        expect(output, ['-', r'\', '&']);
       });
 
       testWidgets('symbol menus stack above their key', (tester) async {
@@ -1599,7 +1602,7 @@ void registerKeyboardToolbarTests() {
               .first,
         );
         var previous = tildeRect;
-        for (final symbol in ['`', r'$', '@', '#', '%', '^']) {
+        for (final symbol in ['-', '_', '=', '+', '^', '`']) {
           final rect = row(symbol);
           expect(rect.bottom, lessThan(previous.top + 0.01), reason: symbol);
           expect(rect.left, greaterThanOrEqualTo(0));
@@ -1612,12 +1615,12 @@ void registerKeyboardToolbarTests() {
           previous = rect;
         }
 
-        await gesture.moveTo(Offset(tildeRect.center.dx, row(r'$').center.dy));
+        await gesture.moveTo(Offset(tildeRect.center.dx, row('=').center.dy));
         await tester.pump();
         await gesture.up();
         await tester.pump();
 
-        expect(output, [r'$']);
+        expect(output, ['=']);
       });
 
       testWidgets('symbol rows are named for screen readers', (tester) async {
@@ -1626,7 +1629,7 @@ void registerKeyboardToolbarTests() {
           bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
         );
 
-        final gesture = await swipeUpFrom(tester, 'Slash');
+        final gesture = await swipeUpFrom(tester, 'Tilde');
         expect(find.bySemanticsLabel('Dash'), findsOneWidget);
 
         await gesture.cancel();
@@ -1642,7 +1645,7 @@ void registerKeyboardToolbarTests() {
         for (final (tooltip, item) in const [
           ('Ctrl', '\u2303D'),
           ('Tab', '\u21e7Tab'),
-          ('Slash', '_'),
+          ('Slash', '*'),
         ]) {
           final gesture = await swipeUpFrom(tester, tooltip);
           await gesture.moveTo(tester.getCenter(find.text(item)));
@@ -1678,9 +1681,9 @@ void registerKeyboardToolbarTests() {
         await tester.pump();
 
         final gesture = await tester.startGesture(
-          tester.getCenter(find.byTooltip('Pipe')),
+          tester.getCenter(find.byTooltip('Slash')),
         );
-        await gesture.moveTo(aboveKey(tester, 'Pipe'));
+        await gesture.moveTo(aboveKey(tester, 'Slash'));
         await tester.pump();
         await gesture.up();
         await tester.pump();
@@ -1720,9 +1723,9 @@ void registerKeyboardToolbarTests() {
         expect(specialKeys, [TerminalKey.escape]);
 
         final swipe = await tester.startGesture(
-          tester.getCenter(find.byTooltip('Slash')),
+          tester.getCenter(find.byTooltip('Tilde')),
         );
-        await swipe.moveTo(aboveKey(tester, 'Slash'));
+        await swipe.moveTo(aboveKey(tester, 'Tilde'));
         await tester.pump();
         await swipe.up();
         await tester.pump();
@@ -1744,7 +1747,7 @@ void registerKeyboardToolbarTests() {
         );
 
         for (final (tooltip, action) in const [
-          ('Slash', 'Send Dash'),
+          ('Tilde', 'Send Dash'),
           ('Escape', 'Send F5'),
           ('Tab', 'Send Shift+Tab'),
         ]) {
@@ -1768,7 +1771,7 @@ void registerKeyboardToolbarTests() {
         ('Paste', 'Paste Media', 'Paste Files'),
         ('Ctrl', '⌃D', '⌃C'),
         ('Escape', 'F2', 'F3'),
-        ('Slash', '_', '='),
+        ('Tilde', '_', '='),
       ]) {
         testWidgets('the $tooltip menu ticks each item the finger crosses', (
           tester,
