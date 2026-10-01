@@ -1150,22 +1150,21 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _ => null,
   };
 
-  /// A stack of symbols like the Ctrl menu: a straight swipe up chooses by
-  /// distance alone, with no sideways aim.
+  /// A one-column stack of symbols centered over the key, so a straight
+  /// swipe up chooses by distance alone, with no sideways aim. Without room
+  /// above the key it folds into fewer, wider rows.
   _KeyMenu _symbolMenu(List<_MenuSymbol> symbols) => _KeyMenu(
     items: [
       for (final (symbol, name) in symbols)
         _KeyMenuItem(
           symbol: symbol,
-          description: name,
           semanticsLabel: name,
           onSelected: () => _sendText(symbol),
         ),
     ],
-    listWidth: _keyMenuListWidth,
-    gridColumns: symbols.length,
-    cellWidth: 88,
-    symbolFontSize: 18,
+    gridColumns: 1,
+    cellWidth: 52,
+    symbolFontSize: 20,
   );
 
   _KeyMenuGesture? _keyMenuGesture(_MenuKey key) => _keyMenuFor(key) == null
@@ -1718,8 +1717,8 @@ class _KeyMenu {
   /// when it fits above the key. Null for a menu that is always a grid.
   final double? listWidth;
 
-  /// Size of a symbol in a list row, or in a grid cell without a description;
-  /// null keeps the menu text size.
+  /// Size of a grid symbol shown without a description; null keeps the menu
+  /// text size.
   final double? symbolFontSize;
 }
 
@@ -1984,12 +1983,11 @@ class _KeyMenuView extends StatelessWidget {
 
   /// Menu cells keep a fixed 44 px height so layout and hit testing need no
   /// text metrics, so text scaling stops where the content still fits with a
-  /// 1.2 line height. A list row holds one line of at most 18 px (18 x 2.0 x
-  /// 1.2 is about 43 px), and a lone grid symbol scales down to fit its cell.
-  /// A grid cell with a description stacks two lines, and a described menu is
-  /// only a grid when there is no vertical room for its list ((14 + 10) x 1.4
-  /// x 1.2 is about 40 px). Screen readers get the full names from the key's
-  /// actions.
+  /// 1.2 line height. A list row holds one 14 px line (14 x 2.0 x 1.2 is about
+  /// 34 px), and a lone grid symbol scales down to fit its cell. A grid cell
+  /// with a description stacks two lines, and a described menu is only a grid
+  /// when there is no vertical room for its list ((14 + 10) x 1.4 x 1.2 is
+  /// about 40 px). Screen readers get the full names from the key's actions.
   static const _maxTextScale = 2.0;
   static const _stackedMaxTextScale = 1.4;
 
@@ -2010,7 +2008,10 @@ class _KeyMenuView extends StatelessWidget {
             for (var row = 0; row < layout.rows; row += 1)
               SizedBox(
                 height: TerminalMenuStyles.itemHeight,
+                // Stretched so a highlight fills the whole row, not just the
+                // height of its text.
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     for (var column = 0; column < layout.columns; column += 1)
                       Expanded(
@@ -2093,12 +2094,9 @@ class _KeyMenuCell extends StatelessWidget {
       content = isList
           ? Row(
               children: [
-                // The symbol leads because it is what gets sent; the
-                // description names it or gives its usual shell meaning.
-                Text(
-                  item.symbol,
-                  style: symbolStyle.copyWith(fontSize: symbolFontSize),
-                ),
+                // The symbol leads because its meaning depends on the
+                // program; the description is the usual shell meaning.
+                Text(item.symbol, style: symbolStyle),
                 const SizedBox(width: TerminalMenuStyles.iconLabelGap),
                 Expanded(child: descriptionText),
               ],
@@ -2119,7 +2117,7 @@ class _KeyMenuCell extends StatelessWidget {
     // and screen readers send items through the key's custom actions.
     return Semantics(
       selected: highlighted,
-      label: description == null || description == item.semanticsLabel
+      label: description == null
           ? item.semanticsLabel
           : '${item.semanticsLabel}, $description',
       excludeSemantics: true,
@@ -2478,14 +2476,7 @@ class _ToolbarButtonState extends State<_ToolbarButton> {
               ? colorScheme.primary.withAlpha(50)
               : colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(6),
-          // A hairline keeps the key's edge visible where its fill matches
-          // the toolbar (the light theme). It stays 1 px when pressed, so the
-          // face does not shift.
-          border: Border.all(
-            color: _isPressed
-                ? colorScheme.primary
-                : colorScheme.outlineVariant,
-          ),
+          border: _isPressed ? Border.all(color: colorScheme.primary) : null,
         ),
         child: _KeyFace(
           hasMenu: widget.menuGesture != null,
@@ -2592,9 +2583,6 @@ class _ModifierButtonState extends State<_ModifierButton> {
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color: widget.state == null ? colorScheme.outlineVariant : bgColor,
-          ),
         ),
         child: _KeyFace(
           hasMenu: widget.menuGesture != null,

@@ -1564,9 +1564,7 @@ void registerKeyboardToolbarTests() {
         expect(output, ['-']);
       });
 
-      testWidgets('symbol menus stack above their key like Ctrl', (
-        tester,
-      ) async {
+      testWidgets('symbol menus stack above their key', (tester) async {
         const size = Size(390, 844);
         await tester.binding.setSurfaceSize(size);
         addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1592,14 +1590,14 @@ void registerKeyboardToolbarTests() {
         final tildeRect = tester.getRect(find.byTooltip('Tilde'));
         final gesture = await swipeUpFrom(tester, 'Tilde');
 
-        // The backtick is the row nearest the key and the rest stack upward,
-        // each spanning the key so a straight swipe up chooses by distance.
+        // The backtick is the row nearest the key and the rest stack upward
+        // in one column over the key, so a straight swipe up chooses by
+        // distance.
         Rect row(String symbol) => tester.getRect(
           find
               .ancestor(of: find.text(symbol), matching: find.byType(Container))
               .first,
         );
-        expect(find.text('Backtick'), findsOneWidget);
         var previous = tildeRect;
         for (final symbol in ['`', r'$', '@', '#', '%', '^']) {
           final rect = row(symbol);
@@ -1622,7 +1620,7 @@ void registerKeyboardToolbarTests() {
         expect(output, [r'$']);
       });
 
-      testWidgets('symbol rows read their name once', (tester) async {
+      testWidgets('symbol rows are named for screen readers', (tester) async {
         final semantics = tester.ensureSemantics();
         await tester.pumpWidget(
           bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
@@ -1630,11 +1628,36 @@ void registerKeyboardToolbarTests() {
 
         final gesture = await swipeUpFrom(tester, 'Slash');
         expect(find.bySemanticsLabel('Dash'), findsOneWidget);
-        expect(find.bySemanticsLabel('Dash, Dash'), findsNothing);
 
         await gesture.cancel();
         await tester.pump();
         semantics.dispose();
+      });
+
+      testWidgets('the highlight fills the whole menu row', (tester) async {
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+
+        for (final (tooltip, item) in const [
+          ('Ctrl', '\u2303D'),
+          ('Tab', '\u21e7Tab'),
+          ('Slash', '_'),
+        ]) {
+          final gesture = await swipeUpFrom(tester, tooltip);
+          await gesture.moveTo(tester.getCenter(find.text(item)));
+          await tester.pump();
+
+          final row = tester.getRect(
+            find
+                .ancestor(of: find.text(item), matching: find.byType(Container))
+                .first,
+          );
+          expect(row.height, TerminalMenuStyles.itemHeight, reason: tooltip);
+
+          await gesture.cancel();
+          await tester.pump();
+        }
       });
 
       testWidgets('symbol menus apply armed modifiers like their keys', (
