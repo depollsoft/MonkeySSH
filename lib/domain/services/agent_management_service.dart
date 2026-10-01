@@ -687,6 +687,7 @@ class AgentManagementService {
   final AgentProbeTimeouts _timeouts;
   final Future<bool> Function() _canManageAgents;
   final DateTime Function() _now;
+  final _runningInstallations = Expando<Set<String>>();
 
   static const _updateCheckTtl = Duration(minutes: 15);
   static const _maxRuntimeCacheEntries = 32;
@@ -1453,6 +1454,37 @@ class AgentManagementService {
         output: 'Agent Management requires MonkeySSH Pro.',
       );
     }
+    // A reopened manager has its own view model. Protect the complete action,
+    // including verification and automatic repair, from a second mutation of
+    // the same installation through that new screen.
+    final running = _runningInstallations[session] ??= <String>{};
+    if (!running.add(definition.id)) {
+      return AgentRuntimeActionResult(
+        succeeded: false,
+        output:
+            'An installation or update for ${definition.label} is already running. Wait for it to finish, then tap Re-check.',
+      );
+    }
+    try {
+      return await _installOrUpdate(
+        session,
+        definition,
+        update: update,
+        current: current,
+        onOutput: onOutput,
+      );
+    } finally {
+      running.remove(definition.id);
+    }
+  }
+
+  Future<AgentRuntimeActionResult> _installOrUpdate(
+    SshSession session,
+    AgentRuntimeDefinition definition, {
+    required bool update,
+    AgentRuntimeInfo? current,
+    ValueChanged<String>? onOutput,
+  }) async {
     final command = buildAgentInstallCommand(
       definition,
       windows: session.remoteIsWindows,
@@ -1488,18 +1520,60 @@ class AgentManagementService {
         onOutput: onOutput,
         unlimitedTimeout: true,
       );
-      // The result dialog is plain text. Strip terminal colors and cursor
-      // controls after assembling chunks, since escapes can cross SSH packets.
-      result = AgentRuntimeActionResult(
-        succeeded: result.succeeded,
-        exitCode: result.exitCode,
-        output: result.output
-            .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
-            .trim(),
-      );
       if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
-        final verified = await inspect(session, definition);
+        var verified = await inspect(session, definition);
+        // OpenCode's updater can leave its package's postinstall scripts
+        // pending. Finish setup on the newly detected launcher, not the old
+        // path or a different global package installation.
+        if (update &&
+            !repairing &&
+            definition.id == 'cli:opencode' &&
+            verified.status == AgentRuntimeStatus.needsRepair) {
+          final repairCommand = buildAgentInstallCommand(
+            definition,
+            windows: session.remoteIsWindows,
+            update: false,
+            repair: true,
+            executablePath: verified.executablePath,
+          );
+          if (repairCommand != null) {
+            DiagnosticsLogService.instance.info(
+              'agent.management',
+              'action_auto_repair',
+              fields: {
+                'connectionId': session.connectionId,
+                'agentId': definition.id,
+              },
+            );
+            const message =
+                '\nRequired setup scripts did not run. Repairing OpenCode automatically.\n';
+            onOutput?.call(message);
+            late final AgentRuntimeActionResult repairResult;
+            try {
+              repairResult = await _run(
+                session,
+                repairCommand,
+                onOutput: onOutput,
+                unlimitedTimeout: true,
+              );
+            } on Object catch (error) {
+              repairResult = AgentRuntimeActionResult(
+                succeeded: false,
+                output: 'Required setup could not be completed. $error',
+              );
+            }
+            result = AgentRuntimeActionResult(
+              succeeded: repairResult.succeeded,
+              exitCode: repairResult.exitCode,
+              output: '${result.output}$message${repairResult.output}',
+            );
+            if (repairResult.succeeded) {
+              verified = await inspect(session, definition);
+            }
+          }
+        }
         final healthy =
+            result.succeeded &&
             (verified.status == AgentRuntimeStatus.installed ||
                 verified.status == AgentRuntimeStatus.updateAvailable) &&
             verified.installedVersion != null;
@@ -1526,6 +1600,16 @@ class AgentManagementService {
         }
       }
 
+      // The result dialog is plain text. Strip terminal colors and cursor
+      // controls after assembling update and repair output, since escapes can
+      // cross SSH packets.
+      result = AgentRuntimeActionResult(
+        succeeded: result.succeeded,
+        exitCode: result.exitCode,
+        output: result.output
+            .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
+            .trim(),
+      );
       DiagnosticsLogService.instance.info(
         'agent.management',
         'action_complete',
