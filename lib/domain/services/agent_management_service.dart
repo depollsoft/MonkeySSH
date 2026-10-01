@@ -1488,18 +1488,52 @@ class AgentManagementService {
         onOutput: onOutput,
         unlimitedTimeout: true,
       );
-      // The result dialog is plain text. Strip terminal colors and cursor
-      // controls after assembling chunks, since escapes can cross SSH packets.
-      result = AgentRuntimeActionResult(
-        succeeded: result.succeeded,
-        exitCode: result.exitCode,
-        output: result.output
-            .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
-            .trim(),
-      );
       if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
-        final verified = await inspect(session, definition);
+        var verified = await inspect(session, definition);
+        // OpenCode's updater can leave its package's postinstall scripts
+        // pending. Finish setup on the newly detected launcher, not the old
+        // path or a different global package installation.
+        if (update &&
+            !repairing &&
+            definition.id == 'cli:opencode' &&
+            verified.status == AgentRuntimeStatus.needsRepair) {
+          final repairCommand = buildAgentInstallCommand(
+            definition,
+            windows: session.remoteIsWindows,
+            update: false,
+            repair: true,
+            executablePath: verified.executablePath,
+          );
+          if (repairCommand != null) {
+            DiagnosticsLogService.instance.info(
+              'agent.management',
+              'action_auto_repair',
+              fields: {
+                'connectionId': session.connectionId,
+                'agentId': definition.id,
+              },
+            );
+            const message =
+                '\nRequired setup scripts did not run. Repairing OpenCode automatically.\n';
+            onOutput?.call(message);
+            final repairResult = await _run(
+              session,
+              repairCommand,
+              onOutput: onOutput,
+              unlimitedTimeout: true,
+            );
+            result = AgentRuntimeActionResult(
+              succeeded: repairResult.succeeded,
+              exitCode: repairResult.exitCode,
+              output: '${result.output}$message${repairResult.output}',
+            );
+            if (repairResult.succeeded) {
+              verified = await inspect(session, definition);
+            }
+          }
+        }
         final healthy =
+            result.succeeded &&
             (verified.status == AgentRuntimeStatus.installed ||
                 verified.status == AgentRuntimeStatus.updateAvailable) &&
             verified.installedVersion != null;
@@ -1526,6 +1560,16 @@ class AgentManagementService {
         }
       }
 
+      // The result dialog is plain text. Strip terminal colors and cursor
+      // controls after assembling update and repair output, since escapes can
+      // cross SSH packets.
+      result = AgentRuntimeActionResult(
+        succeeded: result.succeeded,
+        exitCode: result.exitCode,
+        output: result.output
+            .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
+            .trim(),
+      );
       DiagnosticsLogService.instance.info(
         'agent.management',
         'action_complete',

@@ -158,6 +158,73 @@ void main() {
     runtimes[index] = runtime;
   }
 
+  testWidgets('Update all continues after the manager route is dismissed', (
+    tester,
+  ) async {
+    runtimes[1] = secondUpdate();
+    final first = runtimes.first;
+    final second = runtimes[1];
+    final firstResult = Completer<AgentRuntimeActionResult>();
+    final secondResult = Completer<AgentRuntimeActionResult>();
+    late void Function(String) output;
+    when(() => updateRuntime(first)).thenAnswer((invocation) {
+      output = invocation.namedArguments[#onOutput] as void Function(String);
+      return firstResult.future;
+    });
+    when(() => updateRuntime(second)).thenAnswer((invocation) {
+      output = invocation.namedArguments[#onOutput] as void Function(String);
+      return secondResult.future;
+    });
+    final navigator = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          agentManagementServiceProvider.overrideWithValue(service),
+          monetizationServiceProvider.overrideWithValue(billing),
+          monetizationStateProvider.overrideWith((ref) => Stream.value(access)),
+        ],
+        child: MaterialApp(
+          navigatorKey: navigator,
+          home: const Scaffold(body: Text('Terminal')),
+        ),
+      ),
+    );
+    unawaited(
+      navigator.currentState!.push<void>(
+        MaterialPageRoute(
+          builder: (_) => AgentManagementScreen(session: session),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-update-all')));
+    await pumpFrames(tester);
+    verify(() => updateRuntime(first)).called(1);
+    verifyNever(() => updateRuntime(second));
+
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentManagementScreen), findsNothing);
+    expect(find.text('Terminal'), findsOneWidget);
+    output('output after dismissal');
+    firstResult.complete(
+      const AgentRuntimeActionResult(succeeded: false, output: 'first failed'),
+    );
+    await tester.pumpAndSettle();
+    verify(() => updateRuntime(second)).called(1);
+    output('second update output');
+    secondResult.complete(
+      const AgentRuntimeActionResult(succeeded: true, output: 'done'),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byType(AlertDialog), findsNothing);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(1);
+  });
+
   testWidgets('usage starts before upstream version metadata completes', (
     tester,
   ) async {

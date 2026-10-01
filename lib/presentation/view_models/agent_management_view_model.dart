@@ -31,6 +31,7 @@ class AgentManagementViewModel extends ChangeNotifier {
   bool _disposed = false;
   bool get mounted => !_disposed;
   void _change(VoidCallback change) {
+    if (!mounted) return;
     change();
     notifyListeners();
   }
@@ -177,6 +178,12 @@ class AgentManagementViewModel extends ChangeNotifier {
         .toList(growable: false);
     if (updates.isEmpty || busy || refreshing) return;
 
+    // Capture dependencies while the screen is alive. A started batch belongs
+    // to this SSH session and must not stop or read a disposed widget's ref
+    // when the user dismisses Agent Management. Access is still checked
+    // before each command.
+    final actionService = service();
+    final actionSession = session();
     _change(() {
       updatingAll = true;
       completedUpdates = 0;
@@ -189,8 +196,13 @@ class AgentManagementViewModel extends ChangeNotifier {
     final failures = <String>[];
     try {
       for (final runtime in updates) {
-        if (!mounted || !await canManageAgents() || !mounted) break;
-        final result = await _executeAction(runtime, refreshAfterAction: false);
+        if (!await canManageAgents()) break;
+        final result = await _executeAction(
+          runtime,
+          actionService: actionService,
+          actionSession: actionSession,
+          refreshAfterAction: false,
+        );
         if (!result.succeeded) failures.add(runtime.definition.label);
         if (mounted) _change(() => completedUpdates++);
       }
@@ -215,13 +227,19 @@ class AgentManagementViewModel extends ChangeNotifier {
   Future<void> runAction(AgentRuntimeInfo runtime) async {
     if (!await canManageAgents() || !mounted) return;
     if (busy || refreshing) return;
-    final result = await _executeAction(runtime);
+    final result = await _executeAction(
+      runtime,
+      actionService: service(),
+      actionSession: session(),
+    );
     if (!mounted) return;
     if (!result.succeeded) await showActionResult(runtime, result);
   }
 
   Future<AgentRuntimeActionResult> _executeAction(
     AgentRuntimeInfo runtime, {
+    required AgentManagementService actionService,
+    required SshSession actionSession,
     bool refreshAfterAction = true,
   }) async {
     final id = runtime.definition.id;
@@ -234,8 +252,8 @@ class AgentManagementViewModel extends ChangeNotifier {
 
     late final AgentRuntimeActionResult result;
     try {
-      result = await service().installOrUpdate(
-        session(),
+      result = await actionService.installOrUpdate(
+        actionSession,
         runtime.definition,
         update: update,
         current: runtime,
