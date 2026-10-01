@@ -25,13 +25,13 @@ double resolveSystemBottomInset(MediaQueryData mediaQuery) {
   return math.max(mediaQuery.padding.bottom, unliftedInset);
 }
 
-/// How long a hidden-keyboard report must disagree with an unchanging IME inset
-/// before that inset is treated as stale.
+/// How long a keyboard inset must stay unchanged before it is checked against
+/// the platform's live keyboard state.
 ///
-/// An ordinary dismissal shrinks the inset every frame until it reaches zero,
-/// so this only matches geometry the platform stopped updating. It is longer
-/// than the platform's keyboard hide animation, and it restarts whenever the
-/// inset moves, so slow animations are never cut short.
+/// An ordinary show or dismissal moves the inset every frame, so this only
+/// matches geometry that has settled. It is longer than the platform's keyboard
+/// animation, and it restarts whenever the inset moves, so slow animations are
+/// never cut short.
 const staleKeyboardInsetDelay = Duration(milliseconds: 500);
 
 /// Replaces stale keyboard geometry with the platform-authoritative IME state.
@@ -39,12 +39,15 @@ const staleKeyboardInsetDelay = Duration(milliseconds: 500);
 /// Installed once above the app's navigator, so every route, sheet, and dialog
 /// inherits the corrected [MediaQueryData.viewInsets]. Android's embedding can
 /// keep reporting a keyboard-sized bottom inset after the IME closes, and every
-/// [Scaffold] would then reserve an empty keyboard-sized gap. When the native channel reports the
-/// keyboard hidden and the inset has not moved for [staleKeyboardInsetDelay],
-/// the inset is dropped, the uncovered navigation-bar padding is restored, and
-/// the platform is asked to dispatch fresh insets. Before the native channel
-/// responds, or while it reports the keyboard visible, geometry passes through
-/// unchanged.
+/// [Scaffold] would then reserve an empty keyboard-sized gap.
+///
+/// Once a bottom inset has settled for [staleKeyboardInsetDelay], the live
+/// platform state is queried, whatever the cached visibility says, because a
+/// missed hide event can leave that cache claiming a keyboard. Only a fresh
+/// "hidden" answer drops the inset: the uncovered navigation-bar padding is
+/// restored and the platform is asked to dispatch fresh insets. A confirmed
+/// keyboard is not queried again until its inset or visibility changes. Before
+/// the native channel responds, geometry passes through unchanged.
 class PlatformKeyboardInsetMediaQuery extends StatefulWidget {
   /// Creates a platform-aware keyboard-inset boundary for [child].
   const PlatformKeyboardInsetMediaQuery({required this.child, super.key});
@@ -59,12 +62,16 @@ class PlatformKeyboardInsetMediaQuery extends StatefulWidget {
 
 class _PlatformKeyboardInsetMediaQueryState
     extends State<PlatformKeyboardInsetMediaQuery> {
-  Timer? _staleTimer;
-  double? _pendingInset;
+  final _controller = SystemKeyboardVisibilityController.instance;
+  Timer? _settleTimer;
+  // The state the settle timer, or the live query after it, is checking.
+  double? _settlingInset;
+  bool? _settlingVisible;
+  bool _querying = false;
+  // An inset the platform confirmed belongs to a visible keyboard.
+  double? _confirmedInset;
   bool _insetIsStale = false;
   Stopwatch? _staleStopwatch;
-
-  final _controller = SystemKeyboardVisibilityController.instance;
 
   @override
   void initState() {
@@ -82,7 +89,7 @@ class _PlatformKeyboardInsetMediaQueryState
   @override
   void dispose() {
     _controller.removeListener(_handleVisibilityChanged);
-    _staleTimer?.cancel();
+    _settleTimer?.cancel();
     super.dispose();
   }
 
@@ -90,32 +97,51 @@ class _PlatformKeyboardInsetMediaQueryState
 
   void _evaluate() {
     final inset = MediaQuery.viewInsetsOf(context).bottom;
-    if (inset <= 0 || _controller.visible != false) {
+    final visible = _controller.visible;
+    if (inset <= 0 || visible == null) {
+      _confirmedInset = null;
       _resetStaleTracking(recovered: inset <= 0);
       return;
     }
-    if (_insetIsStale || (_staleTimer != null && _pendingInset == inset)) {
+    if (visible) {
+      // The platform reports a keyboard, so its inset is shown again.
+      if (_insetIsStale) _resetStaleTracking(recovered: false);
+      if (inset == _confirmedInset) return;
+    } else {
+      _confirmedInset = null;
+      if (_insetIsStale) return;
+    }
+    // A live query in flight answers for this inset whatever the cache says.
+    if (_querying && inset == _settlingInset) return;
+    if (_settleTimer != null &&
+        inset == _settlingInset &&
+        visible == _settlingVisible) {
       return;
     }
-    // Hidden per the platform, but the inset is new or still moving: wait for
-    // it to settle.
-    _pendingInset = inset;
-    _staleTimer?.cancel();
-    _staleTimer = Timer(staleKeyboardInsetDelay, _confirmStaleInset);
+    // The inset or the platform's report is new: wait for both to settle.
+    _settlingInset = inset;
+    _settlingVisible = visible;
+    _settleTimer?.cancel();
+    _settleTimer = Timer(staleKeyboardInsetDelay, _checkSettledInset);
   }
 
-  Future<void> _confirmStaleInset() async {
-    _staleTimer = null;
-    final pendingInset = _pendingInset;
-    // Decide on the live platform state, not a cached report that may predate
-    // a missed show event.
+  Future<void> _checkSettledInset() async {
+    _settleTimer = null;
+    final settledInset = _settlingInset;
+    // Decide on the live platform state, not a cached report that may have
+    // missed a show or hide event.
+    _querying = true;
     final liveVisible = await _controller.refresh();
-    // The inset moved or the keyboard state changed while the platform
-    // answered, so a new wait is already running or none is needed.
-    if (!mounted || _staleTimer != null || _insetIsStale) return;
+    _querying = false;
+    // The inset moved while the platform answered, so a new wait is running.
+    if (!mounted || _settleTimer != null || _insetIsStale) return;
     final inset = MediaQuery.viewInsetsOf(context).bottom;
-    if (inset <= 0 || _controller.visible != false || inset != pendingInset) {
+    if (inset <= 0 || inset != settledInset) {
       setState(_evaluate);
+      return;
+    }
+    if (liveVisible == true) {
+      _confirmedInset = inset;
       return;
     }
     // Without a fresh "hidden" answer the inset may belong to a real keyboard.
@@ -132,9 +158,9 @@ class _PlatformKeyboardInsetMediaQueryState
   }
 
   void _resetStaleTracking({required bool recovered}) {
-    _staleTimer?.cancel();
-    _staleTimer = null;
-    _pendingInset = null;
+    _settleTimer?.cancel();
+    _settleTimer = null;
+    _settlingInset = null;
     if (!_insetIsStale) return;
     _insetIsStale = false;
     DiagnosticsLogService.instance.info(

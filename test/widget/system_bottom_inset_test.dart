@@ -162,6 +162,48 @@ void main() {
       expect(calls, isNot(contains('refreshInsets')));
     });
 
+    testWidgets('checks a settled inset even when the cache says visible', (
+      tester,
+    ) async {
+      // A recreated activity can leave the cache claiming a keyboard that the
+      // live window no longer has.
+      final calls = mockKeyboardVisibilityChannel(tester, live: () => false);
+      final keyboard = _keyboard(visible: true);
+      final inset = ValueNotifier<double>(300);
+      addTearDown(inset.dispose);
+      late MediaQueryData resolved;
+      await tester.pumpWidget(_guarded(inset, (data) => resolved = data));
+      expect(resolved.viewInsets.bottom, 300);
+
+      await tester.pump(staleKeyboardInsetDelay);
+      expect(keyboard.visible, isFalse);
+      expect(resolved.viewInsets.bottom, 0);
+      expect(calls.where((method) => method == 'refreshInsets'), hasLength(1));
+    });
+
+    testWidgets('confirms a real keyboard once without polling', (
+      tester,
+    ) async {
+      final calls = mockKeyboardVisibilityChannel(tester);
+      _keyboard(visible: true);
+      final inset = ValueNotifier<double>(300);
+      addTearDown(inset.dispose);
+      late MediaQueryData resolved;
+      await tester.pumpWidget(_guarded(inset, (data) => resolved = data));
+      calls.clear();
+
+      await tester.pump(staleKeyboardInsetDelay * 6);
+      expect(calls, ['getVisibility']);
+      expect(resolved.viewInsets.bottom, 300);
+
+      // A resized keyboard is checked again once it settles.
+      inset.value = 280;
+      await tester.pump();
+      await tester.pump(staleKeyboardInsetDelay * 6);
+      expect(calls, ['getVisibility', 'getVisibility']);
+      expect(resolved.viewInsets.bottom, 280);
+    });
+
     testWidgets('corrects every route below the app navigator', (tester) async {
       mockKeyboardVisibilityChannel(tester);
       tester.view
