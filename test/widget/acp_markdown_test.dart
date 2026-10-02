@@ -129,6 +129,33 @@ void main() {
     expect(find.text('dart'), findsOneWidget);
   });
 
+  testWidgets('paints no fill around a code block outside its rounded box', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      wrap(const AcpMarkdown(data: '```dart\nvoid main() {}\n```')),
+    );
+    await tester.pump();
+
+    // The markdown package wraps each `pre` in a decorated container. Only the
+    // code block's own rounded box may paint; a filled wrapper bleeds past it.
+    final body = tester.widget<MarkdownBody>(find.byType(MarkdownBody));
+    final wrapper = body.styleSheet?.codeblockDecoration;
+    expect(wrapper, isA<BoxDecoration>());
+    expect((wrapper! as BoxDecoration).color, isNull);
+    expect(body.styleSheet?.codeblockPadding, EdgeInsets.zero);
+    final ancestors = find.ancestor(
+      of: find.byType(AcpCodeBlock),
+      matching: find.byType(Container),
+    );
+    for (final container in tester.widgetList<Container>(ancestors)) {
+      final decoration = container.decoration;
+      if (decoration is BoxDecoration) {
+        expect(decoration.color, isNull);
+      }
+    }
+  });
+
   testWidgets('copies code and shows copied state', (tester) async {
     final copied = <String>[];
     final clipboardCalls = <MethodCall>[];

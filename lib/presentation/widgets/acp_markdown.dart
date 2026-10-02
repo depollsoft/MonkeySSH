@@ -189,6 +189,12 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
         borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
       ),
       blockquotePadding: const EdgeInsets.all(FluttyTheme.spacingSm),
+      // The markdown builder wraps every `pre` block in a container painted
+      // with this decoration, even when a custom builder renders it. The
+      // `AcpCodeBlock` draws its own rounded box, so the wrapper must stay
+      // invisible or its square card-colored fill shows around that box.
+      codeblockDecoration: const BoxDecoration(),
+      codeblockPadding: EdgeInsets.zero,
       listBullet: body,
       tableBorder: TableBorder.all(color: scheme.outline),
       tableHead: mono(fontWeight: FontWeight.w600),
