@@ -774,6 +774,7 @@ void main() {
         name: 'first',
         isActive: false,
         currentCommand: 'copilot',
+        activeAgentSessionId: 'session-1',
         agentSessionTitle: 'First title',
       );
       final windows = [
@@ -987,6 +988,30 @@ void main() {
               : TmuxWindowSnapshotEvent(snapshot),
         ).single;
         expect(updated.agentSessionTitle, isNull);
+      });
+
+      test('a snapshot drops a title with no session ID, list=$fullList', () {
+        const native = TmuxWindow(
+          index: 4,
+          id: '@4',
+          panePid: 42,
+          name: 'Pi',
+          isActive: true,
+          agentTool: AgentLaunchTool.pi,
+          nativeAcpBridgeId: '0123456789abcdef0123456789abcdef',
+          nativeAcpProviderId: 'builtin:pi-acp',
+          agentSessionTitle: 'Previous session',
+        );
+        // The bridge moved to a new session whose file Pi has not written yet.
+        final snapshot = native.copyWith(clearActiveAgentSessionMetadata: true);
+        final updated = applyTmuxWindowChangeEvent(
+          [native],
+          fullList
+              ? TmuxWindowListEvent([snapshot])
+              : TmuxWindowSnapshotEvent(snapshot),
+        ).single;
+        expect(updated.agentSessionTitle, isNull);
+        expect(updated.displayTitle, 'Pi');
       });
     }
   });

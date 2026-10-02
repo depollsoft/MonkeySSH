@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.217"
+	monkeyMuxVersion                  = "0.1.218"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -74,6 +74,7 @@ const (
 	oscBufferLimitBytes               = 4096
 	processMetadataTimeout            = 500 * time.Millisecond
 	processMetadataInterval           = 500 * time.Millisecond
+	agentSessionTitleRefreshInterval  = 2 * time.Second
 	runCommandOutputMaxBytes          = 8 * 1024 * 1024
 	runCommandTimeout                 = 20 * time.Second
 	socketTimeout                     = 2 * time.Second
@@ -582,6 +583,7 @@ type windowSnapshot struct {
 	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
 	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
 	AgentSessionIdentityExact bool                      `json:"agentSessionIdentityExact,omitempty"`
+	AgentSessionTitle         string                    `json:"agentSessionTitle,omitempty"`
 	NativeAcpBridgeID         string                    `json:"nativeAcpBridgeId,omitempty"`
 	NativeAcpProviderID       string                    `json:"nativeAcpProviderId,omitempty"`
 	LastActivityEpochSeconds  int64                     `json:"lastActivityEpochSeconds,omitempty"`
@@ -764,6 +766,12 @@ type muxWindow struct {
 	agentSessionAssigned        bool
 	agentIdentityServer         *muxServer
 	agentSessionIdentityExact   bool
+	agentSessionTitle           string
+	piTitleMu                   sync.Mutex
+	piTitleScan                 piSessionTitleScan
+	piNativeSessionBridgeID     string
+	piNativeSessionPath         string
+	piNativeSessionCheckedAt    time.Time
 	nativeAcpBridgeID           string
 	nativeAcpProviderID         string
 	foregroundPid               int
@@ -926,6 +934,7 @@ type windowBroadcastIdentity struct {
 	paneTitle             string
 	agentTool             string
 	agentModelProvider    string
+	agentSessionTitle     string
 	panePid               int
 	alert                 bool
 	progressActive        bool
@@ -6008,6 +6017,7 @@ func serveSession(
 		server.close()
 	}()
 	server.startSocketRepublisher()
+	server.startAgentSessionTitleRefresher()
 
 	for {
 		conn, err := server.acceptConnection()
@@ -9468,6 +9478,7 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		AgentSessionDir:           window.agentSessionDir,
 		AgentSessionPath:          window.agentSessionPath,
 		AgentSessionIdentityExact: window.agentSessionIdentityExact,
+		AgentSessionTitle:         window.agentSessionTitle,
 		NativeAcpBridgeID:         window.nativeAcpBridgeID,
 		NativeAcpProviderID:       window.nativeAcpProviderID,
 		LastActivityEpochSeconds:  window.lastActivity.Unix(),
@@ -15601,6 +15612,7 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 		paneTitle:          w.paneTitle,
 		agentTool:          w.agentToolLocked(),
 		agentModelProvider: w.agentModelProvider,
+		agentSessionTitle:  w.agentSessionTitle,
 		panePid:            w.metadataProcessIDLocked(),
 		alert:              w.alert,
 	}
@@ -15647,6 +15659,8 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 		paneTitle: w.paneTitle, name: w.name,
 	}).agentToolLocked()
 	sessionID := w.agentSessionID
+	sessionPath := w.agentSessionPath
+	bridgeID := w.nativeAcpBridgeID
 	s.mu.Unlock()
 
 	command := commandNameForProcessGroup(pgrp)
@@ -15654,6 +15668,7 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	if command != "" {
 		tool = firstNonEmptyString(agentToolFromCommandName(command), fallbackTool)
 	}
+	sessionTitle := w.readAgentSessionTitle(tool, sessionPath, bridgeID, now)
 	if sessionID == "" && tool == "cursor-agent" && pgrp > 0 {
 		if started := processStartedAtForMetadata(pgrp); !started.IsZero() {
 			sessionID = cursorSessionIDForWorkspace(readCursorChatEntries(), identity.cwd, started)
@@ -15670,6 +15685,9 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	if command != "" {
 		w.foregroundCommand = command
 		w.resetWheelGovernorIfInactiveLocked()
+	}
+	if w.agentSessionPath == sessionPath && w.nativeAcpBridgeID == bridgeID {
+		w.agentSessionTitle = sessionTitle
 	}
 	if w.agentSessionID == "" && sessionID != "" && s.allowAgentSessionFallbackLocked(w, tool, sessionID) {
 		w.agentSessionID = sessionID
@@ -17114,6 +17132,79 @@ func (s *muxServer) startSocketRepublisher() {
 		defer s.socketRepublishers.Done()
 		s.republishSocketLoop()
 	}()
+}
+
+func (s *muxServer) startAgentSessionTitleRefresher() {
+	go func() {
+		ticker := time.NewTicker(agentSessionTitleRefreshInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !s.refreshQuietAgentSessionTitles() {
+				return
+			}
+		}
+	}()
+}
+
+// refreshQuietAgentSessionTitles rereads every window's agent session title
+// while a control client is watching and broadcasts the windows whose title
+// changed. Output refreshes a busy window's title with the rest of its
+// metadata, but a native agent window prints nothing and an agent can rename
+// its session right after its last output. Only titles are read here: a full
+// metadata refresh scans the process table, which quiet windows do not need.
+// It reports false once the server has closed.
+func (s *muxServer) refreshQuietAgentSessionTitles() bool {
+	type titleSource struct {
+		window      *muxWindow
+		tool        string
+		sessionPath string
+		bridgeID    string
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	if len(s.controls) == 0 {
+		s.mu.Unlock()
+		return true
+	}
+	sources := make([]titleSource, 0, len(s.windows))
+	for _, window := range s.windows {
+		if !window.closed {
+			sources = append(sources, titleSource{
+				window:      window,
+				tool:        window.agentToolLocked(),
+				sessionPath: window.agentSessionPath,
+				bridgeID:    window.nativeAcpBridgeID,
+			})
+		}
+	}
+	s.mu.Unlock()
+	now := time.Now()
+	for _, source := range sources {
+		window := source.window
+		title := window.readAgentSessionTitle(source.tool, source.sessionPath, source.bridgeID, now)
+		s.mu.Lock()
+		if s.windowByIDLocked(window.id) != window || window.closed ||
+			window.agentToolLocked() != source.tool ||
+			window.agentSessionPath != source.sessionPath ||
+			window.nativeAcpBridgeID != source.bridgeID ||
+			window.agentSessionTitle == title {
+			s.mu.Unlock()
+			continue
+		}
+		window.agentSessionTitle = title
+		snapshot := s.snapshotLocked(window)
+		window.lastBroadcast = time.Now()
+		s.mu.Unlock()
+		s.broadcast(controlResponse{
+			Type:    "window_updated",
+			Session: s.session,
+			Window:  &snapshot,
+		})
+	}
+	return true
 }
 
 // republishSocketLoop puts the session path back when it no longer names this

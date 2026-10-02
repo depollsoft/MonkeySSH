@@ -729,15 +729,14 @@ TmuxWindow _preserveActiveAgentSessionMetadata(
   if (updated.hasUnsupportedAgentTool || updated.agentSessionTitle != null) {
     return updated;
   }
-  // MonkeyMux snapshots report the live session ID but omit its title, which
-  // arrives in a separate metadata probe. Keep that title for the same session
-  // so each snapshot does not switch the UI back to the terminal title.
+  // MonkeyMux snapshots can report the live session ID but omit its title,
+  // which arrives in a separate metadata probe. Keep that title for the same
+  // session so each snapshot does not switch the UI back to the terminal
+  // title. The probe always reports a session ID with a title. A title
+  // without one came from the snapshot itself, so its absence clears it.
+  if (existing.activeAgentSessionId == null) return updated;
   if (updated.activeAgentSessionId != null &&
       updated.activeAgentSessionId != existing.activeAgentSessionId) {
-    return updated;
-  }
-  if (existing.activeAgentSessionId == null &&
-      existing.agentSessionTitle == null) {
     return updated;
   }
   if (existing.panePid != updated.panePid ||

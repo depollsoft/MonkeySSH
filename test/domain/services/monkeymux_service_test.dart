@@ -478,6 +478,46 @@ void main() {
       expect(window.copyWith(isActive: false).isNativeAcp, isTrue);
     });
 
+    test('titles Pi windows with the helper session label', () {
+      final terminal = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@2',
+        'index': 2,
+        'name': 'pi',
+        'currentCommand': 'pi',
+        'currentPath': '/home/demo/MonkeySSH',
+        'paneTitle': 'π - MonkeySSH',
+        'agentTool': 'pi',
+        'agentSessionId': '01a0f99d-45d8-7081-bc62-85d421c8caeb',
+        'agentSessionIdentityExact': true,
+        'agentSessionTitle': 'Fix the window bar',
+      })!;
+      expect(terminal.agentSessionTitle, 'Fix the window bar');
+      expect(terminal.displayTitle, 'Fix the window bar');
+      expect(terminal.handleTitle, 'Fix the window bar');
+      expect(terminal.secondaryTitle, 'Pi');
+
+      final native = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@4',
+        'index': 4,
+        'name': 'Pi',
+        'paneTitle': 'Pi',
+        'agentTool': 'pi',
+        'nativeAcpBridgeId': '0123456789abcdef0123456789abcdef',
+        'nativeAcpProviderId': 'builtin:pi-acp',
+        'agentSessionTitle': 'Give me a list of image files',
+      })!;
+      expect(native.displayTitle, 'Give me a list of image files');
+
+      final unsupported = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@5',
+        'index': 5,
+        'name': 'Gemini CLI',
+        'agentTool': 'gemini',
+        'agentSessionTitle': 'stale title',
+      })!;
+      expect(unsupported.agentSessionTitle, isNull);
+    });
+
     test('maps exact live Cursor session metadata onto tmux windows', () {
       final window = parseMonkeyMuxWindowSnapshotForTesting({
         'id': '@2',

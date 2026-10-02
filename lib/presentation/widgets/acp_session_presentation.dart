@@ -341,12 +341,18 @@ String acpRelativeTime(DateTime instant, {DateTime? now}) {
   return '${delta.inDays}d ago';
 }
 
-/// A short one-line title for a session, preferring the agent-reported title
-/// and otherwise the provider label.
-String acpSessionDisplayTitle(AcpSessionState session) {
-  final title = session.title?.trim();
-  if (title != null && title.isNotEmpty) {
-    return title;
+/// A short one-line title for a session, preferring the agent-reported title,
+/// then [windowTitle], and otherwise the provider label.
+///
+/// [windowTitle] is the session label of the MonkeyMux window hosting the
+/// session. Pi reports a title over ACP only after `/name`, so MonkeyMux reads
+/// the label Pi's session picker shows from the session file instead.
+String acpSessionDisplayTitle(AcpSessionState session, {String? windowTitle}) {
+  for (final candidate in [session.title, windowTitle]) {
+    final title = candidate?.trim();
+    if (title != null && title.isNotEmpty) {
+      return title;
+    }
   }
   return session.providerLabel;
 }
