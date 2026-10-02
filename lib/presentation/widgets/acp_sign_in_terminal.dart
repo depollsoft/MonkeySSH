@@ -85,7 +85,9 @@ final class _SshSignInProcess implements AcpSignInProcess {
   }
 
   final SSHSession _channel;
-  final _output = StreamController<List<int>>.broadcast();
+  // Single-subscription, so output that arrives before the terminal listens
+  // (a login URL or device code) is buffered instead of dropped.
+  final _output = StreamController<List<int>>();
   final _subscriptions = <StreamSubscription<Uint8List>>[];
 
   @override

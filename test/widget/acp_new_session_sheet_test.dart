@@ -635,17 +635,19 @@ void main() {
       );
     });
 
-    testWidgets('a terminal method runs in the sign-in terminal and relaunches '
-        'after a zero exit status', (tester) async {
+    /// An SSH session whose every command, including the sign-in terminal,
+    /// exits with status zero. Records each command and its PTY request.
+    SshSession signInSession({
+      List<String>? commands,
+      List<SSHPtyConfig?>? ptys,
+    }) {
       registerFallbackValue(const SSHPtyConfig());
       final client = _MockSshClient();
-      final commands = <String>[];
-      final ptys = <SSHPtyConfig?>[];
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         invocation,
       ) async {
-        commands.add(invocation.positionalArguments.single as String);
-        ptys.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
+        commands?.add(invocation.positionalArguments.single as String);
+        ptys?.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
         final exec = _MockExecSession();
         when(() => exec.stdout).thenAnswer(
           (_) => Stream.value(
@@ -658,7 +660,7 @@ void main() {
         when(exec.close).thenAnswer((_) {});
         return exec;
       });
-      final activeSession = SshSession(
+      return SshSession(
         connectionId: 7,
         hostId: 1,
         client: client,
@@ -668,6 +670,13 @@ void main() {
           username: 'root',
         ),
       );
+    }
+
+    testWidgets('a terminal method runs in the sign-in terminal and relaunches '
+        'after a zero exit status', (tester) async {
+      final commands = <String>[];
+      final ptys = <SSHPtyConfig?>[];
+      final activeSession = signInSession(commands: commands, ptys: ptys);
       final terminalLaunch = AcpTerminalAuthLaunch.forMethod(
         hostId: 1,
         providerId: AcpBuiltinProviderIds.copilotCli,
@@ -704,6 +713,59 @@ void main() {
       expect(signIn, contains(r"'\''/usr/bin/copilot'\'' '\''--acp'\'' "));
       expect(signIn, contains(r"'\''--login'\''"));
       expect(ptys.last, isNotNull);
+    });
+
+    testWidgets('signing in to resume a recent session stops its old agent '
+        'first', (tester) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-old',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final recentKey = fakeAcpKey(bridgeId: 'bridge-old');
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..reconnectSessionResults.add(
+          AcpSessionLaunchFailed(
+            recentKey,
+            authRequired.error,
+            terminalAuthentication: AcpTerminalAuthLaunch.forMethod(
+              hostId: 1,
+              providerId: AcpBuiltinProviderIds.copilotCli,
+              providerLabel: 'Copilot CLI',
+              method: terminalLogin,
+              launchArgv: const ['/usr/bin/copilot', '--acp'],
+              workingDirectory: '/home/repo',
+            ),
+          ),
+        )
+        ..reconnectSessionResult = AcpSessionLaunchStarted(key);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        activeSession: signInSession(),
+        startSession: false,
+      );
+      await tester.ensureVisible(find.text('Resume …/repo'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Resume …/repo'));
+      await tester.pumpAndSettle();
+      final resume = find.widgetWithText(FilledButton, 'Resume session');
+      await tester.ensureVisible(resume);
+      await tester.pumpAndSettle();
+      await tester.tap(resume);
+      await tester.pumpAndSettle();
+
+      // The agent that refused the session may keep its old credentials, so
+      // its bridge is stopped and the retry resumes into a fresh agent.
+      expect(manager.stoppedUnusedBridges, [recentKey.value]);
+      expect(manager.reconnects, hasLength(2));
+      expect(result(), key);
     });
   });
 

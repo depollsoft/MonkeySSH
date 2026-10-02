@@ -2,12 +2,20 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/acp_sign_in_terminal.dart';
+
+class _MockSshSession extends Mock implements SshSession {}
+
+class _MockSshChannel extends Mock implements SSHSession {}
 
 final class _FakeSignInProcess implements AcpSignInProcess {
   final outputController = StreamController<List<int>>.broadcast();
@@ -86,6 +94,36 @@ Future<({List<_FakeSignInProcess> processes, bool? Function() result})> _open(
 }
 
 void main() {
+  test('SSH sign-in keeps output sent before the terminal listens', () async {
+    registerFallbackValue(const SSHPtyConfig());
+    final session = _MockSshSession();
+    final channel = _MockSshChannel();
+    final stdout = StreamController<Uint8List>()
+      ..add(Uint8List.fromList(utf8.encode('Open https://example.com/dev\n')));
+    when(() => channel.stdout).thenAnswer((_) => stdout.stream);
+    when(() => channel.stderr).thenAnswer((_) => const Stream.empty());
+    when(channel.close).thenAnswer((_) {});
+    when(() => session.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async => channel);
+
+    final process = await startAcpSignInOverSsh(
+      session,
+      'login',
+      columns: 80,
+      rows: 24,
+    );
+    // The channel's buffered output is delivered before anything listens,
+    // as it is while the sign-in screen is still awaiting the start.
+    await pumpEventQueue();
+    final received = <int>[];
+    process.output.listen(received.addAll);
+    await pumpEventQueue();
+
+    expect(utf8.decode(received), 'Open https://example.com/dev\n');
+    process.close();
+    await stdout.close();
+  });
+
   testWidgets('a zero exit status closes the terminal as signed in', (
     tester,
   ) async {

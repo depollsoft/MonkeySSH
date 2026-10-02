@@ -604,6 +604,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         case AcpSessionLaunchStarted(:final key):
           Navigator.of(context).pop(key);
         case AcpSessionLaunchFailed(
+          :final key,
           :final error,
           terminalAuthentication: final terminalSignIn?,
         ):
@@ -615,7 +616,13 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           if (!mounted) return;
           if (signedIn) {
             // The login is out-of-band: start over with a fresh bridge so the
-            // agent is reconnected and reinitialized.
+            // agent is reconnected and reinitialized. A failed resume leaves
+            // the recent session's agent running with its old credentials,
+            // so stop it and let the retry resume into a new one.
+            if (key != null && _selectedRecent != null) {
+              await ref.read(acpSessionManagerProvider).stopUnusedBridge(key);
+              if (!mounted) return;
+            }
             await _start(afterSignIn: true);
             return;
           }
