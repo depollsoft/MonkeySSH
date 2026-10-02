@@ -6,6 +6,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/acp_authentication.dart';
 import '../models/acp_client_capabilities.dart' as cap;
 import '../models/acp_content.dart';
 import '../models/acp_protocol.dart';
@@ -66,13 +67,23 @@ final class AcpSessionLaunchBlocked extends AcpSessionLaunchResult {
 @immutable
 final class AcpSessionLaunchFailed extends AcpSessionLaunchResult {
   /// Creates a failed launch result.
-  const AcpSessionLaunchFailed(this.key, this.error);
+  const AcpSessionLaunchFailed(
+    this.key,
+    this.error, {
+    this.terminalAuthentication,
+  });
 
   /// Key of the session that failed, when one was allocated.
   final AcpSessionKey? key;
 
   /// Safe failure description.
   final AcpSessionError error;
+
+  /// Interactive login the user chose to complete a `terminal` sign-in method.
+  ///
+  /// When present, the caller runs it and, after a zero exit status, starts
+  /// the launch again so the agent is reconnected and reinitialized.
+  final AcpTerminalAuthLaunch? terminalAuthentication;
 }
 
 /// Aggregate, immutable snapshot of every tracked ACP session.
@@ -198,11 +209,20 @@ class AcpSessionManager {
   /// When the free concurrency limit is reached, returns
   /// [AcpSessionLaunchBlocked] without starting a bridge. Provide [replace] to
   /// first stop those live sessions and continue.
+  ///
+  /// When the agent requires sign-in and advertises usable methods,
+  /// [chooseAuthentication] is asked how to proceed; without it, the launch
+  /// fails with [AcpSessionErrorKind.authenticationRequired]. Like
+  /// [confirmInstall], the chooser runs while this launch holds the lifecycle
+  /// queue: an `agent` sign-in is bounded by [acpAgentAuthenticationTimeout],
+  /// and a `terminal` choice returns at once so the out-of-band login runs
+  /// after the launch has finished.
   Future<AcpSessionLaunchResult> startNewSession({
     required int hostId,
     required String providerId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
@@ -212,6 +232,7 @@ class AcpSessionManager {
     providerId: providerId,
     cwd: cwd,
     confirmInstall: confirmInstall,
+    chooseAuthentication: chooseAuthentication,
     launchCommandOverride: launchCommandOverride,
     providerLabelOverride: providerLabelOverride,
     autoApprovePermissions: autoApprovePermissions,
@@ -229,6 +250,7 @@ class AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
@@ -238,6 +260,7 @@ class AcpSessionManager {
     providerId: providerId,
     cwd: cwd,
     confirmInstall: confirmInstall,
+    chooseAuthentication: chooseAuthentication,
     launchCommandOverride: launchCommandOverride,
     providerLabelOverride: providerLabelOverride,
     autoApprovePermissions: autoApprovePermissions,
@@ -252,6 +275,7 @@ class AcpSessionManager {
     required bool autoApprovePermissions,
     required List<AcpSessionKey> replace,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     String? existingSessionId,
@@ -287,6 +311,7 @@ class AcpSessionManager {
       launch: resolved,
       cwd: workingDirectory.value!,
       confirmInstall: confirmInstall,
+      chooseAuthentication: chooseAuthentication,
       existingSessionId: existingSessionId,
       autoApprovePermissions: autoApprovePermissions,
     );
@@ -297,6 +322,9 @@ class AcpSessionManager {
   /// Used on app restart, host reconnect, and when opening a recent session.
   /// If the session is already live and attached, it is simply selected unless
   /// [selectOnSuccess] is false for a background preload.
+  ///
+  /// [chooseAuthentication] behaves as in [startNewSession]; background
+  /// preloads omit it and keep failing with an authentication-required error.
   Future<AcpSessionLaunchResult> reconnectSession({
     required int hostId,
     required String providerId,
@@ -304,6 +332,7 @@ class AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
@@ -399,6 +428,7 @@ class AcpSessionManager {
         launch: resolved,
         cwd: resolvedCwd,
         confirmInstall: confirmInstall,
+        chooseAuthentication: chooseAuthentication,
         existingSessionId: acpSessionId,
         autoApprovePermissions: autoApprovePermissions,
       );
@@ -412,10 +442,17 @@ class AcpSessionManager {
     if (existing != null) {
       existing.updateWorkingDirectory(resolvedCwd);
       try {
-        await existing.reconnect(remoteBridge: remoteBridge);
+        await existing.reconnect(
+          remoteBridge: remoteBridge,
+          chooseAuthentication: chooseAuthentication,
+        );
       } on _LaunchException catch (error) {
         _emit();
-        return AcpSessionLaunchFailed(error.key ?? key, error.error);
+        return AcpSessionLaunchFailed(
+          error.key ?? key,
+          error.error,
+          terminalAuthentication: error.terminalAuthentication,
+        );
       }
       if (selectOnSuccess) {
         _select(key.value);
@@ -433,6 +470,7 @@ class AcpSessionManager {
       cwd: resolvedCwd,
       existingSessionId: acpSessionId,
       confirmInstall: null,
+      chooseAuthentication: chooseAuthentication,
       autoApprovePermissions: autoApprovePermissions,
       liveBridge: remoteBridge,
       selectOnSuccess: selectOnSuccess,
@@ -531,6 +569,48 @@ class AcpSessionManager {
   Future<void> rejectWrite(AcpSessionKey key, String requestKey) =>
       _requireController(key).rejectWrite(requestKey);
 
+  /// Completes an `agent` sign-in [method] on [key]'s live connection.
+  ///
+  /// Completes with `null` once the agent accepted `authenticate`, after which
+  /// the session leaves the authentication-required state; otherwise with a
+  /// safe, displayable error. Never throws, so the UI may stop waiting.
+  Future<AcpSessionError?> authenticateSession(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) async {
+    final controller = _controllers[key.value];
+    if (controller == null) return _untrackedSessionError;
+    final error = await controller.authenticateWithMethod(method);
+    if (error == null) controller.clearAuthenticationRequired();
+    return error;
+  }
+
+  /// Builds the interactive login for a `terminal` sign-in [method] on [key].
+  ///
+  /// Returns `null` when the session is not tracked or the method cannot be
+  /// run literally.
+  AcpTerminalAuthLaunch? terminalAuthenticationLaunch(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) => _controllers[key.value]?.terminalAuthLaunch(method);
+
+  /// Records that a `terminal` sign-in for [key] exited successfully, so the
+  /// live session leaves the authentication-required state.
+  void markSessionSignedIn(AcpSessionKey key) =>
+      _controllers[key.value]?.clearAuthenticationRequired();
+
+  /// Ends the agent's signed-in state through [key] when the agent advertises
+  /// `auth.logout`.
+  ///
+  /// Completes with `null` on success; afterwards new sessions require signing
+  /// in again, and active-session requests may fail with authentication
+  /// errors that surface the sign-in action. Never throws.
+  Future<AcpSessionError?> logout(AcpSessionKey key) async {
+    final controller = _controllers[key.value];
+    if (controller == null) return _untrackedSessionError;
+    return controller.logout();
+  }
+
   /// Detaches locally from [key] while leaving the remote bridge running.
   Future<void> detachSession(AcpSessionKey key) =>
       _serialize(() => _requireController(key).detach());
@@ -608,6 +688,11 @@ class AcpSessionManager {
   Future<AcpSessionKey?> loadLastSelected() =>
       _recentSessions.getLastSelected();
 
+  static const _untrackedSessionError = AcpSessionError(
+    kind: AcpSessionErrorKind.unknown,
+    message: 'Session is not tracked.',
+  );
+
   /// Releases every session, attachment, and stream. Idempotent.
   Future<void> dispose() async {
     if (_disposed) return;
@@ -637,6 +722,7 @@ class AcpSessionManager {
     required MonkeyMuxInstallConfirmation? confirmInstall,
     required String? existingSessionId,
     required bool autoApprovePermissions,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final startedAt = _clock();
     MonkeyMuxAcpBridgeStartResult startResult;
@@ -676,6 +762,7 @@ class AcpSessionManager {
       cwd: cwd,
       existingSessionId: existingSessionId,
       confirmInstall: confirmInstall,
+      chooseAuthentication: chooseAuthentication,
       startedBridge: true,
       bridgeStartedAt: startedAt,
       autoApprovePermissions: autoApprovePermissions,
@@ -690,6 +777,7 @@ class AcpSessionManager {
     required String? existingSessionId,
     required MonkeyMuxInstallConfirmation? confirmInstall,
     required bool autoApprovePermissions,
+    AcpAuthenticationChooser? chooseAuthentication,
     MonkeyMuxAcpBridgeMetadata? liveBridge,
     bool selectOnSuccess = true,
     bool startedBridge = false,
@@ -722,6 +810,7 @@ class AcpSessionManager {
       attachment: attachment,
       providerLabel: launch.label,
       isCustomProvider: launch.isCustom,
+      launchArgv: launch.argv,
       cwd: cwd,
       clock: _clock,
       diagnostics: _diagnostics,
@@ -754,6 +843,7 @@ class AcpSessionManager {
         bridgeId: bridgeId,
         existingSessionId: existingSessionId,
         liveBridge: liveBridge,
+        chooseAuthentication: chooseAuthentication,
       );
       if (existingSessionId != null) {
         // The reconnect identity is already stable. Publish its connecting
@@ -812,7 +902,11 @@ class AcpSessionManager {
         bridgeId: bridgeId,
       );
       _telemetry.failure(category: error.error.kind.name);
-      return AcpSessionLaunchFailed(error.key, error.error);
+      return AcpSessionLaunchFailed(
+        error.key,
+        error.error,
+        terminalAuthentication: error.terminalAuthentication,
+      );
     } on Object catch (error) {
       discardProvisionalController();
       await controller.disposeLocal();
@@ -830,12 +924,15 @@ class AcpSessionManager {
   /// Best-effort stops a freshly started bridge that never produced a usable
   /// session, so a failed launch does not orphan the remote process.
   ///
-  /// This includes authentication-required failures: there is no
-  /// authenticate/retry-on-existing-bridge path in this release, so a retained
-  /// auth-blocked bridge would be unreachable and each retry would spawn
-  /// another. The UI instead offers the provider's terminal-auth command and
-  /// the user retries cleanly, starting a fresh bridge. The bridge is still
-  /// retained when another session already uses it.
+  /// This includes authentication-required failures that remain after the
+  /// launch's chooser ran. An `agent` sign-in method is completed with
+  /// `authenticate` on this same bridge before the launch gives up, so any
+  /// failure reaching here is final: the user declined, the method failed, or
+  /// they picked a `terminal` method. A terminal login is out-of-band and the
+  /// spec requires reconnecting and reinitializing afterwards, so the caller
+  /// starts a fresh bridge once it succeeds. Retaining an auth-blocked bridge
+  /// would leave it unreachable. The bridge is still retained when another
+  /// session already uses it.
   Future<void> _maybeStopOrphanBridge({
     required bool startedBridge,
     required int hostId,
@@ -1318,6 +1415,7 @@ class _BridgeAttachment {
     final retainedInitialization = _initialization;
     if (retainedInitialization != null) {
       service.attach(client);
+      client.restoreInitialization(retainedInitialization);
       return retainedInitialization;
     }
     final result = await service.initialize(client);
@@ -1369,6 +1467,7 @@ class _SessionController {
     required this.attachment,
     required String providerLabel,
     required bool isCustomProvider,
+    required List<String> launchArgv,
     required String cwd,
     required DateTime Function() clock,
     required DiagnosticsLogger diagnostics,
@@ -1378,6 +1477,7 @@ class _SessionController {
   }) : _manager = manager,
        _providerLabel = providerLabel,
        _isCustomProvider = isCustomProvider,
+       _launchArgv = List<String>.unmodifiable(launchArgv),
        _cwd = cwd,
        _clock = clock,
        _diagnostics = diagnostics,
@@ -1392,6 +1492,10 @@ class _SessionController {
 
   final String _providerLabel;
   final bool _isCustomProvider;
+
+  /// Exact provider argv this session's agent was launched with. Reused, with
+  /// a method's arguments appended, to rerun the agent for terminal sign-in.
+  final List<String> _launchArgv;
   String _cwd;
   final DateTime Function() _clock;
   final DiagnosticsLogger _diagnostics;
@@ -1479,6 +1583,7 @@ class _SessionController {
     required String bridgeId,
     required String? existingSessionId,
     MonkeyMuxAcpBridgeMetadata? liveBridge,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final now = _clock();
     // Provisional key until the real session id is known.
@@ -1548,7 +1653,11 @@ class _SessionController {
     try {
       resolvedSessionId = reattachingActiveTurn
           ? existingSessionId
-          : await _establishSession(existingSessionId, init);
+          : await _establishSessionWithSignIn(
+              existingSessionId,
+              init,
+              chooseAuthentication,
+            );
       if (holdHistoryReplay) {
         await _drainHistoryReplayNotifications();
         _applyHistoryUnavailableWarningIfNeeded();
@@ -1585,6 +1694,210 @@ class _SessionController {
     }
     if (reattachingActiveTurn) _startDetachedTurnMonitor();
     return _key;
+  }
+
+  /// Runs session setup, letting [chooseAuthentication] resolve one
+  /// authentication-required failure.
+  ///
+  /// An `agent` method is authenticated on this same connection by the
+  /// chooser, then setup is retried exactly once. A `terminal` method is never
+  /// sent to `authenticate`: the launch fails carrying the interactive login
+  /// so the caller can run it and then start over with a fresh bridge.
+  Future<String> _establishSessionWithSignIn(
+    String? existingSessionId,
+    AcpInitializeResult init,
+    AcpAuthenticationChooser? chooseAuthentication,
+  ) async {
+    try {
+      return await _establishSession(existingSessionId, init);
+    } on _LaunchException catch (error) {
+      final methods = usableAcpAuthMethods(init.authMethods);
+      if (chooseAuthentication == null ||
+          error.error.kind != AcpSessionErrorKind.authenticationRequired ||
+          methods.isEmpty ||
+          _disposed) {
+        rethrow;
+      }
+      _diagnostics.info(
+        'acp.session',
+        'auth_choice_requested',
+        fields: {
+          'methodCount': methods.length,
+          'terminalMethodCount': methods.where((m) => m.isTerminal).length,
+          'reconnect': existingSessionId != null,
+        },
+      );
+      final choice = await chooseAuthentication(
+        AcpAuthenticationRequest(
+          hostId: _key.hostId,
+          providerId: _key.providerId,
+          providerLabel: _providerLabel,
+          methods: methods,
+          authenticate: authenticateWithMethod,
+        ),
+      );
+      if (_disposed) rethrow;
+      switch (choice) {
+        case AcpAuthenticationCompleted():
+          _diagnostics.info('acp.session', 'auth_setup_retry');
+          clearAuthenticationRequired(status: AcpConnectionStatus.initializing);
+          return _establishSession(existingSessionId, init);
+        case AcpAuthenticationInTerminal(:final method):
+          final launch = terminalAuthLaunch(method);
+          if (launch == null) rethrow;
+          _diagnostics.info('acp.session', 'auth_terminal_chosen');
+          throw _LaunchException(
+            error.key,
+            error.error,
+            terminalAuthentication: launch,
+          );
+        case null:
+          _diagnostics.info('acp.session', 'auth_choice_declined');
+          rethrow;
+      }
+    }
+  }
+
+  AcpInitializeResult? get _knownInitialization =>
+      attachment.initialization ?? _state.initialization;
+
+  /// Sends `authenticate` for an advertised `agent` [method] on the live
+  /// connection, bounded by [acpAgentAuthenticationTimeout].
+  ///
+  /// Completes with `null` on success or a safe error; never throws.
+  Future<AcpSessionError?> authenticateWithMethod(AcpAuthMethod method) async {
+    final advertised =
+        _knownInitialization?.authMethods ?? const <AcpAuthMethod>[];
+    if (!method.isAgent ||
+        !advertised.any((candidate) => candidate.id == method.id)) {
+      // Terminal methods MUST NOT be sent to authenticate, and only advertised
+      // method ids are valid.
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.unsupportedCapability,
+        message: 'This sign-in method cannot be completed by the agent.',
+      );
+    }
+    if (_disposed || !_holdsAttachment) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.transport,
+        message: 'The agent connection closed.',
+        retryable: true,
+      );
+    }
+    final elapsed = Stopwatch()..start();
+    _diagnostics.info(
+      'acp.session',
+      'authenticate_start',
+      fields: {'hostId': _key.hostId},
+    );
+    try {
+      await attachment.client.authenticate(
+        method.id,
+        timeout: acpAgentAuthenticationTimeout,
+      );
+      _diagnostics.info(
+        'acp.session',
+        'authenticate_complete',
+        fields: {'durationMs': elapsed.elapsedMilliseconds},
+      );
+      return null;
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.session',
+        'authenticate_failed',
+        fields: {
+          'durationMs': elapsed.elapsedMilliseconds,
+          'errorType': error.runtimeType,
+          if (error is AcpRemoteException) 'errorCode': error.code,
+        },
+      );
+      return switch (error) {
+        AcpRequestTimeoutException() => const AcpSessionError(
+          kind: AcpSessionErrorKind.timeout,
+          message: 'Sign-in did not finish in time.',
+        ),
+        AcpRemoteException(:final code, :final message) => AcpSessionError(
+          kind: AcpSessionErrorKind.authenticationRequired,
+          message: _safeAcpRemoteError(code, message),
+        ),
+        _ => _mapClientError(error),
+      };
+    }
+  }
+
+  /// Builds the interactive login for an advertised `terminal` [method], or
+  /// `null` when it is not advertised or cannot be run literally.
+  ///
+  /// The advertised descriptor (not the caller's copy) supplies the arguments
+  /// and environment.
+  AcpTerminalAuthLaunch? terminalAuthLaunch(AcpAuthMethod method) {
+    final advertised = _knownInitialization?.authMethods
+        .where((candidate) => candidate.id == method.id && candidate.isTerminal)
+        .firstOrNull;
+    if (advertised == null ||
+        !isUsableAcpAuthMethod(advertised) ||
+        _launchArgv.isEmpty) {
+      return null;
+    }
+    return AcpTerminalAuthLaunch.forMethod(
+      hostId: _key.hostId,
+      providerId: _key.providerId,
+      providerLabel: _providerLabel,
+      method: advertised,
+      launchArgv: _launchArgv,
+      workingDirectory: _cwd,
+    );
+  }
+
+  /// Leaves the authentication-required state after a successful sign-in.
+  ///
+  /// A live session returns to [status] (ready by default); a session that is
+  /// not attached keeps its status and only drops the sign-in error.
+  void clearAuthenticationRequired({
+    AcpConnectionStatus status = AcpConnectionStatus.ready,
+  }) {
+    if (_disposed) return;
+    _update(
+      (s) => s.copyWith(
+        status: s.status == AcpConnectionStatus.authenticationRequired
+            ? status
+            : null,
+        pendingAuthentication: false,
+        clearError: s.error?.kind == AcpSessionErrorKind.authenticationRequired,
+      ),
+    );
+  }
+
+  /// Sends `logout` when the agent advertised `auth.logout`.
+  Future<AcpSessionError?> logout() async {
+    if (!(_knownInitialization?.agentCapabilities.auth.logout ?? false)) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.unsupportedCapability,
+        message: 'This agent does not support signing out.',
+      );
+    }
+    if (_disposed || !_holdsAttachment) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.transport,
+        message: 'The agent connection closed.',
+        retryable: true,
+      );
+    }
+    try {
+      await attachment.client.logout();
+      _diagnostics.info('acp.session', 'logout_complete');
+      return null;
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.session',
+        'logout_failed',
+        fields: {
+          'errorType': error.runtimeType,
+          if (error is AcpRemoteException) 'errorCode': error.code,
+        },
+      );
+      return _mapClientError(error);
+    }
   }
 
   Future<String> _establishSession(
@@ -2381,6 +2694,7 @@ class _SessionController {
         attachment: attachment,
         providerLabel: _providerLabel,
         isCustomProvider: _isCustomProvider,
+        launchArgv: _launchArgv,
         cwd: _cwd,
         clock: _clock,
         diagnostics: _diagnostics,
@@ -2481,6 +2795,7 @@ class _SessionController {
   /// after recording safe error state — it never throws a raw error.
   Future<void> reconnect({
     required MonkeyMuxAcpBridgeMetadata remoteBridge,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final wasDetached = _state.status == AcpConnectionStatus.detached;
     _stopDetachedTurnMonitor();
@@ -2565,7 +2880,11 @@ class _SessionController {
       if (!detachedTurnRunning) {
         _historyReplayPublicationHeld = true;
         try {
-          await _establishSession(sessionId, init);
+          await _establishSessionWithSignIn(
+            sessionId,
+            init,
+            chooseAuthentication,
+          );
           await _drainHistoryReplayNotifications();
           _applyHistoryUnavailableWarningIfNeeded();
         } finally {
@@ -2605,7 +2924,13 @@ class _SessionController {
         succeeded: false,
         failureCategory: mapped.kind.name,
       );
-      throw _LaunchException(_key, mapped);
+      throw _LaunchException(
+        _key,
+        mapped,
+        terminalAuthentication: error is _LaunchException
+            ? error.terminalAuthentication
+            : null,
+      );
     }
   }
 
@@ -2878,8 +3203,10 @@ class _SessionController {
       kind: AcpSessionErrorKind.protocol,
       message: 'The agent sent invalid protocol data.',
     ),
-    AcpRemoteException(:final message)
-        when _isAcpAuthenticationRequired(message) =>
+    AcpRemoteException(:final code, :final message)
+        when _isAcpAuthenticationRequired(message) ||
+            (code == acpAuthRequiredErrorCode &&
+                (_knownInitialization?.authMethods.isNotEmpty ?? false)) =>
       const AcpSessionError(
         kind: AcpSessionErrorKind.authenticationRequired,
         message: 'The agent requires authentication.',
@@ -2973,9 +3300,10 @@ final class _LaunchError extends _LaunchOutcome {
 }
 
 class _LaunchException implements Exception {
-  _LaunchException(this.key, this.error);
+  _LaunchException(this.key, this.error, {this.terminalAuthentication});
   final AcpSessionKey? key;
   final AcpSessionError error;
+  final AcpTerminalAuthLaunch? terminalAuthentication;
 }
 
 /// Provider for the production [AcpBridgeConnector].

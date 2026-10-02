@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -78,6 +79,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
     AcpSessionError(kind: AcpSessionErrorKind.unknown, message: 'No launch.'),
   );
 
+  /// FIFO start results consumed before [startNewSessionResult].
+  final List<AcpSessionLaunchResult> startNewSessionResults = [];
+
   /// FIFO reconnect results consumed before the fallback result/future.
   final List<AcpSessionLaunchResult> reconnectSessionResults = [];
 
@@ -112,6 +116,41 @@ class FakeAcpSessionManager extends AcpSessionManager {
   reconnects = [];
 
   final List<(String, Object)> configOptionSets = <(String, Object)>[];
+
+  /// Sign-in choosers passed to [startNewSession], in call order.
+  final List<AcpAuthenticationChooser?> startChoosers =
+      <AcpAuthenticationChooser?>[];
+
+  /// Sign-in choosers passed to [reconnectSession], in call order.
+  final List<AcpAuthenticationChooser?> reconnectChoosers =
+      <AcpAuthenticationChooser?>[];
+
+  /// When set, a launch with a chooser asks it with this request before
+  /// returning its configured result. The choices are recorded.
+  AcpAuthenticationRequest? authenticationRequest;
+  final List<AcpAuthenticationChoice?> authenticationChoices =
+      <AcpAuthenticationChoice?>[];
+
+  /// Agent sign-in methods sent through [authenticateSession].
+  final List<String> authenticatedMethodIds = <String>[];
+
+  /// Error returned by [authenticateSession]; `null` means success.
+  AcpSessionError? authenticateSessionError;
+
+  /// Optional gate holding [authenticateSession] until completed.
+  Completer<void>? authenticateSessionGate;
+
+  /// Sessions marked signed in after a terminal login.
+  final List<String> signedInSessions = <String>[];
+
+  /// Sessions logged out through [logout].
+  final List<String> loggedOut = <String>[];
+
+  /// Error returned by [logout]; `null` means success.
+  AcpSessionError? logoutError;
+
+  /// Terminal login returned by [terminalAuthenticationLaunch].
+  AcpTerminalAuthLaunch? terminalLaunch;
   final List<bool> autoApprovePermissionSets = <bool>[];
   final List<String> modeSets = <String>[];
   final List<String> modelSets = <String>[];
@@ -218,6 +257,7 @@ class FakeAcpSessionManager extends AcpSessionManager {
     required String providerId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
@@ -226,7 +266,17 @@ class FakeAcpSessionManager extends AcpSessionManager {
     starts.add((hostId: hostId, providerId: providerId, cwd: cwd));
     startLaunchOverrides.add(launchCommandOverride);
     startAutoApprovePermissions.add(autoApprovePermissions);
-    return startNewSessionResult;
+    startChoosers.add(chooseAuthentication);
+    await _askChooser(chooseAuthentication);
+    return startNewSessionResults.isNotEmpty
+        ? startNewSessionResults.removeAt(0)
+        : startNewSessionResult;
+  }
+
+  Future<void> _askChooser(AcpAuthenticationChooser? chooser) async {
+    final request = authenticationRequest;
+    if (chooser == null || request == null) return;
+    authenticationChoices.add(await chooser(request));
   }
 
   @override
@@ -237,6 +287,7 @@ class FakeAcpSessionManager extends AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
@@ -244,6 +295,8 @@ class FakeAcpSessionManager extends AcpSessionManager {
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
   }) async {
+    reconnectChoosers.add(chooseAuthentication);
+    await _askChooser(chooseAuthentication);
     reconnectLaunchOverrides.add(launchCommandOverride);
     reconnectSelectOnSuccess.add(selectOnSuccess);
     reconnectReplaceKeys.add(List<AcpSessionKey>.unmodifiable(replace));
@@ -309,6 +362,33 @@ class FakeAcpSessionManager extends AcpSessionManager {
   }
 
   @override
+  Future<AcpSessionError?> authenticateSession(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) async {
+    authenticatedMethodIds.add(method.id);
+    await authenticateSessionGate?.future;
+    return authenticateSessionError;
+  }
+
+  @override
+  AcpTerminalAuthLaunch? terminalAuthenticationLaunch(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) => terminalLaunch;
+
+  @override
+  void markSessionSignedIn(AcpSessionKey key) {
+    signedInSessions.add(key.value);
+  }
+
+  @override
+  Future<AcpSessionError?> logout(AcpSessionKey key) async {
+    loggedOut.add(key.value);
+    return logoutError;
+  }
+
+  @override
   Future<void> dispose() async {
     await _emitter.close();
   }
@@ -345,6 +425,8 @@ AcpSessionState fakeAcpSession({
       const <AcpPendingPermission>[],
   List<AcpPendingWrite> pendingWrites = const <AcpPendingWrite>[],
   AcpTimeline timeline = const AcpTimeline.empty(),
+  List<AcpAuthMethod> authMethods = const <AcpAuthMethod>[],
+  AcpSessionError? error,
 }) {
   final now = lastActivityAt ?? DateTime(2026);
   return AcpSessionState(
@@ -355,12 +437,16 @@ AcpSessionState fakeAcpSession({
     createdAt: DateTime(2025),
     lastActivityAt: now,
     title: title,
-    initialization: capabilities == null
+    initialization: capabilities == null && authMethods.isEmpty
         ? null
         : AcpInitializeResult(
             protocolVersion: 1,
-            agentCapabilities: capabilities,
+            agentCapabilities: capabilities ?? const AcpAgentCapabilities(),
+            authMethods: authMethods,
           ),
+    authMethods: authMethods,
+    pendingAuthentication: status == AcpConnectionStatus.authenticationRequired,
+    error: error,
     configOptions: configOptions,
     modeState: modeState,
     modelState: modelState,

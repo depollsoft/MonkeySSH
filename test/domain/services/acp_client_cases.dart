@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
@@ -12,6 +13,7 @@ final class _ServerTransport implements AcpTransport {
   final requests = <Map<String, Object?>>[];
   bool closed = false;
   bool advertiseLoad = false;
+  bool advertiseLogout = false;
   bool holdLoad = false;
   Object? heldLoadRequestId;
 
@@ -50,6 +52,7 @@ final class _ServerTransport implements AcpTransport {
             'protocolVersion': 1,
             'agentCapabilities': {
               'loadSession': advertiseLoad,
+              if (advertiseLogout) 'auth': {'logout': <String, Object?>{}},
               'sessionCapabilities': {
                 'list': <String, Object?>{},
                 'fork': <String, Object?>{},
@@ -267,6 +270,64 @@ void registerAcpClientTests() {
         await client.close();
       },
     );
+
+    test('sends logout only when the agent advertises it', () async {
+      final transport = _ServerTransport();
+      final client = AcpClient(AcpJsonRpcConnection(transport: transport));
+      await client.initialize();
+      await expectLater(
+        client.logout(),
+        throwsA(isA<AcpUnsupportedCapabilityException>()),
+      );
+      expect(
+        transport.requests.map((request) => request['method']),
+        isNot(contains('logout')),
+      );
+      await client.close();
+
+      final advertising = _ServerTransport()..advertiseLogout = true;
+      final signedIn = AcpClient(AcpJsonRpcConnection(transport: advertising));
+      await signedIn.initialize();
+      await signedIn.authenticate('agent-login');
+      await signedIn.logout();
+      final methods = advertising.requests.map((request) => request['method']);
+      expect(methods, containsAllInOrder(['authenticate', 'logout']));
+      expect(
+        advertising.requests.firstWhere(
+          (request) => request['method'] == 'authenticate',
+        )['params'],
+        {'methodId': 'agent-login'},
+      );
+      await signedIn.close();
+    });
+
+    test('a reattached client adopts the retained initialization', () async {
+      final transport = _ServerTransport();
+      final client = AcpClient(AcpJsonRpcConnection(transport: transport))
+        ..restoreInitialization(
+          const AcpInitializeResult(
+            protocolVersion: 1,
+            agentCapabilities: AcpAgentCapabilities(
+              auth: AcpAuthCapabilities(logout: true),
+            ),
+          ),
+        );
+      await client.logout();
+      expect(transport.requests.map((request) => request['method']), [
+        'logout',
+      ]);
+      await client.close();
+    });
+
+    test('advertises terminal auth in client capabilities', () {
+      expect(const AcpClientCapabilities(terminalAuth: true).toJson()['auth'], {
+        'terminal': true,
+      });
+      expect(
+        const AcpClientCapabilities().toJson().containsKey('auth'),
+        isFalse,
+      );
+    });
 
     test(
       'rejects session operations absent from initialized capabilities',

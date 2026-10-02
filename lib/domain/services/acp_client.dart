@@ -98,6 +98,16 @@ final class AcpClient {
     return parsed;
   }
 
+  /// Adopts [result] from an earlier client of the same live agent process.
+  ///
+  /// A reattached MonkeyMux bridge keeps the agent's initialized state, so a
+  /// new client must not send `initialize` again. Adopting the retained result
+  /// keeps capability-gated requests such as [logout] aligned with what the
+  /// agent actually advertised.
+  void restoreInitialization(AcpInitializeResult result) {
+    _initialization ??= result;
+  }
+
   /// Authenticates using an advertised method.
   Future<void> authenticate(
     String methodId, {

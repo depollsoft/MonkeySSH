@@ -487,7 +487,13 @@ final class AcpClientCapabilityService {
   var _nextTerminalId = 0;
 
   /// Capabilities that are safe to advertise for this service instance.
+  ///
+  /// `auth.terminal` is always advertised: MonkeySSH knows the provider's
+  /// exact launch argv and host, so it can rerun that agent program in an
+  /// interactive SSH terminal. The legacy `_meta['terminal-auth']` flag stays
+  /// for adapters that predate the stable capability.
   AcpClientCapabilities get capabilities => AcpClientCapabilities(
+    terminalAuth: true,
     meta: const <String, Object?>{
       'subagent-transcript': true,
       'terminal-auth': true,

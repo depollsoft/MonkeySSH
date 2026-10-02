@@ -1,10 +1,26 @@
 #!/usr/bin/env python3
-"""Deterministic, credential-free ACP v1 provider for MonkeySSH validation."""
+"""Deterministic, credential-free ACP v1 provider for MonkeySSH validation.
+
+Modes:
+  (default)        Advertises one ``agent`` auth method and never requires it.
+  --require-auth   Rejects session setup with ``auth_required`` (-32000) until
+                   the ``fake-agent-login`` method is authenticated over ACP or
+                   the ``fake-terminal-login`` terminal method has run. Also
+                   advertises ``agentCapabilities.auth.logout``.
+  --login          Interactive login-only flow run by a client for the
+                   terminal method. Requires ``FAKE_ACP_LOGIN=1`` (the method's
+                   env), asks for Enter, records the sign-in, and exits 0.
+
+The terminal sign-in is shared through ``FAKE_ACP_AUTH_FILE`` (default: a file
+in the system temp directory). No real credentials are read or written.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from typing import Any
 
 MAX_INLINE_BYTES = 64 * 1024
@@ -24,10 +40,54 @@ PERMISSION_OPTIONS = [
 ]
 
 
+AUTH_REQUIRED = -32000
+AGENT_LOGIN_METHOD = "fake-agent-login"
+TERMINAL_LOGIN_METHOD = "fake-terminal-login"
+TERMINAL_LOGIN_ENV = "FAKE_ACP_LOGIN"
+AUTH_SETUP_METHODS = {
+    "session/new",
+    "session/list",
+    "session/load",
+    "session/resume",
+    "session/prompt",
+}
+
+
+def auth_file_path() -> str:
+    """Return the marker shared by the terminal login and later providers."""
+    return os.environ.get("FAKE_ACP_AUTH_FILE") or os.path.join(
+        tempfile.gettempdir(), "monkeyssh-fake-acp-auth"
+    )
+
+
+def run_terminal_login() -> int:
+    """Run the interactive login-only flow for the terminal auth method."""
+    if os.environ.get(TERMINAL_LOGIN_ENV) != "1":
+        sys.stderr.write(f"{TERMINAL_LOGIN_ENV}=1 is required for --login\n")
+        return 2
+    sys.stdout.write("MonkeySSH fake ACP sign-in\n")
+    sys.stdout.write(
+        "Visit https://example.invalid/fake-device and enter code FAKE-1234\n"
+    )
+    sys.stdout.write("Press Enter to finish signing in (type 'no' to cancel): ")
+    sys.stdout.flush()
+    answer = sys.stdin.readline()
+    if not answer or answer.strip().lower() == "no":
+        sys.stdout.write("\nSign-in canceled.\n")
+        return 1
+    with open(auth_file_path(), "w", encoding="utf-8") as marker:
+        marker.write("signed-in\n")
+    sys.stdout.write("Signed in.\n")
+    return 0
+
+
 class FakeAcpProvider:
     """Small stateful ACP provider with deterministic fixtures."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_auth: bool = False) -> None:
+        self.require_auth = require_auth
+        self.agent_authenticated = False
+        self.client_terminal_auth = False
         self.sessions: dict[str, dict[str, Any]] = {}
         self.next_session = 1
         self.next_permission = 1
@@ -159,12 +219,72 @@ class FakeAcpProvider:
             return None
         return session_id
 
+    def is_authenticated(self) -> bool:
+        return self.agent_authenticated or os.path.exists(auth_file_path())
+
+    def auth_methods(self) -> list[dict[str, Any]]:
+        if not self.require_auth:
+            return [
+                {
+                    "id": "fake-local",
+                    "name": "Local deterministic fixture",
+                    "type": "agent",
+                    "description": "No credentials or network access.",
+                }
+            ]
+        methods: list[dict[str, Any]] = [
+            {
+                "id": AGENT_LOGIN_METHOD,
+                "name": "Fake agent sign-in",
+                "description": "Completes immediately over ACP.",
+            }
+        ]
+        # Terminal methods are advertised only to clients that can run them.
+        if self.client_terminal_auth:
+            methods.append(
+                {
+                    "id": TERMINAL_LOGIN_METHOD,
+                    "name": "Fake terminal sign-in",
+                    "type": "terminal",
+                    "description": "Press Enter in the terminal to sign in.",
+                    "args": ["--login"],
+                    "env": {TERMINAL_LOGIN_ENV: "1"},
+                }
+            )
+        return methods
+
     def handle_request(self, message: dict[str, Any]) -> None:
         request_id = message.get("id")
         method = message.get("method")
         params = message.get("params") or {}
 
+        if (
+            self.require_auth
+            and method in AUTH_SETUP_METHODS
+            and not self.is_authenticated()
+        ):
+            self.error(request_id, AUTH_REQUIRED, "Authentication required")
+            return
+
         if method == "initialize":
+            client_capabilities = params.get("clientCapabilities") or {}
+            auth_capabilities = client_capabilities.get("auth") or {}
+            self.client_terminal_auth = auth_capabilities.get("terminal") is True
+            capabilities: dict[str, Any] = {
+                "loadSession": True,
+                "promptCapabilities": {
+                    "image": True,
+                    "audio": False,
+                    "embeddedContext": True,
+                },
+                "sessionCapabilities": {
+                    "list": {},
+                    "resume": {},
+                    "close": {},
+                },
+            }
+            if self.require_auth:
+                capabilities["auth"] = {"logout": {}}
             self.result(
                 request_id,
                 {
@@ -174,34 +294,35 @@ class FakeAcpProvider:
                         "title": "MonkeySSH Fake ACP",
                         "version": "1.0.0",
                     },
-                    "agentCapabilities": {
-                        "loadSession": True,
-                        "promptCapabilities": {
-                            "image": True,
-                            "audio": False,
-                            "embeddedContext": True,
-                        },
-                        "sessionCapabilities": {
-                            "list": {},
-                            "resume": {},
-                            "close": {},
-                        },
-                    },
-                    "authMethods": [
-                        {
-                            "id": "fake-local",
-                            "name": "Local deterministic fixture",
-                            "type": "agent",
-                            "description": "No credentials or network access.",
-                        }
-                    ],
+                    "agentCapabilities": capabilities,
+                    "authMethods": self.auth_methods(),
                 },
             )
         elif method == "authenticate":
-            if params.get("methodId") != "fake-local":
-                self.error(request_id, -32002, "unsupported auth method")
-            else:
+            method_id = params.get("methodId")
+            if not self.require_auth and method_id == "fake-local":
                 self.result(request_id)
+            elif self.require_auth and method_id == AGENT_LOGIN_METHOD:
+                self.agent_authenticated = True
+                self.result(request_id)
+            elif method_id == TERMINAL_LOGIN_METHOD:
+                self.error(
+                    request_id,
+                    -32602,
+                    "terminal methods are completed outside the ACP connection",
+                )
+            else:
+                self.error(request_id, -32002, "unsupported auth method")
+        elif method == "logout":
+            if not self.require_auth:
+                self.error(request_id, -32601, "method not found: logout")
+                return
+            self.agent_authenticated = False
+            try:
+                os.remove(auth_file_path())
+            except FileNotFoundError:
+                pass
+            self.result(request_id)
         elif method == "session/new":
             session_id = self.create_session(str(params.get("cwd") or "."))
             self.result(request_id, self.setup_result(session_id))
@@ -471,7 +592,10 @@ class FakeAcpProvider:
 
 
 def main() -> int:
-    provider = FakeAcpProvider()
+    arguments = sys.argv[1:]
+    if "--login" in arguments:
+        return run_terminal_login()
+    provider = FakeAcpProvider(require_auth="--require-auth" in arguments)
     for raw_line in sys.stdin:
         if len(raw_line.encode("utf-8")) > MAX_INLINE_BYTES:
             provider.error(None, -32000, "frame exceeds fake provider limit")

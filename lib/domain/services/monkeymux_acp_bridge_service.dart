@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/acp_authentication.dart';
 import '../models/acp_json.dart';
 import '../models/acp_provider.dart';
 import '../models/monkeymux_acp_bridge.dart';
@@ -37,6 +38,7 @@ const _profileSourcingPrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 final _bridgeIdPattern = RegExp(r'^[a-f0-9]{32}$');
 final _commandHashPattern = RegExp(r'^[a-f0-9]{64}$');
+final _environmentNamePattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
 
 /// Provides persistent MonkeyMux ACP bridge lifecycle operations.
 final monkeyMuxAcpBridgeServiceProvider = Provider<MonkeyMuxAcpBridgeService>(
@@ -55,19 +57,34 @@ bool isValidMonkeyMuxAcpBridgeId(String bridgeId) =>
 /// POSIX uses the app's established profile/PATH prefix. Windows uses the
 /// established encoded PowerShell convention so every argv element remains a
 /// separate literal even when the login shell is `cmd.exe`.
+///
+/// [environment] overrides are applied after profile sourcing, so they win
+/// over same-named variables from the base launch environment. Names must be
+/// portable identifiers; values are quoted literally. [workingDirectory] is
+/// entered best-effort before the provider starts.
 String buildMonkeyMuxAcpProviderCommand(
   List<String> launchArgv, {
   required bool isWindows,
   String? providerId,
+  Map<String, String> environment = const <String, String>{},
+  String? workingDirectory,
 }) {
   if (launchArgv.isEmpty ||
       launchArgv.first.trim().isEmpty ||
-      launchArgv.any((value) => value.contains('\u0000'))) {
+      launchArgv.any((value) => value.contains('\u0000')) ||
+      (workingDirectory?.contains('\u0000') ?? false) ||
+      environment.entries.any(
+        (entry) =>
+            !_environmentNamePattern.hasMatch(entry.key) ||
+            entry.value.contains('\u0000'),
+      )) {
     throw const MonkeyMuxAcpBridgeException(
       MonkeyMuxAcpBridgeErrorKind.invalidLaunch,
       'The approved provider launch arguments are invalid.',
     );
   }
+  final cwd = workingDirectory?.trim();
+  final hasCwd = cwd != null && cwd.isNotEmpty;
   const executableVariable = r'$__flAcpExe';
   const argumentsVariable = r'$__flAcpArgs';
   const argumentsSplat = '@__flAcpArgs';
@@ -76,6 +93,10 @@ String buildMonkeyMuxAcpProviderCommand(
     // detection can find an npm/fnm/asdf command that the provider process
     // immediately fails to resolve.
     powerShellProfilePathPreamble,
+    if (hasCwd)
+      'Set-Location -LiteralPath ${powerShellSingleQuote(cwd)} -ErrorAction SilentlyContinue;',
+    for (final entry in environment.entries)
+      '\$env:${entry.key}=${powerShellSingleQuote(entry.value)};',
     r"$ErrorActionPreference='Stop';",
     if (providerId == AcpBuiltinProviderIds.museCode)
       _museWindowsExecutablePreamble,
@@ -89,6 +110,8 @@ String buildMonkeyMuxAcpProviderCommand(
   final command = isWindows
       ? buildCompactWindowsPowerShellCommand(windowsScript)
       : '$_profileSourcingPrefix'
+            '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
+            '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
             'exec ${launchArgv.map(shellEscapePosix).join(' ')}';
   if (utf8.encode(command).length > 8192) {
     throw const MonkeyMuxAcpBridgeException(
@@ -97,6 +120,32 @@ String buildMonkeyMuxAcpProviderCommand(
     );
   }
   return command;
+}
+
+/// Builds the interactive login command for an ACP `terminal` auth method.
+///
+/// Reuses the exact bridge launch construction (profile/PATH prefix, literal
+/// argv quoting) so the login runs the same configured agent program with the
+/// method's arguments appended and its environment applied on top. POSIX
+/// hosts run it under the same shell MonkeyMux uses for the provider: the
+/// user's `$SHELL` when it is a POSIX shell, otherwise `/bin/sh`.
+String buildAcpTerminalAuthCommand(
+  AcpTerminalAuthLaunch launch, {
+  required bool isWindows,
+}) {
+  final providerCommand = buildMonkeyMuxAcpProviderCommand(
+    launch.argv,
+    isWindows: isWindows,
+    providerId: launch.providerId,
+    environment: launch.environment,
+    workingDirectory: launch.workingDirectory,
+  );
+  if (isWindows) return providerCommand;
+  const dispatcher =
+      r'case "${SHELL##*/}" in sh|bash|zsh|ksh|dash) exec "$SHELL" -c "$1";; '
+      r'esac; exec /bin/sh -c "$1"';
+  return '/bin/sh -c ${shellEscapePosix(dispatcher)} monkeyssh-sign-in '
+      '${shellEscapePosix(providerCommand)}';
 }
 
 // Node's spawn cannot execute the official muse.cmd shim without a shell.

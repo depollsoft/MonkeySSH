@@ -80,6 +80,7 @@ import '../../domain/services/tmux_service.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
+import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_connection_support.dart';
@@ -9266,6 +9267,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             cwd: cwd,
             confirmInstall: (request) =>
                 confirmAcpMonkeyMuxInstall(context, request),
+            chooseAuthentication: acpAuthenticationChooser(context),
             launchCommandOverride: adapterLaunch.override,
             providerLabelOverride: _nativeProfileDisplayLabel(
               providerId,
@@ -9281,6 +9283,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             cwd: cwd,
             confirmInstall: (request) =>
                 confirmAcpMonkeyMuxInstall(context, request),
+            chooseAuthentication: acpAuthenticationChooser(context),
             launchCommandOverride: adapterLaunch.override,
             providerLabelOverride: _nativeProfileDisplayLabel(
               providerId,
@@ -9328,6 +9331,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     if (!mounted) {
       return;
+    }
+    if (result case AcpSessionLaunchFailed(
+      terminalAuthentication: final terminalSignIn?,
+    )) {
+      final signedIn = await runAcpTerminalSignIn(context, ref, terminalSignIn);
+      if (!mounted) return;
+      // The login ran out-of-band: relaunch so the agent starts fresh.
+      if (signedIn) result = await launch();
+      if (!mounted) return;
     }
     switch (result) {
       case AcpSessionLaunchStarted(:final key):
