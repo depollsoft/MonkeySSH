@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:mime/mime.dart';
 
 import '../../domain/models/acp_attachment.dart';
 import '../../domain/models/acp_content.dart';
@@ -78,6 +79,7 @@ class AcpComposerError {
   bool get isUploadRecoverable =>
       attachmentFailure == AcpAttachmentFailure.inlineSizeLimit ||
       attachmentFailure == AcpAttachmentFailure.imageSizeLimit ||
+      attachmentFailure == AcpAttachmentFailure.audioSizeLimit ||
       attachmentFailure == AcpAttachmentFailure.unsupportedCapability;
 
   @override
@@ -139,6 +141,12 @@ class AcpComposerAttachment {
 
   /// Whether this attachment resolves to an image, for thumbnail rendering.
   bool get isImage => (candidate.mimeType ?? '').startsWith('image/');
+
+  /// Whether this attachment looks like audio, from its MIME type or name.
+  bool get isAudio =>
+      (candidate.mimeType ?? lookupMimeType(candidate.name) ?? '').startsWith(
+        'audio/',
+      );
 
   /// Whether this is full prompt text represented by a compact paste chip.
   bool get isPastedText => candidate.isPastedText;

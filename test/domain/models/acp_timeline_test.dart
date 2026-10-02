@@ -329,6 +329,79 @@ void main() {
       expect(timeline.overflowed, isFalse);
     });
 
+    test('keeps a bounded audio clip alongside an image', () {
+      final builder = AcpTimelineBuilder(
+        limits: const AcpTimelineLimits(
+          // Room for both blocks' metadata, but not for either payload.
+          maxEntryBytes: 2048,
+          maxRetainedImageBytes: 1024 * 1024,
+          maxRetainedAudioBytes: 1024 * 1024,
+          maxTotalBytes: 8 * 1024 * 1024,
+        ),
+      );
+      final image = AcpImageContent(
+        data: 'A' * (512 * 1024),
+        mimeType: 'image/png',
+      );
+      final audio = AcpAudioContent(
+        data: 'A' * (512 * 1024),
+        mimeType: 'audio/mpeg',
+      );
+
+      builder.appendLocalUserPrompt([image, audio]);
+      final timeline = builder.snapshot();
+      final content = (timeline.entries.single as AcpMessageEntry).content;
+
+      expect(content[0], same(image));
+      expect(content[1], same(audio));
+      expect(timeline.overflowed, isFalse);
+      expect(
+        approximateContentBlockBytes(audio),
+        inInclusiveRange(512 * 1024, 512 * 1024 + 1024),
+      );
+    });
+
+    test('bounds and counts an oversized tool name', () {
+      final builder =
+          AcpTimelineBuilder(
+            limits: const AcpTimelineLimits(
+              maxEntryBytes: 512,
+              maxTotalBytes: 8192,
+            ),
+          )..apply(
+            AcpToolCallUpdate(
+              toolCallId: 'tool-1',
+              isInitial: true,
+              title: 'Run',
+              name: 'n' * 100000,
+            ),
+          );
+      final tool = builder.snapshot().entries.single as AcpToolCallEntry;
+      expect(tool.name!.length, lessThanOrEqualTo(128));
+      expect(approximateTimelineEntryBytes(tool), lessThanOrEqualTo(512));
+    });
+
+    test('omits audio above the dedicated audio budget', () {
+      final builder = AcpTimelineBuilder(
+        limits: const AcpTimelineLimits(
+          maxEntryBytes: 32,
+          maxRetainedAudioBytes: 64,
+          maxTotalBytes: 8192,
+        ),
+      );
+
+      final timeline =
+          (builder..appendLocalUserPrompt([
+                AcpAudioContent(data: 'A' * 1024, mimeType: 'audio/mpeg'),
+              ]))
+              .snapshot();
+      final content = (timeline.entries.single as AcpMessageEntry).content;
+
+      expect(content.single, isA<AcpTextContent>());
+      expect((content.single as AcpTextContent).text, contains('omitted'));
+      expect(timeline.overflowed, isTrue);
+    });
+
     test('keeps an image while bounding accompanying pasted text', () {
       final builder = AcpTimelineBuilder(
         limits: const AcpTimelineLimits(

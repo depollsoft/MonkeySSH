@@ -179,6 +179,8 @@ void main() {
           'session': {
             'configOptions': {'boolean': {}},
           },
+          'auth': {'terminal': true},
+          'elicitation': {'form': {}, 'url': {}},
         },
       );
     });
@@ -586,6 +588,42 @@ void main() {
       expect(transport.responseFor('read-1')['result'], {'content': 'two\n'});
     });
 
+    test('each session sharing the bridge keeps its own roots', () async {
+      for (final path in ['/workspace/a.txt', '/docs/a.txt', '/other/a.txt']) {
+        files.files[path] = Uint8List.fromList(utf8.encode('ok'));
+      }
+      service
+        ..setSessionAllowedRoots('session-a', const ['/workspace', '/docs'])
+        ..setSessionAllowedRoots('session-b', const ['/other']);
+      Future<Object?> read(String id, String sessionId, String path) async {
+        transport.sendRequest(id, 'fs/read_text_file', {
+          'sessionId': sessionId,
+          'path': path,
+        });
+        await _settle();
+        final response = transport.responseFor(id);
+        return response['result'] ?? (response['error']! as Map)['message'];
+      }
+
+      const allowed = {'content': 'ok'};
+      expect(await read('a-docs', 'session-a', '/docs/a.txt'), allowed);
+      expect(
+        await read('a-other', 'session-a', '/other/a.txt'),
+        isNot(allowed),
+      );
+      expect(await read('b-other', 'session-b', '/other/a.txt'), allowed);
+      expect(await read('b-docs', 'session-b', '/docs/a.txt'), isNot(allowed));
+      // A session without its own roots yet uses the bridge's launch roots.
+      expect(await read('new', 'session-new', '/workspace/a.txt'), allowed);
+      expect(
+        await read('new-docs', 'session-new', '/docs/a.txt'),
+        isNot(allowed),
+      );
+
+      await service.closeSession('session-a');
+      expect(await read('closed', 'session-a', '/docs/a.txt'), isNot(allowed));
+    });
+
     test('rejects a read that resolves through an escaping symlink', () async {
       files.canonicalPaths['/workspace/link/private.txt'] = '/private.txt';
       transport.sendRequest('read-link', 'fs/read_text_file', {
@@ -912,6 +950,56 @@ void main() {
 
         await service.closeSession('session-1');
         expect(terminals.processes.single.killed, isTrue);
+      },
+    );
+
+    test(
+      'publishes terminal output for display and keeps it after release',
+      () async {
+        transport.sendRequest('create-display', 'terminal/create', {
+          'sessionId': 'session-1',
+          'command': 'npm',
+          'args': ['run', 'test suite'],
+        });
+        await _settle();
+        final terminalId =
+            (transport.responseFor('create-display')['result']!
+                    as Map)['terminalId']
+                as String;
+        final display = service.terminalDisplay('session-1', terminalId);
+        expect(display.value?.command, "npm run 'test suite'");
+        expect(display.value?.output, isEmpty);
+
+        final process = terminals.processes.single
+          ..addOutput(utf8.encode('ok 1\n'), utf8.encode('warn\n'));
+        // Output is batched briefly rather than published per chunk.
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(display.value?.output, 'ok 1\nwarn\n');
+        expect(display.value?.exited, isFalse);
+
+        process.exit(const AcpTerminalExitStatus(exitCode: 3));
+        await _settle();
+        expect(display.value?.exited, isTrue);
+        expect(display.value?.exitCode, 3);
+
+        transport.sendRequest('release-display', 'terminal/release', {
+          'sessionId': 'session-1',
+          'terminalId': terminalId,
+        });
+        await _settle();
+        expect(
+          transport.responseFor('release-display'),
+          isNot(contains('error')),
+        );
+        expect(display.value?.released, isTrue);
+        expect(display.value?.output, 'ok 1\nwarn\n');
+        expect(
+          identical(service.terminalDisplay('session-1', terminalId), display),
+          isTrue,
+        );
+        // Another session never sees this terminal's output.
+        expect(service.terminalDisplay('session-2', terminalId).value, isNull);
+        expect(service.terminalDisplay('session-1', 'unknown').value, isNull);
       },
     );
 
@@ -1371,6 +1459,44 @@ void main() {
       expect(terminals.processes, hasLength(2));
       expect(transport.responseFor('create-1')['result'], isNotNull);
       expect(transport.responseFor('create-2')['result'], isNotNull);
+    });
+
+    test('a new service never reuses an earlier service terminal id', () async {
+      Future<String> firstTerminalId(
+        AcpClientCapabilityService target,
+        _ServerTransport targetTransport,
+      ) async {
+        targetTransport.sendRequest('create', 'terminal/create', {
+          'sessionId': 'session-1',
+          'command': 'echo',
+        });
+        await _settle();
+        return (targetTransport.responseFor('create')['result']!
+                as Map)['terminalId']
+            as String;
+      }
+
+      final nextTransport = _ServerTransport();
+      final nextClient = AcpClient(
+        AcpJsonRpcConnection(transport: nextTransport),
+      );
+      final next = AcpClientCapabilityService(
+        fileSystem: files,
+        terminalExecutor: terminals,
+        allowedRoots: const ['/workspace'],
+        registry: AcpPendingRequestRegistry(),
+      )..attach(nextClient);
+      addTearDown(() async {
+        await next.close();
+        await nextClient.close();
+      });
+
+      // A tool card restored from the first connection must not show the
+      // output of the reconnected service's first terminal.
+      final first = await firstTerminalId(service, transport);
+      expect(first, isNot(await firstTerminalId(next, nextTransport)));
+      // The per-service token carries 128 random bits.
+      expect(first, matches(RegExp(r'^acp-terminal-[0-9a-f]{32}-1$')));
     });
 
     test('creates concurrent terminals, truncates output, waits, kills, and releases', () async {

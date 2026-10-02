@@ -315,6 +315,7 @@ final class AcpAttachmentPreparationService {
         'attachmentCount': attachmentCount,
         'itemCount': draft.items.length,
         'imageSupported': capabilities.image,
+        'audioSupported': capabilities.audio,
         'embeddedContextSupported': capabilities.embeddedContext,
       },
     );
@@ -479,10 +480,14 @@ final class AcpAttachmentPreparationService {
     onUploadProgress,
   }) async {
     _validateSize(bytes.length, remainingTotalBytes);
-    final mimeType = _resolveMimeType(
+    final mimeType = _inlineMimeType(
       name: draft.candidate.name,
-      supplied: draft.candidate.mimeType,
-      headerBytes: bytes.take(limits.mimeSniffBytes).toList(),
+      resolved: _resolveMimeType(
+        name: draft.candidate.name,
+        supplied: draft.candidate.mimeType,
+        headerBytes: bytes.take(limits.mimeSniffBytes).toList(),
+      ),
+      capabilities: capabilities,
     );
     final inline = _inlineKind(
       mimeType: mimeType,
@@ -570,23 +575,26 @@ final class AcpAttachmentPreparationService {
         sniffBytes.add(chunk.sublist(0, take));
         remainingSniff -= take;
       }
-      final mimeType = _resolveMimeType(
+      final mimeType = _inlineMimeType(
         name: candidate.name,
-        supplied: candidate.mimeType,
-        headerBytes: sniffBytes.takeBytes(),
+        resolved: _resolveMimeType(
+          name: candidate.name,
+          supplied: candidate.mimeType,
+          headerBytes: sniffBytes.takeBytes(),
+        ),
+        capabilities: capabilities,
       );
       final knownSize = candidate.sizeBytes;
-      // Buffer only up to a format the agent can actually accept. Images
-      // may also fit as embedded blobs when that capability is advertised.
+      // Buffer only up to a format the agent can actually accept. Images and
+      // audio may also fit as embedded blobs when that capability is
+      // advertised.
+      final mediaLimit = _mediaInlineLimit(mimeType, capabilities);
       final inlineLimit = math.max(
-        mimeType.startsWith('image/') && capabilities.image
-            ? limits.maxImageBytes
-            : 0,
+        mediaLimit ?? 0,
         capabilities.embeddedContext ? limits.maxEmbeddedBytes : 0,
       );
       final canInlineByCapability =
-          (mimeType.startsWith('image/') && capabilities.image) ||
-          capabilities.embeddedContext;
+          mediaLimit != null || capabilities.embeddedContext;
       final shouldTryInline =
           canInlineByCapability &&
           (knownSize == null || knownSize <= inlineLimit) &&
@@ -754,6 +762,13 @@ final class AcpAttachmentPreparationService {
     onUploadProgress,
   }) async {
     if (draft.fallback != AcpAttachmentFallback.remoteUpload) {
+      if (_isAudioMimeType(mimeType) && capabilities.audio) {
+        throw AcpAttachmentException(
+          AcpAttachmentFailure.audioSizeLimit,
+          'Audio clips can be up to '
+          '${_formatByteLimit(limits.maxAudioBytes)} to send inline.',
+        );
+      }
       final capabilitySupported =
           (mimeType.startsWith('image/') && capabilities.image) ||
           capabilities.embeddedContext;
@@ -807,6 +822,11 @@ final class AcpAttachmentPreparationService {
         sizeBytes <= limits.maxImageBytes) {
       return _AcpInlineKind.image;
     }
+    if (_isAudioMimeType(mimeType) &&
+        capabilities.audio &&
+        sizeBytes <= limits.maxAudioBytes) {
+      return _AcpInlineKind.audio;
+    }
     if (!capabilities.embeddedContext || sizeBytes > limits.maxEmbeddedBytes) {
       return null;
     }
@@ -827,6 +847,12 @@ final class AcpAttachmentPreparationService {
         data: base64Encode(bytes),
         mimeType: mimeType,
         uri: uri,
+      ),
+      // ACP audio content carries no URI, so the local file name never
+      // leaves the device for inline clips.
+      _AcpInlineKind.audio => AcpAudioContent(
+        data: base64Encode(bytes),
+        mimeType: mimeType,
       ),
       _AcpInlineKind.textResource => AcpResourceContent(
         resource: AcpTextResource(
@@ -916,6 +942,48 @@ final class AcpAttachmentPreparationService {
     return resolved;
   }
 
+  /// Returns the inline media byte ceiling for [mimeType], or null when the
+  /// agent does not accept that media type inline.
+  int? _mediaInlineLimit(String mimeType, AcpPromptCapabilities capabilities) {
+    if (mimeType.startsWith('image/') && capabilities.image) {
+      return limits.maxImageBytes;
+    }
+    if (_isAudioMimeType(mimeType) && capabilities.audio) {
+      return limits.maxAudioBytes;
+    }
+    return null;
+  }
+
+  /// Normalizes audio types when the agent accepts inline audio.
+  ///
+  /// Audio-only MP4 and WebM containers share magic numbers with video, so an
+  /// audio file-name extension wins over a container-level video sniff. When
+  /// the agent does not advertise audio, [resolved] is returned untouched so
+  /// the existing resource fallbacks keep their current MIME types.
+  String _inlineMimeType({
+    required String name,
+    required String resolved,
+    required AcpPromptCapabilities capabilities,
+  }) {
+    if (!capabilities.audio) return resolved;
+    final byExtension = lookupMimeType(name);
+    if (resolved == 'audio/weba' &&
+        byExtension != null &&
+        byExtension.startsWith('video/')) {
+      // EBML sniffing cannot tell WebM/Matroska video from audio.
+      return byExtension;
+    }
+    if (_isAudioMimeType(resolved)) {
+      return normalizeAcpAudioMimeType(resolved);
+    }
+    if (const {'video/mp4', 'video/3gpp', 'video/webm'}.contains(resolved) &&
+        byExtension != null &&
+        _isAudioMimeType(byExtension)) {
+      return normalizeAcpAudioMimeType(byExtension);
+    }
+    return resolved;
+  }
+
   String _decodeUtf8(Uint8List bytes) {
     try {
       return utf8.decode(bytes, allowMalformed: false);
@@ -928,7 +996,19 @@ final class AcpAttachmentPreparationService {
   }
 }
 
-enum _AcpInlineKind { image, textResource, blobResource }
+enum _AcpInlineKind { image, audio, textResource, blobResource }
+
+bool _isAudioMimeType(String mimeType) => mimeType.startsWith('audio/');
+
+String _formatByteLimit(int bytes) {
+  const mebibyte = 1024 * 1024;
+  if (bytes < 1024) return '$bytes bytes';
+  if (bytes < mebibyte) return '${(bytes / 1024).floor()} KB';
+  final mebibytes = bytes / mebibyte;
+  return mebibytes == mebibytes.roundToDouble()
+      ? '${mebibytes.toStringAsFixed(0)} MB'
+      : '${mebibytes.toStringAsFixed(1)} MB';
+}
 
 bool _isTextMimeType(String mimeType) =>
     mimeType.startsWith('text/') ||
@@ -941,6 +1021,7 @@ bool _isTextMimeType(String mimeType) =>
 
 String _mimeCategory(String mimeType) {
   if (mimeType.startsWith('image/')) return 'image';
+  if (_isAudioMimeType(mimeType)) return 'audio';
   if (_isTextMimeType(mimeType)) return 'text';
   return 'binary';
 }

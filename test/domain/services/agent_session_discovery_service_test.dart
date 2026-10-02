@@ -1073,6 +1073,20 @@ cwd: /tmp/demo
       expect(metadata.summary, 'rename this session');
       expect(metadata.updatedAt, DateTime.parse('2026-04-12T21:07:44.781Z'));
     });
+
+    test('reads Codex 0.160 prompts after the injected context', () {
+      final metadata = parseCodexRolloutMetadata(r'''
+{"timestamp":"2026-10-01T09:00:00.000Z","type":"session_meta","payload":{"id":"01a0fb23-0000-7000-8000-000000000000","cwd":"/work"}}
+{"timestamp":"2026-10-01T09:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer text"}]}}
+{"timestamp":"2026-10-01T09:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work\n..."},{"type":"input_text","text":"<environment_context>\n</environment_context>"}]}}
+{"timestamp":"2026-10-01T09:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_image","image_url":"data:"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"  <div> breaks the layout  "}]}}
+{"timestamp":"2026-10-01T09:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second prompt"}]}}
+''');
+
+      expect(metadata.sessionId, '01a0fb23-0000-7000-8000-000000000000');
+      // A prompt that starts with markup is still the user's.
+      expect(metadata.summary, '<div> breaks the layout');
+    });
   });
 
   group('parseClaudeSessionMetadata', () {

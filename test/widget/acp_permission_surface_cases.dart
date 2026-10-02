@@ -157,11 +157,64 @@ void registerAcpPermissionSurfaceTests() {
       await _pump(tester, [prompt]);
 
       expect(find.text('Allow Write settings?'), findsOneWidget);
-      expect(find.text('Write settings'), findsOneWidget);
+      // The title is not repeated as the context line.
+      expect(find.text('Write settings'), findsNothing);
       expect(find.text('Allow once'), findsOneWidget);
       await tester.tap(find.text('Allow once'));
       await tester.pump();
       expect(selected, ['allow-once']);
+    });
+
+    testWidgets('prefers the title and subject carried by the request', (
+      tester,
+    ) async {
+      final pending = session.AcpPendingPermission(
+        requestKey: 'req-2',
+        sessionId: 'sess',
+        toolCallId: 'tool-2',
+        options: const [
+          AcpPermissionOption(
+            id: 'allow-once',
+            name: 'Allow once',
+            kind: AcpPermissionOptionKind.allowOnce,
+          ),
+        ],
+        requestedAt: DateTime(2026),
+        title: 'Run shell command',
+        toolKind: AcpToolKind.execute,
+        subject: 'rm -rf build',
+      );
+      final prompt = acpToolPromptFromSession(
+        pending,
+        toolTitle: 'Stale timeline title',
+        onSelect: (_) async {},
+        onCancel: () async {},
+      );
+      await _pump(tester, [prompt]);
+
+      expect(find.text('Allow Run shell command?'), findsOneWidget);
+      expect(find.text('rm -rf build'), findsOneWidget);
+      expect(find.textContaining('Stale timeline title'), findsNothing);
+      expect(find.textContaining('tool-2'), findsNothing);
+    });
+
+    test('agent titles are put on one bounded line', () {
+      expect(
+        acpPermissionTitleText('  Run\n\n  the   tests  '),
+        'Run the tests',
+      );
+      expect(acpPermissionTitleText(' \n '), isNull);
+      expect(acpPermissionTitleText(null), isNull);
+      final long = acpPermissionTitleText('x' * 5000)!;
+      expect(long.runes.length, kAcpPermissionTitleMaxCharacters);
+      expect(long, endsWith('…'));
+      // Emoji are counted and cut by code point, never split.
+      final emoji = acpPermissionTitleText('😀' * 200)!;
+      expect(emoji.runes.length, kAcpPermissionTitleMaxCharacters);
+      expect(
+        emoji.runes.every((rune) => rune == 0x1F600 || rune == 0x2026),
+        isTrue,
+      );
     });
   });
 }

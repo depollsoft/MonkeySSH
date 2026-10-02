@@ -140,6 +140,7 @@ ToolSessionInfo? normalizeDiscoveredSessionInfo(
     originWorkingDirectory: info.originWorkingDirectory,
     lastActive: info.lastActive,
     summary: normalizedSummary,
+    additionalDirectories: info.additionalDirectories,
   );
 }
 
@@ -671,15 +672,8 @@ parseCodexRolloutMetadata(String raw) {
     updatedAt ??= _parseDateTimeValue(decoded['timestamp']);
 
     if (summary != null) continue;
-    if (_readStringField(decoded, 'type') != 'event_msg' ||
-        _readStringField(payload, 'type') != 'user_message') {
-      continue;
-    }
-
-    final message = _readStringField(payload, 'message');
-    if (message != null && message.trim().isNotEmpty) {
-      summary = _summarizeSessionText(message);
-    }
+    final prompt = _codexRolloutPrompt(decoded, payload);
+    if (prompt != null) summary = _summarizeSessionText(prompt);
   }
 
   return (
@@ -690,6 +684,61 @@ parseCodexRolloutMetadata(String raw) {
     parsedAny: parsedAny,
   );
 }
+
+/// Returns the prompt a Codex rollout record carries, if any.
+///
+/// Codex before 0.160 logged prompts as `user_message` events. Later versions
+/// log only user messages, where AGENTS.md, environment, and skill context
+/// precede the prompt.
+String? _codexRolloutPrompt(
+  Map<String, dynamic> record,
+  Map<String, dynamic>? payload,
+) {
+  final recordType = _readStringField(record, 'type');
+  final payloadType = _readStringField(payload, 'type');
+  if (recordType == 'event_msg' && payloadType == 'user_message') {
+    final message = _readStringField(payload, 'message')?.trim();
+    return message == null || message.isEmpty ? null : message;
+  }
+  if (recordType != 'response_item' ||
+      payloadType != 'message' ||
+      _readStringField(payload, 'role') != 'user') {
+    return null;
+  }
+  final content = payload?['content'];
+  if (content is! List) return null;
+  for (final part in content) {
+    if (part is! Map || part['type'] != 'input_text') continue;
+    final text = part['text'];
+    if (text is! String) continue;
+    final prompt = text.trim();
+    if (prompt.isEmpty ||
+        _codexInjectedContextPrefixes.any(prompt.startsWith)) {
+      continue;
+    }
+    return prompt;
+  }
+  return null;
+}
+
+/// Openings of the user-role text Codex adds itself: instructions,
+/// environment, plugins, skills, review results, and the wrappers around an
+/// attached image. A prompt that merely starts with markup is still the
+/// user's.
+const _codexInjectedContextPrefixes = [
+  '# AGENTS.md instructions',
+  '<environment_context>',
+  '<user_instructions>',
+  '<recommended_plugins>',
+  '<skill>',
+  '<user_action>',
+  '<user_shell_command>',
+  '<turn_aborted>',
+  '<subagent_notification>',
+  '<image ',
+  '<image>',
+  '</image>',
+];
 
 /// Parses Claude session metadata from a saved JSONL transcript.
 @visibleForTesting
@@ -3974,6 +4023,7 @@ class AgentSessionDiscoveryService {
               summary:
                   sessionInfo.title ??
                   _truncateSessionIdValue(sessionInfo.sessionId),
+              additionalDirectories: sessionInfo.additionalDirectories,
             );
             sessionsById.putIfAbsent(info.sessionId, () => info);
           }

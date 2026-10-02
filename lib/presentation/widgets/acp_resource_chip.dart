@@ -23,6 +23,32 @@ String formatResourceSize(int size) {
   return '$rounded ${units[unit]}';
 }
 
+/// Supplies open and copy actions to resource chips rendered deep in the
+/// thread, such as the resources a tool call produced.
+class AcpResourceActions extends InheritedWidget {
+  /// Creates a resource action scope.
+  const AcpResourceActions({
+    required super.child,
+    super.key,
+    this.onOpen,
+    this.onCopy,
+  });
+
+  /// Opens a resource.
+  final ValueChanged<AcpResourceRef>? onOpen;
+
+  /// Called after a resource URI is copied.
+  final ValueChanged<AcpResourceRef>? onCopy;
+
+  /// Returns the nearest resource action scope, if any.
+  static AcpResourceActions? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<AcpResourceActions>();
+
+  @override
+  bool updateShouldNotify(AcpResourceActions oldWidget) =>
+      onOpen != oldWidget.onOpen || onCopy != oldWidget.onCopy;
+}
+
 /// A compact chip representing a file or resource reference.
 ///
 /// Shows the display name in monospace, optional MIME/size metadata, and
@@ -47,9 +73,13 @@ class AcpResourceChip extends StatelessWidget {
   final ValueChanged<AcpResourceRef>? onCopy;
 
   IconData get _icon {
+    if (resource.text != null) return Icons.article_outlined;
     final mime = resource.mimeType ?? '';
     if (mime.startsWith('image/')) {
       return Icons.image_outlined;
+    }
+    if (mime.startsWith('audio/')) {
+      return Icons.audio_file_outlined;
     }
     if (mime.startsWith('text/') ||
         mime.contains('json') ||

@@ -32,6 +32,7 @@ import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_session_workspace.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_runtime_info.dart';
 import '../../domain/models/agent_usage_rings.dart';
@@ -81,6 +82,7 @@ import '../../domain/services/tmux_service.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
+import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_connection_support.dart';
@@ -1749,6 +1751,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         'hasInitialTmuxWindow': widget.initialTmuxWindowIndex != null,
       },
     );
+    // The extra-keys Ctrl turns Enter into send in the native composer, the
+    // way Ctrl+Enter does on a hardware keyboard.
+    _nativeComposerFocusController
+      ..isSendModifierArmed = (() => _toolbarController.isCtrlActive)
+      ..consumeSendModifier = _toolbarController.consumeOneShot;
     _tmuxService = ref.read(tmuxServiceProvider);
     _tmuxMultiplexerService = _tmuxService;
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);
@@ -8986,12 +8993,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           :final providerId,
           :final acpSessionId,
           :final workingDirectory,
+          :final additionalDirectories,
         ):
           await _startNativeAcpSession(
             session,
             providerId: providerId,
             workingDirectory: workingDirectory,
             resumeSessionId: acpSessionId,
+            additionalDirectories: additionalDirectories,
           );
         case TmuxResumeSessionAction(
           :final resumeCommand,
@@ -9178,6 +9187,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? providerId,
     String? workingDirectory,
     String? resumeSessionId,
+    List<String> additionalDirectories = const <String>[],
   }) async {
     if (providerId == null || _activeMuxBackend != RemoteMuxBackend.monkeyMux) {
       return _performNativeAcpSessionStart(
@@ -9185,6 +9195,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         providerId: providerId,
         workingDirectory: workingDirectory,
         resumeSessionId: resumeSessionId,
+        additionalDirectories: additionalDirectories,
       );
     }
     if (_nativeAcpLaunchState != null) return;
@@ -9209,6 +9220,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         providerId: providerId,
         workingDirectory: workingDirectory,
         resumeSessionId: resumeSessionId,
+        additionalDirectories: additionalDirectories,
         launchGeneration: generation,
       );
     } finally {
@@ -9221,6 +9233,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? providerId,
     String? workingDirectory,
     String? resumeSessionId,
+    List<String> additionalDirectories = const <String>[],
     int? launchGeneration,
   }) async {
     if (_activeMuxBackend != RemoteMuxBackend.monkeyMux) {
@@ -9288,6 +9301,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             cwd: cwd,
             confirmInstall: (request) =>
                 confirmAcpMonkeyMuxInstall(context, request),
+            chooseAuthentication: acpAuthenticationChooser(context),
             launchCommandOverride: adapterLaunch.override,
             providerLabelOverride: _nativeProfileDisplayLabel(
               providerId,
@@ -9303,6 +9317,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             cwd: cwd,
             confirmInstall: (request) =>
                 confirmAcpMonkeyMuxInstall(context, request),
+            chooseAuthentication: acpAuthenticationChooser(context),
             launchCommandOverride: adapterLaunch.override,
             providerLabelOverride: _nativeProfileDisplayLabel(
               providerId,
@@ -9310,6 +9325,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             ),
             autoApprovePermissions: _startClisInYoloMode,
             replace: replace,
+            // Re-send the roots the agent reported via session/list; MCP
+            // servers fall back to the configured defaults.
+            workspace: additionalDirectories.isEmpty
+                ? null
+                : AcpSessionWorkspaceOptions(
+                    additionalDirectories: additionalDirectories,
+                  ),
           );
 
     var result = await launch();
@@ -9351,14 +9373,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
+    if (result case AcpSessionLaunchFailed(
+      terminalAuthentication: final terminalSignIn?,
+    )) {
+      final signedIn = await runAcpTerminalSignIn(context, ref, terminalSignIn);
+      if (!mounted) return;
+      // The login ran out-of-band: relaunch so the agent starts fresh.
+      if (signedIn) result = await launch();
+      if (!mounted) return;
+    }
     switch (result) {
       case AcpSessionLaunchStarted(:final key):
         _openNativeAcpSession(key);
       case AcpSessionLaunchFailed(:final error):
-        final authCommand = await resolveAcpTerminalAuthCommand(
-          providerId: providerId,
-          session: session,
-        );
+        // Offer the CLI sign-in only for a sign-in failure: a launch that
+        // failed for any other reason (a bad flag, a crash) is not fixed by
+        // signing in, and the offer hides the real error.
+        final authCommand =
+            error.kind == AcpSessionErrorKind.authenticationRequired
+            ? await resolveAcpTerminalAuthCommand(
+                providerId: providerId,
+                session: session,
+              )
+            : null;
         if (!mounted) return;
         final unlocksCursorKeychain =
             providerId == AcpBuiltinProviderIds.cursorAgent &&

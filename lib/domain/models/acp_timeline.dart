@@ -23,8 +23,10 @@ final class AcpTimelineLimits {
     this.maxEntries = 500,
     this.maxEntryBytes = 512 * 1024,
     this.maxRetainedImageBytes = kAcpAttachmentImageDisplayMaxBytes,
+    this.maxRetainedAudioBytes = kAcpAttachmentAudioMaxBytes,
     this.maxTotalBytes = 16 * 1024 * 1024,
-  }) : assert(maxRetainedImageBytes >= 0);
+  }) : assert(maxRetainedImageBytes >= 0),
+       assert(maxRetainedAudioBytes >= 0);
 
   /// Maximum retained timeline entries. Oldest entries are dropped first.
   final int maxEntries;
@@ -42,6 +44,13 @@ final class AcpTimelineLimits {
   /// ceiling. Keeping that separate budget prevents an ordinary pasted
   /// screenshot from being replaced by a text-only memory marker.
   final int maxRetainedImageBytes;
+
+  /// Maximum decoded bytes of inline audio protected within one message.
+  ///
+  /// Like [maxRetainedImageBytes], this keeps a playable clip from being
+  /// replaced by a memory marker. It is separate from the image budget so a
+  /// prompt with a screenshot and a voice clip can retain both.
+  final int maxRetainedAudioBytes;
 
   /// Maximum approximate total bytes retained across the whole timeline.
   final int maxTotalBytes;
@@ -168,6 +177,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     required this.toolCallId,
     required this.order,
     this.title,
+    this.name,
     this.toolKind,
     this.status,
     List<AcpToolContent> content = const <AcpToolContent>[],
@@ -187,6 +197,9 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
 
   /// Latest known title.
   final String? title;
+
+  /// Latest known machine-readable tool name, such as `Bash`.
+  final String? name;
 
   /// Latest known tool kind.
   final AcpToolKind? toolKind;
@@ -221,6 +234,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     toolCallId: toolCallId,
     order: order,
     title: update.title ?? title,
+    name: update.name ?? name,
     toolKind: update.toolKind ?? toolKind,
     status: update.status ?? status,
     content: update.content == null
@@ -242,6 +256,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
           toolCallId == other.toolCallId &&
           order == other.order &&
           title == other.title &&
+          name == other.name &&
           toolKind == other.toolKind &&
           status == other.status &&
           rawInput == other.rawInput &&
@@ -259,6 +274,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     toolCallId,
     order,
     title,
+    name,
     toolKind,
     status,
     rawInput,
@@ -348,6 +364,13 @@ int approximateContentBlockBytes(AcpContentBlock block) {
           _approximateJsonBytes(block.meta) +
           _approximateJsonBytes(block.extensions) +
           256,
+    AcpAudioContent() =>
+      block.data.length +
+          utf8.encode(block.mimeType).length +
+          _approximateJsonBytes(block.annotations?.toJson()) +
+          _approximateJsonBytes(block.meta) +
+          _approximateJsonBytes(block.extensions) +
+          256,
     _ => _encodedContentBlockBytes(block),
   };
   _contentBlockByteCache[block] = bytes;
@@ -403,6 +426,7 @@ int _approximateToolCallBytes(AcpToolCallEntry entry) =>
     entry.toolCallId.length +
     (entry.parentToolCallId?.length ?? 0) +
     utf8.encode(entry.title ?? '').length +
+    utf8.encode(entry.name ?? '').length +
     entry.content.fold<int>(
       0,
       (total, content) => total + _approximateToolContentBytes(content),
@@ -689,14 +713,14 @@ class AcpTimelineBuilder {
   /// whole timeline drops its oldest entries), then truncates a single
   /// remaining oversized block as a last resort.
   AcpMessageEntry _boundedMessageEntry(AcpMessageEntry entry) {
-    final protectedImages = _protectedTimelineImages(
-      entry.content,
-      _limits.maxRetainedImageBytes,
-    );
+    final protectedImages = <AcpMediaContent>{
+      ..._protectedTimelineImages(entry.content, _limits.maxRetainedImageBytes),
+      ..._protectedTimelineAudio(entry.content, _limits.maxRetainedAudioBytes),
+    };
     int byteLimit(Iterable<AcpContentBlock> content) => math.min(
       _limits.maxTotalBytes,
       _limits.maxEntryBytes +
-          content.whereType<AcpImageContent>().fold<int>(
+          content.whereType<AcpMediaContent>().fold<int>(
             0,
             (sum, block) =>
                 sum + (protectedImages.contains(block) ? block.data.length : 0),
@@ -762,6 +786,22 @@ class AcpTimelineBuilder {
     return protected;
   }
 
+  Set<AcpAudioContent> _protectedTimelineAudio(
+    List<AcpContentBlock> content,
+    int decodedByteBudget,
+  ) {
+    var remaining = decodedByteBudget;
+    final protected = <AcpAudioContent>{};
+    for (final block in content.reversed) {
+      if (block is! AcpAudioContent || block.data.isEmpty) continue;
+      final decodedBytes = _approximateBase64DecodedBytes(block.data);
+      if (decodedBytes <= 0 || decodedBytes > remaining) continue;
+      protected.add(block);
+      remaining -= decodedBytes;
+    }
+    return protected;
+  }
+
   int _approximateBase64DecodedBytes(String encoded) {
     var padding = 0;
     if (encoded.endsWith('==')) {
@@ -800,6 +840,14 @@ class AcpTimelineBuilder {
       }
       remaining -= utf8.encode(title).length;
     }
+    var name = entry.name;
+    if (name != null) {
+      final nameBudget = math.min(remaining, 128);
+      if (utf8.encode(name).length > nameBudget) {
+        name = String.fromCharCodes(name.runes.take(nameBudget ~/ 4));
+      }
+      remaining -= utf8.encode(name).length;
+    }
     final locations = <AcpToolLocation>[];
     for (final location in entry.locations) {
       final bytes = _approximateToolLocationBytes(location);
@@ -811,6 +859,7 @@ class AcpTimelineBuilder {
       toolCallId: entry.toolCallId,
       order: entry.order,
       title: title,
+      name: name,
       toolKind: entry.toolKind,
       status: entry.status,
       locations: locations,

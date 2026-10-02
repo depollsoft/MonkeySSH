@@ -11,7 +11,9 @@ import 'settings_service.dart';
 /// selected session through [SettingsService].
 ///
 /// This service only ever stores host/provider/bridge/session identifiers, an
-/// optional title and working directory, and activity timestamps. It never
+/// optional title and working directory, the session's workspace choices
+/// (local MCP server ids and additional directories), and activity
+/// timestamps. It never
 /// reads, logs, or persists prompts, messages, attachments, tool data, or
 /// reasoning. Malformed storage is handled defensively and all mutations are
 /// serialized so overlapping writes cannot drop one another's changes.
@@ -43,9 +45,16 @@ class AcpRecentSessionsService {
   /// A reference with the same [AcpSessionKey] replaces the previous entry so
   /// updated titles and timestamps are retained without duplication.
   Future<void> record(AcpRecentSessionRef ref) => _withMutationLock(() async {
+    final mcpServerIds = ref.mcpServerIds;
     final safeRef = ref.copyWith(
       title: _bounded(ref.title, kAcpRecentTitleMaxCharacters),
       cwd: _bounded(ref.cwd, kAcpRecentCwdMaxCharacters),
+      mcpServerIds: mcpServerIds == null
+          ? null
+          : AcpRecentSessionRef.boundedMcpServerIds(mcpServerIds),
+      additionalDirectories: AcpRecentSessionRef.boundedAdditionalDirectories(
+        ref.additionalDirectories,
+      ),
     );
     final existing = await list();
     final deduped = existing

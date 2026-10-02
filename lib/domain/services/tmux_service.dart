@@ -4670,6 +4670,9 @@ flutty_claude_session_title() {
   [ -r "\$file" ] || return 0
   title=\$(grep '"customTitle"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin customTitle)
   if [ -z "\$title" ]; then
+    title=\$(grep '"aiTitle"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin aiTitle)
+  fi
+  if [ -z "\$title" ]; then
     title=\$(grep '"lastPrompt"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin lastPrompt)
   fi
   if [ -z "\$title" ]; then
@@ -4681,6 +4684,65 @@ flutty_claude_session_title() {
       flutty_json_string_field_from_stdin content)
   fi
   flutty_clean_session_title "\$title"
+}
+# Prints the first prompt in Codex rollout lines. Codex before 0.160 logged
+# prompts as user_message events; later versions log only user messages,
+# where the AGENTS.md, environment, plugin, skill, review, and image-wrapper
+# text Codex adds precedes the prompt. A prompt that merely starts with
+# markup is still the user's.
+flutty_codex_prompt_from_stdin() {
+  awk '
+BEGIN {
+  quote = sprintf("%c", 34)
+  slash = sprintf("%c", 92)
+}
+function string_end(s,    offset, q, p, n) {
+  offset = 0
+  while ((q = index(substr(s, offset + 1), quote)) > 0) {
+    p = offset + q
+    n = 0
+    while (p - n - 1 > 0 && substr(s, p - n - 1, 1) == slash) n++
+    if (n % 2 == 0) return p
+    offset = p
+  }
+  return 0
+}
+function is_context(s, injected,    t, count, prefixes, i) {
+  t = s
+  while (t != "") {
+    if (substr(t, 1, 1) == " ") t = substr(t, 2)
+    else if (substr(t, 1, 1) == slash && index("nrt", substr(t, 2, 1)) > 0) t = substr(t, 3)
+    else break
+  }
+  if (t == "") return 1
+  if (!injected) return 0
+  count = split("# AGENTS.md instructions|<environment_context>|<user_instructions>|<recommended_plugins>|<skill>|<user_action>|<user_shell_command>|<turn_aborted>|<subagent_notification>|<image |<image>|</image>", prefixes, "|")
+  for (i = 1; i <= count; i++) {
+    if (index(t, prefixes[i]) == 1) return 1
+  }
+  return 0
+}
+function first_prompt(line, key, injected,    rest, end, body) {
+  rest = line
+  while (match(rest, quote key quote "[[:space:]]*:[[:space:]]*" quote)) {
+    rest = substr(rest, RSTART + RLENGTH)
+    end = string_end(rest)
+    if (end == 0) return ""
+    body = substr(rest, 1, end - 1)
+    rest = substr(rest, end + 1)
+    if (!is_context(body, injected)) return body
+  }
+  return ""
+}
+{ prompt = "" }
+index(\$0, quote "user_message" quote) { prompt = first_prompt(\$0, "message", 0) }
+!index(\$0, quote "user_message" quote) && match(\$0, quote "role" quote "[[:space:]]*:[[:space:]]*" quote "user" quote) {
+  prompt = first_prompt(\$0, "text", 1)
+}
+prompt != "" {
+  print prompt
+  exit
+}'
 }
 flutty_codex_session_title() {
   file=\$1
@@ -4694,10 +4756,9 @@ flutty_codex_session_title() {
       flutty_json_string_field_from_stdin thread_name)
   fi
   if [ -z "\$title" ] && [ -r "\$file" ]; then
-    title=\$(grep '"user_message"' "\$file" 2>/dev/null |
-      grep '"message"' |
-      head -n 1 |
-      flutty_json_string_field_from_stdin message)
+    title=\$(grep -e '"user_message"' -e '"role"[[:space:]]*:[[:space:]]*"user"' "\$file" 2>/dev/null |
+      head -n 20 |
+      flutty_codex_prompt_from_stdin)
   fi
   flutty_clean_session_title "\$title"
 }

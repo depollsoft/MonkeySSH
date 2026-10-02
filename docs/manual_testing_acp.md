@@ -34,7 +34,9 @@ Automated coverage includes initialization and auth metadata, create/list/load/
 resume/close, config options, slash commands, user/assistant/thought replay,
 plan and usage updates, tool creation/update, exact permission choices, bounded
 image/resource content, prompt cancellation, SSH disconnect/reconnect replay,
-and bridge stop.
+and bridge stop. The fake-provider script tests also drive sign-in methods and
+logout, form and URL elicitation, `$/cancel_request` in both directions, and a
+client terminal embedded in a tool call.
 
 ## Fake-provider app setup
 
@@ -49,9 +51,22 @@ Use the values printed by `setup_acp_test_env.sh`:
 6. Choose **New Window → Other native agent**, select `Fake ACP v1`, and start
    the session.
 
-The provider advertises `/echo`, `/fixtures`, and `/wait`. `/fixtures` emits
-all rendering fixtures and a permission request. `/wait` remains active until
-Cancel is tapped.
+The provider advertises these commands:
+
+- `/echo` replies with the given text.
+- `/fixtures` emits all rendering fixtures and a permission request.
+- `/wait` stays active until Cancel is tapped.
+- `/elicit` asks for structured input with a form.
+- `/elicit-url` asks the user to open a page, then sends `elicitation/complete`.
+- `/cancel-permission` requests a permission and withdraws it with
+  `$/cancel_request`.
+- `/terminal` runs a two-line command in a client terminal, embeds it in a
+  tool call next to an embedded text resource, then releases the terminal.
+
+Start the provider with `--require-auth` to reject session setup until the user
+signs in. It advertises one `agent` method, a `terminal` method when the client
+supports terminal auth (the method reruns the provider with `--login`), and
+logout.
 
 ## Mobile one-handed flow
 
@@ -73,6 +88,61 @@ Test on the smallest supported phone size:
 
 Check VoiceOver/TalkBack labels, Dynamic Type/font scaling, landscape, and
 light/dark mode while completing the same flow.
+
+## Tool output, resources, and permission details
+
+1. Run `/terminal`. The tool card shows `$ sh -c ...`, the first line, a
+   blinking cursor while the command runs, then the second line and `exit 0`
+   with a check icon.
+2. Collapse and expand the card after the turn ends. The output is still there
+   even though the provider released the terminal.
+3. Tap the `terminal-notes.md` chip in the same card. A sheet shows the
+   embedded text in a code block with a copy action. It offers no "Open in
+   files" button because the URI is not a remote path.
+4. Run `/fixtures` and check that the permission prompt names the tool and its
+   path rather than a raw tool ID.
+5. Reconnect the app after a `/terminal` turn. The card says the terminal
+   output is no longer available instead of expanding onto nothing.
+
+## Sign-in, elicitation, and withdrawn requests
+
+- With `--require-auth`, starting a session opens the sign-in sheet. The
+  `agent` method signs in and the session starts. The `terminal` method opens
+  the sign-in terminal, and a zero exit starts a fresh session. With a real
+  agent whose login waits on a browser, Cancel sign-in sends
+  `$/cancel_request`.
+- Sign out from the chat menu. The next new session asks to sign in again.
+- `/elicit` shows a form with defaults filled in. Submit, Decline, and
+  swipe-to-dismiss answer `accept`, `decline`, and `cancel`, and the reply
+  text echoes the result.
+- `/elicit-url` shows the full URL with its host emphasized. Opening it sends
+  `accept` first, and the "Continue in browser" row clears when the provider
+  sends `elicitation/complete`.
+- `/cancel-permission` shows a permission prompt that disappears on its own.
+  Background the app before it is withdrawn and confirm reconnect does not
+  bring the prompt back.
+
+## MCP servers and additional directories
+
+1. In **Settings → agents → MCP servers**, add one stdio server and one HTTP
+   server with a header. Mark only the stdio server as a default.
+2. Open the new-session sheet. The stdio server is preselected. Add an
+   additional directory and start the session.
+3. Ask the agent to list its MCP tools. Stdio servers are always sent; HTTP
+   and SSE servers are sent only when the agent advertises them. A skipped
+   server shows up as a count in the chat, never by name.
+4. Ask the agent to read a file in the additional directory. File reads and
+   writes inside it are allowed.
+5. Reopen the session from Recents and confirm it keeps the same servers and
+   directories.
+
+## Audio
+
+Audio attachments appear only for agents that advertise
+`promptCapabilities.audio`, so the fake provider does not offer them. With such
+an agent, attach a short clip and confirm it plays inline in your own prompt.
+Clips over 10 MB are refused before sending. On Windows and Linux the player
+offers Open and Save instead of in-app playback.
 
 ## Free and Pro concurrency
 

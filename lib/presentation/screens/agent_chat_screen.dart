@@ -16,6 +16,7 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -26,10 +27,12 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/theme.dart';
 import '../../domain/models/acp_attachment.dart';
+import '../../domain/models/acp_authentication.dart';
 import '../../domain/models/acp_native_preview.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_concurrency_policy.dart';
@@ -46,17 +49,21 @@ import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
+import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_config_option_controls.dart';
 import '../widgets/acp_connection_support.dart';
+import '../widgets/acp_elicitation_surface.dart';
 import '../widgets/acp_inline_image.dart';
 import '../widgets/acp_markdown_paths.dart';
 import '../widgets/acp_message_thread.dart';
 import '../widgets/acp_permission_surface.dart';
+import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
+import '../widgets/acp_terminal_output.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -209,6 +216,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   var _userDraggingTranscript = false;
   var _connecting = true;
   AcpSessionError? _connectError;
+  var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
   final AcpSftpClientCache _sftpCache = AcpSftpClientCache();
   Timer? _previewPublishTimer;
@@ -365,11 +373,32 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           }
           unawaited(manager.selectSession(key));
           unawaited(_ensureSftpClient());
+        case AcpSessionLaunchFailed(
+          :final error,
+          terminalAuthentication: final terminalSignIn?,
+        ):
+          setState(() {
+            _connecting = false;
+            _connectError = error;
+          });
+          final signedIn = await runAcpTerminalSignIn(
+            context,
+            ref,
+            terminalSignIn,
+          );
+          // The login ran outside the agent connection, and the agent that
+          // refused the session may keep its old credentials: stop its
+          // bridge so the reconnect starts and initializes a fresh one.
+          if (signedIn && mounted) {
+            await manager.stopUnusedBridge(_key);
+            if (mounted) await _ensureConnected();
+          }
         case AcpSessionLaunchFailed(:final error):
           setState(() {
             _connecting = false;
             _connectError = error;
           });
+          if (_providerSignInRequested) await _openTerminalForAuth();
         case AcpSessionLaunchBlocked() || null:
           setState(() => _connecting = false);
       }
@@ -406,6 +435,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         .read(hostCliLaunchPreferencesServiceProvider)
         .getPreferencesForHost(_key.hostId);
     if (!mounted) return null;
+    _providerSignInRequested = false;
     final result = await manager.reconnectSession(
       hostId: _key.hostId,
       providerId: _key.providerId,
@@ -413,6 +443,11 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       acpSessionId: _key.acpSessionId,
       cwd: cwd,
       confirmInstall: (request) => confirmAcpMonkeyMuxInstall(context, request),
+      chooseAuthentication: acpAuthenticationChooser(
+        context,
+        offerProviderCommand: _hasProviderSignInCommand,
+        onProviderCommand: () => _providerSignInRequested = true,
+      ),
       autoApprovePermissions: launchPreferences.startInYoloMode,
       replace: replace,
     );
@@ -636,6 +671,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     return AcpComposerAttachmentActions(
       pickPhotos: _pickPhotos,
       pickFiles: _pickFiles,
+      pickAudio: _pickAudio,
       pickRemoteFiles: (context) =>
           _pickRemoteFiles(context, connectionId, session.cwd),
     );
@@ -655,6 +691,17 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     // (the explicit allowMultiple flag is deprecated); adapters/limits are
     // preserved by the shared PlatformFile adapter below.
     final files = await FilePicker.pickFiles();
+    return [
+      for (final file in files)
+        await acpAttachmentCandidateFromPlatformFile(file),
+    ];
+  }
+
+  Future<List<AcpAttachmentCandidate>> _pickAudio(BuildContext context) async {
+    // The audio filter uses each platform's document picker (UIDocumentPicker
+    // on iOS, ACTION_GET_CONTENT on Android), so no media-library permission
+    // is needed.
+    final files = await FilePicker.pickFiles(type: FileType.audio);
     return [
       for (final file in files)
         await acpAttachmentCandidateFromPlatformFile(file),
@@ -754,6 +801,28 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               manager.pendingWriteContent(_key, write.requestKey) ?? '',
         ),
     ];
+  }
+
+  Widget _elicitationSurface(AcpSessionState session) {
+    final manager = ref.read(acpSessionManagerProvider);
+    return AcpElicitationSurface(
+      agentLabel: session.providerLabel,
+      elicitations: session.pendingElicitations,
+      awaiting: session.awaitingElicitations,
+      toolTitles: {
+        for (final entry
+            in session.timeline.entries.whereType<domain.AcpToolCallEntry>())
+          if (entry.title?.trim().isNotEmpty ?? false)
+            entry.toolCallId: entry.title!.trim(),
+      },
+      onAccept: (requestKey, content) =>
+          manager.acceptElicitation(_key, requestKey, content: content),
+      onDecline: (requestKey) => manager.declineElicitation(_key, requestKey),
+      onCancel: (requestKey) => manager.cancelElicitation(_key, requestKey),
+      onOpenUrl: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+      onDismissAwaiting: (elicitationId) =>
+          manager.dismissAwaitingElicitation(_key, elicitationId),
+    );
   }
 
   /// Resolves a chat image to bounded bytes without ever implicitly fetching
@@ -897,6 +966,37 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
   }
 
+  ValueListenable<AcpTerminalDisplay?> _terminalDisplay(String terminalId) =>
+      ref.read(acpSessionManagerProvider).terminalDisplay(_key, terminalId);
+
+  /// Shows embedded text in a viewer and opens linked resources like links.
+  void _openResource(ui.AcpResourceRef resource) {
+    final text = resource.text;
+    if (text != null) {
+      unawaited(_showResourceText(resource, text));
+      return;
+    }
+    _openLink(resource.uri);
+  }
+
+  /// Shows a resource whose contents the agent embedded, which may have no
+  /// path this client can open.
+  Future<void> _showResourceText(ui.AcpResourceRef resource, String text) =>
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (sheetContext) => AcpResourceTextSheet(
+          resource: resource,
+          text: text,
+          onCopy: () => _copyToClipboard(text, 'Contents'),
+          onOpenPath: (path) {
+            Navigator.of(sheetContext).pop();
+            unawaited(_openRemotePath(path));
+          },
+        ),
+      );
+
   Future<void> _openRemotePath(String path) async {
     final session = ref
         .read(acpSessionManagerProvider)
@@ -955,7 +1055,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontSize: fontSize,
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
-      child: child,
+      child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
@@ -1001,6 +1101,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 (part) => switch (part) {
                   ui.AcpTextPart(:final text) => text,
                   ui.AcpImagePart() => '[image]',
+                  ui.AcpAudioPart() => '[audio]',
                   ui.AcpResourcePart(:final resource) =>
                     '[${resource.displayName}]',
                 },
@@ -1237,8 +1338,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                         ),
                                   imageResolver: _resolveChatImage,
                                   onTapImage: _openImageViewer,
-                                  onOpenResource: (resource) =>
-                                      _openLink(resource.uri),
+                                  onOpenResource: _openResource,
                                   onCopyResource: (resource) =>
                                       _copyToClipboard(
                                         resource.uri,
@@ -1269,7 +1369,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         ],
                       ),
                     ),
-                    if (prompts.isNotEmpty)
+                    if (prompts.isNotEmpty ||
+                        session.pendingElicitations.isNotEmpty ||
+                        session.awaitingElicitations.isNotEmpty)
                       ConstrainedBox(
                         constraints: BoxConstraints(
                           maxHeight: MediaQuery.sizeOf(context).height * 0.34,
@@ -1278,7 +1380,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                           padding: const EdgeInsets.symmetric(
                             horizontal: FluttyTheme.spacingMd,
                           ),
-                          child: AcpPermissionSurface(prompts: prompts),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _elicitationSurface(session),
+                              AcpPermissionSurface(prompts: prompts),
+                            ],
+                          ),
                         ),
                       ),
                     AcpComposer(
@@ -1305,6 +1414,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         status == AcpConnectionStatus.connecting ||
         status == AcpConnectionStatus.initializing ||
         status == AcpConnectionStatus.reconnecting;
+    // A reconnect that failed on sign-in, or a prompt the agent rejected
+    // after logout, routes to the same sign-in action as the live state.
+    final needsSignIn =
+        status == AcpConnectionStatus.authenticationRequired ||
+        (!transitioning &&
+            session.error?.kind == AcpSessionErrorKind.authenticationRequired);
     final (message, icon) = switch (status) {
       AcpConnectionStatus.idle => ('agent is getting ready', Icons.schedule),
       AcpConnectionStatus.connecting => ('connecting to agent', Icons.link),
@@ -1337,14 +1452,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       AcpConnectionStatus.ready => ('ready', Icons.check_circle_outline),
     };
     return _SessionStatusBanner(
-      message: message,
-      icon: icon,
+      message: needsSignIn ? 'agent sign-in required' : message,
+      icon: needsSignIn ? Icons.lock_outline : icon,
       transitioning: transitioning,
-      actionLabel: status == AcpConnectionStatus.authenticationRequired
-          ? 'Open terminal'
+      actionLabel: needsSignIn
+          ? 'Sign in'
           : (transitioning ? null : 'Reconnect'),
-      onAction: status == AcpConnectionStatus.authenticationRequired
-          ? _openTerminalForAuth
+      onAction: needsSignIn
+          ? () => unawaited(_signIn(session))
           : (transitioning ? null : _ensureConnected),
     );
   }
@@ -1404,6 +1519,125 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       return;
     }
     context.go(buildAcpSessionFallbackLocation());
+  }
+
+  bool get _hasProviderSignInCommand => acpBuiltinProviders.any(
+    (provider) =>
+        provider.id == widget.providerId &&
+        provider.terminalAuthCommand != null,
+  );
+
+  /// Offers the agent's advertised sign-in methods for this session.
+  ///
+  /// A live connection authenticates in place; a session that is no longer
+  /// attached reconnects, which asks with the same chooser.
+  Future<void> _signIn(AcpSessionState session) async {
+    if (!session.isLive) {
+      await _ensureConnected();
+      return;
+    }
+    final methods = usableAcpAuthMethods(session.authMethods);
+    if (methods.isEmpty) {
+      await _openTerminalForAuth();
+      return;
+    }
+    final manager = ref.read(acpSessionManagerProvider);
+    final key = _key;
+    var providerCommand = false;
+    final choice =
+        await acpAuthenticationChooser(
+          context,
+          offerProviderCommand: _hasProviderSignInCommand,
+          onProviderCommand: () => providerCommand = true,
+        )(
+          AcpAuthenticationRequest(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            providerLabel: session.providerLabel,
+            methods: methods,
+            authenticate: (method, {cancellation}) => manager
+                .authenticateSession(key, method, cancellation: cancellation),
+          ),
+        );
+    if (!mounted) return;
+    if (providerCommand) {
+      await _openTerminalForAuth();
+      return;
+    }
+    switch (choice) {
+      case AcpAuthenticationCompleted():
+        _showSnack('Signed in to ${session.providerLabel}.');
+      case AcpAuthenticationInTerminal(:final method):
+        final launch = manager.terminalAuthenticationLaunch(key, method);
+        if (launch == null) {
+          _showSnack('This sign-in method can’t run on this host.');
+          return;
+        }
+        final signedIn = await runAcpTerminalSignIn(context, ref, launch);
+        if (!mounted) return;
+        if (!signedIn) {
+          _showSnack('Sign-in didn’t finish.');
+          return;
+        }
+        // The running agent may still hold its old credentials: restart it
+        // on a fresh bridge and resume this conversation there.
+        setState(() => _connecting = true);
+        final restarted = await manager.restartAfterSignIn(key);
+        if (!mounted) return;
+        setState(() => _connecting = false);
+        switch (restarted) {
+          case AcpSessionLaunchStarted(key: final next):
+            if (next != _key) {
+              setState(() => _key = next);
+              _composer.rebindSession(
+                next,
+                session: manager.state.byKeyValue(next.value),
+              );
+              if (widget.embedded) widget.onSessionChanged?.call(next);
+            }
+            _showSnack('Signed in to ${session.providerLabel}.');
+          case AcpSessionLaunchFailed(:final error):
+            _showSnack(error.message);
+          case AcpSessionLaunchBlocked():
+            _showSnack('Signed in. Reopen this chat to continue.');
+        }
+      case null:
+        break;
+    }
+  }
+
+  Future<void> _signOut(AcpSessionState session) async {
+    final label = session.providerLabel;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      requestFocus: terminalOverlayRouteRequestFocus(context),
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Sign out of $label?'),
+        content: Text(
+          '$label signs out on this host. New sessions will ask you to sign '
+          'in again, and this chat may need you to sign in before it '
+          'continues.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (!(confirmed ?? false) || !mounted) return;
+    final error = await ref.read(acpSessionManagerProvider).logout(_key);
+    if (!mounted) return;
+    _showSnack(
+      error == null
+          ? 'Signed out of $label. New sessions will ask you to sign in.'
+          : error.message,
+    );
   }
 
   Future<void> _openTerminalForAuth() async {
@@ -1488,6 +1722,19 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               title: Text('Delete session'),
             ),
           ),
+        if (session.isLive && session.capabilities.auth.logout) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem(
+            value: _ChatAction.signOut,
+            child: ListTile(
+              leading: const Icon(Icons.logout),
+              title: Text(
+                'Sign out of ${session.providerLabel}',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1544,6 +1791,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           if (!await _confirmDeleteSession() || !mounted) return;
           await manager.deleteSession(_key);
           if (mounted) _leaveChat();
+        case _ChatAction.signOut:
+          await _signOut(session);
       }
     } on Object {
       if (!mounted) return;
@@ -2123,4 +2372,4 @@ class _AgentChatZoomSurfaceState extends State<_AgentChatZoomSurface> {
   }
 }
 
-enum _ChatAction { settings, reconnect, detach, stop, fork, delete }
+enum _ChatAction { settings, reconnect, detach, stop, fork, delete, signOut }

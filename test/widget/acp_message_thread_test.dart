@@ -5,7 +5,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/services/acp_audio_clip_cache.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
+import 'package:monkeyssh/presentation/widgets/acp_audio_player.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown_paths.dart';
 import 'package:monkeyssh/presentation/widgets/acp_markdown_virtualization.dart';
@@ -1087,6 +1089,91 @@ void main() {
 
     expect(find.byType(AcpInlineImage), findsOneWidget);
     expect(find.byIcon(Icons.expand_more), findsNothing);
+  });
+
+  testWidgets('renders audio for prompts, agent messages, and tool calls', (
+    tester,
+  ) async {
+    const clip = AcpAudioClip(data: 'AAAA', mimeType: 'audio/mpeg');
+    await tester.pumpWidget(
+      wrap(
+        AcpMessageThread(
+          entries: [
+            AcpUserPromptEntry(
+              id: 'u1',
+              parts: const [AcpTextPart('transcribe'), AcpAudioPart(clip)],
+            ),
+            const AcpAssistantMessageEntry(
+              id: 'a1',
+              markdown: 'Here is the reading:',
+              audio: [clip],
+            ),
+            const AcpAssistantMessageEntry(
+              id: 'a2',
+              markdown: '',
+              audio: [clip],
+            ),
+            AcpToolCallEntry(
+              id: 'speak',
+              toolCall: AcpToolCall(
+                id: 'speak',
+                title: 'speak',
+                status: AcpToolStatus.completed,
+                audio: const [clip],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(AcpAudioPlayer), findsNWidgets(4));
+    expect(find.text('Here is the reading:'), findsOneWidget);
+    expect(find.byIcon(Icons.expand_more), findsNothing);
+    // Rendering never decodes; only an explicit play does.
+    expect(AcpAudioClipCache.instance.length, 0);
+    expect(
+      acpUserPromptSummary(
+        AcpUserPromptEntry(id: 'u2', parts: const [AcpAudioPart(clip)]),
+      ),
+      'Audio clip',
+    );
+  });
+
+  testWidgets('builds agent audio only with the final virtual segment', (
+    tester,
+  ) async {
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    final markdown = List.generate(
+      (kAcpMarkdownVirtualChunkChars ~/ 40) * 3,
+      (index) => 'Paragraph $index carries enough words to wrap.\n',
+    ).join('\n');
+    await tester.pumpWidget(
+      wrap(
+        AcpMessageThread(
+          controller: controller,
+          entries: [
+            AcpAssistantMessageEntry(
+              id: 'long',
+              markdown: markdown,
+              audio: const [AcpAudioClip(data: 'AAAA', mimeType: 'audio/mpeg')],
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(AcpAudioPlayer), findsNothing);
+
+    for (var attempt = 0; attempt < 40; attempt++) {
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pump();
+      if (find.byType(AcpAudioPlayer).evaluate().isNotEmpty) break;
+    }
+    expect(find.byType(AcpAudioPlayer), findsOneWidget);
   });
 
   testWidgets('renders in light and dark themes', (tester) async {

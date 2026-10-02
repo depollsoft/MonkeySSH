@@ -70,7 +70,8 @@ final class AcpActivitySnapshot {
         promptStatus: session.promptStatus,
         needsInput:
             session.pendingPermissions.isNotEmpty ||
-            session.pendingWrites.isNotEmpty,
+            session.pendingWrites.isNotEmpty ||
+            session.pendingElicitations.isNotEmpty,
         planItemCount: session.plan.length,
         completedPlanItemCount: session.plan
             .where((entry) => entry.status == AcpPlanStatus.completed)

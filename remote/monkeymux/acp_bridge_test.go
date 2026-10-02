@@ -1645,20 +1645,6 @@ func startTestAcpBridge(t *testing.T, command string) (*acpBridge, func()) {
 	return nil, nil
 }
 
-func readTestAcpFrame(
-	t *testing.T,
-	reader *bufio.Reader,
-	conn net.Conn,
-) acpWireMessage {
-	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-	message, err := readAcpWireFrame(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return message
-}
-
 func TestAcpWaitRejectsInvalidStatusFrame(t *testing.T) {
 	for _, response := range []string{
 		"invalid\n", "\n", `{"type":1}` + "\n",

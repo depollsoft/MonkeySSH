@@ -41,12 +41,20 @@ final class AcpClient {
   final _updates = StreamController<AcpSessionNotification>.broadcast(
     sync: true,
   );
+  final _serverRequestCancellations = StreamController<AcpRequestId>.broadcast(
+    sync: true,
+  );
+  final _elicitationCompletions = StreamController<String>.broadcast(
+    sync: true,
+  );
   // Exactly one capability router answers provider-to-client requests. Keep a
   // small, bridge-bounded pre-listener queue because pending replay can arrive
-  // as soon as the transport attaches, before that router has rebound.
+  // as soon as the transport attaches, before that router has rebound. The
+  // cancellations and completions that follow a request wait in the same
+  // queue, in arrival order, or a withdrawn prompt retained from an earlier
+  // attachment would never be dropped.
   late final StreamController<AcpJsonRpcServerRequest> _serverRequests;
-  final Queue<AcpJsonRpcServerRequest> _pendingServerRequests =
-      Queue<AcpJsonRpcServerRequest>();
+  final Queue<_RouterEvent> _pendingRouterEvents = Queue<_RouterEvent>();
   var _pendingServerRequestFlushScheduled = false;
   late final StreamSubscription<AcpJsonRpcNotification>
   _notificationSubscription;
@@ -63,6 +71,17 @@ final class AcpClient {
 
   /// Incoming server requests.
   Stream<AcpJsonRpcServerRequest> get serverRequests => _serverRequests.stream;
+
+  /// Exact JSON-RPC ids of agent requests withdrawn with `$/cancel_request`.
+  ///
+  /// The connection has already answered a still-open request on this
+  /// connection with `-32800`. Retained UI state for the id, possibly bound to
+  /// an earlier attachment's request, must be dropped.
+  Stream<AcpRequestId> get serverRequestCancellations =>
+      _serverRequestCancellations.stream;
+
+  /// Opaque ids from `elicitation/complete` notifications.
+  Stream<String> get elicitationCompletions => _elicitationCompletions.stream;
 
   /// Initializes the ACP connection.
   Future<AcpInitializeResult> initialize({
@@ -98,11 +117,25 @@ final class AcpClient {
     return parsed;
   }
 
+  /// Adopts [result] from an earlier client of the same live agent process.
+  ///
+  /// A reattached MonkeyMux bridge keeps the agent's initialized state, so a
+  /// new client must not send `initialize` again. Adopting the retained result
+  /// keeps capability-gated requests such as [logout] aligned with what the
+  /// agent actually advertised.
+  void restoreInitialization(AcpInitializeResult result) {
+    _initialization ??= result;
+  }
+
   /// Authenticates using an advertised method.
+  ///
+  /// [cancellation] abandons the request and sends `$/cancel_request`, so an
+  /// agent-run login flow the user gave up on can stop.
   Future<void> authenticate(
     String methodId, {
     AcpJsonMap meta = const <String, Object?>{},
     Duration? timeout,
+    AcpRequestCancellation? cancellation,
   }) async {
     await connection.request(
       'authenticate',
@@ -110,6 +143,20 @@ final class AcpClient {
         'methodId': methodId,
         if (meta.isNotEmpty) '_meta': meta,
       },
+      timeout: timeout,
+      cancellation: cancellation,
+    );
+  }
+
+  /// Ends the agent's authenticated state when `auth.logout` is advertised.
+  Future<void> logout({Duration? timeout}) async {
+    _requireCapability(
+      'logout',
+      _initialization?.agentCapabilities.auth.logout ?? false,
+    );
+    await connection.request(
+      'logout',
+      params: const <String, Object?>{},
       timeout: timeout,
     );
   }
@@ -342,9 +389,11 @@ final class AcpClient {
     await _notificationSubscription.cancel();
     await _serverRequestSubscription.cancel();
     await connection.close();
-    _pendingServerRequests.clear();
+    _pendingRouterEvents.clear();
     await _updates.close();
     await _serverRequests.close();
+    await _serverRequestCancellations.close();
+    await _elicitationCompletions.close();
   }
 
   Future<AcpSessionSetupResult> _sessionSetupRequest(
@@ -363,8 +412,26 @@ final class AcpClient {
   }
 
   void _handleNotification(AcpJsonRpcNotification notification) {
-    if (notification.method != 'session/update') {
-      return;
+    switch (notification.method) {
+      case acpCancelRequestMethod:
+        final requestId = AcpJson.object(notification.params)?['requestId'];
+        if (requestId is String || requestId is int) {
+          _emitRouterEvent(_RequestCancelled(requestId!));
+        }
+        return;
+      case 'elicitation/complete':
+        final params = AcpJson.object(notification.params);
+        final elicitationId = params == null
+            ? null
+            : AcpJson.identifier(params, 'elicitationId');
+        if (elicitationId != null && elicitationId.isNotEmpty) {
+          _emitRouterEvent(_ElicitationCompleted(elicitationId));
+        }
+        return;
+      case 'session/update':
+        break;
+      default:
+        return;
     }
     final params = AcpJson.object(notification.params);
     if (params == null) {
@@ -373,17 +440,33 @@ final class AcpClient {
     _updates.add(AcpSessionNotification.fromJson(params));
   }
 
-  void _emitServerRequest(AcpJsonRpcServerRequest request) {
+  void _emitServerRequest(AcpJsonRpcServerRequest request) =>
+      _emitRouterEvent(_ServerRequestReceived(request));
+
+  void _emitRouterEvent(_RouterEvent event) {
     if (!_serverRequests.hasListener ||
         _pendingServerRequestFlushScheduled ||
-        _pendingServerRequests.isNotEmpty) {
-      _pendingServerRequests.addLast(request);
+        _pendingRouterEvents.isNotEmpty) {
+      _pendingRouterEvents.addLast(event);
       if (_serverRequests.hasListener) {
         _schedulePendingServerRequestFlush();
       }
       return;
     }
-    _serverRequests.add(request);
+    _deliverRouterEvent(event);
+  }
+
+  void _deliverRouterEvent(_RouterEvent event) {
+    switch (event) {
+      case _ServerRequestReceived(:final request):
+        // The agent may have withdrawn a queued request before any router
+        // saw it; the connection already answered it, so never surface it.
+        if (!request.isAnswered) _serverRequests.add(request);
+      case _RequestCancelled(:final requestId):
+        _serverRequestCancellations.add(requestId);
+      case _ElicitationCompleted(:final elicitationId):
+        _elicitationCompletions.add(elicitationId);
+    }
   }
 
   void _schedulePendingServerRequestFlush() {
@@ -395,8 +478,8 @@ final class AcpClient {
   void _flushPendingServerRequests() {
     _pendingServerRequestFlushScheduled = false;
     if (_closed || !_serverRequests.hasListener) return;
-    while (_pendingServerRequests.isNotEmpty) {
-      _serverRequests.add(_pendingServerRequests.removeFirst());
+    while (_pendingRouterEvents.isNotEmpty) {
+      _deliverRouterEvent(_pendingRouterEvents.removeFirst());
     }
   }
 
@@ -411,4 +494,28 @@ AcpJsonMap _requireObject(Object? value) {
     throw const AcpProtocolException('ACP response result must be an object');
   }
   return object;
+}
+
+/// A server request or a lifecycle notification about one, as delivered to
+/// the capability router.
+sealed class _RouterEvent {
+  const _RouterEvent();
+}
+
+final class _ServerRequestReceived extends _RouterEvent {
+  const _ServerRequestReceived(this.request);
+
+  final AcpJsonRpcServerRequest request;
+}
+
+final class _RequestCancelled extends _RouterEvent {
+  const _RequestCancelled(this.requestId);
+
+  final AcpRequestId requestId;
+}
+
+final class _ElicitationCompleted extends _RouterEvent {
+  const _ElicitationCompleted(this.elicitationId);
+
+  final String elicitationId;
 }

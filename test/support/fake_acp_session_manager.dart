@@ -3,16 +3,21 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_elicitation.dart';
+import 'package:monkeyssh/domain/models/acp_mcp_server.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
+import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
@@ -53,6 +58,13 @@ class FakeAcpSessionManager extends AcpSessionManager {
   final List<({int hostId, String providerId, String cwd})> starts = [];
   final List<AcpLaunchCommand?> startLaunchOverrides = <AcpLaunchCommand?>[];
   final List<bool> startAutoApprovePermissions = <bool>[];
+  final List<AcpSessionWorkspaceOptions?> startWorkspaces =
+      <AcpSessionWorkspaceOptions?>[];
+  final List<AcpSessionWorkspaceOptions?> reconnectWorkspaces =
+      <AcpSessionWorkspaceOptions?>[];
+
+  /// MCP servers returned by [loadMcpServers].
+  List<AcpMcpServerConfig> mcpServers = const <AcpMcpServerConfig>[];
   final List<AcpLaunchCommand?> reconnectLaunchOverrides =
       <AcpLaunchCommand?>[];
   final List<bool> reconnectSelectOnSuccess = <bool>[];
@@ -66,6 +78,10 @@ class FakeAcpSessionManager extends AcpSessionManager {
   final List<String> rejectedWrites = <String>[];
   final List<({int hostId, String bridgeId})> releasedMuxBridges = [];
   final Map<String, String> pendingWriteContents = <String, String>{};
+  final List<(String, Map<String, Object?>?)> acceptedElicitations = [];
+  final List<String> declinedElicitations = <String>[];
+  final List<String> cancelledElicitations = <String>[];
+  final List<String> dismissedAwaitingElicitations = <String>[];
 
   /// Results returned by successive [forkSession] calls, consumed FIFO. When
   /// exhausted, a safe failure is returned.
@@ -77,6 +93,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
     null,
     AcpSessionError(kind: AcpSessionErrorKind.unknown, message: 'No launch.'),
   );
+
+  /// FIFO start results consumed before [startNewSessionResult].
+  final List<AcpSessionLaunchResult> startNewSessionResults = [];
 
   /// FIFO reconnect results consumed before the fallback result/future.
   final List<AcpSessionLaunchResult> reconnectSessionResults = [];
@@ -112,6 +131,44 @@ class FakeAcpSessionManager extends AcpSessionManager {
   reconnects = [];
 
   final List<(String, Object)> configOptionSets = <(String, Object)>[];
+
+  /// Sign-in choosers passed to [startNewSession], in call order.
+  final List<AcpAuthenticationChooser?> startChoosers =
+      <AcpAuthenticationChooser?>[];
+
+  /// Sign-in choosers passed to [reconnectSession], in call order.
+  final List<AcpAuthenticationChooser?> reconnectChoosers =
+      <AcpAuthenticationChooser?>[];
+
+  /// When set, a launch with a chooser asks it with this request before
+  /// returning its configured result. The choices are recorded.
+  AcpAuthenticationRequest? authenticationRequest;
+  final List<AcpAuthenticationChoice?> authenticationChoices =
+      <AcpAuthenticationChoice?>[];
+
+  /// Agent sign-in methods sent through [authenticateSession].
+  final List<String> authenticatedMethodIds = <String>[];
+
+  /// Error returned by [authenticateSession]; `null` means success.
+  AcpSessionError? authenticateSessionError;
+
+  /// Optional gate holding [authenticateSession] until completed.
+  Completer<void>? authenticateSessionGate;
+
+  /// Sessions marked signed in after a terminal login.
+  final List<String> signedInSessions = <String>[];
+
+  /// Result of [restartAfterSignIn]; defaults to keeping the same key.
+  AcpSessionLaunchResult? restartAfterSignInResult;
+
+  /// Sessions logged out through [logout].
+  final List<String> loggedOut = <String>[];
+
+  /// Error returned by [logout]; `null` means success.
+  AcpSessionError? logoutError;
+
+  /// Terminal login returned by [terminalAuthenticationLaunch].
+  AcpTerminalAuthLaunch? terminalLaunch;
   final List<bool> autoApprovePermissionSets = <bool>[];
   final List<String> modeSets = <String>[];
   final List<String> modelSets = <String>[];
@@ -140,6 +197,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
 
   @override
   Future<AcpSessionKey?> loadLastSelected() async => lastSelected;
+
+  @override
+  Future<List<AcpMcpServerConfig>> loadMcpServers() async => mcpServers;
 
   @override
   Future<void> selectSession(AcpSessionKey key) async {
@@ -198,6 +258,30 @@ class FakeAcpSessionManager extends AcpSessionManager {
   }
 
   @override
+  Future<void> acceptElicitation(
+    AcpSessionKey key,
+    String requestKey, {
+    Map<String, Object?>? content,
+  }) async {
+    acceptedElicitations.add((requestKey, content));
+  }
+
+  @override
+  Future<void> declineElicitation(AcpSessionKey key, String requestKey) async {
+    declinedElicitations.add(requestKey);
+  }
+
+  @override
+  Future<void> cancelElicitation(AcpSessionKey key, String requestKey) async {
+    cancelledElicitations.add(requestKey);
+  }
+
+  @override
+  void dismissAwaitingElicitation(AcpSessionKey key, String elicitationId) {
+    dismissedAwaitingElicitations.add(elicitationId);
+  }
+
+  @override
   Future<AcpSessionLaunchResult> forkSession(AcpSessionKey key) async {
     forkCount++;
     if (forkResults.isNotEmpty) {
@@ -218,15 +302,28 @@ class FakeAcpSessionManager extends AcpSessionManager {
     required String providerId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) async {
     starts.add((hostId: hostId, providerId: providerId, cwd: cwd));
     startLaunchOverrides.add(launchCommandOverride);
     startAutoApprovePermissions.add(autoApprovePermissions);
-    return startNewSessionResult;
+    startWorkspaces.add(workspace);
+    startChoosers.add(chooseAuthentication);
+    await _askChooser(chooseAuthentication);
+    return startNewSessionResults.isNotEmpty
+        ? startNewSessionResults.removeAt(0)
+        : startNewSessionResult;
+  }
+
+  Future<void> _askChooser(AcpAuthenticationChooser? chooser) async {
+    final request = authenticationRequest;
+    if (chooser == null || request == null) return;
+    authenticationChoices.add(await chooser(request));
   }
 
   @override
@@ -237,13 +334,18 @@ class FakeAcpSessionManager extends AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     bool selectOnSuccess = true,
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) async {
+    reconnectWorkspaces.add(workspace);
+    reconnectChoosers.add(chooseAuthentication);
+    await _askChooser(chooseAuthentication);
     reconnectLaunchOverrides.add(launchCommandOverride);
     reconnectSelectOnSuccess.add(selectOnSuccess);
     reconnectReplaceKeys.add(List<AcpSessionKey>.unmodifiable(replace));
@@ -309,6 +411,48 @@ class FakeAcpSessionManager extends AcpSessionManager {
   }
 
   @override
+  Future<AcpSessionError?> authenticateSession(
+    AcpSessionKey key,
+    AcpAuthMethod method, {
+    AcpRequestCancellation? cancellation,
+  }) async {
+    authenticatedMethodIds.add(method.id);
+    await authenticateSessionGate?.future;
+    return authenticateSessionError;
+  }
+
+  @override
+  AcpTerminalAuthLaunch? terminalAuthenticationLaunch(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) => terminalLaunch;
+
+  @override
+  void markSessionSignedIn(AcpSessionKey key) {
+    signedInSessions.add(key.value);
+  }
+
+  /// Keys passed to [stopUnusedBridge], in call order.
+  final List<String> stoppedUnusedBridges = <String>[];
+
+  @override
+  Future<void> stopUnusedBridge(AcpSessionKey key) async {
+    stoppedUnusedBridges.add(key.value);
+  }
+
+  @override
+  Future<AcpSessionLaunchResult> restartAfterSignIn(AcpSessionKey key) async {
+    signedInSessions.add(key.value);
+    return restartAfterSignInResult ?? AcpSessionLaunchStarted(key);
+  }
+
+  @override
+  Future<AcpSessionError?> logout(AcpSessionKey key) async {
+    loggedOut.add(key.value);
+    return logoutError;
+  }
+
+  @override
   Future<void> dispose() async {
     await _emitter.close();
   }
@@ -344,7 +488,13 @@ AcpSessionState fakeAcpSession({
   List<AcpPendingPermission> pendingPermissions =
       const <AcpPendingPermission>[],
   List<AcpPendingWrite> pendingWrites = const <AcpPendingWrite>[],
+  List<AcpSessionElicitation> pendingElicitations =
+      const <AcpSessionElicitation>[],
+  List<AcpAwaitingElicitation> awaitingElicitations =
+      const <AcpAwaitingElicitation>[],
   AcpTimeline timeline = const AcpTimeline.empty(),
+  List<AcpAuthMethod> authMethods = const <AcpAuthMethod>[],
+  AcpSessionError? error,
 }) {
   final now = lastActivityAt ?? DateTime(2026);
   return AcpSessionState(
@@ -355,12 +505,16 @@ AcpSessionState fakeAcpSession({
     createdAt: DateTime(2025),
     lastActivityAt: now,
     title: title,
-    initialization: capabilities == null
+    initialization: capabilities == null && authMethods.isEmpty
         ? null
         : AcpInitializeResult(
             protocolVersion: 1,
-            agentCapabilities: capabilities,
+            agentCapabilities: capabilities ?? const AcpAgentCapabilities(),
+            authMethods: authMethods,
           ),
+    authMethods: authMethods,
+    pendingAuthentication: status == AcpConnectionStatus.authenticationRequired,
+    error: error,
     configOptions: configOptions,
     modeState: modeState,
     modelState: modelState,
@@ -368,6 +522,8 @@ AcpSessionState fakeAcpSession({
     plan: plan,
     pendingPermissions: pendingPermissions,
     pendingWrites: pendingWrites,
+    pendingElicitations: pendingElicitations,
+    awaitingElicitations: awaitingElicitations,
     timeline: timeline,
   );
 }

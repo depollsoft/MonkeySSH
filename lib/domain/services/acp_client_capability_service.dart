@@ -6,10 +6,13 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/acp_client_capabilities.dart';
+import '../models/acp_elicitation.dart';
 import '../models/acp_json.dart';
 import '../models/acp_protocol.dart';
+import '../models/acp_terminal_display.dart';
 import '../models/acp_updates.dart';
 import 'acp_client.dart';
 import 'acp_json_rpc_connection.dart';
@@ -315,16 +318,46 @@ final class AcpPendingRequestRegistry {
 
   final _requests = <String, AcpPendingClientRequest>{};
   var _pendingContentBytes = 0;
+  // Accepted URL elicitations the user is finishing out of band, by id.
+  final _awaitingElicitations = <String, AcpAwaitingElicitation>{};
   final _changes = StreamController<List<AcpPendingClientRequest>>.broadcast(
     sync: true,
   );
+
+  /// Most accepted URL elicitations tracked while awaiting completion.
+  static const maxAwaitingElicitations = 32;
 
   /// Current pending requests.
   List<AcpPendingClientRequest> get requests =>
       List<AcpPendingClientRequest>.unmodifiable(_requests.values);
 
-  /// Emits an immutable request snapshot after each change.
+  /// Emits an immutable request snapshot after each change, including changes
+  /// to [awaitingElicitations].
   Stream<List<AcpPendingClientRequest>> get changes => _changes.stream;
+
+  /// Whether any UI is currently mirroring [changes].
+  bool get hasObservers => _changes.hasListener;
+
+  /// Accepted URL elicitations awaiting `elicitation/complete`, oldest first.
+  List<AcpAwaitingElicitation> get awaitingElicitations =>
+      List<AcpAwaitingElicitation>.unmodifiable(_awaitingElicitations.values);
+
+  /// Tracks an accepted URL elicitation until the agent completes it.
+  void markAwaiting(AcpAwaitingElicitation awaiting) {
+    _awaitingElicitations.remove(awaiting.elicitationId);
+    while (_awaitingElicitations.length >= maxAwaitingElicitations) {
+      _awaitingElicitations.remove(_awaitingElicitations.keys.first);
+    }
+    _awaitingElicitations[awaiting.elicitationId] = awaiting;
+    _emit();
+  }
+
+  /// Stops tracking [elicitationId]. Unknown or completed ids are ignored.
+  bool completeAwaiting(String elicitationId) {
+    if (_awaitingElicitations.remove(elicitationId) == null) return false;
+    _emit();
+    return true;
+  }
 
   /// Adds a new request or rebinds its response channel after reconnect.
   ///
@@ -375,6 +408,7 @@ final class AcpPendingRequestRegistry {
     final pending = _requests.values.toList(growable: false);
     _requests.clear();
     _pendingContentBytes = 0;
+    _awaitingElicitations.clear();
     _emit();
     await _cancelPending(pending);
   }
@@ -391,7 +425,14 @@ final class AcpPendingRequestRegistry {
     final matching = _requests.values
         .where((request) => request.sessionId == sessionId)
         .toList(growable: false);
-    if (matching.isEmpty) return;
+    final awaitingCount = _awaitingElicitations.length;
+    _awaitingElicitations.removeWhere(
+      (_, awaiting) => awaiting.sessionId == sessionId,
+    );
+    if (matching.isEmpty) {
+      if (_awaitingElicitations.length != awaitingCount) _emit();
+      return;
+    }
     for (final request in matching) {
       _requests.remove(request.id);
       _pendingContentBytes -= request.retainedContentBytes;
@@ -407,6 +448,8 @@ final class AcpPendingRequestRegistry {
           await request.cancel();
         } else if (request case AcpPendingFileWrite()) {
           await request.reject();
+        } else if (request case AcpPendingElicitation()) {
+          await request.cancel();
         }
       } on Object {
         // A detached bridge can no longer accept a response; its replayed request
@@ -432,12 +475,18 @@ final class AcpClientCapabilityService {
   AcpClientCapabilityService({
     required this.fileSystem,
     required this.terminalExecutor,
-    required this.allowedRoots,
+    required List<String> allowedRoots,
     required this.registry,
     this.autoApprovePermissions = false,
     this.limits = const AcpClientCapabilityLimits(),
     DiagnosticsLogger? diagnostics,
-  }) : _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+    this.unpresentedElicitationTimeout = const Duration(seconds: 10),
+  }) : allowedRoots = List<String>.unmodifiable(allowedRoots),
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+
+  /// How long a request-scoped elicitation may wait for any session view to
+  /// mirror [registry] before it is answered `cancel` instead of hanging.
+  final Duration unpresentedElicitationTimeout;
 
   /// Filesystem implementation for the current remote host.
   final AcpRemoteFileSystem? fileSystem;
@@ -445,8 +494,24 @@ final class AcpClientCapabilityService {
   /// Terminal implementation for the current remote host.
   final AcpTerminalExecutor? terminalExecutor;
 
-  /// Roots that file and terminal working-directory requests may access.
+  /// Roots that file and terminal working-directory requests may access
+  /// for a session without its own roots: the working directory plus any
+  /// additional workspace directories of the session that started the bridge.
   final List<String> allowedRoots;
+
+  final Map<String, List<String>> _sessionAllowedRoots =
+      <String, List<String>>{};
+
+  /// Sets the roots one ACP session sharing this bridge may access, so a
+  /// fork or another session with different directories neither loses its
+  /// own access nor gains the other's.
+  void setSessionAllowedRoots(String sessionId, List<String> roots) {
+    if (sessionId.isEmpty) return;
+    _sessionAllowedRoots[sessionId] = List<String>.unmodifiable(roots);
+  }
+
+  List<String> _allowedRootsForSession(String sessionId) =>
+      _sessionAllowedRoots[sessionId] ?? allowedRoots;
 
   /// User-decision registry. It may be retained over bridge detach/reconnect.
   final AcpPendingRequestRegistry registry;
@@ -476,6 +541,9 @@ final class AcpClientCapabilityService {
 
   final DiagnosticsLogger _diagnostics;
   final _terminals = <String, _ManagedAcpTerminal>{};
+  // Insertion-ordered so the least recently requested display is evicted
+  // first. Displays outlive `terminal/release`: the chat keeps showing output.
+  final _terminalDisplays = <String, ValueNotifier<AcpTerminalDisplay?>>{};
   var _terminalReservations = 0;
   // Routing outlives the stream callback. Permanent teardown invalidates these
   // continuations before awaiting cleanup; soft detach deliberately keeps them.
@@ -484,10 +552,22 @@ final class AcpClientCapabilityService {
   final _closingSessions = <String, int>{};
   var _closed = false;
   StreamSubscription<AcpJsonRpcServerRequest>? _subscription;
+  StreamSubscription<AcpRequestId>? _cancellationSubscription;
+  StreamSubscription<String>? _elicitationCompletionSubscription;
+  final _unpresentedElicitationTimers = <String, Timer>{};
   var _nextTerminalId = 0;
+  // Unique to this service, so a tool card restored from an earlier
+  // connection never resolves to a new terminal that restarted the count.
+  final _terminalIdPrefix = 'acp-terminal-${_randomToken128()}';
 
   /// Capabilities that are safe to advertise for this service instance.
+  ///
+  /// `auth.terminal` is always advertised: MonkeySSH knows the provider's
+  /// exact launch argv and host, so it can rerun that agent program in an
+  /// interactive SSH terminal. The legacy `_meta['terminal-auth']` flag stays
+  /// for adapters that predate the stable capability.
   AcpClientCapabilities get capabilities => AcpClientCapabilities(
+    terminalAuth: true,
     meta: const <String, Object?>{
       'subagent-transcript': true,
       'terminal-auth': true,
@@ -499,7 +579,46 @@ final class AcpClientCapabilityService {
             writeTextFile: true,
           ),
     terminal: terminalExecutor != null,
+    elicitationForm: true,
+    elicitationUrl: true,
   );
+
+  /// Most terminal displays retained, including released terminals.
+  static const maxRetainedTerminalDisplays = 64;
+
+  /// Live display of terminal [terminalId] in [sessionId], for tool calls
+  /// that embed it.
+  ///
+  /// Returns a listenable whose value stays `null` until this client runs a
+  /// matching terminal, so a tool call may subscribe before `terminal/create`
+  /// completes. The value survives `terminal/release`.
+  ValueListenable<AcpTerminalDisplay?> terminalDisplay(
+    String sessionId,
+    String terminalId,
+  ) => _terminalDisplayNotifier(sessionId, terminalId);
+
+  ValueNotifier<AcpTerminalDisplay?> _terminalDisplayNotifier(
+    String sessionId,
+    String terminalId,
+  ) {
+    final key = '$sessionId\u0000$terminalId';
+    final notifier =
+        _terminalDisplays.remove(key) ??
+        ValueNotifier<AcpTerminalDisplay?>(null);
+    _terminalDisplays[key] = notifier;
+    if (_terminalDisplays.length > maxRetainedTerminalDisplays) {
+      final live = <ValueNotifier<AcpTerminalDisplay?>>{
+        for (final terminal in _terminals.values) terminal.display,
+      };
+      _terminalDisplays.entries
+          .where((entry) => !live.contains(entry.value))
+          .map((entry) => entry.key)
+          .take(_terminalDisplays.length - maxRetainedTerminalDisplays)
+          .toList(growable: false)
+          .forEach(_terminalDisplays.remove);
+    }
+    return notifier;
+  }
 
   /// Starts routing server requests from [client].
   ///
@@ -508,6 +627,14 @@ final class AcpClientCapabilityService {
   void attach(AcpClient client) {
     if (_closed) throw StateError('ACP capability service is closed');
     _subscription?.cancel();
+    _cancellationSubscription?.cancel();
+    _elicitationCompletionSubscription?.cancel();
+    _cancellationSubscription = client.serverRequestCancellations.listen(
+      _onServerRequestCancelled,
+    );
+    _elicitationCompletionSubscription = client.elicitationCompletions.listen(
+      _onElicitationCompleted,
+    );
     _subscription = client.serverRequests.listen(_handle);
   }
 
@@ -524,6 +651,16 @@ final class AcpClientCapabilityService {
   Future<void> detach() async {
     await _subscription?.cancel();
     _subscription = null;
+    await _cancellationSubscription?.cancel();
+    _cancellationSubscription = null;
+    await _elicitationCompletionSubscription?.cancel();
+    _elicitationCompletionSubscription = null;
+    // A retained request-scoped elicitation restarts its no-viewer deadline
+    // when the bridge replays it after reconnect.
+    for (final timer in _unpresentedElicitationTimers.values) {
+      timer.cancel();
+    }
+    _unpresentedElicitationTimers.clear();
   }
 
   /// Explicitly destroys session-owned terminal resources and pending requests.
@@ -535,6 +672,7 @@ final class AcpClientCapabilityService {
       _terminals.values.map((terminal) => terminal.release()),
     );
     _terminals.clear();
+    _terminalDisplays.clear();
     _sessionAutoApprovePermissions.clear();
     await registry.close();
   }
@@ -555,6 +693,7 @@ final class AcpClientCapabilityService {
     try {
       _activeRequests.removeWhere((_, owner) => owner == sessionId);
       _sessionAutoApprovePermissions.remove(sessionId);
+      _sessionAllowedRoots.remove(sessionId);
       final owned = _terminals.entries
           .where((entry) => entry.value.sessionId == sessionId)
           .toList(growable: false);
@@ -562,6 +701,9 @@ final class AcpClientCapabilityService {
         _terminals.remove(entry.key);
       }
       await Future.wait<void>(owned.map((entry) => entry.value.release()));
+      _terminalDisplays.removeWhere(
+        (key, _) => key.startsWith('$sessionId\u0000'),
+      );
       await registry.cancelForSession(sessionId);
     } finally {
       final remaining = _closingSessions[sessionId]! - 1;
@@ -647,6 +789,144 @@ final class AcpClientCapabilityService {
     }
   }
 
+  /// Accepts a pending elicitation.
+  ///
+  /// For a form, [content] must validate against the requested schema;
+  /// otherwise this throws [ArgumentError] and the request stays pending. A
+  /// URL consent sends no content and is then tracked in
+  /// [AcpPendingRequestRegistry.awaitingElicitations] until the agent sends
+  /// `elicitation/complete`. The caller opens the URL only after this returns.
+  Future<void> acceptElicitation(
+    String requestId, {
+    Map<String, Object?>? content,
+  }) async {
+    final pending = _pendingElicitation(requestId);
+    final elicitation = pending.elicitation;
+    Map<String, Object?>? submitted;
+    if (elicitation is AcpFormElicitation) {
+      submitted = <String, Object?>{
+        for (final entry in (content ?? const <String, Object?>{}).entries)
+          if (entry.value != null) entry.key: entry.value,
+      };
+      if (!elicitation.canSubmit ||
+          elicitation.validateContent(submitted).isNotEmpty) {
+        throw ArgumentError('Elicitation content does not match the form');
+      }
+    }
+    // An accepted URL is tracked before the answer is sent: the agent may
+    // send elicitation/complete as soon as it reads the answer, and a
+    // completion for an id not yet tracked would be ignored.
+    final awaiting = elicitation is AcpUrlElicitation
+        ? AcpAwaitingElicitation(
+            elicitationId: elicitation.elicitationId,
+            url: elicitation.url,
+            sessionId: elicitation.scope.sessionId,
+            acceptedAt: DateTime.now(),
+          )
+        : null;
+    if (awaiting != null) registry.markAwaiting(awaiting);
+    try {
+      await pending.accept(submitted);
+    } on Object {
+      if (awaiting != null) registry.completeAwaiting(awaiting.elicitationId);
+      rethrow;
+    } finally {
+      _forgetPending(requestId);
+    }
+    _logElicitationResolved(elicitation, 'accept');
+  }
+
+  /// Declines a pending elicitation.
+  Future<void> declineElicitation(String requestId) async {
+    final pending = _pendingElicitation(requestId);
+    try {
+      await pending.decline();
+    } finally {
+      _forgetPending(requestId);
+    }
+    _logElicitationResolved(pending.elicitation, 'decline');
+  }
+
+  /// Cancels a pending elicitation the user dismissed without choosing.
+  Future<void> cancelElicitation(String requestId) async {
+    final pending = _pendingElicitation(requestId);
+    try {
+      await pending.cancel();
+    } finally {
+      _forgetPending(requestId);
+    }
+    _logElicitationResolved(pending.elicitation, 'cancel');
+  }
+
+  /// Stops showing that the user is finishing [elicitationId] in a browser.
+  void dismissAwaitingElicitation(String elicitationId) =>
+      registry.completeAwaiting(elicitationId);
+
+  AcpPendingElicitation _pendingElicitation(String requestId) {
+    final pending = registry._requests[requestId];
+    if (pending is! AcpPendingElicitation) {
+      throw StateError('No pending elicitation for request');
+    }
+    if (pending.request.isCancelled) {
+      _forgetPending(requestId);
+      throw StateError('No pending elicitation for request');
+    }
+    return pending;
+  }
+
+  void _forgetPending(String requestId) {
+    _unpresentedElicitationTimers.remove(requestId)?.cancel();
+    registry.remove(requestId);
+  }
+
+  void _logElicitationResolved(
+    AcpElicitationRequest elicitation,
+    String action,
+  ) {
+    _diagnostics.info(
+      'acp.capability',
+      'elicitation_resolved',
+      fields: {'mode': _elicitationMode(elicitation), 'action': action},
+    );
+  }
+
+  void _onServerRequestCancelled(AcpRequestId requestId) {
+    final key = acpPendingRequestKey(requestId);
+    final pending = registry._requests[key];
+    if (pending == null) return;
+    _forgetPending(key);
+    _diagnostics.info(
+      'acp.capability',
+      'request_cancelled_by_agent',
+      fields: {
+        'kind': switch (pending) {
+          AcpPendingPermission() => 'permission',
+          AcpPendingFileWrite() => 'write',
+          AcpPendingElicitation() => 'elicitation',
+        },
+      },
+    );
+    // A request still bound to this connection was already answered with
+    // -32800. One retained from an earlier attachment is answered best effort.
+    if (!pending.request.isAnswered) {
+      unawaited(_respondSafely(pending.request.respondCancelled));
+    }
+  }
+
+  void _onElicitationCompleted(String elicitationId) {
+    if (registry.completeAwaiting(elicitationId)) {
+      _diagnostics.info('acp.capability', 'elicitation_completed');
+    }
+  }
+
+  Future<void> _respondSafely(Future<void> Function() respond) async {
+    try {
+      await respond();
+    } on Object {
+      // A closed or replaced response channel cannot carry the answer.
+    }
+  }
+
   void _handle(AcpJsonRpcServerRequest request) {
     unawaited(_route(request));
   }
@@ -679,6 +959,8 @@ final class AcpClientCapabilityService {
           await _terminalKill(request);
         case 'terminal/release':
           await _terminalRelease(request);
+        case 'elicitation/create':
+          await _elicitation(request);
         default:
           await request.respondError(-32601, 'Method not found');
       }
@@ -703,7 +985,7 @@ final class AcpClientCapabilityService {
   }
 
   void _ensureRequestActive(AcpJsonRpcServerRequest request) {
-    if (!_activeRequests.containsKey(request)) {
+    if (!_activeRequests.containsKey(request) || request.isCancelled) {
       throw const AcpClientCapabilityException('Request was cancelled');
     }
   }
@@ -764,6 +1046,82 @@ final class AcpClientCapabilityService {
     );
   }
 
+  Future<void> _elicitation(AcpJsonRpcServerRequest request) async {
+    final params = AcpJson.object(request.params);
+    final AcpElicitationRequest elicitation;
+    try {
+      if (params == null) {
+        throw const AcpElicitationRequestException('Invalid params');
+      }
+      if (utf8.encode(jsonEncode(params)).length >
+          acpElicitationMaxRequestBytes) {
+        throw const AcpElicitationRequestException(
+          'Elicitation request is too large',
+        );
+      }
+      final advertised = capabilities;
+      elicitation = AcpElicitationRequest.parse(
+        params,
+        formSupported: advertised.elicitationForm,
+        urlSupported: advertised.elicitationUrl,
+      );
+    } on AcpElicitationRequestException catch (error) {
+      _diagnostics.warning(
+        'acp.capability',
+        'elicitation_rejected',
+        fields: {'unsupportedMode': error.unsupportedMode},
+      );
+      await request.respondError(-32602, error.message);
+      return;
+    }
+    _ensureRequestActive(request);
+    final registered = registry.register(
+      AcpPendingElicitation(request, elicitation),
+    );
+    if (registered == null) {
+      _diagnostics.warning(
+        'acp.capability',
+        'pending_request_overflow',
+        fields: {'kind': 'elicitation'},
+      );
+      await request.respond(const <String, Object?>{'action': 'cancel'});
+      return;
+    }
+    _diagnostics.info(
+      'acp.capability',
+      'elicitation_pending',
+      fields: {
+        'mode': _elicitationMode(elicitation),
+        'requestScoped': elicitation.scope.isRequestScoped,
+        if (elicitation is AcpFormElicitation)
+          'fieldCount': elicitation.schema.fields.length,
+      },
+    );
+    _cancelIfUnpresented(registered);
+  }
+
+  /// Answers a request-scoped elicitation `cancel` if no session view starts
+  /// mirroring the registry in time, so the agent's originating request never
+  /// hangs on input nobody can see. Session-scoped requests wait for their
+  /// session like permissions do.
+  void _cancelIfUnpresented(AcpPendingElicitation pending) {
+    if (!pending.isRequestScoped || registry.hasObservers) return;
+    final key = pending.id;
+    _unpresentedElicitationTimers.remove(key)?.cancel();
+    _unpresentedElicitationTimers[key] = Timer(
+      unpresentedElicitationTimeout,
+      () {
+        _unpresentedElicitationTimers.remove(key);
+        if (_closed || registry.hasObservers) return;
+        final current = registry._requests[key];
+        if (current is! AcpPendingElicitation) return;
+        registry.remove(key);
+        _diagnostics.info('acp.capability', 'elicitation_unpresented');
+        unawaited(_respondSafely(current.cancel));
+      },
+    );
+  }
+
   Future<void> _readTextFile(AcpJsonRpcServerRequest request) async {
     final remoteFileSystem = fileSystem;
     if (remoteFileSystem == null) {
@@ -772,9 +1130,10 @@ final class AcpClientCapabilityService {
       );
     }
     final params = _objectParams(request);
-    _requiredSessionId(params);
+    final sessionId = _requiredSessionId(params);
     final path = await _validatedPath(
       _requiredString(params, 'path'),
+      sessionId: sessionId,
       forWrite: false,
     );
     _ensureRequestActive(request);
@@ -798,6 +1157,7 @@ final class AcpClientCapabilityService {
     final sessionId = _requiredSessionId(params);
     final path = await _validatedPath(
       _requiredString(params, 'path'),
+      sessionId: sessionId,
       forWrite: true,
     );
     _ensureRequestActive(request);
@@ -880,7 +1240,11 @@ final class AcpClientCapabilityService {
     }
     final cwd = requestedCwd == null
         ? null
-        : await _validatedPath(requestedCwd, forWrite: false);
+        : await _validatedPath(
+            requestedCwd,
+            sessionId: sessionId,
+            forWrite: false,
+          );
     final requestedOutputLimit = _optionalPositiveInteger(
       params,
       'outputByteLimit',
@@ -916,12 +1280,23 @@ final class AcpClientCapabilityService {
     } finally {
       _terminalReservations--;
     }
-    if (!_activeRequests.containsKey(request)) {
+    if (!_activeRequests.containsKey(request) || request.isCancelled) {
       process.kill();
       _ensureRequestActive(request);
     }
-    final id = 'acp-terminal-${++_nextTerminalId}';
-    final terminal = _ManagedAcpTerminal(sessionId, process, outputLimit);
+    final id = '$_terminalIdPrefix-${++_nextTerminalId}';
+    final display = _terminalDisplayNotifier(sessionId, id)
+      ..value = AcpTerminalDisplay(
+        terminalId: id,
+        command: _displayCommandLine(command, arguments),
+        output: '',
+      );
+    final terminal = _ManagedAcpTerminal(
+      sessionId,
+      process,
+      outputLimit,
+      display: display,
+    );
     _terminals[id] = terminal;
     terminal
       ..start(
@@ -992,6 +1367,7 @@ final class AcpClientCapabilityService {
 
   Future<String> _validatedPath(
     String candidate, {
+    required String sessionId,
     required bool forWrite,
   }) async {
     final normalized = normalizeSftpAbsolutePath(candidate);
@@ -1006,15 +1382,19 @@ final class AcpClientCapabilityService {
       final resolved = forWrite
           ? await fileSystem!.canonicalizeWritePath(normalized)
           : await fileSystem!.canonicalizeExistingPath(normalized);
-      final canonicalRoots = await Future.wait(
-        allowedRoots.map((root) async {
+      // Resolve each root independently: one missing additional directory
+      // must not make every other root (including the cwd) unusable.
+      final canonicalRoots = (await Future.wait(
+        _allowedRootsForSession(sessionId).map((root) async {
           final normalizedRoot = normalizeSftpAbsolutePath(root);
-          if (normalizedRoot == null) {
-            throw const AcpClientCapabilityException('Path is not allowed');
+          if (normalizedRoot == null) return null;
+          try {
+            return await fileSystem!.canonicalizeExistingPath(normalizedRoot);
+          } on Object {
+            return null;
           }
-          return fileSystem!.canonicalizeExistingPath(normalizedRoot);
         }),
-      );
+      )).nonNulls;
       if (!_isAllowedPath(resolved, canonicalRoots)) {
         throw const AcpClientCapabilityException('Path is not allowed');
       }
@@ -1124,11 +1504,23 @@ final class _SshAcpTerminalProcess implements AcpTerminalProcess {
 }
 
 final class _ManagedAcpTerminal {
-  _ManagedAcpTerminal(this.sessionId, this._process, this._limit);
+  _ManagedAcpTerminal(
+    this.sessionId,
+    this._process,
+    this._limit, {
+    required this.display,
+  });
+
+  /// How often streamed output refreshes the chat's terminal display.
+  static const _displayInterval = Duration(milliseconds: 150);
 
   final String sessionId;
   final AcpTerminalProcess _process;
   final int _limit;
+
+  /// Display snapshot shown in tool calls that embed this terminal.
+  final ValueNotifier<AcpTerminalDisplay?> display;
+  Timer? _displayTimer;
   final Queue<Uint8List> _outputChunks = Queue<Uint8List>();
   late final StreamSubscription<List<int>> _stdoutSubscription;
   late final StreamSubscription<List<int>> _stderrSubscription;
@@ -1156,6 +1548,7 @@ final class _ManagedAcpTerminal {
         _exitStatus = const AcpTerminalExitStatus();
         if (!_exit!.isCompleted) _exit!.complete(_exitStatus);
       } finally {
+        _publishDisplay();
         onExit();
       }
     }());
@@ -1166,6 +1559,7 @@ final class _ManagedAcpTerminal {
     final chunk = Uint8List.fromList(bytes);
     _outputChunks.addLast(chunk);
     _outputLength += chunk.length;
+    _displayTimer ??= Timer(_displayInterval, _publishDisplay);
     if (_outputLength <= _limit) return;
 
     _truncated = true;
@@ -1193,15 +1587,40 @@ final class _ManagedAcpTerminal {
 
   AcpJsonMap _exitStatusJson() => _exitStatus!.toJson();
 
-  String _outputText() {
+  void _publishDisplay() {
+    _displayTimer?.cancel();
+    _displayTimer = null;
+    final current = display.value;
+    if (current == null) return;
+    final exitStatus = _exitStatus;
+    final tailBytes = min(_outputLength, kAcpTerminalDisplayMaxCharacters);
+    display.value = current.copyWith(
+      output: _outputText(maxBytes: tailBytes),
+      truncated: _truncated || tailBytes < _outputLength,
+      exited: exitStatus != null,
+      exitCode: exitStatus?.exitCode,
+      signal: exitStatus?.signal,
+      released: _released,
+    );
+  }
+
+  /// Decodes the retained output, or only its last [maxBytes] when given.
+  String _outputText({int? maxBytes}) {
     if (_outputLength == 0) return '';
+    var skip = maxBytes == null ? 0 : max(0, _outputLength - maxBytes);
     final bytes = BytesBuilder(copy: false);
     var isFirst = true;
     for (final chunk in _outputChunks) {
-      bytes.add(
-        isFirst && _headOffset > 0 ? chunk.sublist(_headOffset) : chunk,
-      );
+      final start = isFirst ? _headOffset : 0;
       isFirst = false;
+      final available = chunk.length - start;
+      if (skip >= available) {
+        skip -= available;
+        continue;
+      }
+      final from = start + skip;
+      skip = 0;
+      bytes.add(from > 0 ? Uint8List.sublistView(chunk, from) : chunk);
     }
     final flattened = bytes.takeBytes();
     final start = _utf8SuffixStart(flattened);
@@ -1253,7 +1672,21 @@ final class _ManagedAcpTerminal {
       _stdoutSubscription.cancel(),
       _stderrSubscription.cancel(),
     ]);
+    _publishDisplay();
   }
+}
+
+/// Formats an agent's terminal command for display, quoting arguments that
+/// would otherwise read ambiguously.
+String _displayCommandLine(String command, List<String> arguments) {
+  String quote(String value) {
+    if (value.isNotEmpty && !RegExp(r"""[\s'"\\$`]""").hasMatch(value)) {
+      return value;
+    }
+    return "'${value.replaceAll("'", r"'\''")}'";
+  }
+
+  return [command, ...arguments.map(quote)].join(' ');
 }
 
 AcpJsonMap _objectParams(AcpJsonRpcServerRequest request) {
@@ -1331,3 +1764,18 @@ String _selectLines(String content, {int? line, int? limit}) {
 }
 
 String _methodCategory(String method) => method.split('/').first;
+
+String _elicitationMode(AcpElicitationRequest elicitation) =>
+    switch (elicitation) {
+      AcpFormElicitation() => 'form',
+      AcpUrlElicitation() => 'url',
+    };
+
+/// 128 random bits as hex, enough that two services never share a prefix.
+String _randomToken128() {
+  final random = Random.secure();
+  return [
+    for (var word = 0; word < 4; word++)
+      random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0'),
+  ].join();
+}

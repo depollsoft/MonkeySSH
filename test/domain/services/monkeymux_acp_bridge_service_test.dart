@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 // ignore_for_file: public_member_api_docs
@@ -7,6 +8,8 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -374,6 +377,108 @@ void main() {
     registerFallbackValue(SshExecPriority.normal);
   });
 
+  group('terminal sign-in command', () {
+    AcpTerminalAuthLaunch launchFor({
+      required List<String> launchArgv,
+      List<String> args = const ['--login'],
+      Map<String, String> env = const {'ACP_LOGIN': "it's 1"},
+      String cwd = '/repo dir',
+    }) => AcpTerminalAuthLaunch.forMethod(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      providerLabel: 'Copilot CLI',
+      method: AcpAuthMethod(
+        id: 'terminal-login',
+        name: 'Terminal login',
+        type: AcpAuthMethod.terminalType,
+        args: args,
+        env: env,
+      ),
+      launchArgv: launchArgv,
+      workingDirectory: cwd,
+    );
+
+    test('reruns the configured agent with method args and env on POSIX', () {
+      final command = buildAcpTerminalAuthCommand(
+        launchFor(launchArgv: const ['/opt/bin/copilot', '--acp']),
+        isWindows: false,
+      );
+      // Same profile prefix as the bridge launch, then cwd, env, exact argv.
+      expect(command, startsWith('/bin/sh -c '));
+      expect(command, contains('. ~/.zprofile'));
+      expect(command, contains(r"cd -- '\''/repo dir'\''"));
+      expect(command, contains(r"export ACP_LOGIN='\''it'\''\'\'''\''s 1'\''"));
+      expect(
+        command,
+        contains(
+          r"exec '\''/opt/bin/copilot'\'' '\''--acp'\'' '\''--login'\''",
+        ),
+      );
+    });
+
+    test('applies env as PowerShell literals on Windows', () {
+      final command = buildAcpTerminalAuthCommand(
+        launchFor(launchArgv: const [r'C:\bin\copilot.exe', '--acp']),
+        isWindows: true,
+      );
+      final script = decodeEncodedPowerShell(command);
+      expect(script, contains("Set-Location -LiteralPath '/repo dir'"));
+      expect(script, contains(r"$env:ACP_LOGIN='it''s 1';"));
+      expect(script, contains(r"$__flAcpArgs=@('--acp','--login')"));
+    });
+
+    test('rejects environment names that are not plain identifiers', () {
+      expect(
+        () => buildAcpTerminalAuthCommand(
+          launchFor(
+            launchArgv: const ['copilot'],
+            env: const {'BAD;rm -rf ~': '1'},
+          ),
+          isWindows: false,
+        ),
+        throwsA(isA<MonkeyMuxAcpBridgeException>()),
+      );
+    });
+
+    test(
+      'runs under a POSIX shell with literal args, env, cwd, and exit status',
+      () async {
+        final home = await Directory.systemTemp.createTemp('acp-sign-in-home');
+        final cwd = await Directory('${home.path}/work dir')
+            .create(recursive: true);
+        addTearDown(() => home.delete(recursive: true));
+        final command = buildAcpTerminalAuthCommand(
+          launchFor(
+            launchArgv: const [
+              '/bin/sh',
+              '-c',
+              r'printf "%s|%s|%s" "$ACP_LOGIN" "$1" "$PWD"; exit 7',
+              'agent',
+            ],
+            args: const [r"$(touch pwned) 'quoted'"],
+            cwd: cwd.path,
+          ),
+          isWindows: false,
+        );
+        final result = await Process.run(
+          '/bin/sh',
+          ['-c', command],
+          environment: {
+            'HOME': home.path,
+            // MonkeyMux runs the provider under a bash/zsh login shell.
+            'SHELL': '/bin/bash',
+            'PATH': '/usr/bin:/bin',
+          },
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 7);
+        expect(result.stdout, "it's 1|\$(touch pwned) 'quoted'|${cwd.path}");
+        expect(File('${cwd.path}/pwned').existsSync(), isFalse);
+      },
+      testOn: 'mac-os || linux',
+    );
+  });
+
   test('quotes exact provider argv on POSIX and Windows', () {
     final posix = buildMonkeyMuxAcpProviderCommand(const [
       'copilot',
@@ -441,6 +546,51 @@ void main() {
       expect(other, isNot(contains('MUSE_CODE_EXECUTABLE')));
     },
   );
+
+  test('Antigravity ACP gets a TERM_PROGRAM so agy skips its DA2 probe', () {
+    const argv = ['npx', '--yes', '--prefer-offline', 'agy-acp@0.5.2'];
+    final posix = buildMonkeyMuxAcpProviderCommand(
+      argv,
+      isWindows: false,
+      providerId: AcpBuiltinProviderIds.antigravity,
+    );
+    // A value from the user's profile wins; the default is set only when
+    // TERM_PROGRAM is missing, and it lands before the exec.
+    const preamble =
+        r'[ -n "${TERM_PROGRAM-}" ] || export TERM_PROGRAM=MonkeySSH; ';
+    expect(posix, contains(preamble));
+    expect(
+      posix.indexOf(preamble),
+      lessThan(posix.indexOf("exec 'npx' '--yes'")),
+    );
+    final windows = decodeEncodedPowerShell(
+      buildMonkeyMuxAcpProviderCommand(
+        argv,
+        isWindows: true,
+        providerId: AcpBuiltinProviderIds.antigravity,
+      ),
+    );
+    expect(
+      windows,
+      contains(
+        r'if([string]::IsNullOrEmpty($env:TERM_PROGRAM)){ '
+        r"$env:TERM_PROGRAM='MonkeySSH' };",
+      ),
+    );
+
+    for (final providerId in [
+      AcpBuiltinProviderIds.copilotCli,
+      AcpBuiltinProviderIds.openCode,
+      null,
+    ]) {
+      final other = buildMonkeyMuxAcpProviderCommand(
+        argv,
+        isWindows: false,
+        providerId: providerId,
+      );
+      expect(other, isNot(contains('TERM_PROGRAM')));
+    }
+  });
 
   test('Cursor ACP leaves credential handling to Cursor', () {
     final cursor = buildMonkeyMuxAcpProviderCommand(const [

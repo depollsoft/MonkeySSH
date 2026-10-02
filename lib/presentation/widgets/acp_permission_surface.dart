@@ -87,20 +87,49 @@ final class AcpWritePermissionPrompt extends AcpPermissionPrompt {
   String get title => 'Write to $fileName';
 }
 
+/// Longest tool title shown in a permission prompt.
+const kAcpPermissionTitleMaxCharacters = 120;
+
+/// Puts an agent-supplied tool title on one bounded line, so a long or
+/// multi-line title cannot crowd out or imitate the approval controls.
+@visibleForTesting
+String? acpPermissionTitleText(String? value) {
+  final collapsed = value?.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (collapsed == null || collapsed.isEmpty) return null;
+  final runes = collapsed.runes;
+  if (runes.length <= kAcpPermissionTitleMaxCharacters) return collapsed;
+  return '${String.fromCharCodes(runes.take(kAcpPermissionTitleMaxCharacters - 1))}…';
+}
+
 /// Builds a tool permission prompt from a session-manager pending permission.
+///
+/// The title the agent put in the permission request wins over [toolTitle]
+/// (the timeline's title for the same tool call), and the request's subject
+/// (the command or path being acted on) becomes the context line.
 AcpToolPermissionPrompt acpToolPromptFromSession(
   session.AcpPendingPermission pending, {
   required Future<void> Function(String optionId) onSelect,
   required Future<void> Function() onCancel,
   String? toolTitle,
-}) => AcpToolPermissionPrompt(
-  stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
-  title: toolTitle == null ? 'Allow this tool action?' : 'Allow $toolTitle?',
-  contextLine: toolTitle ?? 'Tool ${pending.toolCallId}',
-  options: pending.options,
-  onSelect: onSelect,
-  onCancel: onCancel,
-);
+}) {
+  String? nonEmpty(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
+  }
+
+  final title =
+      acpPermissionTitleText(pending.title) ??
+      acpPermissionTitleText(toolTitle);
+  final subject = nonEmpty(pending.subject);
+  return AcpToolPermissionPrompt(
+    stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
+    title: title == null ? 'Allow this tool action?' : 'Allow $title?',
+    contextLine: subject != null && subject != title ? subject : null,
+    options: pending.options,
+    onSelect: onSelect,
+    onCancel: onCancel,
+  );
+}
 
 /// Renders pending [AcpPermissionPrompt]s as an anchored action surface.
 ///
@@ -217,7 +246,12 @@ class _PermissionCard extends StatelessWidget {
             ),
             const SizedBox(width: FluttyTheme.spacingSm),
             Expanded(
-              child: Text(prompt.title, style: theme.textTheme.titleSmall),
+              child: Text(
+                prompt.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall,
+              ),
             ),
           ],
         ),
@@ -246,6 +280,11 @@ class _PermissionCard extends StatelessWidget {
                     : () => onResolve(() => prompt.onSelect(option.id)),
               ),
             TextButton(
+              // Neutral like the elicitation cards' Dismiss: the allow option
+              // stays the card's only accent.
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.onSurface,
+              ),
               onPressed: busy ? null : () => onResolve(prompt.onCancel),
               child: const Text('Cancel request'),
             ),
@@ -299,7 +338,12 @@ class _PermissionCard extends StatelessWidget {
             ),
             const SizedBox(width: FluttyTheme.spacingSm),
             Expanded(
-              child: Text(prompt.title, style: theme.textTheme.titleSmall),
+              child: Text(
+                prompt.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall,
+              ),
             ),
           ],
         ),

@@ -209,6 +209,9 @@ extension type const AcpToolKind(String value) {
   /// External data fetch.
   static const fetch = AcpToolKind('fetch');
 
+  /// Session mode switch.
+  static const switchMode = AcpToolKind('switch_mode');
+
   /// Other tool category.
   static const other = AcpToolKind('other');
 }
@@ -432,6 +435,7 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
     required this.toolCallId,
     this.isInitial = false,
     this.title,
+    this.name,
     this.toolKind,
     this.status,
     this.content,
@@ -453,6 +457,7 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
       toolCallId: AcpJson.identifier(json, 'toolCallId') ?? '',
       isInitial: isInitial,
       title: AcpJson.string(json, 'title'),
+      name: AcpJson.string(json, 'name'),
       toolKind: toolKind == null ? null : AcpToolKind(toolKind),
       status: status == null ? null : AcpToolStatus(status),
       content: json['content'] is List
@@ -468,6 +473,7 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
         'sessionUpdate',
         'toolCallId',
         'title',
+        'name',
         'kind',
         'status',
         'content',
@@ -489,6 +495,9 @@ final class AcpToolCallUpdate extends AcpSessionUpdate {
 
   /// Optional title replacement.
   final String? title;
+
+  /// Optional machine-readable tool name, such as `Bash`.
+  final String? name;
 
   /// Optional tool kind replacement.
   final AcpToolKind? toolKind;

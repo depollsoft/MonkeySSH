@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
+import 'acp_audio_player.dart';
 import 'acp_chat_typography.dart';
 import 'acp_inline_image.dart';
 import 'acp_path_text.dart';
@@ -10,8 +11,9 @@ import 'acp_resource_chip.dart';
 /// Renders a user prompt, preserving the order of its content parts.
 ///
 /// Text parts render as selectable text, image parts render inline via
-/// [AcpInlineImage], and file/resource parts render as [AcpResourceChip]s —
-/// the prompt is never flattened to a single string.
+/// [AcpInlineImage], audio parts render as an [AcpAudioPlayer], and
+/// file/resource parts render as [AcpResourceChip]s — the prompt is never
+/// flattened to a single string.
 class AcpUserPromptView extends StatelessWidget {
   /// Creates a user prompt view.
   const AcpUserPromptView({
@@ -75,6 +77,11 @@ class AcpUserPromptView extends StatelessWidget {
             resolver: imageResolver,
             onTap: onTapImage,
           ),
+        );
+      case AcpAudioPart(:final clip):
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: AcpAudioPlayer(clip: clip),
         );
       case AcpResourcePart(:final resource):
         return Align(

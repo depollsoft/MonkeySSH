@@ -10,10 +10,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_mcp_server.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -566,5 +569,352 @@ void main() {
       find.text('Authentication failed. Check this host’s credentials.'),
       findsOneWidget,
     );
+  });
+
+  group('agent sign-in', () {
+    const agentLogin = AcpAuthMethod(
+      id: 'agent-login',
+      name: 'Agent login',
+      description: 'Sign in with the agent.',
+    );
+    const terminalLogin = AcpAuthMethod(
+      id: 'terminal-login',
+      name: 'Terminal login',
+      type: AcpAuthMethod.terminalType,
+      args: ['--login'],
+    );
+    const authRequired = AcpSessionLaunchFailed(
+      null,
+      AcpSessionError(
+        kind: AcpSessionErrorKind.authenticationRequired,
+        message: 'The agent requires authentication.',
+      ),
+    );
+
+    AcpAuthenticationRequest requestFor(List<AcpAuthMethod> methods) =>
+        AcpAuthenticationRequest(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          providerLabel: 'Copilot CLI',
+          methods: methods,
+          authenticate: (_, {cancellation}) async => null,
+        );
+
+    testWidgets('offers the agent methods and skips the legacy prompt when '
+        'declined', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..authenticationRequest = requestFor(const [agentLogin, terminalLogin])
+        ..startNewSessionResult = authRequired;
+      await _pumpAndLaunch(tester, manager, startSession: false);
+      final startButton = find.widgetWithText(FilledButton, 'Start session');
+      await tester.ensureVisible(startButton);
+      await tester.pumpAndSettle();
+      await tester.tap(startButton);
+      // The Start button spins while the chooser is open, so pump by time.
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(manager.startChoosers.single, isNotNull);
+      expect(find.text('sign in to Copilot CLI'), findsOneWidget);
+      expect(find.text('Agent login'), findsOneWidget);
+      expect(find.text('Sign in with the agent.'), findsOneWidget);
+      expect(find.text('Terminal login'), findsOneWidget);
+      expect(find.text('terminal'), findsOneWidget);
+      expect(find.text('agent'), findsOneWidget);
+      expect(find.text('Copy CLI sign-in command'), findsOneWidget);
+
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+
+      expect(manager.authenticationChoices, [null]);
+      expect(find.text('Sign in required'), findsNothing);
+      expect(
+        find.text('Sign in to the agent to start this session.'),
+        findsOneWidget,
+      );
+    });
+
+    /// An SSH session whose every command, including the sign-in terminal,
+    /// exits with status zero. Records each command and its PTY request.
+    SshSession signInSession({
+      List<String>? commands,
+      List<SSHPtyConfig?>? ptys,
+    }) {
+      registerFallbackValue(const SSHPtyConfig());
+      final client = _MockSshClient();
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        commands?.add(invocation.positionalArguments.single as String);
+        ptys?.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
+        final exec = _MockExecSession();
+        when(() => exec.stdout).thenAnswer(
+          (_) => Stream.value(
+            Uint8List.fromList(utf8.encode('copilot\u001f/usr/bin/copilot\n')),
+          ),
+        );
+        when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => exec.done).thenAnswer((_) => Future<void>.value());
+        when(() => exec.exitCode).thenReturn(0);
+        when(exec.close).thenAnswer((_) {});
+        return exec;
+      });
+      return SshSession(
+        connectionId: 7,
+        hostId: 1,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'alpha.example.com',
+          port: 22,
+          username: 'root',
+        ),
+      );
+    }
+
+    testWidgets('a terminal method runs in the sign-in terminal and relaunches '
+        'after a zero exit status', (tester) async {
+      final commands = <String>[];
+      final ptys = <SSHPtyConfig?>[];
+      final activeSession = signInSession(commands: commands, ptys: ptys);
+      final terminalLaunch = AcpTerminalAuthLaunch.forMethod(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        providerLabel: 'Copilot CLI',
+        method: terminalLogin,
+        launchArgv: const ['/usr/bin/copilot', '--acp'],
+        workingDirectory: '/repo',
+      );
+      final manager = FakeAcpSessionManager()
+        ..startNewSessionResults.add(
+          AcpSessionLaunchFailed(
+            null,
+            authRequired.error,
+            terminalAuthentication: terminalLaunch,
+          ),
+        )
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        activeSession: activeSession,
+      );
+      await tester.pumpAndSettle();
+
+      expect(result(), key);
+      expect(manager.starts, hasLength(2));
+      // The retry reuses the resolved launch instead of probing again.
+      expect(
+        manager.startLaunchOverrides.map((command) => command?.executable),
+        ['/usr/bin/copilot', '/usr/bin/copilot'],
+      );
+      final signIn = commands.last;
+      expect(signIn, contains(r"'\''/usr/bin/copilot'\'' '\''--acp'\'' "));
+      expect(signIn, contains(r"'\''--login'\''"));
+      expect(ptys.last, isNotNull);
+    });
+
+    testWidgets('signing in to resume a recent session stops its old agent '
+        'first', (tester) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-old',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final recentKey = fakeAcpKey(bridgeId: 'bridge-old');
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..reconnectSessionResults.add(
+          AcpSessionLaunchFailed(
+            recentKey,
+            authRequired.error,
+            terminalAuthentication: AcpTerminalAuthLaunch.forMethod(
+              hostId: 1,
+              providerId: AcpBuiltinProviderIds.copilotCli,
+              providerLabel: 'Copilot CLI',
+              method: terminalLogin,
+              launchArgv: const ['/usr/bin/copilot', '--acp'],
+              workingDirectory: '/home/repo',
+            ),
+          ),
+        )
+        ..reconnectSessionResult = AcpSessionLaunchStarted(key);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        activeSession: signInSession(),
+        startSession: false,
+      );
+      await tester.ensureVisible(find.text('Resume …/repo'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Resume …/repo'));
+      await tester.pumpAndSettle();
+      final resume = find.widgetWithText(FilledButton, 'Resume session');
+      await tester.ensureVisible(resume);
+      await tester.pumpAndSettle();
+      await tester.tap(resume);
+      await tester.pumpAndSettle();
+
+      // The agent that refused the session may keep its old credentials, so
+      // its bridge is stopped and the retry resumes into a fresh agent.
+      expect(manager.stoppedUnusedBridges, [recentKey.value]);
+      expect(manager.reconnects, hasLength(2));
+      expect(result(), key);
+    });
+  });
+
+  group('workspace options', () {
+    final defaultServer = AcpMcpServerConfig(
+      id: 'mcp-a',
+      name: 'filesystem',
+      transport: AcpMcpServerTransport.stdio,
+      command: '/usr/local/bin/mcp-fs',
+      useByDefault: true,
+    );
+    final optionalServer = AcpMcpServerConfig(
+      id: 'mcp-b',
+      name: 'github',
+      transport: AcpMcpServerTransport.http,
+      url: 'https://mcp.example.com/mcp',
+    );
+
+    Future<void> tapVisible(WidgetTester tester, Finder finder) async {
+      await tester.ensureVisible(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+    }
+
+    FilterChip chip(WidgetTester tester, String id) => tester
+        .widget<FilterChip>(find.byKey(ValueKey('acp-workspace-mcp-$id')));
+
+    testWidgets('preselects default MCP servers and launches with the '
+        'adjusted set and additional directories', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..mcpServers = [defaultServer, optionalServer]
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      expect(chip(tester, 'mcp-a').selected, isTrue);
+      expect(chip(tester, 'mcp-b').selected, isFalse);
+      expect(find.text('1 of 2'), findsOneWidget);
+      // No directory fields until the user asks for one.
+      expect(find.byType(TextField), findsOneWidget);
+
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-mcp-mcp-b')),
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-mcp-mcp-a')),
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-add-directory')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('acp-workspace-directory-0')),
+        '  ~/shared-lib  ',
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-add-directory')),
+      );
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Start session'),
+      );
+
+      final workspace = manager.startWorkspaces.single!;
+      expect(workspace.mcpServerIds, ['mcp-b']);
+      // The blank second draft is ignored.
+      expect(workspace.additionalDirectories, ['~/shared-lib']);
+    });
+
+    testWidgets('collapses to one row with a setup shortcut when no MCP '
+        'servers are configured', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      expect(find.text('none'), findsOneWidget);
+      expect(find.text('Set up'), findsOneWidget);
+      expect(find.byType(FilterChip), findsNothing);
+
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Start session'),
+      );
+      final workspace = manager.startWorkspaces.single!;
+      expect(workspace.mcpServerIds, isEmpty);
+      expect(workspace.additionalDirectories, isEmpty);
+    });
+
+    testWidgets('selecting a recent session applies its saved workspace', (
+      tester,
+    ) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-1',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        mcpServerIds: const ['mcp-b'],
+        additionalDirectories: const ['/home/docs'],
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..mcpServers = [defaultServer, optionalServer]
+        ..reconnectSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      await tapVisible(tester, find.text('Resume …/repo'));
+      expect(chip(tester, 'mcp-a').selected, isFalse);
+      expect(chip(tester, 'mcp-b').selected, isTrue);
+      expect(find.text('/home/docs'), findsOneWidget);
+
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Resume session'),
+      );
+      final workspace = manager.reconnectWorkspaces.single!;
+      expect(workspace.mcpServerIds, ['mcp-b']);
+      expect(workspace.additionalDirectories, ['/home/docs']);
+    });
+
+    testWidgets('returning to a new session restores the defaults', (
+      tester,
+    ) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-1',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        mcpServerIds: const <String>[],
+        additionalDirectories: const ['/home/docs'],
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..mcpServers = [defaultServer, optionalServer];
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      await tapVisible(tester, find.text('Resume …/repo'));
+      expect(chip(tester, 'mcp-a').selected, isFalse);
+      await tapVisible(tester, find.text('Start a new session'));
+      expect(chip(tester, 'mcp-a').selected, isTrue);
+      expect(find.text('/home/docs'), findsNothing);
+    });
   });
 }

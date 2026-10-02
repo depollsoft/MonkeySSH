@@ -6,14 +6,20 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/acp_authentication.dart';
 import '../models/acp_client_capabilities.dart' as cap;
 import '../models/acp_content.dart';
+import '../models/acp_elicitation.dart';
+import '../models/acp_mcp_server.dart';
 import '../models/acp_protocol.dart';
 import '../models/acp_provider.dart';
 import '../models/acp_recent_session.dart';
 import '../models/acp_session_keys.dart';
 import '../models/acp_session_state.dart';
+import '../models/acp_session_workspace.dart';
+import '../models/acp_terminal_display.dart';
 import '../models/acp_timeline.dart';
+import '../models/acp_tool_subject.dart';
 import '../models/acp_updates.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'acp_bridge_connector.dart';
@@ -21,6 +27,7 @@ import 'acp_client.dart';
 import 'acp_client_capability_service.dart';
 import 'acp_concurrency_policy.dart';
 import 'acp_json_rpc_connection.dart';
+import 'acp_mcp_server_service.dart';
 import 'acp_provider_service.dart';
 import 'acp_recent_sessions_service.dart';
 import 'acp_telemetry.dart';
@@ -66,13 +73,23 @@ final class AcpSessionLaunchBlocked extends AcpSessionLaunchResult {
 @immutable
 final class AcpSessionLaunchFailed extends AcpSessionLaunchResult {
   /// Creates a failed launch result.
-  const AcpSessionLaunchFailed(this.key, this.error);
+  const AcpSessionLaunchFailed(
+    this.key,
+    this.error, {
+    this.terminalAuthentication,
+  });
 
   /// Key of the session that failed, when one was allocated.
   final AcpSessionKey? key;
 
   /// Safe failure description.
   final AcpSessionError error;
+
+  /// Interactive login the user chose to complete a `terminal` sign-in method.
+  ///
+  /// When present, the caller runs it and, after a zero exit status, starts
+  /// the launch again so the agent is reconnected and reinitialized.
+  final AcpTerminalAuthLaunch? terminalAuthentication;
 }
 
 /// Aggregate, immutable snapshot of every tracked ACP session.
@@ -128,6 +145,10 @@ extension _FirstWhereOrNull on List<AcpSessionState> {
   }
 }
 
+/// Shared display for terminals no capability service knows about.
+final ValueListenable<AcpTerminalDisplay?> _unknownTerminalDisplay =
+    ValueNotifier<AcpTerminalDisplay?>(null);
+
 /// Manages multiple simultaneous ACP sessions across hosts and providers.
 ///
 /// Each session runs in an isolated failure domain: one failed SSH connection,
@@ -141,6 +162,7 @@ class AcpSessionManager {
     required AcpProviderService providerService,
     required AcpRecentSessionsService recentSessions,
     required bool Function() isProUnlocked,
+    AcpMcpServerService? mcpServerService,
     AcpConcurrencyPolicy concurrencyPolicy = const AcpConcurrencyPolicy(),
     DiagnosticsLogger? diagnostics,
     AcpTelemetrySink telemetry = const NoopAcpTelemetrySink(),
@@ -150,6 +172,7 @@ class AcpSessionManager {
        _providerService = providerService,
        _recentSessions = recentSessions,
        _isProUnlocked = isProUnlocked,
+       _mcpServerService = mcpServerService,
        _policy = concurrencyPolicy,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
        _telemetry = telemetry,
@@ -160,6 +183,7 @@ class AcpSessionManager {
   final AcpProviderService _providerService;
   final AcpRecentSessionsService _recentSessions;
   final bool Function() _isProUnlocked;
+  final AcpMcpServerService? _mcpServerService;
   final AcpConcurrencyPolicy _policy;
   final DiagnosticsLogger _diagnostics;
   final AcpTelemetrySink _telemetry;
@@ -198,24 +222,39 @@ class AcpSessionManager {
   /// When the free concurrency limit is reached, returns
   /// [AcpSessionLaunchBlocked] without starting a bridge. Provide [replace] to
   /// first stop those live sessions and continue.
+  ///
+  /// When the agent requires sign-in and advertises usable methods,
+  /// [chooseAuthentication] is asked how to proceed; without it, the launch
+  /// fails with [AcpSessionErrorKind.authenticationRequired]. Like
+  /// [confirmInstall], the chooser runs while this launch holds the lifecycle
+  /// queue: an `agent` sign-in is bounded by [acpAgentAuthenticationTimeout],
+  /// and a `terminal` choice returns at once so the out-of-band login runs
+  /// after the launch has finished.
+  ///
+  /// [workspace] selects MCP servers and additional directories; when it is
+  /// `null` (or its server list is), the default MCP servers are attached.
   Future<AcpSessionLaunchResult> startNewSession({
     required int hostId,
     required String providerId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) => _launchProviderSession(
     hostId: hostId,
     providerId: providerId,
     cwd: cwd,
     confirmInstall: confirmInstall,
+    chooseAuthentication: chooseAuthentication,
     launchCommandOverride: launchCommandOverride,
     providerLabelOverride: providerLabelOverride,
     autoApprovePermissions: autoApprovePermissions,
     replace: replace,
+    workspace: workspace,
   );
 
   /// Starts a fresh provider bridge and loads/resumes [acpSessionId].
@@ -229,20 +268,24 @@ class AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) => _launchProviderSession(
     hostId: hostId,
     providerId: providerId,
     cwd: cwd,
     confirmInstall: confirmInstall,
+    chooseAuthentication: chooseAuthentication,
     launchCommandOverride: launchCommandOverride,
     providerLabelOverride: providerLabelOverride,
     autoApprovePermissions: autoApprovePermissions,
     replace: replace,
     existingSessionId: acpSessionId,
+    workspace: workspace,
   );
 
   Future<AcpSessionLaunchResult> _launchProviderSession({
@@ -252,9 +295,11 @@ class AcpSessionManager {
     required bool autoApprovePermissions,
     required List<AcpSessionKey> replace,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     String? existingSessionId,
+    AcpSessionWorkspaceOptions? workspace,
   }) => _serialize(() async {
     _telemetry.featureOpened();
     final launch = await _resolveLaunch(
@@ -272,6 +317,14 @@ class AcpSessionManager {
     if (workingDirectory.error case final error?) {
       return AcpSessionLaunchFailed(null, error);
     }
+    final resolvedWorkspace = await _resolveWorkspace(
+      hostId,
+      cwd: workingDirectory.value!,
+      options: workspace,
+    );
+    if (resolvedWorkspace.error case final error?) {
+      return AcpSessionLaunchFailed(null, error);
+    }
 
     await _stopAll(replace);
 
@@ -287,8 +340,10 @@ class AcpSessionManager {
       launch: resolved,
       cwd: workingDirectory.value!,
       confirmInstall: confirmInstall,
+      chooseAuthentication: chooseAuthentication,
       existingSessionId: existingSessionId,
       autoApprovePermissions: autoApprovePermissions,
+      workspace: resolvedWorkspace.value!,
     );
   });
 
@@ -297,6 +352,13 @@ class AcpSessionManager {
   /// Used on app restart, host reconnect, and when opening a recent session.
   /// If the session is already live and attached, it is simply selected unless
   /// [selectOnSuccess] is false for a background preload.
+  ///
+  /// [chooseAuthentication] behaves as in [startNewSession]; background
+  /// preloads omit it and keep failing with an authentication-required error.
+  ///
+  /// Without an explicit [workspace], the session re-sends the MCP servers
+  /// and additional directories it was last opened with (from its tracked
+  /// controller or recent-session record), falling back to the defaults.
   Future<AcpSessionLaunchResult> reconnectSession({
     required int hostId,
     required String providerId,
@@ -304,12 +366,14 @@ class AcpSessionManager {
     required String acpSessionId,
     required String cwd,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
     AcpLaunchCommand? launchCommandOverride,
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     bool selectOnSuccess = true,
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) => _serialize(() async {
     if (selectOnSuccess) _telemetry.featureOpened();
     final key = AcpSessionKey.of(
@@ -344,6 +408,19 @@ class AcpSessionManager {
       return AcpSessionLaunchFailed(key, error);
     }
     final resolvedCwd = workingDirectory.value!;
+    final resolvedWorkspace = await _resolveWorkspace(
+      hostId,
+      cwd: resolvedCwd,
+      options:
+          workspace ??
+          existing?._workspace.options ??
+          await _recentWorkspaceFor(key),
+      trustAbsolute: true,
+    );
+    if (resolvedWorkspace.error case final error?) {
+      return AcpSessionLaunchFailed(key, error);
+    }
+    final reconnectWorkspace = resolvedWorkspace.value!;
 
     await _stopAll(replace);
 
@@ -399,8 +476,10 @@ class AcpSessionManager {
         launch: resolved,
         cwd: resolvedCwd,
         confirmInstall: confirmInstall,
+        chooseAuthentication: chooseAuthentication,
         existingSessionId: acpSessionId,
         autoApprovePermissions: autoApprovePermissions,
+        workspace: reconnectWorkspace,
       );
       if (restarted is AcpSessionLaunchStarted) {
         await _recentSessions.remove(key);
@@ -410,12 +489,22 @@ class AcpSessionManager {
 
     // Re-attach an existing (detached) controller in place when possible.
     if (existing != null) {
-      existing.updateWorkingDirectory(resolvedCwd);
+      // Re-send this workspace on the reattached session's load/resume.
+      existing
+        ..updateWorkingDirectory(resolvedCwd)
+        .._workspace = reconnectWorkspace;
       try {
-        await existing.reconnect(remoteBridge: remoteBridge);
+        await existing.reconnect(
+          remoteBridge: remoteBridge,
+          chooseAuthentication: chooseAuthentication,
+        );
       } on _LaunchException catch (error) {
         _emit();
-        return AcpSessionLaunchFailed(error.key ?? key, error.error);
+        return AcpSessionLaunchFailed(
+          error.key ?? key,
+          error.error,
+          terminalAuthentication: error.terminalAuthentication,
+        );
       }
       if (selectOnSuccess) {
         _select(key.value);
@@ -433,7 +522,9 @@ class AcpSessionManager {
       cwd: resolvedCwd,
       existingSessionId: acpSessionId,
       confirmInstall: null,
+      chooseAuthentication: chooseAuthentication,
       autoApprovePermissions: autoApprovePermissions,
+      workspace: reconnectWorkspace,
       liveBridge: remoteBridge,
       selectOnSuccess: selectOnSuccess,
     );
@@ -442,6 +533,25 @@ class AcpSessionManager {
   /// Lists safe metadata for remote bridges on [hostId].
   Future<List<MonkeyMuxAcpBridgeMetadata>> listRemoteBridges(int hostId) =>
       _connector.listBridges(hostId);
+
+  /// Loads the configured MCP servers offered when launching a session.
+  ///
+  /// Returns an empty list when none are configured or storage is
+  /// unavailable; launching never depends on this succeeding.
+  Future<List<AcpMcpServerConfig>> loadMcpServers() async {
+    final service = _mcpServerService;
+    if (service == null) return const <AcpMcpServerConfig>[];
+    try {
+      return await service.listServers();
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.manager',
+        'mcp_servers_load_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      return const <AcpMcpServerConfig>[];
+    }
+  }
 
   /// Selects [key] as the active session and persists it as last-selected.
   Future<void> selectSession(AcpSessionKey key) async {
@@ -519,6 +629,20 @@ class AcpSessionManager {
   Future<void> cancelPermission(AcpSessionKey key, String requestKey) =>
       _requireController(key).cancelPermission(requestKey);
 
+  /// Live output of terminal [terminalId] that [key]'s agent runs through
+  /// this client, for tool calls that embed it.
+  ///
+  /// The value stays `null` for terminals this client does not know, such as
+  /// ones from a previous app run replayed by `session/load`.
+  ValueListenable<AcpTerminalDisplay?> terminalDisplay(
+    AcpSessionKey key,
+    String terminalId,
+  ) {
+    final service = _controllers[key.value]?.attachment.capabilityService;
+    return service?.terminalDisplay(key.acpSessionId, terminalId) ??
+        _unknownTerminalDisplay;
+  }
+
   /// Returns a pending write body for explicit in-memory review only.
   String? pendingWriteContent(AcpSessionKey key, String requestKey) =>
       _requireController(key).pendingWriteContent(requestKey);
@@ -530,6 +654,154 @@ class AcpSessionManager {
   /// Rejects a pending file write.
   Future<void> rejectWrite(AcpSessionKey key, String requestKey) =>
       _requireController(key).rejectWrite(requestKey);
+
+  /// Accepts a pending elicitation: a validated form [content], or consent to
+  /// open a URL-mode link (no content). Open the URL only after this returns.
+  Future<void> acceptElicitation(
+    AcpSessionKey key,
+    String requestKey, {
+    Map<String, Object?>? content,
+  }) => _requireController(key).acceptElicitation(requestKey, content);
+
+  /// Declines a pending elicitation.
+  Future<void> declineElicitation(AcpSessionKey key, String requestKey) =>
+      _requireController(key).declineElicitation(requestKey);
+
+  /// Cancels a pending elicitation the user dismissed without choosing.
+  Future<void> cancelElicitation(AcpSessionKey key, String requestKey) =>
+      _requireController(key).cancelElicitation(requestKey);
+
+  /// Stops showing that a URL elicitation is being finished in a browser.
+  void dismissAwaitingElicitation(AcpSessionKey key, String elicitationId) =>
+      _requireController(key).dismissAwaitingElicitation(elicitationId);
+
+  /// Completes an `agent` sign-in [method] on [key]'s live connection.
+  ///
+  /// Completes with `null` once the agent accepted `authenticate`, after which
+  /// the session leaves the authentication-required state; otherwise with a
+  /// safe, displayable error. Never throws, so the UI may stop waiting.
+  Future<AcpSessionError?> authenticateSession(
+    AcpSessionKey key,
+    AcpAuthMethod method, {
+    AcpRequestCancellation? cancellation,
+  }) async {
+    final controller = _controllers[key.value];
+    if (controller == null) return _untrackedSessionError;
+    final error = await controller.authenticateWithMethod(
+      method,
+      cancellation: cancellation,
+    );
+    if (error == null) controller.clearAuthenticationRequired();
+    return error;
+  }
+
+  /// Builds the interactive login for a `terminal` sign-in [method] on [key].
+  ///
+  /// Returns `null` when the session is not tracked or the method cannot be
+  /// run literally.
+  AcpTerminalAuthLaunch? terminalAuthenticationLaunch(
+    AcpSessionKey key,
+    AcpAuthMethod method,
+  ) => _controllers[key.value]?.terminalAuthLaunch(method);
+
+  /// Records that a `terminal` sign-in for [key] exited successfully, so the
+  /// live session leaves the authentication-required state.
+  void markSessionSignedIn(AcpSessionKey key) =>
+      _controllers[key.value]?.clearAuthenticationRequired();
+
+  /// Stops [key]'s remote bridge when no live session here uses it, so the
+  /// next reconnect starts a fresh agent process.
+  ///
+  /// Used after a `terminal` sign-in that followed a failed reconnect: the
+  /// agent that refused the session may keep the credentials it started
+  /// with, and reattaching would reach that same process. Best effort; a
+  /// bridge that is already gone needs nothing.
+  Future<void> stopUnusedBridge(AcpSessionKey key) => _serialize(() async {
+    final inUse = _controllers.values.any(
+      (controller) =>
+          controller.bridgeKey == key.bridge && controller.state.isLive,
+    );
+    if (inUse) return;
+    try {
+      await _connector.stopBridge(key.hostId, key.bridgeId);
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.manager',
+        'sign_in_bridge_stop_failed',
+        fields: {'hostId': key.hostId, 'errorType': error.runtimeType},
+      );
+    }
+  });
+
+  /// Restarts [key]'s agent after a `terminal` sign-in finished outside the
+  /// ACP connection.
+  ///
+  /// The running agent may keep the authentication state it started with, so
+  /// the spec's terminal flow ends by reconnecting and reinitializing. This
+  /// stops the session's bridge and resumes the same ACP session in a fresh
+  /// agent process with the same launch command, directory, and workspace;
+  /// the result carries the new key. When another live session shares the
+  /// bridge, stopping it would end that session too, so the session is only
+  /// marked signed in.
+  Future<AcpSessionLaunchResult> restartAfterSignIn(AcpSessionKey key) =>
+      _serialize(() async {
+        final controller = _controllers[key.value];
+        if (controller == null) {
+          return AcpSessionLaunchFailed(key, _untrackedSessionError);
+        }
+        final shared = _controllers.values.any(
+          (other) =>
+              !identical(other, controller) && other.bridgeKey == key.bridge,
+        );
+        if (shared || controller._launchArgv.isEmpty) {
+          controller.clearAuthenticationRequired();
+          return AcpSessionLaunchStarted(key);
+        }
+        final launch = _ResolvedLaunch(
+          providerId: key.providerId,
+          label: controller._providerLabel,
+          argv: controller._launchArgv,
+          isCustom: controller._isCustomProvider,
+        );
+        final cwd = controller._cwd;
+        final workspace = controller._workspace;
+        final autoApprove = controller._autoApprovePermissions;
+        try {
+          await _stopAll([key]);
+        } on Object catch (error) {
+          return AcpSessionLaunchFailed(key, _mapBridgeError(error));
+        }
+        _diagnostics.info(
+          'acp.manager',
+          'restart_after_sign_in',
+          fields: {'hostId': key.hostId},
+        );
+        final restarted = await _startBridgeAndSession(
+          hostId: key.hostId,
+          launch: launch,
+          cwd: cwd,
+          confirmInstall: null,
+          existingSessionId: key.acpSessionId,
+          autoApprovePermissions: autoApprove,
+          workspace: workspace,
+        );
+        if (restarted is AcpSessionLaunchStarted) {
+          await _recentSessions.remove(key);
+        }
+        return restarted;
+      });
+
+  /// Ends the agent's signed-in state through [key] when the agent advertises
+  /// `auth.logout`.
+  ///
+  /// Completes with `null` on success; afterwards new sessions require signing
+  /// in again, and active-session requests may fail with authentication
+  /// errors that surface the sign-in action. Never throws.
+  Future<AcpSessionError?> logout(AcpSessionKey key) async {
+    final controller = _controllers[key.value];
+    if (controller == null) return _untrackedSessionError;
+    return controller.logout();
+  }
 
   /// Detaches locally from [key] while leaving the remote bridge running.
   Future<void> detachSession(AcpSessionKey key) =>
@@ -608,6 +880,11 @@ class AcpSessionManager {
   Future<AcpSessionKey?> loadLastSelected() =>
       _recentSessions.getLastSelected();
 
+  static const _untrackedSessionError = AcpSessionError(
+    kind: AcpSessionErrorKind.unknown,
+    message: 'Session is not tracked.',
+  );
+
   /// Releases every session, attachment, and stream. Idempotent.
   Future<void> dispose() async {
     if (_disposed) return;
@@ -637,6 +914,8 @@ class AcpSessionManager {
     required MonkeyMuxInstallConfirmation? confirmInstall,
     required String? existingSessionId,
     required bool autoApprovePermissions,
+    required _ResolvedWorkspace workspace,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final startedAt = _clock();
     MonkeyMuxAcpBridgeStartResult startResult;
@@ -676,9 +955,11 @@ class AcpSessionManager {
       cwd: cwd,
       existingSessionId: existingSessionId,
       confirmInstall: confirmInstall,
+      chooseAuthentication: chooseAuthentication,
       startedBridge: true,
       bridgeStartedAt: startedAt,
       autoApprovePermissions: autoApprovePermissions,
+      workspace: workspace,
     );
   }
 
@@ -690,6 +971,8 @@ class AcpSessionManager {
     required String? existingSessionId,
     required MonkeyMuxInstallConfirmation? confirmInstall,
     required bool autoApprovePermissions,
+    required _ResolvedWorkspace workspace,
+    AcpAuthenticationChooser? chooseAuthentication,
     MonkeyMuxAcpBridgeMetadata? liveBridge,
     bool selectOnSuccess = true,
     bool startedBridge = false,
@@ -722,7 +1005,9 @@ class AcpSessionManager {
       attachment: attachment,
       providerLabel: launch.label,
       isCustomProvider: launch.isCustom,
+      launchArgv: launch.argv,
       cwd: cwd,
+      workspace: workspace,
       clock: _clock,
       diagnostics: _diagnostics,
       autoApprovePermissions: autoApprovePermissions,
@@ -754,6 +1039,7 @@ class AcpSessionManager {
         bridgeId: bridgeId,
         existingSessionId: existingSessionId,
         liveBridge: liveBridge,
+        chooseAuthentication: chooseAuthentication,
       );
       if (existingSessionId != null) {
         // The reconnect identity is already stable. Publish its connecting
@@ -812,7 +1098,11 @@ class AcpSessionManager {
         bridgeId: bridgeId,
       );
       _telemetry.failure(category: error.error.kind.name);
-      return AcpSessionLaunchFailed(error.key, error.error);
+      return AcpSessionLaunchFailed(
+        error.key,
+        error.error,
+        terminalAuthentication: error.terminalAuthentication,
+      );
     } on Object catch (error) {
       discardProvisionalController();
       await controller.disposeLocal();
@@ -830,12 +1120,15 @@ class AcpSessionManager {
   /// Best-effort stops a freshly started bridge that never produced a usable
   /// session, so a failed launch does not orphan the remote process.
   ///
-  /// This includes authentication-required failures: there is no
-  /// authenticate/retry-on-existing-bridge path in this release, so a retained
-  /// auth-blocked bridge would be unreachable and each retry would spawn
-  /// another. The UI instead offers the provider's terminal-auth command and
-  /// the user retries cleanly, starting a fresh bridge. The bridge is still
-  /// retained when another session already uses it.
+  /// This includes authentication-required failures that remain after the
+  /// launch's chooser ran. An `agent` sign-in method is completed with
+  /// `authenticate` on this same bridge before the launch gives up, so any
+  /// failure reaching here is final: the user declined, the method failed, or
+  /// they picked a `terminal` method. A terminal login is out-of-band and the
+  /// spec requires reconnecting and reinitializing afterwards, so the caller
+  /// starts a fresh bridge once it succeeds. Retaining an auth-blocked bridge
+  /// would leave it unreachable. The bridge is still retained when another
+  /// session already uses it.
   Future<void> _maybeStopOrphanBridge({
     required bool startedBridge,
     required int hostId,
@@ -874,6 +1167,7 @@ class AcpSessionManager {
           : value.substring(0, maxCharacters);
     }
 
+    final workspace = _controllers[state.key.value]?._workspace;
     try {
       await _recentSessions.record(
         AcpRecentSessionRef(
@@ -883,6 +1177,9 @@ class AcpSessionManager {
           acpSessionId: state.key.acpSessionId,
           title: bounded(state.title, kAcpRecentTitleMaxCharacters),
           cwd: bounded(state.cwd, kAcpRecentCwdMaxCharacters),
+          mcpServerIds: workspace?.mcpServerIds,
+          additionalDirectories:
+              workspace?.additionalDirectories ?? const <String>[],
           createdAt: state.createdAt,
           lastActivityAt: state.lastActivityAt,
         ),
@@ -947,6 +1244,10 @@ class AcpSessionManager {
   /// routed and answered; when no same-host filesystem/terminal binding can
   /// be resolved, `fs/*`/`terminal/*` requests are simply declined as
   /// unavailable rather than left unanswered.
+  ///
+  /// Only [cwd] is allowed until a session's id is known; each session then
+  /// gets its own roots, including the additional directories the agent
+  /// accepted (see [_SessionController._syncAllowedRoots]).
   ///
   /// When [existingRegistry] is provided (a prior attachment's still-pending
   /// permission/write decisions, carried across a soft detach/reconnect), it
@@ -1041,6 +1342,118 @@ class AcpSessionManager {
         ),
         value: null,
       );
+    }
+  }
+
+  /// Resolves requested workspace options into the concrete MCP server
+  /// definitions and absolute additional directories for one session.
+  ///
+  /// A `null` server selection attaches the servers marked as defaults. Ids
+  /// that no longer exist are dropped. Each additional directory is resolved
+  /// like the working directory; an unresolvable one fails the launch.
+  Future<({AcpSessionError? error, _ResolvedWorkspace? value})>
+  _resolveWorkspace(
+    int hostId, {
+    required String cwd,
+    required AcpSessionWorkspaceOptions? options,
+    bool trustAbsolute = false,
+  }) async {
+    final requestedIds = options?.mcpServerIds;
+    var servers = const <AcpMcpServerConfig>[];
+    var serversLoaded = false;
+    final service = _mcpServerService;
+    if (service != null) {
+      try {
+        servers = await service.listServers();
+        serversLoaded = true;
+      } on Object catch (error) {
+        _diagnostics.warning(
+          'acp.manager',
+          'mcp_servers_load_failed',
+          fields: {'errorType': error.runtimeType},
+        );
+      }
+    }
+    final List<String>? selectedIds;
+    if (requestedIds == null) {
+      // Unresolvable defaults stay "unspecified" so a later reconnect can
+      // still apply them rather than persisting an empty choice.
+      selectedIds = serversLoaded || service == null
+          ? <String>[
+              for (final server in servers)
+                if (server.useByDefault) server.id,
+            ]
+          : null;
+    } else if (serversLoaded) {
+      final known = {for (final server in servers) server.id};
+      selectedIds = requestedIds.where(known.contains).toSet().toList();
+      final missing = requestedIds.toSet().length - selectedIds.length;
+      if (missing > 0) {
+        _diagnostics.info(
+          'acp.manager',
+          'mcp_servers_missing',
+          fields: {'missingCount': missing},
+        );
+      }
+    } else {
+      // Keep the persisted choice when storage is temporarily unreadable.
+      selectedIds = requestedIds;
+    }
+    final selectedIdSet = selectedIds?.toSet() ?? const <String>{};
+    final selectedServers = <AcpMcpServerConfig>[
+      for (final server in servers)
+        if (selectedIdSet.contains(server.id)) server,
+    ].take(kAcpMaxSessionMcpServers).toList(growable: false);
+
+    final directories = <String>[];
+    for (final requested
+        in options?.additionalDirectories ?? const <String>[]) {
+      final trimmed = requested.trim();
+      if (trimmed.isEmpty) continue;
+      final resolved = await _resolveWorkingDirectory(
+        hostId,
+        trimmed,
+        trustAbsolute: trustAbsolute,
+      );
+      final value = resolved.value;
+      if (resolved.error != null || value == null) {
+        return (
+          error: const AcpSessionError(
+            kind: AcpSessionErrorKind.bridgeUnavailable,
+            message: 'An additional directory is unavailable on this host.',
+          ),
+          value: null,
+        );
+      }
+      if (value == cwd || directories.contains(value)) continue;
+      directories.add(value);
+      if (directories.length >= kAcpMaxAdditionalDirectories) break;
+    }
+    return (
+      error: null,
+      value: _ResolvedWorkspace(
+        mcpServerIds: selectedIds,
+        mcpServers: selectedServers,
+        additionalDirectories: directories,
+      ),
+    );
+  }
+
+  /// The workspace choices persisted with the recent-session record for
+  /// [key], or `null` when there is none.
+  Future<AcpSessionWorkspaceOptions?> _recentWorkspaceFor(
+    AcpSessionKey key,
+  ) async {
+    try {
+      final recents = await _recentSessions.list();
+      return recents.firstWhereOrNull((recent) => recent.key == key)?.workspace;
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.manager',
+        'recent_workspace_load_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      return null;
     }
   }
 
@@ -1318,6 +1731,7 @@ class _BridgeAttachment {
     final retainedInitialization = _initialization;
     if (retainedInitialization != null) {
       service.attach(client);
+      client.restoreInitialization(retainedInitialization);
       return retainedInitialization;
     }
     final result = await service.initialize(client);
@@ -1369,7 +1783,9 @@ class _SessionController {
     required this.attachment,
     required String providerLabel,
     required bool isCustomProvider,
+    required List<String> launchArgv,
     required String cwd,
+    required _ResolvedWorkspace workspace,
     required DateTime Function() clock,
     required DiagnosticsLogger diagnostics,
     required bool autoApprovePermissions,
@@ -1378,7 +1794,9 @@ class _SessionController {
   }) : _manager = manager,
        _providerLabel = providerLabel,
        _isCustomProvider = isCustomProvider,
+       _launchArgv = List<String>.unmodifiable(launchArgv),
        _cwd = cwd,
+       _workspace = workspace,
        _clock = clock,
        _diagnostics = diagnostics,
        _autoApprovePermissions = autoApprovePermissions,
@@ -1392,7 +1810,13 @@ class _SessionController {
 
   final String _providerLabel;
   final bool _isCustomProvider;
+
+  /// Exact provider argv this session's agent was launched with. Reused, with
+  /// a method's arguments appended, to rerun the agent for terminal sign-in.
+  final List<String> _launchArgv;
   String _cwd;
+  _ResolvedWorkspace _workspace;
+  String? _workspaceNotice;
   final DateTime Function() _clock;
   final DiagnosticsLogger _diagnostics;
   bool _autoApprovePermissions;
@@ -1417,6 +1841,8 @@ class _SessionController {
   Timer? _recentPersistTimer;
   var _detachedTurnMonitorGeneration = 0;
   var _lastAcknowledgedBridgeSequence = 0;
+  // Permission requests whose tool call was already merged into the timeline.
+  final _mergedPermissionToolCalls = <String>{};
 
   StreamSubscription<AcpSessionNotification>? _updatesSub;
   StreamSubscription<List<cap.AcpPendingClientRequest>>? _capabilityRequestsSub;
@@ -1446,6 +1872,77 @@ class _SessionController {
     }
     _cwd = cwd;
     _update((state) => state.copyWith(cwd: cwd));
+  }
+
+  /// Gives this session's fs/terminal requests its own root set on the
+  /// shared capability service: the working directory, plus the additional
+  /// directories only when the agent advertises them and so was sent them.
+  /// A new session's id is known only once session/new returns; until then
+  /// only the bridge's working directory is allowed.
+  void _syncAllowedRoots() {
+    final shared =
+        (attachment.initialization ?? _state.initialization)
+            ?.agentCapabilities
+            .session
+            .additionalDirectories ??
+        false;
+    attachment.capabilityService?.setSessionAllowedRoots(_key.acpSessionId, [
+      _cwd,
+      if (shared) ..._workspace.additionalDirectories,
+    ]);
+  }
+
+  /// Filters this session's workspace by the agent's advertised capabilities
+  /// and surfaces a non-blocking notice for anything that could not be sent.
+  AcpSessionWorkspaceSetup _workspaceSetup(AcpInitializeResult? init) {
+    final setup = planAcpSessionWorkspaceSetup(
+      mcpServers: _workspace.mcpServers,
+      additionalDirectories: _workspace.additionalDirectories,
+      capabilities:
+          (init ?? attachment.initialization ?? _state.initialization)
+              ?.agentCapabilities ??
+          const AcpAgentCapabilities(),
+    );
+    if (_workspace.mcpServers.isNotEmpty ||
+        _workspace.additionalDirectories.isNotEmpty) {
+      _diagnostics.info(
+        'acp.session',
+        'workspace_setup',
+        fields: {
+          'mcpServerCount': setup.mcpServers.length,
+          'mcpUnsupportedCount': setup.unsupportedMcpServerCount,
+          'mcpUnreadableCount': setup.unreadableMcpServerCount,
+          'additionalDirectoryCount': setup.additionalDirectories.length,
+          'additionalDirectoriesUnsupported':
+              setup.additionalDirectoriesUnsupported,
+        },
+      );
+    }
+    _applyWorkspaceNotice(setup.notice);
+    return setup;
+  }
+
+  void _applyWorkspaceNotice(String? notice) {
+    final current = _state.warning;
+    final ownsWarning =
+        current != null &&
+        current.kind == AcpSessionErrorKind.unsupportedCapability &&
+        current.message == _workspaceNotice;
+    _workspaceNotice = notice;
+    if (notice == null) {
+      if (ownsWarning) _update((state) => state.copyWith(clearWarning: true));
+      return;
+    }
+    // Never displace a more important warning such as history loss.
+    if (current != null && !ownsWarning) return;
+    _update(
+      (state) => state.copyWith(
+        warning: AcpSessionError(
+          kind: AcpSessionErrorKind.unsupportedCapability,
+          message: notice,
+        ),
+      ),
+    );
   }
 
   /// Acquires a lease on [target], making it this controller's attachment.
@@ -1479,6 +1976,7 @@ class _SessionController {
     required String bridgeId,
     required String? existingSessionId,
     MonkeyMuxAcpBridgeMetadata? liveBridge,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final now = _clock();
     // Provisional key until the real session id is known.
@@ -1534,6 +2032,7 @@ class _SessionController {
     _update(
       (s) => s.copyWith(initialization: init, authMethods: init.authMethods),
     );
+    _syncAllowedRoots();
     if (reattachingLiveBridge) _subscribeCapabilityRequests();
 
     // For an existing session, the id is already known, so subscribe to session
@@ -1548,7 +2047,11 @@ class _SessionController {
     try {
       resolvedSessionId = reattachingActiveTurn
           ? existingSessionId
-          : await _establishSession(existingSessionId, init);
+          : await _establishSessionWithSignIn(
+              existingSessionId,
+              init,
+              chooseAuthentication,
+            );
       if (holdHistoryReplay) {
         await _drainHistoryReplayNotifications();
         _applyHistoryUnavailableWarningIfNeeded();
@@ -1567,6 +2070,7 @@ class _SessionController {
       resolvedSessionId,
       enabled: _autoApprovePermissions,
     );
+    _syncAllowedRoots();
     _update(
       (s) => s.copyWith(
         status: AcpConnectionStatus.ready,
@@ -1587,15 +2091,228 @@ class _SessionController {
     return _key;
   }
 
+  /// Runs session setup, letting [chooseAuthentication] resolve one
+  /// authentication-required failure.
+  ///
+  /// An `agent` method is authenticated on this same connection by the
+  /// chooser, then setup is retried exactly once. A `terminal` method is never
+  /// sent to `authenticate`: the launch fails carrying the interactive login
+  /// so the caller can run it and then start over with a fresh bridge.
+  Future<String> _establishSessionWithSignIn(
+    String? existingSessionId,
+    AcpInitializeResult init,
+    AcpAuthenticationChooser? chooseAuthentication,
+  ) async {
+    try {
+      return await _establishSession(existingSessionId, init);
+    } on _LaunchException catch (error) {
+      final methods = usableAcpAuthMethods(init.authMethods);
+      if (chooseAuthentication == null ||
+          error.error.kind != AcpSessionErrorKind.authenticationRequired ||
+          methods.isEmpty ||
+          _disposed) {
+        rethrow;
+      }
+      _diagnostics.info(
+        'acp.session',
+        'auth_choice_requested',
+        fields: {
+          'methodCount': methods.length,
+          'terminalMethodCount': methods.where((m) => m.isTerminal).length,
+          'reconnect': existingSessionId != null,
+        },
+      );
+      final choice = await chooseAuthentication(
+        AcpAuthenticationRequest(
+          hostId: _key.hostId,
+          providerId: _key.providerId,
+          providerLabel: _providerLabel,
+          methods: methods,
+          authenticate: authenticateWithMethod,
+        ),
+      );
+      if (_disposed) rethrow;
+      switch (choice) {
+        case AcpAuthenticationCompleted():
+          _diagnostics.info('acp.session', 'auth_setup_retry');
+          clearAuthenticationRequired(status: AcpConnectionStatus.initializing);
+          return _establishSession(existingSessionId, init);
+        case AcpAuthenticationInTerminal(:final method):
+          final launch = terminalAuthLaunch(method);
+          if (launch == null) rethrow;
+          _diagnostics.info('acp.session', 'auth_terminal_chosen');
+          throw _LaunchException(
+            error.key,
+            error.error,
+            terminalAuthentication: launch,
+          );
+        case null:
+          _diagnostics.info('acp.session', 'auth_choice_declined');
+          rethrow;
+      }
+    }
+  }
+
+  AcpInitializeResult? get _knownInitialization =>
+      attachment.initialization ?? _state.initialization;
+
+  /// Sends `authenticate` for an advertised `agent` [method] on the live
+  /// connection, bounded by [acpAgentAuthenticationTimeout].
+  ///
+  /// Completes with `null` on success or a safe error; never throws.
+  Future<AcpSessionError?> authenticateWithMethod(
+    AcpAuthMethod method, {
+    AcpRequestCancellation? cancellation,
+  }) async {
+    final advertised =
+        _knownInitialization?.authMethods ?? const <AcpAuthMethod>[];
+    if (!method.isAgent ||
+        !advertised.any((candidate) => candidate.id == method.id)) {
+      // Terminal methods MUST NOT be sent to authenticate, and only advertised
+      // method ids are valid.
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.unsupportedCapability,
+        message: 'This sign-in method cannot be completed by the agent.',
+      );
+    }
+    if (_disposed || !_holdsAttachment) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.transport,
+        message: 'The agent connection closed.',
+        retryable: true,
+      );
+    }
+    final elapsed = Stopwatch()..start();
+    _diagnostics.info(
+      'acp.session',
+      'authenticate_start',
+      fields: {'hostId': _key.hostId},
+    );
+    try {
+      await attachment.client.authenticate(
+        method.id,
+        timeout: acpAgentAuthenticationTimeout,
+        cancellation: cancellation,
+      );
+      _diagnostics.info(
+        'acp.session',
+        'authenticate_complete',
+        fields: {'durationMs': elapsed.elapsedMilliseconds},
+      );
+      return null;
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.session',
+        'authenticate_failed',
+        fields: {
+          'durationMs': elapsed.elapsedMilliseconds,
+          'errorType': error.runtimeType,
+          if (error is AcpRemoteException) 'errorCode': error.code,
+        },
+      );
+      return switch (error) {
+        AcpRequestTimeoutException() => const AcpSessionError(
+          kind: AcpSessionErrorKind.timeout,
+          message: 'Sign-in did not finish in time.',
+        ),
+        AcpRemoteException(:final code, :final message) => AcpSessionError(
+          kind: AcpSessionErrorKind.authenticationRequired,
+          message: _safeAcpRemoteError(code, message),
+        ),
+        _ => _mapClientError(error),
+      };
+    }
+  }
+
+  /// Builds the interactive login for an advertised `terminal` [method], or
+  /// `null` when it is not advertised or cannot be run literally.
+  ///
+  /// The advertised descriptor (not the caller's copy) supplies the arguments
+  /// and environment.
+  AcpTerminalAuthLaunch? terminalAuthLaunch(AcpAuthMethod method) {
+    final advertised = _knownInitialization?.authMethods
+        .where((candidate) => candidate.id == method.id && candidate.isTerminal)
+        .firstOrNull;
+    if (advertised == null ||
+        !isUsableAcpAuthMethod(advertised) ||
+        _launchArgv.isEmpty) {
+      return null;
+    }
+    return AcpTerminalAuthLaunch.forMethod(
+      hostId: _key.hostId,
+      providerId: _key.providerId,
+      providerLabel: _providerLabel,
+      method: advertised,
+      launchArgv: _launchArgv,
+      workingDirectory: _cwd,
+    );
+  }
+
+  /// Leaves the authentication-required state after a successful sign-in.
+  ///
+  /// A live session returns to [status] (ready by default); a session that is
+  /// not attached keeps its status and only drops the sign-in error.
+  void clearAuthenticationRequired({
+    AcpConnectionStatus status = AcpConnectionStatus.ready,
+  }) {
+    if (_disposed) return;
+    _update(
+      (s) => s.copyWith(
+        status: s.status == AcpConnectionStatus.authenticationRequired
+            ? status
+            : null,
+        pendingAuthentication: false,
+        clearError: s.error?.kind == AcpSessionErrorKind.authenticationRequired,
+      ),
+    );
+  }
+
+  /// Sends `logout` when the agent advertised `auth.logout`.
+  Future<AcpSessionError?> logout() async {
+    if (!(_knownInitialization?.agentCapabilities.auth.logout ?? false)) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.unsupportedCapability,
+        message: 'This agent does not support signing out.',
+      );
+    }
+    if (_disposed || !_holdsAttachment) {
+      return const AcpSessionError(
+        kind: AcpSessionErrorKind.transport,
+        message: 'The agent connection closed.',
+        retryable: true,
+      );
+    }
+    try {
+      await attachment.client.logout();
+      _diagnostics.info('acp.session', 'logout_complete');
+      return null;
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.session',
+        'logout_failed',
+        fields: {
+          'errorType': error.runtimeType,
+          if (error is AcpRemoteException) 'errorCode': error.code,
+        },
+      );
+      return _mapClientError(error);
+    }
+  }
+
   Future<String> _establishSession(
     String? existingSessionId,
     AcpInitializeResult init,
   ) async {
     final caps = init.agentCapabilities;
+    final workspace = _workspaceSetup(init);
     try {
       if (existingSessionId == null) {
         final sessionNew = Stopwatch()..start();
-        final result = await attachment.client.newSession(cwd: _cwd);
+        final result = await attachment.client.newSession(
+          cwd: _cwd,
+          mcpServers: workspace.mcpServers,
+          additionalDirectories: workspace.additionalDirectories,
+        );
         _applySetupResult(result);
         _diagnostics.info(
           'acp.session',
@@ -1621,7 +2338,7 @@ class _SessionController {
       if ((_freshBridge || attachment.skippedHistoricalReplay) &&
           caps.loadSession) {
         final historyLoad = Stopwatch()..start();
-        final result = await _loadExistingSession(existingSessionId);
+        final result = await _loadExistingSession(existingSessionId, workspace);
         if (result != null) {
           _clearHistoryUnavailableWarning();
           _applySetupResult(result);
@@ -1640,6 +2357,8 @@ class _SessionController {
               final resumed = await attachment.client.resumeSession(
                 sessionId: existingSessionId,
                 cwd: _cwd,
+                mcpServers: workspace.mcpServers,
+                additionalDirectories: workspace.additionalDirectories,
               );
               _applySetupResult(resumed);
             } on AcpRemoteException catch (error) {
@@ -1660,12 +2379,14 @@ class _SessionController {
         final result = await attachment.client.resumeSession(
           sessionId: existingSessionId,
           cwd: _cwd,
+          mcpServers: workspace.mcpServers,
+          additionalDirectories: workspace.additionalDirectories,
         );
         _applySetupResult(result);
         return existingSessionId;
       }
       if (caps.loadSession) {
-        final result = await _loadExistingSession(existingSessionId);
+        final result = await _loadExistingSession(existingSessionId, workspace);
         if (result != null) {
           _clearHistoryUnavailableWarning();
           _applySetupResult(result);
@@ -1722,11 +2443,16 @@ class _SessionController {
     }
   }
 
-  Future<AcpSessionSetupResult?> _loadExistingSession(String sessionId) async {
+  Future<AcpSessionSetupResult?> _loadExistingSession(
+    String sessionId,
+    AcpSessionWorkspaceSetup workspace,
+  ) async {
     try {
       return await attachment.client.loadSession(
         sessionId: sessionId,
         cwd: _cwd,
+        mcpServers: workspace.mcpServers,
+        additionalDirectories: workspace.additionalDirectories,
       );
     } on AcpRemoteException catch (error) {
       if (!_isAcpSessionAlreadyLoadedError(error, sessionId)) rethrow;
@@ -2069,17 +2795,24 @@ class _SessionController {
   ) {
     final permissions = <AcpPendingPermission>[];
     final writes = <AcpPendingWrite>[];
+    final pendingPermissionKeys = <String>{};
     for (final request in requests) {
       if (request.sessionId != _key.acpSessionId) continue;
       switch (request) {
         case cap.AcpPendingPermission(:final permission):
+          final toolCall = permission.toolCall;
+          pendingPermissionKeys.add(request.id);
+          _mergePermissionToolCall(request.id, permission);
           permissions.add(
             AcpPendingPermission(
               requestKey: request.id,
               sessionId: request.sessionId,
-              toolCallId: permission.toolCall.toolCallId,
+              toolCallId: toolCall.toolCallId,
               options: permission.options,
               requestedAt: request.requestedAt,
+              title: toolCall.title,
+              toolKind: toolCall.toolKind,
+              subject: acpToolCallSubject(toolCall),
             ),
           );
         case cap.AcpPendingFileWrite(:final path, :final content):
@@ -2092,12 +2825,106 @@ class _SessionController {
               requestedAt: request.requestedAt,
             ),
           );
+        case cap.AcpPendingElicitation():
+          // Mirrored by _elicitationsFor, which also keeps request-scoped ones.
+          break;
       }
     }
+    _mergedPermissionToolCalls.retainAll(pendingPermissionKeys);
     _update(
-      (s) => s.copyWith(pendingPermissions: permissions, pendingWrites: writes),
+      (s) => s.copyWith(
+        pendingPermissions: permissions,
+        pendingWrites: writes,
+        pendingElicitations: _elicitationsFor(requests),
+        awaitingElicitations: _awaitingElicitationsFor(),
+      ),
+    );
+    if (_historyReplayPublicationHeld) _publishPendingRequestsDuringReplay();
+  }
+
+  /// Publishes this session's pending requests while its replayed history is
+  /// still held. An agent may ask for input while it handles session/load,
+  /// and the load cannot finish until the user answers, so the prompt cannot
+  /// wait for the transcript. Only the request fields change; the transcript
+  /// stays as last published until the replay completes.
+  void _publishPendingRequestsDuringReplay() {
+    if (_disposed || !_manager._controllers.containsValue(this)) return;
+    _publishedState = publishedState.copyWith(
+      pendingPermissions: _state.pendingPermissions,
+      pendingWrites: _state.pendingWrites,
+      pendingElicitations: _state.pendingElicitations,
+      awaitingElicitations: _state.awaitingElicitations,
+    );
+    _manager._emit();
+  }
+
+  /// Upserts the tool call described by a permission request into the
+  /// timeline, once per request.
+  ///
+  /// The request's `toolCall` is a `ToolCallUpdate`. Agents may send the
+  /// title, diff, and locations only there, without an earlier `tool_call`,
+  /// so without this the user would approve an action they cannot see. It is
+  /// queued behind already-received session updates to keep their order.
+  void _mergePermissionToolCall(
+    String requestKey,
+    AcpPermissionRequest permission,
+  ) {
+    if (permission.toolCall.toolCallId.isEmpty) return;
+    if (!_mergedPermissionToolCalls.add(requestKey)) return;
+    _onSessionUpdate(
+      AcpSessionNotification(
+        sessionId: permission.sessionId,
+        update: permission.toolCall,
+      ),
     );
   }
+
+  /// Elicitations this session shows: its own, plus request-scoped ones that
+  /// belong to no session and so surface on every session of the attachment.
+  List<AcpSessionElicitation> _elicitationsFor(
+    List<cap.AcpPendingClientRequest> requests,
+  ) => [
+    for (final request in requests)
+      if (request is cap.AcpPendingElicitation &&
+          (request.isRequestScoped || request.sessionId == _key.acpSessionId))
+        AcpSessionElicitation(
+          requestKey: request.id,
+          request: request.elicitation,
+          requestedAt: request.requestedAt,
+        ),
+  ];
+
+  List<AcpAwaitingElicitation> _awaitingElicitationsFor() => [
+    for (final awaiting
+        in attachment.capabilityService?.registry.awaitingElicitations ??
+            const <AcpAwaitingElicitation>[])
+      if (awaiting.sessionId == null || awaiting.sessionId == _key.acpSessionId)
+        awaiting,
+  ];
+
+  Future<void> acceptElicitation(
+    String requestKey,
+    Map<String, Object?>? content,
+  ) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.acceptElicitation(requestKey, content: content);
+  }
+
+  Future<void> declineElicitation(String requestKey) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.declineElicitation(requestKey);
+  }
+
+  Future<void> cancelElicitation(String requestKey) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.cancelElicitation(requestKey);
+  }
+
+  void dismissAwaitingElicitation(String elicitationId) =>
+      attachment.capabilityService?.dismissAwaitingElicitation(elicitationId);
 
   Future<void> respondToPermission(String requestKey, String optionId) async {
     final service = attachment.capabilityService;
@@ -2248,6 +3075,22 @@ class _SessionController {
             }
             continue;
           }
+          if (error is AcpRequestCancelledException) {
+            // The prompt reached the agent and its turn was cancelled: end it
+            // like a `cancelled` stop instead of rolling back as a failure.
+            const result = AcpPromptResult(stopReason: AcpStopReason.cancelled);
+            _update(
+              (s) => s.copyWith(
+                promptStatus: AcpPromptStatus.idle,
+                lastStopReason: result.stopReason,
+                lastActivityAt: _clock(),
+              ),
+            );
+            if (!queued.completer.isCompleted) {
+              queued.completer.complete(result);
+            }
+            continue;
+          }
           final rolledBackTimeline = _timelineBuilder.removeLocalUserPrompt(
             queued.localMessageId,
           );
@@ -2362,9 +3205,12 @@ class _SessionController {
 
   Future<AcpSessionLaunchResult> fork() async {
     try {
+      final workspace = _workspaceSetup(null);
       final result = await attachment.client.forkSession(
         sessionId: _key.acpSessionId,
         cwd: _cwd,
+        mcpServers: workspace.mcpServers,
+        additionalDirectories: workspace.additionalDirectories,
       );
       final newId = result.sessionId;
       if (newId == null || newId.isEmpty) {
@@ -2381,7 +3227,9 @@ class _SessionController {
         attachment: attachment,
         providerLabel: _providerLabel,
         isCustomProvider: _isCustomProvider,
+        launchArgv: _launchArgv,
         cwd: _cwd,
+        workspace: _workspace,
         clock: _clock,
         diagnostics: _diagnostics,
         autoApprovePermissions: _autoApprovePermissions,
@@ -2446,6 +3294,7 @@ class _SessionController {
       acpSessionId,
       enabled: _autoApprovePermissions,
     );
+    _syncAllowedRoots();
     _applySetupResult(setupResult);
     _subscribeTransport();
     _subscribeSessionStreams();
@@ -2481,6 +3330,7 @@ class _SessionController {
   /// after recording safe error state — it never throws a raw error.
   Future<void> reconnect({
     required MonkeyMuxAcpBridgeMetadata remoteBridge,
+    AcpAuthenticationChooser? chooseAuthentication,
   }) async {
     final wasDetached = _state.status == AcpConnectionStatus.detached;
     _stopDetachedTurnMonitor();
@@ -2557,6 +3407,7 @@ class _SessionController {
       _subscribeTransport();
       final init = await attachment.ensureInitialized();
       _update((s) => s.copyWith(initialization: init));
+      _syncAllowedRoots();
       // Subscribe before any replay so detached notifications are retained.
       _subscribeSessionStreams();
       final detachedTurnRunning =
@@ -2565,7 +3416,11 @@ class _SessionController {
       if (!detachedTurnRunning) {
         _historyReplayPublicationHeld = true;
         try {
-          await _establishSession(sessionId, init);
+          await _establishSessionWithSignIn(
+            sessionId,
+            init,
+            chooseAuthentication,
+          );
           await _drainHistoryReplayNotifications();
           _applyHistoryUnavailableWarningIfNeeded();
         } finally {
@@ -2605,7 +3460,13 @@ class _SessionController {
         succeeded: false,
         failureCategory: mapped.kind.name,
       );
-      throw _LaunchException(_key, mapped);
+      throw _LaunchException(
+        _key,
+        mapped,
+        terminalAuthentication: error is _LaunchException
+            ? error.terminalAuthentication
+            : null,
+      );
     }
   }
 
@@ -2878,8 +3739,14 @@ class _SessionController {
       kind: AcpSessionErrorKind.protocol,
       message: 'The agent sent invalid protocol data.',
     ),
-    AcpRemoteException(:final message)
-        when _isAcpAuthenticationRequired(message) =>
+    AcpRequestCancelledException() => const AcpSessionError(
+      kind: AcpSessionErrorKind.cancelled,
+      message: 'The request was cancelled.',
+    ),
+    AcpRemoteException(:final code, :final message)
+        when _isAcpAuthenticationRequired(message) ||
+            (code == acpAuthRequiredErrorCode &&
+                (_knownInitialization?.authMethods.isNotEmpty ?? false)) =>
       const AcpSessionError(
         kind: AcpSessionErrorKind.authenticationRequired,
         message: 'The agent requires authentication.',
@@ -2973,9 +3840,30 @@ final class _LaunchError extends _LaunchOutcome {
 }
 
 class _LaunchException implements Exception {
-  _LaunchException(this.key, this.error);
+  _LaunchException(this.key, this.error, {this.terminalAuthentication});
   final AcpSessionKey? key;
   final AcpSessionError error;
+  final AcpTerminalAuthLaunch? terminalAuthentication;
+}
+
+/// Concrete workspace for one session: decrypted MCP server definitions and
+/// resolved absolute additional directories. Held only in memory.
+final class _ResolvedWorkspace {
+  const _ResolvedWorkspace({
+    this.mcpServerIds = const <String>[],
+    this.mcpServers = const <AcpMcpServerConfig>[],
+    this.additionalDirectories = const <String>[],
+  });
+
+  /// Selected server ids to persist, or `null` when defaults are unresolved.
+  final List<String>? mcpServerIds;
+  final List<AcpMcpServerConfig> mcpServers;
+  final List<String> additionalDirectories;
+
+  AcpSessionWorkspaceOptions get options => AcpSessionWorkspaceOptions(
+    mcpServerIds: mcpServerIds,
+    additionalDirectories: additionalDirectories,
+  );
 }
 
 /// Provider for the production [AcpBridgeConnector].
@@ -3000,6 +3888,7 @@ final acpSessionManagerProvider = Provider<AcpSessionManager>((ref) {
     connector: ref.watch(acpBridgeConnectorProvider),
     providerService: ref.watch(acpProviderServiceProvider),
     recentSessions: ref.watch(acpRecentSessionsServiceProvider),
+    mcpServerService: ref.watch(acpMcpServerServiceProvider),
     isProUnlocked: () =>
         ref.read(monetizationServiceProvider).currentState.isProUnlocked,
     telemetry: AcpTelemetryAdapter(ref.watch(telemetryServiceProvider)),

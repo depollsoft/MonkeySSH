@@ -21,13 +21,15 @@ typedef AcpAttachmentPick = Future<List<AcpAttachmentCandidate>> Function(
 ///
 /// Each entry is optional; only the provided sources appear in the menu. All
 /// picker invocation goes through these callbacks so the composer can be
-/// exercised in tests without any platform picker.
+/// exercised in tests without any platform picker. [pickAudio] is shown only
+/// while the session's agent advertises `promptCapabilities.audio`.
 @immutable
 class AcpComposerAttachmentActions {
   /// Creates attachment actions.
   const AcpComposerAttachmentActions({
     this.pickPhotos,
     this.pickFiles,
+    this.pickAudio,
     this.pickRemoteFiles,
   });
 
@@ -37,17 +39,41 @@ class AcpComposerAttachmentActions {
   /// Picks arbitrary local files.
   final AcpAttachmentPick? pickFiles;
 
+  /// Picks local audio files, offered only to audio-capable agents.
+  final AcpAttachmentPick? pickAudio;
+
   /// Picks files from the remote host over SFTP.
   final AcpAttachmentPick? pickRemoteFiles;
 
   /// Whether at least one source is available.
   bool get hasAny =>
-      pickPhotos != null || pickFiles != null || pickRemoteFiles != null;
+      pickPhotos != null ||
+      pickFiles != null ||
+      pickAudio != null ||
+      pickRemoteFiles != null;
+
+  /// Whether at least one source is offered given the agent's audio support.
+  bool hasAnyFor({required bool audioSupported}) =>
+      pickPhotos != null ||
+      pickFiles != null ||
+      (audioSupported && pickAudio != null) ||
+      pickRemoteFiles != null;
 }
 
 /// Controls the native composer focus from the persistent terminal shell.
 class AcpComposerFocusController {
   _AcpComposerState? _state;
+
+  /// Reports whether the shell's on-screen Ctrl modifier is armed.
+  ///
+  /// The extra-keys toolbar's Ctrl is not a hardware modifier, so the
+  /// composer asks the shell: with it armed, Enter from the toolbar or the
+  /// system keyboard sends the message, like Ctrl+Enter on a hardware keyboard.
+  bool Function()? isSendModifierArmed;
+
+  /// Consumes a one-shot on-screen Ctrl after a system-keyboard Enter used it.
+  /// The toolbar consumes it itself after its own Enter key.
+  VoidCallback? consumeSendModifier;
 
   /// Whether the composer currently owns text focus.
   bool get hasFocus => _state?._focusNode.hasFocus ?? false;
@@ -204,9 +230,38 @@ class _AcpComposerState extends State<AcpComposer> {
         ..addPastedText(insertion.text);
       return;
     }
+    final newline = _singleNewlineInsertion(previous, next);
+    if (newline != null &&
+        (widget.focusController?.isSendModifierArmed?.call() ?? false)) {
+      // The system keyboard's Enter with the on-screen Ctrl armed sends
+      // instead of adding a line.
+      _syncing = true;
+      _text.value = TextEditingValue(
+        text: previous,
+        selection: TextSelection.collapsed(offset: newline),
+      );
+      _syncing = false;
+      widget.focusController?.consumeSendModifier?.call();
+      if (_controller.canSend) unawaited(_controller.send());
+      return;
+    }
     final selection = _text.selection;
     final caret = selection.isValid ? selection.baseOffset : next.length;
     _controller.setText(next, caret: caret);
+  }
+
+  /// The offset of a single `\n` the user just typed into [previous], if that
+  /// is the only change.
+  static int? _singleNewlineInsertion(String previous, String next) {
+    if (next.length != previous.length + 1) return null;
+    var index = 0;
+    while (index < previous.length && previous[index] == next[index]) {
+      index++;
+    }
+    if (next[index] != '\n') return null;
+    return next.substring(index + 1) == previous.substring(index)
+        ? index
+        : null;
   }
 
   ({int start, String text})? _largePastedInsertion(
@@ -378,6 +433,12 @@ class _AcpComposerState extends State<AcpComposer> {
       case TerminalKey.tab:
         _insertExternalText('\t');
       case TerminalKey.enter:
+        // The toolbar's Enter with its Ctrl armed sends; the toolbar
+        // consumes the one-shot modifier after this returns.
+        if (widget.focusController?.isSendModifierArmed?.call() ?? false) {
+          if (_controller.canSend) unawaited(_controller.send());
+          return;
+        }
         _insertExternalText('\n');
       case TerminalKey.arrowLeft:
         _controller.setText(
@@ -406,6 +467,10 @@ class _AcpComposerState extends State<AcpComposer> {
         await _addAttachments(actions.pickPhotos);
       case _AcpAddAction.files:
         await _addAttachments(actions.pickFiles);
+      case _AcpAddAction.audio:
+        if (_controller.promptCapabilities.audio) {
+          await _addAttachments(actions.pickAudio);
+        }
       case _AcpAddAction.remoteFiles:
         await _addAttachments(actions.pickRemoteFiles);
     }
@@ -613,8 +678,13 @@ class _AcpComposerState extends State<AcpComposer> {
                               actions: widget.attachmentActions,
                               enabled:
                                   _controller.isEditable &&
-                                  widget.attachmentActions.hasAny,
+                                  widget.attachmentActions.hasAnyFor(
+                                    audioSupported:
+                                        _controller.promptCapabilities.audio,
+                                  ),
                               attachmentsEnabled: _controller.canAddAttachment,
+                              audioSupported:
+                                  _controller.promptCapabilities.audio,
                               onSelected: _handleAddAction,
                             ),
                             if (widget.controls != null) ...[
@@ -660,7 +730,7 @@ class _AcpComposerState extends State<AcpComposer> {
 const _composerControlTapDimension = 44.0;
 const _composerControlVisualDimension = 38.0;
 
-enum _AcpAddAction { photos, files, remoteFiles }
+enum _AcpAddAction { photos, files, audio, remoteFiles }
 
 class _ComposerToolbarButton extends StatelessWidget {
   const _ComposerToolbarButton({
@@ -711,12 +781,14 @@ class _AddButton extends StatelessWidget {
     required this.actions,
     required this.enabled,
     required this.attachmentsEnabled,
+    required this.audioSupported,
     required this.onSelected,
   });
 
   final AcpComposerAttachmentActions actions;
   final bool enabled;
   final bool attachmentsEnabled;
+  final bool audioSupported;
   final ValueChanged<_AcpAddAction> onSelected;
 
   @override
@@ -748,6 +820,15 @@ class _AddButton extends StatelessWidget {
                 ? () => onSelected(_AcpAddAction.files)
                 : null,
             child: const Text('Choose file'),
+          ),
+        if (audioSupported && actions.pickAudio != null)
+          MenuItemButton(
+            style: itemStyle,
+            leadingIcon: const Icon(Icons.audio_file_outlined),
+            onPressed: attachmentsEnabled
+                ? () => onSelected(_AcpAddAction.audio)
+                : null,
+            child: const Text('Audio file'),
           ),
         if (actions.pickRemoteFiles != null)
           MenuItemButton(

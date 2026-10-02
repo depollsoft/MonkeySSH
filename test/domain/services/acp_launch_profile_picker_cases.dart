@@ -58,6 +58,32 @@ void registerAcpLaunchProfilePickerTests() {
         startInYoloMode: true,
       );
       expect(grok.arguments, ['--yolo', 'agent', 'stdio']);
+
+      // OpenCode 2 rejects `--auto` ahead of `acp`; native YOLO comes from
+      // the client auto-approving permission requests instead.
+      final openCode = applyAcpAgentLaunchSettings(
+        provider: acpOpenCodeProvider,
+        command: AcpLaunchCommand(
+          executable: '/Users/demo/.nvm/bin/opencode',
+          arguments: acpOpenCodeProvider.launchCommand.arguments,
+        ),
+        startInYoloMode: true,
+      );
+      expect(openCode.arguments, ['acp']);
+      expect(
+        isApprovedAcpBuiltinLaunchOverride(acpOpenCodeProvider, openCode),
+        isTrue,
+      );
+      expect(
+        isApprovedAcpBuiltinLaunchOverride(
+          acpOpenCodeProvider,
+          AcpLaunchCommand(
+            executable: '/Users/demo/.nvm/bin/opencode',
+            arguments: const ['--auto', 'acp'],
+          ),
+        ),
+        isFalse,
+      );
       expect(
         isApprovedAcpBuiltinLaunchOverride(acpGrokBuildProvider, grok),
         isTrue,

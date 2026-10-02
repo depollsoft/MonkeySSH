@@ -8,11 +8,14 @@ import 'dart:typed_data';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
+import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
@@ -49,9 +52,34 @@ class _FakeAcpServer implements AcpTransport {
     this.newResponseGate,
     this.permissionIdOnLoad,
     this.permissionIdOnResume,
+    this.supportsLogout = false,
+    this.authenticated = false,
+    this.authenticateErrorMessage,
+    this.promptRequiresAuthentication = false,
   });
 
   final bool supportsResume;
+
+  /// Advertises `agentCapabilities.auth.logout`.
+  final bool supportsLogout;
+
+  /// Whether `authenticate` succeeded (or the agent started signed in).
+  bool authenticated;
+
+  /// When set, `authenticate` fails with this message.
+  final String? authenticateErrorMessage;
+
+  /// When true, `session/prompt` fails with `auth_required` while signed out.
+  final bool promptRequiresAuthentication;
+
+  /// Optional gate holding the `authenticate` response.
+  Completer<void>? authenticateGate;
+
+  /// Method ids sent to `authenticate`, in order.
+  final List<String> authenticatedMethodIds = <String>[];
+
+  /// Params of the most recent `initialize` request.
+  Map<String, Object?>? initializeParams;
   final bool supportsLoad;
   final List<Map<String, Object?>> authMethods;
 
@@ -142,6 +170,7 @@ class _FakeAcpServer implements AcpTransport {
 
     switch (method) {
       case 'initialize':
+        initializeParams = (message['params']! as Map).cast<String, Object?>();
         if (rejectInitialize) {
           _replyError(id, -32602, 'Invalid params');
           break;
@@ -150,6 +179,7 @@ class _FakeAcpServer implements AcpTransport {
           'protocolVersion': 1,
           'agentCapabilities': {
             'loadSession': supportsLoad,
+            if (supportsLogout) 'auth': {'logout': <String, Object?>{}},
             'sessionCapabilities': {
               if (supportsResume) 'resume': <String, Object?>{},
               'fork': <String, Object?>{},
@@ -163,7 +193,7 @@ class _FakeAcpServer implements AcpTransport {
         if (newResponseGate != null) await newResponseGate;
         final params = (message['params']! as Map).cast<String, Object?>();
         newSessionCwds.add(params['cwd']! as String);
-        if (authMethods.isNotEmpty || failNewSession) {
+        if ((authMethods.isNotEmpty && !authenticated) || failNewSession) {
           _replyError(id, newSessionErrorCode, 'Session creation failed');
         } else {
           _reply(id, {'sessionId': 'session-${++_sessionCounter}'});
@@ -172,6 +202,10 @@ class _FakeAcpServer implements AcpTransport {
         final sessionId = 'fork-${++_sessionCounter}';
         _reply(id, {'sessionId': sessionId});
       case 'session/resume':
+        if (authMethods.isNotEmpty && !authenticated) {
+          _replyError(id, -32000, 'Authentication required');
+          break;
+        }
         final params = (message['params']! as Map).cast<String, Object?>();
         final sessionId = params['sessionId'] as String? ?? '';
         if (replayTextOnResume != null) {
@@ -229,8 +263,23 @@ class _FakeAcpServer implements AcpTransport {
         }
         if (loadResponseGate != null) await loadResponseGate;
         _reply(id, <String, Object?>{});
+      case 'authenticate':
+        final params = (message['params']! as Map).cast<String, Object?>();
+        authenticatedMethodIds.add(params['methodId']! as String);
+        if (authenticateGate != null) await authenticateGate!.future;
+        if (authenticateErrorMessage != null) {
+          _replyError(id, -32603, authenticateErrorMessage!);
+        } else {
+          authenticated = true;
+          _reply(id, <String, Object?>{});
+        }
+      case 'logout':
+        authenticated = false;
+        _reply(id, <String, Object?>{});
       case 'session/prompt':
-        if (promptErrorMessage != null) {
+        if (promptRequiresAuthentication && !authenticated) {
+          _replyError(id, -32000, 'Authentication required');
+        } else if (promptErrorMessage != null) {
           _replyError(id, -32000, promptErrorMessage!);
         } else if (holdPrompts) {
           _heldPromptIds.addLast(id);
@@ -645,6 +694,43 @@ void main() {
     return (result as AcpSessionLaunchStarted).key;
   }
 
+  test(
+    'restarts the agent on a fresh bridge after a terminal sign-in',
+    () async {
+      final key = await startCopilot();
+      final restarted = await manager.restartAfterSignIn(key);
+
+      expect(restarted, isA<AcpSessionLaunchStarted>());
+      final next = (restarted as AcpSessionLaunchStarted).key;
+      // Same conversation, new agent process: the old bridge stops and the
+      // fresh one loads the session instead of creating another.
+      expect(next.acpSessionId, key.acpSessionId);
+      expect(next.bridgeId, isNot(key.bridgeId));
+      expect(connector.stoppedBridges, [key.bridgeId]);
+      expect(connector.startedBridges, hasLength(2));
+      final server = connector.servers[next.bridgeId]!;
+      expect(server.methods, contains('initialize'));
+      expect(server.methods, contains('session/load'));
+      expect(server.methods, isNot(contains('session/new')));
+      expect(manager.state.byKeyValue(key.value), isNull);
+      expect(manager.state.byKeyValue(next.value)!.isLive, isTrue);
+      expect(manager.state.selectedKey, next.value);
+    },
+  );
+
+  test(
+    'stops a bridge for sign-in only when no live session uses it',
+    () async {
+      final key = await startCopilot();
+      await manager.stopUnusedBridge(key);
+      expect(connector.stoppedBridges, isEmpty);
+
+      await manager.detachSession(key);
+      await manager.stopUnusedBridge(key);
+      expect(connector.stoppedBridges, [key.bridgeId]);
+    },
+  );
+
   test('starts a new session and reaches ready', () async {
     final key = await startCopilot();
     final state = manager.state.byKeyValue(key.value)!;
@@ -1038,6 +1124,75 @@ void main() {
       await _pump();
       expect(manager.state.byKeyValue(key.value)!.pendingPermissions, isEmpty);
       expect(server.permissionResponses[requestId], isNotNull);
+    });
+
+    test('shows tool details sent only in the permission request', () async {
+      final key = await startCopilot();
+      final server = connector.servers[key.bridgeId]!;
+      final mergedTool = manager.states.firstWhere(
+        (state) =>
+            state
+                .byKeyValue(key.value)
+                ?.timeline
+                .entries
+                .whereType<AcpToolCallEntry>()
+                .any((entry) => entry.toolCallId == 'edit-1') ??
+            false,
+      );
+      await pumpEventQueue();
+      // No tool_call precedes the request; the details exist only here.
+      server.pushServerRequest('session/request_permission', {
+        'sessionId': key.acpSessionId,
+        'toolCall': {
+          'toolCallId': 'edit-1',
+          'title': 'Edit main.dart',
+          'kind': 'edit',
+          'status': 'pending',
+          'content': [
+            {
+              'type': 'diff',
+              'path': '/work/lib/main.dart',
+              'oldText': 'a',
+              'newText': 'b',
+            },
+          ],
+          'locations': [
+            {'path': '/work/lib/main.dart', 'line': 3},
+          ],
+        },
+        'options': [
+          {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+        ],
+      });
+      final state = (await mergedTool.timeout(const Duration(seconds: 5)))
+          .byKeyValue(key.value)!;
+
+      final tool = state.timeline.entries
+          .whereType<AcpToolCallEntry>()
+          .singleWhere((entry) => entry.toolCallId == 'edit-1');
+      expect(tool.title, 'Edit main.dart');
+      expect(tool.toolKind, AcpToolKind.edit);
+      expect(tool.content.whereType<AcpToolDiff>().single.newText, 'b');
+      final pending = state.pendingPermissions.single;
+      expect(pending.title, 'Edit main.dart');
+      expect(pending.toolKind, AcpToolKind.edit);
+      expect(pending.subject, '/work/lib/main.dart');
+
+      // A later registry change for the same request merges nothing twice.
+      server.pushUpdate(key.acpSessionId, {
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': 'edit-1',
+        'status': 'in_progress',
+      });
+      await _pump();
+      final entries = manager.state
+          .byKeyValue(key.value)!
+          .timeline
+          .entries
+          .whereType<AcpToolCallEntry>()
+          .where((entry) => entry.toolCallId == 'edit-1');
+      expect(entries, hasLength(1));
+      expect(entries.single.status, AcpToolStatus.inProgress);
     });
   });
 
@@ -2257,7 +2412,7 @@ void main() {
           (result as AcpSessionLaunchFailed).error.kind,
           AcpSessionErrorKind.authenticationRequired,
         );
-        // There is no authenticate/retry-on-existing-bridge path, so the
+        // Without a sign-in chooser the launch cannot authenticate, so the
         // orphaned bridge is stopped just like any other failed creation. The
         // UI offers the provider's terminal-auth command and the user retries
         // cleanly.
@@ -2268,6 +2423,304 @@ void main() {
         expect(authManager.liveSessionKeyValues, isEmpty);
       },
     );
+
+    group('sign-in', () {
+      const agentMethod = {
+        'id': 'agent-login',
+        'name': 'Agent login',
+        'description': 'Sign in with the agent',
+      };
+      const terminalMethod = {
+        'id': 'terminal-login',
+        'name': 'Terminal login',
+        'type': 'terminal',
+        'args': ['--login', 'with space'],
+        'env': {'ACP_LOGIN': '1'},
+      };
+      const retiredMethod = {
+        'id': 'env-login',
+        'name': 'Env var',
+        'type': 'env_var',
+      };
+
+      _FakeConnector authConnector({
+        String? authenticateErrorMessage,
+        bool promptRequiresAuthentication = false,
+        bool authenticated = false,
+      }) => _FakeConnector(
+        serverFactory: (_, _) => _FakeAcpServer(
+          authMethods: const [agentMethod, terminalMethod, retiredMethod],
+          authenticateErrorMessage: authenticateErrorMessage,
+          promptRequiresAuthentication: promptRequiresAuthentication,
+          authenticated: authenticated,
+          supportsLogout: true,
+        ),
+      );
+
+      AcpAuthMethod methodWithId(AcpAuthenticationRequest request, String id) =>
+          request.methods.singleWhere((method) => method.id == id);
+
+      test('advertises terminal auth to the agent', () async {
+        final key = await startCopilot();
+        final params = connector.servers[key.bridgeId]!.initializeParams!;
+        final capabilities = params['clientCapabilities']! as Map;
+        expect(capabilities['auth'], {'terminal': true});
+        expect((capabilities['_meta'] as Map?)?['terminal-auth'], isTrue);
+      });
+
+      test(
+        'agent method authenticates on the same bridge and retries setup once',
+        () async {
+          final custom = authConnector();
+          final authManager = buildManagerWith(custom);
+          final requests = <AcpAuthenticationRequest>[];
+          final result = await authManager.startNewSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.copilotCli,
+            cwd: '/repo',
+            chooseAuthentication: (request) async {
+              requests.add(request);
+              final error = await request.authenticate(
+                methodWithId(request, 'agent-login'),
+              );
+              expect(error, isNull);
+              return const AcpAuthenticationCompleted();
+            },
+          );
+
+          expect(result, isA<AcpSessionLaunchStarted>());
+          final request = requests.single;
+          expect(request.providerLabel, acpCopilotCliProvider.label);
+          // The retired env_var draft is never offered.
+          expect(request.methods.map((method) => method.id), [
+            'agent-login',
+            'terminal-login',
+          ]);
+          final server = custom.servers[custom.startedBridges.single]!;
+          expect(server.authenticatedMethodIds, ['agent-login']);
+          expect(
+            server.methods.where((method) => method == 'session/new'),
+            hasLength(2),
+          );
+          expect(custom.startedBridges, hasLength(1));
+          expect(custom.stoppedBridges, isEmpty);
+          final key = (result as AcpSessionLaunchStarted).key;
+          final state = authManager.state.byKeyValue(key.value)!;
+          expect(state.status, AcpConnectionStatus.ready);
+          expect(state.pendingAuthentication, isFalse);
+          expect(state.error, isNull);
+        },
+      );
+
+      test('declining the chooser fails and stops the fresh bridge', () async {
+        final custom = authConnector();
+        final authManager = buildManagerWith(custom);
+        final result = await authManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          cwd: '/repo',
+          chooseAuthentication: (_) async => null,
+        );
+
+        expect(
+          (result as AcpSessionLaunchFailed).error.kind,
+          AcpSessionErrorKind.authenticationRequired,
+        );
+        expect(result.terminalAuthentication, isNull);
+        expect(
+          custom.servers[custom.startedBridges.single]!.authenticatedMethodIds,
+          isEmpty,
+        );
+        expect(custom.stoppedBridges, custom.startedBridges);
+        expect(authManager.state.sessions, isEmpty);
+      });
+
+      test(
+        'terminal method never authenticates and returns the login launch',
+        () async {
+          final custom = authConnector();
+          final authManager = buildManagerWith(custom);
+          AcpSessionError? terminalAuthenticateError;
+          final result = await authManager.startNewSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.copilotCli,
+            cwd: '/repo',
+            chooseAuthentication: (request) async {
+              final method = methodWithId(request, 'terminal-login');
+              // Terminal methods MUST NOT be sent to authenticate.
+              terminalAuthenticateError = await request.authenticate(method);
+              return AcpAuthenticationInTerminal(method);
+            },
+          );
+
+          expect(
+            terminalAuthenticateError?.kind,
+            AcpSessionErrorKind.unsupportedCapability,
+          );
+          final failed = result as AcpSessionLaunchFailed;
+          expect(failed.error.kind, AcpSessionErrorKind.authenticationRequired);
+          final launch = failed.terminalAuthentication!;
+          expect(launch.hostId, 1);
+          expect(launch.providerId, AcpBuiltinProviderIds.copilotCli);
+          expect(launch.method.id, 'terminal-login');
+          expect(launch.argv, [
+            ...acpCopilotCliProvider.launchCommand.argv,
+            '--login',
+            'with space',
+          ]);
+          expect(launch.environment, {'ACP_LOGIN': '1'});
+          expect(launch.workingDirectory, '/repo');
+          final server = custom.servers[custom.startedBridges.single]!;
+          expect(server.authenticatedMethodIds, isEmpty);
+          expect(server.methods, isNot(contains('authenticate')));
+          // The login is out-of-band; the caller relaunches a fresh bridge.
+          expect(custom.stoppedBridges, custom.startedBridges);
+        },
+      );
+
+      test('reports a failed authenticate without throwing', () async {
+        final custom = authConnector(authenticateErrorMessage: 'Denied');
+        final authManager = buildManagerWith(custom);
+        AcpSessionError? authenticateError;
+        final result = await authManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          cwd: '/repo',
+          chooseAuthentication: (request) async {
+            authenticateError = await request.authenticate(
+              methodWithId(request, 'agent-login'),
+            );
+            return null;
+          },
+        );
+
+        expect(
+          authenticateError?.kind,
+          AcpSessionErrorKind.authenticationRequired,
+        );
+        expect(authenticateError?.message, contains('Denied'));
+        expect(result, isA<AcpSessionLaunchFailed>());
+        expect(custom.stoppedBridges, custom.startedBridges);
+      });
+
+      test('a prompt rejected with auth_required surfaces sign-in, and '
+          'authenticateSession restores the live session', () async {
+        final custom = authConnector(
+          authenticated: true,
+          promptRequiresAuthentication: true,
+        );
+        final authManager = buildManagerWith(custom);
+        final started = await authManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        final server = custom.servers[key.bridgeId]!;
+
+        expect(await authManager.logout(key), isNull);
+        expect(server.methods, contains('logout'));
+
+        await expectLater(
+          authManager.prompt(key, const [AcpTextContent('hi')]),
+          throwsA(isA<AcpRemoteException>()),
+        );
+        var state = authManager.state.byKeyValue(key.value)!;
+        expect(state.status, AcpConnectionStatus.authenticationRequired);
+        expect(state.pendingAuthentication, isTrue);
+        expect(state.error?.kind, AcpSessionErrorKind.authenticationRequired);
+        expect(
+          state.authMethods.map((method) => method.id),
+          contains('agent-login'),
+        );
+
+        final agent = state.authMethods.singleWhere(
+          (method) => method.id == 'agent-login',
+        );
+        expect(await authManager.authenticateSession(key, agent), isNull);
+        state = authManager.state.byKeyValue(key.value)!;
+        expect(state.status, AcpConnectionStatus.ready);
+        expect(state.pendingAuthentication, isFalse);
+        expect(state.error, isNull);
+
+        final terminal = state.authMethods.singleWhere(
+          (method) => method.id == 'terminal-login',
+        );
+        final launch = authManager.terminalAuthenticationLaunch(key, terminal)!;
+        expect(launch.argv.last, 'with space');
+      });
+
+      test('logout is refused when the agent does not advertise it', () async {
+        final key = await startCopilot();
+        final error = await manager.logout(key);
+        expect(error?.kind, AcpSessionErrorKind.unsupportedCapability);
+        expect(
+          connector.servers[key.bridgeId]!.methods,
+          isNot(contains('logout')),
+        );
+      });
+
+      test(
+        'a detached reconnect carries the chosen terminal login back',
+        () async {
+          var serverCount = 0;
+          final custom = _FakeConnector(
+            serverFactory: (_, _) => _FakeAcpServer(
+              authMethods: const [agentMethod, terminalMethod],
+              // Signed in for the launch, signed out by the reattach.
+              authenticated: serverCount++ == 0,
+            ),
+          );
+          final authManager = buildManagerWith(custom);
+          final started = await authManager.startNewSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.copilotCli,
+            cwd: '/repo',
+          );
+          final key = (started as AcpSessionLaunchStarted).key;
+          await authManager.detachSession(key);
+
+          final result = await authManager.reconnectSession(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: key.acpSessionId,
+            cwd: '/repo',
+            chooseAuthentication: (request) async =>
+                AcpAuthenticationInTerminal(
+                  methodWithId(request, 'terminal-login'),
+                ),
+          );
+
+          final failed = result as AcpSessionLaunchFailed;
+          expect(failed.error.kind, AcpSessionErrorKind.authenticationRequired);
+          expect(failed.terminalAuthentication?.method.id, 'terminal-login');
+          expect(failed.terminalAuthentication?.argv.last, 'with space');
+          expect(custom.servers[key.bridgeId]!.authenticatedMethodIds, isEmpty);
+        },
+      );
+
+      test('logout still works after a soft reattach', () async {
+        final custom = authConnector(authenticated: true);
+        final authManager = buildManagerWith(custom);
+        final started = await authManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await authManager.detachSession(key);
+        final reconnected = await authManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        expect(reconnected, isA<AcpSessionLaunchStarted>());
+        expect(await authManager.logout(key), isNull);
+      });
+    });
 
     test(
       'soft reattach resumes from the last rendered bridge sequence',

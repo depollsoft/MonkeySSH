@@ -53,6 +53,10 @@ String _buildAcpUserPromptSummary(AcpUserPromptEntry entry) {
               ? image.label!.trim()
               : 'Image',
         AcpResourcePart(:final resource) => resource.displayName,
+        AcpAudioPart(:final clip) =>
+          (clip.label?.trim().isNotEmpty ?? false)
+              ? clip.label!.trim()
+              : 'Audio clip',
         AcpTextPart() => '',
       },
   ]..removeWhere((label) => label.isEmpty);

@@ -218,6 +218,8 @@ class _Thumbnail extends StatelessWidget {
       icon = Icons.notes_rounded;
     } else if (attachment.isImage) {
       icon = Icons.image_outlined;
+    } else if (attachment.isAudio) {
+      icon = Icons.audio_file_outlined;
     } else if (candidate.sourceKind == AcpAttachmentSourceKind.remoteFile) {
       icon = Icons.cloud_outlined;
     } else {

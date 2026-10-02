@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.218"
+	monkeyMuxVersion                  = "0.1.219"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -772,6 +772,7 @@ type muxWindow struct {
 	piNativeSessionBridgeID     string
 	piNativeSessionPath         string
 	piNativeSessionCheckedAt    time.Time
+	nativeAgentTitle            nativeAgentSessionTitle
 	nativeAcpBridgeID           string
 	nativeAcpProviderID         string
 	foregroundPid               int
