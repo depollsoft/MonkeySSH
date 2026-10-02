@@ -188,15 +188,61 @@ void main() {
     lease.release();
   });
 
-  test('keeps clips in a directory only this user can open', () async {
+  test('keeps each process in its own unpredictable directory', () async {
     final lease = await cache().acquire(
       data: base64.encode(utf8.encode('private')),
       mimeType: 'audio/mpeg',
     );
-    final directory = lease.file.parent;
-    expect(path.basename(directory.path), startsWith('monkeyssh-acp-audio-'));
-    // Owner read, write, and search only, even in a shared /tmp.
-    expect(directory.statSync().mode & 0x1ff, 0x1c0);
+    final name = path.basename(lease.file.parent.path);
+    expect(name, startsWith('monkeyssh-acp-audio-'));
+    expect(name.length, greaterThan('monkeyssh-acp-audio-'.length));
     lease.release();
-  }, skip: Platform.isWindows ? 'POSIX permissions only' : false);
+  });
+
+  group('base directory', () {
+    final temporary = Directory('/tmp');
+    final appCache = Directory('/home/me/.cache/app');
+    Future<String> resolve({
+      required bool isLinux,
+      Map<String, String> environment = const {},
+    }) async => (await acpAudioClipBaseDirectory(
+      isLinux: isLinux,
+      environment: environment,
+      temporaryDirectory: () async => temporary,
+      applicationCacheDirectory: () async => appCache,
+    )).path;
+
+    test('uses the per-user runtime directory on Linux', () async {
+      expect(
+        await resolve(
+          isLinux: true,
+          environment: {'XDG_RUNTIME_DIR': base.path},
+        ),
+        base.path,
+      );
+    });
+
+    test('falls back to the app cache, never the shared /tmp', () async {
+      expect(await resolve(isLinux: true), appCache.path);
+      for (final runtime in ['${base.path}/missing', 'relative/dir']) {
+        expect(
+          await resolve(
+            isLinux: true,
+            environment: {'XDG_RUNTIME_DIR': runtime},
+          ),
+          appCache.path,
+        );
+      }
+    });
+
+    test('uses the temporary directory elsewhere', () async {
+      expect(
+        await resolve(
+          isLinux: false,
+          environment: {'XDG_RUNTIME_DIR': base.path},
+        ),
+        temporary.path,
+      );
+    });
+  });
 }

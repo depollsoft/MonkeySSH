@@ -83,7 +83,7 @@ class AcpAudioClipCache {
   }) : assert(maxFiles > 0),
        assert(maxBytes > 0),
        assert(maxClipBytes > 0),
-       _baseDirectory = baseDirectory ?? getTemporaryDirectory,
+       _baseDirectory = baseDirectory ?? _defaultClipBaseDirectory,
        _diagnostics = diagnostics;
 
   /// Shared app-wide cache.
@@ -293,9 +293,8 @@ class AcpAudioClipCache {
     } on FileSystemException {
       // Best effort: a leftover clip only wastes temporary storage.
     }
-    // On Linux the temporary directory is the shared /tmp. A new temp
-    // directory is created owner-only (0700) under an unpredictable name, so
-    // other local users can neither read clips nor claim the path first.
+    // An unpredictable name, so nobody can claim the path first. Privacy
+    // comes from the base directory (see [acpAudioClipBaseDirectory]).
     return base.createTemp('$_cacheDirectoryName-');
   }
 
@@ -359,4 +358,36 @@ final class _IOSinkByteSink implements Sink<List<int>> {
 
   @override
   void close() {}
+}
+
+Future<Directory> _defaultClipBaseDirectory() => acpAudioClipBaseDirectory(
+  isLinux: Platform.isLinux,
+  environment: Platform.environment,
+  temporaryDirectory: getTemporaryDirectory,
+  applicationCacheDirectory: getApplicationCacheDirectory,
+);
+
+/// Chooses the directory that holds decoded clips, which must be private
+/// to the user.
+///
+/// Linux's temporary directory is the shared /tmp, and Dart creates
+/// directories there with the default umask (usually 0755), so clips would
+/// be readable by other local users. On Linux clips go under the user's
+/// runtime directory, which the XDG Base Directory spec requires to be
+/// owned by the user with mode 0700, or under the app's cache directory in
+/// the user's home when there is none. Other platforms' temporary
+/// directories are already per user or per app.
+@visibleForTesting
+Future<Directory> acpAudioClipBaseDirectory({
+  required bool isLinux,
+  required Map<String, String> environment,
+  required Future<Directory> Function() temporaryDirectory,
+  required Future<Directory> Function() applicationCacheDirectory,
+}) async {
+  if (!isLinux) return temporaryDirectory();
+  final runtime = environment['XDG_RUNTIME_DIR']?.trim() ?? '';
+  if (path.isAbsolute(runtime) && FileSystemEntity.isDirectorySync(runtime)) {
+    return Directory(runtime);
+  }
+  return applicationCacheDirectory();
 }
