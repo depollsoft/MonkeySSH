@@ -15,6 +15,29 @@ void main() {
       expect(tabStops.isSetAt(15), false);
       expect(tabStops.isSetAt(16), true);
     });
+
+    for (final index in [-1, 1024, 2000]) {
+      test('ignores tab stop access outside the table at $index', () {
+        final tabStops = TabStops()..setAt(1023);
+
+        tabStops.setAt(index);
+        tabStops.clearAt(index);
+
+        expect(tabStops.isSetAt(index), isFalse);
+        expect(tabStops.isSetAt(0), isTrue);
+        expect(tabStops.isSetAt(8), isTrue);
+        expect(tabStops.isSetAt(1023), isTrue);
+      });
+    }
+
+    test('HTS and TBC beyond column 1023 preserve existing stops', () {
+      final terminal = Terminal()..resize(2048, 2);
+      terminal.write('\x1b[1025G\x1bH\x1b[g');
+      expect(terminal.buffer.cursorX, 1024);
+
+      terminal.write('\x1b[8G\t');
+      expect(terminal.buffer.cursorX, 8);
+    });
   });
 
   group('TabStops.find()', () {

@@ -40,7 +40,9 @@ class KeyboardVisibilityState extends State<KeyboardVisibility>
     // defunct, so bail out instead.
     if (!mounted) return;
 
-    final bottomInset = View.of(context).viewInsets.bottom;
+    final view = View.maybeOf(context);
+    if (view == null) return;
+    final bottomInset = view.viewInsets.bottom;
 
     if (bottomInset != _lastBottomInset) {
       if (bottomInset > 0) {

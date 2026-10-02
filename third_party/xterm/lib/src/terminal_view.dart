@@ -399,14 +399,17 @@ class TerminalViewState extends State<TerminalView> {
       return resultOverride;
     }
 
-    // ignore: invalid_use_of_protected_member
-    final shortcutResult = _shortcutManager.handleKeypress(
-      focusNode.context!,
-      event,
-    );
-
-    if (shortcutResult != KeyEventResult.ignored) {
-      return shortcutResult;
+    // Match Shortcuts' guard when a focus node has been detached.
+    final shortcutContext = focusNode.context;
+    if (shortcutContext != null) {
+      // ignore: invalid_use_of_protected_member
+      final shortcutResult = _shortcutManager.handleKeypress(
+        shortcutContext,
+        event,
+      );
+      if (shortcutResult != KeyEventResult.ignored) {
+        return shortcutResult;
+      }
     }
 
     if (event is KeyUpEvent && !widget.terminal.kittyKeyboardMode) {
