@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -129,9 +130,9 @@ class AcpAudioClipCache {
       throw const AcpAudioClipException('The audio clip is too large.');
     }
     final normalizedMime = normalizeAcpAudioMimeType(mimeType ?? '');
-    // String hash codes are cached by the VM after the first computation, so
-    // repeated lookups for the same retained payload stay cheap.
-    final key = '$normalizedMime\u0000${data.length}\u0000${data.hashCode}';
+    // Key by a digest of the payload: String.hashCode collides for distinct
+    // same-length clips, which would play or export the wrong audio.
+    final key = '$normalizedMime\u0000${await _digest(data)}';
     var existing = _entries.remove(key);
     if (existing != null &&
         existing.leases == 0 &&
@@ -277,6 +278,20 @@ class AcpAudioClipCache {
     return directory;
   }
 
+  /// SHA-256 of [data], hashed in slices so a large clip never needs a
+  /// second full copy in memory and the UI isolate is yielded between them.
+  static Future<String> _digest(String data) async {
+    final sink = _DigestSink();
+    final input = sha256.startChunkedConversion(sink);
+    for (var start = 0; start < data.length; start += _decodeSliceChars) {
+      final end = math.min(start + _decodeSliceChars, data.length);
+      input.add(utf8.encode(data.substring(start, end)));
+      if (end < data.length) await Future<void>.delayed(Duration.zero);
+    }
+    input.close();
+    return sink.value.toString();
+  }
+
   static int _estimatedDecodedLength(String data) {
     final length = data.length;
     var padding = 0;
@@ -297,6 +312,16 @@ class AcpAudioClipCache {
       // Best effort; the OS reclaims temporary storage.
     }
   }
+}
+
+final class _DigestSink implements Sink<Digest> {
+  late Digest value;
+
+  @override
+  void add(Digest data) => value = data;
+
+  @override
+  void close() {}
 }
 
 final class _IOSinkByteSink implements Sink<List<int>> {

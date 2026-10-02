@@ -126,6 +126,24 @@ void main() {
             ]).single
             as p.AcpAssistantMessageEntry;
     expect(message.markdown, 'Visible answer');
+
+    final withAudio =
+        _map([
+              _message(AcpMessageRole.agent, [
+                {'type': 'text', 'text': 'Listen:'},
+                {
+                  'type': 'audio',
+                  'data': 'AAAA',
+                  'mimeType': 'audio/wav',
+                  'annotations': {
+                    'audience': ['assistant'],
+                  },
+                },
+                {'type': 'audio', 'data': 'BBBB', 'mimeType': 'audio/wav'},
+              ]),
+            ]).single
+            as p.AcpAssistantMessageEntry;
+    expect(withAudio.audio.map((clip) => clip.data), ['BBBB']);
   });
 
   test('renders an embedded text resource in a reply as a code block', () {

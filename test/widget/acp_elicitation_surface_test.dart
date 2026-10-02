@@ -217,6 +217,36 @@ void main() {
     expect(calls.log, isEmpty);
   });
 
+  testWidgets('withdrawal closes the sheet even with a date picker open', (
+    tester,
+  ) async {
+    final calls = _Calls();
+    final dated = _item('s:dated', {
+      'sessionId': 's',
+      'mode': 'form',
+      'message': 'When should it run?',
+      'requestedSchema': {
+        'type': 'object',
+        'properties': {
+          'day': {'type': 'string', 'title': 'Day', 'format': 'date'},
+        },
+      },
+    });
+    await tester.pumpWidget(_host(calls, items: [dated]));
+    await tester.tap(find.text('Respond'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Pick a date'));
+    await tester.pumpAndSettle();
+    expect(find.byType(DatePickerDialog), findsOneWidget);
+
+    await tester.pumpWidget(_host(calls, items: const []));
+    await tester.pumpAndSettle();
+    // The picker on top of the sheet must not absorb the withdrawal.
+    expect(find.byType(DatePickerDialog), findsNothing);
+    expect(find.text('Submit'), findsNothing);
+    expect(calls.log, isEmpty);
+  });
+
   testWidgets('an awaiting URL can be reopened or dismissed', (tester) async {
     final calls = _Calls();
     await tester.pumpWidget(

@@ -1,6 +1,47 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+
+/// Shows an elicitation bottom sheet that closes when [withdrawn] completes.
+///
+/// The sheet's own route is closed, together with anything opened above it
+/// from the sheet such as a date picker, so a withdrawal never pops an
+/// unrelated route and the returned future always resolves (with `null`).
+Future<T?> showAcpWithdrawableSheet<T>(
+  BuildContext context, {
+  required WidgetBuilder builder,
+  Future<void>? withdrawn,
+}) {
+  final navigator = Navigator.of(context);
+  final localizations = MaterialLocalizations.of(context);
+  final route = ModalBottomSheetRoute<T>(
+    builder: builder,
+    capturedThemes: InheritedTheme.capture(
+      from: context,
+      to: navigator.context,
+    ),
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    barrierLabel: localizations.scrimLabel,
+    barrierOnTapHint: localizations.scrimOnTapHint(
+      localizations.bottomSheetLabel,
+    ),
+    modalBarrierColor: Theme.of(context).bottomSheetTheme.modalBarrierColor,
+  );
+  unawaited(
+    withdrawn?.then((_) {
+      final routeNavigator = route.navigator;
+      if (routeNavigator == null || !route.isActive) return;
+      routeNavigator
+        ..popUntil((candidate) => identical(candidate, route))
+        ..pop();
+    }),
+  );
+  return navigator.push(route);
+}
 
 /// Title row shared by the elicitation sheets, with an explicit dismiss
 /// control so dismissing never depends on a drag gesture.

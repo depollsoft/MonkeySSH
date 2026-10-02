@@ -59,6 +59,22 @@ void main() {
     second.release();
   });
 
+  test('never reuses a file for a different same-length payload', () async {
+    final subject = cache();
+    // Distinct, same-length payloads whose String.hashCode collides on the
+    // Dart VM: a hash-keyed cache would hand back the first clip's file.
+    const first = 'Y2xpcC0wMDAwMTAyMzQ=';
+    const second = 'Y2xpcC0wMDAwMzYyNjA=';
+    final a = await subject.acquire(data: first, mimeType: 'audio/wav');
+    final b = await subject.acquire(data: second, mimeType: 'audio/wav');
+
+    expect(b.file.path, isNot(a.file.path));
+    expect(utf8.decode(a.file.readAsBytesSync()), 'clip-000010234');
+    expect(utf8.decode(b.file.readAsBytesSync()), 'clip-000036260');
+    a.release();
+    b.release();
+  });
+
   test('restores omitted base64 padding', () async {
     final data = base64.encode(utf8.encode('ab')).replaceAll('=', '');
     final lease = await cache().acquire(data: data, mimeType: 'audio/ogg');

@@ -1049,9 +1049,11 @@ func (b *acpBridge) observeClientMessage(envelope acpEnvelope) {
 
 // claimClientResponse reports whether a client frame may reach the provider.
 // A response to a provider request the bridge already answered as cancelled
-// is dropped, so the provider never sees two answers. Any other response
-// claims its request before the write, so a racing provider cancellation
-// cannot also answer it.
+// is dropped, so the provider never sees two answers. The marker stays until
+// the provider reuses the id or the bounded memory evicts it: each attachment
+// that resumes from before the cancel replays the request and answers it
+// again. Any other response claims its request before the write, so a racing
+// provider cancellation cannot also answer it.
 func (b *acpBridge) claimClientResponse(envelope acpEnvelope) bool {
 	if len(envelope.ID) == 0 || len(envelope.Method) > 0 {
 		return true
@@ -1060,7 +1062,6 @@ func (b *acpBridge) claimClientResponse(envelope acpEnvelope) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, cancelled := b.cancelledRequests[key]; cancelled {
-		delete(b.cancelledRequests, key)
 		return false
 	}
 	delete(b.pendingRequests, key)

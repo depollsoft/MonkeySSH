@@ -36,24 +36,12 @@ Future<AcpElicitationFormOutcome?> showAcpElicitationFormSheet(
   required String agentLabel,
   required AcpFormElicitation request,
   Future<void>? withdrawn,
-}) {
-  final navigator = Navigator.of(context);
-  var open = true;
-  final sheet = showModalBottomSheet<AcpElicitationFormOutcome>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: true,
-    builder: (context) =>
-        AcpElicitationFormSheet(agentLabel: agentLabel, request: request),
-  );
-  unawaited(
-    withdrawn?.then((_) {
-      if (open && navigator.mounted && navigator.canPop()) navigator.pop();
-    }),
-  );
-  return sheet.whenComplete(() => open = false);
-}
+}) => showAcpWithdrawableSheet<AcpElicitationFormOutcome>(
+  context,
+  withdrawn: withdrawn,
+  builder: (context) =>
+      AcpElicitationFormSheet(agentLabel: agentLabel, request: request),
+);
 
 /// The body of the form-mode elicitation sheet.
 class AcpElicitationFormSheet extends StatefulWidget {
@@ -319,6 +307,8 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
         : DateTime.now();
     final picked = await showDatePicker(
       context: context,
+      // Same navigator as the sheet, so a withdrawn request closes both.
+      useRootNavigator: false,
       initialDate: current,
       firstDate: DateTime(1900),
       lastDate: DateTime(2200),

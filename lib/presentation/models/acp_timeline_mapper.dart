@@ -382,7 +382,7 @@ AcpAudioClip _mapAudio(d.AcpAudioContent block) {
 List<AcpAudioClip> _audioFromContent(List<d.AcpContentBlock> content) {
   final audio = <AcpAudioClip>[
     for (final block in content)
-      if (block is d.AcpAudioContent) _mapAudio(block),
+      if (block is d.AcpAudioContent && _isForUser(block)) _mapAudio(block),
   ];
   return audio.isEmpty ? const [] : List.unmodifiable(audio);
 }

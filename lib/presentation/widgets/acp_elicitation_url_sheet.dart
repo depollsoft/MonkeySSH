@@ -24,24 +24,12 @@ Future<AcpElicitationUrlOutcome?> showAcpElicitationUrlSheet(
   required String agentLabel,
   required AcpUrlElicitation request,
   Future<void>? withdrawn,
-}) {
-  final navigator = Navigator.of(context);
-  var open = true;
-  final sheet = showModalBottomSheet<AcpElicitationUrlOutcome>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: true,
-    builder: (context) =>
-        AcpElicitationUrlSheet(agentLabel: agentLabel, request: request),
-  );
-  unawaited(
-    withdrawn?.then((_) {
-      if (open && navigator.mounted && navigator.canPop()) navigator.pop();
-    }),
-  );
-  return sheet.whenComplete(() => open = false);
-}
+}) => showAcpWithdrawableSheet<AcpElicitationUrlOutcome>(
+  context,
+  withdrawn: withdrawn,
+  builder: (context) =>
+      AcpElicitationUrlSheet(agentLabel: agentLabel, request: request),
+);
 
 /// The body of the URL-mode consent sheet.
 class AcpElicitationUrlSheet extends StatefulWidget {

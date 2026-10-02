@@ -204,19 +204,19 @@ func TestAcpClientAnswerToCancelledRequestIsNotForwarded(t *testing.T) {
 
 	conn, reader := attachTestClient(t, bridge, acpWireMessage{LastAck: 2})
 	_ = readTestAcpFrame(t, reader, conn) // hello
-	sendTestClientInput(
-		t,
-		conn,
-		`{"jsonrpc":"2.0","id":"permission-1","error":{"code":-32800,"message":"Request cancelled"}}`,
-	)
+	answer := `{"jsonrpc":"2.0","id":"permission-1","error":{"code":-32800,"message":"Request cancelled"}}`
+	sendTestClientInput(t, conn, answer)
+	// A later attachment that resumes from before the cancel replays the
+	// request and answers it again; that answer must be dropped too.
+	sendTestClientInput(t, conn, answer)
 	sendTestClientInput(t, conn, `{"jsonrpc":"2.0","method":"after"}`)
 	if line := nextProviderLine(t, lines); !bytes.Contains([]byte(line), []byte(`"after"`)) {
 		t.Fatalf("provider input = %s, want only the following notification", line)
 	}
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if _, ok := bridge.cancelledRequests[`"permission-1"`]; ok {
-		t.Fatal("dropped answer did not clear the cancelled marker")
+	if _, ok := bridge.cancelledRequests[`"permission-1"`]; !ok {
+		t.Fatal("dropped answer cleared the cancelled marker")
 	}
 }
 
