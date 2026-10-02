@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:in_app_review/in_app_review.dart';
 
@@ -48,12 +49,14 @@ class AppReviewPromptService {
     required TelemetryService telemetryService,
     AppReviewClient client = const _InAppReviewClient(),
     DateTime Function() now = DateTime.now,
+    bool Function()? isAppActive,
     bool? isSupportedPlatform,
   }) : _settingsService = settingsService,
        _diagnosticsLogger = diagnosticsLogger,
        _telemetryService = telemetryService,
        _client = client,
        _now = now,
+       _isAppActive = isAppActive ?? _isAppResumed,
        _isSupportedPlatform =
            isSupportedPlatform ??
            (!kIsWeb &&
@@ -67,9 +70,9 @@ class AppReviewPromptService {
   /// so a burst of use in the first few days does not qualify.
   static const minimumTimeSinceFirstConnection = Duration(days: 7);
 
-  /// Minimum time between requests: at most two a year, below the App Store
-  /// limit of three in 365 days.
-  static const minimumRequestInterval = Duration(days: 180);
+  /// Minimum time between requests: at most two in any 365 days, below the
+  /// App Store limit of three. 180 days would allow days 0, 180 and 360.
+  static const minimumRequestInterval = Duration(days: 183);
 
   /// Minimum foreground time on a live connection before leaving a terminal
   /// is a moment to ask.
@@ -80,6 +83,7 @@ class AppReviewPromptService {
   final TelemetryService _telemetryService;
   final AppReviewClient _client;
   final DateTime Function() _now;
+  final bool Function() _isAppActive;
   final bool _isSupportedPlatform;
   bool _requestInFlight = false;
 
@@ -139,6 +143,11 @@ class AppReviewPromptService {
         _diagnosticsLogger.info('app_review', 'review_unavailable');
         return false;
       }
+      // The sheet cannot appear over a backgrounded app, and claiming the
+      // request then would spend the whole interval on nothing.
+      if (!_isAppActive()) {
+        return false;
+      }
       // Claim the request before making it, so a failed or repeated call
       // cannot ask again inside the interval.
       var claimed = false;
@@ -186,6 +195,9 @@ class AppReviewPromptService {
     return lastRequestedAt == null ||
         now.difference(lastRequestedAt) >= minimumRequestInterval;
   }
+
+  static bool _isAppResumed() =>
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
 
   static String _dayKey(DateTime time) {
     final local = time.toLocal();

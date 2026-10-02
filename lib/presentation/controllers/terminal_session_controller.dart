@@ -58,6 +58,9 @@ class TerminalSessionController {
   /// Foreground time this screen has spent on a live, connected shell.
   Duration get connectedForegroundTime => _connectedTime.elapsed;
 
+  /// Whether the last sync found a live, connected shell in the foreground.
+  bool get isOnLiveConnection => _connectedTime.isRunning;
+
   /// The SSH session currently driving terminal metadata in the UI.
   SshSession? get observedSession => _observedSession;
 

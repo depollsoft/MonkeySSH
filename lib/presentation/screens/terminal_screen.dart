@@ -131,6 +131,20 @@ bool _isPromptReturnWhitespaceCodeUnit(int codeUnit) =>
 /// Lets the pop transition back to home finish before the rating sheet.
 const _appReviewAfterLeavingDelay = Duration(milliseconds: 700);
 
+/// Whether home is the only route on the root navigator, so no other screen,
+/// dialog or sheet sits on top of it.
+///
+/// `currentConfiguration.uri` ignores imperative pushes, so a screen pushed
+/// over home still reports `/` there; [GoRouter.state] reflects the top match.
+bool _isHomeTheOnlyRoute(GoRouter router) {
+  final delegate = router.routerDelegate;
+  final navigator = delegate.navigatorKey.currentState;
+  return navigator != null &&
+      !navigator.canPop() &&
+      delegate.currentConfiguration.isNotEmpty &&
+      router.state.uri.path == '/';
+}
+
 const _redactStoreScreenshotIdentities = bool.fromEnvironment(
   'STORE_SCREENSHOT_REDACT_IDENTITIES',
 );
@@ -1133,6 +1147,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // when it resumes if the OS killed the socket.
   bool _wasBackgrounded = false;
   bool _connectionLostWhileBackgrounded = false;
+
+  /// Whether this screen's session ended through [_disconnect] rather than
+  /// a dropped connection or an error.
+  bool _sessionEndedCleanly = false;
   int? _suppressNextAutomaticReconnectConnectionId;
   int? _suppressRemoteMuxDetectionConnectionId;
   bool _restoreKeyboardAfterAppResume = false;
@@ -10942,6 +10960,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _disconnect() async {
     final connectionId = _connectionId;
     _connectionId = null;
+    _sessionEndedCleanly = true;
     _clearAppThemeOverride();
     _cancelTerminalThemeRefreshTimers();
     _clearTmuxState();
@@ -10965,12 +10984,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// Offers the system rating sheet once the user is back on the home screen
-  /// after real use of this connection. Waiting out the pop transition also
-  /// confirms they landed on home rather than another terminal.
+  /// after real use of a healthy connection: one still live, or one they
+  /// disconnected themselves. Never after a dropped connection or an error.
+  /// Waiting out the pop transition also confirms they landed on home rather
+  /// than another terminal.
   void _offerAppReviewAfterLeaving() {
     final reviewPrompt = ref.read(appReviewPromptServiceProvider);
     final router = GoRouter.maybeOf(context);
+    final leftHealthySession =
+        _sessionEndedCleanly || _sessionController.isOnLiveConnection;
     if (router == null ||
+        !leftHealthySession ||
         !reviewPrompt.isQualifyingConnectedTime(
           _sessionController.connectedForegroundTime,
         )) {
@@ -10978,7 +11002,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     unawaited(
       Future<void>.delayed(_appReviewAfterLeavingDelay, () async {
-        if (router.routerDelegate.currentConfiguration.uri.path != '/') {
+        if (!_isHomeTheOnlyRoute(router)) {
           return;
         }
         await reviewPrompt.maybeRequestReview();

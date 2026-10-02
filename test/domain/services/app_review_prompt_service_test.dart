@@ -16,6 +16,7 @@ void main() {
   late _FakeAnalyticsClient analytics;
   late _FakeReviewClient client;
   late DateTime now;
+  late bool appActive;
 
   AppReviewPromptService createService({bool isSupportedPlatform = true}) =>
       AppReviewPromptService(
@@ -29,6 +30,7 @@ void main() {
         ),
         client: client,
         now: () => now,
+        isAppActive: () => appActive,
         isSupportedPlatform: isSupportedPlatform,
       );
 
@@ -57,6 +59,7 @@ void main() {
     analytics = _FakeAnalyticsClient();
     client = _FakeReviewClient();
     now = DateTime(2026, 10, 1, 9);
+    appActive = true;
   });
 
   tearDown(() async {
@@ -119,6 +122,37 @@ void main() {
     expect(await service.maybeRequestReview(), isTrue);
     expect(client.requestCount, 2);
   });
+
+  test('asks at most twice in any 365 days', () async {
+    final service = createService();
+    await becomeEligible(service);
+    final firstRequest = now;
+
+    expect(await service.maybeRequestReview(), isTrue);
+    now = firstRequest.add(AppReviewPromptService.minimumRequestInterval);
+    expect(await service.maybeRequestReview(), isTrue);
+    now = firstRequest.add(const Duration(days: 365));
+    expect(await service.maybeRequestReview(), isFalse);
+    now = firstRequest.add(const Duration(days: 366));
+    expect(await service.maybeRequestReview(), isTrue);
+    expect(client.requestCount, 3);
+  });
+
+  test(
+    'does not spend the window while the app is in the background',
+    () async {
+      final service = createService();
+      await becomeEligible(service);
+      appActive = false;
+
+      expect(await service.maybeRequestReview(), isFalse);
+      expect(client.requestCount, 0);
+
+      appActive = true;
+      expect(await service.maybeRequestReview(), isTrue);
+      expect(client.requestCount, 1);
+    },
+  );
 
   test('keeps the request window across service instances', () async {
     await becomeEligible(createService());

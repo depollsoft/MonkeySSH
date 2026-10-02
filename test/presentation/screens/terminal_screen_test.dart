@@ -3508,6 +3508,7 @@ void main() {
       WidgetTester tester, {
       required String baseLocation,
       required _RecordingAppReviewPromptService reviewPrompt,
+      ActiveSessionsNotifier? activeSessions,
     }) async {
       final router = GoRouter(
         initialLocation: baseLocation,
@@ -3530,6 +3531,7 @@ void main() {
       addTearDown(router.dispose);
       await tester.pumpWidget(
         buildScreen(
+          activeSessions: activeSessions,
           overrides: [
             appReviewPromptServiceProvider.overrideWithValue(reviewPrompt),
           ],
@@ -3585,6 +3587,95 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
 
       expect(reviewPrompt.checkedConnectedTimes, hasLength(1));
+      expect(reviewPrompt.requestCount, 0);
+    });
+
+    testWidgets('does not offer a rating after the connection drops', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      final activeSessions = _TestActiveSessionsNotifier(session);
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+        activeSessions: activeSessions,
+      );
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('Reconnect'), findsOneWidget);
+
+      router.pop();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('Home'), findsOneWidget);
+      expect(reviewPrompt.checkedConnectedTimes, isEmpty);
+      expect(reviewPrompt.requestCount, 0);
+    });
+
+    testWidgets('offers a rating after an explicit disconnect', (tester) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+      );
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(find.text('Disconnect'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('Home'), findsOneWidget);
+      expect(reviewPrompt.requestCount, 1);
+    });
+
+    testWidgets('does not offer a rating over a screen opened from home', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+      unawaited(router.push<void>('/hosts'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('Hosts'), findsOneWidget);
+      expect(reviewPrompt.requestCount, 0);
+    });
+
+    testWidgets('does not offer a rating over a dialog on home', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+      unawaited(
+        showDialog<void>(
+          context: tester.element(find.text('Home')),
+          builder: (context) => const AlertDialog(content: Text('Dialog')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('Dialog'), findsOneWidget);
       expect(reviewPrompt.requestCount, 0);
     });
 
