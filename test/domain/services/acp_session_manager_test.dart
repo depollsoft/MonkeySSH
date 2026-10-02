@@ -694,6 +694,30 @@ void main() {
     return (result as AcpSessionLaunchStarted).key;
   }
 
+  test(
+    'restarts the agent on a fresh bridge after a terminal sign-in',
+    () async {
+      final key = await startCopilot();
+      final restarted = await manager.restartAfterSignIn(key);
+
+      expect(restarted, isA<AcpSessionLaunchStarted>());
+      final next = (restarted as AcpSessionLaunchStarted).key;
+      // Same conversation, new agent process: the old bridge stops and the
+      // fresh one loads the session instead of creating another.
+      expect(next.acpSessionId, key.acpSessionId);
+      expect(next.bridgeId, isNot(key.bridgeId));
+      expect(connector.stoppedBridges, [key.bridgeId]);
+      expect(connector.startedBridges, hasLength(2));
+      final server = connector.servers[next.bridgeId]!;
+      expect(server.methods, contains('initialize'));
+      expect(server.methods, contains('session/load'));
+      expect(server.methods, isNot(contains('session/new')));
+      expect(manager.state.byKeyValue(key.value), isNull);
+      expect(manager.state.byKeyValue(next.value)!.isLive, isTrue);
+      expect(manager.state.selectedKey, next.value);
+    },
+  );
+
   test('starts a new session and reaches ready', () async {
     final key = await startCopilot();
     final state = manager.state.byKeyValue(key.value)!;

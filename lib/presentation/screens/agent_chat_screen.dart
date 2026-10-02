@@ -1577,11 +1577,31 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         }
         final signedIn = await runAcpTerminalSignIn(context, ref, launch);
         if (!mounted) return;
-        if (signedIn) {
-          manager.markSessionSignedIn(key);
-          _showSnack('Signed in to ${session.providerLabel}.');
-        } else {
+        if (!signedIn) {
           _showSnack('Sign-in didn’t finish.');
+          return;
+        }
+        // The running agent may still hold its old credentials: restart it
+        // on a fresh bridge and resume this conversation there.
+        setState(() => _connecting = true);
+        final restarted = await manager.restartAfterSignIn(key);
+        if (!mounted) return;
+        setState(() => _connecting = false);
+        switch (restarted) {
+          case AcpSessionLaunchStarted(key: final next):
+            if (next != _key) {
+              setState(() => _key = next);
+              _composer.rebindSession(
+                next,
+                session: manager.state.byKeyValue(next.value),
+              );
+              if (widget.embedded) widget.onSessionChanged?.call(next);
+            }
+            _showSnack('Signed in to ${session.providerLabel}.');
+          case AcpSessionLaunchFailed(:final error):
+            _showSnack(error.message);
+          case AcpSessionLaunchBlocked():
+            _showSnack('Signed in. Reopen this chat to continue.');
         }
       case null:
         break;

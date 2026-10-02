@@ -158,6 +158,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
   /// Sessions marked signed in after a terminal login.
   final List<String> signedInSessions = <String>[];
 
+  /// Result of [restartAfterSignIn]; defaults to keeping the same key.
+  AcpSessionLaunchResult? restartAfterSignInResult;
+
   /// Sessions logged out through [logout].
   final List<String> loggedOut = <String>[];
 
@@ -427,6 +430,12 @@ class FakeAcpSessionManager extends AcpSessionManager {
   @override
   void markSessionSignedIn(AcpSessionKey key) {
     signedInSessions.add(key.value);
+  }
+
+  @override
+  Future<AcpSessionLaunchResult> restartAfterSignIn(AcpSessionKey key) async {
+    signedInSessions.add(key.value);
+    return restartAfterSignInResult ?? AcpSessionLaunchStarted(key);
   }
 
   @override

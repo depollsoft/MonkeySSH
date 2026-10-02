@@ -709,6 +709,64 @@ class AcpSessionManager {
   void markSessionSignedIn(AcpSessionKey key) =>
       _controllers[key.value]?.clearAuthenticationRequired();
 
+  /// Restarts [key]'s agent after a `terminal` sign-in finished outside the
+  /// ACP connection.
+  ///
+  /// The running agent may keep the authentication state it started with, so
+  /// the spec's terminal flow ends by reconnecting and reinitializing. This
+  /// stops the session's bridge and resumes the same ACP session in a fresh
+  /// agent process with the same launch command, directory, and workspace;
+  /// the result carries the new key. When another live session shares the
+  /// bridge, stopping it would end that session too, so the session is only
+  /// marked signed in.
+  Future<AcpSessionLaunchResult> restartAfterSignIn(AcpSessionKey key) =>
+      _serialize(() async {
+        final controller = _controllers[key.value];
+        if (controller == null) {
+          return AcpSessionLaunchFailed(key, _untrackedSessionError);
+        }
+        final shared = _controllers.values.any(
+          (other) =>
+              !identical(other, controller) && other.bridgeKey == key.bridge,
+        );
+        if (shared || controller._launchArgv.isEmpty) {
+          controller.clearAuthenticationRequired();
+          return AcpSessionLaunchStarted(key);
+        }
+        final launch = _ResolvedLaunch(
+          providerId: key.providerId,
+          label: controller._providerLabel,
+          argv: controller._launchArgv,
+          isCustom: controller._isCustomProvider,
+        );
+        final cwd = controller._cwd;
+        final workspace = controller._workspace;
+        final autoApprove = controller._autoApprovePermissions;
+        try {
+          await _stopAll([key]);
+        } on Object catch (error) {
+          return AcpSessionLaunchFailed(key, _mapBridgeError(error));
+        }
+        _diagnostics.info(
+          'acp.manager',
+          'restart_after_sign_in',
+          fields: {'hostId': key.hostId},
+        );
+        final restarted = await _startBridgeAndSession(
+          hostId: key.hostId,
+          launch: launch,
+          cwd: cwd,
+          confirmInstall: null,
+          existingSessionId: key.acpSessionId,
+          autoApprovePermissions: autoApprove,
+          workspace: workspace,
+        );
+        if (restarted is AcpSessionLaunchStarted) {
+          await _recentSessions.remove(key);
+        }
+        return restarted;
+      });
+
   /// Ends the agent's signed-in state through [key] when the agent advertises
   /// `auth.logout`.
   ///
