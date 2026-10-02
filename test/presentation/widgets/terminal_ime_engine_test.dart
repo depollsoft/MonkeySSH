@@ -1917,6 +1917,50 @@ void main() {
       );
     }
 
+    for (final commits in [
+      (first: 'pi \n\nxyz', replay: 'pi\n\nxyz'),
+      (first: 'pi\n\nxyz', replay: 'pi \n\nxyz'),
+      (first: 'pi\n\nxyz', replay: 'pi\n\nxyz'),
+    ]) {
+      test(
+        '${platform.name} shell completion action-first extra Return survives replay, commits=$commits',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          driver.updateEditingValue(
+            _editingValue(commits.first, selectionOffset: commits.first.length),
+          );
+          await driver.flush();
+          final output = harness.terminalOutput.join();
+          expect(
+            output,
+            '${_terminalKeyOutput(TerminalKey.enter)}${_terminalKeyOutput(TerminalKey.enter)}xyz',
+          );
+          await driver.flush(const Duration(milliseconds: 100));
+          driver.updateEditingValue(
+            _editingValue(
+              commits.replay,
+              selectionOffset: commits.replay.length,
+            ),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput.join(), output);
+          expect(
+            driver.engine.editingValue,
+            _editingValue('xyz', selectionOffset: 3),
+          );
+        },
+      );
+    }
+
     for (final replay in ['pi', 'pi\n']) {
       test(
         '${platform.name} shell completion action-first tail survives delayed $replay',

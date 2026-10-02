@@ -940,6 +940,11 @@ class TerminalImeEngine {
           nativePrefixes: {
             if (rawText.length > trailingText.length)
               rawText.substring(0, rawText.length - trailingText.length),
+            // The same replay may arrive with or without a separator space.
+            for (final prefix in _shellCompletionObsoleteTexts) ...[
+              '$prefix${enterSuffix.substring(0, newlineLength)}',
+              '$prefix ${enterSuffix.substring(0, newlineLength)}',
+            ],
           },
         );
         return _canonicalEditingStateForUserText(value, trailingText);
