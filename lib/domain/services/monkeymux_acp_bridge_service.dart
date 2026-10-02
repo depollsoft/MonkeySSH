@@ -100,6 +100,8 @@ String buildMonkeyMuxAcpProviderCommand(
     r"$ErrorActionPreference='Stop';",
     if (providerId == AcpBuiltinProviderIds.museCode)
       _museWindowsExecutablePreamble,
+    if (providerId == AcpBuiltinProviderIds.antigravity)
+      _antigravityWindowsTerminalProgramPreamble,
     '$executableVariable=${powerShellSingleQuote(launchArgv.first)};',
     '$argumentsVariable=@(',
     launchArgv.skip(1).map(powerShellSingleQuote).join(','),
@@ -111,6 +113,7 @@ String buildMonkeyMuxAcpProviderCommand(
       ? buildCompactWindowsPowerShellCommand(windowsScript)
       : '$_profileSourcingPrefix'
             '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
+            '${providerId == AcpBuiltinProviderIds.antigravity ? _antigravityTerminalProgramPreamble : ''}'
             '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
             'exec ${launchArgv.map(shellEscapePosix).join(' ')}';
   if (utf8.encode(command).length > 8192) {
@@ -147,6 +150,16 @@ String buildAcpTerminalAuthCommand(
   return '/bin/sh -c ${shellEscapePosix(dispatcher)} monkeyssh-sign-in '
       '${shellEscapePosix(providerCommand)}';
 }
+
+// agy-acp drives agy through its own PTY. With no TERM_PROGRAM, agy opens by
+// asking the terminal to identify itself (ESC [ > c) and waits for a reply
+// the adapter never sends, so every prompt hangs. Any value skips the query.
+// Shells started by MonkeyMux over SSH usually have none.
+const _antigravityTerminalProgramPreamble =
+    r'[ -n "${TERM_PROGRAM-}" ] || export TERM_PROGRAM=MonkeySSH; ';
+const _antigravityWindowsTerminalProgramPreamble =
+    r'if([string]::IsNullOrEmpty($env:TERM_PROGRAM)){ '
+    r"$env:TERM_PROGRAM='MonkeySSH' };";
 
 // Node's spawn cannot execute the official muse.cmd shim without a shell.
 // Resolve the launcher's selected native binary for the adapter's subprocess.

@@ -547,6 +547,51 @@ void main() {
     },
   );
 
+  test('Antigravity ACP gets a TERM_PROGRAM so agy skips its DA2 probe', () {
+    const argv = ['npx', '--yes', '--prefer-offline', 'agy-acp@0.5.2'];
+    final posix = buildMonkeyMuxAcpProviderCommand(
+      argv,
+      isWindows: false,
+      providerId: AcpBuiltinProviderIds.antigravity,
+    );
+    // A value from the user's profile wins; the default is set only when
+    // TERM_PROGRAM is missing, and it lands before the exec.
+    const preamble =
+        r'[ -n "${TERM_PROGRAM-}" ] || export TERM_PROGRAM=MonkeySSH; ';
+    expect(posix, contains(preamble));
+    expect(
+      posix.indexOf(preamble),
+      lessThan(posix.indexOf("exec 'npx' '--yes'")),
+    );
+    final windows = decodeEncodedPowerShell(
+      buildMonkeyMuxAcpProviderCommand(
+        argv,
+        isWindows: true,
+        providerId: AcpBuiltinProviderIds.antigravity,
+      ),
+    );
+    expect(
+      windows,
+      contains(
+        r'if([string]::IsNullOrEmpty($env:TERM_PROGRAM)){ '
+        r"$env:TERM_PROGRAM='MonkeySSH' };",
+      ),
+    );
+
+    for (final providerId in [
+      AcpBuiltinProviderIds.copilotCli,
+      AcpBuiltinProviderIds.openCode,
+      null,
+    ]) {
+      final other = buildMonkeyMuxAcpProviderCommand(
+        argv,
+        isWindows: false,
+        providerId: providerId,
+      );
+      expect(other, isNot(contains('TERM_PROGRAM')));
+    }
+  });
+
   test('Cursor ACP leaves credential handling to Cursor', () {
     final cursor = buildMonkeyMuxAcpProviderCommand(const [
       '/Users/demo/.local/bin/cursor-agent',
