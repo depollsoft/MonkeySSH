@@ -786,6 +786,56 @@ func TestAcquireSessionLockIsExclusiveUnderContention(t *testing.T) {
 	}
 }
 
+// A helper checking a lock's holder opens the file, and on Windows os.Open
+// does not share delete access, so the holder's unlock lands on a sharing
+// violation while the read lasts. The unlock must wait it out rather than
+// leave its lock installed under a live pid, which would block every other
+// helper for the session (this is what timed out the contention test above).
+func TestSessionUnlockWaitsOutAConcurrentReadOfTheLock(t *testing.T) {
+	isolateTestRuntime(t)
+
+	session := fmt.Sprintf("lock-read-%d", time.Now().UnixNano())
+	unlock, err := acquireSessionLock(session)
+	if err != nil {
+		t.Fatalf("acquireSessionLock: %v", err)
+	}
+	path, err := sessionLockPath(session)
+	if err != nil {
+		t.Fatalf("sessionLockPath: %v", err)
+	}
+	reader, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	unlocked := make(chan struct{})
+	go func() {
+		unlock()
+		close(unlocked)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	select {
+	case <-unlocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unlock did not return")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unlock left the lock installed: stat err = %v", err)
+	}
+
+	started := time.Now()
+	relock, err := acquireSessionLock(session)
+	if err != nil {
+		t.Fatalf("relock: %v", err)
+	}
+	relock()
+	if waited := time.Since(started); waited > time.Second {
+		t.Fatalf("relock waited %v for a released lock", waited)
+	}
+}
+
 func TestReclaimSessionFileWaitsForTakeoverGuard(t *testing.T) {
 	isolateTestRuntime(t)
 
