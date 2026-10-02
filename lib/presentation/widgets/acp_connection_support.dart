@@ -328,6 +328,7 @@ AcpLaunchCommand applyAcpAgentLaunchSettings({
         startInYoloMode: true,
         launchProfile: profile,
         quoteProfileForShell: false,
+        acpEntrypoint: true,
       ),
       ...provider.launchCommand.arguments,
     ],

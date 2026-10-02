@@ -9381,10 +9381,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case AcpSessionLaunchStarted(:final key):
         _openNativeAcpSession(key);
       case AcpSessionLaunchFailed(:final error):
-        final authCommand = await resolveAcpTerminalAuthCommand(
-          providerId: providerId,
-          session: session,
-        );
+        // Offer the CLI sign-in only for a sign-in failure: a launch that
+        // failed for any other reason (a bad flag, a crash) is not fixed by
+        // signing in, and the offer hides the real error.
+        final authCommand =
+            error.kind == AcpSessionErrorKind.authenticationRequired
+            ? await resolveAcpTerminalAuthCommand(
+                providerId: providerId,
+                session: session,
+              )
+            : null;
         if (!mounted) return;
         final unlocksCursorKeychain =
             providerId == AcpBuiltinProviderIds.cursorAgent &&

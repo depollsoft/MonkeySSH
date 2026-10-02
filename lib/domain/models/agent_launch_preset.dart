@@ -162,6 +162,17 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.museCode => const ['--yolo'],
   };
 
+  /// YOLO arguments accepted ahead of this tool's ACP entrypoint.
+  ///
+  /// OpenCode 2 defines `--auto` only on its interactive command, so
+  /// `opencode --auto acp` prints help and exits. A native session still
+  /// starts in YOLO mode: MonkeySSH auto-approves the agent's ACP permission
+  /// requests.
+  List<String> get acpYoloArguments => switch (this) {
+    AgentLaunchTool.openCode => const [],
+    _ => yoloArguments,
+  };
+
   /// Environment variables that enable YOLO mode for this tool.
   Map<String, String> get yoloEnvironment => switch (this) {
     AgentLaunchTool.openCode => const {'OPENCODE_PERMISSION': '{"*":"allow"}'},
@@ -505,6 +516,7 @@ List<String> buildAgentGlobalLaunchArguments(
   String? launchProfile,
   bool quoteProfileForShell = true,
   bool windows = false,
+  bool acpEntrypoint = false,
 }) {
   final profile = launchProfile?.trim();
   if (profile != null && profile.isNotEmpty && !tool.supportsLaunchProfiles) {
@@ -520,7 +532,8 @@ List<String> buildAgentGlobalLaunchArguments(
       '--profile',
       profileArgument,
     ],
-    if (startInYoloMode) ...tool.yoloArguments,
+    if (startInYoloMode)
+      ...(acpEntrypoint ? tool.acpYoloArguments : tool.yoloArguments),
   ];
 }
 

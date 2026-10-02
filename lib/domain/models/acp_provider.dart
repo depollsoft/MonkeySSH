@@ -552,6 +552,7 @@ bool isApprovedAcpBuiltinLaunchOverride(
         startInYoloMode: true,
         launchProfile: profile,
         quoteProfileForShell: false,
+        acpEntrypoint: true,
       ),
       ...baseArguments,
     ];
