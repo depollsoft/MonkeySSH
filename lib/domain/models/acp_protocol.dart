@@ -83,6 +83,9 @@ final class AcpClientCapabilities implements AcpExtensible {
     this.fileSystem,
     this.terminal = false,
     this.booleanConfigOptions = true,
+    this.terminalAuth = false,
+    this.elicitationForm = false,
+    this.elicitationUrl = false,
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
@@ -95,6 +98,16 @@ final class AcpClientCapabilities implements AcpExtensible {
 
   /// Whether boolean session configuration options are supported.
   final bool booleanConfigOptions;
+
+  /// Whether `terminal` authentication methods can be run interactively
+  /// (`clientCapabilities.auth.terminal`).
+  final bool terminalAuth;
+
+  /// Whether form-mode `elicitation/create` requests are supported.
+  final bool elicitationForm;
+
+  /// Whether URL-mode `elicitation/create` requests are supported.
+  final bool elicitationUrl;
 
   @override
   final AcpJsonMap meta;
@@ -111,6 +124,14 @@ final class AcpClientCapabilities implements AcpExtensible {
         'configOptions': <String, Object?>{
           'boolean': const <String, Object?>{},
         },
+      },
+    if (terminalAuth) 'auth': const <String, Object?>{'terminal': true},
+    // Each elicitation mode is advertised only by an explicit object; an empty
+    // `elicitation` object would advertise no modes at all.
+    if (elicitationForm || elicitationUrl)
+      'elicitation': <String, Object?>{
+        if (elicitationForm) 'form': const <String, Object?>{},
+        if (elicitationUrl) 'url': const <String, Object?>{},
       },
     if (meta.isNotEmpty) '_meta': meta,
     ...extensions,
@@ -349,26 +370,49 @@ final class AcpAuthMethod implements AcpExtensible {
   const AcpAuthMethod({
     required this.id,
     required this.name,
-    this.type = 'agent',
+    this.type = agentType,
     this.description,
+    this.args = const <String>[],
+    this.env = const <String, String>{},
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
 
   /// Parses an authentication method.
-  factory AcpAuthMethod.fromJson(AcpJsonMap json) => AcpAuthMethod(
-    id: AcpJson.identifier(json, 'id') ?? '',
-    name: AcpJson.string(json, 'name') ?? '',
-    type: AcpJson.string(json, 'type') ?? 'agent',
-    description: AcpJson.string(json, 'description'),
-    meta: AcpJson.meta(json),
-    extensions: AcpJson.extensions(json, const [
-      'id',
-      'name',
-      'type',
-      'description',
-    ]),
-  );
+  factory AcpAuthMethod.fromJson(AcpJsonMap json) {
+    final type = AcpJson.string(json, 'type') ?? agentType;
+    final rawEnv = AcpJson.object(json['env']);
+    return AcpAuthMethod(
+      id: AcpJson.identifier(json, 'id') ?? '',
+      name: AcpJson.string(json, 'name') ?? '',
+      type: type,
+      description: AcpJson.string(json, 'description'),
+      args: type == terminalType
+          ? AcpJson.strings(json['args'])
+          : const <String>[],
+      env: type == terminalType && rawEnv != null
+          ? Map<String, String>.unmodifiable(<String, String>{
+              for (final entry in rawEnv.entries)
+                if (entry.value is String) entry.key: entry.value! as String,
+            })
+          : const <String, String>{},
+      meta: AcpJson.meta(json),
+      extensions: AcpJson.extensions(json, const [
+        'id',
+        'name',
+        'type',
+        'description',
+        'args',
+        'env',
+      ]),
+    );
+  }
+
+  /// Default method type: the agent runs the login flow after `authenticate`.
+  static const agentType = 'agent';
+
+  /// The client reruns the agent program interactively with [args] and [env].
+  static const terminalType = 'terminal';
 
   /// Stable authentication method identifier.
   final String id;
@@ -381,6 +425,18 @@ final class AcpAuthMethod implements AcpExtensible {
 
   /// Optional method description.
   final String? description;
+
+  /// Arguments appended to the agent launch command for a terminal method.
+  final List<String> args;
+
+  /// Environment overrides applied for a terminal method.
+  final Map<String, String> env;
+
+  /// Whether the client completes this method by calling `authenticate`.
+  bool get isAgent => type == agentType;
+
+  /// Whether the client completes this method in an interactive terminal.
+  bool get isTerminal => type == terminalType;
 
   @override
   final AcpJsonMap meta;

@@ -114,6 +114,19 @@ final class AcpClient {
     );
   }
 
+  /// Ends the agent's authenticated state when `auth.logout` is advertised.
+  Future<void> logout({Duration? timeout}) async {
+    _requireCapability(
+      'logout',
+      _initialization?.agentCapabilities.auth.logout ?? false,
+    );
+    await connection.request(
+      'logout',
+      params: const <String, Object?>{},
+      timeout: timeout,
+    );
+  }
+
   /// Creates a new ACP session.
   Future<AcpSessionSetupResult> newSession({
     required String cwd,
