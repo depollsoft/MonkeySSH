@@ -1081,6 +1081,192 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final delay in [
+      const Duration(milliseconds: 500),
+      const Duration(seconds: 5),
+    ]) {
+      test(
+        '${platform.name} shell completion filters delayed commit-first Return after $delay',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          await driver.flush(delay);
+          driver.updateEditingValue(_editingValue('pi\n', selectionOffset: 3));
+          await driver.flush();
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            _terminalKeyOutput(TerminalKey.enter),
+          );
+          await driver.flush(hardwareEnterStaleEditWindow);
+          driver.updateEditingValue(_editingValue('pi\n', selectionOffset: 3));
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            '${_terminalKeyOutput(TerminalKey.enter)}pi${_terminalKeyOutput(TerminalKey.enter)}',
+          );
+        },
+      );
+    }
+
+    for (final composingReplay in [false, true]) {
+      test(
+        '${platform.name} shell completion retains the guard across repeated taps, composing=$composingReplay',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          if (composingReplay) {
+            driver.updateEditingValue(
+              _editingValue(
+                'pip',
+                selectionOffset: 3,
+                composing: const TextRange(start: 0, end: 3),
+              ),
+            );
+            await driver.flush();
+          }
+          await driver.flush(const Duration(milliseconds: 100));
+          driver.engine.resetAfterShellCompletion();
+          if (composingReplay) {
+            await driver.flush(const Duration(milliseconds: 500));
+          }
+          final replay = composingReplay ? 'pip' : 'pi';
+          driver.updateEditingValue(
+            _editingValue(replay, selectionOffset: replay.length),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput, isEmpty);
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            _terminalKeyOutput(TerminalKey.enter),
+          );
+        },
+      );
+    }
+
+    test(
+      '${platform.name} shell completion repeated tap does not restart the bare-prefix window',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialEditingValue: _editingValue('pi', selectionOffset: 2),
+        );
+        driver.engine.resetAfterShellCompletion();
+        harness.terminalOutput.clear();
+        await driver.flush(const Duration(milliseconds: 200));
+        driver.engine.resetAfterShellCompletion();
+        await driver.flush(const Duration(milliseconds: 75));
+        driver.updateEditingValue(_editingValue('pi', selectionOffset: 2));
+        await driver.flush();
+        expect(harness.terminalOutput.join(), 'pi');
+      },
+    );
+
+    for (final actionBetween in [false, true]) {
+      test(
+        '${platform.name} shell completion defers Return preview and deduplicates its commit, actionBetween=$actionBetween',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(
+            _editingValue(
+              'pi\n',
+              selectionOffset: 3,
+              composing: const TextRange(start: 0, end: 3),
+            ),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput, isEmpty);
+          if (actionBetween) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+            expect(
+              harness.terminalOutput.join(),
+              _terminalKeyOutput(TerminalKey.enter),
+            );
+          }
+          driver.updateEditingValue(_editingValue('pi\n', selectionOffset: 3));
+          await driver.flush();
+          if (!actionBetween) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          expect(
+            harness.terminalOutput.join(),
+            _terminalKeyOutput(TerminalKey.enter),
+          );
+        },
+      );
+    }
+
+    for (final secondTap in [false, true]) {
+      test(
+        '${platform.name} shell completion retains Return preview across a second tap or delayed native commit, secondTap=$secondTap',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(
+            _editingValue(
+              'pi\n',
+              selectionOffset: 3,
+              composing: const TextRange(start: 0, end: 3),
+            ),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput, isEmpty);
+          if (secondTap) {
+            driver.engine.resetAfterShellCompletion();
+          } else {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush(const Duration(milliseconds: 500));
+            expect(
+              harness.terminalOutput.join(),
+              _terminalKeyOutput(TerminalKey.enter),
+            );
+          }
+          driver.updateEditingValue(_editingValue('pi\n', selectionOffset: 3));
+          await driver.flush();
+          if (secondTap) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          expect(
+            harness.terminalOutput.join(),
+            _terminalKeyOutput(TerminalKey.enter),
+          );
+        },
+      );
+    }
+
     test(
       '${platform.name} shell completion retains composition active at the tap for a delayed commit',
       () async {

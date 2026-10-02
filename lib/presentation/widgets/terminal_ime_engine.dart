@@ -755,8 +755,10 @@ class TerminalImeEngine {
   ///
   /// Android and iOS can deliver queued composing updates after the reset.
   /// Bare matches are ambiguous, so only reject them briefly after the tap or
-  /// Return. An active or queued composition stays protected through its
-  /// commit, up to [shellCompletionComposingReplayWindow].
+  /// Return. Newline-bearing replays remain recognizable until fresh input
+  /// or submission, even after a pause before Return. An active or queued
+  /// composition stays protected through its commit, up to
+  /// [shellCompletionComposingReplayWindow].
   void resetAfterShellCompletion() {
     final composingTexts = <String>{
       _extractRawInputText(_currentEditingState.text),
@@ -765,7 +767,27 @@ class TerminalImeEngine {
     final obsoleteTexts = <String>{...composingTexts, _lastSentText}
       ..removeWhere((text) => text.isEmpty);
     final hadComposition = !_currentEditingState.composing.isCollapsed;
-    clearImeBufferForFreshInput(flushPlatformContext: true);
+    final submittedAt = _shellCompletionSubmittedAt;
+    final composingAt = _shellCompletionPendingComposingAt;
+    final preserveExistingGuard =
+        (obsoleteTexts.isEmpty ||
+            (_shellCompletionHasComposingEnterPreview &&
+                obsoleteTexts.every(_enterCommitNewlineSequences.contains))) &&
+        _shellCompletionObsoleteTexts.isNotEmpty &&
+        (submittedAt == null ||
+            now().difference(submittedAt) < hardwareEnterStaleEditWindow ||
+            (composingAt != null &&
+                now().difference(composingAt) <
+                    shellCompletionComposingReplayWindow));
+    clearImeBufferForFreshInput(
+      flushPlatformContext: true,
+      preserveShellCompletion: preserveExistingGuard,
+    );
+    if (preserveExistingGuard) {
+      // A second tap sees the field we already cleared, not a new prefix.
+      // Keep the original deadlines instead of restarting the protection.
+      return;
+    }
     _shellCompletionObsoleteTexts = obsoleteTexts;
     _shellCompletionResetAt = now();
     if (hadComposition && composingTexts.isNotEmpty) {
@@ -779,6 +801,7 @@ class TerminalImeEngine {
   DateTime? _shellCompletionResetAt;
   DateTime? _shellCompletionSubmittedAt;
   DateTime? _shellCompletionPendingComposingAt;
+  bool _shellCompletionHasComposingEnterPreview = false;
 
   void _clearShellCompletionPendingComposition() {
     _shellCompletionPendingComposingTexts = const {};
@@ -790,11 +813,13 @@ class TerminalImeEngine {
     _clearShellCompletionPendingComposition();
     _shellCompletionResetAt = null;
     _shellCompletionSubmittedAt = null;
+    _shellCompletionHasComposingEnterPreview = false;
   }
 
   void _recordShellCompletionEnter() {
     if (_shellCompletionObsoleteTexts.isNotEmpty) {
       _shellCompletionSubmittedAt ??= now();
+      _shellCompletionHasComposingEnterPreview = false;
     }
   }
 
@@ -825,7 +850,9 @@ class TerminalImeEngine {
     final resetAt = _shellCompletionSubmittedAt ?? _shellCompletionResetAt!;
     final withinStaleWindow =
         now().difference(resetAt) < hardwareEnterStaleEditWindow;
-    if (!withinStaleWindow && _shellCompletionPendingComposingTexts.isEmpty) {
+    final protectEnterReplay =
+        _shellCompletionSubmittedAt == null || withinStaleWindow;
+    if (!protectEnterReplay && _shellCompletionPendingComposingTexts.isEmpty) {
       _clearShellCompletionGuard();
       return value;
     }
@@ -839,7 +866,14 @@ class TerminalImeEngine {
       // The reset acknowledgment can precede an already queued commit.
       return value;
     }
-    final obsoleteTexts = withinStaleWindow
+    // A Return can arrive long after the completion tap. Keep the snapshot
+    // for that newline-bearing replay, but do not reject fresh bare text once
+    // the short window expires. A bare newline is Return, not fresh typing;
+    // retaining the guard also lets an action commit a normalized preview.
+    if (texts.any(_enterCommitNewlineSequences.contains)) {
+      return value;
+    }
+    final obsoleteTexts = protectEnterReplay
         ? _shellCompletionObsoleteTexts
         : _shellCompletionPendingComposingTexts;
     final isComposing = !value.composing.isCollapsed;
@@ -849,7 +883,10 @@ class TerminalImeEngine {
           continue;
         }
         final suffix = text.substring(obsolete.length);
-        if (suffix.isEmpty || suffix == ' ') {
+        final protectBareReplay =
+            withinStaleWindow ||
+            _shellCompletionPendingComposingTexts.contains(obsolete);
+        if ((suffix.isEmpty || suffix == ' ') && protectBareReplay) {
           return _discardShellCompletionComposition(
             texts,
             isComposing: isComposing,
@@ -859,8 +896,29 @@ class TerminalImeEngine {
             ? suffix.substring(1)
             : suffix;
         if (_enterCommitNewlineSequences.contains(enterSuffix)) {
-          _clearShellCompletionPendingComposition();
-          return _editingStateForUserText(userText: enterSuffix);
+          if (isComposing && _shellCompletionSubmittedAt == null) {
+            // Keep the native preview's exact commit even if its owning
+            // action sends Return before that commit arrives.
+            _shellCompletionPendingComposingTexts = {
+              ..._shellCompletionPendingComposingTexts,
+              ...texts,
+            };
+            _shellCompletionPendingComposingAt ??= now();
+          } else {
+            _clearShellCompletionPendingComposition();
+          }
+          if (_shellCompletionSubmittedAt != null) {
+            // The action or the committed preview already sent this Return.
+            _syncEditingStateWithUserText('');
+            return initEditingState;
+          }
+          _shellCompletionHasComposingEnterPreview = isComposing;
+          return _editingStateForUserText(
+            userText: enterSuffix,
+            userComposing: isComposing
+                ? TextRange(start: 0, end: enterSuffix.length)
+                : TextRange.empty,
+          );
         }
         if (withinStaleWindow && isComposing) {
           // This candidate extends the replaced word before the keyboard has
@@ -3518,7 +3576,8 @@ class TerminalImeEngine {
         _pendingComposingEnterStalePrefix = stalePrefix;
         _pendingComposingEnterRevision = pendingRevision;
         _pendingComposingEnterMayBeInText =
-            !hasUncommittedComposition && hasPendingEditingValue;
+            _shellCompletionHasComposingEnterPreview ||
+            (!hasUncommittedComposition && hasPendingEditingValue);
         if (hasUncommittedComposition) {
           _acceptNextPendingComposingEnterCommit = true;
           updateEditingValue(
