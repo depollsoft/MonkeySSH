@@ -24,12 +24,34 @@ func TestAttachCLI(t *testing.T) {
 		attachCommand([]string{"--quiet", "--existing", "--width", "120", "--height", "40", "audit"})
 		os.Exit(0)
 	}
-	for _, failingOutput := range []bool{false, true} {
-		name := "explicit_size_without_pty"
-		if failingOutput {
-			name = "restore_terminal_after_output_error"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		failingOutput bool
+		output        string
+		wantStdout    string
+	}{
+		{
+			name:       "explicit_size_without_pty",
+			output:     "attached output",
+			wantStdout: "attached output",
+		},
+		{
+			name:          "restore_terminal_after_output_error",
+			failingOutput: true,
+			output:        "attached output",
+		},
+		{
+			// An agent pane switched on the kitty keyboard protocol, mouse
+			// reporting, and a hidden cursor; ending the attach must hand the
+			// shell back a terminal that sends plain keys again.
+			name:   "reset_input_modes_after_detach",
+			output: "\x1b[>5u\x1b[?1000h\x1b[?1006h\x1b[?25lagent",
+			wantStdout: "\x1b[>5u\x1b[?1000h\x1b[?1006h\x1b[?25lagent" +
+				"\x1b[<99u\x1b[=0;1u\x1b[?1000l\x1b[?1006l\x1b[?25h",
+		},
+	} {
+		failingOutput := test.failingOutput
+		t.Run(test.name, func(t *testing.T) {
 			dir := shortUnixSocketDir(t)
 			t.Setenv("XDG_RUNTIME_DIR", dir)
 			path, err := socketPath("audit")
@@ -62,7 +84,7 @@ func TestAttachCLI(t *testing.T) {
 						}
 						messages <- hello
 						if hello.Role == "attach" {
-							_, _ = io.WriteString(conn, "attached output")
+							_, _ = io.WriteString(conn, test.output)
 							return
 						}
 						enc := json.NewEncoder(conn)
@@ -118,7 +140,7 @@ func TestAttachCLI(t *testing.T) {
 				if !reflect.DeepEqual(before, after) {
 					t.Fatal("attach left terminal in raw mode")
 				}
-			} else if err != nil || stdout.String() != "attached output" {
+			} else if err != nil || stdout.String() != test.wantStdout {
 				t.Fatalf("attach = %v, stdout = %q, stderr = %q", err, stdout.String(), stderr.String())
 			}
 			close(messages)

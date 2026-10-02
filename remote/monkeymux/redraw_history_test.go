@@ -643,7 +643,7 @@ func TestPlaceholderImageFollowUpKeepsReplayBudget(t *testing.T) {
 	server.mu.Lock()
 	// The pre-change foreground-redraw replay: the recency-selected images and
 	// nothing else.
-	want := buildWindowReplay(window, window.kittyImageReplayLocked(nil))
+	want := buildWindowReplay(window, window.kittyImageReplayLocked(nil), false)
 	replay, followUp := server.replayBytesWithImageFollowUpLocked(window, nil)
 	active := server.activeReplayLocked()
 	server.mu.Unlock()

@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.218"
+	monkeyMuxVersion                  = "0.1.219"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -697,6 +697,9 @@ type muxServer struct {
 	pendingResizeWidth               int
 	pendingResizeHeight              int
 	pendingResizeRedraw              bool
+	// keyboardModesUsed records that a window switched the terminal's
+	// keyboard encoding, so replays restore each window's own encoding.
+	keyboardModesUsed bool
 	// pendingResizeSyntheticRedraw preserves, across a viewport-transition
 	// deferral, whether a deferred forced redraw needs the synthetic one-cell
 	// resize dance (e.g. a theme change, whose SIGWINCH at an unchanged size
@@ -814,6 +817,11 @@ type muxWindow struct {
 	lastBroadcast              time.Time
 	cursorVisible              bool
 	cursorVisibilityKnown      bool
+	// kittyKeyboard holds the kitty keyboard state of the main [0] and
+	// alternate [1] screens, which the protocol keeps independent.
+	kittyKeyboard     [2]kittyKeyboardModes
+	modifyOtherKeys   int
+	keyboardModesUsed bool
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -1058,6 +1066,10 @@ type attachClient struct {
 	replayMu                              sync.Mutex
 	replayedWindowID                      string
 	replayedOutputGeneration              uint64
+
+	// consumedKeyReleases holds keys whose kitty press MonkeyMux consumed as a
+	// prefix or command, so their release reports are not sent to the window.
+	consumedKeyReleases []rune
 
 	queue       []attachWrite
 	queueReady  chan struct{}
@@ -1377,13 +1389,17 @@ func attachCommand(args []string) {
 		_, _ = io.Copy(conn, os.Stdin)
 	}()
 
-	attachOut := attachOutputWriter(os.Stdout)
+	modes := newAttachModeTracker(os.Stdout)
+	attachOut := attachOutputWriter(modes)
 	_, copyErr := io.Copy(attachOut, conn)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
 	// buffers, e.g. the Windows win32-input-mode request stripper).
 	if flusher, ok := attachOut.(interface{ Flush() error }); ok {
 		_ = flusher.Flush()
+	}
+	if reset := modes.resetSequence(); len(reset) > 0 {
+		_, _ = os.Stdout.Write(reset)
 	}
 	restoreTerminal()
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
@@ -6722,6 +6738,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	// same chunk as a colour query is already reflected when the query is
 	// answered below (and when the answer is encoded in writeWindow).
 	window.observeTerminalModesLocked(chunk)
+	if window.keyboardModesUsed {
+		s.keyboardModesUsed = true
+	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
@@ -10762,7 +10781,7 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 		replayHistory := append(images, history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
-				buildWindowReplay(window, replayHistory),
+				buildWindowReplay(window, replayHistory, s.keyboardModesUsed),
 			),
 			// The raw history tail is bounded, so a transmission it once
 			// carried can have been evicted while its placeholder cells
@@ -10785,7 +10804,7 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 		// survive eviction from the rolling visible history and are store-only
 		// (a=T downgraded to a=t) so they produce no visible output themselves.
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
-		return buildWindowReplay(window, images),
+		return buildWindowReplay(window, images, s.keyboardModesUsed),
 			window.kittyPlaceholderImageFollowUpLocked(
 				replayed,
 				nil,
@@ -10800,7 +10819,7 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 	// transmission whose placeholder cells are still inside the tail. Ids the
 	// tail still transmits are excluded, so this is a no-op for the ordinary
 	// shell window that replays its images intact.
-	return buildWindowReplay(window, history),
+	return buildWindowReplay(window, history, s.keyboardModesUsed),
 		window.kittyPlaceholderImageFollowUpLocked(
 			nil,
 			history,
@@ -10883,10 +10902,20 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	replayHistory := make([]byte, 0, len(images)+len(history))
 	replayHistory = append(replayHistory, images...)
 	replayHistory = append(replayHistory, history...)
-	return buildWindowReplay(window, replayHistory)
+	return buildWindowReplay(window, replayHistory, s.keyboardModesUsed)
 }
 
-func buildWindowReplay(window *muxWindow, history []byte) []byte {
+func buildWindowReplay(
+	window *muxWindow,
+	history []byte,
+	restoreKeyboardModes bool,
+) []byte {
+	// The replay prefix leaves the terminal on the main screen, where the
+	// keyboard restore has to start.
+	var keyboardModes []byte
+	if restoreKeyboardModes {
+		keyboardModes = window.keyboardModeReplayLocked()
+	}
 	title := terminalTitleReplaySequence(window)
 	preModes := terminalModePreReplaySequence(window)
 	preHistoryClear := terminalPreHistoryClearSequence(window)
@@ -10897,11 +10926,12 @@ func buildWindowReplay(window *muxWindow, history []byte) []byte {
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(title)+len(preModes)+
+		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(preModes)+
 			len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
 	replay = append(replay, activeWindowReplayPrefix...)
+	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
 	replay = append(replay, preModes...)
 	replay = append(replay, preHistoryClear...)
@@ -11790,11 +11820,31 @@ func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
 		s.writeActiveFromAttach(pending)
 		pending = pending[:0]
 	}
-	for _, value := range data {
+	for len(data) > 0 {
+		key := data[:1]
+		value, valueOK := data[0], true
+		event, length, isEvent := parseAttachKeyEvent(data)
+		if isEvent {
+			key = data[:length]
+		}
+		data = data[len(key):]
+		if isEvent {
+			if event.release && client.takeConsumedKeyRelease(event.code) {
+				continue
+			}
+			// Releases and bare modifier keys belong to the window and must not
+			// stand in for the key a pending prefix or close prompt waits for.
+			if event.release || event.isModifierOrLockKey() {
+				pending = append(pending, key...)
+				continue
+			}
+			value, valueOK = event.legacyByte()
+		}
 		if client.confirmCloseID != "" {
 			windowID := client.confirmCloseID
 			client.confirmCloseID = ""
-			if value == 'y' || value == 'Y' {
+			client.noteConsumedKey(event, isEvent)
+			if valueOK && (value == 'y' || value == 'Y') {
 				shouldShutdown, err := s.closeWindow(windowID)
 				if err != nil {
 					s.ringAttachBell(client)
@@ -11809,31 +11859,70 @@ func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
 		}
 		if client.prefixPending {
 			client.prefixPending = false
+			// Ctrl-B Ctrl-B passes the key press on, so its release follows it.
+			if !valueOK || value != 0x02 {
+				client.noteConsumedKey(event, isEvent)
+			}
 			flush()
-			if s.handleAttachPrefixCommand(client, value) {
+			if !valueOK {
+				s.ringAttachBell(client)
+				continue
+			}
+			if s.handleAttachPrefixCommand(client, value, key) {
 				return true
 			}
 			continue
 		}
-		if value == 0x02 {
+		if valueOK && value == 0x02 {
 			flush()
 			client.prefixPending = true
+			client.noteConsumedKey(event, isEvent)
 			continue
 		}
-		pending = append(pending, value)
+		pending = append(pending, key...)
 	}
 	flush()
 	return false
 }
 
+// noteConsumedKey remembers a consumed kitty key press so its release report,
+// sent only when the window enabled kitty event types, is dropped as well.
+func (c *attachClient) noteConsumedKey(event attachKeyEvent, isEvent bool) {
+	if !isEvent {
+		return
+	}
+	const limit = 8
+	if len(c.consumedKeyReleases) == limit {
+		c.consumedKeyReleases = c.consumedKeyReleases[1:]
+	}
+	c.consumedKeyReleases = append(c.consumedKeyReleases, event.code)
+}
+
+func (c *attachClient) takeConsumedKeyRelease(code rune) bool {
+	for i, consumed := range c.consumedKeyReleases {
+		if consumed == code {
+			c.consumedKeyReleases = append(
+				c.consumedKeyReleases[:i],
+				c.consumedKeyReleases[i+1:]...,
+			)
+			return true
+		}
+	}
+	return false
+}
+
+// handleAttachPrefixCommand runs the command for the key after the prefix.
+// literal is that key as the terminal encoded it, which Ctrl-B Ctrl-B sends on
+// to the window unchanged.
 func (s *muxServer) handleAttachPrefixCommand(
 	client *attachClient,
 	command byte,
+	literal []byte,
 ) bool {
 	var err error
 	switch command {
 	case 0x02:
-		s.writeActiveFromAttach([]byte{0x02})
+		s.writeActiveFromAttach(literal)
 	case 'c':
 		err = s.createWindowFromActiveDirectory()
 	case 'n':
@@ -13359,7 +13448,8 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			continue
 		}
 		shouldStrip := isQuery ||
-			isReplayUnsafeOscNotificationSequence(data[i:sequenceEnd])
+			isReplayUnsafeOscNotificationSequence(data[i:sequenceEnd]) ||
+			isKeyboardModeSequence(data[i:sequenceEnd])
 		if !shouldStrip {
 			i = sequenceEnd
 			continue
@@ -16164,6 +16254,11 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		switch data[escapeIndex+1] {
 		case '[':
+		case 'c':
+			// RIS resets the terminal, keyboard encoding included.
+			w.resetKeyboardModesLocked()
+			data = data[escapeIndex+2:]
+			continue
 		case '=':
 			w.applicationKeypadEnabled = true
 			w.applicationKeypadKnown = true
@@ -16185,6 +16280,12 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 			return
 		}
 		final := data[end]
+		switch final {
+		case 'u':
+			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
+		case 'm':
+			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+		}
 		if final == 'h' || final == 'l' {
 			params := string(data[escapeIndex+2 : end])
 			enabled := final == 'h'
