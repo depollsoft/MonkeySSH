@@ -299,7 +299,14 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
             : TextCapitalization.none,
         textInputAction: TextInputAction.next,
         style: format == null ? null : FluttyTheme.monoStyle,
-        inputFormatters: [LengthLimitingTextInputFormatter(field.inputLimit)],
+        inputFormatters: [
+          // A zero limit (`maxLength: 0`) only allows an empty answer, and
+          // the length formatter rejects zero.
+          if (field.inputLimit > 0)
+            LengthLimitingTextInputFormatter(field.inputLimit)
+          else
+            FilteringTextInputFormatter.deny(RegExp(r'[\s\S]')),
+        ],
         decoration: InputDecoration(
           hintText: switch (format) {
             AcpElicitationStringFormat.email => 'name@example.com',
@@ -327,6 +334,8 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
   }
 
   Future<void> _pickDate(TextEditingController controller) async {
+    final firstDate = DateTime(1900);
+    final lastDate = DateTime(2200);
     final current = isValidAcpElicitationDate(controller.text)
         ? DateTime.parse(controller.text)
         : DateTime.now();
@@ -334,9 +343,15 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
       context: context,
       // Same navigator as the sheet, so a withdrawn request closes both.
       useRootNavigator: false,
-      initialDate: current,
-      firstDate: DateTime(1900),
-      lastDate: DateTime(2200),
+      // A typed or default date may fall outside the calendar's range; open
+      // at the nearest end without changing the entered text.
+      initialDate: current.isBefore(firstDate)
+          ? firstDate
+          : current.isAfter(lastDate)
+          ? lastDate
+          : current,
+      firstDate: firstDate,
+      lastDate: lastDate,
     );
     if (picked == null || !mounted) return;
     String two(int value) => value.toString().padLeft(2, '0');

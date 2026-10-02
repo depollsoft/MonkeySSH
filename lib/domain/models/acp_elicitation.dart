@@ -497,19 +497,27 @@ sealed class AcpElicitationField {
         );
       case 'number' || 'integer':
         final integer = type == 'integer';
-        num? bound(Object? value) =>
-            value is num && value.isFinite && (!integer || value is int)
-            ? value
-            : null;
+        num? finite(Object? value) =>
+            value is num && value.isFinite ? value : null;
+        final minimum = finite(json['minimum']);
+        final maximum = finite(json['maximum']);
+        final defaultValue = finite(json['default']);
         return AcpNumberElicitationField(
           name: name,
           isRequired: isRequired,
           title: title,
           description: description,
           integer: integer,
-          minimum: bound(json['minimum']),
-          maximum: bound(json['maximum']),
-          defaultValue: bound(json['default']),
+          // An integer field's bounds may be any number, such as 1.5 or a
+          // serialized 1.0. Only whole numbers between them can be answered,
+          // so round them inward.
+          minimum: integer ? minimum?.ceil() : minimum,
+          maximum: integer ? maximum?.floor() : maximum,
+          defaultValue: integer
+              ? (defaultValue != null && defaultValue == defaultValue.truncate()
+                    ? defaultValue.toInt()
+                    : null)
+              : defaultValue,
         );
       case 'boolean':
         final defaultValue = json['default'];

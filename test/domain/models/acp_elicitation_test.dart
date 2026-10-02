@@ -395,6 +395,21 @@ void main() {
       expect(integer.parse('2'), 2);
       expect(integer.parse('2.0'), isNull);
 
+      // Integer bounds and defaults may be serialized as any number.
+      final fractional = field({
+        'type': 'integer',
+        'minimum': 1.5,
+        'maximum': 4.0,
+        'default': 2.0,
+      }) as AcpNumberElicitationField;
+      expect(fractional.minimum, 2);
+      expect(fractional.maximum, 4);
+      expect(fractional.defaultValue, 2);
+      expect(fractional.defaultValue, isA<int>());
+      expect(fractional.validate(1), isNotNull);
+      expect(fractional.validate(5), isNotNull);
+      expect(fractional.validate(4), isNull);
+
       final number = field({'type': 'number'}) as AcpNumberElicitationField;
       expect(number.parse('2.5'), 2.5);
       expect(number.parse('NaN'), isNull);

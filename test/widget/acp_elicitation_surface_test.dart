@@ -284,6 +284,56 @@ void main() {
     expect(calls.log, isEmpty);
   });
 
+  testWidgets('edge-case schemas open without breaking field preconditions', (
+    tester,
+  ) async {
+    final calls = _Calls();
+    final edgy = _item('s:edgy', {
+      'sessionId': 's',
+      'mode': 'form',
+      'message': 'Edge cases',
+      'requestedSchema': {
+        'type': 'object',
+        'properties': {
+          'day': {
+            'type': 'string',
+            'title': 'Day',
+            'format': 'date',
+            'default': '1800-01-01',
+          },
+          'blank': {'type': 'string', 'title': 'Blank', 'maxLength': 0},
+        },
+      },
+    });
+    await tester.pumpWidget(_host(calls, items: [edgy]));
+    await tester.tap(find.text('Respond'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // A field limited to zero characters accepts no input.
+    final blank = find.byType(TextFormField).last;
+    await tester.ensureVisible(blank);
+    await tester.enterText(blank, 'x');
+    await tester.pump();
+    expect(tester.widget<TextFormField>(blank).controller!.text, isEmpty);
+
+    // A default before the calendar's range opens at its first date and
+    // leaves the entered value alone.
+    await tester.tap(find.byTooltip('Pick a date'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byType(DatePickerDialog), findsOneWidget);
+    expect(
+      tester
+          .widget<DatePickerDialog>(find.byType(DatePickerDialog))
+          .initialDate,
+      DateTime(1900),
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('1800-01-01'), findsOneWidget);
+  });
+
   testWidgets('an awaiting URL can be reopened or dismissed', (tester) async {
     final calls = _Calls();
     await tester.pumpWidget(
