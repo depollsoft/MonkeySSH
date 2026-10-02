@@ -199,6 +199,51 @@ void main() {
     lease.release();
   });
 
+  test('refuses clips when their directory cannot be made private', () async {
+    var allowPrivate = false;
+    final restricted = <String>[];
+    final diagnostics = RecordingDiagnosticsLogger();
+    final subject = AcpAudioClipCache(
+      baseDirectory: () async => base,
+      restrictToOwner: (directory) async {
+        restricted.add(directory.path);
+        if (!allowPrivate) throw const FileSystemException('chmod failed');
+      },
+      diagnostics: diagnostics,
+    );
+    Future<AcpAudioClipLease> acquire() => subject.acquire(
+      data: base64.encode(utf8.encode('clip')),
+      mimeType: 'audio/mpeg',
+    );
+
+    await expectLater(acquire(), throwsA(isA<AcpAudioClipException>()));
+    // Nothing is left behind where other users might read it.
+    expect(cacheDirectories(), isEmpty);
+    expect(
+      diagnostics.events.map((event) => event.message),
+      contains('private_directory_failed'),
+    );
+
+    // The next clip tries again.
+    allowPrivate = true;
+    final lease = await acquire();
+    expect(lease.file.parent.path, restricted.last);
+    lease.release();
+  });
+
+  test('restricting a directory leaves it owner-only', () async {
+    final directory = await base.createTemp('open-');
+    await Process.run('chmod', ['755', directory.path]);
+    expect(directory.statSync().mode & 0x3f, isNot(0));
+
+    await acpRestrictDirectoryToOwner(directory);
+    expect(directory.statSync().mode & 0x1ff, 0x1c0);
+    await expectLater(
+      acpRestrictDirectoryToOwner(Directory('${base.path}/missing')),
+      throwsA(isA<FileSystemException>()),
+    );
+  }, skip: Platform.isWindows ? 'POSIX permissions only' : false);
+
   group('base directory', () {
     final temporary = Directory('/tmp');
     final appCache = Directory('/home/me/.cache/app');
