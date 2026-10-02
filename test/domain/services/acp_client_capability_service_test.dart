@@ -915,6 +915,56 @@ void main() {
       },
     );
 
+    test(
+      'publishes terminal output for display and keeps it after release',
+      () async {
+        transport.sendRequest('create-display', 'terminal/create', {
+          'sessionId': 'session-1',
+          'command': 'npm',
+          'args': ['run', 'test suite'],
+        });
+        await _settle();
+        final terminalId =
+            (transport.responseFor('create-display')['result']!
+                    as Map)['terminalId']
+                as String;
+        final display = service.terminalDisplay('session-1', terminalId);
+        expect(display.value?.command, "npm run 'test suite'");
+        expect(display.value?.output, isEmpty);
+
+        final process = terminals.processes.single
+          ..addOutput(utf8.encode('ok 1\n'), utf8.encode('warn\n'));
+        // Output is batched briefly rather than published per chunk.
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(display.value?.output, 'ok 1\nwarn\n');
+        expect(display.value?.exited, isFalse);
+
+        process.exit(const AcpTerminalExitStatus(exitCode: 3));
+        await _settle();
+        expect(display.value?.exited, isTrue);
+        expect(display.value?.exitCode, 3);
+
+        transport.sendRequest('release-display', 'terminal/release', {
+          'sessionId': 'session-1',
+          'terminalId': terminalId,
+        });
+        await _settle();
+        expect(
+          transport.responseFor('release-display'),
+          isNot(contains('error')),
+        );
+        expect(display.value?.released, isTrue);
+        expect(display.value?.output, 'ok 1\nwarn\n');
+        expect(
+          identical(service.terminalDisplay('session-1', terminalId), display),
+          isTrue,
+        );
+        // Another session never sees this terminal's output.
+        expect(service.terminalDisplay('session-2', terminalId).value, isNull);
+        expect(service.terminalDisplay('session-1', 'unknown').value, isNull);
+      },
+    );
+
     group('session teardown admission', () {
       void sendRequests(String prefix, String sessionId) {
         transport

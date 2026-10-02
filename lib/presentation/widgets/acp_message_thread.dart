@@ -10,6 +10,7 @@ import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
 import 'acp_markdown_data_images.dart';
 import 'acp_plan.dart';
+import 'acp_resource_chip.dart';
 import 'acp_status_entry.dart';
 import 'acp_thought.dart';
 import 'acp_thread_projection.dart';
@@ -709,9 +710,13 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       case AcpPlanEntry():
         return AcpPlanView(plan: entry.plan);
       case AcpToolCallEntry():
-        final tool = AcpToolCallView(
-          toolCall: entry.toolCall,
-          onOpenLocation: widget.onOpenLocation,
+        final tool = AcpResourceActions(
+          onOpen: widget.onOpenResource,
+          onCopy: widget.onCopyResource,
+          child: AcpToolCallView(
+            toolCall: entry.toolCall,
+            onOpenLocation: widget.onOpenLocation,
+          ),
         );
         return entry.isSubagent ? _SubagentLaunchSurface(child: tool) : tool;
       case AcpSubagentTranscriptEntry():

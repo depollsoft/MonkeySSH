@@ -354,6 +354,7 @@ class AcpResourceRef extends Equatable {
     this.name,
     this.mimeType,
     this.sizeBytes,
+    this.text,
   });
 
   /// The resource URI or path.
@@ -368,6 +369,10 @@ class AcpResourceRef extends Equatable {
   /// The size in bytes, if known.
   final int? sizeBytes;
 
+  /// Bounded text the agent embedded for this resource, when it sent the
+  /// contents inline instead of a link. Viewable without opening [uri].
+  final String? text;
+
   /// The name to display for this resource.
   String get displayName {
     final explicit = name;
@@ -381,7 +386,7 @@ class AcpResourceRef extends Equatable {
   }
 
   @override
-  List<Object?> get props => [uri, name, mimeType, sizeBytes];
+  List<Object?> get props => [uri, name, mimeType, sizeBytes, text];
 }
 
 /// Lifecycle status of an ACP tool call.
@@ -427,6 +432,9 @@ enum AcpToolKind {
 
   /// Reasons or thinks.
   think,
+
+  /// Switches the session mode.
+  switchMode,
 
   /// Any other or unknown tool.
   other,
@@ -489,12 +497,17 @@ class AcpToolCall extends Equatable {
     this.rawInput,
     this.rawOutput,
     this.rawOutputIsStructured = false,
+    this.name,
     List<AcpToolLocation> locations = const [],
     List<AcpDiff> diffs = const [],
     List<AcpImageContent> images = const [],
+    List<AcpResourceRef> resources = const [],
+    List<String> terminalIds = const [],
   }) : locations = List.unmodifiable(locations),
        diffs = List.unmodifiable(diffs),
-       images = List.unmodifiable(images);
+       images = List.unmodifiable(images),
+       resources = List.unmodifiable(resources),
+       terminalIds = List.unmodifiable(terminalIds);
 
   /// The tool-call identifier used to merge updates.
   final String id;
@@ -517,6 +530,9 @@ class AcpToolCall extends Equatable {
   /// Whether [rawOutput] is structured YAML-like data rather than Markdown.
   final bool rawOutputIsStructured;
 
+  /// Machine-readable tool name, such as `Bash`, when the agent sends one.
+  final String? name;
+
   /// File locations touched by the tool call.
   final List<AcpToolLocation> locations;
 
@@ -525,6 +541,12 @@ class AcpToolCall extends Equatable {
 
   /// Images produced by the tool call.
   final List<AcpImageContent> images;
+
+  /// Resources (links or embedded contents) produced by the tool call.
+  final List<AcpResourceRef> resources;
+
+  /// Client-run terminals whose live output this tool call embeds.
+  final List<String> terminalIds;
 
   @override
   List<Object?> get props => [
@@ -535,9 +557,12 @@ class AcpToolCall extends Equatable {
     rawInput,
     rawOutput,
     rawOutputIsStructured,
+    name,
     locations,
     diffs,
     images,
+    resources,
+    terminalIds,
   ];
 }
 

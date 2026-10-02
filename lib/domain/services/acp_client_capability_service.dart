@@ -6,10 +6,12 @@ import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/acp_client_capabilities.dart';
 import '../models/acp_json.dart';
 import '../models/acp_protocol.dart';
+import '../models/acp_terminal_display.dart';
 import '../models/acp_updates.dart';
 import 'acp_client.dart';
 import 'acp_json_rpc_connection.dart';
@@ -476,6 +478,9 @@ final class AcpClientCapabilityService {
 
   final DiagnosticsLogger _diagnostics;
   final _terminals = <String, _ManagedAcpTerminal>{};
+  // Insertion-ordered so the least recently requested display is evicted
+  // first. Displays outlive `terminal/release`: the chat keeps showing output.
+  final _terminalDisplays = <String, ValueNotifier<AcpTerminalDisplay?>>{};
   var _terminalReservations = 0;
   // Routing outlives the stream callback. Permanent teardown invalidates these
   // continuations before awaiting cleanup; soft detach deliberately keeps them.
@@ -500,6 +505,43 @@ final class AcpClientCapabilityService {
           ),
     terminal: terminalExecutor != null,
   );
+
+  /// Most terminal displays retained, including released terminals.
+  static const maxRetainedTerminalDisplays = 64;
+
+  /// Live display of terminal [terminalId] in [sessionId], for tool calls
+  /// that embed it.
+  ///
+  /// Returns a listenable whose value stays `null` until this client runs a
+  /// matching terminal, so a tool call may subscribe before `terminal/create`
+  /// completes. The value survives `terminal/release`.
+  ValueListenable<AcpTerminalDisplay?> terminalDisplay(
+    String sessionId,
+    String terminalId,
+  ) => _terminalDisplayNotifier(sessionId, terminalId);
+
+  ValueNotifier<AcpTerminalDisplay?> _terminalDisplayNotifier(
+    String sessionId,
+    String terminalId,
+  ) {
+    final key = '$sessionId\u0000$terminalId';
+    final notifier =
+        _terminalDisplays.remove(key) ??
+        ValueNotifier<AcpTerminalDisplay?>(null);
+    _terminalDisplays[key] = notifier;
+    if (_terminalDisplays.length > maxRetainedTerminalDisplays) {
+      final live = <ValueNotifier<AcpTerminalDisplay?>>{
+        for (final terminal in _terminals.values) terminal.display,
+      };
+      _terminalDisplays.entries
+          .where((entry) => !live.contains(entry.value))
+          .map((entry) => entry.key)
+          .take(_terminalDisplays.length - maxRetainedTerminalDisplays)
+          .toList(growable: false)
+          .forEach(_terminalDisplays.remove);
+    }
+    return notifier;
+  }
 
   /// Starts routing server requests from [client].
   ///
@@ -535,6 +577,7 @@ final class AcpClientCapabilityService {
       _terminals.values.map((terminal) => terminal.release()),
     );
     _terminals.clear();
+    _terminalDisplays.clear();
     _sessionAutoApprovePermissions.clear();
     await registry.close();
   }
@@ -562,6 +605,9 @@ final class AcpClientCapabilityService {
         _terminals.remove(entry.key);
       }
       await Future.wait<void>(owned.map((entry) => entry.value.release()));
+      _terminalDisplays.removeWhere(
+        (key, _) => key.startsWith('$sessionId\u0000'),
+      );
       await registry.cancelForSession(sessionId);
     } finally {
       final remaining = _closingSessions[sessionId]! - 1;
@@ -921,7 +967,18 @@ final class AcpClientCapabilityService {
       _ensureRequestActive(request);
     }
     final id = 'acp-terminal-${++_nextTerminalId}';
-    final terminal = _ManagedAcpTerminal(sessionId, process, outputLimit);
+    final display = _terminalDisplayNotifier(sessionId, id)
+      ..value = AcpTerminalDisplay(
+        terminalId: id,
+        command: _displayCommandLine(command, arguments),
+        output: '',
+      );
+    final terminal = _ManagedAcpTerminal(
+      sessionId,
+      process,
+      outputLimit,
+      display: display,
+    );
     _terminals[id] = terminal;
     terminal
       ..start(
@@ -1124,11 +1181,23 @@ final class _SshAcpTerminalProcess implements AcpTerminalProcess {
 }
 
 final class _ManagedAcpTerminal {
-  _ManagedAcpTerminal(this.sessionId, this._process, this._limit);
+  _ManagedAcpTerminal(
+    this.sessionId,
+    this._process,
+    this._limit, {
+    required this.display,
+  });
+
+  /// How often streamed output refreshes the chat's terminal display.
+  static const _displayInterval = Duration(milliseconds: 150);
 
   final String sessionId;
   final AcpTerminalProcess _process;
   final int _limit;
+
+  /// Display snapshot shown in tool calls that embed this terminal.
+  final ValueNotifier<AcpTerminalDisplay?> display;
+  Timer? _displayTimer;
   final Queue<Uint8List> _outputChunks = Queue<Uint8List>();
   late final StreamSubscription<List<int>> _stdoutSubscription;
   late final StreamSubscription<List<int>> _stderrSubscription;
@@ -1156,6 +1225,7 @@ final class _ManagedAcpTerminal {
         _exitStatus = const AcpTerminalExitStatus();
         if (!_exit!.isCompleted) _exit!.complete(_exitStatus);
       } finally {
+        _publishDisplay();
         onExit();
       }
     }());
@@ -1166,6 +1236,7 @@ final class _ManagedAcpTerminal {
     final chunk = Uint8List.fromList(bytes);
     _outputChunks.addLast(chunk);
     _outputLength += chunk.length;
+    _displayTimer ??= Timer(_displayInterval, _publishDisplay);
     if (_outputLength <= _limit) return;
 
     _truncated = true;
@@ -1193,15 +1264,40 @@ final class _ManagedAcpTerminal {
 
   AcpJsonMap _exitStatusJson() => _exitStatus!.toJson();
 
-  String _outputText() {
+  void _publishDisplay() {
+    _displayTimer?.cancel();
+    _displayTimer = null;
+    final current = display.value;
+    if (current == null) return;
+    final exitStatus = _exitStatus;
+    final tailBytes = min(_outputLength, kAcpTerminalDisplayMaxCharacters);
+    display.value = current.copyWith(
+      output: _outputText(maxBytes: tailBytes),
+      truncated: _truncated || tailBytes < _outputLength,
+      exited: exitStatus != null,
+      exitCode: exitStatus?.exitCode,
+      signal: exitStatus?.signal,
+      released: _released,
+    );
+  }
+
+  /// Decodes the retained output, or only its last [maxBytes] when given.
+  String _outputText({int? maxBytes}) {
     if (_outputLength == 0) return '';
+    var skip = maxBytes == null ? 0 : max(0, _outputLength - maxBytes);
     final bytes = BytesBuilder(copy: false);
     var isFirst = true;
     for (final chunk in _outputChunks) {
-      bytes.add(
-        isFirst && _headOffset > 0 ? chunk.sublist(_headOffset) : chunk,
-      );
+      final start = isFirst ? _headOffset : 0;
       isFirst = false;
+      final available = chunk.length - start;
+      if (skip >= available) {
+        skip -= available;
+        continue;
+      }
+      final from = start + skip;
+      skip = 0;
+      bytes.add(from > 0 ? Uint8List.sublistView(chunk, from) : chunk);
     }
     final flattened = bytes.takeBytes();
     final start = _utf8SuffixStart(flattened);
@@ -1253,7 +1349,21 @@ final class _ManagedAcpTerminal {
       _stdoutSubscription.cancel(),
       _stderrSubscription.cancel(),
     ]);
+    _publishDisplay();
   }
+}
+
+/// Formats an agent's terminal command for display, quoting arguments that
+/// would otherwise read ambiguously.
+String _displayCommandLine(String command, List<String> arguments) {
+  String quote(String value) {
+    if (value.isNotEmpty && !RegExp(r"""[\s'"\\$`]""").hasMatch(value)) {
+      return value;
+    }
+    return "'${value.replaceAll("'", r"'\''")}'";
+  }
+
+  return [command, ...arguments.map(quote)].join(' ');
 }
 
 AcpJsonMap _objectParams(AcpJsonRpcServerRequest request) {

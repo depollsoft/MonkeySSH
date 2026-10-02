@@ -6,6 +6,8 @@ import 'acp_chat_typography.dart';
 import 'acp_diff.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
+import 'acp_resource_chip.dart';
+import 'acp_terminal_output.dart';
 
 /// Presentation helpers for [AcpToolStatus].
 extension AcpToolStatusPresentation on AcpToolStatus {
@@ -31,6 +33,7 @@ extension AcpToolKindPresentation on AcpToolKind {
     AcpToolKind.execute => Icons.terminal_rounded,
     AcpToolKind.fetch => Icons.cloud_download_outlined,
     AcpToolKind.think => Icons.psychology_outlined,
+    AcpToolKind.switchMode => Icons.swap_horiz_rounded,
     AcpToolKind.other => Icons.build_outlined,
   };
 }
@@ -88,7 +91,9 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
         (call.rawInput?.isNotEmpty ?? false) ||
         (call.rawOutput?.isNotEmpty ?? false) ||
         call.locations.isNotEmpty ||
-        call.diffs.isNotEmpty;
+        call.diffs.isNotEmpty ||
+        call.resources.isNotEmpty ||
+        call.terminalIds.isNotEmpty;
   }
 
   String? get _headerPreview {
@@ -101,7 +106,8 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
     }
     final input = call.rawInput?.trim();
     if (input == null || input.isEmpty) {
-      return null;
+      final name = call.name?.trim();
+      return name == null || name.isEmpty || name == call.title ? null : name;
     }
     final line = input.split('\n').firstWhere((line) => line.trim().isNotEmpty);
     final compact = line.trim().replaceAll(RegExp(r'\s+'), ' ');
@@ -321,16 +327,28 @@ class _ToolCallDetails extends StatelessWidget {
         hasOutput &&
         !toolCall.rawOutputIsStructured &&
         _looksLikeRichToolOutput(output!);
+    final terminals = AcpTerminalOutputScope.maybeOf(context);
+    final showsTerminals = terminals != null && toolCall.terminalIds.isNotEmpty;
     if ((input?.isNotEmpty ?? false) ||
         (hasOutput && !richOutput) ||
-        (active && !hasOutput)) {
+        (active && !hasOutput && !showsTerminals)) {
       children.add(
         _ToolPayloadStream(
           input: input,
           output: richOutput ? null : output,
-          active: active,
+          active: active && !showsTerminals,
         ),
       );
+    }
+    if (showsTerminals) {
+      for (final terminalId in toolCall.terminalIds) {
+        children.add(
+          AcpTerminalOutputView(
+            key: ValueKey('terminal-$terminalId'),
+            display: terminals.resolver(terminalId),
+          ),
+        );
+      }
     }
     if (richOutput) {
       children.add(
@@ -354,6 +372,23 @@ class _ToolCallDetails extends StatelessWidget {
     }
     for (final diff in toolCall.diffs) {
       children.add(AcpDiffView(diff: diff));
+    }
+    if (toolCall.resources.isNotEmpty) {
+      final actions = AcpResourceActions.maybeOf(context);
+      children.add(
+        Wrap(
+          spacing: FluttyTheme.spacingXs,
+          runSpacing: FluttyTheme.spacingXs,
+          children: [
+            for (final resource in toolCall.resources)
+              AcpResourceChip(
+                resource: resource,
+                onOpen: actions?.onOpen,
+                onCopy: actions?.onCopy,
+              ),
+          ],
+        ),
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

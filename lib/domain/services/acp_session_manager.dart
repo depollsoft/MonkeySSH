@@ -13,6 +13,7 @@ import '../models/acp_provider.dart';
 import '../models/acp_recent_session.dart';
 import '../models/acp_session_keys.dart';
 import '../models/acp_session_state.dart';
+import '../models/acp_terminal_display.dart';
 import '../models/acp_timeline.dart';
 import '../models/acp_tool_subject.dart';
 import '../models/acp_updates.dart';
@@ -128,6 +129,10 @@ extension _FirstWhereOrNull on List<AcpSessionState> {
     return null;
   }
 }
+
+/// Shared display for terminals no capability service knows about.
+final ValueListenable<AcpTerminalDisplay?> _unknownTerminalDisplay =
+    ValueNotifier<AcpTerminalDisplay?>(null);
 
 /// Manages multiple simultaneous ACP sessions across hosts and providers.
 ///
@@ -519,6 +524,20 @@ class AcpSessionManager {
   /// Cancels a pending permission request.
   Future<void> cancelPermission(AcpSessionKey key, String requestKey) =>
       _requireController(key).cancelPermission(requestKey);
+
+  /// Live output of terminal [terminalId] that [key]'s agent runs through
+  /// this client, for tool calls that embed it.
+  ///
+  /// The value stays `null` for terminals this client does not know, such as
+  /// ones from a previous app run replayed by `session/load`.
+  ValueListenable<AcpTerminalDisplay?> terminalDisplay(
+    AcpSessionKey key,
+    String terminalId,
+  ) {
+    final service = _controllers[key.value]?.attachment.capabilityService;
+    return service?.terminalDisplay(key.acpSessionId, terminalId) ??
+        _unknownTerminalDisplay;
+  }
 
   /// Returns a pending write body for explicit in-memory review only.
   String? pendingWriteContent(AcpSessionKey key, String requestKey) =>

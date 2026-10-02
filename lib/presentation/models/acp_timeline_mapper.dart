@@ -27,6 +27,9 @@ const int kAcpMapperMaxToolTextChars = 16 * 1024;
 /// widget's own bounding takes over.
 const int kAcpMapperMaxDiffSourceChars = 128 * 1024;
 
+/// Maximum characters of an embedded text resource kept for in-app viewing.
+const int kAcpMapperMaxResourceTextChars = 64 * 1024;
+
 final Expando<List<AcpTimelineEntry>> _sharedTimelineMappings =
     Expando<List<AcpTimelineEntry>>('ACP presentation timeline');
 final Expando<_CachedTimelinePreview> _sharedTimelinePreviews =
@@ -335,6 +338,7 @@ AcpTimelineEntry? _mapMessage(
 List<AcpPromptPart> _mapPromptParts(List<d.AcpContentBlock> content) {
   final parts = <AcpPromptPart>[];
   for (final block in content) {
+    if (!_isForUser(block)) continue;
     switch (block) {
       case d.AcpTextContent(:final text):
         if (text.isNotEmpty) {
@@ -345,23 +349,10 @@ List<AcpPromptPart> _mapPromptParts(List<d.AcpContentBlock> content) {
         if (image != null) {
           parts.add(AcpImagePart(image));
         }
-      case d.AcpResourceContent(:final resource):
-        parts.add(
-          AcpResourcePart(
-            AcpResourceRef(uri: resource.uri, mimeType: resource.mimeType),
-          ),
-        );
+      case d.AcpResourceContent():
+        parts.add(AcpResourcePart(_embeddedResourceRef(block)));
       case d.AcpResourceLinkContent():
-        parts.add(
-          AcpResourcePart(
-            AcpResourceRef(
-              uri: block.uri,
-              name: block.title ?? block.name,
-              mimeType: block.mimeType,
-              sizeBytes: block.size,
-            ),
-          ),
-        );
+        parts.add(AcpResourcePart(_resourceLinkRef(block)));
       case d.AcpAudioContent():
         parts.add(
           AcpResourcePart(
@@ -442,6 +433,7 @@ String? _imageMarkdown(d.AcpImageContent block) {
 String _markdownFromContent(List<d.AcpContentBlock> content) {
   final buffer = StringBuffer();
   for (final block in content) {
+    if (!_isForUser(block)) continue;
     switch (block) {
       case d.AcpTextContent(:final text):
         buffer.write(text);
@@ -452,7 +444,8 @@ String _markdownFromContent(List<d.AcpContentBlock> content) {
         }
       case d.AcpResourceLinkContent():
         buffer.write('\n\n[${block.title ?? block.name}](${block.uri})');
-      case d.AcpResourceContent():
+      case d.AcpResourceContent(:final resource):
+        buffer.write(_embeddedResourceMarkdown(resource));
       case d.AcpAudioContent():
       case d.AcpUnknownContent():
         break;
@@ -461,10 +454,46 @@ String _markdownFromContent(List<d.AcpContentBlock> content) {
   return buffer.toString();
 }
 
+/// Renders a resource the agent embedded in its reply: text contents as a
+/// labelled code block, binary contents as a link to the resource URI.
+String _embeddedResourceMarkdown(d.AcpEmbeddedResource resource) {
+  final uri = resource.uri;
+  final segments = Uri.tryParse(uri)?.pathSegments.where((s) => s.isNotEmpty);
+  final label = segments == null || segments.isEmpty ? uri : segments.last;
+  if (resource is! d.AcpTextResource) {
+    return '\n\n[${_markdownLinkText(label)}](<${uri.replaceAll('>', '%3E')}>)';
+  }
+  final text = _bound(resource.text, kAcpMapperMaxResourceTextChars);
+  final dot = label.lastIndexOf('.');
+  final extension = dot > 0 ? label.substring(dot + 1).toLowerCase() : '';
+  final language = RegExp(r'^[a-z0-9+#-]{1,16}$').hasMatch(extension)
+      ? extension
+      : '';
+  final labelFence = _backtickFence(label, minimum: 1);
+  final fence = _backtickFence(text, minimum: 3);
+  return '\n\n$labelFence$label$labelFence\n$fence$language\n$text\n$fence\n';
+}
+
+/// A backtick run longer than any inside [text], so [text] cannot close it.
+String _backtickFence(String text, {required int minimum}) {
+  var longest = 0;
+  for (final match in RegExp('`+').allMatches(text)) {
+    longest = match.end - match.start > longest
+        ? match.end - match.start
+        : longest;
+  }
+  return '`' * (longest + 1 > minimum ? longest + 1 : minimum);
+}
+
+String _markdownLinkText(String text) =>
+    text.replaceAllMapped(RegExp(r'[\\\[\]]'), (m) => '\\${m[0]}');
+
 AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   final diffs = <AcpDiff>[];
   final (images, outputText) = _extractRawToolOutput(entry.rawOutput);
   final outputBlocks = <String>[];
+  final resources = <AcpResourceRef>[];
+  final terminalIds = <String>[];
   for (final content in entry.content) {
     switch (content) {
       case d.AcpToolDiff():
@@ -482,6 +511,7 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
         );
       case d.AcpToolContentBlock():
         final inner = content.content;
+        if (!_isForUser(inner)) continue;
         if (inner is d.AcpTextContent && inner.text.isNotEmpty) {
           outputBlocks.add(inner.text);
         } else if (inner is d.AcpImageContent) {
@@ -489,8 +519,15 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
           if (image != null && !images.contains(image)) {
             images.add(image);
           }
+        } else if (inner is d.AcpResourceLinkContent) {
+          resources.add(_resourceLinkRef(inner));
+        } else if (inner is d.AcpResourceContent) {
+          resources.add(_embeddedResourceRef(inner));
         }
-      case d.AcpToolTerminal():
+      case d.AcpToolTerminal(:final terminalId):
+        if (terminalId.isNotEmpty && !terminalIds.contains(terminalId)) {
+          terminalIds.add(terminalId);
+        }
       case d.AcpUnknownToolContent():
         break;
     }
@@ -546,6 +583,9 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
       rawInput: rawInput,
       rawOutput: rawOutput,
       rawOutputIsStructured: textualDiff == null && rawOutputIsStructured,
+      name: entry.name,
+      resources: resources,
+      terminalIds: terminalIds,
       locations: [
         for (final location in entry.locations)
           AcpToolLocation(path: location.path, line: location.line),
@@ -644,8 +684,38 @@ AcpToolKind _mapToolKind(d.AcpToolKind? kind) => switch (kind?.value) {
   'execute' => AcpToolKind.execute,
   'fetch' => AcpToolKind.fetch,
   'think' => AcpToolKind.think,
+  'switch_mode' => AcpToolKind.switchMode,
   _ => AcpToolKind.other,
 };
+
+/// Whether [block] is meant for the user to see.
+///
+/// Content annotated with an audience that excludes `user` (for example
+/// `["assistant"]`) is context for the model, not for display.
+bool _isForUser(d.AcpContentBlock block) {
+  final audience = block.annotations?.audience;
+  return audience == null || audience.isEmpty || audience.contains('user');
+}
+
+AcpResourceRef _resourceLinkRef(d.AcpResourceLinkContent block) =>
+    AcpResourceRef(
+      uri: block.uri,
+      name: block.title ?? block.name,
+      mimeType: block.mimeType,
+      sizeBytes: block.size,
+    );
+
+/// Maps an embedded resource, keeping a bounded copy of its text so it can be
+/// read in the app even when its URI is not a path the client can open.
+AcpResourceRef _embeddedResourceRef(d.AcpResourceContent block) {
+  final resource = block.resource;
+  final text = resource is d.AcpTextResource ? resource.text : null;
+  return AcpResourceRef(
+    uri: resource.uri,
+    mimeType: resource.mimeType,
+    text: text == null ? null : _bound(text, kAcpMapperMaxResourceTextChars),
+  );
+}
 
 AcpToolStatus _mapToolStatus(d.AcpToolStatus? status) =>
     switch (status?.value) {

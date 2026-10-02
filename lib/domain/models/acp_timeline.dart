@@ -168,6 +168,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     required this.toolCallId,
     required this.order,
     this.title,
+    this.name,
     this.toolKind,
     this.status,
     List<AcpToolContent> content = const <AcpToolContent>[],
@@ -187,6 +188,9 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
 
   /// Latest known title.
   final String? title;
+
+  /// Latest known machine-readable tool name, such as `Bash`.
+  final String? name;
 
   /// Latest known tool kind.
   final AcpToolKind? toolKind;
@@ -221,6 +225,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     toolCallId: toolCallId,
     order: order,
     title: update.title ?? title,
+    name: update.name ?? name,
     toolKind: update.toolKind ?? toolKind,
     status: update.status ?? status,
     content: update.content == null
@@ -242,6 +247,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
           toolCallId == other.toolCallId &&
           order == other.order &&
           title == other.title &&
+          name == other.name &&
           toolKind == other.toolKind &&
           status == other.status &&
           rawInput == other.rawInput &&
@@ -259,6 +265,7 @@ final class AcpToolCallEntry extends AcpTimelineEntry {
     toolCallId,
     order,
     title,
+    name,
     toolKind,
     status,
     rawInput,
@@ -811,6 +818,7 @@ class AcpTimelineBuilder {
       toolCallId: entry.toolCallId,
       order: entry.order,
       title: title,
+      name: entry.name,
       toolKind: entry.toolKind,
       status: entry.status,
       locations: locations,

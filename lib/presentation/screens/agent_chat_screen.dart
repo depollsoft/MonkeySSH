@@ -16,6 +16,7 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -30,6 +31,7 @@ import '../../domain/models/acp_native_preview.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_concurrency_policy.dart';
@@ -56,6 +58,7 @@ import '../widgets/acp_message_thread.dart';
 import '../widgets/acp_permission_surface.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
+import '../widgets/acp_terminal_output.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -899,7 +902,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
   }
 
+  ValueListenable<AcpTerminalDisplay?> _terminalDisplay(String terminalId) =>
+      ref.read(acpSessionManagerProvider).terminalDisplay(_key, terminalId);
+
   void _openResource(ui.AcpResourceRef resource) {
+    final text = resource.text;
+    if (text != null) {
+      unawaited(_showResourceText(resource, text));
+      return;
+    }
     final uri = resource.uri;
     if (uri.startsWith('http://') || uri.startsWith('https://')) {
       final parsed = Uri.tryParse(uri);
@@ -910,6 +921,74 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
     _openRemotePath(uri.startsWith('file:') ? Uri.parse(uri).path : uri);
   }
+
+  /// Shows a resource whose contents the agent embedded, which may have no
+  /// path this client can open.
+  Future<void> _showResourceText(ui.AcpResourceRef resource, String text) =>
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) {
+          final theme = Theme.of(context);
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  FluttyTheme.spacingMd,
+                  0,
+                  FluttyTheme.spacingMd,
+                  FluttyTheme.spacingMd,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            resource.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: FluttyTheme.displayMono(fontSize: 16),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Copy contents',
+                          icon: const Icon(Icons.copy_rounded),
+                          onPressed: () => _copyToClipboard(text, 'Contents'),
+                        ),
+                      ],
+                    ),
+                    Text(
+                      resource.uri,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: FluttyTheme.monoStyle.copyWith(
+                        fontSize: 11,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: FluttyTheme.spacingSm),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          text,
+                          style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      );
 
   void _openRemotePath(String path) {
     final connectionId = ref
@@ -966,7 +1045,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontSize: fontSize,
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
-      child: child,
+      child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
