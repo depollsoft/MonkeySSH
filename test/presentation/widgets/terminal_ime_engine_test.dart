@@ -1081,6 +1081,93 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final newline in ['\n', '\r', '\r\n']) {
+      for (final actionFirst in [false, true]) {
+        for (final composingTail in [false, true]) {
+          test(
+            '${platform.name} shell completion preserves coalesced Return tail, newline=${newline.codeUnits}, actionFirst=$actionFirst, composing=$composingTail',
+            () async {
+              final driver = _ImeDriver(platform: platform);
+              addTearDown(driver.dispose);
+              final harness = await _createImeHarness(
+                driver,
+                initialEditingValue: _editingValue('pi', selectionOffset: 2),
+              );
+              driver.engine.resetAfterShellCompletion();
+              harness.terminalOutput.clear();
+              if (actionFirst) {
+                await driver.receiveAction(TextInputAction.done);
+                await driver.flush();
+              }
+              final prefix = 'pi$newline';
+              final value = _editingValue(
+                '${prefix}xyz',
+                selectionOffset: prefix.length + 2,
+                composing: composingTail
+                    ? TextRange(
+                        start: prefix.length + 1,
+                        end: prefix.length + 3,
+                      )
+                    : TextRange.empty,
+              );
+              driver.updateEditingValue(value);
+              await driver.flush();
+              if (composingTail) {
+                expect(
+                  harness.terminalOutput.join(),
+                  actionFirst ? _terminalKeyOutput(TerminalKey.enter) : '',
+                );
+                expect(
+                  driver.engine.editingValue,
+                  _editingValue(
+                    actionFirst ? 'xyz' : '${newline}xyz',
+                    selectionOffset: actionFirst ? 2 : newline.length + 2,
+                    composing: TextRange(
+                      start: actionFirst ? 1 : newline.length + 1,
+                      end: actionFirst ? 3 : newline.length + 3,
+                    ),
+                  ),
+                );
+                if (!actionFirst) {
+                  await driver.receiveAction(TextInputAction.done);
+                  await driver.flush();
+                }
+                await driver.flush(const Duration(milliseconds: 500));
+                driver.updateEditingValue(
+                  value.copyWith(composing: TextRange.empty),
+                );
+                await driver.flush();
+              }
+              if (!actionFirst && !composingTail) {
+                await driver.receiveAction(TextInputAction.done);
+                await driver.flush();
+              }
+              expect(
+                harness.terminalOutput.join(),
+                '${_terminalKeyOutput(TerminalKey.enter)}xyz${_terminalKeyOutput(TerminalKey.arrowLeft)}',
+              );
+              expect(
+                driver.engine.editingValue,
+                _editingValue('xyz', selectionOffset: 2),
+              );
+              driver.updateEditingValue(
+                _editingValue('xyaz', selectionOffset: 3),
+              );
+              await driver.flush();
+              expect(
+                harness.terminalOutput.join(),
+                '${_terminalKeyOutput(TerminalKey.enter)}xyz${_terminalKeyOutput(TerminalKey.arrowLeft)}a',
+              );
+              expect(
+                driver.engine.editingValue,
+                _editingValue('xyaz', selectionOffset: 3),
+              );
+            },
+          );
+        }
+      }
+    }
+
     for (final delay in [
       const Duration(milliseconds: 500),
       const Duration(seconds: 5),
