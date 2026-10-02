@@ -450,6 +450,9 @@ enum AcpNotificationKind {
 
   /// The agent requested approval for a validated file write.
   writeApproval,
+
+  /// The agent asked for information or to open a page (an elicitation).
+  input,
 }
 
 /// Stable, process-independent notification ID namespaced away from terminal

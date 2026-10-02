@@ -179,6 +179,7 @@ class AcpLifecycleService {
       final previous = _lastKnownStates[session.key.value];
       _maybeNotifyNewPermission(session, previous);
       _maybeNotifyNewWrite(session, previous);
+      _maybeNotifyNewElicitation(session, previous);
       _maybeNotifyCompletion(session, previous);
       _lastKnownStates[session.key.value] =
           _AcpNotificationSnapshot.fromSession(session);
@@ -217,6 +218,23 @@ class AcpLifecycleService {
         session,
         AcpNotificationKind.writeApproval,
         title: '${acpSafeAgentDisplayLabel(session)} needs write approval',
+        body: 'Open the app to review and respond.',
+      ),
+    );
+  }
+
+  void _maybeNotifyNewElicitation(
+    AcpSessionState session,
+    _AcpNotificationSnapshot? previous,
+  ) {
+    final previousCount = previous?.pendingElicitationCount ?? 0;
+    if (session.pendingElicitations.length <= previousCount) return;
+    if (!_canNotify(session.key.hostId)) return;
+    unawaited(
+      _notify(
+        session,
+        AcpNotificationKind.input,
+        title: '${acpSafeAgentDisplayLabel(session)} needs your input',
         body: 'Open the app to review and respond.',
       ),
     );
@@ -311,6 +329,7 @@ final class _AcpNotificationSnapshot {
   const _AcpNotificationSnapshot({
     required this.pendingPermissionCount,
     required this.pendingWriteCount,
+    required this.pendingElicitationCount,
     required this.promptStatus,
   });
 
@@ -318,11 +337,13 @@ final class _AcpNotificationSnapshot {
       _AcpNotificationSnapshot(
         pendingPermissionCount: session.pendingPermissions.length,
         pendingWriteCount: session.pendingWrites.length,
+        pendingElicitationCount: session.pendingElicitations.length,
         promptStatus: session.promptStatus,
       );
 
   final int pendingPermissionCount;
   final int pendingWriteCount;
+  final int pendingElicitationCount;
   final AcpPromptStatus promptStatus;
 }
 

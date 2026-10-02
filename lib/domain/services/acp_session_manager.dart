@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/acp_client_capabilities.dart' as cap;
 import '../models/acp_content.dart';
+import '../models/acp_elicitation.dart';
 import '../models/acp_protocol.dart';
 import '../models/acp_provider.dart';
 import '../models/acp_recent_session.dart';
@@ -550,6 +551,26 @@ class AcpSessionManager {
   /// Rejects a pending file write.
   Future<void> rejectWrite(AcpSessionKey key, String requestKey) =>
       _requireController(key).rejectWrite(requestKey);
+
+  /// Accepts a pending elicitation: a validated form [content], or consent to
+  /// open a URL-mode link (no content). Open the URL only after this returns.
+  Future<void> acceptElicitation(
+    AcpSessionKey key,
+    String requestKey, {
+    Map<String, Object?>? content,
+  }) => _requireController(key).acceptElicitation(requestKey, content);
+
+  /// Declines a pending elicitation.
+  Future<void> declineElicitation(AcpSessionKey key, String requestKey) =>
+      _requireController(key).declineElicitation(requestKey);
+
+  /// Cancels a pending elicitation the user dismissed without choosing.
+  Future<void> cancelElicitation(AcpSessionKey key, String requestKey) =>
+      _requireController(key).cancelElicitation(requestKey);
+
+  /// Stops showing that a URL elicitation is being finished in a browser.
+  void dismissAwaitingElicitation(AcpSessionKey key, String elicitationId) =>
+      _requireController(key).dismissAwaitingElicitation(elicitationId);
 
   /// Detaches locally from [key] while leaving the remote bridge running.
   Future<void> detachSession(AcpSessionKey key) =>
@@ -2121,11 +2142,19 @@ class _SessionController {
               requestedAt: request.requestedAt,
             ),
           );
+        case cap.AcpPendingElicitation():
+          // Mirrored by _elicitationsFor, which also keeps request-scoped ones.
+          break;
       }
     }
     _mergedPermissionToolCalls.retainAll(pendingPermissionKeys);
     _update(
-      (s) => s.copyWith(pendingPermissions: permissions, pendingWrites: writes),
+      (s) => s.copyWith(
+        pendingPermissions: permissions,
+        pendingWrites: writes,
+        pendingElicitations: _elicitationsFor(requests),
+        awaitingElicitations: _awaitingElicitationsFor(),
+      ),
     );
   }
 
@@ -2149,6 +2178,53 @@ class _SessionController {
       ),
     );
   }
+
+  /// Elicitations this session shows: its own, plus request-scoped ones that
+  /// belong to no session and so surface on every session of the attachment.
+  List<AcpSessionElicitation> _elicitationsFor(
+    List<cap.AcpPendingClientRequest> requests,
+  ) => [
+    for (final request in requests)
+      if (request is cap.AcpPendingElicitation &&
+          (request.isRequestScoped || request.sessionId == _key.acpSessionId))
+        AcpSessionElicitation(
+          requestKey: request.id,
+          request: request.elicitation,
+          requestedAt: request.requestedAt,
+        ),
+  ];
+
+  List<AcpAwaitingElicitation> _awaitingElicitationsFor() => [
+    for (final awaiting
+        in attachment.capabilityService?.registry.awaitingElicitations ??
+            const <AcpAwaitingElicitation>[])
+      if (awaiting.sessionId == null || awaiting.sessionId == _key.acpSessionId)
+        awaiting,
+  ];
+
+  Future<void> acceptElicitation(
+    String requestKey,
+    Map<String, Object?>? content,
+  ) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.acceptElicitation(requestKey, content: content);
+  }
+
+  Future<void> declineElicitation(String requestKey) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.declineElicitation(requestKey);
+  }
+
+  Future<void> cancelElicitation(String requestKey) async {
+    final service = attachment.capabilityService;
+    if (service == null) return;
+    await service.cancelElicitation(requestKey);
+  }
+
+  void dismissAwaitingElicitation(String elicitationId) =>
+      attachment.capabilityService?.dismissAwaitingElicitation(elicitationId);
 
   Future<void> respondToPermission(String requestKey, String optionId) async {
     final service = attachment.capabilityService;
@@ -2296,6 +2372,22 @@ class _SessionController {
             );
             if (!queued.completer.isCompleted) {
               queued.completer.completeError(error, stackTrace);
+            }
+            continue;
+          }
+          if (error is AcpRequestCancelledException) {
+            // The prompt reached the agent and its turn was cancelled: end it
+            // like a `cancelled` stop instead of rolling back as a failure.
+            const result = AcpPromptResult(stopReason: AcpStopReason.cancelled);
+            _update(
+              (s) => s.copyWith(
+                promptStatus: AcpPromptStatus.idle,
+                lastStopReason: result.stopReason,
+                lastActivityAt: _clock(),
+              ),
+            );
+            if (!queued.completer.isCompleted) {
+              queued.completer.complete(result);
             }
             continue;
           }
@@ -2928,6 +3020,10 @@ class _SessionController {
     AcpProtocolException() => const AcpSessionError(
       kind: AcpSessionErrorKind.protocol,
       message: 'The agent sent invalid protocol data.',
+    ),
+    AcpRequestCancelledException() => const AcpSessionError(
+      kind: AcpSessionErrorKind.cancelled,
+      message: 'The request was cancelled.',
     ),
     AcpRemoteException(:final message)
         when _isAcpAuthenticationRequired(message) =>

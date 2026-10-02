@@ -1,6 +1,7 @@
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
+import 'acp_elicitation.dart';
 import 'acp_protocol.dart';
 import 'acp_session_keys.dart';
 import 'acp_timeline.dart';
@@ -101,6 +102,10 @@ enum AcpSessionErrorKind {
 
   /// A request exceeded its deadline.
   timeout,
+
+  /// A request was cancelled, by the user or by the agent (JSON-RPC
+  /// `-32800`). Not a failure of the session itself.
+  cancelled,
 
   /// An otherwise uncategorized failure.
   unknown,
@@ -305,6 +310,10 @@ final class AcpSessionState {
     List<AcpPendingPermission> pendingPermissions =
         const <AcpPendingPermission>[],
     List<AcpPendingWrite> pendingWrites = const <AcpPendingWrite>[],
+    List<AcpSessionElicitation> pendingElicitations =
+        const <AcpSessionElicitation>[],
+    List<AcpAwaitingElicitation> awaitingElicitations =
+        const <AcpAwaitingElicitation>[],
     this.transportState,
     this.error,
     this.warning,
@@ -318,7 +327,13 @@ final class AcpSessionState {
        pendingPermissions = List<AcpPendingPermission>.unmodifiable(
          pendingPermissions,
        ),
-       pendingWrites = List<AcpPendingWrite>.unmodifiable(pendingWrites);
+       pendingWrites = List<AcpPendingWrite>.unmodifiable(pendingWrites),
+       pendingElicitations = List<AcpSessionElicitation>.unmodifiable(
+         pendingElicitations,
+       ),
+       awaitingElicitations = List<AcpAwaitingElicitation>.unmodifiable(
+         awaitingElicitations,
+       );
 
   /// Stable composite identity of this session.
   final AcpSessionKey key;
@@ -388,6 +403,14 @@ final class AcpSessionState {
 
   /// File write requests awaiting a user decision.
   final List<AcpPendingWrite> pendingWrites;
+
+  /// Agent requests for user input (`elicitation/create`) awaiting a
+  /// decision, including request-scoped ones shared by every session on this
+  /// bridge attachment.
+  final List<AcpSessionElicitation> pendingElicitations;
+
+  /// Accepted URL elicitations the user is finishing in a browser.
+  final List<AcpAwaitingElicitation> awaitingElicitations;
 
   /// Latest transport state, when connected through a MonkeyMux bridge.
   final MonkeyMuxAcpTransportState? transportState;
@@ -481,6 +504,8 @@ final class AcpSessionState {
     AcpPromptStatus? promptStatus,
     List<AcpPendingPermission>? pendingPermissions,
     List<AcpPendingWrite>? pendingWrites,
+    List<AcpSessionElicitation>? pendingElicitations,
+    List<AcpAwaitingElicitation>? awaitingElicitations,
     MonkeyMuxAcpTransportState? transportState,
     AcpSessionError? error,
     bool clearError = false,
@@ -514,6 +539,8 @@ final class AcpSessionState {
     promptStatus: promptStatus ?? this.promptStatus,
     pendingPermissions: pendingPermissions ?? this.pendingPermissions,
     pendingWrites: pendingWrites ?? this.pendingWrites,
+    pendingElicitations: pendingElicitations ?? this.pendingElicitations,
+    awaitingElicitations: awaitingElicitations ?? this.awaitingElicitations,
     transportState: transportState ?? this.transportState,
     error: clearError ? null : (error ?? this.error),
     warning: clearWarning ? null : (warning ?? this.warning),
@@ -565,6 +592,14 @@ final class AcpSessionState {
           const ListEquality<AcpPendingWrite>().equals(
             pendingWrites,
             other.pendingWrites,
+          ) &&
+          const ListEquality<AcpSessionElicitation>().equals(
+            pendingElicitations,
+            other.pendingElicitations,
+          ) &&
+          const ListEquality<AcpAwaitingElicitation>().equals(
+            awaitingElicitations,
+            other.awaitingElicitations,
           );
 
   @override
@@ -594,6 +629,8 @@ final class AcpSessionState {
       const ListEquality<AcpPlanEntry>().hash(plan),
       const ListEquality<AcpPendingPermission>().hash(pendingPermissions),
       const ListEquality<AcpPendingWrite>().hash(pendingWrites),
+      const ListEquality<AcpSessionElicitation>().hash(pendingElicitations),
+      const ListEquality<AcpAwaitingElicitation>().hash(awaitingElicitations),
     ),
   );
 }

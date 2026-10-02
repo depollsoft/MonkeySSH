@@ -53,6 +53,7 @@ import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_config_option_controls.dart';
 import '../widgets/acp_connection_support.dart';
+import '../widgets/acp_elicitation_surface.dart';
 import '../widgets/acp_inline_image.dart';
 import '../widgets/acp_message_thread.dart';
 import '../widgets/acp_permission_surface.dart';
@@ -775,6 +776,28 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     ];
   }
 
+  Widget _elicitationSurface(AcpSessionState session) {
+    final manager = ref.read(acpSessionManagerProvider);
+    return AcpElicitationSurface(
+      agentLabel: session.providerLabel,
+      elicitations: session.pendingElicitations,
+      awaiting: session.awaitingElicitations,
+      toolTitles: {
+        for (final entry
+            in session.timeline.entries.whereType<domain.AcpToolCallEntry>())
+          if (entry.title?.trim().isNotEmpty ?? false)
+            entry.toolCallId: entry.title!.trim(),
+      },
+      onAccept: (requestKey, content) =>
+          manager.acceptElicitation(_key, requestKey, content: content),
+      onDecline: (requestKey) => manager.declineElicitation(_key, requestKey),
+      onCancel: (requestKey) => manager.cancelElicitation(_key, requestKey),
+      onOpenUrl: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+      onDismissAwaiting: (elicitationId) =>
+          manager.dismissAwaitingElicitation(_key, elicitationId),
+    );
+  }
+
   /// Resolves a chat image to bounded bytes without ever implicitly fetching
   /// over the network.
   ///
@@ -1322,7 +1345,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         ],
                       ),
                     ),
-                    if (prompts.isNotEmpty)
+                    if (prompts.isNotEmpty ||
+                        session.pendingElicitations.isNotEmpty ||
+                        session.awaitingElicitations.isNotEmpty)
                       ConstrainedBox(
                         constraints: BoxConstraints(
                           maxHeight: MediaQuery.sizeOf(context).height * 0.34,
@@ -1331,7 +1356,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                           padding: const EdgeInsets.symmetric(
                             horizontal: FluttyTheme.spacingMd,
                           ),
-                          child: AcpPermissionSurface(prompts: prompts),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _elicitationSurface(session),
+                              AcpPermissionSurface(prompts: prompts),
+                            ],
+                          ),
                         ),
                       ),
                     AcpComposer(

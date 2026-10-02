@@ -41,6 +41,12 @@ final class AcpClient {
   final _updates = StreamController<AcpSessionNotification>.broadcast(
     sync: true,
   );
+  final _serverRequestCancellations = StreamController<AcpRequestId>.broadcast(
+    sync: true,
+  );
+  final _elicitationCompletions = StreamController<String>.broadcast(
+    sync: true,
+  );
   // Exactly one capability router answers provider-to-client requests. Keep a
   // small, bridge-bounded pre-listener queue because pending replay can arrive
   // as soon as the transport attaches, before that router has rebound.
@@ -63,6 +69,17 @@ final class AcpClient {
 
   /// Incoming server requests.
   Stream<AcpJsonRpcServerRequest> get serverRequests => _serverRequests.stream;
+
+  /// Exact JSON-RPC ids of agent requests withdrawn with `$/cancel_request`.
+  ///
+  /// The connection has already answered a still-open request on this
+  /// connection with `-32800`. Retained UI state for the id, possibly bound to
+  /// an earlier attachment's request, must be dropped.
+  Stream<AcpRequestId> get serverRequestCancellations =>
+      _serverRequestCancellations.stream;
+
+  /// Opaque ids from `elicitation/complete` notifications.
+  Stream<String> get elicitationCompletions => _elicitationCompletions.stream;
 
   /// Initializes the ACP connection.
   Future<AcpInitializeResult> initialize({
@@ -358,6 +375,8 @@ final class AcpClient {
     _pendingServerRequests.clear();
     await _updates.close();
     await _serverRequests.close();
+    await _serverRequestCancellations.close();
+    await _elicitationCompletions.close();
   }
 
   Future<AcpSessionSetupResult> _sessionSetupRequest(
@@ -376,8 +395,26 @@ final class AcpClient {
   }
 
   void _handleNotification(AcpJsonRpcNotification notification) {
-    if (notification.method != 'session/update') {
-      return;
+    switch (notification.method) {
+      case acpCancelRequestMethod:
+        final requestId = AcpJson.object(notification.params)?['requestId'];
+        if (requestId is String || requestId is int) {
+          _serverRequestCancellations.add(requestId!);
+        }
+        return;
+      case 'elicitation/complete':
+        final params = AcpJson.object(notification.params);
+        final elicitationId = params == null
+            ? null
+            : AcpJson.identifier(params, 'elicitationId');
+        if (elicitationId != null && elicitationId.isNotEmpty) {
+          _elicitationCompletions.add(elicitationId);
+        }
+        return;
+      case 'session/update':
+        break;
+      default:
+        return;
     }
     final params = AcpJson.object(notification.params);
     if (params == null) {
@@ -409,7 +446,11 @@ final class AcpClient {
     _pendingServerRequestFlushScheduled = false;
     if (_closed || !_serverRequests.hasListener) return;
     while (_pendingServerRequests.isNotEmpty) {
-      _serverRequests.add(_pendingServerRequests.removeFirst());
+      final request = _pendingServerRequests.removeFirst();
+      // The agent may have withdrawn a queued request before any router saw
+      // it; the connection already answered it, so never surface it.
+      if (request.isAnswered) continue;
+      _serverRequests.add(request);
     }
   }
 

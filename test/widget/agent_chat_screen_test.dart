@@ -11,6 +11,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_native_preview.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -28,6 +29,7 @@ import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_co
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_chat_typography.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
+import 'package:monkeyssh/presentation/widgets/acp_elicitation_surface.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_permission_surface.dart';
@@ -960,6 +962,41 @@ void main() {
     await tester.tap(find.text('Review changes'));
     await tester.pump();
     expect(find.text('updated contents'), findsOneWidget);
+  });
+
+  testWidgets('surfaces a pending elicitation beside permissions', (
+    tester,
+  ) async {
+    final manager = FakeAcpSessionManager(
+      sessions: [
+        fakeAcpSession(
+          pendingElicitations: [
+            AcpSessionElicitation(
+              requestKey: 's:elicit-1',
+              requestedAt: DateTime(2026),
+              request: AcpElicitationRequest.parse(
+                const {
+                  'sessionId': 'session-1',
+                  'mode': 'form',
+                  'message': 'Which strategy?',
+                  'requestedSchema': {'type': 'object', 'properties': {}},
+                },
+                formSupported: true,
+                urlSupported: true,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    await tester.pumpWidget(_wrap(manager));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AcpElicitationSurface), findsOneWidget);
+    expect(find.text('Copilot CLI needs your input'), findsOneWidget);
+    await tester.tap(find.text('Decline'));
+    await tester.pumpAndSettle();
+    expect(manager.declinedElicitations, ['s:elicit-1']);
   });
 
   testWidgets('cancelling delete keeps the remote session', (tester) async {

@@ -11,6 +11,12 @@ typedef AcpRequestId = Object;
 /// Generates request identifiers for an [AcpJsonRpcConnection].
 typedef AcpRequestIdFactory = AcpRequestId Function();
 
+/// JSON-RPC error code for a cancelled request (ACP `$/cancel_request`).
+const acpRequestCancelledErrorCode = -32800;
+
+/// Protocol-level notification that cancels one outstanding request.
+const acpCancelRequestMethod = r'$/cancel_request';
+
 /// Base class for ACP JSON-RPC failures.
 sealed class AcpJsonRpcException implements Exception {
   const AcpJsonRpcException(this.message);
@@ -42,6 +48,63 @@ final class AcpRemoteException extends AcpJsonRpcException {
 
   /// Optional error data.
   final Object? data;
+}
+
+/// A request ended as cancelled (JSON-RPC `-32800`).
+///
+/// Raised when the peer answers with `-32800`, and when this side cancels its
+/// own in-flight request through [AcpJsonRpcConnection.cancelRequest]. It is an
+/// [AcpRemoteException] so existing remote-error handling keeps working, while
+/// callers that surface errors can match it and show a plain "cancelled"
+/// outcome instead of a protocol failure.
+final class AcpRequestCancelledException extends AcpRemoteException {
+  /// Creates a cancellation error.
+  const AcpRequestCancelledException({
+    super.message = 'Request cancelled',
+    super.data,
+    this.cancelledLocally = false,
+  }) : super(code: acpRequestCancelledErrorCode);
+
+  /// Whether this side cancelled the request before any peer response.
+  final bool cancelledLocally;
+}
+
+/// Lets a caller cancel one request issued with [AcpJsonRpcConnection.request].
+///
+/// Pass a fresh instance per request. Cancelling fails the request's future
+/// with a locally cancelled [AcpRequestCancelledException] and sends a
+/// best-effort `$/cancel_request` so the peer can stop its work.
+final class AcpRequestCancellation {
+  /// Creates an unbound cancellation handle.
+  AcpRequestCancellation();
+
+  Object? _owner;
+  void Function()? _onCancel;
+  var _cancelled = false;
+
+  /// Whether [cancel] has been called.
+  bool get isCancelled => _cancelled;
+
+  /// Cancels the bound request, if it is still pending. Idempotent.
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final onCancel = _onCancel;
+    _owner = null;
+    _onCancel = null;
+    onCancel?.call();
+  }
+
+  void _bind(Object owner, void Function() onCancel) {
+    _owner = owner;
+    _onCancel = onCancel;
+  }
+
+  void _unbind(Object owner) {
+    if (!identical(_owner, owner)) return;
+    _owner = null;
+    _onCancel = null;
+  }
 }
 
 /// A request did not receive a response before its deadline.
@@ -92,8 +155,10 @@ final class AcpJsonRpcServerRequest {
     required Future<void> Function(Object? result) respond,
     required Future<void> Function(int code, String message, Object? data)
     respondError,
+    void Function(AcpJsonRpcServerRequest request)? onAnswered,
   }) : _respond = respond,
-       _respondError = respondError;
+       _respondError = respondError,
+       _onAnswered = onAnswered;
 
   /// Request identifier.
   final AcpRequestId id;
@@ -110,23 +175,58 @@ final class AcpJsonRpcServerRequest {
   final Future<void> Function(Object? result) _respond;
   final Future<void> Function(int code, String message, Object? data)
   _respondError;
+  final void Function(AcpJsonRpcServerRequest request)? _onAnswered;
+  final _cancellation = Completer<void>();
   var _answered = false;
+  var _cancelledByPeer = false;
+
+  /// Whether a response (including a cancellation error) has been sent.
+  bool get isAnswered => _answered;
+
+  /// Whether the peer withdrew this request with `$/cancel_request`.
+  ///
+  /// The connection has already answered it with `-32800`; later [respond]
+  /// and [respondError] calls are silently ignored so slow work that finishes
+  /// afterward never double-answers.
+  bool get isCancelled => _cancelledByPeer;
+
+  /// Completes when the peer cancels this request. Never errors.
+  Future<void> get cancelled => _cancellation.future;
 
   /// Responds successfully exactly once.
   Future<void> respond([Object? result]) {
+    if (_cancelledByPeer) return Future<void>.value();
     _markAnswered();
     return _respond(result);
   }
 
   /// Responds with a JSON-RPC error exactly once.
   Future<void> respondError(int code, String message, {Object? data}) {
+    if (_cancelledByPeer) return Future<void>.value();
     _markAnswered();
     return _respondError(code, message, data);
+  }
+
+  /// Answers with `-32800` because this side abandoned the request.
+  Future<void> respondCancelled() =>
+      respondError(acpRequestCancelledErrorCode, 'Request cancelled');
+
+  Future<void> _cancelFromPeer() {
+    if (_answered) return Future<void>.value();
+    _markAnswered();
+    _cancelledByPeer = true;
+    _cancellation.complete();
+    return _respondError(
+      acpRequestCancelledErrorCode,
+      'Request cancelled',
+      null,
+    );
   }
 
   void _markAnswered() {
     if (_answered) throw StateError('JSON-RPC request was already answered');
     _answered = true;
+    _onAnswered?.call(this);
   }
 }
 
@@ -135,11 +235,13 @@ final class _PendingResponse {
     required this.id,
     required this.completer,
     required this.timer,
+    this.cancellation,
   });
 
   final AcpRequestId id;
   final Completer<Object?> completer;
   final Timer? timer;
+  final AcpRequestCancellation? cancellation;
 }
 
 /// Default bounded ACP JSON-RPC frame size, large enough for a 10 MiB image
@@ -184,6 +286,9 @@ final class AcpJsonRpcConnection {
   final AcpRequestIdFactory _requestIdFactory;
   final _frameBytes = <int>[];
   final _pending = <AcpRequestId, _PendingResponse>{};
+  // Unanswered peer requests by their exact JSON-RPC id. Dart map keys keep
+  // numeric `1` and string `"1"` distinct, matching JSON-RPC identity.
+  final _inboundRequests = <AcpRequestId, AcpJsonRpcServerRequest>{};
   final _notifications = StreamController<AcpJsonRpcNotification>.broadcast(
     sync: true,
   );
@@ -209,12 +314,18 @@ final class AcpJsonRpcConnection {
   bool get isClosed => _closed;
 
   /// Sends a request and awaits its result.
+  ///
+  /// When the deadline passes, the request fails with
+  /// [AcpRequestTimeoutException] and a best-effort `$/cancel_request` asks the
+  /// peer to stop working on it. [cancellation] lets the caller cancel it
+  /// explicitly; see [cancelRequest].
   Future<Object?> request(
     String method, {
     Object? params,
     Duration? timeout,
     AcpRequestId? id,
     bool noTimeout = false,
+    AcpRequestCancellation? cancellation,
   }) {
     _ensureOpen();
     final requestId = id ?? _requestIdFactory();
@@ -227,6 +338,11 @@ final class AcpJsonRpcConnection {
     }
     if (_pending.containsKey(requestId)) {
       throw StateError('Duplicate JSON-RPC request ID: $requestId');
+    }
+    if (cancellation?.isCancelled ?? false) {
+      return Future<Object?>.error(
+        const AcpRequestCancelledException(cancelledLocally: true),
+      );
     }
     final completer = Completer<Object?>();
     final effectiveTimeout = noTimeout
@@ -242,13 +358,16 @@ final class AcpJsonRpcConnection {
             pending.completer.completeError(
               AcpRequestTimeoutException(requestId, method, effectiveTimeout),
             );
+            _sendCancelRequest(requestId);
           });
     pending = _PendingResponse(
       id: requestId,
       completer: completer,
       timer: timer,
+      cancellation: cancellation,
     );
     _pending[requestId] = pending;
+    cancellation?._bind(pending, () => cancelRequest(requestId));
     unawaited(
       _writeMessage(<String, Object?>{
         'jsonrpc': '2.0',
@@ -272,6 +391,34 @@ final class AcpJsonRpcConnection {
       'method': method,
       'params': ?params,
     });
+  }
+
+  /// Cancels an in-flight request this side issued.
+  ///
+  /// The request's future fails immediately with a locally cancelled
+  /// [AcpRequestCancelledException], and a best-effort `$/cancel_request` asks
+  /// the peer to stop. Any late peer response for [id] is ignored. Returns
+  /// whether a pending request with exactly [id] (type included) was found.
+  bool cancelRequest(AcpRequestId id) {
+    final pending = _pending[id];
+    if (pending == null || !_removePending(pending)) return false;
+    if (!pending.completer.isCompleted) {
+      pending.completer.completeError(
+        const AcpRequestCancelledException(cancelledLocally: true),
+      );
+    }
+    _sendCancelRequest(id);
+    return true;
+  }
+
+  void _sendCancelRequest(AcpRequestId id) {
+    if (_closed) return;
+    unawaited(
+      notify(
+        acpCancelRequestMethod,
+        params: <String, Object?>{'requestId': id},
+      ).then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+    );
   }
 
   /// Closes the connection and fails all pending requests.
@@ -343,6 +490,11 @@ final class AcpJsonRpcConnection {
     final id = message['id'];
     if (method != null) {
       if (id == null) {
+        if (method == acpCancelRequestMethod) {
+          // Answer before listeners see the notification so they observe the
+          // request as already cancelled.
+          _handlePeerCancel(message['params']);
+        }
         _notifications.add(
           AcpJsonRpcNotification(
             method: method,
@@ -378,7 +530,13 @@ final class AcpJsonRpcConnection {
                 'data': ?data,
               },
             }),
+        onAnswered: (answered) {
+          if (identical(_inboundRequests[answered.id], answered)) {
+            _inboundRequests.remove(answered.id);
+          }
+        },
       );
+      _inboundRequests[id] = request;
       _serverRequests.add(request);
       return;
     }
@@ -391,6 +549,7 @@ final class AcpJsonRpcConnection {
     final pending = _pending.remove(id);
     if (pending == null) return;
     pending.timer?.cancel();
+    pending.cancellation?._unbind(pending);
     final error = AcpJson.objectField(message, 'error');
     if (error != null) {
       final code = AcpJson.integer(error, 'code');
@@ -402,12 +561,18 @@ final class AcpJsonRpcConnection {
         _protocolFailure(protocolError);
         return;
       }
+      final errorMessage = AcpJson.string(error, 'message') ?? 'Remote error';
       pending.completer.completeError(
-        AcpRemoteException(
-          code: code,
-          message: AcpJson.string(error, 'message') ?? 'Remote error',
-          data: error['data'],
-        ),
+        code == acpRequestCancelledErrorCode
+            ? AcpRequestCancelledException(
+                message: errorMessage,
+                data: error['data'],
+              )
+            : AcpRemoteException(
+                code: code,
+                message: errorMessage,
+                data: error['data'],
+              ),
       );
       return;
     }
@@ -427,7 +592,22 @@ final class AcpJsonRpcConnection {
     if (!identical(_pending[pending.id], pending)) return false;
     _pending.remove(pending.id);
     pending.timer?.cancel();
+    pending.cancellation?._unbind(pending);
     return true;
+  }
+
+  void _handlePeerCancel(Object? params) {
+    final requestId = AcpJson.object(params)?['requestId'];
+    // Only exact JSON-RPC ids match: a numeric 1 never cancels request "1".
+    if (requestId is! String && requestId is! int) return;
+    final request = _inboundRequests.remove(requestId);
+    if (request == null) return;
+    unawaited(
+      request._cancelFromPeer().then<void>(
+        (_) {},
+        onError: (Object _, StackTrace _) {},
+      ),
+    );
   }
 
   Future<void> _writeMessage(AcpJsonMap message) async {
@@ -491,11 +671,13 @@ final class AcpJsonRpcConnection {
     _closed = true;
     for (final pending in _pending.values) {
       pending.timer?.cancel();
+      pending.cancellation?._unbind(pending);
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(reason, stackTrace);
       }
     }
     _pending.clear();
+    _inboundRequests.clear();
     await _incomingSubscription.cancel();
     try {
       await _transport.close();

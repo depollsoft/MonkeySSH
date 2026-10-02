@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
@@ -66,6 +67,10 @@ class FakeAcpSessionManager extends AcpSessionManager {
   final List<String> rejectedWrites = <String>[];
   final List<({int hostId, String bridgeId})> releasedMuxBridges = [];
   final Map<String, String> pendingWriteContents = <String, String>{};
+  final List<(String, Map<String, Object?>?)> acceptedElicitations = [];
+  final List<String> declinedElicitations = <String>[];
+  final List<String> cancelledElicitations = <String>[];
+  final List<String> dismissedAwaitingElicitations = <String>[];
 
   /// Results returned by successive [forkSession] calls, consumed FIFO. When
   /// exhausted, a safe failure is returned.
@@ -195,6 +200,30 @@ class FakeAcpSessionManager extends AcpSessionManager {
   @override
   Future<void> rejectWrite(AcpSessionKey key, String requestKey) async {
     rejectedWrites.add(requestKey);
+  }
+
+  @override
+  Future<void> acceptElicitation(
+    AcpSessionKey key,
+    String requestKey, {
+    Map<String, Object?>? content,
+  }) async {
+    acceptedElicitations.add((requestKey, content));
+  }
+
+  @override
+  Future<void> declineElicitation(AcpSessionKey key, String requestKey) async {
+    declinedElicitations.add(requestKey);
+  }
+
+  @override
+  Future<void> cancelElicitation(AcpSessionKey key, String requestKey) async {
+    cancelledElicitations.add(requestKey);
+  }
+
+  @override
+  void dismissAwaitingElicitation(AcpSessionKey key, String elicitationId) {
+    dismissedAwaitingElicitations.add(elicitationId);
   }
 
   @override
@@ -344,6 +373,10 @@ AcpSessionState fakeAcpSession({
   List<AcpPendingPermission> pendingPermissions =
       const <AcpPendingPermission>[],
   List<AcpPendingWrite> pendingWrites = const <AcpPendingWrite>[],
+  List<AcpSessionElicitation> pendingElicitations =
+      const <AcpSessionElicitation>[],
+  List<AcpAwaitingElicitation> awaitingElicitations =
+      const <AcpAwaitingElicitation>[],
   AcpTimeline timeline = const AcpTimeline.empty(),
 }) {
   final now = lastActivityAt ?? DateTime(2026);
@@ -368,6 +401,8 @@ AcpSessionState fakeAcpSession({
     plan: plan,
     pendingPermissions: pendingPermissions,
     pendingWrites: pendingWrites,
+    pendingElicitations: pendingElicitations,
+    awaitingElicitations: awaitingElicitations,
     timeline: timeline,
   );
 }

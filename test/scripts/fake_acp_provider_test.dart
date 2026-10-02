@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_json.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
@@ -84,6 +85,9 @@ void main() {
       'echo',
       'fixtures',
       'wait',
+      'elicit',
+      'elicit-url',
+      'cancel-permission',
     ]);
     expect((await client.listSessions()).sessions.single.sessionId, sessionId);
 
@@ -187,4 +191,103 @@ void main() {
     await client.close();
     expect(await stderr, isEmpty);
   });
+
+  test(
+    'fake provider exercises elicitation and cancellation fixtures',
+    () async {
+      final process = await Process.start('python3', const [
+        'scripts/fake_acp_provider.py',
+      ]);
+      final stderr = process.stderr.transform(utf8.decoder).join();
+      final connection = AcpJsonRpcConnection(
+        transport: _ProcessTransport(process),
+        defaultRequestTimeout: const Duration(seconds: 5),
+      );
+      final client = AcpClient(connection);
+      final requests = client.serverRequests.asBroadcastStream();
+      final texts = <String>[];
+      final subscription = client.updates.listen((notification) {
+        final update = notification.update;
+        if (update is AcpContentChunkUpdate &&
+            update.kind == 'agent_message_chunk' &&
+            update.content is AcpTextContent) {
+          texts.add((update.content as AcpTextContent).text);
+        }
+      });
+
+      await client.initialize(
+        capabilities: const AcpClientCapabilities(
+          elicitationForm: true,
+          elicitationUrl: true,
+        ),
+      );
+      final sessionId = (await client.newSession(cwd: '.')).sessionId!;
+      Future<AcpPromptResult> prompt(String text) =>
+          client.prompt(sessionId: sessionId, content: [AcpTextContent(text)]);
+      AcpElicitationRequest parse(AcpJsonRpcServerRequest request) =>
+          AcpElicitationRequest.parse(
+            AcpJson.object(request.params)!,
+            formSupported: true,
+            urlSupported: true,
+          );
+
+      final formRequest = requests.firstWhere(
+        (request) => request.method == 'elicitation/create',
+      );
+      final formTurn = prompt('/elicit');
+      final form = await formRequest;
+      final formElicitation = parse(form) as AcpFormElicitation;
+      expect(formElicitation.scope.sessionId, sessionId);
+      // The fake provider sorts JSON keys; fields keep the wire order.
+      expect(formElicitation.schema.fields.map((field) => field.name), [
+        'dryRun',
+        'retries',
+        'strategy',
+      ]);
+      final content = {'strategy': 'fast', 'retries': 2};
+      expect(formElicitation.validateContent(content), isEmpty);
+      await form.respond({'action': 'accept', 'content': content});
+      expect((await formTurn).stopReason, AcpStopReason.endTurn);
+      expect(texts.last, 'elicitation=accept {"retries":2,"strategy":"fast"}');
+
+      final urlRequest = requests.firstWhere(
+        (request) => request.method == 'elicitation/create',
+      );
+      final completion = client.elicitationCompletions.first;
+      final urlTurn = prompt('/elicit-url');
+      final link = await urlRequest;
+      final urlElicitation = parse(link) as AcpUrlElicitation;
+      expect(urlElicitation.review.canOpen, isTrue);
+      await link.respond({'action': 'accept'});
+      expect(await completion, urlElicitation.elicitationId);
+      await urlTurn;
+      expect(texts.last, 'elicitation=accept');
+
+      final withdrawn = client.serverRequestCancellations.first;
+      final withdrawnTurn = prompt('/cancel-permission');
+      expect('${await withdrawn}', startsWith('fake-permission-'));
+      await withdrawnTurn;
+      expect(texts.last, 'permission=withdrawn');
+
+      final cancellation = AcpRequestCancellation();
+      final waiting = connection.request(
+        'session/prompt',
+        params: {
+          'sessionId': sessionId,
+          'prompt': [const AcpTextContent('/wait').toJson()],
+        },
+        noTimeout: true,
+        cancellation: cancellation,
+      );
+      await client.updates.firstWhere(
+        (notification) => notification.update.kind == 'plan',
+      );
+      cancellation.cancel();
+      await expectLater(waiting, throwsA(isA<AcpRequestCancelledException>()));
+
+      await subscription.cancel();
+      await client.close();
+      expect(await stderr, isEmpty);
+    },
+  );
 }

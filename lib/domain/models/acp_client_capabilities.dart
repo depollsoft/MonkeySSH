@@ -1,7 +1,12 @@
 import 'dart:convert';
 
 import '../services/acp_json_rpc_connection.dart';
+import 'acp_elicitation.dart';
 import 'acp_updates.dart';
+
+/// Type-tagged registry key for JSON-RPC request [id]: `n:<int>` or
+/// `s:<string>`, so numeric `1` and string `"1"` never collide.
+String acpPendingRequestKey(AcpRequestId id) => id is int ? 'n:$id' : 's:$id';
 
 /// A user-decision request retained until it is explicitly answered.
 sealed class AcpPendingClientRequest {
@@ -18,10 +23,7 @@ sealed class AcpPendingClientRequest {
   /// JSON-RPC numeric `1` and string `"1"` are distinct IDs and may be
   /// outstanding simultaneously. The tag prevents registry collisions while
   /// retaining a compact UI-safe key.
-  String get id {
-    final value = request.id;
-    return value is int ? 'n:$value' : 's:$value';
-  }
+  String get id => acpPendingRequestKey(request.id);
 
   /// ACP session that owns this request, if supplied by the agent.
   String get sessionId;
@@ -100,4 +102,33 @@ final class AcpPendingFileWrite extends AcpPendingClientRequest {
   /// Refuses this write without exposing the target path or content.
   Future<void> reject() =>
       request.respondError(-32001, 'File write was not approved');
+}
+
+/// A pending `elicitation/create` request awaiting the user.
+final class AcpPendingElicitation extends AcpPendingClientRequest {
+  /// Creates a pending elicitation.
+  AcpPendingElicitation(super.request, this.elicitation, {super.requestedAt});
+
+  /// Parsed request. Its message, schema, and URL are never logged.
+  final AcpElicitationRequest elicitation;
+
+  /// Owning session, or empty for a request-scoped elicitation.
+  @override
+  String get sessionId => elicitation.scope.sessionId ?? '';
+
+  /// Whether this request belongs to a request rather than one session.
+  bool get isRequestScoped => elicitation.scope.isRequestScoped;
+
+  /// Sends the user's submission or URL consent.
+  Future<void> accept([Map<String, Object?>? content]) => request.respond(
+    <String, Object?>{'action': 'accept', 'content': ?content},
+  );
+
+  /// Tells the agent the user explicitly declined.
+  Future<void> decline() =>
+      request.respond(const <String, Object?>{'action': 'decline'});
+
+  /// Tells the agent the user dismissed the request without choosing.
+  Future<void> cancel() =>
+      request.respond(const <String, Object?>{'action': 'cancel'});
 }

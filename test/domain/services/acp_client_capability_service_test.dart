@@ -179,6 +179,7 @@ void main() {
           'session': {
             'configOptions': {'boolean': {}},
           },
+          'elicitation': {'form': {}, 'url': {}},
         },
       );
     });
