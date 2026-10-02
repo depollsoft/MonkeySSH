@@ -64,6 +64,7 @@ AcpSessionKey _key() => AcpSessionKey.of(
 AcpSessionState _session({
   AcpPromptStatus promptStatus = AcpPromptStatus.idle,
   List<AcpAvailableCommand> commands = const <AcpAvailableCommand>[],
+  AcpPromptCapabilities promptCapabilities = const AcpPromptCapabilities(),
 }) {
   final now = DateTime(2026);
   return AcpSessionState(
@@ -75,7 +76,10 @@ AcpSessionState _session({
     lastActivityAt: now,
     promptStatus: promptStatus,
     availableCommands: commands,
-    initialization: const AcpInitializeResult(protocolVersion: 1),
+    initialization: AcpInitializeResult(
+      protocolVersion: 1,
+      agentCapabilities: AcpAgentCapabilities(prompt: promptCapabilities),
+    ),
   );
 }
 
@@ -431,6 +435,109 @@ void main() {
     await tester.tap(find.byTooltip('Remove notes.txt'));
     await tester.pump();
     expect(controller.attachments, isEmpty);
+  });
+
+  testWidgets('offers audio files only to audio-capable agents', (
+    tester,
+  ) async {
+    final manager = _RecordingManager();
+    final withoutAudio = _makeController(manager);
+    addTearDown(withoutAudio.dispose);
+    var audioPicks = 0;
+    final actions = AcpComposerAttachmentActions(
+      pickFiles: (_) async => const [],
+      pickAudio: (_) async {
+        audioPicks++;
+        return [
+          AcpAttachmentCandidate.memory(
+            name: 'memo.mp3',
+            bytes: Uint8List.fromList(const [0x49, 0x44, 0x33, 4]),
+          ),
+        ];
+      },
+    );
+    await _pump(tester, withoutAudio, actions: actions);
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose file'), findsOneWidget);
+    expect(find.text('Audio file'), findsNothing);
+    await tester.tapAt(const Offset(200, 100));
+    await tester.pumpAndSettle();
+
+    final withAudio = _makeController(
+      manager,
+      session: _session(
+        promptCapabilities: const AcpPromptCapabilities(audio: true),
+      ),
+    );
+    addTearDown(withAudio.dispose);
+    await _pump(tester, withAudio, actions: actions);
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Audio file'));
+    await tester.pumpAndSettle();
+
+    expect(audioPicks, 1);
+    expect(withAudio.attachments.single.isAudio, isTrue);
+    expect(find.text('memo.mp3'), findsOneWidget);
+    expect(find.byIcon(Icons.audio_file_outlined), findsOneWidget);
+  });
+
+  testWidgets('an audio-only picker leaves the add button disabled without '
+      'audio support', (tester) async {
+    final controller = _makeController(_RecordingManager());
+    addTearDown(controller.dispose);
+    await _pump(
+      tester,
+      controller,
+      actions: AcpComposerAttachmentActions(pickAudio: (_) async => const []),
+    );
+
+    final button = tester.widget<IconButton>(
+      find.ancestor(
+        of: find.byKey(const ValueKey('acp-add-button-visual')),
+        matching: find.byType(IconButton),
+      ),
+    );
+    expect(button.onPressed, isNull);
+  });
+
+  testWidgets('oversize audio offers the explicit upload fallback', (
+    tester,
+  ) async {
+    final manager = _RecordingManager();
+    final controller = _makeController(
+      manager,
+      session: _session(
+        promptCapabilities: const AcpPromptCapabilities(audio: true),
+      ),
+      preparationService: const AcpAttachmentPreparationService(
+        limits: AcpAttachmentLimits(maxAudioBytes: 4),
+      ),
+    );
+    addTearDown(controller.dispose);
+    await _pump(tester, controller);
+    controller.addAttachment(
+      AcpAttachmentCandidate.memory(
+        name: 'long.mp3',
+        bytes: Uint8List.fromList(const [0x49, 0x44, 0x33, 4, 0, 0, 0, 0]),
+      ),
+    );
+
+    expect(await controller.send(), isFalse);
+    await tester.pump();
+
+    expect(manager.promptCount, 0);
+    expect(
+      controller.error?.attachmentFailure,
+      AcpAttachmentFailure.audioSizeLimit,
+    );
+    expect(controller.error?.isUploadRecoverable, isTrue);
+    expect(
+      find.text('Audio clips can be up to 4 bytes to send inline.'),
+      findsOneWidget,
+    );
+    expect(find.text('Upload'), findsOneWidget);
   });
 
   testWidgets('error banner surfaces a dismissable message', (tester) async {

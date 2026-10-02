@@ -23,8 +23,10 @@ final class AcpTimelineLimits {
     this.maxEntries = 500,
     this.maxEntryBytes = 512 * 1024,
     this.maxRetainedImageBytes = kAcpAttachmentImageDisplayMaxBytes,
+    this.maxRetainedAudioBytes = kAcpAttachmentAudioMaxBytes,
     this.maxTotalBytes = 16 * 1024 * 1024,
-  }) : assert(maxRetainedImageBytes >= 0);
+  }) : assert(maxRetainedImageBytes >= 0),
+       assert(maxRetainedAudioBytes >= 0);
 
   /// Maximum retained timeline entries. Oldest entries are dropped first.
   final int maxEntries;
@@ -42,6 +44,13 @@ final class AcpTimelineLimits {
   /// ceiling. Keeping that separate budget prevents an ordinary pasted
   /// screenshot from being replaced by a text-only memory marker.
   final int maxRetainedImageBytes;
+
+  /// Maximum decoded bytes of inline audio protected within one message.
+  ///
+  /// Like [maxRetainedImageBytes], this keeps a playable clip from being
+  /// replaced by a memory marker. It is separate from the image budget so a
+  /// prompt with a screenshot and a voice clip can retain both.
+  final int maxRetainedAudioBytes;
 
   /// Maximum approximate total bytes retained across the whole timeline.
   final int maxTotalBytes;
@@ -351,6 +360,13 @@ int approximateContentBlockBytes(AcpContentBlock block) {
       block.data.length +
           utf8.encode(block.mimeType).length +
           utf8.encode(block.uri ?? '').length +
+          _approximateJsonBytes(block.annotations?.toJson()) +
+          _approximateJsonBytes(block.meta) +
+          _approximateJsonBytes(block.extensions) +
+          256,
+    AcpAudioContent() =>
+      block.data.length +
+          utf8.encode(block.mimeType).length +
           _approximateJsonBytes(block.annotations?.toJson()) +
           _approximateJsonBytes(block.meta) +
           _approximateJsonBytes(block.extensions) +
@@ -696,14 +712,14 @@ class AcpTimelineBuilder {
   /// whole timeline drops its oldest entries), then truncates a single
   /// remaining oversized block as a last resort.
   AcpMessageEntry _boundedMessageEntry(AcpMessageEntry entry) {
-    final protectedImages = _protectedTimelineImages(
-      entry.content,
-      _limits.maxRetainedImageBytes,
-    );
+    final protectedImages = <AcpMediaContent>{
+      ..._protectedTimelineImages(entry.content, _limits.maxRetainedImageBytes),
+      ..._protectedTimelineAudio(entry.content, _limits.maxRetainedAudioBytes),
+    };
     int byteLimit(Iterable<AcpContentBlock> content) => math.min(
       _limits.maxTotalBytes,
       _limits.maxEntryBytes +
-          content.whereType<AcpImageContent>().fold<int>(
+          content.whereType<AcpMediaContent>().fold<int>(
             0,
             (sum, block) =>
                 sum + (protectedImages.contains(block) ? block.data.length : 0),
@@ -761,6 +777,22 @@ class AcpTimelineBuilder {
     final protected = <AcpImageContent>{};
     for (final block in content.reversed) {
       if (block is! AcpImageContent || block.data.isEmpty) continue;
+      final decodedBytes = _approximateBase64DecodedBytes(block.data);
+      if (decodedBytes <= 0 || decodedBytes > remaining) continue;
+      protected.add(block);
+      remaining -= decodedBytes;
+    }
+    return protected;
+  }
+
+  Set<AcpAudioContent> _protectedTimelineAudio(
+    List<AcpContentBlock> content,
+    int decodedByteBudget,
+  ) {
+    var remaining = decodedByteBudget;
+    final protected = <AcpAudioContent>{};
+    for (final block in content.reversed) {
+      if (block is! AcpAudioContent || block.data.isEmpty) continue;
       final decodedBytes = _approximateBase64DecodedBytes(block.data);
       if (decodedBytes <= 0 || decodedBytes > remaining) continue;
       protected.add(block);

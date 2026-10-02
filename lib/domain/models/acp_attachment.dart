@@ -3,6 +3,53 @@ import 'package:flutter/foundation.dart';
 /// Maximum image payload that the ACP timeline can safely display.
 const int kAcpAttachmentImageDisplayMaxBytes = 10 * 1024 * 1024;
 
+/// Maximum decoded audio payload sent inline or retained for playback.
+///
+/// Matches the image ceiling: a clip at this size encodes to roughly 13.4 MiB
+/// of base64, which stays inside the 20 MiB ACP JSON-RPC frame with headroom
+/// for the rest of the prompt.
+const int kAcpAttachmentAudioMaxBytes = 10 * 1024 * 1024;
+
+/// Normalizes common non-canonical audio MIME aliases.
+///
+/// File-name and magic-number detection report legacy `x-` aliases (for
+/// example `audio/x-wav`). Agents generally expect the registered names, so
+/// inline audio is labelled with them. Non-audio and unknown audio types are
+/// returned lower-cased and trimmed but otherwise unchanged.
+String normalizeAcpAudioMimeType(String mimeType) {
+  final normalized = mimeType.trim().toLowerCase();
+  return switch (normalized) {
+    'audio/x-wav' || 'audio/wave' || 'audio/vnd.wave' => 'audio/wav',
+    'audio/mp3' || 'audio/x-mp3' || 'audio/mpeg3' => 'audio/mpeg',
+    'audio/x-flac' => 'audio/flac',
+    'audio/x-m4a' || 'audio/m4a' => 'audio/mp4',
+    'audio/x-aiff' => 'audio/aiff',
+    'audio/weba' => 'audio/webm',
+    'audio/x-aac' => 'audio/aac',
+    _ => normalized,
+  };
+}
+
+/// Returns a conventional file extension for an audio [mimeType].
+///
+/// Native players (notably AVFoundation) pick a demuxer from the extension,
+/// so decoded clips are written with one. Unknown types fall back to `audio`.
+String acpAudioFileExtension(String? mimeType) =>
+    switch (normalizeAcpAudioMimeType(mimeType ?? '')) {
+      'audio/mpeg' => 'mp3',
+      'audio/wav' => 'wav',
+      'audio/mp4' => 'm4a',
+      'audio/aac' => 'aac',
+      'audio/ogg' || 'audio/opus' => 'ogg',
+      'audio/flac' => 'flac',
+      'audio/webm' => 'webm',
+      'audio/aiff' => 'aiff',
+      'audio/x-caf' => 'caf',
+      'audio/amr' => 'amr',
+      'audio/3gpp' => '3gp',
+      _ => 'audio',
+    };
+
 /// Internal MIME marker for text collapsed into a composer paste chip.
 ///
 /// It is converted back to ordinary ACP text before leaving the app.
@@ -192,6 +239,7 @@ final class AcpAttachmentLimits {
     this.maxTotalBytes = 100 * 1024 * 1024,
     this.maxEmbeddedBytes = 5 * 1024 * 1024,
     this.maxImageBytes = kAcpAttachmentImageDisplayMaxBytes,
+    this.maxAudioBytes = kAcpAttachmentAudioMaxBytes,
     this.maxFileNameBytes = 255,
     this.maxMimeTypeBytes = 127,
     this.mimeSniffBytes = 512,
@@ -201,6 +249,8 @@ final class AcpAttachmentLimits {
        assert(maxEmbeddedBytes > 0),
        assert(maxImageBytes > 0),
        assert(maxImageBytes <= kAcpAttachmentImageDisplayMaxBytes),
+       assert(maxAudioBytes > 0),
+       assert(maxAudioBytes <= kAcpAttachmentAudioMaxBytes),
        assert(maxFileNameBytes > 0),
        assert(maxMimeTypeBytes > 0),
        assert(mimeSniffBytes > 0);
@@ -219,6 +269,9 @@ final class AcpAttachmentLimits {
 
   /// Maximum bytes embedded as an ACP image.
   final int maxImageBytes;
+
+  /// Maximum bytes embedded as ACP audio.
+  final int maxAudioBytes;
 
   /// Maximum UTF-8 bytes in a file name.
   final int maxFileNameBytes;
@@ -243,6 +296,9 @@ enum AcpAttachmentFailure {
 
   /// An image exceeds the safe display limit.
   imageSizeLimit,
+
+  /// An audio clip exceeds the inline audio limit.
+  audioSizeLimit,
 
   /// A file name is empty, unsafe, or too long.
   invalidFileName,

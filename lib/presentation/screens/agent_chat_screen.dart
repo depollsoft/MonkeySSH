@@ -643,6 +643,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     return AcpComposerAttachmentActions(
       pickPhotos: _pickPhotos,
       pickFiles: _pickFiles,
+      pickAudio: _pickAudio,
       pickRemoteFiles: (context) =>
           _pickRemoteFiles(context, connectionId, session.cwd),
     );
@@ -662,6 +663,17 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     // (the explicit allowMultiple flag is deprecated); adapters/limits are
     // preserved by the shared PlatformFile adapter below.
     final files = await FilePicker.pickFiles();
+    return [
+      for (final file in files)
+        await acpAttachmentCandidateFromPlatformFile(file),
+    ];
+  }
+
+  Future<List<AcpAttachmentCandidate>> _pickAudio(BuildContext context) async {
+    // The audio filter uses each platform's document picker (UIDocumentPicker
+    // on iOS, ACTION_GET_CONTENT on Android), so no media-library permission
+    // is needed.
+    final files = await FilePicker.pickFiles(type: FileType.audio);
     return [
       for (final file in files)
         await acpAttachmentCandidateFromPlatformFile(file),
@@ -1042,6 +1054,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 (part) => switch (part) {
                   ui.AcpTextPart(:final text) => text,
                   ui.AcpImagePart() => '[image]',
+                  ui.AcpAudioPart() => '[audio]',
                   ui.AcpResourcePart(:final resource) =>
                     '[${resource.displayName}]',
                 },

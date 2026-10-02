@@ -78,6 +78,9 @@ class AcpResourceChip extends StatelessWidget {
     if (mime.startsWith('image/')) {
       return Icons.image_outlined;
     }
+    if (mime.startsWith('audio/')) {
+      return Icons.audio_file_outlined;
+    }
     if (mime.startsWith('text/') ||
         mime.contains('json') ||
         mime.contains('xml')) {

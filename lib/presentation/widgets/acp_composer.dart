@@ -21,13 +21,15 @@ typedef AcpAttachmentPick = Future<List<AcpAttachmentCandidate>> Function(
 ///
 /// Each entry is optional; only the provided sources appear in the menu. All
 /// picker invocation goes through these callbacks so the composer can be
-/// exercised in tests without any platform picker.
+/// exercised in tests without any platform picker. [pickAudio] is shown only
+/// while the session's agent advertises `promptCapabilities.audio`.
 @immutable
 class AcpComposerAttachmentActions {
   /// Creates attachment actions.
   const AcpComposerAttachmentActions({
     this.pickPhotos,
     this.pickFiles,
+    this.pickAudio,
     this.pickRemoteFiles,
   });
 
@@ -37,12 +39,25 @@ class AcpComposerAttachmentActions {
   /// Picks arbitrary local files.
   final AcpAttachmentPick? pickFiles;
 
+  /// Picks local audio files, offered only to audio-capable agents.
+  final AcpAttachmentPick? pickAudio;
+
   /// Picks files from the remote host over SFTP.
   final AcpAttachmentPick? pickRemoteFiles;
 
   /// Whether at least one source is available.
   bool get hasAny =>
-      pickPhotos != null || pickFiles != null || pickRemoteFiles != null;
+      pickPhotos != null ||
+      pickFiles != null ||
+      pickAudio != null ||
+      pickRemoteFiles != null;
+
+  /// Whether at least one source is offered given the agent's audio support.
+  bool hasAnyFor({required bool audioSupported}) =>
+      pickPhotos != null ||
+      pickFiles != null ||
+      (audioSupported && pickAudio != null) ||
+      pickRemoteFiles != null;
 }
 
 /// Controls the native composer focus from the persistent terminal shell.
@@ -406,6 +421,10 @@ class _AcpComposerState extends State<AcpComposer> {
         await _addAttachments(actions.pickPhotos);
       case _AcpAddAction.files:
         await _addAttachments(actions.pickFiles);
+      case _AcpAddAction.audio:
+        if (_controller.promptCapabilities.audio) {
+          await _addAttachments(actions.pickAudio);
+        }
       case _AcpAddAction.remoteFiles:
         await _addAttachments(actions.pickRemoteFiles);
     }
@@ -613,8 +632,13 @@ class _AcpComposerState extends State<AcpComposer> {
                               actions: widget.attachmentActions,
                               enabled:
                                   _controller.isEditable &&
-                                  widget.attachmentActions.hasAny,
+                                  widget.attachmentActions.hasAnyFor(
+                                    audioSupported:
+                                        _controller.promptCapabilities.audio,
+                                  ),
                               attachmentsEnabled: _controller.canAddAttachment,
+                              audioSupported:
+                                  _controller.promptCapabilities.audio,
                               onSelected: _handleAddAction,
                             ),
                             if (widget.controls != null) ...[
@@ -660,7 +684,7 @@ class _AcpComposerState extends State<AcpComposer> {
 const _composerControlTapDimension = 44.0;
 const _composerControlVisualDimension = 38.0;
 
-enum _AcpAddAction { photos, files, remoteFiles }
+enum _AcpAddAction { photos, files, audio, remoteFiles }
 
 class _ComposerToolbarButton extends StatelessWidget {
   const _ComposerToolbarButton({
@@ -711,12 +735,14 @@ class _AddButton extends StatelessWidget {
     required this.actions,
     required this.enabled,
     required this.attachmentsEnabled,
+    required this.audioSupported,
     required this.onSelected,
   });
 
   final AcpComposerAttachmentActions actions;
   final bool enabled;
   final bool attachmentsEnabled;
+  final bool audioSupported;
   final ValueChanged<_AcpAddAction> onSelected;
 
   @override
@@ -748,6 +774,15 @@ class _AddButton extends StatelessWidget {
                 ? () => onSelected(_AcpAddAction.files)
                 : null,
             child: const Text('Choose file'),
+          ),
+        if (audioSupported && actions.pickAudio != null)
+          MenuItemButton(
+            style: itemStyle,
+            leadingIcon: const Icon(Icons.audio_file_outlined),
+            onPressed: attachmentsEnabled
+                ? () => onSelected(_AcpAddAction.audio)
+                : null,
+            child: const Text('Audio file'),
           ),
         if (actions.pickRemoteFiles != null)
           MenuItemButton(

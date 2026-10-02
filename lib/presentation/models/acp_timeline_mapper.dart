@@ -129,6 +129,8 @@ String? buildAcpConversationPreview(
       final line = switch (entry) {
         AcpUserPromptEntry() =>
           'You: ${clean(entry.parts.whereType<AcpTextPart>().map((part) => part.text).join(' '))}',
+        AcpAssistantMessageEntry() when entry.audio.isNotEmpty =>
+          'Agent: ${'${clean(entry.markdown)} [audio]'.trim()}',
         AcpAssistantMessageEntry() => 'Agent: ${clean(entry.markdown)}',
         AcpToolCallEntry() =>
           '${entry.isSubagent ? 'Subagent' : 'Tool'}: '
@@ -325,6 +327,7 @@ AcpTimelineEntry? _mapMessage(
         markdown: _markdownFromContent(entry.content),
         parentToolCallId: entry.parentToolCallId,
         status: status,
+        audio: _audioFromContent(entry.content),
       );
     case d.AcpMessageRole.thought:
       return AcpThoughtEntry(
@@ -355,20 +358,33 @@ List<AcpPromptPart> _mapPromptParts(List<d.AcpContentBlock> content) {
       case d.AcpResourceLinkContent():
         parts.add(AcpResourcePart(_resourceLinkRef(block)));
       case d.AcpAudioContent():
-        parts.add(
-          AcpResourcePart(
-            AcpResourceRef(
-              uri: 'audio',
-              name: 'Audio clip',
-              mimeType: block.mimeType,
-            ),
-          ),
-        );
+        parts.add(AcpAudioPart(_mapAudio(block)));
       case d.AcpUnknownContent():
         break;
     }
   }
   return parts;
+}
+
+/// Maps inline audio without decoding it. Payloads whose estimated decoded
+/// size exceeds [kAcpAttachmentAudioMaxBytes] are dropped from the clip so the
+/// player shows a placeholder and never allocates them.
+AcpAudioClip _mapAudio(d.AcpAudioContent block) {
+  final data = block.data;
+  final size = data.isEmpty ? null : _base64DecodedLength(data);
+  return AcpAudioClip(
+    data: size != null && size <= kAcpAttachmentAudioMaxBytes ? data : null,
+    mimeType: block.mimeType.isEmpty ? null : block.mimeType,
+    sizeBytes: size,
+  );
+}
+
+List<AcpAudioClip> _audioFromContent(List<d.AcpContentBlock> content) {
+  final audio = <AcpAudioClip>[
+    for (final block in content)
+      if (block is d.AcpAudioContent) _mapAudio(block),
+  ];
+  return audio.isEmpty ? const [] : List.unmodifiable(audio);
 }
 
 AcpImageContent? _mapImage(d.AcpImageContent block) {
@@ -487,6 +503,7 @@ String _markdownLinkText(String text) =>
 
 AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   final diffs = <AcpDiff>[];
+  final audio = <AcpAudioClip>[];
   final (images, outputText) = _extractRawToolOutput(entry.rawOutput);
   final outputBlocks = <String>[];
   final resources = <AcpResourceRef>[];
@@ -516,6 +533,8 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
           if (image != null && !images.contains(image)) {
             images.add(image);
           }
+        } else if (inner is d.AcpAudioContent) {
+          audio.add(_mapAudio(inner));
         } else if (inner is d.AcpResourceLinkContent) {
           resources.add(_resourceLinkRef(inner));
         } else if (inner is d.AcpResourceContent) {
@@ -551,7 +570,8 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   // ACP content blocks are the adapter's user-facing result stream. Prefer
   // them over rawOutput, which may be a very large provider/Fabric tracing
   // envelope containing duplicated args, call ids, phases, and results.
-  final formattedOutput = visibleOutputBlocks.isEmpty && images.isEmpty
+  final formattedOutput =
+      visibleOutputBlocks.isEmpty && images.isEmpty && audio.isEmpty
       ? formatAcpToolPayload(entry.rawOutput)
       : null;
   final selectedRawOutput = visibleOutputBlocks.isEmpty
@@ -589,6 +609,7 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
       ],
       diffs: diffs,
       images: images,
+      audio: audio,
     ),
   );
 }
