@@ -778,8 +778,13 @@ class TerminalImeEngine {
     final composingAt = _shellCompletionPendingComposingAt;
     final preserveExistingGuard =
         (obsoleteTexts.isEmpty ||
+            // The field holds our normalized Return preview, possibly with
+            // fresh text after it, not a new prefix to protect.
             (_shellCompletionHasComposingEnterPreview &&
-                obsoleteTexts.every(_enterCommitNewlineSequences.contains))) &&
+                _leadingEnterSequenceLength(
+                      _extractRawInputText(_currentEditingState.text),
+                    ) >
+                    0)) &&
         _shellCompletionObsoleteTexts.isNotEmpty &&
         (submittedAt == null ||
             now().difference(submittedAt) < hardwareEnterStaleEditWindow ||
@@ -3163,6 +3168,7 @@ class TerminalImeEngine {
       return;
     }
 
+    final completionFollowUp = _shellCompletionEnterFollowUp;
     final value = _normalizeShellCompletionEcho(incomingValue);
     if (value == null) {
       return;
@@ -3171,6 +3177,9 @@ class TerminalImeEngine {
     if (_acceptNextPendingComposingEnterCommit) {
       _acceptNextPendingComposingEnterCommit = false;
     } else if (_capturePendingComposingEnterFollowUp(value)) {
+      // This echo never takes an editing revision, so it must not rebind the
+      // completion Return to a revision that will never be processed.
+      _shellCompletionEnterFollowUp = completionFollowUp;
       return;
     }
 

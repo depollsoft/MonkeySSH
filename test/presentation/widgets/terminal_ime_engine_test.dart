@@ -1510,6 +1510,49 @@ void main() {
 
     for (final approve in [false, true]) {
       test(
+        '${platform.name} shell completion keeps Return ownership when a repeated echo is consumed during review, approved=$approve',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final decision = Completer<bool>();
+          var reviewCount = 0;
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            onReviewInsertedText: (_) {
+              reviewCount++;
+              return decision.future;
+            },
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(_editingValue('pi\nx', selectionOffset: 4));
+          await driver.flush();
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          driver.updateEditingValue(_editingValue('pi\nx', selectionOffset: 4));
+          await driver.flush();
+          expect(reviewCount, 1);
+          expect(harness.terminalOutput, isEmpty);
+          decision.complete(approve);
+          await driver.flush();
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            approve ? '${_terminalKeyOutput(TerminalKey.enter)}x' : '',
+          );
+          if (approve) {
+            expect(
+              driver.engine.editingValue,
+              _editingValue('x', selectionOffset: 1),
+            );
+          }
+        },
+      );
+    }
+
+    for (final approve in [false, true]) {
+      test(
         '${platform.name} shell completion coalesced Return waits for review, approved=$approve',
         () async {
           final driver = _ImeDriver(platform: platform);
@@ -1823,6 +1866,52 @@ void main() {
           expect(
             harness.terminalOutput.join(),
             _terminalKeyOutput(TerminalKey.enter),
+          );
+        },
+      );
+    }
+
+    for (final actionFirst in [false, true]) {
+      test(
+        '${platform.name} shell completion keeps a Return preview with trailing text across a second tap, actionFirst=$actionFirst',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(
+            _editingValue(
+              'pi\nx',
+              selectionOffset: 4,
+              composing: const TextRange(start: 0, end: 4),
+            ),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput, isEmpty);
+          await driver.flush(const Duration(milliseconds: 100));
+          driver.engine.resetAfterShellCompletion();
+          if (actionFirst) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          driver.updateEditingValue(_editingValue('pi\nx', selectionOffset: 4));
+          await driver.flush();
+          if (!actionFirst) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          expect(harness.terminalOutput.join(), isNot(contains('pi')));
+          expect(
+            harness.terminalOutput.join(),
+            startsWith(_terminalKeyOutput(TerminalKey.enter)),
+          );
+          expect(
+            RegExp('\r').allMatches(harness.terminalOutput.join()),
+            hasLength(1),
           );
         },
       );
