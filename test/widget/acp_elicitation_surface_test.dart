@@ -139,6 +139,54 @@ void main() {
     });
   });
 
+  testWidgets('yes/no questions stay unanswered until chosen and required '
+      'text may be empty', (tester) async {
+    final calls = _Calls();
+    final form = _item('s:answers', {
+      'sessionId': 's',
+      'mode': 'form',
+      'message': 'A few answers',
+      'requestedSchema': {
+        'type': 'object',
+        'properties': {
+          'note': {'type': 'string', 'title': 'Note'},
+          'confirm': {'type': 'boolean', 'title': 'Confirm'},
+          'notify': {'type': 'boolean', 'title': 'Notify'},
+        },
+        'required': ['note', 'confirm'],
+      },
+    });
+    await tester.pumpWidget(_host(calls, items: [form]));
+    await tester.tap(find.text('Respond'));
+    await tester.pumpAndSettle();
+    final yes = find.widgetWithText(ChoiceChip, 'Yes');
+    final no = find.widgetWithText(ChoiceChip, 'No');
+    expect(yes, findsNWidgets(2));
+    expect(
+      tester
+          .widgetList<ChoiceChip>(find.byType(ChoiceChip))
+          .where((chip) => chip.selected),
+      isEmpty,
+    );
+
+    // A required yes/no needs a choice; the empty required note does not.
+    await tester.tap(find.text('Submit'));
+    await tester.pumpAndSettle();
+    expect(find.text('Required'), findsOneWidget);
+    expect(calls.log, isEmpty);
+
+    await tester.tap(no.first);
+    // An optional answer can be picked and then cleared again.
+    await tester.tap(yes.last);
+    await tester.pump();
+    await tester.tap(yes.last);
+    await tester.pump();
+    await tester.ensureVisible(find.text('Submit'));
+    await tester.tap(find.text('Submit'));
+    await tester.pumpAndSettle();
+    expect(calls.accepted.single.$2, {'note': '', 'confirm': false});
+  });
+
   testWidgets('dismissing the form sheet cancels and declining declines', (
     tester,
   ) async {

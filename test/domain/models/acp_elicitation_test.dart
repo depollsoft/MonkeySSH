@@ -329,7 +329,8 @@ void main() {
         'pattern': r'^[a-z]+$',
       }, req: true);
       expect(text.validate(null), 'Required');
-      expect(text.validate(''), 'Required');
+      // An empty answer is present; minLength is what rejects it.
+      expect(text.validate(''), 'Use at least 2 characters');
       expect(text.validate('a'), isNotNull);
       expect(text.validate('abcde'), isNotNull);
       // Patterns are checked off the UI isolate at submit, not here.
@@ -447,8 +448,15 @@ void main() {
       }, req: true);
       expect(choice.validate(''), isNull);
       expect(choice.validate(null), 'Required');
-      // A free-text box left empty is still unanswered.
-      expect(field({'type': 'string'}, req: true).validate(''), 'Required');
+      expect(choice.validate('other'), isNotNull);
+      // `required` only asks for presence: without minLength or a format,
+      // an empty string is a valid answer.
+      expect(field({'type': 'string'}, req: true).validate(''), isNull);
+      expect(field({'type': 'string'}, req: true).validate(null), 'Required');
+      expect(
+        field({'type': 'string', 'format': 'email'}, req: true).validate(''),
+        isNotNull,
+      );
 
       Map<String, Object?> list([Map<String, Object?> extra = const {}]) => {
         'type': 'array',
@@ -462,7 +470,12 @@ void main() {
         field(list({'minItems': 0}), req: true).validate(<String>[]),
         isNull,
       );
-      expect(field(list(), req: true).validate(<String>[]), 'Required');
+      expect(field(list(), req: true).validate(<String>[]), isNull);
+      expect(field(list(), req: true).validate(null), 'Required');
+      expect(
+        field(list({'minItems': 1}), req: true).validate(<String>[]),
+        isNotNull,
+      );
     });
 
     test('form content rejects unknown keys and invalid values', () {

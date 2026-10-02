@@ -238,8 +238,12 @@ final class AcpFormElicitation extends AcpElicitationRequest {
   }) => acpElicitationPatternMismatches([
     for (final field in schema.fields)
       if (field is AcpStringElicitationField)
-        if ((field.pattern, content[field.name])
-            case (final regex?, final String value) when value.isNotEmpty)
+        // A required text box submits even when empty, so "" is checked
+        // too; an optional one left empty is absent from content.
+        if ((field.pattern, content[field.name]) case (
+          final regex?,
+          final String value,
+        ))
           (
             field: field.name,
             pattern: regex.pattern,
@@ -631,13 +635,11 @@ final class AcpStringElicitationField extends AcpElicitationField {
 
   @override
   String? validate(Object? value) {
-    // An empty text box reads as unanswered, but an option whose value is
-    // the empty string (a titled "None") is a real answer.
-    final emptyIsAnswer = options?.any((option) => option.value.isEmpty);
-    if (value == null ||
-        (value is String && value.isEmpty && !(emptyIsAnswer ?? false))) {
-      return isRequired ? 'Required' : null;
-    }
+    // `required` only asks for the property to be present, so an empty
+    // string is a real answer; minLength, a format, or the options decide
+    // whether it is acceptable. The form passes null for an optional text
+    // box left empty, which leaves it unanswered.
+    if (value == null) return isRequired ? 'Required' : null;
     if (value is! String) return 'Enter text';
     if (options case final choices?) {
       return choices.any((option) => option.value == value)
@@ -782,9 +784,8 @@ final class AcpMultiSelectElicitationField extends AcpElicitationField {
       return 'Choose from the options';
     }
     if (value.toSet().length != value.length) return 'Choose each option once';
-    // An explicit `minItems: 0` lets a required list be answered with no
-    // choices; otherwise an empty required list reads as unanswered.
-    if (isRequired && value.isEmpty && minItems != 0) return 'Required';
+    // `required` only asks for the property; an empty list is a real answer
+    // unless minItems asks for more.
     if (minItems case final min? when value.length < min) {
       return 'Choose at least $min';
     }

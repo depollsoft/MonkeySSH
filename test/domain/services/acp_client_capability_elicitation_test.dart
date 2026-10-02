@@ -16,6 +16,9 @@ final class _Transport implements AcpTransport {
   final _incoming = StreamController<List<int>>();
   final messages = <Map<String, Object?>>[];
 
+  /// Runs for each message written, as the agent receiving it.
+  void Function(Map<String, Object?> message)? onWrite;
+
   @override
   Stream<List<int>> get incoming => _incoming.stream;
 
@@ -49,9 +52,10 @@ final class _Transport implements AcpTransport {
 
   @override
   Future<void> write(List<int> bytes) async {
-    messages.add(
-      (jsonDecode(utf8.decode(bytes).trim()) as Map).cast<String, Object?>(),
-    );
+    final message = (jsonDecode(utf8.decode(bytes).trim()) as Map)
+        .cast<String, Object?>();
+    messages.add(message);
+    onWrite?.call(message);
   }
 
   @override
@@ -411,6 +415,22 @@ void main() {
       transport.sendComplete('oauth-1');
       await _settle();
     });
+
+    test(
+      'a completion sent as soon as the agent reads the answer is kept',
+      () async {
+        transport.sendRequest('url', 'elicitation/create', _urlParams);
+        await _settle();
+        // The agent finishes the out-of-band step before the answer's write
+        // even returns.
+        transport.onWrite = (message) {
+          if (message['id'] == 'url') transport.sendComplete('oauth-1');
+        };
+        await service.acceptElicitation('s:url');
+        await _settle();
+        expect(registry.awaitingElicitations, isEmpty);
+      },
+    );
 
     test('closing a session forgets its awaiting URL', () async {
       transport.sendRequest('url', 'elicitation/create', _urlParams);

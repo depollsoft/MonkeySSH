@@ -67,7 +67,9 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
   final _formKey = GlobalKey<FormState>();
   final _controllers = <String, TextEditingController>{};
   final _choices = <String, String?>{};
-  final _toggles = <String, bool>{};
+  // Null until answered: an optional yes/no without a default stays
+  // unanswered unless the user picks one.
+  final _toggles = <String, bool?>{};
   final _selections = <String, Set<String>>{};
   // Pattern failures found at submit; a field's entry clears when it changes.
   final _patternErrors = <String, String>{};
@@ -90,7 +92,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
             text: defaultValue == null ? '' : '$defaultValue',
           );
         case AcpBooleanElicitationField(:final defaultValue):
-          _toggles[field.name] = defaultValue ?? false;
+          _toggles[field.name] = defaultValue;
         case AcpMultiSelectElicitationField(:final defaultValue):
           _selections[field.name] = {...defaultValue};
         case AcpUnsupportedElicitationField():
@@ -116,13 +118,17 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
             content[field.name] = value;
           }
         case AcpStringElicitationField():
+          // A required property is present even when empty; an optional
+          // box left empty is unanswered.
           final text = _controllers[field.name]!.text;
-          if (text.isNotEmpty) content[field.name] = text;
+          if (text.isNotEmpty || field.isRequired) content[field.name] = text;
         case AcpNumberElicitationField():
           final text = _controllers[field.name]!.text.trim();
           if (text.isNotEmpty) content[field.name] = field.parse(text);
         case AcpBooleanElicitationField():
-          content[field.name] = _toggles[field.name];
+          if (_toggles[field.name] case final value?) {
+            content[field.name] = value;
+          }
         case AcpMultiSelectElicitationField():
           final selected = _selections[field.name]!;
           if (selected.isNotEmpty || field.isRequired) {
@@ -190,9 +196,11 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
             Flexible(
               child: Form(
                 key: _formKey,
+                // Until the first submit, each field checks only itself once
+                // touched, so answering one question never flags another.
                 autovalidateMode: _submitted
                     ? AutovalidateMode.always
-                    : AutovalidateMode.onUserInteraction,
+                    : AutovalidateMode.disabled,
                 child: ListView(
                   shrinkWrap: true,
                   padding: const EdgeInsets.fromLTRB(
@@ -272,7 +280,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
         ),
         AcpStringElicitationField() => _textField(field),
         AcpNumberElicitationField() => _numberField(field),
-        AcpBooleanElicitationField() => _switchField(field),
+        AcpBooleanElicitationField() => _yesNoChips(field),
         AcpMultiSelectElicitationField() => _multiSelect(field),
         AcpUnsupportedElicitationField() => _unsupported(field),
       };
@@ -284,6 +292,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
       field: field,
       hint: _lengthHint(field),
       child: TextFormField(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         controller: controller,
         keyboardType: switch (format) {
           AcpElicitationStringFormat.email => TextInputType.emailAddress,
@@ -326,9 +335,13 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
         onChanged: (_) {
           if (_patternErrors.remove(field.name) != null) setState(() {});
         },
-        validator: (text) =>
-            field.validate(text == null || text.isEmpty ? null : text) ??
-            _patternErrors[field.name],
+        validator: (text) {
+          final value = text ?? '';
+          return field.validate(
+                value.isEmpty && !field.isRequired ? null : value,
+              ) ??
+              _patternErrors[field.name];
+        },
       ),
     );
   }
@@ -372,6 +385,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
         _ => field.integer ? 'A whole number' : null,
       },
       child: TextFormField(
+        autovalidateMode: AutovalidateMode.onUserInteraction,
         controller: _controllers[field.name],
         keyboardType: TextInputType.numberWithOptions(
           signed: min == null || min < 0,
@@ -398,22 +412,30 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
     );
   }
 
-  Widget _switchField(AcpBooleanElicitationField field) => FormField<bool>(
+  /// Yes and No as choice chips, like single-choice fields, so a question
+  /// can show that it has not been answered yet.
+  Widget _yesNoChips(AcpBooleanElicitationField field) => FormField<bool>(
+    autovalidateMode: AutovalidateMode.onUserInteraction,
     initialValue: _toggles[field.name],
     validator: field.validate,
-    builder: (state) => MergeSemantics(
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    builder: (state) => _Labeled(
+      field: field,
+      error: state.errorText,
+      child: Wrap(
+        spacing: FluttyTheme.spacingSm,
+        runSpacing: FluttyTheme.spacingXs,
         children: [
-          Expanded(child: _FieldLabel(field: field)),
-          const SizedBox(width: FluttyTheme.spacingMd),
-          Switch(
-            value: state.value ?? false,
-            onChanged: (value) {
-              state.didChange(value);
-              setState(() => _toggles[field.name] = value);
-            },
-          ),
+          for (final (answer, label) in const [(true, 'Yes'), (false, 'No')])
+            ChoiceChip(
+              label: Text(label),
+              selected: state.value == answer,
+              onSelected: (selected) {
+                // An optional answer can be cleared by tapping it again.
+                final value = selected || field.isRequired ? answer : null;
+                state.didChange(value);
+                setState(() => _toggles[field.name] = value);
+              },
+            ),
         ],
       ),
     ),
@@ -423,6 +445,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
     AcpStringElicitationField field,
     List<AcpElicitationOption> options,
   ) => FormField<String>(
+    autovalidateMode: AutovalidateMode.onUserInteraction,
     initialValue: _choices[field.name],
     validator: field.validate,
     builder: (state) => _Labeled(
@@ -456,6 +479,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
   ) => _Labeled(
     field: field,
     child: DropdownButtonFormField<String>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       initialValue: _choices[field.name],
       isExpanded: true,
       hint: const Text('Choose one'),
@@ -477,6 +501,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
     final min = field.minItems;
     final max = field.maxItems;
     return FormField<Set<String>>(
+      autovalidateMode: AutovalidateMode.onUserInteraction,
       initialValue: _selections[field.name],
       validator: (value) {
         final selected = value ?? const <String>{};

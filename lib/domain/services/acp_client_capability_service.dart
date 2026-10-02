@@ -814,20 +814,25 @@ final class AcpClientCapabilityService {
         throw ArgumentError('Elicitation content does not match the form');
       }
     }
+    // An accepted URL is tracked before the answer is sent: the agent may
+    // send elicitation/complete as soon as it reads the answer, and a
+    // completion for an id not yet tracked would be ignored.
+    final awaiting = elicitation is AcpUrlElicitation
+        ? AcpAwaitingElicitation(
+            elicitationId: elicitation.elicitationId,
+            url: elicitation.url,
+            sessionId: elicitation.scope.sessionId,
+            acceptedAt: DateTime.now(),
+          )
+        : null;
+    if (awaiting != null) registry.markAwaiting(awaiting);
     try {
       await pending.accept(submitted);
+    } on Object {
+      if (awaiting != null) registry.completeAwaiting(awaiting.elicitationId);
+      rethrow;
     } finally {
       _forgetPending(requestId);
-    }
-    if (elicitation is AcpUrlElicitation) {
-      registry.markAwaiting(
-        AcpAwaitingElicitation(
-          elicitationId: elicitation.elicitationId,
-          url: elicitation.url,
-          sessionId: elicitation.scope.sessionId,
-          acceptedAt: DateTime.now(),
-        ),
-      );
     }
     _logElicitationResolved(elicitation, 'accept');
   }
