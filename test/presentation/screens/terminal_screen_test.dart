@@ -6856,6 +6856,57 @@ void main() {
         },
         variant: TargetPlatformVariant.only(platform),
       );
+      testWidgets(
+        'shell completion preserves a matching fresh argument on ${platform.name}',
+        (tester) async {
+          var fakeNow = DateTime(2026);
+          debugSetModifierChordClock(() => fakeNow);
+          addTearDown(() => debugSetModifierChordClock(null));
+          final completionService = _TestShellCompletionService(
+            cachedSuggestions: const [
+              ShellCompletionSuggestion(
+                label: 'checkout',
+                replacement: 'checkout',
+                replacementStart: 4,
+                replacementEnd: 6,
+                kind: ShellCompletionSuggestionKind.history,
+                commitSuffix: ' ',
+              ),
+            ],
+          );
+          session.terminal!.write('root@host ~ % git c');
+          await pumpScreen(tester, shellCompletionService: completionService);
+          tester.testTextInput.updateEditingValue(
+            _editingValue('h', selectionOffset: 1),
+          );
+          await tester.pump();
+          await tester.pump();
+          shellWrites.clear();
+          await tester.tap(find.text('checkout'));
+          fakeNow = fakeNow.add(const Duration(milliseconds: 500));
+          await tester.pump(const Duration(milliseconds: 500));
+          final client = tester.state(
+            find.byType(TerminalTextInputHandler),
+          ) as TextInputClient;
+          for (final text in ['h', 'ho', 'hot', 'hotf', 'hotfi', 'hotfix']) {
+            tester.testTextInput.updateEditingValue(
+              _editingValue(text, selectionOffset: text.length),
+            );
+            await tester.pump();
+            expect(
+              client.currentTextEditingValue!.text,
+              '$_deleteDetectionMarker$text',
+            );
+          }
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pump();
+          expect(
+            shellWrites.map(String.fromCharCodes).join(),
+            '\x7f\x7fcheckout hotfix\r',
+          );
+        },
+        variant: TargetPlatformVariant.only(platform),
+      );
     }
 
     testWidgets('overflow menu toggles shell completion popups', (

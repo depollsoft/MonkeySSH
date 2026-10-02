@@ -48,6 +48,11 @@ const terminalTrailingSuffixRewriteLimit = 4;
 @visibleForTesting
 const hardwareEnterStaleEditWindow = Duration(milliseconds: 250);
 
+/// Hard limit for an obsolete IME composition retained after shell completion.
+/// A keyboard that abandons its commit must not block a later identical word.
+@visibleForTesting
+const shellCompletionComposingReplayWindow = Duration(seconds: 2);
+
 /// How long after an IME batch is framed as a bracketed paste a separate
 /// single-character commit still joins that framing.
 ///
@@ -458,6 +463,7 @@ class TerminalImeEngine {
   /// terminal, so the IME buffer must start over like after an IME Enter;
   /// otherwise later caret moves and edits are computed against stale text.
   void _resetAfterHardwareEnter() {
+    _recordShellCompletionEnter();
     final submittedText = _lastSentText;
     _hardwareEnterSubmittedText = submittedText;
     _hardwareEnterStaleLines =
@@ -705,10 +711,14 @@ class TerminalImeEngine {
     String? deleteResetDeletedSuffixText,
     bool flushPlatformContext = false,
     bool armIosBackspaceRunway = false,
+    bool preserveShellCompletion = false,
   }) {
     cancelDeferredTrailingBackspaceImeClear();
-    _shellCompletionObsoleteTexts = const {};
-    _shellCompletionSubmittedAt = null;
+    final preserveCompletionEnter =
+        preserveShellCompletion && _shellCompletionObsoleteTexts.isNotEmpty;
+    if (!preserveShellCompletion) {
+      _clearShellCompletionGuard();
+    }
     if (flushPlatformContext && (effects.canSyncEditingState?.call() ?? true)) {
       // Reset the editing state in-place rather than closing/reopening
       // the input connection. Closing triggers a keyboard dismiss+reshow
@@ -720,6 +730,10 @@ class TerminalImeEngine {
     _resetCommittedInputState(
       clearPendingDeleteResetBaseline: false,
       armIosBackspaceRunway: armIosBackspaceRunway,
+      clearPendingPerformedEnterText: !preserveCompletionEnter,
+      pendingEnterSuppressions: preserveCompletionEnter
+          ? _pendingEnterActionSuppressions
+          : 0,
     );
     _sawImeComposition = false;
     _hasPendingPromptOutputImeReset = false;
@@ -739,55 +753,127 @@ class TerminalImeEngine {
 
   /// Discards keyboard text replaced directly by a shell completion.
   ///
-  /// Android and iOS may still deliver the old composing word after the reset,
-  /// especially when Return commits a keyboard suggestion. Keep that obsolete
-  /// buffer until fresh input starts or Return's queued echoes settle.
+  /// Android and iOS can deliver queued composing updates after the reset.
+  /// Bare matches are ambiguous, so only reject them briefly after the tap or
+  /// Return. An active or queued composition stays protected through its
+  /// commit, up to [shellCompletionComposingReplayWindow].
   void resetAfterShellCompletion() {
-    final obsoleteTexts = <String>{
+    final composingTexts = <String>{
       _extractRawInputText(_currentEditingState.text),
-      _lastSentText,
+      _extractInputText(_currentEditingState.text),
     }..removeWhere((text) => text.isEmpty);
+    final obsoleteTexts = <String>{...composingTexts, _lastSentText}
+      ..removeWhere((text) => text.isEmpty);
+    final hadComposition = !_currentEditingState.composing.isCollapsed;
     clearImeBufferForFreshInput(flushPlatformContext: true);
     _shellCompletionObsoleteTexts = obsoleteTexts;
+    _shellCompletionResetAt = now();
+    if (hadComposition && composingTexts.isNotEmpty) {
+      _shellCompletionPendingComposingTexts = composingTexts;
+      _shellCompletionPendingComposingAt = _shellCompletionResetAt;
+    }
   }
 
   Set<String> _shellCompletionObsoleteTexts = const {};
+  Set<String> _shellCompletionPendingComposingTexts = const {};
+  DateTime? _shellCompletionResetAt;
   DateTime? _shellCompletionSubmittedAt;
+  DateTime? _shellCompletionPendingComposingAt;
+
+  void _clearShellCompletionPendingComposition() {
+    _shellCompletionPendingComposingTexts = const {};
+    _shellCompletionPendingComposingAt = null;
+  }
+
+  void _clearShellCompletionGuard() {
+    _shellCompletionObsoleteTexts = const {};
+    _clearShellCompletionPendingComposition();
+    _shellCompletionResetAt = null;
+    _shellCompletionSubmittedAt = null;
+  }
+
+  void _recordShellCompletionEnter() {
+    if (_shellCompletionObsoleteTexts.isNotEmpty) {
+      _shellCompletionSubmittedAt ??= now();
+    }
+  }
+
+  TextEditingValue _discardShellCompletionComposition(
+    Set<String> texts, {
+    required bool isComposing,
+  }) {
+    if (isComposing) {
+      _shellCompletionPendingComposingTexts = texts;
+      // Repeated composing echoes must not extend the hard retention limit.
+      _shellCompletionPendingComposingAt ??= now();
+    } else {
+      _clearShellCompletionPendingComposition();
+    }
+    _syncEditingStateWithUserText('');
+    return initEditingState;
+  }
 
   TextEditingValue _normalizeShellCompletionEcho(TextEditingValue value) {
-    final submittedAt = _shellCompletionSubmittedAt;
-    if (submittedAt != null &&
-        now().difference(submittedAt) >= hardwareEnterStaleEditWindow) {
-      // Once Enter's queued echoes settle, an identical keyboard suggestion
-      // or dictated command on the next line is fresh input again.
-      _shellCompletionObsoleteTexts = const {};
-      _shellCompletionSubmittedAt = null;
-    }
     if (_shellCompletionObsoleteTexts.isEmpty) {
       return value;
     }
-    final text = _extractRawInputText(value.text);
-    if (text.isEmpty) {
-      // Acknowledging the reset does not guarantee an already queued commit
-      // has arrived. Keep the obsolete buffer until genuinely new text arrives.
+    final composingAt = _shellCompletionPendingComposingAt;
+    if (composingAt != null &&
+        now().difference(composingAt) >= shellCompletionComposingReplayWindow) {
+      _clearShellCompletionPendingComposition();
+    }
+    final resetAt = _shellCompletionSubmittedAt ?? _shellCompletionResetAt!;
+    final withinStaleWindow =
+        now().difference(resetAt) < hardwareEnterStaleEditWindow;
+    if (!withinStaleWindow && _shellCompletionPendingComposingTexts.isEmpty) {
+      _clearShellCompletionGuard();
       return value;
     }
-    for (final obsolete in _shellCompletionObsoleteTexts) {
-      if (!text.startsWith(obsolete)) {
-        continue;
-      }
-      final suffix = text.substring(obsolete.length);
-      if (suffix.isEmpty || suffix == ' ') {
-        _syncEditingStateWithUserText('');
-        return initEditingState;
-      }
-      final enterSuffix = suffix.startsWith(' ') ? suffix.substring(1) : suffix;
-      if (_enterCommitNewlineSequences.contains(enterSuffix)) {
-        return _editingStateForUserText(userText: enterSuffix);
+    final texts = <String>{
+      _extractRawInputText(value.text),
+      // Use the same artifact normalization as the eventual terminal delta.
+      // It trims a recognized suggestion space, not intentional indentation.
+      _extractInputText(value.text),
+    }..removeWhere((text) => text.isEmpty);
+    if (texts.isEmpty) {
+      // The reset acknowledgment can precede an already queued commit.
+      return value;
+    }
+    final obsoleteTexts = withinStaleWindow
+        ? _shellCompletionObsoleteTexts
+        : _shellCompletionPendingComposingTexts;
+    final isComposing = !value.composing.isCollapsed;
+    for (final text in texts) {
+      for (final obsolete in obsoleteTexts) {
+        if (!text.startsWith(obsolete)) {
+          continue;
+        }
+        final suffix = text.substring(obsolete.length);
+        if (suffix.isEmpty || suffix == ' ') {
+          return _discardShellCompletionComposition(
+            texts,
+            isComposing: isComposing,
+          );
+        }
+        final enterSuffix = suffix.startsWith(' ')
+            ? suffix.substring(1)
+            : suffix;
+        if (_enterCommitNewlineSequences.contains(enterSuffix)) {
+          _clearShellCompletionPendingComposition();
+          return _editingStateForUserText(userText: enterSuffix);
+        }
+        if (withinStaleWindow && isComposing) {
+          // This candidate extends the replaced word before the keyboard has
+          // applied the reset. Track its exact commit, not all future prefixes.
+          _shellCompletionObsoleteTexts = {
+            ..._shellCompletionObsoleteTexts,
+            ...texts,
+          };
+          return _discardShellCompletionComposition(texts, isComposing: true);
+        }
       }
     }
-    _shellCompletionObsoleteTexts = const {};
-    _shellCompletionSubmittedAt = null;
+    _clearShellCompletionGuard();
     return value;
   }
 
@@ -819,6 +905,7 @@ class TerminalImeEngine {
     clearImeBufferForFreshInput(
       flushPlatformContext: true,
       armSplitLeadingTokenNormalization: true,
+      preserveShellCompletion: true,
     );
   }
 
@@ -855,8 +942,7 @@ class TerminalImeEngine {
         enableIMEPersonalizedLearning: !options.sensitiveInput,
       );
   void resetConnectionEditingState() {
-    _shellCompletionObsoleteTexts = const {};
-    _shellCompletionSubmittedAt = null;
+    _clearShellCompletionGuard();
     _isFramingImeText = false;
     _invalidatePendingEditingUpdates();
     _sawImeComposition = false;
@@ -1443,9 +1529,6 @@ class TerminalImeEngine {
   }) {
     _isFramingImeText = false;
     cancelDeferredTrailingBackspaceImeClear();
-    if (_shellCompletionObsoleteTexts.isNotEmpty) {
-      _shellCompletionSubmittedAt ??= now();
-    }
     _lastSentText = '';
     _lastSentCursorOffset = 0;
     // A composition abandoned by a reset must not mark a later commit, such
@@ -3202,6 +3285,7 @@ class TerminalImeEngine {
         enterModifiers: payloadEnterModifiers,
       );
       if (newlineCount > 0) {
+        _recordShellCompletionEnter();
         if (pendingEnterActionArrived &&
             !pendingEnterRepresentedByPayloadNewline) {
           _completePendingComposingEnterAction(revision);
@@ -3350,6 +3434,7 @@ class TerminalImeEngine {
       : null;
 
   void _sendPerformedEnter(({bool ctrl, bool alt, bool shift}) modifiers) {
+    _recordShellCompletionEnter();
     _hasPendingPromptOutputImeReset = true;
     _notifyUserInput();
     sendTerminalEnterInput(
