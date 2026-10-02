@@ -76,6 +76,7 @@ class AcpAudioClipCache {
   /// Creates an audio clip cache.
   AcpAudioClipCache({
     Future<Directory> Function()? baseDirectory,
+    Future<void> Function(Directory directory)? restrictToOwner,
     this.maxFiles = 6,
     this.maxBytes = 48 * 1024 * 1024,
     this.maxClipBytes = kAcpAttachmentAudioMaxBytes,
@@ -84,6 +85,9 @@ class AcpAudioClipCache {
        assert(maxBytes > 0),
        assert(maxClipBytes > 0),
        _baseDirectory = baseDirectory ?? _defaultClipBaseDirectory,
+       _restrictToOwner =
+           restrictToOwner ??
+           (Platform.isLinux ? acpRestrictDirectoryToOwner : _alreadyPrivate),
        _diagnostics = diagnostics;
 
   /// Shared app-wide cache.
@@ -101,6 +105,7 @@ class AcpAudioClipCache {
   final int maxClipBytes;
 
   final Future<Directory> Function() _baseDirectory;
+  final Future<void> Function(Directory directory) _restrictToOwner;
   final DiagnosticsLogger _diagnostics;
   final LinkedHashMap<String, _CachedClip> _entries =
       LinkedHashMap<String, _CachedClip>();
@@ -293,9 +298,26 @@ class AcpAudioClipCache {
     } on FileSystemException {
       // Best effort: a leftover clip only wastes temporary storage.
     }
-    // An unpredictable name, so nobody can claim the path first. Privacy
-    // comes from the base directory (see [acpAudioClipBaseDirectory]).
-    return base.createTemp('$_cacheDirectoryName-');
+    // An unpredictable name, so nobody can claim the path first.
+    final directory = await base.createTemp('$_cacheDirectoryName-');
+    try {
+      // Dart creates it with the default umask on Linux, and the app cache
+      // fallback may be readable by others too, so the directory itself is
+      // made owner-only. Clips are refused rather than written anywhere
+      // other users could read them.
+      await _restrictToOwner(directory);
+    } on Object {
+      try {
+        await directory.delete(recursive: true);
+      } on FileSystemException {
+        // Nothing has been written to it yet.
+      }
+      _diagnostics.warning(_diagnosticsCategory, 'private_directory_failed');
+      throw const AcpAudioClipException(
+        'Audio clips can’t be kept private on this device.',
+      );
+    }
+    return directory;
   }
 
   /// SHA-256 of [data], hashed in slices so a large clip never needs a
@@ -360,6 +382,23 @@ final class _IOSinkByteSink implements Sink<List<int>> {
   void close() {}
 }
 
+Future<void> _alreadyPrivate(Directory directory) async {}
+
+/// Makes [directory] accessible to its owner only (mode 0700), and throws
+/// unless it ends up with no group or other permissions.
+///
+/// dart:io has no chmod, so this runs the system's. Clip files inside are
+/// unreachable by other users once the directory is closed to them,
+/// whatever mode the files themselves get.
+@visibleForTesting
+Future<void> acpRestrictDirectoryToOwner(Directory directory) async {
+  final result = await Process.run('chmod', ['--', '700', directory.path]);
+  final mode = directory.statSync().mode;
+  if (result.exitCode != 0 || mode & 0x3f != 0) {
+    throw const FileSystemException('Could not make the directory private');
+  }
+}
+
 Future<Directory> _defaultClipBaseDirectory() => acpAudioClipBaseDirectory(
   isLinux: Platform.isLinux,
   environment: Platform.environment,
@@ -375,8 +414,10 @@ Future<Directory> _defaultClipBaseDirectory() => acpAudioClipBaseDirectory(
 /// be readable by other local users. On Linux clips go under the user's
 /// runtime directory, which the XDG Base Directory spec requires to be
 /// owned by the user with mode 0700, or under the app's cache directory in
-/// the user's home when there is none. Other platforms' temporary
-/// directories are already per user or per app.
+/// the user's home when there is none. That fallback is not guaranteed to
+/// be private, so on Linux the clip directory itself is also made
+/// owner-only (see [acpRestrictDirectoryToOwner]). Other platforms'
+/// temporary directories are already per user or per app.
 @visibleForTesting
 Future<Directory> acpAudioClipBaseDirectory({
   required bool isLinux,
