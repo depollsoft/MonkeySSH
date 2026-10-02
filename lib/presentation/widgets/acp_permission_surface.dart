@@ -88,19 +88,32 @@ final class AcpWritePermissionPrompt extends AcpPermissionPrompt {
 }
 
 /// Builds a tool permission prompt from a session-manager pending permission.
+///
+/// The title the agent put in the permission request wins over [toolTitle]
+/// (the timeline's title for the same tool call), and the request's subject
+/// (the command or path being acted on) becomes the context line.
 AcpToolPermissionPrompt acpToolPromptFromSession(
   session.AcpPendingPermission pending, {
   required Future<void> Function(String optionId) onSelect,
   required Future<void> Function() onCancel,
   String? toolTitle,
-}) => AcpToolPermissionPrompt(
-  stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
-  title: toolTitle == null ? 'Allow this tool action?' : 'Allow $toolTitle?',
-  contextLine: toolTitle ?? 'Tool ${pending.toolCallId}',
-  options: pending.options,
-  onSelect: onSelect,
-  onCancel: onCancel,
-);
+}) {
+  String? nonEmpty(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
+  }
+
+  final title = nonEmpty(pending.title) ?? nonEmpty(toolTitle);
+  final subject = nonEmpty(pending.subject);
+  return AcpToolPermissionPrompt(
+    stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
+    title: title == null ? 'Allow this tool action?' : 'Allow $title?',
+    contextLine: subject != null && subject != title ? subject : null,
+    options: pending.options,
+    onSelect: onSelect,
+    onCancel: onCancel,
+  );
+}
 
 /// Renders pending [AcpPermissionPrompt]s as an anchored action surface.
 ///

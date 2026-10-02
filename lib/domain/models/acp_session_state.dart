@@ -159,6 +159,9 @@ final class AcpPendingPermission {
     required this.toolCallId,
     required List<AcpPermissionOption> options,
     required this.requestedAt,
+    this.title,
+    this.toolKind,
+    this.subject,
   }) : options = List<AcpPermissionOption>.unmodifiable(options);
 
   /// Local key that uniquely identifies this pending request within a session.
@@ -176,6 +179,19 @@ final class AcpPendingPermission {
   /// When the request was first observed locally.
   final DateTime requestedAt;
 
+  /// Tool title carried by the permission request itself, when supplied.
+  ///
+  /// Agents may describe the tool only in the request (no earlier
+  /// `tool_call`), so this is the authoritative label for the prompt.
+  final String? title;
+
+  /// Tool kind carried by the permission request, when supplied.
+  final AcpToolKind? toolKind;
+
+  /// One-line description of what the tool acts on (a command or path),
+  /// derived from the request. Shown in the prompt only; never logged.
+  final String? subject;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -184,6 +200,9 @@ final class AcpPendingPermission {
           sessionId == other.sessionId &&
           toolCallId == other.toolCallId &&
           requestedAt == other.requestedAt &&
+          title == other.title &&
+          toolKind == other.toolKind &&
+          subject == other.subject &&
           const ListEquality<AcpPermissionOption>().equals(
             options,
             other.options,
@@ -195,6 +214,9 @@ final class AcpPendingPermission {
     sessionId,
     toolCallId,
     requestedAt,
+    title,
+    toolKind,
+    subject,
     const ListEquality<AcpPermissionOption>().hash(options),
   );
 }

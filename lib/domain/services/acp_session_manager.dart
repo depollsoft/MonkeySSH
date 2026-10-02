@@ -14,6 +14,7 @@ import '../models/acp_recent_session.dart';
 import '../models/acp_session_keys.dart';
 import '../models/acp_session_state.dart';
 import '../models/acp_timeline.dart';
+import '../models/acp_tool_subject.dart';
 import '../models/acp_updates.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'acp_bridge_connector.dart';
@@ -1417,6 +1418,8 @@ class _SessionController {
   Timer? _recentPersistTimer;
   var _detachedTurnMonitorGeneration = 0;
   var _lastAcknowledgedBridgeSequence = 0;
+  // Permission requests whose tool call was already merged into the timeline.
+  final _mergedPermissionToolCalls = <String>{};
 
   StreamSubscription<AcpSessionNotification>? _updatesSub;
   StreamSubscription<List<cap.AcpPendingClientRequest>>? _capabilityRequestsSub;
@@ -2069,17 +2072,24 @@ class _SessionController {
   ) {
     final permissions = <AcpPendingPermission>[];
     final writes = <AcpPendingWrite>[];
+    final pendingPermissionKeys = <String>{};
     for (final request in requests) {
       if (request.sessionId != _key.acpSessionId) continue;
       switch (request) {
         case cap.AcpPendingPermission(:final permission):
+          final toolCall = permission.toolCall;
+          pendingPermissionKeys.add(request.id);
+          _mergePermissionToolCall(request.id, permission);
           permissions.add(
             AcpPendingPermission(
               requestKey: request.id,
               sessionId: request.sessionId,
-              toolCallId: permission.toolCall.toolCallId,
+              toolCallId: toolCall.toolCallId,
               options: permission.options,
               requestedAt: request.requestedAt,
+              title: toolCall.title,
+              toolKind: toolCall.toolKind,
+              subject: acpToolCallSubject(toolCall),
             ),
           );
         case cap.AcpPendingFileWrite(:final path, :final content):
@@ -2094,8 +2104,30 @@ class _SessionController {
           );
       }
     }
+    _mergedPermissionToolCalls.retainAll(pendingPermissionKeys);
     _update(
       (s) => s.copyWith(pendingPermissions: permissions, pendingWrites: writes),
+    );
+  }
+
+  /// Upserts the tool call described by a permission request into the
+  /// timeline, once per request.
+  ///
+  /// The request's `toolCall` is a `ToolCallUpdate`. Agents may send the
+  /// title, diff, and locations only there, without an earlier `tool_call`,
+  /// so without this the user would approve an action they cannot see. It is
+  /// queued behind already-received session updates to keep their order.
+  void _mergePermissionToolCall(
+    String requestKey,
+    AcpPermissionRequest permission,
+  ) {
+    if (permission.toolCall.toolCallId.isEmpty) return;
+    if (!_mergedPermissionToolCalls.add(requestKey)) return;
+    _onSessionUpdate(
+      AcpSessionNotification(
+        sessionId: permission.sessionId,
+        update: permission.toolCall,
+      ),
     );
   }
 

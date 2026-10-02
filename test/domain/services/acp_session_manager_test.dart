@@ -13,6 +13,7 @@ import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
+import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
@@ -1038,6 +1039,75 @@ void main() {
       await _pump();
       expect(manager.state.byKeyValue(key.value)!.pendingPermissions, isEmpty);
       expect(server.permissionResponses[requestId], isNotNull);
+    });
+
+    test('shows tool details sent only in the permission request', () async {
+      final key = await startCopilot();
+      final server = connector.servers[key.bridgeId]!;
+      final mergedTool = manager.states.firstWhere(
+        (state) =>
+            state
+                .byKeyValue(key.value)
+                ?.timeline
+                .entries
+                .whereType<AcpToolCallEntry>()
+                .any((entry) => entry.toolCallId == 'edit-1') ??
+            false,
+      );
+      await pumpEventQueue();
+      // No tool_call precedes the request; the details exist only here.
+      server.pushServerRequest('session/request_permission', {
+        'sessionId': key.acpSessionId,
+        'toolCall': {
+          'toolCallId': 'edit-1',
+          'title': 'Edit main.dart',
+          'kind': 'edit',
+          'status': 'pending',
+          'content': [
+            {
+              'type': 'diff',
+              'path': '/work/lib/main.dart',
+              'oldText': 'a',
+              'newText': 'b',
+            },
+          ],
+          'locations': [
+            {'path': '/work/lib/main.dart', 'line': 3},
+          ],
+        },
+        'options': [
+          {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+        ],
+      });
+      final state = (await mergedTool.timeout(const Duration(seconds: 5)))
+          .byKeyValue(key.value)!;
+
+      final tool = state.timeline.entries
+          .whereType<AcpToolCallEntry>()
+          .singleWhere((entry) => entry.toolCallId == 'edit-1');
+      expect(tool.title, 'Edit main.dart');
+      expect(tool.toolKind, AcpToolKind.edit);
+      expect(tool.content.whereType<AcpToolDiff>().single.newText, 'b');
+      final pending = state.pendingPermissions.single;
+      expect(pending.title, 'Edit main.dart');
+      expect(pending.toolKind, AcpToolKind.edit);
+      expect(pending.subject, '/work/lib/main.dart');
+
+      // A later registry change for the same request merges nothing twice.
+      server.pushUpdate(key.acpSessionId, {
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': 'edit-1',
+        'status': 'in_progress',
+      });
+      await _pump();
+      final entries = manager.state
+          .byKeyValue(key.value)!
+          .timeline
+          .entries
+          .whereType<AcpToolCallEntry>()
+          .where((entry) => entry.toolCallId == 'edit-1');
+      expect(entries, hasLength(1));
+      expect(entries.single.status, AcpToolStatus.inProgress);
     });
   });
 
