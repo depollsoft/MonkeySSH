@@ -199,7 +199,7 @@ func TestNativeAgentToolForProviderMapsBuiltinIDs(t *testing.T) {
 
 func TestQuietTitleRefreshTitlesNativeClaudeCodexAndCopilotWindows(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	t.Setenv("CODEX_HOME", "")
 	claudeSession := "11111111-1111-4111-8111-111111111111"
 	codexSession := "22222222-2222-4222-8222-222222222222"
@@ -265,7 +265,7 @@ func TestQuietTitleRefreshTitlesNativeClaudeCodexAndCopilotWindows(t *testing.T)
 
 func TestNativeAgentSessionTitleFollowsTheBridgeToAnotherSession(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	project := filepath.Join(home, ".claude", "projects", "-work")
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
