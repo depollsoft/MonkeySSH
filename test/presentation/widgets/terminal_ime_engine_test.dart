@@ -1081,6 +1081,98 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final approve in [false, true]) {
+      test(
+        '${platform.name} shell completion coalesced Return waits for review, approved=$approve',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final decision = Completer<bool>();
+          var reviewCount = 0;
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            onReviewInsertedText: (_) {
+              reviewCount++;
+              return decision.future;
+            },
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          driver.updateEditingValue(_editingValue('pi\nx', selectionOffset: 4));
+          await driver.flush();
+          expect(reviewCount, 1);
+          expect(harness.terminalOutput, isEmpty);
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          expect(harness.terminalOutput, isEmpty);
+          // Ignoring a stale word must not supersede the reviewed revision.
+          driver.updateEditingValue(_editingValue('pi', selectionOffset: 2));
+          await driver.flush();
+          expect(reviewCount, 1);
+          decision.complete(approve);
+          await driver.flush();
+          await driver.flush();
+          expect(
+            harness.terminalOutput.join(),
+            approve ? '${_terminalKeyOutput(TerminalKey.enter)}x' : '',
+          );
+          if (approve) {
+            expect(
+              driver.engine.editingValue,
+              _editingValue('x', selectionOffset: 1),
+            );
+          }
+        },
+      );
+    }
+
+    for (final replay in ['pi', 'pi\n']) {
+      for (final activeComposition in [false, true]) {
+        test(
+          '${platform.name} shell completion preserves already-forwarded tail on rejected $replay, composing=$activeComposition',
+          () async {
+            final driver = _ImeDriver(platform: platform);
+            addTearDown(driver.dispose);
+            final harness = await _createImeHarness(
+              driver,
+              initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            );
+            driver.engine.resetAfterShellCompletion();
+            harness.terminalOutput.clear();
+            driver.updateEditingValue(
+              _editingValue('pi\nxyz', selectionOffset: 5),
+            );
+            await driver.flush();
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+            expect(
+              driver.engine.editingValue,
+              _editingValue('xyz', selectionOffset: 2),
+            );
+            if (activeComposition) {
+              driver.updateEditingValue(
+                _editingValue(
+                  'pi\nxyzt',
+                  selectionOffset: 7,
+                  composing: const TextRange(start: 6, end: 7),
+                ),
+              );
+              await driver.flush();
+            }
+            final baseline = driver.engine.editingValue;
+            final output = harness.terminalOutput.join();
+            driver.updateEditingValue(
+              _editingValue(replay, selectionOffset: replay.length),
+            );
+            await driver.flush();
+            expect(harness.terminalOutput.join(), output);
+            expect(driver.engine.editingValue, baseline);
+          },
+        );
+      }
+    }
+
     for (final newline in ['\n', '\r', '\r\n']) {
       for (final actionFirst in [false, true]) {
         for (final composingTail in [false, true]) {

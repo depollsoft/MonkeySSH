@@ -825,7 +825,16 @@ class TerminalImeEngine {
     }
   }
 
-  TextEditingValue _discardShellCompletionComposition(
+  TextEditingValue? _rejectShellCompletionEcho() {
+    if (effects.canSyncEditingState?.call() ?? true) {
+      effects.onEditingState?.call(_currentEditingState);
+    }
+    // A rejected platform echo is not an empty edit. In particular, it must
+    // not delete a fresh post-Return baseline or supersede an awaiting review.
+    return null;
+  }
+
+  TextEditingValue? _discardShellCompletionComposition(
     Set<String> texts, {
     required bool isComposing,
   }) {
@@ -836,8 +845,7 @@ class TerminalImeEngine {
     } else {
       _clearShellCompletionPendingComposition();
     }
-    _syncEditingStateWithUserText('');
-    return initEditingState;
+    return _rejectShellCompletionEcho();
   }
 
   int _leadingEnterSequenceLength(String text) => text.startsWith('\r\n')
@@ -860,7 +868,7 @@ class TerminalImeEngine {
           );
   }
 
-  TextEditingValue _normalizeShellCompletionReturn(
+  TextEditingValue? _normalizeShellCompletionReturn(
     TextEditingValue value,
     String obsolete,
     String enterSuffix,
@@ -881,8 +889,7 @@ class TerminalImeEngine {
     if (_shellCompletionSubmittedAt != null) {
       final trailingText = enterSuffix.substring(newlineLength);
       if (trailingText.isEmpty) {
-        _syncEditingStateWithUserText('');
-        return initEditingState;
+        return _rejectShellCompletionEcho();
       }
       if (!isComposing) {
         _clearShellCompletionGuard();
@@ -908,7 +915,7 @@ class TerminalImeEngine {
     return normalized;
   }
 
-  TextEditingValue _normalizeShellCompletionEcho(TextEditingValue value) {
+  TextEditingValue? _normalizeShellCompletionEcho(TextEditingValue value) {
     if (_shellCompletionObsoleteTexts.isEmpty) {
       return value;
     }
@@ -3066,6 +3073,9 @@ class TerminalImeEngine {
     }
 
     final value = _normalizeShellCompletionEcho(incomingValue);
+    if (value == null) {
+      return;
+    }
 
     if (_acceptNextPendingComposingEnterCommit) {
       _acceptNextPendingComposingEnterCommit = false;
@@ -3582,8 +3592,7 @@ class TerminalImeEngine {
           _pendingComposingEnterMayBeInText &&
           _pendingComposingEnterText != null &&
           (_textEndsWithEnterSequence(_pendingComposingEnterText!) ||
-              (_shellCompletionHasComposingEnterPreview &&
-                  _shellCompletionEnterFollowUp?.revision == revision))
+              _shellCompletionEnterFollowUp?.revision == revision)
       ? _pendingComposingEnterModifiers
       : null;
 
