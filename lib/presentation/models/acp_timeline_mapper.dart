@@ -507,7 +507,8 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   final (images, outputText) = _extractRawToolOutput(entry.rawOutput);
   final outputBlocks = <String>[];
   final resources = <AcpResourceRef>[];
-  final terminalIds = <String>[];
+  final terminalIds = <String>{};
+  final omittedTerminalIds = <String>{};
   for (final content in entry.content) {
     switch (content) {
       case d.AcpToolDiff():
@@ -541,8 +542,11 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
           resources.add(_embeddedResourceRef(inner));
         }
       case d.AcpToolTerminal(:final terminalId):
-        if (terminalId.isNotEmpty && !terminalIds.contains(terminalId)) {
+        if (terminalId.isEmpty || terminalIds.contains(terminalId)) continue;
+        if (terminalIds.length < kAcpToolMaxTerminals) {
           terminalIds.add(terminalId);
+        } else {
+          omittedTerminalIds.add(terminalId);
         }
       case d.AcpUnknownToolContent():
         break;
@@ -602,7 +606,8 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
       rawOutputIsStructured: textualDiff == null && rawOutputIsStructured,
       name: entry.name,
       resources: resources,
-      terminalIds: terminalIds,
+      terminalIds: terminalIds.toList(),
+      omittedTerminalCount: omittedTerminalIds.length,
       locations: [
         for (final location in entry.locations)
           AcpToolLocation(path: location.path, line: location.line),

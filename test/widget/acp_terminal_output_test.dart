@@ -89,6 +89,33 @@ void main() {
     expect(find.byType(CursorBlock), findsNothing);
   });
 
+  testWidgets('says how many terminals a tool call did not render', (
+    tester,
+  ) async {
+    final unknown = ValueNotifier<AcpTerminalDisplay?>(null);
+    addTearDown(unknown.dispose);
+    await tester.pumpWidget(
+      _wrap(
+        AcpTerminalOutputScope(
+          resolver: (_) => unknown,
+          child: AcpToolCallView(
+            toolCall: AcpToolCall(
+              id: 'tool-1',
+              title: 'Fan out',
+              kind: AcpToolKind.execute,
+              status: AcpToolStatus.completed,
+              terminalIds: const ['term-1'],
+              omittedTerminalCount: 12,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Fan out'));
+    await tester.pumpAndSettle();
+    expect(find.text('12 more terminals not shown'), findsOneWidget);
+  });
+
   testWidgets('renders nothing for a terminal this client does not know', (
     tester,
   ) async {

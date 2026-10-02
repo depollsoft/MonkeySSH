@@ -44,6 +44,22 @@ AcpMessageEntry _message(
 );
 
 void main() {
+  test('renders a bounded number of terminals and counts the rest', () {
+    final tool = _mapTool({
+      'title': 'Fan out',
+      'content': [
+        for (var index = 0; index < 5000; index++)
+          {'type': 'terminal', 'terminalId': 'term-${index % 20}'},
+      ],
+    });
+    expect(tool.terminalIds, [
+      for (var index = 0; index < p.kAcpToolMaxTerminals; index++)
+        'term-$index',
+    ]);
+    // Repeated ids are counted once.
+    expect(tool.omittedTerminalCount, 20 - p.kAcpToolMaxTerminals);
+  });
+
   test('collects embedded terminals, resources, name, and switch_mode', () {
     final tool = _mapTool({
       'title': 'Run tests',

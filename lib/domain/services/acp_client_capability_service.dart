@@ -558,8 +558,7 @@ final class AcpClientCapabilityService {
   var _nextTerminalId = 0;
   // Unique to this service, so a tool card restored from an earlier
   // connection never resolves to a new terminal that restarted the count.
-  final _terminalIdPrefix =
-      'acp-terminal-${Random.secure().nextInt(1 << 32).toRadixString(16)}';
+  final _terminalIdPrefix = 'acp-terminal-${_randomToken128()}';
 
   /// Capabilities that are safe to advertise for this service instance.
   ///
@@ -1771,3 +1770,12 @@ String _elicitationMode(AcpElicitationRequest elicitation) =>
       AcpFormElicitation() => 'form',
       AcpUrlElicitation() => 'url',
     };
+
+/// 128 random bits as hex, enough that two services never share a prefix.
+String _randomToken128() {
+  final random = Random.secure();
+  return [
+    for (var word = 0; word < 4; word++)
+      random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0'),
+  ].join();
+}

@@ -1493,10 +1493,10 @@ void main() {
 
       // A tool card restored from the first connection must not show the
       // output of the reconnected service's first terminal.
-      expect(
-        await firstTerminalId(service, transport),
-        isNot(await firstTerminalId(next, nextTransport)),
-      );
+      final first = await firstTerminalId(service, transport);
+      expect(first, isNot(await firstTerminalId(next, nextTransport)));
+      // The per-service token carries 128 random bits.
+      expect(first, matches(RegExp(r'^acp-terminal-[0-9a-f]{32}-1$')));
     });
 
     test('creates concurrent terminals, truncates output, waits, kills, and releases', () async {

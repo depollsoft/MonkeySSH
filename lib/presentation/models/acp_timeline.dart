@@ -550,6 +550,7 @@ class AcpToolCall extends Equatable {
     List<AcpAudioClip> audio = const [],
     List<AcpResourceRef> resources = const [],
     List<String> terminalIds = const [],
+    this.omittedTerminalCount = 0,
   }) : locations = List.unmodifiable(locations),
        diffs = List.unmodifiable(diffs),
        images = List.unmodifiable(images),
@@ -596,8 +597,13 @@ class AcpToolCall extends Equatable {
   /// Resources (links or embedded contents) produced by the tool call.
   final List<AcpResourceRef> resources;
 
-  /// Client-run terminals whose live output this tool call embeds.
+  /// Client-run terminals whose live output this tool call embeds, at most
+  /// [kAcpToolMaxTerminals].
   final List<String> terminalIds;
+
+  /// Further terminals the tool call names beyond [terminalIds], counted
+  /// but not rendered.
+  final int omittedTerminalCount;
 
   @override
   List<Object?> get props => [
@@ -615,8 +621,13 @@ class AcpToolCall extends Equatable {
     audio,
     resources,
     terminalIds,
+    omittedTerminalCount,
   ];
 }
+
+/// Most terminals one tool call renders. Each is a live view with its own
+/// listener, so an agent naming thousands must not be able to stall the UI.
+const kAcpToolMaxTerminals = 8;
 
 /// Status of a single plan item.
 enum AcpPlanItemStatus {

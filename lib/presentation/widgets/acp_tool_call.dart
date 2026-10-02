@@ -384,6 +384,18 @@ class _ToolCallDetails extends StatelessWidget {
           ),
         );
       }
+      if (toolCall.omittedTerminalCount > 0) {
+        final count = toolCall.omittedTerminalCount;
+        children.add(
+          Text(
+            '$count more ${count == 1 ? 'terminal' : 'terminals'} not shown',
+            style: AcpChatTypography.monoStyleOf(context).copyWith(
+              fontSize: 11.5,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        );
+      }
     }
     if (richOutput) {
       children.add(
