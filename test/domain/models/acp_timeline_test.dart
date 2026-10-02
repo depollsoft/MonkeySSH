@@ -361,6 +361,26 @@ void main() {
       );
     });
 
+    test('bounds and counts an oversized tool name', () {
+      final builder =
+          AcpTimelineBuilder(
+            limits: const AcpTimelineLimits(
+              maxEntryBytes: 512,
+              maxTotalBytes: 8192,
+            ),
+          )..apply(
+            AcpToolCallUpdate(
+              toolCallId: 'tool-1',
+              isInitial: true,
+              title: 'Run',
+              name: 'n' * 100000,
+            ),
+          );
+      final tool = builder.snapshot().entries.single as AcpToolCallEntry;
+      expect(tool.name!.length, lessThanOrEqualTo(128));
+      expect(approximateTimelineEntryBytes(tool), lessThanOrEqualTo(512));
+    });
+
     test('omits audio above the dedicated audio budget', () {
       final builder = AcpTimelineBuilder(
         limits: const AcpTimelineLimits(

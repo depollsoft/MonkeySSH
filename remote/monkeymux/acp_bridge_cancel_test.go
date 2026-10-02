@@ -312,6 +312,36 @@ func TestAcpCancelledRequestMemoryIsBounded(t *testing.T) {
 	}
 }
 
+func TestAcpReusedCancelledIDKeepsItsNewMarkerThroughEviction(t *testing.T) {
+	bridge := newTestAcpBridge()
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	cancel := func(key string) {
+		bridge.pendingRequests[key] = struct{}{}
+		if bridge.cancelPendingRequestLocked(key) == nil {
+			t.Fatalf("pending request %s was not cancelled", key)
+		}
+	}
+	cancel(`"reused"`)
+	// The provider reuses the id for a new request, then cancels that too.
+	bridge.forgetCancelledRequestLocked(`"reused"`)
+	cancel(`"reused"`)
+	// Fill the memory until the first cancellation would have been evicted.
+	for index := 0; index < acpCancelledRequestMemory-1; index++ {
+		cancel(fmt.Sprintf("%d", index))
+	}
+	if _, ok := bridge.cancelledRequests[`"reused"`]; !ok {
+		t.Fatal("evicting the stale record dropped the newer cancellation")
+	}
+	if len(bridge.cancelledOrder) != len(bridge.cancelledRequests) {
+		t.Fatalf(
+			"eviction records = %d, markers = %d",
+			len(bridge.cancelledOrder),
+			len(bridge.cancelledRequests),
+		)
+	}
+}
+
 func TestParseAcpProviderOutputRecognizesOnlyCancelNotifications(t *testing.T) {
 	tests := []struct {
 		name    string

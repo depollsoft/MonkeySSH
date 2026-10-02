@@ -432,6 +432,14 @@ class FakeAcpSessionManager extends AcpSessionManager {
     signedInSessions.add(key.value);
   }
 
+  /// Keys passed to [stopUnusedBridge], in call order.
+  final List<String> stoppedUnusedBridges = <String>[];
+
+  @override
+  Future<void> stopUnusedBridge(AcpSessionKey key) async {
+    stoppedUnusedBridges.add(key.value);
+  }
+
   @override
   Future<AcpSessionLaunchResult> restartAfterSignIn(AcpSessionKey key) async {
     signedInSessions.add(key.value);

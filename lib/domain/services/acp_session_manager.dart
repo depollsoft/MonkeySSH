@@ -709,6 +709,30 @@ class AcpSessionManager {
   void markSessionSignedIn(AcpSessionKey key) =>
       _controllers[key.value]?.clearAuthenticationRequired();
 
+  /// Stops [key]'s remote bridge when no live session here uses it, so the
+  /// next reconnect starts a fresh agent process.
+  ///
+  /// Used after a `terminal` sign-in that followed a failed reconnect: the
+  /// agent that refused the session may keep the credentials it started
+  /// with, and reattaching would reach that same process. Best effort; a
+  /// bridge that is already gone needs nothing.
+  Future<void> stopUnusedBridge(AcpSessionKey key) => _serialize(() async {
+    final inUse = _controllers.values.any(
+      (controller) =>
+          controller.bridgeKey == key.bridge && controller.state.isLive,
+    );
+    if (inUse) return;
+    try {
+      await _connector.stopBridge(key.hostId, key.bridgeId);
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'acp.manager',
+        'sign_in_bridge_stop_failed',
+        fields: {'hostId': key.hostId, 'errorType': error.runtimeType},
+      );
+    }
+  });
+
   /// Restarts [key]'s agent after a `terminal` sign-in finished outside the
   /// ACP connection.
   ///

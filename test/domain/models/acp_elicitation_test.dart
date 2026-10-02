@@ -419,6 +419,34 @@ void main() {
       expect(multi.validate(['z']), isNotNull);
     });
 
+    test('required fields accept explicit empty answers the schema allows', () {
+      final choice = field({
+        'type': 'string',
+        'oneOf': [
+          {'const': '', 'title': 'None'},
+          {'const': 'main', 'title': 'Main'},
+        ],
+      }, req: true);
+      expect(choice.validate(''), isNull);
+      expect(choice.validate(null), 'Required');
+      // A free-text box left empty is still unanswered.
+      expect(field({'type': 'string'}, req: true).validate(''), 'Required');
+
+      Map<String, Object?> list([Map<String, Object?> extra = const {}]) => {
+        'type': 'array',
+        'items': {
+          'type': 'string',
+          'enum': ['a', 'b'],
+        },
+        ...extra,
+      };
+      expect(
+        field(list({'minItems': 0}), req: true).validate(<String>[]),
+        isNull,
+      );
+      expect(field(list(), req: true).validate(<String>[]), 'Required');
+    });
+
     test('form content rejects unknown keys and invalid values', () {
       final request = _parse(
         _form(

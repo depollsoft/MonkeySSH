@@ -623,7 +623,11 @@ final class AcpStringElicitationField extends AcpElicitationField {
 
   @override
   String? validate(Object? value) {
-    if (value == null || (value is String && value.isEmpty)) {
+    // An empty text box reads as unanswered, but an option whose value is
+    // the empty string (a titled "None") is a real answer.
+    final emptyIsAnswer = options?.any((option) => option.value.isEmpty);
+    if (value == null ||
+        (value is String && value.isEmpty && !(emptyIsAnswer ?? false))) {
       return isRequired ? 'Required' : null;
     }
     if (value is! String) return 'Enter text';
@@ -770,7 +774,9 @@ final class AcpMultiSelectElicitationField extends AcpElicitationField {
       return 'Choose from the options';
     }
     if (value.toSet().length != value.length) return 'Choose each option once';
-    if (isRequired && value.isEmpty) return 'Required';
+    // An explicit `minItems: 0` lets a required list be answered with no
+    // choices; otherwise an empty required list reads as unanswered.
+    if (isRequired && value.isEmpty && minItems != 0) return 'Required';
     if (minItems case final min? when value.length < min) {
       return 'Choose at least $min';
     }

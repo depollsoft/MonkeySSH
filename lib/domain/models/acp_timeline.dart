@@ -426,6 +426,7 @@ int _approximateToolCallBytes(AcpToolCallEntry entry) =>
     entry.toolCallId.length +
     (entry.parentToolCallId?.length ?? 0) +
     utf8.encode(entry.title ?? '').length +
+    utf8.encode(entry.name ?? '').length +
     entry.content.fold<int>(
       0,
       (total, content) => total + _approximateToolContentBytes(content),
@@ -839,6 +840,14 @@ class AcpTimelineBuilder {
       }
       remaining -= utf8.encode(title).length;
     }
+    var name = entry.name;
+    if (name != null) {
+      final nameBudget = math.min(remaining, 128);
+      if (utf8.encode(name).length > nameBudget) {
+        name = String.fromCharCodes(name.runes.take(nameBudget ~/ 4));
+      }
+      remaining -= utf8.encode(name).length;
+    }
     final locations = <AcpToolLocation>[];
     for (final location in entry.locations) {
       final bytes = _approximateToolLocationBytes(location);
@@ -850,7 +859,7 @@ class AcpTimelineBuilder {
       toolCallId: entry.toolCallId,
       order: entry.order,
       title: title,
-      name: entry.name,
+      name: name,
       toolKind: entry.toolKind,
       status: entry.status,
       locations: locations,

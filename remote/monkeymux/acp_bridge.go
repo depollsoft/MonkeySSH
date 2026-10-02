@@ -1106,6 +1106,22 @@ func (b *acpBridge) cancelPendingRequestLocked(key string) json.RawMessage {
 	return response
 }
 
+// forgetCancelledRequestLocked drops the cancelled marker for key and its
+// eviction record. Leaving the record would let a later eviction delete the
+// marker of a newer request that reused the id and was cancelled again.
+func (b *acpBridge) forgetCancelledRequestLocked(key string) {
+	if _, ok := b.cancelledRequests[key]; !ok {
+		return
+	}
+	delete(b.cancelledRequests, key)
+	for index, candidate := range b.cancelledOrder {
+		if candidate == key {
+			b.cancelledOrder = append(b.cancelledOrder[:index], b.cancelledOrder[index+1:]...)
+			break
+		}
+	}
+}
+
 func isAcpSessionSetupMethod(method string) bool {
 	switch method {
 	case "session/new", "session/load", "session/resume", "session/fork":
@@ -1151,7 +1167,7 @@ func (b *acpBridge) publish(
 	if pendingID != "" {
 		b.pendingRequests[pendingID] = struct{}{}
 		// A reused id names a new request; only an older one was cancelled.
-		delete(b.cancelledRequests, pendingID)
+		b.forgetCancelledRequestLocked(pendingID)
 	}
 	var cancelResponse json.RawMessage
 	if cancelledID != "" {

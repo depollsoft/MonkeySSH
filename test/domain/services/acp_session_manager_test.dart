@@ -718,6 +718,19 @@ void main() {
     },
   );
 
+  test(
+    'stops a bridge for sign-in only when no live session uses it',
+    () async {
+      final key = await startCopilot();
+      await manager.stopUnusedBridge(key);
+      expect(connector.stoppedBridges, isEmpty);
+
+      await manager.detachSession(key);
+      await manager.stopUnusedBridge(key);
+      expect(connector.stoppedBridges, [key.bridgeId]);
+    },
+  );
+
   test('starts a new session and reaches ready', () async {
     final key = await startCopilot();
     final state = manager.state.byKeyValue(key.value)!;

@@ -385,9 +385,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             ref,
             terminalSignIn,
           );
-          // The login ran outside the agent connection: reconnect so the
-          // agent is reinitialized with the new credentials.
-          if (signedIn && mounted) await _ensureConnected();
+          // The login ran outside the agent connection, and the agent that
+          // refused the session may keep its old credentials: stop its
+          // bridge so the reconnect starts and initializes a fresh one.
+          if (signedIn && mounted) {
+            await manager.stopUnusedBridge(_key);
+            if (mounted) await _ensureConnected();
+          }
         case AcpSessionLaunchFailed(:final error):
           setState(() {
             _connecting = false;
