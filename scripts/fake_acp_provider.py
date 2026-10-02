@@ -97,6 +97,9 @@ class FakeAcpProvider:
         self.pending_elicitations: dict[str, dict[str, Any]] = {}
         self.withdrawn_permissions: dict[str, str] = {}
         self.elicitation_modes: set[str] = set()
+        self.client_terminal = False
+        self.next_terminal_step = 1
+        self.terminal_steps: dict[str, dict[str, Any]] = {}
 
     def write(self, message: dict[str, Any]) -> None:
         encoded = json.dumps(message, separators=(",", ":"), sort_keys=True)
@@ -211,6 +214,10 @@ class FakeAcpProvider:
                         "name": "cancel-permission",
                         "description": "Request and then withdraw a permission.",
                     },
+                    {
+                        "name": "terminal",
+                        "description": "Run a command in a client terminal.",
+                    },
                 ],
             },
         )
@@ -292,6 +299,7 @@ class FakeAcpProvider:
             }
             auth_capabilities = client_capabilities.get("auth") or {}
             self.client_terminal_auth = auth_capabilities.get("terminal") is True
+            self.client_terminal = client_capabilities.get("terminal") is True
             capabilities: dict[str, Any] = {
                 "loadSession": True,
                 "promptCapabilities": {
@@ -463,6 +471,9 @@ class FakeAcpProvider:
         if text == "/cancel-permission":
             self.start_withdrawn_permission(request_id, session_id)
             return
+        if text == "/terminal":
+            self.start_terminal(request_id, session_id)
+            return
 
         response_text = (
             text.removeprefix("/echo").strip()
@@ -611,6 +622,116 @@ class FakeAcpProvider:
         if content is not None:
             summary += " " + json.dumps(content, separators=(",", ":"), sort_keys=True)
         self.finish_prompt_with_text(prompt["requestId"], prompt["sessionId"], summary)
+
+    def terminal_request(
+        self,
+        prompt: str,
+        stage: str,
+        method: str,
+        params: dict[str, Any],
+        **state: Any,
+    ) -> None:
+        step_id = f"fake-terminal-{self.next_terminal_step:04d}"
+        self.next_terminal_step += 1
+        self.terminal_steps[step_id] = {"prompt": prompt, "stage": stage, **state}
+        self.write({"jsonrpc": "2.0", "id": step_id, "method": method, "params": params})
+
+    def start_terminal(self, request_id: Any, session_id: str) -> None:
+        """Runs a short command in a client terminal and embeds its output.
+
+        Exercises terminal/create, a tool call that embeds the terminal and an
+        embedded resource, terminal/wait_for_exit, and terminal/release.
+        """
+        if not self.client_terminal:
+            self.finish_prompt_with_text(
+                request_id, session_id, "terminal=unsupported"
+            )
+            return
+        self.terminal_request(
+            str(request_id),
+            "create",
+            "terminal/create",
+            {
+                "sessionId": session_id,
+                "command": "sh",
+                "args": [
+                    "-c",
+                    "printf 'fixture line 1\\n'; sleep 1; printf 'fixture line 2\\n'",
+                ],
+                "outputByteLimit": 4096,
+            },
+        )
+
+    def advance_terminal(self, message: dict[str, Any]) -> None:
+        step = self.terminal_steps.pop(str(message.get("id")))
+        prompt = self.pending_prompts.get(step["prompt"])
+        if prompt is None:
+            return
+        session_id = prompt["sessionId"]
+        tool_call_id = f"tool-terminal-{prompt['requestId']}"
+        if "error" in message:
+            self.finish_prompt_with_text(
+                prompt["requestId"],
+                session_id,
+                f"terminal=error{message['error'].get('code')}",
+            )
+            return
+        result = message.get("result") or {}
+        if step["stage"] == "create":
+            terminal_id = result.get("terminalId")
+            self.update(
+                session_id,
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_call_id,
+                    "title": "Run fixture command",
+                    "name": "Bash",
+                    "kind": "execute",
+                    "status": "in_progress",
+                    "content": [
+                        {"type": "terminal", "terminalId": terminal_id},
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "resource",
+                                "resource": {
+                                    "uri": "fixture://terminal-notes.md",
+                                    "mimeType": "text/markdown",
+                                    "text": "# Fixture notes\n\nEmbedded text.",
+                                },
+                            },
+                        },
+                    ],
+                },
+            )
+            self.terminal_request(
+                step["prompt"],
+                "wait",
+                "terminal/wait_for_exit",
+                {"sessionId": session_id, "terminalId": terminal_id},
+                terminalId=terminal_id,
+            )
+        elif step["stage"] == "wait":
+            exit_code = result.get("exitCode")
+            self.update(
+                session_id,
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id,
+                    "status": "completed" if exit_code == 0 else "failed",
+                },
+            )
+            self.terminal_request(
+                step["prompt"],
+                "release",
+                "terminal/release",
+                {"sessionId": session_id, "terminalId": step["terminalId"]},
+                exitCode=exit_code,
+            )
+        else:
+            self.finish_prompt_with_text(
+                prompt["requestId"], session_id, f"terminal=exit {step['exitCode']}"
+            )
 
     def start_withdrawn_permission(self, request_id: Any, session_id: str) -> None:
         permission_id = f"fake-permission-{self.next_permission:04d}"
@@ -763,6 +884,8 @@ class FakeAcpProvider:
             self.finish_elicitation(message)
         elif "method" not in message and message_id in self.withdrawn_permissions:
             self.finish_withdrawn_permission(message)
+        elif "method" not in message and message_id in self.terminal_steps:
+            self.advance_terminal(message)
         elif message.get("method") == "$/cancel_request" and "id" not in message:
             self.cancel_request(message.get("params") or {})
         elif message.get("method") == "session/cancel" and "id" not in message:

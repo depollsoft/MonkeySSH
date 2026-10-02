@@ -89,6 +89,7 @@ void main() {
       'elicit',
       'elicit-url',
       'cancel-permission',
+      'terminal',
     ]);
     expect((await client.listSessions()).sessions.single.sessionId, sessionId);
 
@@ -291,6 +292,73 @@ void main() {
       expect(await stderr, isEmpty);
     },
   );
+
+  test('fake provider embeds a client terminal in a tool call', () async {
+    final process = await Process.start('python3', const [
+      'scripts/fake_acp_provider.py',
+    ]);
+    final stderr = process.stderr.transform(utf8.decoder).join();
+    final client = AcpClient(
+      AcpJsonRpcConnection(
+        transport: _ProcessTransport(process),
+        defaultRequestTimeout: const Duration(seconds: 5),
+      ),
+    );
+    final requests = <String>[];
+    client.serverRequests.listen((request) {
+      requests.add(request.method);
+      final params = AcpJson.object(request.params)!;
+      switch (request.method) {
+        case 'terminal/create':
+          expect(params['command'], 'sh');
+          unawaited(request.respond({'terminalId': 'term-1'}));
+        case 'terminal/wait_for_exit':
+          expect(params['terminalId'], 'term-1');
+          unawaited(request.respond({'exitCode': 0, 'signal': null}));
+        case 'terminal/release':
+          expect(params.keys.toSet(), {'sessionId', 'terminalId'});
+          unawaited(request.respond());
+      }
+    });
+    final tools = <AcpToolCallUpdate>[];
+    final texts = <String>[];
+    final subscription = client.updates.listen((notification) {
+      final update = notification.update;
+      if (update is AcpToolCallUpdate) tools.add(update);
+      if (update is AcpContentChunkUpdate && update.content is AcpTextContent) {
+        texts.add((update.content as AcpTextContent).text);
+      }
+    });
+
+    await client.initialize(
+      capabilities: const AcpClientCapabilities(terminal: true),
+    );
+    final sessionId = (await client.newSession(cwd: '.')).sessionId!;
+    final result = await client.prompt(
+      sessionId: sessionId,
+      content: const [AcpTextContent('/terminal')],
+    );
+
+    expect(result.stopReason, AcpStopReason.endTurn);
+    expect(requests, [
+      'terminal/create',
+      'terminal/wait_for_exit',
+      'terminal/release',
+    ]);
+    final embedded = tools.first;
+    expect(embedded.name, 'Bash');
+    expect(
+      embedded.content!.whereType<AcpToolTerminal>().single.terminalId,
+      'term-1',
+    );
+    expect(embedded.content!.whereType<AcpToolContentBlock>(), hasLength(1));
+    expect(tools.last.status, AcpToolStatus.completed);
+    expect(texts.last, 'terminal=exit 0');
+
+    await subscription.cancel();
+    await client.close();
+    expect(await stderr, isEmpty);
+  });
 
   group('auth-required mode', () {
     late Directory stateDir;
