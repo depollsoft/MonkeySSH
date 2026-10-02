@@ -1081,6 +1081,49 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final source in ['hardware', 'action', 'payload']) {
+      test(
+        '${platform.name} shell completion still submits on Ctrl+Alt Enter via $source',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          var activeModifier = true;
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('h', selectionOffset: 1),
+            resolveTerminalKeyModifiers: () =>
+                (ctrl: activeModifier, alt: activeModifier, shift: false),
+            consumeTerminalKeyModifiers: () => activeModifier = false,
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          await driver.flush(const Duration(milliseconds: 500));
+          if (source == 'hardware') {
+            await driver.hardwareKey(TerminalKey.enter, ctrl: true, alt: true);
+            activeModifier = false;
+          } else if (source == 'action') {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          } else {
+            driver.updateEditingValue(_editingValue('\n', selectionOffset: 1));
+            await driver.flush();
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          final submitted = harness.terminalOutput.join();
+          expect(submitted, isNotEmpty);
+          await driver.flush(const Duration(milliseconds: 100));
+          driver.updateEditingValue(_editingValue('h', selectionOffset: 1));
+          await driver.flush();
+          expect(harness.terminalOutput.join(), submitted);
+          await driver.flush(hardwareEnterStaleEditWindow);
+          driver.updateEditingValue(_editingValue('h', selectionOffset: 1));
+          await driver.flush();
+          expect(harness.terminalOutput.join(), '${submitted}h');
+        },
+      );
+    }
+
     for (final chord in ['shift', 'alt']) {
       for (final source in ['hardware', 'action', 'payload']) {
         for (final delayedReplay in [false, true]) {
@@ -1277,6 +1320,100 @@ void main() {
             await driver.flush();
             expect(harness.terminalOutput.join(), output);
             expect(driver.engine.editingValue, editingValue);
+          },
+        );
+      }
+    }
+
+    for (final newline in ['\n', '\r\n']) {
+      for (final prefixes in [
+        (preview: ' pi ', commit: 'pi '),
+        (preview: ' pi', commit: 'pi'),
+        (preview: 'pi ', commit: 'pi'),
+      ]) {
+        test(
+          '${platform.name} shell completion recognizes normalized multi-Return commit, prefixes=$prefixes, newline=${newline.codeUnits}',
+          () async {
+            final driver = _ImeDriver(platform: platform);
+            addTearDown(driver.dispose);
+            final harness = await _createImeHarness(
+              driver,
+              initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            );
+            driver.engine.resetAfterShellCompletion();
+            harness.terminalOutput.clear();
+            final previewText = '${prefixes.preview}${newline}x$newline';
+            driver.updateEditingValue(
+              _editingValue(
+                previewText,
+                selectionOffset: previewText.length,
+                composing: TextRange(start: 0, end: previewText.length),
+              ),
+            );
+            await driver.flush();
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+            final expected =
+                '${_terminalKeyOutput(TerminalKey.enter)}x${_terminalKeyOutput(TerminalKey.enter)}';
+            expect(harness.terminalOutput.join(), expected);
+            await driver.flush(const Duration(milliseconds: 500));
+            final commitText = '${prefixes.commit}${newline}x$newline';
+            driver.updateEditingValue(
+              _editingValue(commitText, selectionOffset: commitText.length),
+            );
+            await driver.flush();
+            expect(harness.terminalOutput.join(), expected);
+            expect(
+              driver.engine.editingValue,
+              _editingValue('', selectionOffset: 0),
+            );
+          },
+        );
+      }
+    }
+
+    for (final previewNewline in ['\n', '\r', '\r\n']) {
+      for (final commitNewline in [
+        '\n',
+        '\r',
+        '\r\n',
+      ].where((value) => value != previewNewline)) {
+        test(
+          '${platform.name} shell completion recognizes changed native Return representation, preview=${previewNewline.codeUnits}, commit=${commitNewline.codeUnits}',
+          () async {
+            final driver = _ImeDriver(platform: platform);
+            addTearDown(driver.dispose);
+            final harness = await _createImeHarness(
+              driver,
+              initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            );
+            driver.engine.resetAfterShellCompletion();
+            harness.terminalOutput.clear();
+            final preview = 'pi${previewNewline}x$previewNewline';
+            driver.updateEditingValue(
+              _editingValue(
+                preview,
+                selectionOffset: preview.length,
+                composing: TextRange(start: 0, end: preview.length),
+              ),
+            );
+            await driver.flush();
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+            final expected =
+                '${_terminalKeyOutput(TerminalKey.enter)}x${_terminalKeyOutput(TerminalKey.enter)}';
+            expect(harness.terminalOutput.join(), expected);
+            await driver.flush(const Duration(milliseconds: 500));
+            final commit = 'pi${commitNewline}x$commitNewline';
+            driver.updateEditingValue(
+              _editingValue(commit, selectionOffset: commit.length),
+            );
+            await driver.flush();
+            expect(harness.terminalOutput.join(), expected);
+            expect(
+              driver.engine.editingValue,
+              _editingValue('', selectionOffset: 0),
+            );
           },
         );
       }

@@ -451,7 +451,14 @@ class TerminalImeEngine {
       if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
           type == TerminalKeyEventType.press &&
           _currentEditingState.composing.isCollapsed) {
-        _resetAfterHardwareEnter(submitting: !shift && !alt);
+        _resetAfterHardwareEnter(
+          submitting: _isSubmittingEnter(
+            ctrl: ctrl,
+            alt: alt,
+            shift: shift,
+            meta: meta,
+          ),
+        );
       }
     }
 
@@ -819,6 +826,13 @@ class TerminalImeEngine {
     _shellCompletionEnterFollowUp = null;
   }
 
+  bool _isSubmittingEnter({
+    required bool ctrl,
+    required bool alt,
+    required bool shift,
+    bool meta = false,
+  }) => !shift && (!alt || ctrl || meta);
+
   void _recordShellCompletionEnter({bool submitting = true}) {
     if (_shellCompletionObsoleteTexts.isNotEmpty) {
       if (submitting) {
@@ -911,6 +925,7 @@ class TerminalImeEngine {
     }
     _shellCompletionHasComposingEnterPreview = isComposing;
     final rawText = _extractRawInputText(value.text);
+    final normalizedText = _extractInputText(value.text);
     _captureShellCompletionEnterFollowUp(
       value,
       enterSuffix,
@@ -918,6 +933,12 @@ class TerminalImeEngine {
       nativePrefixes: {
         ..._shellCompletionObsoleteTexts,
         rawText.substring(0, rawText.length - enterSuffix.length),
+        if (normalizedText.length > enterSuffix.length &&
+            normalizedText.endsWith(enterSuffix))
+          normalizedText.substring(
+            0,
+            normalizedText.length - enterSuffix.length,
+          ),
       },
     );
     var normalized = _canonicalEditingStateForUserText(value, enterSuffix);
@@ -930,6 +951,45 @@ class TerminalImeEngine {
       );
     }
     return normalized;
+  }
+
+  int? _matchedShellCompletionPrefixLength(String text, String prefix) {
+    if (prefix.isEmpty) {
+      return null;
+    }
+    var textOffset = 0;
+    var prefixOffset = 0;
+    while (prefixOffset < prefix.length) {
+      if (textOffset >= text.length) {
+        return null;
+      }
+      final expected = prefix.codeUnitAt(prefixOffset);
+      final actual = text.codeUnitAt(textOffset);
+      if (_isNewlineCodeUnit(expected) && _isNewlineCodeUnit(actual)) {
+        // IMEs can normalize LF/CR/CRLF between preview and commitment.
+        // Compare line breaks semantically but retain the source length for
+        // slicing and mapping that native value's editing ranges.
+        prefixOffset +=
+            expected == 0x0D &&
+                prefixOffset + 1 < prefix.length &&
+                prefix.codeUnitAt(prefixOffset + 1) == 0x0A
+            ? 2
+            : 1;
+        textOffset +=
+            actual == 0x0D &&
+                textOffset + 1 < text.length &&
+                text.codeUnitAt(textOffset + 1) == 0x0A
+            ? 2
+            : 1;
+      } else {
+        if (expected != actual) {
+          return null;
+        }
+        prefixOffset++;
+        textOffset++;
+      }
+    }
+    return textOffset;
   }
 
   TextEditingValue? _normalizeShellCompletionEcho(TextEditingValue value) {
@@ -989,10 +1049,14 @@ class TerminalImeEngine {
     final isComposing = !value.composing.isCollapsed;
     for (final text in texts) {
       for (final obsolete in obsoleteTexts) {
-        if (!text.startsWith(obsolete)) {
+        final prefixLength = _matchedShellCompletionPrefixLength(
+          text,
+          obsolete,
+        );
+        if (prefixLength == null) {
           continue;
         }
-        final suffix = text.substring(obsolete.length);
+        final suffix = text.substring(prefixLength);
         final protectBareReplay =
             withinStaleWindow ||
             _shellCompletionPendingComposingTexts.contains(obsolete);
@@ -1668,9 +1732,11 @@ class TerminalImeEngine {
     final effectiveModifiers =
         modifiers ?? effects.resolveTerminalKeyModifiers?.call();
     _recordShellCompletionEnter(
-      submitting:
-          !(effectiveModifiers?.shift ?? false) &&
-          !(effectiveModifiers?.alt ?? false),
+      submitting: _isSubmittingEnter(
+        ctrl: effectiveModifiers?.ctrl ?? false,
+        alt: effectiveModifiers?.alt ?? false,
+        shift: effectiveModifiers?.shift ?? false,
+      ),
     );
     sendTerminalEnterInput(
       terminal,
@@ -3703,7 +3769,13 @@ class TerminalImeEngine {
       : null;
 
   void _sendPerformedEnter(({bool ctrl, bool alt, bool shift}) modifiers) {
-    _recordShellCompletionEnter(submitting: !modifiers.shift && !modifiers.alt);
+    _recordShellCompletionEnter(
+      submitting: _isSubmittingEnter(
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+      ),
+    );
     _hasPendingPromptOutputImeReset = true;
     _notifyUserInput();
     sendTerminalEnterInput(
