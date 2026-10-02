@@ -481,7 +481,7 @@ final class AcpClientCapabilityService {
     this.limits = const AcpClientCapabilityLimits(),
     DiagnosticsLogger? diagnostics,
     this.unpresentedElicitationTimeout = const Duration(seconds: 10),
-  }) : _allowedRoots = List<String>.unmodifiable(allowedRoots),
+  }) : allowedRoots = List<String>.unmodifiable(allowedRoots),
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   /// How long a request-scoped elicitation may wait for any session view to
@@ -494,15 +494,24 @@ final class AcpClientCapabilityService {
   /// Terminal implementation for the current remote host.
   final AcpTerminalExecutor? terminalExecutor;
 
-  /// Roots that file and terminal working-directory requests may access:
-  /// the session working directory plus any additional workspace directories.
-  List<String> get allowedRoots => _allowedRoots;
+  /// Roots that file and terminal working-directory requests may access
+  /// for a session without its own roots: the working directory plus any
+  /// additional workspace directories of the session that started the bridge.
+  final List<String> allowedRoots;
 
-  /// Replaces the allowed roots, for example when a reconnect re-sends a
-  /// different set of additional workspace directories.
-  set allowedRoots(List<String> roots) =>
-      _allowedRoots = List<String>.unmodifiable(roots);
-  List<String> _allowedRoots;
+  final Map<String, List<String>> _sessionAllowedRoots =
+      <String, List<String>>{};
+
+  /// Sets the roots one ACP session sharing this bridge may access, so a
+  /// fork or another session with different directories neither loses its
+  /// own access nor gains the other's.
+  void setSessionAllowedRoots(String sessionId, List<String> roots) {
+    if (sessionId.isEmpty) return;
+    _sessionAllowedRoots[sessionId] = List<String>.unmodifiable(roots);
+  }
+
+  List<String> _allowedRootsForSession(String sessionId) =>
+      _sessionAllowedRoots[sessionId] ?? allowedRoots;
 
   /// User-decision registry. It may be retained over bridge detach/reconnect.
   final AcpPendingRequestRegistry registry;
@@ -547,6 +556,10 @@ final class AcpClientCapabilityService {
   StreamSubscription<String>? _elicitationCompletionSubscription;
   final _unpresentedElicitationTimers = <String, Timer>{};
   var _nextTerminalId = 0;
+  // Unique to this service, so a tool card restored from an earlier
+  // connection never resolves to a new terminal that restarted the count.
+  final _terminalIdPrefix =
+      'acp-terminal-${Random.secure().nextInt(1 << 32).toRadixString(16)}';
 
   /// Capabilities that are safe to advertise for this service instance.
   ///
@@ -681,6 +694,7 @@ final class AcpClientCapabilityService {
     try {
       _activeRequests.removeWhere((_, owner) => owner == sessionId);
       _sessionAutoApprovePermissions.remove(sessionId);
+      _sessionAllowedRoots.remove(sessionId);
       final owned = _terminals.entries
           .where((entry) => entry.value.sessionId == sessionId)
           .toList(growable: false);
@@ -1112,9 +1126,10 @@ final class AcpClientCapabilityService {
       );
     }
     final params = _objectParams(request);
-    _requiredSessionId(params);
+    final sessionId = _requiredSessionId(params);
     final path = await _validatedPath(
       _requiredString(params, 'path'),
+      sessionId: sessionId,
       forWrite: false,
     );
     _ensureRequestActive(request);
@@ -1138,6 +1153,7 @@ final class AcpClientCapabilityService {
     final sessionId = _requiredSessionId(params);
     final path = await _validatedPath(
       _requiredString(params, 'path'),
+      sessionId: sessionId,
       forWrite: true,
     );
     _ensureRequestActive(request);
@@ -1220,7 +1236,11 @@ final class AcpClientCapabilityService {
     }
     final cwd = requestedCwd == null
         ? null
-        : await _validatedPath(requestedCwd, forWrite: false);
+        : await _validatedPath(
+            requestedCwd,
+            sessionId: sessionId,
+            forWrite: false,
+          );
     final requestedOutputLimit = _optionalPositiveInteger(
       params,
       'outputByteLimit',
@@ -1260,7 +1280,7 @@ final class AcpClientCapabilityService {
       process.kill();
       _ensureRequestActive(request);
     }
-    final id = 'acp-terminal-${++_nextTerminalId}';
+    final id = '$_terminalIdPrefix-${++_nextTerminalId}';
     final display = _terminalDisplayNotifier(sessionId, id)
       ..value = AcpTerminalDisplay(
         terminalId: id,
@@ -1343,6 +1363,7 @@ final class AcpClientCapabilityService {
 
   Future<String> _validatedPath(
     String candidate, {
+    required String sessionId,
     required bool forWrite,
   }) async {
     final normalized = normalizeSftpAbsolutePath(candidate);
@@ -1360,7 +1381,7 @@ final class AcpClientCapabilityService {
       // Resolve each root independently: one missing additional directory
       // must not make every other root (including the cwd) unusable.
       final canonicalRoots = (await Future.wait(
-        allowedRoots.map((root) async {
+        _allowedRootsForSession(sessionId).map((root) async {
           final normalizedRoot = normalizeSftpAbsolutePath(root);
           if (normalizedRoot == null) return null;
           try {

@@ -285,6 +285,43 @@ void main() {
       expect(registry.requests, isEmpty);
     });
 
+    test('a cancel replayed before the router reattaches still drops the '
+        'retained request', () async {
+      transport.sendRequest('perm-old', 'session/request_permission', {
+        'sessionId': 'session-1',
+        'toolCall': {'toolCallId': 'call-1'},
+        'options': [
+          {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+        ],
+      });
+      await _settle();
+      await service.detach();
+      final nextTransport = _Transport();
+      final nextClient = AcpClient(
+        AcpJsonRpcConnection(transport: nextTransport),
+      );
+      addTearDown(nextClient.close);
+      // The bridge replays the withdrawn request and its cancel while the
+      // new capability service is still being created.
+      nextTransport
+        ..sendRequest('perm-old', 'session/request_permission', {
+          'sessionId': 'session-1',
+          'toolCall': {'toolCallId': 'call-1'},
+          'options': [
+            {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+          ],
+        })
+        ..sendCancel('perm-old')
+        ..sendComplete('elicitation-1');
+      await _settle();
+      expect(registry.requests, hasLength(1));
+
+      service.attach(nextClient);
+      await _settle();
+      expect(registry.requests, isEmpty);
+      expect(nextTransport.responsesFor('perm-old'), hasLength(1));
+    });
+
     test('a numeric cancel never drops a string-keyed request', () async {
       transport.sendRequest('1', 'elicitation/create', _formParams);
       await _settle();

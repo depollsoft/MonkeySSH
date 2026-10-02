@@ -588,6 +588,42 @@ void main() {
       expect(transport.responseFor('read-1')['result'], {'content': 'two\n'});
     });
 
+    test('each session sharing the bridge keeps its own roots', () async {
+      for (final path in ['/workspace/a.txt', '/docs/a.txt', '/other/a.txt']) {
+        files.files[path] = Uint8List.fromList(utf8.encode('ok'));
+      }
+      service
+        ..setSessionAllowedRoots('session-a', const ['/workspace', '/docs'])
+        ..setSessionAllowedRoots('session-b', const ['/other']);
+      Future<Object?> read(String id, String sessionId, String path) async {
+        transport.sendRequest(id, 'fs/read_text_file', {
+          'sessionId': sessionId,
+          'path': path,
+        });
+        await _settle();
+        final response = transport.responseFor(id);
+        return response['result'] ?? (response['error']! as Map)['message'];
+      }
+
+      const allowed = {'content': 'ok'};
+      expect(await read('a-docs', 'session-a', '/docs/a.txt'), allowed);
+      expect(
+        await read('a-other', 'session-a', '/other/a.txt'),
+        isNot(allowed),
+      );
+      expect(await read('b-other', 'session-b', '/other/a.txt'), allowed);
+      expect(await read('b-docs', 'session-b', '/docs/a.txt'), isNot(allowed));
+      // A session without its own roots yet uses the bridge's launch roots.
+      expect(await read('new', 'session-new', '/workspace/a.txt'), allowed);
+      expect(
+        await read('new-docs', 'session-new', '/docs/a.txt'),
+        isNot(allowed),
+      );
+
+      await service.closeSession('session-a');
+      expect(await read('closed', 'session-a', '/docs/a.txt'), isNot(allowed));
+    });
+
     test('rejects a read that resolves through an escaping symlink', () async {
       files.canonicalPaths['/workspace/link/private.txt'] = '/private.txt';
       transport.sendRequest('read-link', 'fs/read_text_file', {
@@ -1423,6 +1459,44 @@ void main() {
       expect(terminals.processes, hasLength(2));
       expect(transport.responseFor('create-1')['result'], isNotNull);
       expect(transport.responseFor('create-2')['result'], isNotNull);
+    });
+
+    test('a new service never reuses an earlier service terminal id', () async {
+      Future<String> firstTerminalId(
+        AcpClientCapabilityService target,
+        _ServerTransport targetTransport,
+      ) async {
+        targetTransport.sendRequest('create', 'terminal/create', {
+          'sessionId': 'session-1',
+          'command': 'echo',
+        });
+        await _settle();
+        return (targetTransport.responseFor('create')['result']!
+                as Map)['terminalId']
+            as String;
+      }
+
+      final nextTransport = _ServerTransport();
+      final nextClient = AcpClient(
+        AcpJsonRpcConnection(transport: nextTransport),
+      );
+      final next = AcpClientCapabilityService(
+        fileSystem: files,
+        terminalExecutor: terminals,
+        allowedRoots: const ['/workspace'],
+        registry: AcpPendingRequestRegistry(),
+      )..attach(nextClient);
+      addTearDown(() async {
+        await next.close();
+        await nextClient.close();
+      });
+
+      // A tool card restored from the first connection must not show the
+      // output of the reconnected service's first terminal.
+      expect(
+        await firstTerminalId(service, transport),
+        isNot(await firstTerminalId(next, nextTransport)),
+      );
     });
 
     test('creates concurrent terminals, truncates output, waits, kills, and releases', () async {

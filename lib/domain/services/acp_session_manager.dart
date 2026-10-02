@@ -1875,13 +1875,15 @@ class _SessionController {
     _update((state) => state.copyWith(cwd: cwd));
   }
 
-  /// Points the shared capability service at this session's root set so
-  /// fs/terminal requests inside additional directories are allowed.
+  /// Gives this session's fs/terminal requests its own root set on the
+  /// shared capability service, so requests inside its additional
+  /// directories are allowed. A new session's id is known only once
+  /// session/new returns; until then the bridge's launch roots apply.
   void _syncAllowedRoots() {
-    attachment.capabilityService?.allowedRoots = <String>[
+    attachment.capabilityService?.setSessionAllowedRoots(_key.acpSessionId, [
       _cwd,
       ..._workspace.additionalDirectories,
-    ];
+    ]);
   }
 
   /// Filters this session's workspace by the agent's advertised capabilities
@@ -2062,6 +2064,7 @@ class _SessionController {
       resolvedSessionId,
       enabled: _autoApprovePermissions,
     );
+    _syncAllowedRoots();
     _update(
       (s) => s.copyWith(
         status: AcpConnectionStatus.ready,
@@ -3268,6 +3271,7 @@ class _SessionController {
       acpSessionId,
       enabled: _autoApprovePermissions,
     );
+    _syncAllowedRoots();
     _applySetupResult(setupResult);
     _subscribeTransport();
     _subscribeSessionStreams();

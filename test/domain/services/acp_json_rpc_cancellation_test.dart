@@ -177,7 +177,8 @@ void main() {
       },
     );
 
-    test('forwards elicitation completions by id', () async {
+    test('forwards elicitation completions by id once the router '
+        'listens', () async {
       final transport = _Transport();
       final client = AcpClient(AcpJsonRpcConnection(transport: transport));
       addTearDown(client.close);
@@ -194,6 +195,11 @@ void main() {
           'method': 'elicitation/complete',
           'params': {'elicitationId': 42},
         });
+      await _settle();
+      // Held with any queued requests until a capability router attaches.
+      expect(completed, isEmpty);
+
+      client.serverRequests.listen((_) {});
       await _settle();
       expect(completed, ['oauth-1']);
     });
