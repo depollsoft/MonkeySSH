@@ -26,6 +26,7 @@ import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
+import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/background_ssh_service.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
@@ -4865,6 +4866,58 @@ LISTEN ::1:4201
       expect(cancellableService.receivedToken?.isCancelled, isTrue);
     });
 
+    for (final demo in [false, true]) {
+      test(
+        '${demo ? 'skips' : 'counts'} ${demo ? 'demo' : 'real'} connections for the rating prompt',
+        () async {
+          final reviewPrompt = _RecordingAppReviewPromptService();
+          final host = _automaticForwardHost(enabled: false).copyWith(
+            label: demo ? 'App Review Demo · Rating' : 'Rating',
+            tags: const Value('app-review,demo'),
+          );
+          final hostRepository = _MockHostRepository();
+          when(() => hostRepository.getById(host.id))
+              .thenAnswer((_) async => host);
+          when(() => hostRepository.updateLastConnected(host.id))
+              .thenAnswer((_) async => true);
+          final service = demo
+              ? SshService(hostRepository: hostRepository)
+              : fakeSshService;
+          final localContainer = ProviderContainer(
+            overrides: [
+              sshServiceProvider.overrideWithValue(service),
+              telemetryServiceProvider.overrideWithValue(telemetry),
+              hostRepositoryProvider.overrideWithValue(hostRepository),
+              portForwardRepositoryProvider.overrideWithValue(
+                _emptyPortForwardRepository(),
+              ),
+              localNotificationServiceProvider.overrideWithValue(
+                notificationService,
+              ),
+              terminalNotificationsNotifierProvider.overrideWith(
+                _EnabledTerminalNotificationsNotifier.new,
+              ),
+              appReviewPromptServiceProvider.overrideWithValue(reviewPrompt),
+            ],
+          );
+          addTearDown(localContainer.dispose);
+          final notifier = localContainer.read(activeSessionsProvider.notifier);
+          // Disconnect through the notifier and drain its follow-up work
+          // before the container is disposed.
+          addTearDown(() async {
+            await notifier.disconnectAll();
+            await pumpEventQueue();
+          });
+
+          final result = await notifier.connect(host.id, forceNew: true);
+          await pumpEventQueue();
+
+          expect(result.success, isTrue);
+          expect(reviewPrompt.recordedConnections, demo ? 0 : 1);
+        },
+      );
+    }
+
     test('cancelConnectionAttempt is a no-op without an attempt', () async {
       final notifier = container.read(activeSessionsProvider.notifier);
 
@@ -8522,3 +8575,18 @@ Answer<Future<SSHForwardChannel>> _returnTargetSocket(
   SSHForwardChannel socket,
 ) =>
     (_) async => socket;
+
+class _RecordingAppReviewPromptService implements AppReviewPromptService {
+  int recordedConnections = 0;
+
+  @override
+  Future<void> recordSuccessfulConnection() async {
+    recordedConnections += 1;
+  }
+
+  @override
+  bool isQualifyingConnectedTime(Duration connectedTime) => false;
+
+  @override
+  Future<bool> maybeRequestReview() async => false;
+}

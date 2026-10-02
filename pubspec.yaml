@@ -79,6 +79,7 @@ dependencies:
   in_app_purchase: ^3.3.0
   in_app_purchase_android: ^0.5.2
   in_app_purchase_storekit: ^0.4.13
+  in_app_review: ^2.0.12
   quick_actions: ^1.1.1
   video_player: ^2.14.0
   http: ^1.6.0
