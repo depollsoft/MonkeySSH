@@ -1751,6 +1751,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         'hasInitialTmuxWindow': widget.initialTmuxWindowIndex != null,
       },
     );
+    // The extra-keys Ctrl turns Enter into send in the native composer, the
+    // way Ctrl+Enter does on a hardware keyboard.
+    _nativeComposerFocusController
+      ..isSendModifierArmed = (() => _toolbarController.isCtrlActive)
+      ..consumeSendModifier = _toolbarController.consumeOneShot;
     _tmuxService = ref.read(tmuxServiceProvider);
     _tmuxMultiplexerService = _tmuxService;
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);

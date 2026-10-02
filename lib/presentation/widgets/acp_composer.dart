@@ -64,6 +64,17 @@ class AcpComposerAttachmentActions {
 class AcpComposerFocusController {
   _AcpComposerState? _state;
 
+  /// Reports whether the shell's on-screen Ctrl modifier is armed.
+  ///
+  /// The extra-keys toolbar's Ctrl is not a hardware modifier, so the
+  /// composer asks the shell: with it armed, Enter from the toolbar or the
+  /// system keyboard sends the message, like Ctrl+Enter on a hardware keyboard.
+  bool Function()? isSendModifierArmed;
+
+  /// Consumes a one-shot on-screen Ctrl after a system-keyboard Enter used it.
+  /// The toolbar consumes it itself after its own Enter key.
+  VoidCallback? consumeSendModifier;
+
   /// Whether the composer currently owns text focus.
   bool get hasFocus => _state?._focusNode.hasFocus ?? false;
 
@@ -219,9 +230,38 @@ class _AcpComposerState extends State<AcpComposer> {
         ..addPastedText(insertion.text);
       return;
     }
+    final newline = _singleNewlineInsertion(previous, next);
+    if (newline != null &&
+        (widget.focusController?.isSendModifierArmed?.call() ?? false)) {
+      // The system keyboard's Enter with the on-screen Ctrl armed sends
+      // instead of adding a line.
+      _syncing = true;
+      _text.value = TextEditingValue(
+        text: previous,
+        selection: TextSelection.collapsed(offset: newline),
+      );
+      _syncing = false;
+      widget.focusController?.consumeSendModifier?.call();
+      if (_controller.canSend) unawaited(_controller.send());
+      return;
+    }
     final selection = _text.selection;
     final caret = selection.isValid ? selection.baseOffset : next.length;
     _controller.setText(next, caret: caret);
+  }
+
+  /// The offset of a single `\n` the user just typed into [previous], if that
+  /// is the only change.
+  static int? _singleNewlineInsertion(String previous, String next) {
+    if (next.length != previous.length + 1) return null;
+    var index = 0;
+    while (index < previous.length && previous[index] == next[index]) {
+      index++;
+    }
+    if (next[index] != '\n') return null;
+    return next.substring(index + 1) == previous.substring(index)
+        ? index
+        : null;
   }
 
   ({int start, String text})? _largePastedInsertion(
@@ -393,6 +433,12 @@ class _AcpComposerState extends State<AcpComposer> {
       case TerminalKey.tab:
         _insertExternalText('\t');
       case TerminalKey.enter:
+        // The toolbar's Enter with its Ctrl armed sends; the toolbar
+        // consumes the one-shot modifier after this returns.
+        if (widget.focusController?.isSendModifierArmed?.call() ?? false) {
+          if (_controller.canSend) unawaited(_controller.send());
+          return;
+        }
         _insertExternalText('\n');
       case TerminalKey.arrowLeft:
         _controller.setText(

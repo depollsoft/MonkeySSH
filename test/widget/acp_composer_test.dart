@@ -230,6 +230,49 @@ void main() {
     expect(manager.promptCount, 1);
   });
 
+  testWidgets(
+    'Enter with the on-screen Ctrl armed sends instead of a newline',
+    (tester) async {
+      final manager = _RecordingManager();
+      final controller = _makeController(manager)..setText('ship it');
+      addTearDown(controller.dispose);
+      var armed = true;
+      var consumed = 0;
+      final focus = AcpComposerFocusController()
+        ..isSendModifierArmed = (() => armed)
+        ..consumeSendModifier = () {
+          consumed++;
+          armed = false;
+        };
+      await _pump(tester, controller, focusController: focus);
+      await tester.tap(find.byType(TextField));
+
+      // The system keyboard's Enter arrives as a newline in the field.
+      await tester.enterText(find.byType(TextField), 'ship it\n');
+      await tester.pumpAndSettle();
+      expect(manager.promptCount, 1);
+      expect(consumed, 1);
+      expect(find.text('ship it\n'), findsNothing);
+
+      // The toolbar's own Enter key, with Ctrl armed again, sends too; the
+      // toolbar consumes its modifier itself.
+      controller.setText('and this');
+      armed = true;
+      focus.sendSpecialKey(TerminalKey.enter);
+      await tester.pumpAndSettle();
+      expect(manager.promptCount, 2);
+      expect(consumed, 1);
+
+      // Without the modifier, Enter is a newline.
+      controller.setText('line');
+      armed = false;
+      focus.sendSpecialKey(TerminalKey.enter);
+      await tester.pumpAndSettle();
+      expect(manager.promptCount, 2);
+      expect(controller.text, 'line\n');
+    },
+  );
+
   testWidgets('send button meets the 44px minimum touch target', (
     tester,
   ) async {
