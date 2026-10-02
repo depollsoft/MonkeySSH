@@ -152,6 +152,31 @@ void main() {
     expect(process.closed, isTrue);
   });
 
+  test('opens only http(s) addresses with a host', () {
+    expect(acpSignInWebLink('https://example.com/device'), isNotNull);
+    expect(acpSignInWebLink('HTTP://example.com'), isNotNull);
+    expect(acpSignInWebLink('custom:https://example.com'), isNull);
+    expect(acpSignInWebLink('javascript:alert(1)//https://x'), isNull);
+    expect(acpSignInWebLink('https:///no-host'), isNull);
+    expect(acpSignInWebLink('file:///etc/passwd'), isNull);
+  });
+
+  testWidgets('a hyperlink to another scheme is not offered', (tester) async {
+    final opened = await _open(tester);
+    opened.processes.single.emit(
+      '\x1b]8;;custom:https://example.com\x07Sign in\x1b]8;;\x07\r\n',
+    );
+    await tester.pump();
+    expect(find.textContaining('custom:'), findsNothing);
+    opened.processes.single.emit(
+      '\x1b]8;;https://example.com/ok\x07Sign in\x1b]8;;\x07\r\n',
+    );
+    await tester.pump();
+    expect(find.text('https://example.com/ok'), findsOneWidget);
+    opened.processes.single.exit.complete(1);
+    await tester.pump();
+  });
+
   testWidgets('a non-zero exit stays open and can run again', (tester) async {
     final opened = await _open(tester);
     opened.processes.single.exit.complete(3);

@@ -523,4 +523,43 @@ void main() {
     expect((agent.responses[allowed]! as Map)['content'], 'guide');
     expect((agent.responses[refused]! as Map).containsKey('code'), isTrue);
   });
+
+  test('directories an agent was not sent are not opened to it', () async {
+    final fileSystem = _MemoryFileSystem()
+      ..files['/repo/readme.md'] = 'readme'
+      ..files['/docs/guide.md'] = 'guide';
+    final connector = _Connector(
+      additionalDirectories: false,
+      binding: AcpHostCapabilityBinding(
+        fileSystem: fileSystem,
+        terminalExecutor: _NoTerminals(),
+      ),
+    );
+    final manager = build(connector);
+    final key = await start(
+      manager,
+      workspace: AcpSessionWorkspaceOptions(
+        additionalDirectories: const ['/docs'],
+      ),
+    );
+    final agent = connector.agents[key.bridgeId]!;
+    expect(
+      agent
+          .paramsFor('session/new')
+          .single
+          .containsKey('additionalDirectories'),
+      isFalse,
+    );
+    final cwdRead = agent.request('fs/read_text_file', {
+      'sessionId': key.acpSessionId,
+      'path': '/repo/readme.md',
+    });
+    final extraRead = agent.request('fs/read_text_file', {
+      'sessionId': key.acpSessionId,
+      'path': '/docs/guide.md',
+    });
+    await _pump();
+    expect((agent.responses[cwdRead]! as Map)['content'], 'readme');
+    expect((agent.responses[extraRead]! as Map).containsKey('code'), isTrue);
+  });
 }

@@ -87,6 +87,20 @@ final class AcpWritePermissionPrompt extends AcpPermissionPrompt {
   String get title => 'Write to $fileName';
 }
 
+/// Longest tool title shown in a permission prompt.
+const kAcpPermissionTitleMaxCharacters = 120;
+
+/// Puts an agent-supplied tool title on one bounded line, so a long or
+/// multi-line title cannot crowd out or imitate the approval controls.
+@visibleForTesting
+String? acpPermissionTitleText(String? value) {
+  final collapsed = value?.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (collapsed == null || collapsed.isEmpty) return null;
+  final runes = collapsed.runes;
+  if (runes.length <= kAcpPermissionTitleMaxCharacters) return collapsed;
+  return '${String.fromCharCodes(runes.take(kAcpPermissionTitleMaxCharacters - 1))}…';
+}
+
 /// Builds a tool permission prompt from a session-manager pending permission.
 ///
 /// The title the agent put in the permission request wins over [toolTitle]
@@ -103,7 +117,9 @@ AcpToolPermissionPrompt acpToolPromptFromSession(
     return trimmed == null || trimmed.isEmpty ? null : trimmed;
   }
 
-  final title = nonEmpty(pending.title) ?? nonEmpty(toolTitle);
+  final title =
+      acpPermissionTitleText(pending.title) ??
+      acpPermissionTitleText(toolTitle);
   final subject = nonEmpty(pending.subject);
   return AcpToolPermissionPrompt(
     stableKey: 'session:${pending.sessionId}:${pending.requestKey}',
@@ -230,7 +246,12 @@ class _PermissionCard extends StatelessWidget {
             ),
             const SizedBox(width: FluttyTheme.spacingSm),
             Expanded(
-              child: Text(prompt.title, style: theme.textTheme.titleSmall),
+              child: Text(
+                prompt.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall,
+              ),
             ),
           ],
         ),
@@ -317,7 +338,12 @@ class _PermissionCard extends StatelessWidget {
             ),
             const SizedBox(width: FluttyTheme.spacingSm),
             Expanded(
-              child: Text(prompt.title, style: theme.textTheme.titleSmall),
+              child: Text(
+                prompt.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall,
+              ),
             ),
           ],
         ),

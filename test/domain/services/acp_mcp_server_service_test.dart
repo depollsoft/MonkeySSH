@@ -310,6 +310,40 @@ void main() {
       expect(replaced.env.single.value, 'new-key');
     });
 
+    test('repeated names keep their own unreadable values', () async {
+      await service.saveServer(
+        _remote(AcpMcpServerTransport.http).copyWith(
+          headers: const [
+            AcpMcpNameValue(name: 'X-Key', value: 'first'),
+            AcpMcpNameValue(name: 'X-Key', value: 'second'),
+          ],
+        ),
+      );
+      List<String> storedHeaderValues(String? raw) => [
+        for (final header
+            in ((jsonDecode(raw!) as List).single as Map)['headers'] as List)
+          (header as Map)['value'] as String,
+      ];
+      final original = storedHeaderValues(
+        await settings.getString(SettingKeys.acpMcpServers),
+      );
+      final otherDevice = AcpMcpServerService(
+        settings,
+        SecretEncryptionService.forTesting(),
+      );
+      final unreadable = (await otherDevice.listServers()).single;
+      await otherDevice.saveServer(unreadable.copyWith(name: 'renamed'));
+
+      expect(
+        storedHeaderValues(await settings.getString(SettingKeys.acpMcpServers)),
+        original,
+      );
+      expect((await service.listServers()).single.headers.map((h) => h.value), [
+        'first',
+        'second',
+      ]);
+    });
+
     test('skips malformed entries', () async {
       await settings.setString(
         SettingKeys.acpMcpServers,

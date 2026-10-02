@@ -996,7 +996,6 @@ class AcpSessionManager {
             hostId: hostId,
             cwd: cwd,
             autoApprovePermissions: autoApprovePermissions,
-            additionalRoots: workspace.additionalDirectories,
           ),
         );
     _attachments[bridgeKey.value] = attachment;
@@ -1246,8 +1245,9 @@ class AcpSessionManager {
   /// be resolved, `fs/*`/`terminal/*` requests are simply declined as
   /// unavailable rather than left unanswered.
   ///
-  /// [additionalRoots] (the session's additional workspace directories) are
-  /// allowed alongside [cwd] for filesystem and terminal requests.
+  /// Only [cwd] is allowed until a session's id is known; each session then
+  /// gets its own roots, including the additional directories the agent
+  /// accepted (see [_SessionController._syncAllowedRoots]).
   ///
   /// When [existingRegistry] is provided (a prior attachment's still-pending
   /// permission/write decisions, carried across a soft detach/reconnect), it
@@ -1258,7 +1258,6 @@ class AcpSessionManager {
     required int hostId,
     required String cwd,
     required bool autoApprovePermissions,
-    List<String> additionalRoots = const <String>[],
     AcpPendingRequestRegistry? existingRegistry,
   }) => () async {
     AcpHostCapabilityBinding? binding;
@@ -1275,7 +1274,7 @@ class AcpSessionManager {
     return AcpClientCapabilityService(
       fileSystem: binding?.fileSystem,
       terminalExecutor: binding?.terminalExecutor,
-      allowedRoots: <String>[cwd, ...additionalRoots],
+      allowedRoots: <String>[cwd],
       registry: existingRegistry ?? AcpPendingRequestRegistry(),
       autoApprovePermissions: autoApprovePermissions,
       diagnostics: _diagnostics,
@@ -1876,13 +1875,20 @@ class _SessionController {
   }
 
   /// Gives this session's fs/terminal requests its own root set on the
-  /// shared capability service, so requests inside its additional
-  /// directories are allowed. A new session's id is known only once
-  /// session/new returns; until then the bridge's launch roots apply.
+  /// shared capability service: the working directory, plus the additional
+  /// directories only when the agent advertises them and so was sent them.
+  /// A new session's id is known only once session/new returns; until then
+  /// only the bridge's working directory is allowed.
   void _syncAllowedRoots() {
+    final shared =
+        (attachment.initialization ?? _state.initialization)
+            ?.agentCapabilities
+            .session
+            .additionalDirectories ??
+        false;
     attachment.capabilityService?.setSessionAllowedRoots(_key.acpSessionId, [
       _cwd,
-      ..._workspace.additionalDirectories,
+      if (shared) ..._workspace.additionalDirectories,
     ]);
   }
 
@@ -3381,7 +3387,6 @@ class _SessionController {
           hostId: hostId,
           cwd: _cwd,
           autoApprovePermissions: _autoApprovePermissions,
-          additionalRoots: _workspace.additionalDirectories,
           existingRegistry: priorRegistry,
         ),
         initialization: priorInitialization,

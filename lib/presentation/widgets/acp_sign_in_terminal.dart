@@ -150,6 +150,17 @@ Future<bool> showAcpSignInTerminal(
   return succeeded ?? false;
 }
 
+/// Parses [link] as an http(s) address with a host, the only kind the
+/// sign-in terminal opens, or returns `null`.
+@visibleForTesting
+Uri? acpSignInWebLink(String link) {
+  final uri = Uri.tryParse(link.trim());
+  if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+    return null;
+  }
+  return uri.host.isEmpty ? null : uri;
+}
+
 enum _SignInPhase { starting, running, failed, unavailable }
 
 /// Full-screen terminal that runs one interactive sign-in and pops with
@@ -289,8 +300,10 @@ class _AcpSignInTerminalScreenState extends State<AcpSignInTerminalScreen> {
     final scan = '$_linkScanCarry$text';
     String? found;
     for (final match in _oscHyperlinkPattern.allMatches(scan)) {
+      // A hyperlink target is agent-controlled; only a whole web address
+      // counts, not one embedded in another scheme.
       final target = match.group(1);
-      if (target != null && _urlPattern.hasMatch(target)) found = target;
+      if (target != null && acpSignInWebLink(target) != null) found = target;
     }
     final plain = scan.replaceAll(_escapeSequencePattern, '');
     for (final match in _urlPattern.allMatches(plain)) {
@@ -316,7 +329,7 @@ class _AcpSignInTerminalScreenState extends State<AcpSignInTerminalScreen> {
   }
 
   void _openLink(String link) {
-    final uri = Uri.tryParse(link);
+    final uri = acpSignInWebLink(link);
     if (uri == null) return;
     unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
   }

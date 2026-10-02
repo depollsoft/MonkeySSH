@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -171,8 +172,12 @@ class AcpMcpServerService {
         for (final pair in pairs)
           <String, Object?>{
             'name': pair.name,
-            'value': pair.value.isEmpty && unreadable.containsKey(pair.name)
-                ? unreadable[pair.name]
+            // Repeated names (such as two headers) keep their own values,
+            // matched in stored order.
+            'value':
+                pair.value.isEmpty &&
+                    (unreadable[pair.name]?.isNotEmpty ?? false)
+                ? unreadable[pair.name]!.removeFirst()
                 : await _encryption.encryptRequired(pair.value),
           },
       ];
@@ -194,9 +199,12 @@ class AcpMcpServerService {
     };
   }
 
-  /// Stored ciphertexts in [pairs] that cannot be decrypted, by pair name.
-  Future<Map<String, String>> _unreadableStoredValues(Object? pairs) async {
-    final unreadable = <String, String>{};
+  /// Stored ciphertexts in [pairs] that cannot be decrypted, by pair name
+  /// in stored order. A name without any is absent.
+  Future<Map<String, Queue<String>>> _unreadableStoredValues(
+    Object? pairs,
+  ) async {
+    final unreadable = <String, Queue<String>>{};
     if (pairs is! List) return unreadable;
     for (final item in pairs) {
       if (item is! Map) continue;
@@ -206,7 +214,7 @@ class AcpMcpServerService {
       try {
         await _encryption.decryptNullable(stored);
       } on Object {
-        unreadable[name] = stored;
+        unreadable.putIfAbsent(name, Queue<String>.new).add(stored);
       }
     }
     return unreadable;

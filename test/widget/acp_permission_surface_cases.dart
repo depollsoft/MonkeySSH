@@ -197,5 +197,24 @@ void registerAcpPermissionSurfaceTests() {
       expect(find.textContaining('Stale timeline title'), findsNothing);
       expect(find.textContaining('tool-2'), findsNothing);
     });
+
+    test('agent titles are put on one bounded line', () {
+      expect(
+        acpPermissionTitleText('  Run\n\n  the   tests  '),
+        'Run the tests',
+      );
+      expect(acpPermissionTitleText(' \n '), isNull);
+      expect(acpPermissionTitleText(null), isNull);
+      final long = acpPermissionTitleText('x' * 5000)!;
+      expect(long.runes.length, kAcpPermissionTitleMaxCharacters);
+      expect(long, endsWith('…'));
+      // Emoji are counted and cut by code point, never split.
+      final emoji = acpPermissionTitleText('😀' * 200)!;
+      expect(emoji.runes.length, kAcpPermissionTitleMaxCharacters);
+      expect(
+        emoji.runes.every((rune) => rune == 0x1F600 || rune == 0x2026),
+        isTrue,
+      );
+    });
   });
 }
