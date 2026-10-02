@@ -1081,6 +1081,203 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final chord in ['shift', 'alt']) {
+      for (final source in ['hardware', 'action', 'payload']) {
+        for (final delayedReplay in [false, true]) {
+          test(
+            '${platform.name} shell completion does not submit on $chord Enter via $source, replay=$delayedReplay',
+            () async {
+              final driver = _ImeDriver(platform: platform);
+              addTearDown(driver.dispose);
+              var activeModifier = true;
+              final harness = await _createImeHarness(
+                driver,
+                initialEditingValue: _editingValue('h', selectionOffset: 1),
+                resolveTerminalKeyModifiers: () => (
+                  ctrl: false,
+                  alt: activeModifier && chord == 'alt',
+                  shift: activeModifier && chord == 'shift',
+                ),
+                consumeTerminalKeyModifiers: () => activeModifier = false,
+              );
+              driver.engine.resetAfterShellCompletion();
+              harness.terminalOutput.clear();
+              await driver.flush(const Duration(milliseconds: 500));
+              if (source == 'hardware') {
+                await driver.hardwareKey(
+                  TerminalKey.enter,
+                  alt: chord == 'alt',
+                  shift: chord == 'shift',
+                );
+                activeModifier = false;
+              } else if (source == 'action') {
+                await driver.receiveAction(TextInputAction.done);
+                await driver.flush();
+              } else {
+                driver.updateEditingValue(
+                  _editingValue('\n', selectionOffset: 1),
+                );
+                await driver.flush();
+                await driver.receiveAction(TextInputAction.done);
+                await driver.flush();
+              }
+              final chordOutput = chord == 'shift' ? '\n' : '\x1b\r';
+              expect(harness.terminalOutput.join(), chordOutput);
+              await driver.flush(
+                Duration(milliseconds: delayedReplay ? 300 : 100),
+              );
+              if (delayedReplay) {
+                driver.updateEditingValue(
+                  _editingValue('h\n', selectionOffset: 2),
+                );
+                await driver.flush();
+                expect(harness.terminalOutput.join(), chordOutput);
+              }
+              driver.updateEditingValue(_editingValue('h', selectionOffset: 1));
+              await driver.flush();
+              expect(harness.terminalOutput.join(), '${chordOutput}h');
+            },
+          );
+        }
+      }
+    }
+
+    for (final bracketed in [false, true]) {
+      for (final scenario in [
+        (
+          suffix: '\nx\n',
+          plain: '\rx\r',
+          pasted: '\rx\r',
+          plainBaseline: '',
+          pastedBaseline: '',
+        ),
+        (
+          suffix: '\nx\ny',
+          plain: '\rx\ry',
+          pasted: '\rx\ny',
+          plainBaseline: 'y',
+          pastedBaseline: 'x\ny',
+        ),
+        (
+          suffix: '\nx\ny\n',
+          plain: '\rx\ry\r',
+          pasted: '\rx\ny\r',
+          plainBaseline: '',
+          pastedBaseline: '',
+        ),
+        (
+          suffix: '\n\nxyz',
+          plain: '\r\rxyz',
+          pasted: '\r\rxyz',
+          plainBaseline: 'xyz',
+          pastedBaseline: 'xyz',
+        ),
+      ]) {
+        test(
+          '${platform.name} shell completion restores only the last key-path Return tail, bracketed=$bracketed, suffix=${scenario.suffix.codeUnits}',
+          () async {
+            final driver = _ImeDriver(platform: platform);
+            addTearDown(driver.dispose);
+            final harness = await _createImeHarness(
+              driver,
+              initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            );
+            if (bracketed) harness.terminal.write('\x1b[?2004h');
+            driver.engine.resetAfterShellCompletion();
+            harness.terminalOutput.clear();
+            final rawText = 'pi${scenario.suffix}';
+            driver.updateEditingValue(
+              _editingValue(rawText, selectionOffset: rawText.length - 1),
+            );
+            await driver.flush();
+            final baseline = bracketed
+                ? scenario.pastedBaseline
+                : scenario.plainBaseline;
+            final caret = baseline.isEmpty ? 0 : baseline.length - 1;
+            expect(
+              driver.engine.editingValue,
+              _editingValue(baseline, selectionOffset: caret),
+            );
+            final expectedOutput =
+                (bracketed
+                    ? scenario.pasted.replaceAll('\n', '\r')
+                    : scenario.plain) +
+                (baseline.isEmpty
+                    ? ''
+                    : _terminalKeyOutput(TerminalKey.arrowLeft));
+            String unframedOutput() => harness.terminalOutput
+                .join()
+                .replaceAll('\x1b[200~', '')
+                .replaceAll('\x1b[201~', '');
+            expect(unframedOutput(), expectedOutput);
+            if (bracketed && scenario.pasted.contains('\n')) {
+              // xterm.paste encodes LF as CR inside the framing markers.
+              expect(
+                harness.terminalOutput.join(),
+                contains('\x1b[200~x\ry\x1b[201~'),
+              );
+            }
+            final freshText = baseline.replaceRange(caret, caret, 'a');
+            driver.updateEditingValue(
+              _editingValue(freshText, selectionOffset: caret + 1),
+            );
+            await driver.flush();
+            expect(unframedOutput(), '${expectedOutput}a');
+          },
+        );
+      }
+    }
+
+    test(
+      '${platform.name} shell completion matches expanded obsolete prefix before Return tail',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialEditingValue: _editingValue('pi', selectionOffset: 2),
+        );
+        driver.engine.resetAfterShellCompletion();
+        harness.terminalOutput.clear();
+        driver.updateEditingValue(
+          _editingValue(
+            'pip',
+            selectionOffset: 3,
+            composing: const TextRange(start: 0, end: 3),
+          ),
+        );
+        await driver.flush();
+        driver.updateEditingValue(
+          _editingValue(
+            'pip\nxyz',
+            selectionOffset: 7,
+            composing: const TextRange(start: 0, end: 7),
+          ),
+        );
+        await driver.flush();
+        expect(harness.terminalOutput, isEmpty);
+        await driver.receiveAction(TextInputAction.done);
+        await driver.flush();
+        expect(
+          harness.terminalOutput.join(),
+          '${_terminalKeyOutput(TerminalKey.enter)}xyz',
+        );
+        await driver.flush(const Duration(milliseconds: 500));
+        driver.updateEditingValue(
+          _editingValue('pip\nxyz', selectionOffset: 7),
+        );
+        await driver.flush();
+        expect(
+          harness.terminalOutput.join(),
+          '${_terminalKeyOutput(TerminalKey.enter)}xyz',
+        );
+        expect(
+          driver.engine.editingValue,
+          _editingValue('xyz', selectionOffset: 3),
+        );
+      },
+    );
+
     for (final approve in [false, true]) {
       test(
         '${platform.name} shell completion coalesced Return waits for review, approved=$approve',

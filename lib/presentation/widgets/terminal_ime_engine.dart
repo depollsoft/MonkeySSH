@@ -451,7 +451,7 @@ class TerminalImeEngine {
       if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
           type == TerminalKeyEventType.press &&
           _currentEditingState.composing.isCollapsed) {
-        _resetAfterHardwareEnter();
+        _resetAfterHardwareEnter(submitting: !shift && !alt);
       }
     }
 
@@ -462,8 +462,8 @@ class TerminalImeEngine {
   /// as does any hardware keyboard. The line it submitted is gone from the
   /// terminal, so the IME buffer must start over like after an IME Enter;
   /// otherwise later caret moves and edits are computed against stale text.
-  void _resetAfterHardwareEnter() {
-    _recordShellCompletionEnter();
+  void _resetAfterHardwareEnter({required bool submitting}) {
+    _recordShellCompletionEnter(submitting: submitting);
     final submittedText = _lastSentText;
     _hardwareEnterSubmittedText = submittedText;
     _hardwareEnterStaleLines =
@@ -818,9 +818,11 @@ class TerminalImeEngine {
     _shellCompletionEnterFollowUp = null;
   }
 
-  void _recordShellCompletionEnter() {
+  void _recordShellCompletionEnter({bool submitting = true}) {
     if (_shellCompletionObsoleteTexts.isNotEmpty) {
-      _shellCompletionSubmittedAt ??= now();
+      if (submitting) {
+        _shellCompletionSubmittedAt ??= now();
+      }
       _shellCompletionHasComposingEnterPreview = false;
     }
   }
@@ -963,9 +965,12 @@ class TerminalImeEngine {
     if (texts.any(_enterCommitNewlineSequences.contains)) {
       return value;
     }
-    final obsoleteTexts = protectEnterReplay
-        ? _shellCompletionObsoleteTexts
-        : _shellCompletionPendingComposingTexts;
+    final obsoleteTexts =
+        (protectEnterReplay
+                ? _shellCompletionObsoleteTexts
+                : _shellCompletionPendingComposingTexts)
+            .toList()
+          ..sort((a, b) => b.length.compareTo(a.length));
     final isComposing = !value.composing.isCollapsed;
     for (final text in texts) {
       for (final obsolete in obsoleteTexts) {
@@ -1647,6 +1652,11 @@ class TerminalImeEngine {
     _isFramingImeText = false;
     final effectiveModifiers =
         modifiers ?? effects.resolveTerminalKeyModifiers?.call();
+    _recordShellCompletionEnter(
+      submitting:
+          !(effectiveModifiers?.shift ?? false) &&
+          !(effectiveModifiers?.alt ?? false),
+    );
     sendTerminalEnterInput(
       terminal,
       shiftActive: effectiveModifiers?.shift ?? false,
@@ -3418,6 +3428,20 @@ class TerminalImeEngine {
       final payloadEnterModifiers = _payloadEnterModifiers(revision);
       final pendingEnterRepresentedByPayloadNewline =
           payloadEnterModifiers != null;
+      final completionFollowUp = _shellCompletionEnterFollowUp;
+      final completionPasteBlock = completionFollowUp?.revision == revision
+          ? _embeddedNewlineBlock(
+              delta.appendedText,
+              hasVisiblePredecessor:
+                  delta.deleteCursorOffset > delta.deletedCount &&
+                  _currentLineOf(
+                    deltaPreviousText.characters
+                        .take(delta.deleteCursorOffset - delta.deletedCount)
+                        .string,
+                  ).trim().isNotEmpty,
+              enterModifiers: payloadEnterModifiers,
+            )
+          : null;
       final newlineCount = _sendInputDelta(
         effectiveCurrentText,
         delta,
@@ -3425,9 +3449,10 @@ class TerminalImeEngine {
         enterModifiers: payloadEnterModifiers,
       );
       if (newlineCount > 0) {
-        final completionFollowUp = _shellCompletionEnterFollowUp;
         _shellCompletionEnterFollowUp = null;
-        _recordShellCompletionEnter();
+        final completionNeedsModifiedEnterEcho =
+            _shellCompletionObsoleteTexts.isNotEmpty &&
+            _shellCompletionSubmittedAt == null;
         if (pendingEnterActionArrived &&
             !pendingEnterRepresentedByPayloadNewline) {
           _completePendingComposingEnterAction(revision);
@@ -3450,7 +3475,11 @@ class TerminalImeEngine {
             completionFollowUp.revision == revision) {
           // These characters already went out after Return in the same delta.
           // Keep them as the new-line baseline rather than sending them again.
-          final followUpValue = completionFollowUp.value;
+          final followUpValue = _completionFollowUpAfterFinalReturn(
+            completionFollowUp.value,
+            delta.appendedText,
+            pasteBlock: completionPasteBlock,
+          );
           final trailingText = _extractRawInputText(followUpValue.text);
           _lastSentText = trailingText;
           _lastSentCursorOffset = trailingText.characters.length;
@@ -3466,6 +3495,12 @@ class TerminalImeEngine {
             sourceValue: followUpValue,
             forceResyncState: true,
           );
+        }
+        if (completionNeedsModifiedEnterEcho) {
+          // Shift/Alt Enter still resets the field, but its native echo is
+          // not a later submitting Return and must not replay the old prefix.
+          _pendingPerformedEnterText = '';
+          _pendingPerformedEnterNeedsNewline = false;
         }
         _sawImeComposition = false;
         return;
@@ -3583,6 +3618,40 @@ class TerminalImeEngine {
     }
   }
 
+  TextEditingValue _completionFollowUpAfterFinalReturn(
+    TextEditingValue value,
+    String appendedText, {
+    required ({int start, int end})? pasteBlock,
+  }) {
+    var index = 0;
+    var lastReturnEnd = 0;
+    while (index < appendedText.length) {
+      if (pasteBlock != null &&
+          pasteBlock.end > pasteBlock.start &&
+          index == pasteBlock.start) {
+        index = pasteBlock.end;
+        continue;
+      }
+      final codeUnit = appendedText.codeUnitAt(index);
+      if (!_isNewlineCodeUnit(codeUnit)) {
+        index++;
+        continue;
+      }
+      final newlineLength =
+          codeUnit == 0x0D &&
+              index + 1 < appendedText.length &&
+              appendedText.codeUnitAt(index + 1) == 0x0A
+          ? 2
+          : 1;
+      index += newlineLength;
+      lastReturnEnd = index;
+    }
+    return _canonicalEditingStateForUserText(
+      value,
+      appendedText.substring(lastReturnEnd),
+    );
+  }
+
   /// Modifiers of the pending Enter that a newline in [revision]'s payload
   /// stands for, captured when Enter was pressed. Null means the payload's
   /// newlines use the live toolbar state. Review and sending both use this so
@@ -3597,7 +3666,7 @@ class TerminalImeEngine {
       : null;
 
   void _sendPerformedEnter(({bool ctrl, bool alt, bool shift}) modifiers) {
-    _recordShellCompletionEnter();
+    _recordShellCompletionEnter(submitting: !modifiers.shift && !modifiers.alt);
     _hasPendingPromptOutputImeReset = true;
     _notifyUserInput();
     sendTerminalEnterInput(
