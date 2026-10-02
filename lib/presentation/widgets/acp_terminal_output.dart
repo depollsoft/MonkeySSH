@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../app/theme.dart';
 import '../../domain/models/acp_terminal_display.dart';
 import 'acp_chat_typography.dart';
+import 'cursor_block.dart';
 
 /// Resolves the live display of a client-run terminal by its ACP id.
 typedef AcpTerminalDisplayResolver =
@@ -114,30 +115,75 @@ class _AcpTerminalOutputViewState extends State<AcpTerminalOutputView> {
     return false;
   }
 
-  String _statusLabel(AcpTerminalDisplay display) {
+  /// Exit state as an icon and mono label, or `null` while it runs: the live
+  /// cursor already says that.
+  ({IconData icon, String label, bool failed})? _exitStatus(
+    AcpTerminalDisplay display,
+  ) {
     if (!display.exited) {
-      return display.released ? 'stopped' : 'running';
+      return display.released
+          ? (icon: Icons.stop_circle_outlined, label: 'stopped', failed: false)
+          : null;
     }
     final signal = display.signal;
-    if (signal != null && signal.isNotEmpty) return 'terminated by $signal';
+    if (signal != null && signal.isNotEmpty) {
+      return (
+        icon: Icons.cancel_outlined,
+        label: 'signal $signal',
+        failed: true,
+      );
+    }
     final code = display.exitCode;
-    return code == null ? 'exited' : 'exit $code';
+    if (code == null) {
+      return (icon: Icons.stop_circle_outlined, label: 'exited', failed: false);
+    }
+    return code == 0
+        ? (icon: Icons.check_rounded, label: 'exit 0', failed: false)
+        : (icon: Icons.error_outline, label: 'exit $code', failed: true);
   }
 
   @override
   Widget build(BuildContext context) {
-    final display = widget.display.value;
-    if (display == null) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     final mono = AcpChatTypography.monoStyleOf(context);
+    final display = widget.display.value;
+    if (display == null) {
+      // A terminal from before the app reconnected: say so instead of
+      // expanding onto nothing.
+      return Row(
+        children: [
+          Icon(
+            Icons.terminal_rounded,
+            size: 14,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Terminal output is no longer available',
+              style: mono.copyWith(
+                fontSize: 11.5,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
     final output = acpPlainTerminalText(display.output).trimRight();
-    final failed =
-        display.exited &&
-        ((display.exitCode ?? 0) != 0 || (display.signal?.isNotEmpty ?? false));
-    final status = _statusLabel(display);
+    final running = !display.exited && !display.released;
+    final exit = _exitStatus(display);
+    final exitColor = exit != null && exit.failed
+        ? scheme.error
+        : scheme.onSurfaceVariant;
+    final outputStyle = mono.copyWith(
+      fontSize: 11.5,
+      height: 1.35,
+      color: scheme.onSurface,
+    );
     return Semantics(
       container: true,
-      label: 'Terminal output, $status',
+      label: 'Terminal output, ${exit?.label ?? 'running'}',
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: scheme.surfaceContainerHighest,
@@ -151,30 +197,31 @@ class _AcpTerminalOutputViewState extends State<AcpTerminalOutputView> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
                     child: Text(
                       '\$ ${display.command}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: mono.copyWith(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                        color: scheme.onSurface,
-                      ),
+                      style: outputStyle.copyWith(fontWeight: FontWeight.w600),
                     ),
                   ),
-                  const SizedBox(width: FluttyTheme.spacingSm),
-                  Text(
-                    status,
-                    style: mono.copyWith(
-                      fontSize: 10.5,
-                      color: failed ? scheme.error : scheme.onSurfaceVariant,
+                  if (exit != null) ...[
+                    const SizedBox(width: FluttyTheme.spacingSm),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 1),
+                      child: Icon(exit.icon, size: 13, color: exitColor),
                     ),
-                  ),
+                    const SizedBox(width: 3),
+                    Text(
+                      exit.label,
+                      style: mono.copyWith(fontSize: 11, color: exitColor),
+                    ),
+                  ],
                 ],
               ),
-              if (output.isNotEmpty || display.truncated) ...[
+              if (output.isNotEmpty || running) ...[
                 const SizedBox(height: 4),
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 240),
@@ -182,16 +229,29 @@ class _AcpTerminalOutputViewState extends State<AcpTerminalOutputView> {
                     onNotification: _onScroll,
                     child: SingleChildScrollView(
                       controller: _scroll,
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: SelectableText(
-                          display.truncated ? '…\n$output' : output,
-                          style: mono.copyWith(
-                            fontSize: 11.5,
-                            height: 1.35,
-                            color: scheme.onSurface,
-                          ),
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (output.isNotEmpty)
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: SelectableText(
+                                display.truncated ? '…\n$output' : output,
+                                style: outputStyle,
+                              ),
+                            ),
+                          // A live command parks the cursor on the next line,
+                          // the way the shell it runs in would.
+                          if (running)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: CursorBlock(
+                                color: scheme.onSurfaceVariant,
+                                size: 11.5,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ),

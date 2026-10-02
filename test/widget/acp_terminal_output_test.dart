@@ -3,9 +3,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_terminal_display.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
+import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_resource_chip.dart';
+import 'package:monkeyssh/presentation/widgets/acp_resource_text_sheet.dart';
 import 'package:monkeyssh/presentation/widgets/acp_terminal_output.dart';
 import 'package:monkeyssh/presentation/widgets/acp_tool_call.dart';
+import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
 
 Widget _wrap(Widget child) => MaterialApp(
   theme: FluttyTheme.dark,
@@ -61,7 +64,9 @@ void main() {
 
     expect(resolved, contains('term-1'));
     expect(find.text(r'$ npm test'), findsOneWidget);
-    expect(find.text('running'), findsWidgets);
+    // A live command shows the terminal cursor rather than a status label.
+    expect(find.byType(CursorBlock), findsOneWidget);
+    expect(find.textContaining('exit'), findsNothing);
     // The terminal replaces the generic pending-result placeholder.
     expect(find.textContaining('result: …'), findsNothing);
 
@@ -73,6 +78,8 @@ void main() {
     await tester.pump();
     expect(find.text('running\nFAIL one'), findsOneWidget);
     expect(find.text('exit 1'), findsOneWidget);
+    expect(find.byIcon(Icons.error_outline), findsOneWidget);
+    expect(find.byType(CursorBlock), findsNothing);
   });
 
   testWidgets('renders nothing for a terminal this client does not know', (
@@ -83,6 +90,38 @@ void main() {
     await tester.pumpWidget(_wrap(AcpTerminalOutputView(display: unknown)));
     expect(find.byType(SelectableText), findsNothing);
     expect(find.textContaining(r'$'), findsNothing);
+    expect(find.text('Terminal output is no longer available'), findsOneWidget);
+  });
+
+  testWidgets('reads embedded resource text and opens its remote path', (
+    tester,
+  ) async {
+    final opened = <String>[];
+    await tester.pumpWidget(
+      _wrap(
+        AcpResourceTextSheet(
+          resource: const AcpResourceRef(uri: 'file:///work/lib/main.dart'),
+          text: 'void main() {}',
+          onOpenPath: opened.add,
+        ),
+      ),
+    );
+    expect(find.text('main.dart'), findsOneWidget);
+    expect(find.byType(AcpCodeBlock), findsOneWidget);
+    expect(find.text('dart'), findsOneWidget);
+    await tester.tap(find.text('Open in files'));
+    expect(opened, ['/work/lib/main.dart']);
+
+    await tester.pumpWidget(
+      _wrap(
+        AcpResourceTextSheet(
+          resource: const AcpResourceRef(uri: 'mem://scratch'),
+          text: 'notes',
+          onOpenPath: opened.add,
+        ),
+      ),
+    );
+    expect(find.text('Open in files'), findsNothing);
   });
 
   testWidgets('lists resources a tool produced with open actions', (

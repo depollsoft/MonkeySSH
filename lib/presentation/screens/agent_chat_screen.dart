@@ -56,6 +56,7 @@ import '../widgets/acp_connection_support.dart';
 import '../widgets/acp_inline_image.dart';
 import '../widgets/acp_message_thread.dart';
 import '../widgets/acp_permission_surface.dart';
+import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/acp_terminal_output.dart';
@@ -929,65 +930,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (context) {
-          final theme = Theme.of(context);
-          return SafeArea(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.sizeOf(context).height * 0.8,
-              ),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  FluttyTheme.spacingMd,
-                  0,
-                  FluttyTheme.spacingMd,
-                  FluttyTheme.spacingMd,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            resource.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: FluttyTheme.displayMono(fontSize: 16),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Copy contents',
-                          icon: const Icon(Icons.copy_rounded),
-                          onPressed: () => _copyToClipboard(text, 'Contents'),
-                        ),
-                      ],
-                    ),
-                    Text(
-                      resource.uri,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: FluttyTheme.monoStyle.copyWith(
-                        fontSize: 11,
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const SizedBox(height: FluttyTheme.spacingSm),
-                    Flexible(
-                      child: SingleChildScrollView(
-                        child: SelectableText(
-                          text,
-                          style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
+        builder: (sheetContext) => AcpResourceTextSheet(
+          resource: resource,
+          text: text,
+          onCopy: () => _copyToClipboard(text, 'Contents'),
+          onOpenPath: (path) {
+            Navigator.of(sheetContext).pop();
+            _openRemotePath(path);
+          },
+        ),
       );
 
   void _openRemotePath(String path) {

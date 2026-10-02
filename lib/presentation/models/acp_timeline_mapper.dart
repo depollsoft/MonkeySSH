@@ -18,6 +18,7 @@ import '../../domain/models/acp_protocol.dart' as d;
 import '../../domain/models/acp_session_state.dart' as d;
 import '../../domain/models/acp_timeline.dart' as d;
 import '../../domain/models/acp_updates.dart' as d;
+import '../widgets/syntax_highlight_language.dart';
 import 'acp_timeline.dart';
 
 /// Maximum characters of formatted tool input/output surfaced by the mapper.
@@ -464,11 +465,7 @@ String _embeddedResourceMarkdown(d.AcpEmbeddedResource resource) {
     return '\n\n[${_markdownLinkText(label)}](<${uri.replaceAll('>', '%3E')}>)';
   }
   final text = _bound(resource.text, kAcpMapperMaxResourceTextChars);
-  final dot = label.lastIndexOf('.');
-  final extension = dot > 0 ? label.substring(dot + 1).toLowerCase() : '';
-  final language = RegExp(r'^[a-z0-9+#-]{1,16}$').hasMatch(extension)
-      ? extension
-      : '';
+  final language = detectLanguageFromFilename(label) ?? '';
   final labelFence = _backtickFence(label, minimum: 1);
   final fence = _backtickFence(text, minimum: 3);
   return '\n\n$labelFence$label$labelFence\n$fence$language\n$text\n$fence\n';
