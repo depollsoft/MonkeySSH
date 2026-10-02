@@ -367,3 +367,19 @@ func TestParseAcpProviderOutputRecognizesOnlyCancelNotifications(t *testing.T) {
 		})
 	}
 }
+
+// readTestAcpFrame reads the next bridge frame, failing after a second. It
+// lives in this untagged file because the Windows build vets these tests too.
+func readTestAcpFrame(
+	t *testing.T,
+	reader *bufio.Reader,
+	conn net.Conn,
+) acpWireMessage {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	message, err := readAcpWireFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return message
+}
