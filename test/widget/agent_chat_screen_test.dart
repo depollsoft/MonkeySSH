@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -1590,5 +1591,161 @@ void main() {
     await tester.pump();
 
     expect(committed, isEmpty);
+  });
+
+  group('agent sign-in and sign-out', () {
+    const agentLogin = AcpAuthMethod(
+      id: 'agent-login',
+      name: 'Agent login',
+      description: 'Finish signing in from the agent.',
+    );
+
+    testWidgets('a sign-in-required session authenticates in place', (
+      tester,
+    ) async {
+      final key = fakeAcpKey();
+      final manager = FakeAcpSessionManager(
+        sessions: [
+          fakeAcpSession(
+            key: key,
+            status: AcpConnectionStatus.authenticationRequired,
+            authMethods: const [agentLogin],
+          ),
+        ],
+      );
+      await tester.pumpWidget(_wrap(manager));
+      await tester.pumpAndSettle();
+
+      expect(find.text('agent sign-in required'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'Sign in'));
+      await tester.pumpAndSettle();
+      expect(find.text('sign in to Copilot CLI'), findsOneWidget);
+      expect(find.text('Finish signing in from the agent.'), findsOneWidget);
+
+      await tester.tap(find.text('Agent login'));
+      await tester.pumpAndSettle();
+
+      expect(manager.authenticatedMethodIds, ['agent-login']);
+      expect(find.text('sign in to Copilot CLI'), findsNothing);
+      expect(find.text('Signed in to Copilot CLI.'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a failed agent sign-in keeps the chooser open with the error',
+      (tester) async {
+        final key = fakeAcpKey();
+        final gate = Completer<void>();
+        final manager =
+            FakeAcpSessionManager(
+                sessions: [
+                  fakeAcpSession(
+                    key: key,
+                    status: AcpConnectionStatus.authenticationRequired,
+                    authMethods: const [agentLogin],
+                  ),
+                ],
+              )
+              ..authenticateSessionGate = gate
+              ..authenticateSessionError = const AcpSessionError(
+                kind: AcpSessionErrorKind.authenticationRequired,
+                message: 'The agent rejected the request (-32603): Denied',
+              );
+        await tester.pumpWidget(_wrap(manager));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(TextButton, 'Sign in'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Agent login'));
+        await tester.pump();
+
+        expect(find.text('waiting for the agent'), findsOneWidget);
+        expect(find.text('Cancel sign-in'), findsOneWidget);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        expect(
+          find.text('The agent rejected the request (-32603): Denied'),
+          findsOneWidget,
+        );
+        expect(find.text('Agent login'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a reconnect that failed on sign-in offers the chooser', (
+      tester,
+    ) async {
+      final key = fakeAcpKey();
+      final manager = FakeAcpSessionManager(
+        sessions: [
+          fakeAcpSession(
+            key: key,
+            status: AcpConnectionStatus.failed,
+            authMethods: const [agentLogin],
+            error: const AcpSessionError(
+              kind: AcpSessionErrorKind.authenticationRequired,
+              message: 'The agent requires authentication.',
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        _wrap(manager, connectOnMount: false, hasActiveSshSession: true),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('agent sign-in required'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'Sign in'));
+      await tester.pumpAndSettle();
+
+      expect(manager.reconnectChoosers, hasLength(1));
+      expect(manager.reconnectChoosers.single, isNotNull);
+    });
+
+    testWidgets('signs out after confirmation when logout is advertised', (
+      tester,
+    ) async {
+      final key = fakeAcpKey();
+      final manager = FakeAcpSessionManager(
+        sessions: [
+          fakeAcpSession(
+            key: key,
+            capabilities: const AcpAgentCapabilities(
+              auth: AcpAuthCapabilities(logout: true),
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(_wrap(manager));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Sign out of Copilot CLI'));
+      await tester.pumpAndSettle();
+      expect(find.text('Sign out of Copilot CLI?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+      await tester.pumpAndSettle();
+
+      expect(manager.loggedOut, [key.value]);
+      expect(
+        find.text(
+          'Signed out of Copilot CLI. New sessions will ask you to '
+          'sign in.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('hides sign-out when the agent does not advertise logout', (
+      tester,
+    ) async {
+      final manager = FakeAcpSessionManager(sessions: [fakeAcpSession()]);
+      await tester.pumpWidget(_wrap(manager));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      expect(find.text('Sign out of Copilot CLI'), findsNothing);
+      expect(find.text('Stop session'), findsOneWidget);
+    });
   });
 }

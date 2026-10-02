@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_json.dart';
@@ -290,4 +291,112 @@ void main() {
       expect(await stderr, isEmpty);
     },
   );
+
+  group('auth-required mode', () {
+    late Directory stateDir;
+    late String authFile;
+
+    setUp(() async {
+      stateDir = await Directory.systemTemp.createTemp('fake-acp-auth');
+      authFile = '${stateDir.path}/auth';
+    });
+
+    tearDown(() => stateDir.delete(recursive: true));
+
+    Future<(AcpClient, Future<String>)> startProvider() async {
+      final process = await Process.start(
+        'python3',
+        const ['scripts/fake_acp_provider.py', '--require-auth'],
+        environment: {'FAKE_ACP_AUTH_FILE': authFile},
+      );
+      final stderr = process.stderr.transform(utf8.decoder).join();
+      final client = AcpClient(
+        AcpJsonRpcConnection(
+          transport: _ProcessTransport(process),
+          defaultRequestTimeout: const Duration(seconds: 5),
+        ),
+      );
+      return (client, stderr);
+    }
+
+    Matcher authRequired() => isA<AcpRemoteException>().having(
+      (error) => error.code,
+      'code',
+      acpAuthRequiredErrorCode,
+    );
+
+    test('agent method signs in over ACP and logout signs out', () async {
+      final (client, stderr) = await startProvider();
+      final initialization = await client.initialize(
+        capabilities: const AcpClientCapabilities(terminalAuth: true),
+      );
+      final methods = initialization.authMethods;
+      expect(methods.map((method) => method.id), [
+        'fake-agent-login',
+        'fake-terminal-login',
+      ]);
+      expect(methods.first.isAgent, isTrue);
+      final terminal = methods.last;
+      expect(terminal.isTerminal, isTrue);
+      expect(terminal.args, ['--login']);
+      expect(terminal.env, {'FAKE_ACP_LOGIN': '1'});
+      expect(isUsableAcpAuthMethod(terminal), isTrue);
+      expect(initialization.agentCapabilities.auth.logout, isTrue);
+
+      await expectLater(client.newSession(cwd: '.'), throwsA(authRequired()));
+      await expectLater(
+        client.authenticate('fake-terminal-login'),
+        throwsA(isA<AcpRemoteException>()),
+      );
+      await client.authenticate('fake-agent-login');
+      expect((await client.newSession(cwd: '.')).sessionId, isNotNull);
+
+      await client.logout();
+      await expectLater(client.newSession(cwd: '.'), throwsA(authRequired()));
+      await client.close();
+      expect(await stderr, isEmpty);
+    });
+
+    test(
+      'terminal method is offered only with the client capability',
+      () async {
+        final (client, stderr) = await startProvider();
+        final initialization = await client.initialize();
+        expect(initialization.authMethods.map((method) => method.id), [
+          'fake-agent-login',
+        ]);
+        await client.close();
+        expect(await stderr, isEmpty);
+      },
+    );
+
+    test('terminal login applies the method env, exits 0, and a fresh '
+        'provider is then signed in', () async {
+      final missingEnv = await Process.run(
+        'python3',
+        const ['scripts/fake_acp_provider.py', '--require-auth', '--login'],
+        environment: {'FAKE_ACP_AUTH_FILE': authFile},
+      );
+      expect(missingEnv.exitCode, 2);
+
+      final login = await Process.start(
+        'python3',
+        const ['scripts/fake_acp_provider.py', '--require-auth', '--login'],
+        environment: {'FAKE_ACP_AUTH_FILE': authFile, 'FAKE_ACP_LOGIN': '1'},
+      );
+      final output = login.stdout.transform(utf8.decoder).join();
+      login.stdin.writeln();
+      await login.stdin.close();
+      expect(await login.exitCode, 0);
+      expect(await output, contains('https://example.invalid/fake-device'));
+
+      final (client, stderr) = await startProvider();
+      await client.initialize(
+        capabilities: const AcpClientCapabilities(terminalAuth: true),
+      );
+      expect((await client.newSession(cwd: '.')).sessionId, isNotNull);
+      await client.close();
+      expect(await stderr, isEmpty);
+    });
+  });
 }

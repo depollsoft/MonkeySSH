@@ -10,10 +10,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -566,5 +568,141 @@ void main() {
       find.text('Authentication failed. Check this host’s credentials.'),
       findsOneWidget,
     );
+  });
+
+  group('agent sign-in', () {
+    const agentLogin = AcpAuthMethod(
+      id: 'agent-login',
+      name: 'Agent login',
+      description: 'Sign in with the agent.',
+    );
+    const terminalLogin = AcpAuthMethod(
+      id: 'terminal-login',
+      name: 'Terminal login',
+      type: AcpAuthMethod.terminalType,
+      args: ['--login'],
+    );
+    const authRequired = AcpSessionLaunchFailed(
+      null,
+      AcpSessionError(
+        kind: AcpSessionErrorKind.authenticationRequired,
+        message: 'The agent requires authentication.',
+      ),
+    );
+
+    AcpAuthenticationRequest requestFor(List<AcpAuthMethod> methods) =>
+        AcpAuthenticationRequest(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.copilotCli,
+          providerLabel: 'Copilot CLI',
+          methods: methods,
+          authenticate: (_, {cancellation}) async => null,
+        );
+
+    testWidgets('offers the agent methods and skips the legacy prompt when '
+        'declined', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..authenticationRequest = requestFor(const [agentLogin, terminalLogin])
+        ..startNewSessionResult = authRequired;
+      await _pumpAndLaunch(tester, manager, startSession: false);
+      final startButton = find.widgetWithText(FilledButton, 'Start session');
+      await tester.ensureVisible(startButton);
+      await tester.pumpAndSettle();
+      await tester.tap(startButton);
+      // The Start button spins while the chooser is open, so pump by time.
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(manager.startChoosers.single, isNotNull);
+      expect(find.text('sign in to Copilot CLI'), findsOneWidget);
+      expect(find.text('Agent login'), findsOneWidget);
+      expect(find.text('Sign in with the agent.'), findsOneWidget);
+      expect(find.text('Terminal login'), findsOneWidget);
+      expect(find.text('terminal'), findsOneWidget);
+      expect(find.text('agent'), findsOneWidget);
+      expect(find.text('Copy CLI sign-in command'), findsOneWidget);
+
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+
+      expect(manager.authenticationChoices, [null]);
+      expect(find.text('Sign in required'), findsNothing);
+      expect(
+        find.text('Sign in to the agent to start this session.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a terminal method runs in the sign-in terminal and relaunches '
+        'after a zero exit status', (tester) async {
+      registerFallbackValue(const SSHPtyConfig());
+      final client = _MockSshClient();
+      final commands = <String>[];
+      final ptys = <SSHPtyConfig?>[];
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        commands.add(invocation.positionalArguments.single as String);
+        ptys.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
+        final exec = _MockExecSession();
+        when(() => exec.stdout).thenAnswer(
+          (_) => Stream.value(
+            Uint8List.fromList(utf8.encode('copilot\u001f/usr/bin/copilot\n')),
+          ),
+        );
+        when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => exec.done).thenAnswer((_) => Future<void>.value());
+        when(() => exec.exitCode).thenReturn(0);
+        when(exec.close).thenAnswer((_) {});
+        return exec;
+      });
+      final activeSession = SshSession(
+        connectionId: 7,
+        hostId: 1,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'alpha.example.com',
+          port: 22,
+          username: 'root',
+        ),
+      );
+      final terminalLaunch = AcpTerminalAuthLaunch.forMethod(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        providerLabel: 'Copilot CLI',
+        method: terminalLogin,
+        launchArgv: const ['/usr/bin/copilot', '--acp'],
+        workingDirectory: '/repo',
+      );
+      final manager = FakeAcpSessionManager()
+        ..startNewSessionResults.add(
+          AcpSessionLaunchFailed(
+            null,
+            authRequired.error,
+            terminalAuthentication: terminalLaunch,
+          ),
+        )
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        activeSession: activeSession,
+      );
+      await tester.pumpAndSettle();
+
+      expect(result(), key);
+      expect(manager.starts, hasLength(2));
+      // The retry reuses the resolved launch instead of probing again.
+      expect(
+        manager.startLaunchOverrides.map((command) => command?.executable),
+        ['/usr/bin/copilot', '/usr/bin/copilot'],
+      );
+      final signIn = commands.last;
+      expect(signIn, contains(r"'\''/usr/bin/copilot'\'' '\''--acp'\'' "));
+      expect(signIn, contains(r"'\''--login'\''"));
+      expect(ptys.last, isNotNull);
+    });
   });
 }

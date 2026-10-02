@@ -3,8 +3,9 @@
 /// Walks the user through: choose a saved host → connect/reuse SSH → choose a
 /// built-in provider → choose a working directory → start a new session or
 /// reconnect a recent one. It handles helper-install confirmation,
-/// missing/auth-required providers (with a safe Open Terminal escape hatch),
-/// and the free-tier concurrency choice.
+/// missing/auth-required providers (the agent's advertised sign-in methods,
+/// with a safe Open Terminal escape hatch), and the free-tier concurrency
+/// choice.
 ///
 /// No prompts, transcripts, or command text are ever logged.
 library;
@@ -19,6 +20,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
+import '../../domain/models/acp_authentication.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
@@ -37,6 +39,7 @@ import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
+import 'acp_auth_method_sheet.dart';
 import 'acp_concurrency_choice.dart';
 import 'acp_connection_support.dart';
 import 'acp_session_presentation.dart';
@@ -234,6 +237,15 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   var _defaultsScheduled = false;
   var _hostDefaultsGeneration = 0;
   String? _error;
+  var _authChooserShown = false;
+  var _providerCommandRequested = false;
+  ({
+    int hostId,
+    String providerId,
+    AcpLaunchCommand? override,
+    AcpLaunchProfile? profile,
+  })?
+  _lastResolvedLaunch;
   late final Future<List<AcpRecentSessionRef>> _recents;
 
   @override
@@ -428,8 +440,21 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     unawaited(router.push<void>('/terminal/$hostId'));
   }
 
+  Future<AcpAuthenticationChoice?> _chooseAuthentication(
+    AcpAuthenticationRequest request,
+  ) {
+    _authChooserShown = true;
+    return acpAuthenticationChooser(
+      context,
+      offerProviderCommand:
+          acpTerminalAuthCommandFor(request.providerId) != null,
+      onProviderCommand: () => _providerCommandRequested = true,
+    )(request);
+  }
+
   Future<AcpSessionLaunchResult?> _launch({
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    bool reuseResolvedLaunch = false,
   }) async {
     final hostId = _hostId;
     final providerId = _providerId;
@@ -474,7 +499,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final builtinProvider = acpBuiltinProviders
         .where((provider) => provider.id == providerId)
         .firstOrNull;
-    if (sshSession != null && builtinProvider != null) {
+    final reusable = _lastResolvedLaunch;
+    if (reuseResolvedLaunch &&
+        reusable != null &&
+        reusable.hostId == hostId &&
+        reusable.providerId == providerId) {
+      // Retrying after a terminal sign-in relaunches the exact program the
+      // login just ran, without asking for the profile or adapter again.
+      launchCommandOverride = reusable.override;
+      selectedProfile = reusable.profile;
+    } else if (sshSession != null && builtinProvider != null) {
       final launch = await resolveAcpRemoteProviderLaunch(
         context: context,
         session: sshSession,
@@ -490,6 +524,12 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       }
       launchCommandOverride = launch.override;
     }
+    _lastResolvedLaunch = (
+      hostId: hostId,
+      providerId: providerId,
+      override: launchCommandOverride,
+      profile: selectedProfile,
+    );
 
     final recent = _selectedRecent;
     if (recent != null) {
@@ -500,6 +540,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         acpSessionId: recent.acpSessionId,
         cwd: recent.cwd ?? cwd,
         confirmInstall: _confirmInstall,
+        chooseAuthentication: _chooseAuthentication,
         launchCommandOverride: launchCommandOverride,
         providerLabelOverride: selectedProfile?.showInTitle ?? false
             ? '${builtinProvider?.label ?? 'Agent'} · ${selectedProfile!.label}'
@@ -513,6 +554,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       providerId: providerId,
       cwd: cwd,
       confirmInstall: _confirmInstall,
+      chooseAuthentication: _chooseAuthentication,
       launchCommandOverride: launchCommandOverride,
       providerLabelOverride: selectedProfile?.showInTitle ?? false
           ? '${builtinProvider?.label ?? 'Agent'} · ${selectedProfile!.label}'
@@ -522,13 +564,15 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     );
   }
 
-  Future<void> _start() async {
+  Future<void> _start({bool afterSignIn = false}) async {
     setState(() {
       _busy = true;
       _error = null;
     });
+    _authChooserShown = false;
+    _providerCommandRequested = false;
     try {
-      var result = await _launch();
+      var result = await _launch(reuseResolvedLaunch: afterSignIn);
       // Resolve a free-tier concurrency block, then retry once.
       if (result is AcpSessionLaunchBlocked && mounted) {
         final resolved = await _resolveConcurrency(result.decision);
@@ -549,6 +593,28 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       switch (result) {
         case AcpSessionLaunchStarted(:final key):
           Navigator.of(context).pop(key);
+        case AcpSessionLaunchFailed(
+          :final error,
+          terminalAuthentication: final terminalSignIn?,
+        ):
+          final signedIn = await runAcpTerminalSignIn(
+            context,
+            ref,
+            terminalSignIn,
+          );
+          if (!mounted) return;
+          if (signedIn) {
+            // The login is out-of-band: start over with a fresh bridge so the
+            // agent is reconnected and reinitialized.
+            await _start(afterSignIn: true);
+            return;
+          }
+          setState(() {
+            _busy = false;
+            _error = error.kind == AcpSessionErrorKind.authenticationRequired
+                ? 'Sign-in didn’t finish. Start the session to try again.'
+                : error.message;
+          });
         case AcpSessionLaunchFailed(:final error):
           await _handleFailure(error);
           if (mounted) {
@@ -614,7 +680,14 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final providerId = _providerId;
     switch (error.kind) {
       case AcpSessionErrorKind.authenticationRequired:
-        if (providerId != null) {
+        if (providerId != null && _providerCommandRequested) {
+          await _openTerminalForAuth(providerId);
+        } else if (_authChooserShown) {
+          // The agent's own methods were offered; don't stack a second prompt.
+          setState(
+            () => _error = 'Sign in to the agent to start this session.',
+          );
+        } else if (providerId != null) {
           await _showAuthRequired(providerId);
         }
       case AcpSessionErrorKind.commandNotApproved:
