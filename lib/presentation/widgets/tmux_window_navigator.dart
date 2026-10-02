@@ -1706,7 +1706,11 @@ class MuxWindowProjection {
       if (bridge != null) {
         serverBridges.add(bridge);
         final session = sessionForWindow(window);
-        if (session != null) nativeIndices[session.key] = window.index;
+        if (session != null) {
+          nativeIndices[session.key] = window.index;
+          final title = window.agentSessionDisplayTitle;
+          if (title != null) windowTitles[session.key] = title;
+        }
       }
     }
     orphanSessions =
@@ -1735,6 +1739,13 @@ class MuxWindowProjection {
   /// Server or synthetic window index for each tracked session.
   final nativeIndices = <AcpSessionKey, int>{};
 
+  /// Session labels reported by the server windows hosting tracked sessions.
+  final windowTitles = <AcpSessionKey, String>{};
+
+  /// Title for [session], falling back to its server window's session label.
+  String sessionTitle(AcpSessionState session) =>
+      acpSessionDisplayTitle(session, windowTitle: windowTitles[session.key]);
+
   /// Resolves native activity without scanning the session list per row.
   AcpSessionState? sessionForWindow(TmuxWindow window) =>
       sessionsByBridge[(window.nativeAcpBridgeId, window.nativeAcpProviderId)];
@@ -1754,7 +1765,10 @@ class MuxWindowPresentation {
            displayTitle ??
            (session == null
                ? window.displayTitle
-               : acpSessionDisplayTitle(session)),
+               : acpSessionDisplayTitle(
+                   session,
+                   windowTitle: window.agentSessionDisplayTitle,
+                 )),
        subtitle = displayTitle != null
            ? null
            : session == null

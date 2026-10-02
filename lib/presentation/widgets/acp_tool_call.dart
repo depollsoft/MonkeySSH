@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
@@ -7,6 +8,8 @@ import 'acp_chat_typography.dart';
 import 'acp_diff.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
+import 'acp_markdown_paths.dart';
+import 'acp_path_text.dart';
 import 'acp_resource_chip.dart';
 import 'acp_terminal_output.dart';
 
@@ -54,6 +57,7 @@ class AcpToolCallView extends StatefulWidget {
     super.key,
     this.initiallyExpanded = false,
     this.onOpenLocation,
+    this.onTapLink,
   });
 
   /// The merged tool call state to render.
@@ -64,6 +68,9 @@ class AcpToolCallView extends StatefulWidget {
 
   /// Called when a file location is tapped.
   final ValueChanged<AcpToolLocation>? onOpenLocation;
+
+  /// Handles links and detected paths in rich tool results.
+  final MarkdownTapLinkCallback? onTapLink;
 
   @override
   State<AcpToolCallView> createState() => _AcpToolCallViewState();
@@ -286,6 +293,7 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
               child: _ToolCallDetails(
                 toolCall: call,
                 onOpenLocation: widget.onOpenLocation,
+                onTapLink: widget.onTapLink,
               ),
             ),
         ],
@@ -330,10 +338,15 @@ class _StatusBadge extends StatelessWidget {
 }
 
 class _ToolCallDetails extends StatelessWidget {
-  const _ToolCallDetails({required this.toolCall, this.onOpenLocation});
+  const _ToolCallDetails({
+    required this.toolCall,
+    this.onOpenLocation,
+    this.onTapLink,
+  });
 
   final AcpToolCall toolCall;
   final ValueChanged<AcpToolLocation>? onOpenLocation;
+  final MarkdownTapLinkCallback? onTapLink;
 
   @override
   Widget build(BuildContext context) {
@@ -358,6 +371,7 @@ class _ToolCallDetails extends StatelessWidget {
           input: input,
           output: richOutput ? null : output,
           active: active && !showsTerminals,
+          onTapLink: onTapLink,
         ),
       );
     }
@@ -374,6 +388,7 @@ class _ToolCallDetails extends StatelessWidget {
     if (richOutput) {
       children.add(
         _RichToolResult(
+          onTapLink: onTapLink,
           markdown: active
               ? _ToolPayloadStream._boundedLiveValue(
                   output,
@@ -437,9 +452,10 @@ bool _looksLikeRichToolOutput(String value) {
 }
 
 class _RichToolResult extends StatelessWidget {
-  const _RichToolResult({required this.markdown});
+  const _RichToolResult({required this.markdown, this.onTapLink});
 
   final String markdown;
+  final MarkdownTapLinkCallback? onTapLink;
 
   @override
   Widget build(BuildContext context) {
@@ -456,6 +472,7 @@ class _RichToolResult extends StatelessWidget {
         const SizedBox(height: 2),
         AcpMarkdown(
           data: markdown,
+          onTapLink: onTapLink,
           machineContent: true,
           imageResolver: imageActions?.resolver,
           onTapImage: imageActions?.onTap,
@@ -470,11 +487,13 @@ class _ToolPayloadStream extends StatelessWidget {
     required this.input,
     required this.output,
     required this.active,
+    this.onTapLink,
   });
 
   final String? input;
   final String? output;
   final bool active;
+  final MarkdownTapLinkCallback? onTapLink;
 
   String get _text {
     final sections = <String>[];
@@ -543,8 +562,11 @@ class _ToolPayloadStream extends StatelessWidget {
         padding: const EdgeInsets.all(6),
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          child: SelectableText(
-            _text,
+          child: AcpPathText(
+            text: _text,
+            onTapPath: onTapLink == null
+                ? null
+                : (path) => onTapLink!(path, acpMarkdownPathHref(path), ''),
             style: AcpChatTypography.monoStyleOf(
               context,
             ).copyWith(fontSize: 11.5, color: scheme.onSurface, height: 1.35),
@@ -608,6 +630,8 @@ class _LocationRow extends StatelessWidget {
               style: AcpChatTypography.monoStyleOf(context).copyWith(
                 fontSize: 12,
                 color: onOpen != null ? scheme.primary : scheme.onSurface,
+                decoration: onOpen != null ? TextDecoration.underline : null,
+                decorationColor: scheme.primary,
               ),
             ),
           ),

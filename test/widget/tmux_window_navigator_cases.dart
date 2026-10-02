@@ -323,6 +323,53 @@ void registerTmuxWindowNavigatorTests() {
         expect(initial.sessionForWindow(windows.single), same(server));
       });
 
+      test(
+        'untitled native sessions use their server window session label',
+        () {
+          final untitled = fakeAcpSession(
+            key: fakeAcpKey(bridgeId: 'pi'),
+            providerLabel: 'Pi',
+          );
+          final named = untitled.copyWith(title: 'Named over ACP');
+          final window = TmuxWindow(
+            index: 4,
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: untitled.key.bridgeId,
+            nativeAcpProviderId: untitled.key.providerId,
+            agentSessionTitle: 'Give me a list of image files',
+          );
+
+          expect(
+            MuxWindowProjection([window], [untitled]).sessionTitle(untitled),
+            'Give me a list of image files',
+          );
+          expect(
+            MuxWindowPresentation.window(
+              window,
+              session: untitled,
+              isActive: true,
+            ).title,
+            'Give me a list of image files',
+          );
+          expect(
+            MuxWindowPresentation.window(
+              window,
+              session: named,
+              isActive: true,
+            ).title,
+            'Named over ACP',
+          );
+          expect(
+            MuxWindowProjection(
+              [window.copyWith(clearActiveAgentSessionMetadata: true)],
+              [untitled],
+            ).sessionTitle(untitled),
+            'Pi',
+          );
+        },
+      );
+
       for (final inBar in [false, true]) {
         for (final identity in [
           'terminal',

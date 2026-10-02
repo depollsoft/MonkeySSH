@@ -2600,6 +2600,9 @@ TmuxWindow? _windowFromJson(Object? value) {
     agentTool: agentTool,
     hasUnsupportedAgentTool: unsupportedTool,
     activeAgentSessionId: agentSessionId,
+    agentSessionTitle: unsupportedTool
+        ? null
+        : _nonEmpty(value['agentSessionTitle'] as String?),
     agentModelProvider: agentTool == AgentLaunchTool.pi
         ? _nonEmpty(value['agentModelProvider'] as String?)
         : null,
