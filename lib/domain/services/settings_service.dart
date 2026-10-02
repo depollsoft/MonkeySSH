@@ -112,6 +112,11 @@ abstract final class SettingKeys {
   /// Canonical key of the last selected ACP session (JSON string).
   static const acpLastSelectedSession = 'acp_last_selected_session';
 
+  /// Saved user-defined MCP servers for native agent sessions (JSON array).
+  ///
+  /// Environment variable and HTTP header values are stored encrypted.
+  static const acpMcpServers = 'acp_mcp_servers';
+
   /// Enable shared clipboard between device and remote session.
   ///
   /// The remote host can update the local clipboard through OSC 52 and remote
