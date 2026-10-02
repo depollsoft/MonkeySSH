@@ -905,7 +905,7 @@ bool isValidAcpElicitationDate(String value) {
 /// Whether [value] is an RFC 3339 date-time with an explicit offset.
 bool isValidAcpElicitationDateTime(String value) {
   final match = RegExp(
-    r'^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$',
+    r'^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$',
   ).firstMatch(value);
   if (match == null || !isValidAcpElicitationDate(match.group(1)!)) {
     return false;
@@ -913,7 +913,13 @@ bool isValidAcpElicitationDateTime(String value) {
   final hour = int.parse(match.group(2)!);
   final minute = int.parse(match.group(3)!);
   final second = int.parse(match.group(4)!);
-  return hour < 24 && minute < 60 && second <= 60;
+  final offsetHour = int.parse(match.group(6) ?? '0');
+  final offsetMinute = int.parse(match.group(7) ?? '0');
+  return hour < 24 &&
+      minute < 60 &&
+      second <= 60 &&
+      offsetHour < 24 &&
+      offsetMinute < 60;
 }
 
 final _emailPattern = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');

@@ -31,6 +31,8 @@ class _Agent implements AcpTransport {
   final responses = <Object, Map<String, Object?>>{};
   Map<String, Object?>? clientCapabilities;
   Object? heldPromptId;
+  Object? heldSetupId;
+  bool holdSetup = false;
   int _sessions = 0;
   bool closed = false;
 
@@ -66,6 +68,8 @@ class _Agent implements AcpTransport {
         _reply(id, {'sessionId': 'fork-${++_sessions}'});
       case 'session/prompt':
         heldPromptId = id;
+      case 'session/load' || 'session/resume' when holdSetup:
+        heldSetupId = id;
       default:
         _reply(id, <String, Object?>{});
     }
@@ -82,6 +86,8 @@ class _Agent implements AcpTransport {
     'id': heldPromptId,
     'error': {'code': code, 'message': 'Request cancelled'},
   });
+
+  void releaseSetup() => _reply(heldSetupId!, <String, Object?>{});
 
   void _reply(Object id, Object? result) =>
       push({'jsonrpc': '2.0', 'id': id, 'result': result});
@@ -101,6 +107,7 @@ class _Agent implements AcpTransport {
 
 class _Connector implements AcpBridgeConnector {
   final agents = <String, _Agent>{};
+  bool holdSessionSetup = false;
   var _bridges = 0;
 
   @override
@@ -142,7 +149,7 @@ class _Connector implements AcpBridgeConnector {
     required String providerId,
     int lastAcknowledgedSequence = 0,
   }) {
-    final agent = agents[bridgeId] = _Agent();
+    final agent = agents[bridgeId] = _Agent()..holdSetup = holdSessionSetup;
     final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();
     final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
     final client = AcpClient(AcpJsonRpcConnection(transport: agent));
@@ -286,6 +293,47 @@ void main() {
       );
     },
   );
+
+  test('an elicitation sent while a session loads is shown before the load '
+      'finishes', () async {
+    connector.holdSessionSetup = true;
+    final reconnect = manager.reconnectSession(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      bridgeId: 'bridge-gone',
+      acpSessionId: 'session-9',
+      cwd: '/repo',
+    );
+    await _pump();
+    final agent = connector.agents.values.single;
+    expect(agent.heldSetupId, isNotNull);
+
+    // The agent needs an answer before it can finish loading the session,
+    // while the replayed transcript is still held back.
+    agent.request('elicit-load', 'elicitation/create', {
+      ..._form,
+      'sessionId': 'session-9',
+    });
+    await _pump();
+    final session = manager.state.sessions.single;
+    expect(session.status, isNot(AcpConnectionStatus.ready));
+    final pending = session.pendingElicitations.single;
+    expect(pending.requestKey, 's:elicit-load');
+
+    await manager.acceptElicitation(
+      session.key,
+      pending.requestKey,
+      content: {'strategy': 'safe'},
+    );
+    await _pump();
+    expect(agent.responses['elicit-load']!['result'], {
+      'action': 'accept',
+      'content': {'strategy': 'safe'},
+    });
+    agent.releaseSetup();
+    expect(await reconnect, isA<AcpSessionLaunchStarted>());
+    expect(manager.state.sessions.single.pendingElicitations, isEmpty);
+  });
 
   test('an accepted URL waits for elicitation/complete', () async {
     final key = await start();

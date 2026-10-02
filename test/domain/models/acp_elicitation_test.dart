@@ -369,6 +369,9 @@ void main() {
       expect(dateTime.validate('2026-10-01 09:30'), isNotNull);
       expect(dateTime.validate('2026-10-01T09:30:00Z'), isNull);
       expect(dateTime.validate('2026-10-01T09:30:00.5+02:00'), isNull);
+      expect(dateTime.validate('2026-10-01T09:30:00-23:59'), isNull);
+      expect(dateTime.validate('2026-10-01T09:30:00+99:99'), isNotNull);
+      expect(dateTime.validate('2026-10-01T09:30:00+05:60'), isNotNull);
       expect(field({'type': 'string'}).validate(null), isNull);
     });
 

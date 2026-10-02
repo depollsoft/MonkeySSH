@@ -2833,6 +2833,23 @@ class _SessionController {
         awaitingElicitations: _awaitingElicitationsFor(),
       ),
     );
+    if (_historyReplayPublicationHeld) _publishPendingRequestsDuringReplay();
+  }
+
+  /// Publishes this session's pending requests while its replayed history is
+  /// still held. An agent may ask for input while it handles session/load,
+  /// and the load cannot finish until the user answers, so the prompt cannot
+  /// wait for the transcript. Only the request fields change; the transcript
+  /// stays as last published until the replay completes.
+  void _publishPendingRequestsDuringReplay() {
+    if (_disposed || !_manager._controllers.containsValue(this)) return;
+    _publishedState = publishedState.copyWith(
+      pendingPermissions: _state.pendingPermissions,
+      pendingWrites: _state.pendingWrites,
+      pendingElicitations: _state.pendingElicitations,
+      awaitingElicitations: _state.awaitingElicitations,
+    );
+    _manager._emit();
   }
 
   /// Upserts the tool call described by a permission request into the
