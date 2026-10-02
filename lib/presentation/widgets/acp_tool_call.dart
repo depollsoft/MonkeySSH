@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
+import 'acp_audio_player.dart';
 import 'acp_chat_typography.dart';
 import 'acp_diff.dart';
 import 'acp_inline_image.dart';
@@ -244,6 +245,26 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
                       resolver: imageActions?.resolver,
                       onTap: imageActions?.onTap,
                     ),
+                  ],
+                ],
+              ),
+            ),
+          if (call.audio.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                FluttyTheme.spacingSm,
+                0,
+                FluttyTheme.spacingSm,
+                FluttyTheme.spacingSm,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < call.audio.length; index++) ...[
+                    if (index > 0)
+                      const SizedBox(height: FluttyTheme.spacingSm),
+                    AcpAudioPlayer(clip: call.audio[index]),
                   ],
                 ],
               ),

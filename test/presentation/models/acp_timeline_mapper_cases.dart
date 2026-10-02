@@ -790,5 +790,92 @@ hidden: false
       expect(image.uri, 'file:///big.png');
       expect(image.bytes, isNull);
     });
+    test('maps audio in prompts, agent messages, and tool calls', () {
+      final data = base64.encode(List<int>.filled(48, 3));
+      final audio = AcpAudioContent(data: data, mimeType: 'audio/mpeg');
+      final timeline = AcpTimeline(
+        entries: [
+          AcpMessageEntry(
+            role: AcpMessageRole.user,
+            order: 0,
+            content: [const AcpTextContent('transcribe'), audio],
+          ),
+          AcpMessageEntry(
+            role: AcpMessageRole.agent,
+            order: 1,
+            content: [const AcpTextContent('Here it is:'), audio],
+          ),
+          AcpToolCallEntry(
+            toolCallId: 'speak',
+            order: 2,
+            title: 'speak',
+            status: AcpToolStatus.completed,
+            content: [AcpToolContentBlock(content: audio)],
+            rawOutput: {'audio': data},
+          ),
+          AcpMessageEntry(
+            role: AcpMessageRole.thought,
+            order: 3,
+            content: [audio],
+          ),
+        ],
+      );
+
+      final entries = mapAcpSessionTimeline(_state(timeline: timeline));
+      final user = entries[0] as p.AcpUserPromptEntry;
+      expect(user.parts.first, isA<p.AcpTextPart>());
+      final part = user.parts[1] as p.AcpAudioPart;
+      expect(part.clip.data, same(data));
+      expect(part.clip.mimeType, 'audio/mpeg');
+      expect(part.clip.sizeBytes, 48);
+      expect(part.clip.isPlayable, isTrue);
+
+      final assistant = entries[1] as p.AcpAssistantMessageEntry;
+      expect(assistant.markdown, 'Here it is:');
+      expect(assistant.audio.single.data, same(data));
+
+      final tool = (entries[2] as p.AcpToolCallEntry).toolCall;
+      expect(tool.audio.single.data, same(data));
+      // Audio-only content never falls back to dumping the raw envelope.
+      expect(tool.rawOutput, isNull);
+
+      final thought = entries[3] as p.AcpThoughtEntry;
+      expect(thought.markdown, isEmpty);
+
+      expect(
+        buildAcpConversationPreview(entries),
+        allOf(contains('Agent: Here it is: [audio]'), isNot(contains(data))),
+      );
+    });
+
+    test('keeps oversized audio as a placeholder and never decodes it', () {
+      final oversized = 'A' * (kAcpAttachmentAudioMaxBytes * 4 ~/ 3 + 8);
+      final timeline = AcpTimeline(
+        entries: [
+          AcpMessageEntry(
+            role: AcpMessageRole.user,
+            order: 0,
+            content: [AcpAudioContent(data: oversized, mimeType: 'audio/wav')],
+          ),
+          AcpMessageEntry(
+            role: AcpMessageRole.agent,
+            order: 1,
+            content: const [AcpAudioContent(data: '', mimeType: '')],
+          ),
+        ],
+      );
+
+      final entries = mapAcpSessionTimeline(_state(timeline: timeline));
+      final clip =
+          ((entries[0] as p.AcpUserPromptEntry).parts.single as p.AcpAudioPart)
+              .clip;
+      expect(clip.data, isNull);
+      expect(clip.isPlayable, isFalse);
+      expect(clip.sizeBytes, greaterThan(kAcpAttachmentAudioMaxBytes));
+      final empty = (entries[1] as p.AcpAssistantMessageEntry).audio.single;
+      expect(empty.isPlayable, isFalse);
+      expect(empty.mimeType, isNull);
+      expect(empty.sizeBytes, isNull);
+    });
   });
 }

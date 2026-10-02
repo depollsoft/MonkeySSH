@@ -6,6 +6,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
+import 'acp_audio_player.dart';
 import 'acp_inline_image.dart';
 import 'acp_markdown.dart';
 import 'acp_markdown_data_images.dart';
@@ -1218,13 +1219,35 @@ class _AssistantMessage extends StatelessWidget {
         ? ', part ${part + 1} of $count'
         : '';
     final isFinalPart = part == null || count == null || part == count - 1;
+    // Audio clips follow the message text, on its final virtual segment only,
+    // so a player is built (and can decode) only once that segment is laid
+    // out and is disposed with it when scrolled away.
+    final audio = isFinalPart ? entry.audio : const <AcpAudioClip>[];
+    final showMarkdown = (markdown ?? entry.markdown).isNotEmpty;
     return Semantics(
       container: true,
       liveRegion: !streaming && isFinalPart,
       label: streaming
           ? 'Agent response streaming$partDescription'
           : 'Agent response complete$partDescription',
-      child: markdownView,
+      child: audio.isEmpty
+          ? markdownView
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (showMarkdown) markdownView,
+                for (var index = 0; index < audio.length; index++)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: showMarkdown || index > 0
+                          ? FluttyTheme.spacingSm
+                          : 0,
+                    ),
+                    child: AcpAudioPlayer(clip: audio[index]),
+                  ),
+              ],
+            ),
     );
   }
 }

@@ -82,6 +82,7 @@ final class AcpAssistantMessageEntry extends AcpTimelineEntry {
     required this.markdown,
     super.parentToolCallId,
     this.status = AcpStreamStatus.complete,
+    this.audio = const [],
   });
 
   /// The raw Markdown produced by the assistant.
@@ -90,8 +91,11 @@ final class AcpAssistantMessageEntry extends AcpTimelineEntry {
   /// Whether more Markdown is still streaming into this entry.
   final AcpStreamStatus status;
 
+  /// Audio clips in the message, in order, rendered after the Markdown.
+  final List<AcpAudioClip> audio;
+
   @override
-  List<Object?> get props => [id, parentToolCallId, markdown, status];
+  List<Object?> get props => [id, parentToolCallId, markdown, status, audio];
 }
 
 /// A thought / reasoning group emitted by the assistant.
@@ -238,6 +242,18 @@ final class AcpImagePart extends AcpPromptPart {
   List<Object?> get props => [image];
 }
 
+/// An audio part of a user prompt, shown as a compact player.
+final class AcpAudioPart extends AcpPromptPart {
+  /// Creates an audio part.
+  const AcpAudioPart(this.clip);
+
+  /// The audio clip to render.
+  final AcpAudioClip clip;
+
+  @override
+  List<Object?> get props => [clip];
+}
+
 /// A file / resource-link part of a user prompt, shown as a chip.
 final class AcpResourcePart extends AcpPromptPart {
   /// Creates a resource part.
@@ -343,6 +359,36 @@ class AcpImageContent extends Equatable {
     decodeWidth,
     decodeHeight,
   ];
+}
+
+/// An inline ACP audio clip.
+///
+/// [data] keeps a reference to the base64 payload already retained by the
+/// domain timeline; it is decoded only when the user starts playback. Clips
+/// whose decoded size exceeds the playback ceiling carry no [data] and render
+/// as a non-playable placeholder.
+@immutable
+class AcpAudioClip extends Equatable {
+  /// Creates an audio clip.
+  const AcpAudioClip({this.data, this.mimeType, this.sizeBytes, this.label});
+
+  /// Base64-encoded audio, or null when the clip is unavailable for playback.
+  final String? data;
+
+  /// The audio MIME type, if known (e.g. `audio/mpeg`).
+  final String? mimeType;
+
+  /// Estimated decoded size in bytes, if known.
+  final int? sizeBytes;
+
+  /// An accessible label describing the clip.
+  final String? label;
+
+  /// Whether the clip carries a bounded payload that can be played or saved.
+  bool get isPlayable => data?.isNotEmpty ?? false;
+
+  @override
+  List<Object?> get props => [data, mimeType, sizeBytes, label];
 }
 
 /// A reference to a file or resource, rendered as a chip.
@@ -492,9 +538,11 @@ class AcpToolCall extends Equatable {
     List<AcpToolLocation> locations = const [],
     List<AcpDiff> diffs = const [],
     List<AcpImageContent> images = const [],
+    List<AcpAudioClip> audio = const [],
   }) : locations = List.unmodifiable(locations),
        diffs = List.unmodifiable(diffs),
-       images = List.unmodifiable(images);
+       images = List.unmodifiable(images),
+       audio = List.unmodifiable(audio);
 
   /// The tool-call identifier used to merge updates.
   final String id;
@@ -526,6 +574,9 @@ class AcpToolCall extends Equatable {
   /// Images produced by the tool call.
   final List<AcpImageContent> images;
 
+  /// Audio clips produced by the tool call.
+  final List<AcpAudioClip> audio;
+
   @override
   List<Object?> get props => [
     id,
@@ -538,6 +589,7 @@ class AcpToolCall extends Equatable {
     locations,
     diffs,
     images,
+    audio,
   ];
 }
 

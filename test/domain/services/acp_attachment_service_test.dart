@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -968,6 +969,268 @@ void main() {
     });
   });
 
+  group('AcpAttachmentPreparationService audio', () {
+    const audioCapabilities = AcpPromptCapabilities(audio: true);
+
+    AcpAttachmentDraft memoryDraft(
+      String name,
+      List<int> bytes, {
+      String? mimeType,
+      AcpAttachmentFallback fallback = AcpAttachmentFallback.reject,
+    }) => AcpAttachmentDraft(
+      candidate: AcpAttachmentCandidate.memory(
+        name: name,
+        bytes: Uint8List.fromList(bytes),
+        mimeType: mimeType,
+      ),
+      fallback: fallback,
+    );
+
+    test('sends audio inline as ACP audio content in prompt order', () async {
+      final diagnostics = RecordingDiagnosticsLogger();
+      final blocks =
+          await AcpAttachmentPreparationService(diagnostics: diagnostics)
+              .prepare(
+                draft: AcpPromptDraft([
+                  const AcpPromptTextDraft('before'),
+                  memoryDraft('voice memo.mp3', _mp3Header),
+                  const AcpPromptTextDraft('after'),
+                ]),
+                capabilities: audioCapabilities,
+              );
+
+      expect(blocks, hasLength(3));
+      final audio = blocks[1] as AcpAudioContent;
+      expect(audio.mimeType, 'audio/mpeg');
+      expect(base64Decode(audio.data), _mp3Header);
+      // ACP audio has no URI, so the local file name never leaves the device.
+      expect(
+        audio.toJson().keys,
+        unorderedEquals(['type', 'data', 'mimeType']),
+      );
+      expect((blocks[2] as AcpTextContent).text, 'after');
+      final started = diagnostics.events.firstWhere(
+        (event) => event.message == 'prepare_started',
+      );
+      expect(started.fields['audioSupported'], isTrue);
+      for (final event in diagnostics.events) {
+        expect(event.searchableText, isNot(contains('voice memo')));
+      }
+    });
+
+    test('labels inline audio with registered MIME names', () async {
+      final blocks = await const AcpAttachmentPreparationService().prepare(
+        draft: AcpPromptDraft([
+          memoryDraft('take.wav', _wavHeader),
+          memoryDraft('take.flac', _flacHeader),
+        ]),
+        capabilities: audioCapabilities,
+      );
+
+      expect((blocks[0] as AcpAudioContent).mimeType, 'audio/wav');
+      expect((blocks[1] as AcpAudioContent).mimeType, 'audio/flac');
+    });
+
+    test('trusts an audio extension over an MP4 container sniff', () async {
+      final blocks = await const AcpAttachmentPreparationService().prepare(
+        draft: AcpPromptDraft([memoryDraft('memo.m4a', _isomMp4Header)]),
+        capabilities: audioCapabilities,
+      );
+
+      expect((blocks.single as AcpAudioContent).mimeType, 'audio/mp4');
+    });
+
+    test('never sends WebM video as audio', () async {
+      final blocks = await const AcpAttachmentPreparationService().prepare(
+        draft: AcpPromptDraft([memoryDraft('screen.webm', _ebmlHeader)]),
+        capabilities: const AcpPromptCapabilities(
+          audio: true,
+          embeddedContext: true,
+        ),
+      );
+
+      final resource =
+          (blocks.single as AcpResourceContent).resource as AcpBlobResource;
+      expect(resource.mimeType, 'video/webm');
+    });
+
+    test(
+      'falls back to an embedded blob when audio is not advertised',
+      () async {
+        final blocks = await const AcpAttachmentPreparationService().prepare(
+          draft: AcpPromptDraft([memoryDraft('take.wav', _wavHeader)]),
+          capabilities: const AcpPromptCapabilities(embeddedContext: true),
+        );
+
+        final resource =
+            (blocks.single as AcpResourceContent).resource as AcpBlobResource;
+        expect(resource.mimeType, 'audio/x-wav');
+        expect(base64Decode(resource.blob), _wavHeader);
+      },
+    );
+
+    test('requires a capability or upload when audio is unsupported', () async {
+      await expectLater(
+        const AcpAttachmentPreparationService().prepare(
+          draft: AcpPromptDraft([memoryDraft('take.mp3', _mp3Header)]),
+          capabilities: const AcpPromptCapabilities(image: true),
+        ),
+        throwsA(
+          isA<AcpAttachmentException>().having(
+            (error) => error.failure,
+            'failure',
+            AcpAttachmentFailure.unsupportedCapability,
+          ),
+        ),
+      );
+    });
+
+    test(
+      'rejects oversize audio before sending any part of the prompt',
+      () async {
+        final uploader = _RecordingUploader();
+        final bytes = Uint8List(kAcpAttachmentAudioMaxBytes + 1)
+          ..setRange(0, _mp3Header.length, _mp3Header);
+
+        await expectLater(
+          const AcpAttachmentPreparationService().prepare(
+            draft: AcpPromptDraft([
+              const AcpPromptTextDraft('transcribe this'),
+              AcpAttachmentDraft(
+                candidate: AcpAttachmentCandidate.memory(
+                  name: 'long.mp3',
+                  bytes: bytes,
+                ),
+              ),
+            ]),
+            capabilities: audioCapabilities,
+            uploader: uploader,
+          ),
+          throwsA(
+            isA<AcpAttachmentException>()
+                .having(
+                  (error) => error.failure,
+                  'failure',
+                  AcpAttachmentFailure.audioSizeLimit,
+                )
+                .having((error) => error.message, 'message', contains('10 MB')),
+          ),
+        );
+        expect(uploader.calls, 0);
+      },
+    );
+
+    test('streams a local audio file and stops at the audio cap', () async {
+      const service = AcpAttachmentPreparationService(
+        limits: AcpAttachmentLimits(maxAudioBytes: 64),
+      );
+      Stream<List<int>> chunks(int total) async* {
+        yield _mp3Header;
+        var sent = _mp3Header.length;
+        while (sent < total) {
+          final size = math.min(16, total - sent);
+          yield List<int>.filled(size, 7);
+          sent += size;
+        }
+      }
+
+      final small = await service.prepare(
+        draft: AcpPromptDraft([
+          AcpAttachmentDraft(
+            candidate: AcpAttachmentCandidate.localFile(
+              name: 'short.mp3',
+              openRead: () => chunks(48),
+            ),
+          ),
+        ]),
+        capabilities: audioCapabilities,
+      );
+      expect(
+        base64Decode((small.single as AcpAudioContent).data),
+        hasLength(48),
+      );
+
+      await expectLater(
+        service.prepare(
+          draft: AcpPromptDraft([
+            AcpAttachmentDraft(
+              candidate: AcpAttachmentCandidate.localFile(
+                name: 'long.mp3',
+                openRead: () => chunks(200),
+              ),
+            ),
+          ]),
+          capabilities: audioCapabilities,
+        ),
+        throwsA(
+          isA<AcpAttachmentException>().having(
+            (error) => error.failure,
+            'failure',
+            AcpAttachmentFailure.audioSizeLimit,
+          ),
+        ),
+      );
+    });
+
+    test('uploads oversize audio only after an explicit fallback', () async {
+      final uploader = _RecordingUploader();
+      final blocks =
+          await const AcpAttachmentPreparationService(
+            limits: AcpAttachmentLimits(maxAudioBytes: 8),
+          ).prepare(
+            draft: AcpPromptDraft([
+              memoryDraft('long.mp3', [
+                ..._mp3Header,
+                ...List<int>.filled(32, 1),
+              ], fallback: AcpAttachmentFallback.remoteUpload),
+            ]),
+            capabilities: audioCapabilities,
+            uploader: uploader,
+          );
+
+      final link = blocks.single as AcpResourceLinkContent;
+      expect(link.mimeType, 'audio/mpeg');
+      expect(uploader.calls, 1);
+    });
+
+    test('keeps a remote SFTP audio file as a resource link', () async {
+      final blocks = await const AcpAttachmentPreparationService().prepare(
+        draft: AcpPromptDraft(const [
+          AcpAttachmentDraft(
+            candidate: AcpAttachmentCandidate.remoteFile(
+              name: 'repro.mp3',
+              remotePath: '/home/demo/repro.mp3',
+              sizeBytes: 2048,
+            ),
+          ),
+        ]),
+        capabilities: audioCapabilities,
+      );
+
+      final link = blocks.single as AcpResourceLinkContent;
+      expect(link.mimeType, 'audio/mpeg');
+      expect(link.uri, 'file:///home/demo/repro.mp3');
+    });
+  });
+
+  group('audio MIME helpers', () {
+    test('normalize legacy aliases and keep other types', () {
+      expect(normalizeAcpAudioMimeType(' Audio/X-WAV '), 'audio/wav');
+      expect(normalizeAcpAudioMimeType('audio/mp3'), 'audio/mpeg');
+      expect(normalizeAcpAudioMimeType('audio/weba'), 'audio/webm');
+      expect(normalizeAcpAudioMimeType('audio/ogg'), 'audio/ogg');
+      expect(normalizeAcpAudioMimeType('image/png'), 'image/png');
+    });
+
+    test('pick a playable file extension', () {
+      expect(acpAudioFileExtension('audio/mpeg'), 'mp3');
+      expect(acpAudioFileExtension('audio/x-wav'), 'wav');
+      expect(acpAudioFileExtension('audio/mp4'), 'm4a');
+      expect(acpAudioFileExtension(null), 'audio');
+      expect(acpAudioFileExtension('audio/x-unknown'), 'audio');
+    });
+  });
+
   group('attachment models', () {
     test(
       'defensively copies bytes and does not expose content in toString',
@@ -990,3 +1253,12 @@ void main() {
 }
 
 const _pngHeader = <int>[137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13];
+const _mp3Header = <int>[0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0, 0, 0];
+const _wavHeader = <int>[
+  0x52, 0x49, 0x46, 0x46, 0x24, 0, 0, 0, 0x57, 0x41, 0x56, 0x45, //
+];
+const _flacHeader = <int>[0x66, 0x4C, 0x61, 0x43, 0, 0, 0, 0x22];
+const _isomMp4Header = <int>[
+  0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D, //
+];
+const _ebmlHeader = <int>[0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81];
