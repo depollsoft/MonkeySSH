@@ -829,7 +829,12 @@ class TerminalImeEngine {
     _shellCompletionSubmittedAt = null;
     _shellCompletionHasComposingEnterPreview = false;
     _shellCompletionEnterFollowUp = null;
+    _shellCompletionForwardedTail = false;
   }
+
+  /// Whether fresh text after the completion Return has reached the terminal
+  /// while the replay guard is still armed.
+  bool _shellCompletionForwardedTail = false;
 
   bool _isSubmittingEnter({
     required bool ctrl,
@@ -918,9 +923,28 @@ class TerminalImeEngine {
       if (trailingText.isEmpty) {
         return _rejectShellCompletionEcho();
       }
-      if (!isComposing) {
-        _clearShellCompletionGuard();
+      // The removed Return is the echo of the one already sent. Keep the
+      // guard until its deadline or unrelated input: a delayed replay can
+      // still follow this tail.
+      _pendingPerformedEnterText = null;
+      _pendingPerformedEnterNeedsNewline = false;
+      final trailingNewlineLength = _leadingEnterSequenceLength(trailingText);
+      if (trailingNewlineLength > 0) {
+        // Further Returns are the user's own. Send them with the tail instead
+        // of letting fresh-input normalization drop them as swipe artifacts.
+        final rawText = _extractRawInputText(value.text);
+        _captureShellCompletionEnterFollowUp(
+          value,
+          trailingText,
+          trailingNewlineLength,
+          nativePrefixes: {
+            if (rawText.length > trailingText.length)
+              rawText.substring(0, rawText.length - trailingText.length),
+          },
+        );
+        return _canonicalEditingStateForUserText(value, trailingText);
       }
+      _shellCompletionForwardedTail = true;
       _syncEditingStateWithUserText(
         trailingText,
         sourceValue: value,
@@ -1022,6 +1046,14 @@ class TerminalImeEngine {
       _extractInputText(value.text),
     }..removeWhere((text) => text.isEmpty);
     if (texts.isEmpty) {
+      if (_shellCompletionForwardedTail &&
+          _shellCompletionSubmittedAt != null &&
+          withinStaleWindow &&
+          _lastSentText.isNotEmpty) {
+        // A late acknowledgment of the completion reset, not a deletion of
+        // the tail the keyboard committed after it.
+        return _rejectShellCompletionEcho();
+      }
       // The reset acknowledgment can precede an already queued commit.
       return value;
     }
@@ -1328,7 +1360,7 @@ class TerminalImeEngine {
     // line's text. Its leading newline is owned input, not a swipe artifact.
     final preserveCompletionReturn =
         _shellCompletionEnterFollowUp != null &&
-        _shellCompletionSubmittedAt == null &&
+        _shellCompletionObsoleteTexts.isNotEmpty &&
         _leadingEnterSequenceLength(extractedText) > 0;
     final sanitizedText = preserveCompletionReturn
         ? extractedText
@@ -3572,6 +3604,7 @@ class TerminalImeEngine {
             nativePrefixes: completionFollowUp.nativePrefixes,
           );
           final trailingText = _extractRawInputText(followUpValue.text);
+          _shellCompletionForwardedTail = trailingText.isNotEmpty;
           _lastSentText = trailingText;
           _lastSentCursorOffset = trailingText.characters.length;
           final cursorOffset = _collapsedSelectionCursorOffset(

@@ -1917,6 +1917,102 @@ void main() {
       );
     }
 
+    for (final replay in ['pi', 'pi\n']) {
+      test(
+        '${platform.name} shell completion action-first tail survives delayed $replay',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          driver.updateEditingValue(
+            _editingValue('pi\nxyz', selectionOffset: 6),
+          );
+          await driver.flush();
+          final output = harness.terminalOutput.join();
+          expect(output, '${_terminalKeyOutput(TerminalKey.enter)}xyz');
+          final baseline = driver.engine.editingValue;
+          await driver.flush(const Duration(milliseconds: 100));
+          driver.updateEditingValue(
+            _editingValue(replay, selectionOffset: replay.length),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput.join(), output);
+          expect(driver.engine.editingValue, baseline);
+        },
+      );
+    }
+
+    test(
+      '${platform.name} shell completion action-first keeps additional Returns',
+      () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(
+          driver,
+          initialEditingValue: _editingValue('pi', selectionOffset: 2),
+        );
+        driver.engine.resetAfterShellCompletion();
+        harness.terminalOutput.clear();
+        await driver.receiveAction(TextInputAction.done);
+        await driver.flush();
+        driver.updateEditingValue(
+          _editingValue('pi\n\nxyz', selectionOffset: 7),
+        );
+        await driver.flush();
+        expect(
+          harness.terminalOutput.join(),
+          '${_terminalKeyOutput(TerminalKey.enter)}${_terminalKeyOutput(TerminalKey.enter)}xyz',
+        );
+      },
+    );
+
+    for (final actionFirst in [false, true]) {
+      test(
+        '${platform.name} shell completion ignores a late empty reset acknowledgment after a forwarded tail, actionFirst=$actionFirst',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          if (actionFirst) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          driver.updateEditingValue(
+            _editingValue('pi\nxyz', selectionOffset: 6),
+          );
+          await driver.flush();
+          if (!actionFirst) {
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+          }
+          final output = harness.terminalOutput.join();
+          driver.updateEditingValue(_editingValue('', selectionOffset: 0));
+          await driver.flush();
+          expect(harness.terminalOutput.join(), output);
+          expect(
+            driver.engine.editingValue,
+            _editingValue('xyz', selectionOffset: 3),
+          );
+          // A genuine deletion afterwards still reaches the terminal.
+          driver.updateEditingValue(_editingValue('xy', selectionOffset: 2));
+          await driver.flush();
+          expect(harness.terminalOutput.join(), '$output\x7f');
+        },
+      );
+    }
+
     for (final secondTap in [false, true]) {
       test(
         '${platform.name} shell completion retains Return preview across a second tap or delayed native commit, secondTap=$secondTap',
