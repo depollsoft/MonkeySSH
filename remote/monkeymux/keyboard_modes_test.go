@@ -106,6 +106,23 @@ func TestReplayStripsKeyboardModeSequences(t *testing.T) {
 	}
 }
 
+func TestReplayKeepsKeyboardModeSequencesAfterLastReset(t *testing.T) {
+	// A full reset in the history erases the restore written before it, so
+	// the changes after the last reset have to replay to rebuild the state.
+	history := "a\x1b[>1u\x1bcb\x1b[>2u\x1bcc\x1b[>5u\x1b[>4;2md"
+	want := "a\x1bcb\x1bcc\x1b[>5u\x1b[>4;2md"
+	if got := string(stripTerminalQueriesFromReplay([]byte(history))); got != want {
+		t.Fatalf("replay = %q, want %q", got, want)
+	}
+}
+
+func TestReplayLeavesUntrackedEightBitKeyboardSequences(t *testing.T) {
+	history := "a\x9b>5ub"
+	if got := string(stripTerminalQueriesFromReplay([]byte(history))); got != history {
+		t.Fatalf("replay = %q, want %q", got, history)
+	}
+}
+
 func TestWindowSwitchRestoresEachWindowsKeyboardModes(t *testing.T) {
 	server := newMuxServer("test")
 	agent := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}

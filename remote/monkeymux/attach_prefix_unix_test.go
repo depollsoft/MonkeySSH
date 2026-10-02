@@ -135,3 +135,81 @@ func TestAttachCloseConfirmationAcceptsKittyKeys(t *testing.T) {
 		t.Fatalf("active window after close = %q, want @2", got)
 	}
 }
+
+func TestAttachPrefixRecognizesKeysSplitAcrossReads(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input []string
+	}{
+		{"inside parameters", []string{"\x1b[98;", "5ud"}},
+		{"after the introducer", []string{"x\x1b[", "98;5ud"}},
+		{"after escape", []string{"x\x1b", "[98;5ud"}},
+		{"modifyOtherKeys", []string{"\x1b[27;5", ";98~d"}},
+		{"command key", []string{"\x1b[98;5u\x1b[10", "0u"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inputReader, inputWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = inputReader.Close()
+				_ = inputWriter.Close()
+			})
+			server := newMuxServer("test")
+			server.windows = []*muxWindow{
+				{id: "@1", index: 0, pty: wrapPty(t, inputWriter), lastActivity: time.Now()},
+			}
+			server.activeID = "@1"
+			client := registerTestAttachClient(t, server, &recordingConn{}, "keys", 80, 24)
+			detached := false
+			for _, chunk := range test.input {
+				detached = server.handleAttachInputSerialized(client, []byte(chunk), false)
+			}
+			if !detached {
+				t.Fatal("split Ctrl-B d did not detach")
+			}
+		})
+	}
+}
+
+func TestAttachHeldPartialKeyIsFlushedWhenNothingCompletesIt(t *testing.T) {
+	inputReader, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = inputReader.Close()
+		_ = inputWriter.Close()
+	})
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, pty: wrapPty(t, inputWriter), lastActivity: time.Now()},
+	}
+	server.activeID = "@1"
+	client := registerTestAttachClient(t, server, &recordingConn{}, "keys", 80, 24)
+
+	// A lone ESC read on its own is the Escape key, already held upstream for
+	// the paste marker, so it goes straight through.
+	server.handleAttachInputSerialized(client, []byte("\x1b"), false)
+	if got := readPipeUntil(t, inputReader, func(output string) bool {
+		return output == "\x1b"
+	}); got != "\x1b" {
+		t.Fatalf("escape = %q", got)
+	}
+	// A cut-off sequence is held, then released after the carry delay.
+	server.handleAttachInputSerialized(client, []byte("a\x1b[1;5"), false)
+	if got := readPipeUntil(t, inputReader, func(output string) bool {
+		return output == "a\x1b[1;5"
+	}); got != "a\x1b[1;5" {
+		t.Fatalf("held partial key = %q", got)
+	}
+	// A paste arriving behind a held partial key keeps its place after it.
+	server.handleAttachInputSerialized(client, []byte("\x1b[9"), false)
+	server.handleAttachInputSerialized(client, []byte("pasted"), true)
+	if got := readPipeUntil(t, inputReader, func(output string) bool {
+		return strings.HasSuffix(output, "pasted")
+	}); got != "\x1b[9pasted" {
+		t.Fatalf("partial key before paste = %q", got)
+	}
+}

@@ -1070,6 +1070,10 @@ type attachClient struct {
 	// consumedKeyReleases holds keys whose kitty press MonkeyMux consumed as a
 	// prefix or command, so their release reports are not sent to the window.
 	consumedKeyReleases []rune
+	// keyCarry holds an enhanced key sequence cut off at the end of a read;
+	// keyCarryGeneration invalidates the timer that flushes a stale one.
+	keyCarry           []byte
+	keyCarryGeneration uint64
 
 	queue       []attachWrite
 	queueReady  chan struct{}
@@ -11797,6 +11801,10 @@ func (s *muxServer) handleAttachInputSerialized(
 	client.inputMu.Lock()
 	defer client.inputMu.Unlock()
 	if bracketedPaste {
+		// A held partial key precedes the paste.
+		if s.flushAttachKeyCarry(client) {
+			return true
+		}
 		s.writeActiveFromAttachInput(data, true)
 		return false
 	}
@@ -11804,6 +11812,18 @@ func (s *muxServer) handleAttachInputSerialized(
 }
 
 func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
+	return s.handleAttachKeys(client, data, true)
+}
+
+// handleAttachKeys routes attach input, running prefix commands. With
+// allowCarry, an enhanced key sequence cut off at the end of data is held
+// until the next input completes it, because the prefix is only recognized in
+// a whole sequence.
+func (s *muxServer) handleAttachKeys(
+	client *attachClient,
+	data []byte,
+	allowCarry bool,
+) bool {
 	if client == nil || len(data) == 0 {
 		return false
 	}
@@ -11811,6 +11831,11 @@ func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
 		s.writeActiveFromAttach(data)
 		return false
 	}
+	freshInput := len(client.keyCarry) == 0
+	if !freshInput {
+		data = append(client.takeKeyCarry(), data...)
+	}
+	inputLength := len(data)
 
 	pending := make([]byte, 0, len(data))
 	flush := func() {
@@ -11821,6 +11846,15 @@ func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
 		pending = pending[:0]
 	}
 	for len(data) > 0 {
+		// A read holding only ESC or ESC [ was already held for the
+		// bracketed-paste marker before it reached here, so it is not held
+		// again.
+		if allowCarry && isIncompleteAttachKeyEvent(data) &&
+			(len(data) > 2 || !freshInput || len(data) < inputLength) {
+			flush()
+			s.holdAttachKeyCarry(client, data)
+			return false
+		}
 		key := data[:1]
 		value, valueOK := data[0], true
 		event, length, isEvent := parseAttachKeyEvent(data)
@@ -11883,6 +11917,43 @@ func (s *muxServer) handleAttachInput(client *attachClient, data []byte) bool {
 	}
 	flush()
 	return false
+}
+
+func (c *attachClient) takeKeyCarry() []byte {
+	carry := c.keyCarry
+	c.keyCarry = nil
+	c.keyCarryGeneration++
+	return carry
+}
+
+func (s *muxServer) holdAttachKeyCarry(client *attachClient, data []byte) {
+	client.keyCarry = append([]byte(nil), data...)
+	client.keyCarryGeneration++
+	generation := client.keyCarryGeneration
+	time.AfterFunc(bracketedPasteStartCarryDelay, func() {
+		client.inputMu.Lock()
+		defer client.inputMu.Unlock()
+		if client.keyCarryGeneration != generation {
+			return
+		}
+		select {
+		case <-client.done:
+			return
+		default:
+		}
+		if s.flushAttachKeyCarry(client) {
+			client.close()
+		}
+	})
+}
+
+// flushAttachKeyCarry routes a held partial key as ordinary input once nothing
+// completed it. It reports whether that input detached the client.
+func (s *muxServer) flushAttachKeyCarry(client *attachClient) bool {
+	if len(client.keyCarry) == 0 {
+		return false
+	}
+	return s.handleAttachKeys(client, client.takeKeyCarry(), false)
 }
 
 // noteConsumedKey remembers a consumed kitty key press so its release report,
@@ -13437,6 +13508,10 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 
 	var output []byte
 	copyStart := 0
+	// Keyboard-mode changes after the last full reset rebuild the window's
+	// state from scratch and are kept; earlier ones are replaced by the
+	// replay's own restore, which that reset would otherwise erase.
+	lastReset := bytes.LastIndex(data, []byte("\x1bc"))
 	for i := 0; i < len(data); {
 		sequenceEnd, isQuery, incomplete, recognized :=
 			terminalQuerySequenceAt(data, i)
@@ -13449,7 +13524,8 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 		}
 		shouldStrip := isQuery ||
 			isReplayUnsafeOscNotificationSequence(data[i:sequenceEnd]) ||
-			isKeyboardModeSequence(data[i:sequenceEnd])
+			((lastReset < 0 || i < lastReset) &&
+				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
 			i = sequenceEnd
 			continue

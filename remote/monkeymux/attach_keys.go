@@ -71,6 +71,27 @@ func parseAttachKeyEvent(data []byte) (attachKeyEvent, int, bool) {
 	return event, end + 1, true
 }
 
+// isIncompleteAttachKeyEvent reports whether data is the start of an enhanced
+// key sequence that later input could complete: ESC, ESC [, or ESC [ followed
+// only by parameter bytes.
+func isIncompleteAttachKeyEvent(data []byte) bool {
+	if len(data) == 0 || data[0] != 0x1b || len(data) >= attachKeyEventMaxLength {
+		return false
+	}
+	if len(data) == 1 {
+		return true
+	}
+	if data[1] != '[' {
+		return false
+	}
+	for _, value := range data[2:] {
+		if (value < '0' || value > '9') && value != ';' && value != ':' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseKittyKeyParams(params []string) (attachKeyEvent, bool) {
 	if len(params) > 3 {
 		return attachKeyEvent{}, false

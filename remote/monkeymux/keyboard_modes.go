@@ -157,18 +157,13 @@ func parseKeyboardModeParam(value string, fallback int) (int, bool) {
 // isKeyboardModeSequence reports whether a CSI sequence changes the kitty
 // keyboard flags or modifyOtherKeys. Replays drop these from retained output
 // and restore the tracked state instead, because a trimmed history holds only
-// part of a window's pushes and pops.
+// part of a window's pushes and pops. Only the ESC [ form is tracked, so the
+// eight-bit CSI form is left in the history.
 func isKeyboardModeSequence(sequence []byte) bool {
-	bodyStart := 0
-	switch {
-	case len(sequence) >= 3 && sequence[0] == '\x1b' && sequence[1] == '[':
-		bodyStart = 2
-	case len(sequence) >= 2 && sequence[0] == 0x9b:
-		bodyStart = 1
-	default:
+	if len(sequence) < 3 || sequence[0] != '\x1b' || sequence[1] != '[' {
 		return false
 	}
-	params := string(sequence[bodyStart : len(sequence)-1])
+	params := string(sequence[2 : len(sequence)-1])
 	if params == "" {
 		return false
 	}
