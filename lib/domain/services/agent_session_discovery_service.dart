@@ -713,14 +713,32 @@ String? _codexRolloutPrompt(
     if (text is! String) continue;
     final prompt = text.trim();
     if (prompt.isEmpty ||
-        prompt.startsWith('<') ||
-        prompt.startsWith('# AGENTS.md instructions')) {
+        _codexInjectedContextPrefixes.any(prompt.startsWith)) {
       continue;
     }
     return prompt;
   }
   return null;
 }
+
+/// Openings of the user-role text Codex adds itself: instructions,
+/// environment, plugins, skills, review results, and the wrappers around an
+/// attached image. A prompt that merely starts with markup is still the
+/// user's.
+const _codexInjectedContextPrefixes = [
+  '# AGENTS.md instructions',
+  '<environment_context>',
+  '<user_instructions>',
+  '<recommended_plugins>',
+  '<skill>',
+  '<user_action>',
+  '<user_shell_command>',
+  '<turn_aborted>',
+  '<subagent_notification>',
+  '<image ',
+  '<image>',
+  '</image>',
+];
 
 /// Parses Claude session metadata from a saved JSONL transcript.
 @visibleForTesting

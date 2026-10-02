@@ -326,10 +326,12 @@ void main() {
         await rollout.writeAsString(
           '{"type":"session_meta","payload":{"id":"thread-1"}}\n'
           '{"type":"event_msg","payload":{"type":"user_message",'
-          r'"message":"Fix the \"flaky\" test"}}'
+          r'"message":"<div> is \"flaky\""}}'
           '\n',
         );
-        expect(await title(), 'Fix the "flaky" test');
+        // An event is always the user's prompt, even when it starts with
+        // markup.
+        expect(await title(), '<div> is "flaky"');
 
         // Codex 0.160 logs only user messages, after injected context.
         await rollout.writeAsString(
@@ -337,12 +339,12 @@ void main() {
             '{"type":"session_meta","payload":{"id":"thread-1"}}',
             '{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer text"}]}}',
             r'{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work\n\"quoted\" rules"},{"type":"input_text","text":"<environment_context>\n</environment_context>"}]}}',
-            r'{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:"},{"type":"input_text","text":"\n  Tighten the retry loop"}]}}',
+            r'{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_image","image_url":"data:"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"\n  <div> breaks the layout"}]}}',
             '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second prompt"}]}}',
             '',
           ].join('\n'),
         );
-        expect(await title(), 'Tighten the retry loop');
+        expect(await title(), '<div> breaks the layout');
 
         // A thread name wins over either prompt.
         await File('${home.path}/.codex/session_index.jsonl')

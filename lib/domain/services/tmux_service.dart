@@ -4687,7 +4687,9 @@ flutty_claude_session_title() {
 }
 # Prints the first prompt in Codex rollout lines. Codex before 0.160 logged
 # prompts as user_message events; later versions log only user messages,
-# where AGENTS.md, environment, and skill context precede the prompt.
+# where the AGENTS.md, environment, plugin, skill, review, and image-wrapper
+# text Codex adds precedes the prompt. A prompt that merely starts with
+# markup is still the user's.
 flutty_codex_prompt_from_stdin() {
   awk '
 BEGIN {
@@ -4705,16 +4707,22 @@ function string_end(s,    offset, q, p, n) {
   }
   return 0
 }
-function is_context(s,    t) {
+function is_context(s, injected,    t, count, prefixes, i) {
   t = s
   while (t != "") {
     if (substr(t, 1, 1) == " ") t = substr(t, 2)
     else if (substr(t, 1, 1) == slash && index("nrt", substr(t, 2, 1)) > 0) t = substr(t, 3)
     else break
   }
-  return t == "" || substr(t, 1, 1) == "<" || index(t, "# AGENTS.md instructions") == 1
+  if (t == "") return 1
+  if (!injected) return 0
+  count = split("# AGENTS.md instructions|<environment_context>|<user_instructions>|<recommended_plugins>|<skill>|<user_action>|<user_shell_command>|<turn_aborted>|<subagent_notification>|<image |<image>|</image>", prefixes, "|")
+  for (i = 1; i <= count; i++) {
+    if (index(t, prefixes[i]) == 1) return 1
+  }
+  return 0
 }
-function first_prompt(line, key,    rest, end, body) {
+function first_prompt(line, key, injected,    rest, end, body) {
   rest = line
   while (match(rest, quote key quote "[[:space:]]*:[[:space:]]*" quote)) {
     rest = substr(rest, RSTART + RLENGTH)
@@ -4722,14 +4730,14 @@ function first_prompt(line, key,    rest, end, body) {
     if (end == 0) return ""
     body = substr(rest, 1, end - 1)
     rest = substr(rest, end + 1)
-    if (!is_context(body)) return body
+    if (!is_context(body, injected)) return body
   }
   return ""
 }
 { prompt = "" }
-index(\$0, quote "user_message" quote) { prompt = first_prompt(\$0, "message") }
+index(\$0, quote "user_message" quote) { prompt = first_prompt(\$0, "message", 0) }
 !index(\$0, quote "user_message" quote) && match(\$0, quote "role" quote "[[:space:]]*:[[:space:]]*" quote "user" quote) {
-  prompt = first_prompt(\$0, "text")
+  prompt = first_prompt(\$0, "text", 1)
 }
 prompt != "" {
   print prompt

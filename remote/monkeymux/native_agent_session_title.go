@@ -361,14 +361,41 @@ func (scan *codexSessionTitleScan) observeRollout(line []byte, truncated bool) {
 		// messages ahead of the prompt.
 		for _, part := range record.Payload.Content {
 			text := strings.TrimSpace(part.Text)
-			if part.Type != "input_text" || text == "" ||
-				strings.HasPrefix(text, "<") || strings.HasPrefix(text, "# AGENTS.md instructions") {
+			if part.Type != "input_text" || text == "" || isCodexInjectedContext(text) {
 				continue
 			}
 			scan.firstMessage = text
 			return
 		}
 	}
+}
+
+// codexInjectedContextPrefixes open the user-role text Codex adds itself:
+// instructions, environment, plugins, skills, review results, and the
+// wrappers around an attached image. A prompt that merely starts with markup
+// is still the user's.
+var codexInjectedContextPrefixes = []string{
+	"# AGENTS.md instructions",
+	"<environment_context>",
+	"<user_instructions>",
+	"<recommended_plugins>",
+	"<skill>",
+	"<user_action>",
+	"<user_shell_command>",
+	"<turn_aborted>",
+	"<subagent_notification>",
+	"<image ",
+	"<image>",
+	"</image>",
+}
+
+func isCodexInjectedContext(text string) bool {
+	for _, prefix := range codexInjectedContextPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // codexRolloutFile finds `rollout-*-<id>.jsonl` under sessions/YYYY/MM/DD,

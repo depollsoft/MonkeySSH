@@ -125,12 +125,15 @@ func TestCodexSessionTitleScanSkipsInjectedContext(t *testing.T) {
 			`{"type":"input_text","text":"# AGENTS.md instructions for /work"},`+
 			`{"type":"input_text","text":"<environment_context>\\n<cwd>/work</cwd>"}]}}`+"\n",
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[`+
+			`{"type":"input_text","text":"<image name=[Image #1]>"},`+
 			`{"type":"input_image","image_url":"data:"},`+
-			`{"type":"input_text","text":"  Tighten the retry loop  "}]}}`+"\n",
+			`{"type":"input_text","text":"</image>"},`+
+			`{"type":"input_text","text":"  <div> breaks the layout  "}]}}`+"\n",
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second prompt"}]}}`+"\n",
 	)
 	var scan codexSessionTitleScan
-	if got := scan.title(codexHome, nativeTitleTestSessionID, time.Now()); got != "Tighten the retry loop" {
+	// A prompt that starts with markup is still the user's.
+	if got := scan.title(codexHome, nativeTitleTestSessionID, time.Now()); got != "<div> breaks the layout" {
 		t.Fatalf("first prompt title = %q", got)
 	}
 }
