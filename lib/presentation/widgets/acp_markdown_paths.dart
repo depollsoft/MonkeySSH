@@ -42,10 +42,22 @@ String? resolveAcpMarkdownPath(String href) {
   if (uri.scheme.toLowerCase() == 'file') {
     return resolveTerminalFileUriPath(href);
   }
-  if (uri.hasScheme && !RegExp(r'^[A-Za-z]:[\\/]').hasMatch(href)) {
+  final windowsDrivePath = RegExp(r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])')
+      .hasMatch(href);
+  if (uri.hasScheme && !windowsDrivePath) {
     return null;
   }
-  final path = trimTerminalFilePathCandidate(href);
+  // Explicit Markdown destinations are URIs, not literal detected paths.
+  // Decode once, omitting URI fragments/queries without losing drive letters.
+  final String decodedPath;
+  try {
+    decodedPath = Uri.decodeComponent(
+      windowsDrivePath ? '${href.substring(0, 2)}${uri.path}' : uri.path,
+    );
+  } on FormatException {
+    return null;
+  }
+  final path = trimTerminalFilePathCandidate(decodedPath);
   return isSupportedTerminalFilePath(path) ? path : null;
 }
 
@@ -87,9 +99,10 @@ class AcpMarkdownPathSyntax extends md.InlineSyntax {
     if (element.tag == 'code') {
       // Only a path, not a command or expression, gets a code-span link.
       final text = element.textContent;
-      final path = resolveAcpMarkdownPath(text);
+      // Code-span text is literal, unlike an explicit Markdown destination.
+      final path = trimTerminalFilePathCandidate(text);
       final matches = detectAcpFilePaths(text);
-      if (path != null &&
+      if (isSupportedTerminalFilePath(path) &&
           matches.length == 1 &&
           matches.single.start == 0 &&
           matches.single.path == path) {

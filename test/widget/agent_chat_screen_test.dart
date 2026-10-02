@@ -141,6 +141,9 @@ void main() {
     ('`lib/main.dart`', 'lib/main.dart'),
     ('```text\nlib/main.dart:42\n```', 'lib/main.dart'),
     ('[source](lib/main.dart)', 'lib/main.dart'),
+    ('[source](lib/my%20file.dart)', 'lib/my file.dart'),
+    ('[source](lib/my%2520file.dart)', 'lib/my%20file.dart'),
+    ('`/tmp/my%20file.dart`', '/tmp/my%20file.dart'),
     ('[source](file:///tmp/a%20b.txt)', '/tmp/a b.txt'),
     (r'C:\Users\dev\main.dart', 'C:/Users/dev/main.dart'),
   ]) {

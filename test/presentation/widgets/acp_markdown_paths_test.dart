@@ -128,6 +128,44 @@ https://example.com/lib/main.dart
     expect(elements(nodes, 'table'), hasLength(1));
   });
 
+  for (final (href, path) in [
+    ('lib/my%20file.dart', 'lib/my file.dart'),
+    ('./lib/my%20file.dart', 'lib/my file.dart'),
+    ('../lib/my%20file.dart:42', '../lib/my file.dart'),
+    ('/tmp/my%20file.dart', '/tmp/my file.dart'),
+    ('~/my%20project/main.dart', '~/my project/main.dart'),
+    ('lib/my%2520file.dart', 'lib/my%20file.dart'),
+    ('lib/my%23file.dart#L42', 'lib/my#file.dart'),
+    ('lib/main.dart?view=source#L42', 'lib/main.dart'),
+    (r'C:\Users\dev\my%20file.dart', 'C:/Users/dev/my file.dart'),
+    ('C:/Users/dev/my%20file.dart', 'C:/Users/dev/my file.dart'),
+    ('C:%5CUsers%5Cdev%5Cmy%20file.dart', 'C:/Users/dev/my file.dart'),
+    (
+      'C:/Users/dev/my%20file.dart?view=source#L42',
+      'C:/Users/dev/my file.dart',
+    ),
+  ]) {
+    test('decodes explicit Markdown destination $href exactly once', () {
+      expect(resolveAcpMarkdownPath(href), path);
+      final anchor = elements(parse('[source]($href)'), 'a').single;
+      expect(resolveAcpMarkdownPath(anchor.attributes['href']!), path);
+    });
+  }
+
+  for (final source in ['/tmp/my%20file.dart', '`/tmp/my%20file.dart`']) {
+    test('preserves literal percent escapes in detected path $source', () {
+      final anchor = elements(parse(source), 'a').single;
+      expect(
+        resolveAcpMarkdownPath(anchor.attributes['href']!),
+        '/tmp/my%20file.dart',
+      );
+    });
+  }
+
+  test('ignores invalid UTF-8 in a percent-encoded path', () {
+    expect(resolveAcpMarkdownPath('lib/%FF.dart'), isNull);
+  });
+
   test('resolves file URLs and relative Markdown destinations', () {
     expect(resolveAcpMarkdownPath('file:///tmp/a%20b.txt'), '/tmp/a b.txt');
     expect(resolveAcpMarkdownPath('lib/main.dart:12'), 'lib/main.dart');
