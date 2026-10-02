@@ -33,6 +33,10 @@ class FakeAcpProvider:
         self.next_permission = 1
         self.pending_prompts: dict[str, dict[str, Any]] = {}
         self.pending_permissions: dict[str, str] = {}
+        self.next_elicitation = 1
+        self.pending_elicitations: dict[str, dict[str, Any]] = {}
+        self.withdrawn_permissions: dict[str, str] = {}
+        self.elicitation_modes: set[str] = set()
 
     def write(self, message: dict[str, Any]) -> None:
         encoded = json.dumps(message, separators=(",", ":"), sort_keys=True)
@@ -135,6 +139,18 @@ class FakeAcpProvider:
                         "name": "wait",
                         "description": "Wait until session/cancel.",
                     },
+                    {
+                        "name": "elicit",
+                        "description": "Ask for structured input.",
+                    },
+                    {
+                        "name": "elicit-url",
+                        "description": "Ask the user to open a page.",
+                    },
+                    {
+                        "name": "cancel-permission",
+                        "description": "Request and then withdraw a permission.",
+                    },
                 ],
             },
         )
@@ -165,6 +181,13 @@ class FakeAcpProvider:
         params = message.get("params") or {}
 
         if method == "initialize":
+            capabilities = params.get("clientCapabilities") or {}
+            elicitation = capabilities.get("elicitation") or {}
+            self.elicitation_modes = {
+                mode
+                for mode in ("form", "url")
+                if isinstance(elicitation, dict) and elicitation.get(mode) is not None
+            }
             self.result(
                 request_id,
                 {
@@ -311,6 +334,15 @@ class FakeAcpProvider:
         }
         if text.startswith("/wait") or text == "wait":
             return
+        if text == "/elicit":
+            self.start_elicitation(request_id, session_id, "form")
+            return
+        if text == "/elicit-url":
+            self.start_elicitation(request_id, session_id, "url")
+            return
+        if text == "/cancel-permission":
+            self.start_withdrawn_permission(request_id, session_id)
+            return
 
         response_text = (
             text.removeprefix("/echo").strip()
@@ -381,6 +413,149 @@ class FakeAcpProvider:
                 },
             }
         )
+
+    def start_elicitation(self, request_id: Any, session_id: str, mode: str) -> None:
+        if mode not in self.elicitation_modes:
+            self.finish_prompt_with_text(
+                request_id, session_id, f"elicitation={mode}-unsupported"
+            )
+            return
+        elicitation_id = f"fake-elicit-{self.next_elicitation:04d}"
+        self.next_elicitation += 1
+        params: dict[str, Any] = {"sessionId": session_id, "mode": mode}
+        if mode == "form":
+            params["message"] = "Choose how the fixture should proceed."
+            params["requestedSchema"] = {
+                "type": "object",
+                "properties": {
+                    "strategy": {
+                        "type": "string",
+                        "title": "Strategy",
+                        "oneOf": [
+                            {"const": "safe", "title": "Safe"},
+                            {"const": "fast", "title": "Fast"},
+                        ],
+                        "default": "safe",
+                    },
+                    "retries": {
+                        "type": "integer",
+                        "title": "Retries",
+                        "minimum": 0,
+                        "maximum": 3,
+                        "default": 1,
+                    },
+                    "dryRun": {"type": "boolean", "title": "Dry run"},
+                },
+                "required": ["strategy"],
+            }
+        else:
+            params["message"] = "Connect the deterministic fixture account."
+            params["elicitationId"] = f"fake-oauth-{elicitation_id}"
+            params["url"] = (
+                "https://example.com/fake-acp/connect?elicitation="
+                + elicitation_id
+            )
+        self.pending_elicitations[elicitation_id] = {
+            "prompt": str(request_id),
+            "mode": mode,
+            "elicitationId": params.get("elicitationId"),
+        }
+        self.write(
+            {
+                "jsonrpc": "2.0",
+                "id": elicitation_id,
+                "method": "elicitation/create",
+                "params": params,
+            }
+        )
+
+    def finish_elicitation(self, message: dict[str, Any]) -> None:
+        pending = self.pending_elicitations.pop(str(message.get("id")))
+        prompt = self.pending_prompts.get(pending["prompt"])
+        if prompt is None:
+            return
+        result = message.get("result") or {}
+        action = result.get("action") if isinstance(result, dict) else None
+        if "error" in message:
+            action = f"error{message['error'].get('code')}"
+        content = result.get("content") if isinstance(result, dict) else None
+        if pending["mode"] == "url" and action == "accept":
+            self.write(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "elicitation/complete",
+                    "params": {"elicitationId": pending["elicitationId"]},
+                }
+            )
+        summary = f"elicitation={action}"
+        if content is not None:
+            summary += " " + json.dumps(content, separators=(",", ":"), sort_keys=True)
+        self.finish_prompt_with_text(prompt["requestId"], prompt["sessionId"], summary)
+
+    def start_withdrawn_permission(self, request_id: Any, session_id: str) -> None:
+        permission_id = f"fake-permission-{self.next_permission:04d}"
+        self.next_permission += 1
+        self.withdrawn_permissions[permission_id] = str(request_id)
+        self.write(
+            {
+                "jsonrpc": "2.0",
+                "id": permission_id,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": session_id,
+                    "toolCall": {
+                        "toolCallId": f"tool-{request_id}",
+                        "title": "Withdrawn fixture",
+                    },
+                    "options": PERMISSION_OPTIONS,
+                },
+            }
+        )
+        self.write(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/cancel_request",
+                "params": {"requestId": permission_id},
+            }
+        )
+
+    def finish_withdrawn_permission(self, message: dict[str, Any]) -> None:
+        prompt_key = self.withdrawn_permissions.pop(str(message.get("id")))
+        prompt = self.pending_prompts.get(prompt_key)
+        if prompt is None:
+            return
+        code = (message.get("error") or {}).get("code")
+        self.finish_prompt_with_text(
+            prompt["requestId"],
+            prompt["sessionId"],
+            "permission=withdrawn" if code == -32800 else "permission=answered",
+        )
+
+    def finish_prompt_with_text(
+        self, request_id: Any, session_id: str, text: str
+    ) -> None:
+        self.pending_prompts.pop(str(request_id), None)
+        self.update(
+            session_id,
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "messageId": f"assistant-{request_id}",
+                "content": {"type": "text", "text": text},
+            },
+            record=True,
+        )
+        self.result(request_id, {"stopReason": "end_turn"})
+
+    def cancel_request(self, params: dict[str, Any]) -> None:
+        """Answers a client-cancelled prompt with -32800."""
+        prompt_key = str(params.get("requestId"))
+        pending = self.pending_prompts.pop(prompt_key, None)
+        if pending is None:
+            return
+        for permission_id, candidate in list(self.pending_permissions.items()):
+            if candidate == prompt_key:
+                self.pending_permissions.pop(permission_id)
+        self.error(pending["requestId"], -32800, "Request cancelled")
 
     def finish_permission(self, message: dict[str, Any]) -> None:
         permission_id = str(message.get("id"))
@@ -464,6 +639,12 @@ class FakeAcpProvider:
         message_id = str(message.get("id"))
         if "method" not in message and message_id in self.pending_permissions:
             self.finish_permission(message)
+        elif "method" not in message and message_id in self.pending_elicitations:
+            self.finish_elicitation(message)
+        elif "method" not in message and message_id in self.withdrawn_permissions:
+            self.finish_withdrawn_permission(message)
+        elif message.get("method") == "$/cancel_request" and "id" not in message:
+            self.cancel_request(message.get("params") or {})
         elif message.get("method") == "session/cancel" and "id" not in message:
             self.cancel_prompt(message.get("params") or {})
         elif "method" in message and "id" in message:

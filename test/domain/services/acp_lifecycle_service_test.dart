@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
@@ -501,6 +502,60 @@ void main() {
     expect(call.body, 'Open the app to review and respond.');
     // The working directory and write path never reach the notification.
     expect(call.subtitle, isNot(contains('/')));
+  });
+
+  test('a new elicitation raises a content-free input alert', () async {
+    final key = fakeAcpKey();
+    final initial = fakeAcpSession(key: key);
+    final fakeManager = FakeAcpSessionManager(sessions: [initial]);
+    final notifications = _RecordingAcpNotificationService();
+    final testLifecycle = AcpLifecycleService(
+      sessionManager: fakeManager,
+      hasActiveSshSession: (_) => true,
+      notificationService: notifications,
+      diagnostics: const NoopDiagnosticsLogger(),
+    )..start();
+    addTearDown(testLifecycle.dispose);
+    addTearDown(fakeManager.dispose);
+    addTearDown(notifications.dispose);
+
+    await _pump();
+    await testLifecycle.handleBackground();
+    fakeManager.emit(
+      AcpSessionManagerState(
+        sessions: [
+          initial.copyWith(
+            pendingElicitations: [
+              AcpSessionElicitation(
+                requestKey: 's:elicit-1',
+                requestedAt: DateTime(2026),
+                request: AcpElicitationRequest.parse(
+                  {
+                    'sessionId': key.acpSessionId,
+                    'mode': 'url',
+                    'elicitationId': 'oauth-1',
+                    'url': 'https://private.example.com/secret-path',
+                    'message': 'Private message never notified',
+                  },
+                  formSupported: true,
+                  urlSupported: true,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    await _pump();
+
+    final call = notifications.calls.single;
+    expect(call.payload.kind, AcpNotificationKind.input);
+    expect(call.title, 'Copilot CLI needs your input');
+    expect(call.body, 'Open the app to review and respond.');
+    for (final text in [call.title, call.body, call.subtitle ?? '']) {
+      expect(text, isNot(contains('private')));
+      expect(text, isNot(contains('Private')));
+    }
   });
 
   test(

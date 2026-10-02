@@ -8,6 +8,7 @@ import 'package:collection/collection.dart';
 import 'package:dartssh2/dartssh2.dart';
 
 import '../models/acp_client_capabilities.dart';
+import '../models/acp_elicitation.dart';
 import '../models/acp_json.dart';
 import '../models/acp_protocol.dart';
 import '../models/acp_updates.dart';
@@ -315,16 +316,46 @@ final class AcpPendingRequestRegistry {
 
   final _requests = <String, AcpPendingClientRequest>{};
   var _pendingContentBytes = 0;
+  // Accepted URL elicitations the user is finishing out of band, by id.
+  final _awaitingElicitations = <String, AcpAwaitingElicitation>{};
   final _changes = StreamController<List<AcpPendingClientRequest>>.broadcast(
     sync: true,
   );
+
+  /// Most accepted URL elicitations tracked while awaiting completion.
+  static const maxAwaitingElicitations = 32;
 
   /// Current pending requests.
   List<AcpPendingClientRequest> get requests =>
       List<AcpPendingClientRequest>.unmodifiable(_requests.values);
 
-  /// Emits an immutable request snapshot after each change.
+  /// Emits an immutable request snapshot after each change, including changes
+  /// to [awaitingElicitations].
   Stream<List<AcpPendingClientRequest>> get changes => _changes.stream;
+
+  /// Whether any UI is currently mirroring [changes].
+  bool get hasObservers => _changes.hasListener;
+
+  /// Accepted URL elicitations awaiting `elicitation/complete`, oldest first.
+  List<AcpAwaitingElicitation> get awaitingElicitations =>
+      List<AcpAwaitingElicitation>.unmodifiable(_awaitingElicitations.values);
+
+  /// Tracks an accepted URL elicitation until the agent completes it.
+  void markAwaiting(AcpAwaitingElicitation awaiting) {
+    _awaitingElicitations.remove(awaiting.elicitationId);
+    while (_awaitingElicitations.length >= maxAwaitingElicitations) {
+      _awaitingElicitations.remove(_awaitingElicitations.keys.first);
+    }
+    _awaitingElicitations[awaiting.elicitationId] = awaiting;
+    _emit();
+  }
+
+  /// Stops tracking [elicitationId]. Unknown or completed ids are ignored.
+  bool completeAwaiting(String elicitationId) {
+    if (_awaitingElicitations.remove(elicitationId) == null) return false;
+    _emit();
+    return true;
+  }
 
   /// Adds a new request or rebinds its response channel after reconnect.
   ///
@@ -375,6 +406,7 @@ final class AcpPendingRequestRegistry {
     final pending = _requests.values.toList(growable: false);
     _requests.clear();
     _pendingContentBytes = 0;
+    _awaitingElicitations.clear();
     _emit();
     await _cancelPending(pending);
   }
@@ -391,7 +423,14 @@ final class AcpPendingRequestRegistry {
     final matching = _requests.values
         .where((request) => request.sessionId == sessionId)
         .toList(growable: false);
-    if (matching.isEmpty) return;
+    final awaitingCount = _awaitingElicitations.length;
+    _awaitingElicitations.removeWhere(
+      (_, awaiting) => awaiting.sessionId == sessionId,
+    );
+    if (matching.isEmpty) {
+      if (_awaitingElicitations.length != awaitingCount) _emit();
+      return;
+    }
     for (final request in matching) {
       _requests.remove(request.id);
       _pendingContentBytes -= request.retainedContentBytes;
@@ -407,6 +446,8 @@ final class AcpPendingRequestRegistry {
           await request.cancel();
         } else if (request case AcpPendingFileWrite()) {
           await request.reject();
+        } else if (request case AcpPendingElicitation()) {
+          await request.cancel();
         }
       } on Object {
         // A detached bridge can no longer accept a response; its replayed request
@@ -437,7 +478,12 @@ final class AcpClientCapabilityService {
     this.autoApprovePermissions = false,
     this.limits = const AcpClientCapabilityLimits(),
     DiagnosticsLogger? diagnostics,
+    this.unpresentedElicitationTimeout = const Duration(seconds: 10),
   }) : _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+
+  /// How long a request-scoped elicitation may wait for any session view to
+  /// mirror [registry] before it is answered `cancel` instead of hanging.
+  final Duration unpresentedElicitationTimeout;
 
   /// Filesystem implementation for the current remote host.
   final AcpRemoteFileSystem? fileSystem;
@@ -484,6 +530,9 @@ final class AcpClientCapabilityService {
   final _closingSessions = <String, int>{};
   var _closed = false;
   StreamSubscription<AcpJsonRpcServerRequest>? _subscription;
+  StreamSubscription<AcpRequestId>? _cancellationSubscription;
+  StreamSubscription<String>? _elicitationCompletionSubscription;
+  final _unpresentedElicitationTimers = <String, Timer>{};
   var _nextTerminalId = 0;
 
   /// Capabilities that are safe to advertise for this service instance.
@@ -499,6 +548,8 @@ final class AcpClientCapabilityService {
             writeTextFile: true,
           ),
     terminal: terminalExecutor != null,
+    elicitationForm: true,
+    elicitationUrl: true,
   );
 
   /// Starts routing server requests from [client].
@@ -508,6 +559,14 @@ final class AcpClientCapabilityService {
   void attach(AcpClient client) {
     if (_closed) throw StateError('ACP capability service is closed');
     _subscription?.cancel();
+    _cancellationSubscription?.cancel();
+    _elicitationCompletionSubscription?.cancel();
+    _cancellationSubscription = client.serverRequestCancellations.listen(
+      _onServerRequestCancelled,
+    );
+    _elicitationCompletionSubscription = client.elicitationCompletions.listen(
+      _onElicitationCompleted,
+    );
     _subscription = client.serverRequests.listen(_handle);
   }
 
@@ -524,6 +583,16 @@ final class AcpClientCapabilityService {
   Future<void> detach() async {
     await _subscription?.cancel();
     _subscription = null;
+    await _cancellationSubscription?.cancel();
+    _cancellationSubscription = null;
+    await _elicitationCompletionSubscription?.cancel();
+    _elicitationCompletionSubscription = null;
+    // A retained request-scoped elicitation restarts its no-viewer deadline
+    // when the bridge replays it after reconnect.
+    for (final timer in _unpresentedElicitationTimers.values) {
+      timer.cancel();
+    }
+    _unpresentedElicitationTimers.clear();
   }
 
   /// Explicitly destroys session-owned terminal resources and pending requests.
@@ -647,6 +716,139 @@ final class AcpClientCapabilityService {
     }
   }
 
+  /// Accepts a pending elicitation.
+  ///
+  /// For a form, [content] must validate against the requested schema;
+  /// otherwise this throws [ArgumentError] and the request stays pending. A
+  /// URL consent sends no content and is then tracked in
+  /// [AcpPendingRequestRegistry.awaitingElicitations] until the agent sends
+  /// `elicitation/complete`. The caller opens the URL only after this returns.
+  Future<void> acceptElicitation(
+    String requestId, {
+    Map<String, Object?>? content,
+  }) async {
+    final pending = _pendingElicitation(requestId);
+    final elicitation = pending.elicitation;
+    Map<String, Object?>? submitted;
+    if (elicitation is AcpFormElicitation) {
+      submitted = <String, Object?>{
+        for (final entry in (content ?? const <String, Object?>{}).entries)
+          if (entry.value != null) entry.key: entry.value,
+      };
+      if (!elicitation.canSubmit ||
+          elicitation.validateContent(submitted).isNotEmpty) {
+        throw ArgumentError('Elicitation content does not match the form');
+      }
+    }
+    try {
+      await pending.accept(submitted);
+    } finally {
+      _forgetPending(requestId);
+    }
+    if (elicitation is AcpUrlElicitation) {
+      registry.markAwaiting(
+        AcpAwaitingElicitation(
+          elicitationId: elicitation.elicitationId,
+          url: elicitation.url,
+          sessionId: elicitation.scope.sessionId,
+          acceptedAt: DateTime.now(),
+        ),
+      );
+    }
+    _logElicitationResolved(elicitation, 'accept');
+  }
+
+  /// Declines a pending elicitation.
+  Future<void> declineElicitation(String requestId) async {
+    final pending = _pendingElicitation(requestId);
+    try {
+      await pending.decline();
+    } finally {
+      _forgetPending(requestId);
+    }
+    _logElicitationResolved(pending.elicitation, 'decline');
+  }
+
+  /// Cancels a pending elicitation the user dismissed without choosing.
+  Future<void> cancelElicitation(String requestId) async {
+    final pending = _pendingElicitation(requestId);
+    try {
+      await pending.cancel();
+    } finally {
+      _forgetPending(requestId);
+    }
+    _logElicitationResolved(pending.elicitation, 'cancel');
+  }
+
+  /// Stops showing that the user is finishing [elicitationId] in a browser.
+  void dismissAwaitingElicitation(String elicitationId) =>
+      registry.completeAwaiting(elicitationId);
+
+  AcpPendingElicitation _pendingElicitation(String requestId) {
+    final pending = registry._requests[requestId];
+    if (pending is! AcpPendingElicitation) {
+      throw StateError('No pending elicitation for request');
+    }
+    if (pending.request.isCancelled) {
+      _forgetPending(requestId);
+      throw StateError('No pending elicitation for request');
+    }
+    return pending;
+  }
+
+  void _forgetPending(String requestId) {
+    _unpresentedElicitationTimers.remove(requestId)?.cancel();
+    registry.remove(requestId);
+  }
+
+  void _logElicitationResolved(
+    AcpElicitationRequest elicitation,
+    String action,
+  ) {
+    _diagnostics.info(
+      'acp.capability',
+      'elicitation_resolved',
+      fields: {'mode': _elicitationMode(elicitation), 'action': action},
+    );
+  }
+
+  void _onServerRequestCancelled(AcpRequestId requestId) {
+    final key = acpPendingRequestKey(requestId);
+    final pending = registry._requests[key];
+    if (pending == null) return;
+    _forgetPending(key);
+    _diagnostics.info(
+      'acp.capability',
+      'request_cancelled_by_agent',
+      fields: {
+        'kind': switch (pending) {
+          AcpPendingPermission() => 'permission',
+          AcpPendingFileWrite() => 'write',
+          AcpPendingElicitation() => 'elicitation',
+        },
+      },
+    );
+    // A request still bound to this connection was already answered with
+    // -32800. One retained from an earlier attachment is answered best effort.
+    if (!pending.request.isAnswered) {
+      unawaited(_respondSafely(pending.request.respondCancelled));
+    }
+  }
+
+  void _onElicitationCompleted(String elicitationId) {
+    if (registry.completeAwaiting(elicitationId)) {
+      _diagnostics.info('acp.capability', 'elicitation_completed');
+    }
+  }
+
+  Future<void> _respondSafely(Future<void> Function() respond) async {
+    try {
+      await respond();
+    } on Object {
+      // A closed or replaced response channel cannot carry the answer.
+    }
+  }
+
   void _handle(AcpJsonRpcServerRequest request) {
     unawaited(_route(request));
   }
@@ -679,6 +881,8 @@ final class AcpClientCapabilityService {
           await _terminalKill(request);
         case 'terminal/release':
           await _terminalRelease(request);
+        case 'elicitation/create':
+          await _elicitation(request);
         default:
           await request.respondError(-32601, 'Method not found');
       }
@@ -703,7 +907,7 @@ final class AcpClientCapabilityService {
   }
 
   void _ensureRequestActive(AcpJsonRpcServerRequest request) {
-    if (!_activeRequests.containsKey(request)) {
+    if (!_activeRequests.containsKey(request) || request.isCancelled) {
       throw const AcpClientCapabilityException('Request was cancelled');
     }
   }
@@ -761,6 +965,82 @@ final class AcpClientCapabilityService {
       'acp.capability',
       'permission_pending',
       fields: {'optionCount': permission.options.length},
+    );
+  }
+
+  Future<void> _elicitation(AcpJsonRpcServerRequest request) async {
+    final params = AcpJson.object(request.params);
+    final AcpElicitationRequest elicitation;
+    try {
+      if (params == null) {
+        throw const AcpElicitationRequestException('Invalid params');
+      }
+      if (utf8.encode(jsonEncode(params)).length >
+          acpElicitationMaxRequestBytes) {
+        throw const AcpElicitationRequestException(
+          'Elicitation request is too large',
+        );
+      }
+      final advertised = capabilities;
+      elicitation = AcpElicitationRequest.parse(
+        params,
+        formSupported: advertised.elicitationForm,
+        urlSupported: advertised.elicitationUrl,
+      );
+    } on AcpElicitationRequestException catch (error) {
+      _diagnostics.warning(
+        'acp.capability',
+        'elicitation_rejected',
+        fields: {'unsupportedMode': error.unsupportedMode},
+      );
+      await request.respondError(-32602, error.message);
+      return;
+    }
+    _ensureRequestActive(request);
+    final registered = registry.register(
+      AcpPendingElicitation(request, elicitation),
+    );
+    if (registered == null) {
+      _diagnostics.warning(
+        'acp.capability',
+        'pending_request_overflow',
+        fields: {'kind': 'elicitation'},
+      );
+      await request.respond(const <String, Object?>{'action': 'cancel'});
+      return;
+    }
+    _diagnostics.info(
+      'acp.capability',
+      'elicitation_pending',
+      fields: {
+        'mode': _elicitationMode(elicitation),
+        'requestScoped': elicitation.scope.isRequestScoped,
+        if (elicitation is AcpFormElicitation)
+          'fieldCount': elicitation.schema.fields.length,
+      },
+    );
+    _cancelIfUnpresented(registered);
+  }
+
+  /// Answers a request-scoped elicitation `cancel` if no session view starts
+  /// mirroring the registry in time, so the agent's originating request never
+  /// hangs on input nobody can see. Session-scoped requests wait for their
+  /// session like permissions do.
+  void _cancelIfUnpresented(AcpPendingElicitation pending) {
+    if (!pending.isRequestScoped || registry.hasObservers) return;
+    final key = pending.id;
+    _unpresentedElicitationTimers.remove(key)?.cancel();
+    _unpresentedElicitationTimers[key] = Timer(
+      unpresentedElicitationTimeout,
+      () {
+        _unpresentedElicitationTimers.remove(key);
+        if (_closed || registry.hasObservers) return;
+        final current = registry._requests[key];
+        if (current is! AcpPendingElicitation) return;
+        registry.remove(key);
+        _diagnostics.info('acp.capability', 'elicitation_unpresented');
+        unawaited(_respondSafely(current.cancel));
+      },
     );
   }
 
@@ -916,7 +1196,7 @@ final class AcpClientCapabilityService {
     } finally {
       _terminalReservations--;
     }
-    if (!_activeRequests.containsKey(request)) {
+    if (!_activeRequests.containsKey(request) || request.isCancelled) {
       process.kill();
       _ensureRequestActive(request);
     }
@@ -1331,3 +1611,9 @@ String _selectLines(String content, {int? line, int? limit}) {
 }
 
 String _methodCategory(String method) => method.split('/').first;
+
+String _elicitationMode(AcpElicitationRequest elicitation) =>
+    switch (elicitation) {
+      AcpFormElicitation() => 'form',
+      AcpUrlElicitation() => 'url',
+    };
