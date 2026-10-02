@@ -180,7 +180,14 @@ class AcpAudioClipCache {
     required String mimeType,
   }) async {
     final stopwatch = Stopwatch()..start();
-    final directory = await (_directory ??= _prepareDirectory());
+    final Directory directory;
+    try {
+      directory = await (_directory ??= _prepareDirectory());
+    } on Object {
+      // Let the next clip try again instead of failing for the whole run.
+      _directory = null;
+      rethrow;
+    }
     final id = _nextFileId++;
     final extension = acpAudioFileExtension(mimeType);
     final partial = File(path.join(directory.path, 'clip-$id.part'));
@@ -265,6 +272,8 @@ class AcpAudioClipCache {
 
   Future<Directory> _prepareDirectory() async {
     final base = await _baseDirectory();
+    // The platform may report a temporary directory it has not created yet.
+    await base.create(recursive: true);
     // Clips from an earlier process are stale; never let them accumulate.
     // Links are skipped, so a planted one is never followed.
     try {

@@ -165,6 +165,29 @@ void main() {
     lease.release();
   });
 
+  test('creates a missing base directory and retries a failed setup', () async {
+    final missing = Directory('${base.path}/not-created-yet/tmp');
+    var calls = 0;
+    final subject = AcpAudioClipCache(
+      baseDirectory: () async {
+        // The first lookup fails; a failed setup must not stick.
+        if (++calls == 1) throw const FileSystemException('unavailable');
+        return missing;
+      },
+      diagnostics: RecordingDiagnosticsLogger(),
+    );
+    Future<AcpAudioClipLease> acquire() => subject.acquire(
+      data: base64.encode(utf8.encode('clip')),
+      mimeType: 'audio/mpeg',
+    );
+
+    await expectLater(acquire(), throwsA(isA<FileSystemException>()));
+    final lease = await acquire();
+    expect(lease.file.existsSync(), isTrue);
+    expect(path.isWithin(missing.path, lease.file.path), isTrue);
+    lease.release();
+  });
+
   test('keeps clips in a directory only this user can open', () async {
     final lease = await cache().acquire(
       data: base64.encode(utf8.encode('private')),
