@@ -255,6 +255,46 @@ void main() {
       },
     );
 
+    test('Claude titles prefer a rename, then the generated title', () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'monkeyssh-claude-title-test-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final session = File('${directory.path}/session.jsonl');
+      final command = buildAgentActiveSessionMetadataCommand(const {42});
+      // Run only the probe's title helpers against a sample session file.
+      final helpers = command.substring(
+        command.indexOf('flutty_json_string_field_from_stdin() {'),
+        command.indexOf('flutty_codex_session_title() {'),
+      );
+      Future<String> title() async {
+        final result = await Process.run('/bin/sh', [
+          '-c',
+          '$helpers\nflutty_claude_session_title "\$1"',
+          'probe',
+          session.path,
+        ]);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        return (result.stdout as String).trim();
+      }
+
+      await session.writeAsString(
+        '{"type":"user","message":{"role":"user","content":"First ask"}}\n'
+        '{"type":"last-prompt","lastPrompt":"Latest ask"}\n',
+      );
+      expect(await title(), 'Latest ask');
+      await session.writeAsString(
+        '{"type":"ai-title","aiTitle":"Generated title"}\n',
+        mode: FileMode.append,
+      );
+      expect(await title(), 'Generated title');
+      await session.writeAsString(
+        '{"type":"custom-title","customTitle":"Renamed"}\n',
+        mode: FileMode.append,
+      );
+      expect(await title(), 'Renamed');
+    });
+
     test('ignores stale Copilot locks when a pane PID is reused', () async {
       final home = await Directory.systemTemp.createTemp(
         'monkeyssh-copilot-lock-test-',

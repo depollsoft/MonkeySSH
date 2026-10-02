@@ -772,6 +772,7 @@ type muxWindow struct {
 	piNativeSessionBridgeID     string
 	piNativeSessionPath         string
 	piNativeSessionCheckedAt    time.Time
+	nativeAgentTitle            nativeAgentSessionTitle
 	nativeAcpBridgeID           string
 	nativeAcpProviderID         string
 	foregroundPid               int

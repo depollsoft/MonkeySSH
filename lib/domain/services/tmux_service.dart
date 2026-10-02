@@ -4670,6 +4670,9 @@ flutty_claude_session_title() {
   [ -r "\$file" ] || return 0
   title=\$(grep '"customTitle"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin customTitle)
   if [ -z "\$title" ]; then
+    title=\$(grep '"aiTitle"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin aiTitle)
+  fi
+  if [ -z "\$title" ]; then
     title=\$(grep '"lastPrompt"' "\$file" 2>/dev/null | tail -n 1 | flutty_json_string_field_from_stdin lastPrompt)
   fi
   if [ -z "\$title" ]; then
