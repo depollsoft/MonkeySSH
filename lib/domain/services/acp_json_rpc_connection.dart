@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
+
+import 'package:uuid/uuid.dart';
 
 import '../models/acp_json.dart';
 import 'acp_transport.dart';
@@ -155,7 +156,7 @@ final class AcpJsonRpcConnection {
     this.maxFrameSize = acpJsonRpcDefaultMaxFrameBytes,
     AcpRequestIdFactory? requestIdFactory,
   }) : _transport = transport,
-       _requestIdFactory = requestIdFactory ?? _newUuid {
+       _requestIdFactory = requestIdFactory ?? const Uuid().v4 {
     if (maxFrameSize <= 0) {
       throw ArgumentError.value(maxFrameSize, 'maxFrameSize');
     }
@@ -177,7 +178,7 @@ final class AcpJsonRpcConnection {
   /// Default deadline applied to requests.
   final Duration defaultRequestTimeout;
 
-  /// Maximum encoded size of one NDJSON frame.
+  /// Maximum UTF-8 size of one JSON frame, excluding its LF or CRLF delimiter.
   final int maxFrameSize;
 
   final AcpTransport _transport;
@@ -209,6 +210,8 @@ final class AcpJsonRpcConnection {
   bool get isClosed => _closed;
 
   /// Sends a request and awaits its result.
+  ///
+  /// Requests that expire before their queued write begins are not sent.
   Future<Object?> request(
     String method, {
     Object? params,
@@ -236,9 +239,7 @@ final class AcpJsonRpcConnection {
     final timer = effectiveTimeout == null
         ? null
         : Timer(effectiveTimeout, () {
-            if (!_removePending(pending) || pending.completer.isCompleted) {
-              return;
-            }
+            if (!_removePending(pending)) return;
             pending.completer.completeError(
               AcpRequestTimeoutException(requestId, method, effectiveTimeout),
             );
@@ -255,8 +256,8 @@ final class AcpJsonRpcConnection {
         'id': requestId,
         'method': method,
         'params': ?params,
-      }).catchError((Object error, StackTrace stackTrace) {
-        if (_removePending(pending) && !pending.completer.isCompleted) {
+      }, pending: pending).catchError((Object error, StackTrace stackTrace) {
+        if (_removePending(pending)) {
           pending.completer.completeError(error, stackTrace);
         }
       }),
@@ -289,26 +290,15 @@ final class AcpJsonRpcConnection {
         continue;
       }
       _frameBytes.add(byte);
-      if (_frameBytes.length > maxFrameSize) {
-        _protocolFailure(
-          AcpProtocolException(
-            'ACP frame exceeds maximum size of $maxFrameSize bytes',
-          ),
-        );
+      // A trailing CR may be the first byte of a split CRLF delimiter.
+      final frameSize = _frameBytes.length - (byte == 0x0d ? 1 : 0);
+      if (!_validateIncomingFrameSize(frameSize)) {
         return;
       }
     }
   }
 
   void _handleFrame(List<int> bytes) {
-    if (bytes.length > maxFrameSize) {
-      _protocolFailure(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
-      );
-      return;
-    }
     late final Object? decoded;
     try {
       decoded = jsonDecode(utf8.decode(bytes, allowMalformed: false));
@@ -321,15 +311,18 @@ final class AcpJsonRpcConnection {
 
   void _handleDecodedFrame(AcpDecodedFrame frame) {
     if (_closed) return;
-    if (frame.byteLength > maxFrameSize || frame.byteLength < 0) {
-      _protocolFailure(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
-      );
-      return;
-    }
+    if (!_validateIncomingFrameSize(frame.byteLength)) return;
     _handleMessage(frame.message, immutable: true);
+  }
+
+  bool _validateIncomingFrameSize(int byteLength) {
+    if (byteLength >= 0 && byteLength <= maxFrameSize) return true;
+    _protocolFailure(
+      AcpProtocolException(
+        'ACP frame exceeds maximum size of $maxFrameSize bytes',
+      ),
+    );
+    return false;
   }
 
   void _handleMessage(AcpJsonMap? message, {bool immutable = false}) {
@@ -430,19 +423,23 @@ final class AcpJsonRpcConnection {
     return true;
   }
 
-  Future<void> _writeMessage(AcpJsonMap message) async {
+  Future<void> _writeMessage(
+    AcpJsonMap message, {
+    _PendingResponse? pending,
+  }) async {
     _ensureOpen();
     final bytes = utf8.encode('${jsonEncode(message)}\n');
-    if (bytes.length > maxFrameSize) {
-      return Future<void>.error(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
+    if (bytes.length - 1 > maxFrameSize) {
+      throw AcpProtocolException(
+        'ACP frame exceeds maximum size of $maxFrameSize bytes',
       );
     }
-    final operation = _writeTail.then((_) {
+    final operation = _writeTail.then<void>((_) async {
       _ensureOpen();
-      return _transport.write(bytes);
+      // A request may expire while waiting for an earlier write. Check the
+      // pending object as well as its ID because callers can reuse expired IDs.
+      if (pending != null && !identical(_pending[pending.id], pending)) return;
+      await _transport.write(bytes);
     });
     _writeTail = operation.then<void>(
       (_) {},
@@ -491,9 +488,7 @@ final class AcpJsonRpcConnection {
     _closed = true;
     for (final pending in _pending.values) {
       pending.timer?.cancel();
-      if (!pending.completer.isCompleted) {
-        pending.completer.completeError(reason, stackTrace);
-      }
+      pending.completer.completeError(reason, stackTrace);
     }
     _pending.clear();
     await _incomingSubscription.cancel();
@@ -510,19 +505,4 @@ final class AcpJsonRpcConnection {
   void _ensureOpen() {
     if (_closed) throw const AcpConnectionClosedException();
   }
-}
-
-final _secureRandom = Random.secure();
-
-AcpRequestId _newUuid() {
-  final bytes = List<int>.generate(16, (_) => _secureRandom.nextInt(256));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  String hex(int value) => value.toRadixString(16).padLeft(2, '0');
-  final encoded = bytes.map(hex).join();
-  return '${encoded.substring(0, 8)}-'
-      '${encoded.substring(8, 12)}-'
-      '${encoded.substring(12, 16)}-'
-      '${encoded.substring(16, 20)}-'
-      '${encoded.substring(20)}';
 }

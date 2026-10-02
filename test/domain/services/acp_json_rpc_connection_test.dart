@@ -81,6 +81,67 @@ final class _GatedTransport extends _MemoryTransport {
 
 void main() {
   group('acp_json_rpc_connection', () {
+    for (final reuseId in [false, true]) {
+      test('expired queued requests are not sent, reuse ID=$reuseId', () async {
+        final transport = _GatedTransport();
+        final connection = AcpJsonRpcConnection(transport: transport);
+        transport.finishClose.complete();
+        addTearDown(connection.close);
+        final first = connection.notify('first');
+        await transport.writeStarted.future;
+
+        await expectLater(
+          connection.request('expired', id: 'same', timeout: Duration.zero),
+          throwsA(isA<AcpRequestTimeoutException>()),
+        );
+        final replacement = reuseId
+            ? connection.request('replacement', id: 'same', noTimeout: true)
+            : null;
+        final flushed = connection.notify('after');
+        transport.finishWrite.complete();
+        await Future.wait([first, flushed]);
+        if (replacement != null) {
+          transport.add(
+            _encodeMessage({'jsonrpc': '2.0', 'id': 'same', 'result': 'ok'}),
+          );
+          expect(await replacement, 'ok');
+        }
+
+        expect(transport.writes.map((bytes) => _decodeWrite(bytes)['method']), [
+          'first',
+          if (reuseId) 'replacement',
+          'after',
+        ]);
+        expect(connection.isClosed, isFalse);
+      });
+    }
+
+    test('queued requests without a timeout are still sent', () async {
+      final transport = _GatedTransport();
+      final connection = AcpJsonRpcConnection(
+        transport: transport,
+        defaultRequestTimeout: Duration.zero,
+      );
+      transport.finishClose.complete();
+      addTearDown(connection.close);
+      final first = connection.notify('first');
+      await transport.writeStarted.future;
+      final pending = connection.request('prompt', id: 7, noTimeout: true);
+      await Future<void>.delayed(Duration.zero);
+      final flushed = connection.notify('after');
+      transport.finishWrite.complete();
+      await Future.wait([first, flushed]);
+      transport.add(
+        _encodeMessage({'jsonrpc': '2.0', 'id': 7, 'result': 'ok'}),
+      );
+      expect(await pending, 'ok');
+      expect(transport.writes.map((bytes) => _decodeWrite(bytes)['method']), [
+        'first',
+        'prompt',
+        'after',
+      ]);
+    });
+
     test('queued writes do not reach the transport after close', () async {
       final transport = _GatedTransport();
       final connection = AcpJsonRpcConnection(transport: transport);
@@ -275,6 +336,10 @@ void main() {
           const AcpDecodedFrame(
             message: {'jsonrpc': '2.0', 'method': 'history'},
             byteLength: 129,
+          ),
+          const AcpDecodedFrame(
+            message: {'jsonrpc': '2.0', 'method': 'history'},
+            byteLength: -1,
           ),
           const AcpDecodedFrame(
             message: {'jsonrpc': '1.0', 'method': 'history'},
@@ -494,6 +559,109 @@ void main() {
       expect(transport.writes, isEmpty);
       expect(connection.isClosed, isFalse);
       await connection.close();
+    });
+
+    test('outbound frame limit excludes only the NDJSON newline', () async {
+      final transport = _MemoryTransport();
+      final message = <String, Object?>{
+        'jsonrpc': '2.0',
+        'method': 'example',
+        'params': {'text': 'café 🚀'},
+      };
+      final bytes = _encodeMessage(message);
+      final connection = AcpJsonRpcConnection(
+        transport: transport,
+        maxFrameSize: bytes.length - 1,
+      );
+      addTearDown(connection.close);
+
+      await connection.notify('example', params: message['params']);
+      await expectLater(
+        connection.notify('example', params: {'text': 'café 🚀x'}),
+        throwsA(isA<AcpProtocolException>()),
+      );
+
+      expect(transport.writes.single, bytes);
+      expect(connection.isClosed, isFalse);
+    });
+
+    for (final delimiter in ['\n', '\r\n']) {
+      test('inbound frame limit excludes ${jsonEncode(delimiter)}', () async {
+        final transport = _MemoryTransport();
+        final message = <String, Object?>{
+          'jsonrpc': '2.0',
+          'method': 'example',
+          'params': {'text': 'café 🚀'},
+        };
+        final frame = utf8.encode(jsonEncode(message));
+        final connection = AcpJsonRpcConnection(
+          transport: transport,
+          maxFrameSize: frame.length,
+        );
+        addTearDown(connection.close);
+        final received = expectLater(
+          connection.notifications.first,
+          completion(
+            isA<AcpJsonRpcNotification>().having(
+              (notification) => notification.raw,
+              'message',
+              message,
+            ),
+          ),
+        );
+        transport.add(frame);
+        // Delimiters can arrive in separate SSH packets.
+        for (final byte in utf8.encode(delimiter)) {
+          transport.add([byte]);
+        }
+        await received;
+        expect(connection.isClosed, isFalse);
+      });
+    }
+
+    for (final nextByte in [0x0d, 0x78]) {
+      test(
+        'a trailing CR only exempts one delimiter byte, next=$nextByte',
+        () async {
+          final transport = _MemoryTransport();
+          final connection = AcpJsonRpcConnection(
+            transport: transport,
+            maxFrameSize: 8,
+          );
+          addTearDown(connection.close);
+          final error = expectLater(
+            connection.errors.first,
+            completion(isA<AcpProtocolException>()),
+          );
+          transport.add(utf8.encode('12345678\r'));
+          await Future<void>.delayed(Duration.zero);
+          expect(connection.isClosed, isFalse);
+          transport.add([nextByte]);
+          await error;
+          expect(connection.isClosed, isTrue);
+        },
+      );
+    }
+
+    test('decoded input accepts the exact frame limit', () async {
+      final transport = _DecodedMemoryTransport();
+      final message = AcpJson.immutableObject({
+        'jsonrpc': '2.0',
+        'method': 'example',
+        'params': {'text': 'café 🚀'},
+      });
+      final byteLength = utf8.encode(jsonEncode(message)).length;
+      final connection = AcpJsonRpcConnection(
+        transport: transport,
+        maxFrameSize: byteLength,
+      );
+      addTearDown(connection.close);
+      final received = connection.notifications.first;
+      transport.frames.add(
+        AcpDecodedFrame(message: message, byteLength: byteLength),
+      );
+      expect((await received).raw, same(message));
+      expect(connection.isClosed, isFalse);
     });
 
     test('default frame budget covers base64-expanded display images', () {
