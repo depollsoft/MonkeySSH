@@ -1228,6 +1228,99 @@ void main() {
       }
     }
 
+    for (final bracketed in [false, true]) {
+      for (final scenario in [
+        (suffix: '\nx\n', plainBaseline: '', pastedBaseline: ''),
+        (suffix: '\nx\ny', plainBaseline: 'y', pastedBaseline: 'x\ny'),
+        (suffix: '\nx\ny\n', plainBaseline: '', pastedBaseline: ''),
+        (suffix: '\n\nxyz', plainBaseline: 'xyz', pastedBaseline: 'xyz'),
+      ]) {
+        test(
+          '${platform.name} shell completion rejects delayed multi-Return native commit, bracketed=$bracketed, suffix=${scenario.suffix.codeUnits}',
+          () async {
+            final driver = _ImeDriver(platform: platform);
+            addTearDown(driver.dispose);
+            final harness = await _createImeHarness(
+              driver,
+              initialEditingValue: _editingValue('pi', selectionOffset: 2),
+            );
+            if (bracketed) harness.terminal.write('\x1b[?2004h');
+            driver.engine.resetAfterShellCompletion();
+            harness.terminalOutput.clear();
+            final rawText = 'pi${scenario.suffix}';
+            final nativeValue = _editingValue(
+              rawText,
+              selectionOffset: rawText.length - 1,
+              composing: TextRange(start: 0, end: rawText.length),
+            );
+            driver.updateEditingValue(nativeValue);
+            await driver.flush();
+            expect(harness.terminalOutput, isEmpty);
+            await driver.receiveAction(TextInputAction.done);
+            await driver.flush();
+            final baseline = bracketed
+                ? scenario.pastedBaseline
+                : scenario.plainBaseline;
+            expect(
+              driver.engine.editingValue,
+              _editingValue(
+                baseline,
+                selectionOffset: baseline.isEmpty ? 0 : baseline.length - 1,
+              ),
+            );
+            final output = harness.terminalOutput.join();
+            final editingValue = driver.engine.editingValue;
+            await driver.flush(const Duration(milliseconds: 500));
+            driver.updateEditingValue(
+              nativeValue.copyWith(composing: TextRange.empty),
+            );
+            await driver.flush();
+            expect(harness.terminalOutput.join(), output);
+            expect(driver.engine.editingValue, editingValue);
+          },
+        );
+      }
+    }
+
+    for (final nativePrefix in ['pi ', ' pi', ' pi ']) {
+      test(
+        '${platform.name} shell completion retains multi-Return native prefix artifacts, prefix=$nativePrefix',
+        () async {
+          final driver = _ImeDriver(platform: platform);
+          addTearDown(driver.dispose);
+          final harness = await _createImeHarness(
+            driver,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          driver.engine.resetAfterShellCompletion();
+          harness.terminalOutput.clear();
+          final text = '$nativePrefix\nx\n';
+          final preview = _editingValue(
+            text,
+            selectionOffset: text.length,
+            composing: TextRange(start: 0, end: text.length),
+          );
+          driver.updateEditingValue(preview);
+          await driver.flush();
+          await driver.receiveAction(TextInputAction.done);
+          await driver.flush();
+          final expected =
+              '${_terminalKeyOutput(TerminalKey.enter)}x${_terminalKeyOutput(TerminalKey.enter)}';
+          expect(harness.terminalOutput.join(), expected);
+          await driver.flush(const Duration(milliseconds: 500));
+          driver.updateEditingValue(
+            preview.copyWith(composing: TextRange.empty),
+          );
+          await driver.flush();
+          expect(harness.terminalOutput.join(), expected);
+          expect(
+            driver.engine.editingValue,
+            _editingValue('', selectionOffset: 0),
+          );
+        },
+      );
+    }
+
     test(
       '${platform.name} shell completion matches expanded obsolete prefix before Return tail',
       () async {

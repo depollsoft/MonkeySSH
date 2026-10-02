@@ -802,7 +802,8 @@ class TerminalImeEngine {
   DateTime? _shellCompletionSubmittedAt;
   DateTime? _shellCompletionPendingComposingAt;
   bool _shellCompletionHasComposingEnterPreview = false;
-  ({int revision, TextEditingValue value})? _shellCompletionEnterFollowUp;
+  ({int revision, TextEditingValue value, Set<String> nativePrefixes})?
+  _shellCompletionEnterFollowUp;
 
   void _clearShellCompletionPendingComposition() {
     _shellCompletionPendingComposingTexts = const {};
@@ -859,14 +860,19 @@ class TerminalImeEngine {
   void _captureShellCompletionEnterFollowUp(
     TextEditingValue value,
     String enterSuffix,
-    int newlineLength,
-  ) {
+    int newlineLength, {
+    Set<String>? nativePrefixes,
+  }) {
     final trailingText = enterSuffix.substring(newlineLength);
     _shellCompletionEnterFollowUp = trailingText.isEmpty
         ? null
         : (
             revision: _latestEditingValueRevision + 1,
             value: _canonicalEditingStateForUserText(value, trailingText),
+            nativePrefixes:
+                nativePrefixes ??
+                _shellCompletionEnterFollowUp?.nativePrefixes ??
+                _shellCompletionObsoleteTexts,
           );
   }
 
@@ -904,7 +910,16 @@ class TerminalImeEngine {
       return _currentEditingState;
     }
     _shellCompletionHasComposingEnterPreview = isComposing;
-    _captureShellCompletionEnterFollowUp(value, enterSuffix, newlineLength);
+    final rawText = _extractRawInputText(value.text);
+    _captureShellCompletionEnterFollowUp(
+      value,
+      enterSuffix,
+      newlineLength,
+      nativePrefixes: {
+        ..._shellCompletionObsoleteTexts,
+        rawText.substring(0, rawText.length - enterSuffix.length),
+      },
+    );
     var normalized = _canonicalEditingStateForUserText(value, enterSuffix);
     if (isComposing && normalized.composing.isCollapsed) {
       // Even composition limited to the obsolete prefix is a Return preview,
@@ -3479,6 +3494,7 @@ class TerminalImeEngine {
             completionFollowUp.value,
             delta.appendedText,
             pasteBlock: completionPasteBlock,
+            nativePrefixes: completionFollowUp.nativePrefixes,
           );
           final trailingText = _extractRawInputText(followUpValue.text);
           _lastSentText = trailingText;
@@ -3622,8 +3638,10 @@ class TerminalImeEngine {
     TextEditingValue value,
     String appendedText, {
     required ({int start, int end})? pasteBlock,
+    required Set<String> nativePrefixes,
   }) {
     var index = 0;
+    var lastReturnStart = 0;
     var lastReturnEnd = 0;
     while (index < appendedText.length) {
       if (pasteBlock != null &&
@@ -3643,8 +3661,27 @@ class TerminalImeEngine {
               appendedText.codeUnitAt(index + 1) == 0x0A
           ? 2
           : 1;
+      lastReturnStart = index;
       index += newlineLength;
       lastReturnEnd = index;
+    }
+    if (_shellCompletionObsoleteTexts.isNotEmpty) {
+      // A delayed native commit still includes every line already sent.
+      // Match through the final key-path Return, not just the first one.
+      final submittedPrefixes = {
+        for (final prefix in nativePrefixes)
+          '$prefix${appendedText.substring(0, lastReturnStart)}',
+      };
+      _shellCompletionObsoleteTexts = {
+        ..._shellCompletionObsoleteTexts,
+        ...submittedPrefixes,
+      };
+      if (_shellCompletionPendingComposingAt != null) {
+        _shellCompletionPendingComposingTexts = {
+          ..._shellCompletionPendingComposingTexts,
+          ...submittedPrefixes,
+        };
+      }
     }
     return _canonicalEditingStateForUserText(
       value,
