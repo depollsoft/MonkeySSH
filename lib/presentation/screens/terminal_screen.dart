@@ -4367,7 +4367,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _terminal.textInput(text);
     }
     _handleTerminalUserInput();
-    _terminalTextInputController.clearImeBuffer();
+    _terminalTextInputController.resetAfterShellCompletion();
   }
 
   void _handleTerminalLinkTapDown(

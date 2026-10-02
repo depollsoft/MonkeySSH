@@ -240,6 +240,12 @@ class TerminalTextInputHandlerController extends ChangeNotifier {
     _state?._ime.resetForExternalCursorMove();
   }
 
+  /// Discards keyboard suggestions for text replaced by a shell completion.
+  /// Keeps the input connection open so the keyboard does not flicker.
+  void resetAfterShellCompletion() {
+    _state?._ime.resetAfterShellCompletion();
+  }
+
   /// Resets platform IME completions after switching terminal contexts.
   void resetImeCompletions() {
     _state?._ime.resetImeCompletions();

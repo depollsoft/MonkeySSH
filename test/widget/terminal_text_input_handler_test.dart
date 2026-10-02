@@ -302,6 +302,82 @@ Map<dynamic, dynamic> _latestTextInputSetClientConfiguration(
 }
 
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final commit in ['pi', 'pi ', 'pi\n', 'pi \n', 'pi\r\n']) {
+      testWidgets(
+        '${platform.name} shell completion rejects stale keyboard commit '
+        '${commit.replaceAll('\n', r'\n').replaceAll('\r', r'\r')}',
+        (tester) async {
+          final harness = await pumpTerminalInputHarness(
+            tester,
+            initialEditingValue: _editingValue('pi', selectionOffset: 2),
+          );
+          addTearDown(harness.controller.dispose);
+
+          // The shell popup replaces the prefix outside the IME pipeline.
+          harness.terminal
+            ..keyInput(TerminalKey.backspace)
+            ..keyInput(TerminalKey.backspace)
+            ..textInput('pi --help ');
+          harness.controller.resetAfterShellCompletion();
+          await tester.pump();
+          expect(
+            tester.testTextInput.editingState!['text'],
+            _deleteDetectionMarker,
+          );
+          expect(tester.testTextInput.editingState!['composingBase'], -1);
+          expect(tester.testTextInput.isVisible, isTrue);
+          expect(
+            tester.testTextInput.log.where(
+              (call) => call.method == 'TextInput.clearClient',
+            ),
+            isEmpty,
+          );
+
+          // Even an acknowledgment can precede an already queued old commit.
+          tester.testTextInput.updateEditingValue(
+            _editingValue('', selectionOffset: 0),
+          );
+          await tester.pump();
+          tester.testTextInput.updateEditingValue(
+            _editingValue(
+              'pi',
+              selectionOffset: 2,
+              composing: const TextRange(start: 0, end: 2),
+            ),
+          );
+          await tester.pump(const Duration(seconds: 1));
+          tester.testTextInput.updateEditingValue(
+            _editingValue(commit, selectionOffset: commit.length),
+          );
+          await tester.pump();
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pump();
+
+          expect(
+            harness.terminalOutput.join(),
+            'pi${_terminalKeyOutput(TerminalKey.backspace)}'
+            '${_terminalKeyOutput(TerminalKey.backspace)}pi --help '
+            '${_terminalKeyOutput(TerminalKey.enter)}',
+          );
+
+          // Retyping the same command after submission is still ordinary input.
+          tester.testTextInput.updateEditingValue(
+            _editingValue('p', selectionOffset: 1),
+          );
+          await tester.pump();
+          tester.testTextInput.updateEditingValue(
+            _editingValue('pi', selectionOffset: 2),
+          );
+          await tester.pump();
+          expect(harness.terminalOutput.join(), endsWith('\rpi'));
+          await disposeTerminalInputHarness(tester, harness);
+        },
+        variant: TargetPlatformVariant.only(platform),
+      );
+    }
+  }
+
   group('terminalTextLooksLikeSensitiveInputPrompt', () {
     test('detects common password-like prompts', () {
       const prompts = [

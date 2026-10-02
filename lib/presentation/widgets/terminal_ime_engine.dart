@@ -48,6 +48,11 @@ const terminalTrailingSuffixRewriteLimit = 4;
 @visibleForTesting
 const hardwareEnterStaleEditWindow = Duration(milliseconds: 250);
 
+/// Hard limit for an obsolete IME composition retained after shell completion.
+/// A keyboard that abandons its commit must not block a later identical word.
+@visibleForTesting
+const shellCompletionComposingReplayWindow = Duration(seconds: 2);
+
 /// How long after an IME batch is framed as a bracketed paste a separate
 /// single-character commit still joins that framing.
 ///
@@ -446,7 +451,14 @@ class TerminalImeEngine {
       if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
           type == TerminalKeyEventType.press &&
           _currentEditingState.composing.isCollapsed) {
-        _resetAfterHardwareEnter();
+        _resetAfterHardwareEnter(
+          submitting: _isSubmittingEnter(
+            ctrl: ctrl,
+            alt: alt,
+            shift: shift,
+            meta: meta,
+          ),
+        );
       }
     }
 
@@ -457,7 +469,8 @@ class TerminalImeEngine {
   /// as does any hardware keyboard. The line it submitted is gone from the
   /// terminal, so the IME buffer must start over like after an IME Enter;
   /// otherwise later caret moves and edits are computed against stale text.
-  void _resetAfterHardwareEnter() {
+  void _resetAfterHardwareEnter({required bool submitting}) {
+    _recordShellCompletionEnter(submitting: submitting);
     final submittedText = _lastSentText;
     _hardwareEnterSubmittedText = submittedText;
     _hardwareEnterStaleLines =
@@ -705,8 +718,14 @@ class TerminalImeEngine {
     String? deleteResetDeletedSuffixText,
     bool flushPlatformContext = false,
     bool armIosBackspaceRunway = false,
+    bool preserveShellCompletion = false,
   }) {
     cancelDeferredTrailingBackspaceImeClear();
+    final preserveCompletionEnter =
+        preserveShellCompletion && _shellCompletionObsoleteTexts.isNotEmpty;
+    if (!preserveShellCompletion) {
+      _clearShellCompletionGuard();
+    }
     if (flushPlatformContext && (effects.canSyncEditingState?.call() ?? true)) {
       // Reset the editing state in-place rather than closing/reopening
       // the input connection. Closing triggers a keyboard dismiss+reshow
@@ -718,6 +737,10 @@ class TerminalImeEngine {
     _resetCommittedInputState(
       clearPendingDeleteResetBaseline: false,
       armIosBackspaceRunway: armIosBackspaceRunway,
+      clearPendingPerformedEnterText: !preserveCompletionEnter,
+      pendingEnterSuppressions: preserveCompletionEnter
+          ? _pendingEnterActionSuppressions
+          : 0,
     );
     _sawImeComposition = false;
     _hasPendingPromptOutputImeReset = false;
@@ -733,6 +756,383 @@ class TerminalImeEngine {
     _trimLeadingSwipeSpaceAfterBufferClear = false;
     _allowSplitLeadingTokenNormalization = armSplitLeadingTokenNormalization;
     _modifierChordResetTime = armModifierChordWindow ? now() : null;
+  }
+
+  /// Discards keyboard text replaced directly by a shell completion.
+  ///
+  /// Android and iOS can deliver queued composing updates after the reset.
+  /// Bare matches are ambiguous, so only reject them briefly after the tap or
+  /// Return. Newline-bearing replays remain recognizable until fresh input
+  /// or submission, even after a pause before Return. An active or queued
+  /// composition stays protected through its commit, up to
+  /// [shellCompletionComposingReplayWindow].
+  void resetAfterShellCompletion() {
+    final composingTexts = <String>{
+      _extractRawInputText(_currentEditingState.text),
+      _extractInputText(_currentEditingState.text),
+    }..removeWhere((text) => text.isEmpty);
+    final obsoleteTexts = <String>{...composingTexts, _lastSentText}
+      ..removeWhere((text) => text.isEmpty);
+    final hadComposition = !_currentEditingState.composing.isCollapsed;
+    final submittedAt = _shellCompletionSubmittedAt;
+    final composingAt = _shellCompletionPendingComposingAt;
+    final preserveExistingGuard =
+        (obsoleteTexts.isEmpty ||
+            // The field holds our normalized Return preview, possibly with
+            // fresh text after it, not a new prefix to protect.
+            (_shellCompletionHasComposingEnterPreview &&
+                _leadingEnterSequenceLength(
+                      _extractRawInputText(_currentEditingState.text),
+                    ) >
+                    0)) &&
+        _shellCompletionObsoleteTexts.isNotEmpty &&
+        (submittedAt == null ||
+            now().difference(submittedAt) < hardwareEnterStaleEditWindow ||
+            (composingAt != null &&
+                now().difference(composingAt) <
+                    shellCompletionComposingReplayWindow));
+    clearImeBufferForFreshInput(
+      flushPlatformContext: true,
+      preserveShellCompletion: preserveExistingGuard,
+    );
+    if (preserveExistingGuard) {
+      // A second tap sees the field we already cleared, not a new prefix.
+      // Keep the original deadlines instead of restarting the protection.
+      return;
+    }
+    _shellCompletionObsoleteTexts = obsoleteTexts;
+    _shellCompletionResetAt = now();
+    if (hadComposition && composingTexts.isNotEmpty) {
+      _shellCompletionPendingComposingTexts = composingTexts;
+      _shellCompletionPendingComposingAt = _shellCompletionResetAt;
+    }
+  }
+
+  Set<String> _shellCompletionObsoleteTexts = const {};
+  Set<String> _shellCompletionPendingComposingTexts = const {};
+  DateTime? _shellCompletionResetAt;
+  DateTime? _shellCompletionSubmittedAt;
+  DateTime? _shellCompletionPendingComposingAt;
+  bool _shellCompletionHasComposingEnterPreview = false;
+  ({int revision, TextEditingValue value, Set<String> nativePrefixes})?
+  _shellCompletionEnterFollowUp;
+
+  void _clearShellCompletionPendingComposition() {
+    _shellCompletionPendingComposingTexts = const {};
+    _shellCompletionPendingComposingAt = null;
+  }
+
+  void _clearShellCompletionGuard() {
+    _shellCompletionObsoleteTexts = const {};
+    _clearShellCompletionPendingComposition();
+    _shellCompletionResetAt = null;
+    _shellCompletionSubmittedAt = null;
+    _shellCompletionHasComposingEnterPreview = false;
+    _shellCompletionEnterFollowUp = null;
+    _shellCompletionForwardedTail = false;
+  }
+
+  /// Whether fresh text after the completion Return has reached the terminal
+  /// while the replay guard is still armed.
+  bool _shellCompletionForwardedTail = false;
+
+  bool _isSubmittingEnter({
+    required bool ctrl,
+    required bool alt,
+    required bool shift,
+    bool meta = false,
+  }) => !shift && (!alt || ctrl || meta);
+
+  void _recordShellCompletionEnter({bool submitting = true}) {
+    if (_shellCompletionObsoleteTexts.isNotEmpty) {
+      if (submitting) {
+        _shellCompletionSubmittedAt ??= now();
+      }
+      _shellCompletionHasComposingEnterPreview = false;
+    }
+  }
+
+  TextEditingValue? _rejectShellCompletionEcho() {
+    if (effects.canSyncEditingState?.call() ?? true) {
+      effects.onEditingState?.call(_currentEditingState);
+    }
+    // A rejected platform echo is not an empty edit. In particular, it must
+    // not delete a fresh post-Return baseline or supersede an awaiting review.
+    return null;
+  }
+
+  TextEditingValue? _discardShellCompletionComposition(
+    Set<String> texts, {
+    required bool isComposing,
+  }) {
+    if (isComposing) {
+      _shellCompletionPendingComposingTexts = texts;
+      // Repeated composing echoes must not extend the hard retention limit.
+      _shellCompletionPendingComposingAt ??= now();
+    } else {
+      _clearShellCompletionPendingComposition();
+    }
+    return _rejectShellCompletionEcho();
+  }
+
+  int _leadingEnterSequenceLength(String text) => text.startsWith('\r\n')
+      ? 2
+      : text.startsWith('\r') || text.startsWith('\n')
+      ? 1
+      : 0;
+
+  void _captureShellCompletionEnterFollowUp(
+    TextEditingValue value,
+    String enterSuffix,
+    int newlineLength, {
+    Set<String>? nativePrefixes,
+  }) {
+    final trailingText = enterSuffix.substring(newlineLength);
+    _shellCompletionEnterFollowUp = trailingText.isEmpty
+        ? null
+        : (
+            revision: _latestEditingValueRevision + 1,
+            value: _canonicalEditingStateForUserText(value, trailingText),
+            nativePrefixes:
+                nativePrefixes ??
+                _shellCompletionEnterFollowUp?.nativePrefixes ??
+                _shellCompletionObsoleteTexts,
+          );
+  }
+
+  TextEditingValue? _normalizeShellCompletionReturn(
+    TextEditingValue value,
+    String obsolete,
+    String enterSuffix,
+    int newlineLength,
+  ) {
+    final isComposing = !value.composing.isCollapsed;
+    if (isComposing) {
+      // Retain the obsolete prefix, not the fresh text after Return. A late
+      // native commit must still forward that fresh suffix and its ranges.
+      _shellCompletionPendingComposingTexts = {
+        ..._shellCompletionPendingComposingTexts,
+        obsolete,
+      };
+      _shellCompletionPendingComposingAt ??= now();
+    } else {
+      _clearShellCompletionPendingComposition();
+    }
+    if (_shellCompletionSubmittedAt != null) {
+      final trailingText = enterSuffix.substring(newlineLength);
+      if (trailingText.isEmpty) {
+        return _rejectShellCompletionEcho();
+      }
+      // The removed Return is the echo of the one already sent. Keep the
+      // guard until its deadline or unrelated input: a delayed replay can
+      // still follow this tail.
+      _pendingPerformedEnterText = null;
+      _pendingPerformedEnterNeedsNewline = false;
+      final trailingNewlineLength = _leadingEnterSequenceLength(trailingText);
+      if (trailingNewlineLength > 0) {
+        // Further Returns are the user's own. Send them with the tail instead
+        // of letting fresh-input normalization drop them as swipe artifacts.
+        final rawText = _extractRawInputText(value.text);
+        _captureShellCompletionEnterFollowUp(
+          value,
+          trailingText,
+          trailingNewlineLength,
+          nativePrefixes: {
+            if (rawText.length > trailingText.length)
+              rawText.substring(0, rawText.length - trailingText.length),
+            // The same replay may arrive with or without a separator space.
+            for (final prefix in _shellCompletionObsoleteTexts) ...[
+              '$prefix${enterSuffix.substring(0, newlineLength)}',
+              '$prefix ${enterSuffix.substring(0, newlineLength)}',
+            ],
+          },
+        );
+        return _canonicalEditingStateForUserText(value, trailingText);
+      }
+      _shellCompletionForwardedTail = true;
+      _syncEditingStateWithUserText(
+        trailingText,
+        sourceValue: value,
+        forceResyncState: true,
+      );
+      return _currentEditingState;
+    }
+    _shellCompletionHasComposingEnterPreview = isComposing;
+    final rawText = _extractRawInputText(value.text);
+    final normalizedText = _extractInputText(value.text);
+    _captureShellCompletionEnterFollowUp(
+      value,
+      enterSuffix,
+      newlineLength,
+      nativePrefixes: {
+        ..._shellCompletionObsoleteTexts,
+        rawText.substring(0, rawText.length - enterSuffix.length),
+        if (normalizedText.length > enterSuffix.length &&
+            normalizedText.endsWith(enterSuffix))
+          normalizedText.substring(
+            0,
+            normalizedText.length - enterSuffix.length,
+          ),
+      },
+    );
+    var normalized = _canonicalEditingStateForUserText(value, enterSuffix);
+    if (isComposing && normalized.composing.isCollapsed) {
+      // Even composition limited to the obsolete prefix is a Return preview,
+      // not a commitment to send the normalized newline yet.
+      final prefixLength = _editingPrefixLength(normalized.text);
+      normalized = normalized.copyWith(
+        composing: TextRange(start: prefixLength, end: normalized.text.length),
+      );
+    }
+    return normalized;
+  }
+
+  int? _matchedShellCompletionPrefixLength(String text, String prefix) {
+    if (prefix.isEmpty) {
+      return null;
+    }
+    var textOffset = 0;
+    var prefixOffset = 0;
+    while (prefixOffset < prefix.length) {
+      if (textOffset >= text.length) {
+        return null;
+      }
+      final expected = prefix.codeUnitAt(prefixOffset);
+      final actual = text.codeUnitAt(textOffset);
+      if (_isNewlineCodeUnit(expected) && _isNewlineCodeUnit(actual)) {
+        // IMEs can normalize LF/CR/CRLF between preview and commitment.
+        // Compare line breaks semantically but retain the source length for
+        // slicing and mapping that native value's editing ranges.
+        prefixOffset +=
+            expected == 0x0D &&
+                prefixOffset + 1 < prefix.length &&
+                prefix.codeUnitAt(prefixOffset + 1) == 0x0A
+            ? 2
+            : 1;
+        textOffset +=
+            actual == 0x0D &&
+                textOffset + 1 < text.length &&
+                text.codeUnitAt(textOffset + 1) == 0x0A
+            ? 2
+            : 1;
+      } else {
+        if (expected != actual) {
+          return null;
+        }
+        prefixOffset++;
+        textOffset++;
+      }
+    }
+    return textOffset;
+  }
+
+  TextEditingValue? _normalizeShellCompletionEcho(TextEditingValue value) {
+    if (_shellCompletionObsoleteTexts.isEmpty) {
+      return value;
+    }
+    final composingAt = _shellCompletionPendingComposingAt;
+    if (composingAt != null &&
+        now().difference(composingAt) >= shellCompletionComposingReplayWindow) {
+      _clearShellCompletionPendingComposition();
+    }
+    final resetAt = _shellCompletionSubmittedAt ?? _shellCompletionResetAt!;
+    final withinStaleWindow =
+        now().difference(resetAt) < hardwareEnterStaleEditWindow;
+    final protectEnterReplay =
+        _shellCompletionSubmittedAt == null || withinStaleWindow;
+    if (!protectEnterReplay && _shellCompletionPendingComposingTexts.isEmpty) {
+      _clearShellCompletionGuard();
+      return value;
+    }
+    final texts = <String>{
+      _extractRawInputText(value.text),
+      // Use the same artifact normalization as the eventual terminal delta.
+      // It trims a recognized suggestion space, not intentional indentation.
+      _extractInputText(value.text),
+    }..removeWhere((text) => text.isEmpty);
+    if (texts.isEmpty) {
+      if (_shellCompletionForwardedTail &&
+          _shellCompletionSubmittedAt != null &&
+          withinStaleWindow &&
+          _lastSentText.isNotEmpty) {
+        // A late acknowledgment of the completion reset, not a deletion of
+        // the tail the keyboard committed after it.
+        return _rejectShellCompletionEcho();
+      }
+      // The reset acknowledgment can precede an already queued commit.
+      return value;
+    }
+    // A Return can arrive long after the completion tap. Keep the snapshot
+    // for that newline-bearing replay, but do not reject fresh bare text once
+    // the short window expires. A bare newline is Return, not fresh typing;
+    // retaining the guard also lets an action commit a normalized preview.
+    final rawText = _extractRawInputText(value.text);
+    final normalizedNewlineLength = _leadingEnterSequenceLength(rawText);
+    if (_shellCompletionHasComposingEnterPreview &&
+        normalizedNewlineLength > 0) {
+      // An owning action commits our normalized preview, not the native
+      // obsolete-prefix field. Rebind any fresh suffix to this revision.
+      _captureShellCompletionEnterFollowUp(
+        value,
+        rawText,
+        normalizedNewlineLength,
+      );
+      return value;
+    }
+    if (texts.any(_enterCommitNewlineSequences.contains)) {
+      return value;
+    }
+    final obsoleteTexts =
+        (protectEnterReplay
+                ? _shellCompletionObsoleteTexts
+                : _shellCompletionPendingComposingTexts)
+            .toList()
+          ..sort((a, b) => b.length.compareTo(a.length));
+    final isComposing = !value.composing.isCollapsed;
+    for (final text in texts) {
+      for (final obsolete in obsoleteTexts) {
+        final prefixLength = _matchedShellCompletionPrefixLength(
+          text,
+          obsolete,
+        );
+        if (prefixLength == null) {
+          continue;
+        }
+        final suffix = text.substring(prefixLength);
+        final protectBareReplay =
+            withinStaleWindow ||
+            _shellCompletionPendingComposingTexts.contains(obsolete);
+        if ((suffix.isEmpty || suffix == ' ') && protectBareReplay) {
+          return _discardShellCompletionComposition(
+            texts,
+            isComposing: isComposing,
+          );
+        }
+        final enterSuffix = suffix.startsWith(' ')
+            ? suffix.substring(1)
+            : suffix;
+        final newlineLength = _leadingEnterSequenceLength(enterSuffix);
+        if (newlineLength > 0) {
+          return _normalizeShellCompletionReturn(
+            value,
+            obsolete,
+            enterSuffix,
+            newlineLength,
+          );
+        }
+        if (withinStaleWindow && isComposing) {
+          // This candidate extends the replaced word before the keyboard has
+          // applied the reset. Track its exact commit, not all future prefixes.
+          _shellCompletionObsoleteTexts = {
+            ..._shellCompletionObsoleteTexts,
+            ...texts,
+          };
+          return _discardShellCompletionComposition(texts, isComposing: true);
+        }
+      }
+    }
+    _clearShellCompletionGuard();
+    return value;
   }
 
   void resetImeCompletions() {
@@ -763,6 +1163,7 @@ class TerminalImeEngine {
     clearImeBufferForFreshInput(
       flushPlatformContext: true,
       armSplitLeadingTokenNormalization: true,
+      preserveShellCompletion: true,
     );
   }
 
@@ -799,6 +1200,7 @@ class TerminalImeEngine {
         enableIMEPersonalizedLearning: !options.sensitiveInput,
       );
   void resetConnectionEditingState() {
+    _clearShellCompletionGuard();
     _isFramingImeText = false;
     _invalidatePendingEditingUpdates();
     _sawImeComposition = false;
@@ -959,10 +1361,15 @@ class TerminalImeEngine {
   /// Drops IME artifacts that lead fresh input: a newline left by a swipe
   /// after Return, and a single separator space before a swiped word.
   String _normalizeFreshInputText(String extractedText) {
-    final sanitizedText = extractedText.replaceFirst(
-      _leadingSwipeNewlineArtifactPattern,
-      '',
-    );
+    // A recognized completion replay can contain Return followed by the next
+    // line's text. Its leading newline is owned input, not a swipe artifact.
+    final preserveCompletionReturn =
+        _shellCompletionEnterFollowUp != null &&
+        _shellCompletionObsoleteTexts.isNotEmpty &&
+        _leadingEnterSequenceLength(extractedText) > 0;
+    final sanitizedText = preserveCompletionReturn
+        ? extractedText
+        : extractedText.replaceFirst(_leadingSwipeNewlineArtifactPattern, '');
     if ((_sawImeComposition ||
             _trimLeadingSuggestionSpaceAfterDelete ||
             _trimLeadingSwipeSpaceAfterBufferClear) &&
@@ -1366,6 +1773,13 @@ class TerminalImeEngine {
     _isFramingImeText = false;
     final effectiveModifiers =
         modifiers ?? effects.resolveTerminalKeyModifiers?.call();
+    _recordShellCompletionEnter(
+      submitting: _isSubmittingEnter(
+        ctrl: effectiveModifiers?.ctrl ?? false,
+        alt: effectiveModifiers?.alt ?? false,
+        shift: effectiveModifiers?.shift ?? false,
+      ),
+    );
     sendTerminalEnterInput(
       terminal,
       shiftActive: effectiveModifiers?.shift ?? false,
@@ -2786,14 +3200,23 @@ class TerminalImeEngine {
     updateEditingValue(value);
   }
 
-  void updateEditingValue(TextEditingValue value) {
+  void updateEditingValue(TextEditingValue incomingValue) {
     if (!_active || options.readOnly) {
+      return;
+    }
+
+    final completionFollowUp = _shellCompletionEnterFollowUp;
+    final value = _normalizeShellCompletionEcho(incomingValue);
+    if (value == null) {
       return;
     }
 
     if (_acceptNextPendingComposingEnterCommit) {
       _acceptNextPendingComposingEnterCommit = false;
     } else if (_capturePendingComposingEnterFollowUp(value)) {
+      // This echo never takes an editing revision, so it must not rebind the
+      // completion Return to a revision that will never be processed.
+      _shellCompletionEnterFollowUp = completionFollowUp;
       return;
     }
 
@@ -3132,6 +3555,20 @@ class TerminalImeEngine {
       final payloadEnterModifiers = _payloadEnterModifiers(revision);
       final pendingEnterRepresentedByPayloadNewline =
           payloadEnterModifiers != null;
+      final completionFollowUp = _shellCompletionEnterFollowUp;
+      final completionPasteBlock = completionFollowUp?.revision == revision
+          ? _embeddedNewlineBlock(
+              delta.appendedText,
+              hasVisiblePredecessor:
+                  delta.deleteCursorOffset > delta.deletedCount &&
+                  _currentLineOf(
+                    deltaPreviousText.characters
+                        .take(delta.deleteCursorOffset - delta.deletedCount)
+                        .string,
+                  ).trim().isNotEmpty,
+              enterModifiers: payloadEnterModifiers,
+            )
+          : null;
       final newlineCount = _sendInputDelta(
         effectiveCurrentText,
         delta,
@@ -3139,6 +3576,10 @@ class TerminalImeEngine {
         enterModifiers: payloadEnterModifiers,
       );
       if (newlineCount > 0) {
+        _shellCompletionEnterFollowUp = null;
+        final completionNeedsModifiedEnterEcho =
+            _shellCompletionObsoleteTexts.isNotEmpty &&
+            _shellCompletionSubmittedAt == null;
         if (pendingEnterActionArrived &&
             !pendingEnterRepresentedByPayloadNewline) {
           _completePendingComposingEnterAction(revision);
@@ -3157,6 +3598,38 @@ class TerminalImeEngine {
         _trimLeadingSuggestionSpaceAfterDelete = true;
         if (followUpSuffix != null) {
           _restoreEditingValue(followUpSuffix);
+        } else if (completionFollowUp != null &&
+            completionFollowUp.revision == revision) {
+          // These characters already went out after Return in the same delta.
+          // Keep them as the new-line baseline rather than sending them again.
+          final followUpValue = _completionFollowUpAfterFinalReturn(
+            completionFollowUp.value,
+            delta.appendedText,
+            pasteBlock: completionPasteBlock,
+            nativePrefixes: completionFollowUp.nativePrefixes,
+          );
+          final trailingText = _extractRawInputText(followUpValue.text);
+          _shellCompletionForwardedTail = trailingText.isNotEmpty;
+          _lastSentText = trailingText;
+          _lastSentCursorOffset = trailingText.characters.length;
+          final cursorOffset = _collapsedSelectionCursorOffset(
+            trailingText,
+            followUpValue,
+          );
+          if (cursorOffset != null) {
+            _moveTerminalCursorTo(cursorOffset);
+          }
+          _syncEditingStateWithUserText(
+            trailingText,
+            sourceValue: followUpValue,
+            forceResyncState: true,
+          );
+        }
+        if (completionNeedsModifiedEnterEcho) {
+          // Shift/Alt Enter still resets the field, but its native echo is
+          // not a later submitting Return and must not replay the old prefix.
+          _pendingPerformedEnterText = '';
+          _pendingPerformedEnterNeedsNewline = false;
         }
         _sawImeComposition = false;
         return;
@@ -3274,6 +3747,61 @@ class TerminalImeEngine {
     }
   }
 
+  TextEditingValue _completionFollowUpAfterFinalReturn(
+    TextEditingValue value,
+    String appendedText, {
+    required ({int start, int end})? pasteBlock,
+    required Set<String> nativePrefixes,
+  }) {
+    var index = 0;
+    var lastReturnStart = 0;
+    var lastReturnEnd = 0;
+    while (index < appendedText.length) {
+      if (pasteBlock != null &&
+          pasteBlock.end > pasteBlock.start &&
+          index == pasteBlock.start) {
+        index = pasteBlock.end;
+        continue;
+      }
+      final codeUnit = appendedText.codeUnitAt(index);
+      if (!_isNewlineCodeUnit(codeUnit)) {
+        index++;
+        continue;
+      }
+      final newlineLength =
+          codeUnit == 0x0D &&
+              index + 1 < appendedText.length &&
+              appendedText.codeUnitAt(index + 1) == 0x0A
+          ? 2
+          : 1;
+      lastReturnStart = index;
+      index += newlineLength;
+      lastReturnEnd = index;
+    }
+    if (_shellCompletionObsoleteTexts.isNotEmpty) {
+      // A delayed native commit still includes every line already sent.
+      // Match through the final key-path Return, not just the first one.
+      final submittedPrefixes = {
+        for (final prefix in nativePrefixes)
+          '$prefix${appendedText.substring(0, lastReturnStart)}',
+      };
+      _shellCompletionObsoleteTexts = {
+        ..._shellCompletionObsoleteTexts,
+        ...submittedPrefixes,
+      };
+      if (_shellCompletionPendingComposingAt != null) {
+        _shellCompletionPendingComposingTexts = {
+          ..._shellCompletionPendingComposingTexts,
+          ...submittedPrefixes,
+        };
+      }
+    }
+    return _canonicalEditingStateForUserText(
+      value,
+      appendedText.substring(lastReturnEnd),
+    );
+  }
+
   /// Modifiers of the pending Enter that a newline in [revision]'s payload
   /// stands for, captured when Enter was pressed. Null means the payload's
   /// newlines use the live toolbar state. Review and sending both use this so
@@ -3282,11 +3810,19 @@ class TerminalImeEngine {
       revision == _pendingComposingEnterRevision &&
           _pendingComposingEnterMayBeInText &&
           _pendingComposingEnterText != null &&
-          _textEndsWithEnterSequence(_pendingComposingEnterText!)
+          (_textEndsWithEnterSequence(_pendingComposingEnterText!) ||
+              _shellCompletionEnterFollowUp?.revision == revision)
       ? _pendingComposingEnterModifiers
       : null;
 
   void _sendPerformedEnter(({bool ctrl, bool alt, bool shift}) modifiers) {
+    _recordShellCompletionEnter(
+      submitting: _isSubmittingEnter(
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+      ),
+    );
     _hasPendingPromptOutputImeReset = true;
     _notifyUserInput();
     sendTerminalEnterInput(
@@ -3370,7 +3906,8 @@ class TerminalImeEngine {
         _pendingComposingEnterStalePrefix = stalePrefix;
         _pendingComposingEnterRevision = pendingRevision;
         _pendingComposingEnterMayBeInText =
-            !hasUncommittedComposition && hasPendingEditingValue;
+            _shellCompletionHasComposingEnterPreview ||
+            (!hasUncommittedComposition && hasPendingEditingValue);
         if (hasUncommittedComposition) {
           _acceptNextPendingComposingEnterCommit = true;
           updateEditingValue(
