@@ -259,6 +259,11 @@ class _PermissionCard extends StatelessWidget {
                     : () => onResolve(() => prompt.onSelect(option.id)),
               ),
             TextButton(
+              // Neutral like the elicitation cards' Dismiss: the allow option
+              // stays the card's only accent.
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.onSurface,
+              ),
               onPressed: busy ? null : () => onResolve(prompt.onCancel),
               child: const Text('Cancel request'),
             ),
