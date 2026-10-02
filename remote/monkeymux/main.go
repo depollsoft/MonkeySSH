@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.219"
+	monkeyMuxVersion                  = "0.1.220"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -2921,8 +2921,14 @@ func removePIDFileIfUnchanged(path string, record pidRecord) bool {
 		if !isFileInUseError(err) || attempt >= pidFileRemoveRetryAttempts {
 			return false
 		}
-		time.Sleep(pidFileRemoveRetryInterval)
+		waitForFileInUse()
 	}
+}
+
+// waitForFileInUse pauses before retrying a removal that another handle
+// blocked; tests replace it to observe the retry.
+var waitForFileInUse = func() {
+	time.Sleep(pidFileRemoveRetryInterval)
 }
 
 // clearAbandonedPIDFile removes a session file that cannot be parsed at all,

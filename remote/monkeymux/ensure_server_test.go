@@ -807,12 +807,29 @@ func TestSessionUnlockWaitsOutAConcurrentReadOfTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open lock: %v", err)
 	}
+	// The reader stays open until the unlock has either hit its handle and is
+	// waiting it out, or returned, so the removal always meets the open file.
+	blocked := make(chan struct{}, 1)
+	originalWait := waitForFileInUse
+	waitForFileInUse = func() {
+		select {
+		case blocked <- struct{}{}:
+		default:
+		}
+		originalWait()
+	}
+	t.Cleanup(func() { waitForFileInUse = originalWait })
 	unlocked := make(chan struct{})
 	go func() {
 		unlock()
 		close(unlocked)
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-blocked:
+	case <-unlocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unlock neither returned nor waited for the reader")
+	}
 	if err := reader.Close(); err != nil {
 		t.Fatalf("close reader: %v", err)
 	}
