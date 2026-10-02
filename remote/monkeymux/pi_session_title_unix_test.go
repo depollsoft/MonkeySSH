@@ -39,13 +39,43 @@ func TestRefreshProcessMetadataPublishesPiSessionTitle(t *testing.T) {
 		t.Fatalf("window update did not carry the title: %s", control.String())
 	}
 
-	// Pi records a new name, then retitles its terminal. The retitle refreshes
-	// the label at once, inside the metadata interval, so an idle window does
-	// not keep the old one.
+	// A rename right after the window's last output reaches clients through
+	// the quiet-window refresh.
 	appendPiTitleTestRecords(t, path, `{"type":"session_info","name":"Bar names"}`+"\n")
-	server.handleWindowOutput(window.id, []byte("\x1b]0;π - Bar names - project\x07"))
+	expireMetadataRefresh(server, window)
+	if !server.refreshQuietWindowMetadata() {
+		t.Fatal("quiet refresh reported a closed server")
+	}
 	if !strings.Contains(control.String(), `"agentSessionTitle":"Bar names"`) {
 		t.Fatalf("rename was not broadcast: %s", control.String())
+	}
+}
+
+func expireMetadataRefresh(server *muxServer, window *muxWindow) {
+	server.mu.Lock()
+	window.lastProcessMetadataRefresh = time.Time{}
+	server.mu.Unlock()
+}
+
+func TestRefreshQuietWindowMetadataWaitsForAWatcher(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	appendPiTitleTestRecords(t, path, piTitleTestHeader,
+		`{"type":"message","message":{"role":"user","content":"Unwatched"}}`+"\n")
+	window := &muxWindow{
+		id: "@1", agentTool: "pi", agentToolConfirmed: true, agentSessionPath: path,
+	}
+	_, server := newThemeQueryTestServer(t, window)
+	if !server.refreshQuietWindowMetadata() {
+		t.Fatal("quiet refresh reported a closed server")
+	}
+	if !window.lastProcessMetadataRefresh.IsZero() || window.agentSessionTitle != "" {
+		t.Fatal("quiet refresh ran without a control client")
+	}
+	server.mu.Lock()
+	server.closed = true
+	server.mu.Unlock()
+	if server.refreshQuietWindowMetadata() {
+		t.Fatal("quiet refresh kept running after close")
 	}
 }
 
@@ -59,10 +89,6 @@ func TestRefreshProcessMetadataTitlesNativePiWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionID := "01a0f9cd-03d9-75cd-9ffa-8b89ede923c4"
-	appendPiTitleTestRecords(t, filepath.Join(bucket, "2026-10-01T23-29-17-785Z_"+sessionID+".jsonl"),
-		piTitleTestHeader,
-		`{"type":"message","message":{"role":"user","content":"Native prompt"}}`+"\n",
-	)
 	bridgeID := "0123456789abcdef0123456789abcdef"
 	stubPiTitleBridgeStatus(t, func(id string) (acpBridgeInfo, error) {
 		return acpBridgeInfo{ID: id, SessionID: sessionID, Cwd: cwd}, nil
@@ -77,9 +103,28 @@ func TestRefreshProcessMetadataTitlesNativePiWindows(t *testing.T) {
 		nativeAcpProviderID: "builtin:pi-acp",
 	}
 	_, server := newThemeQueryTestServer(t, window)
+	control := &recordingConn{}
+	server.controls[newControlClient(control)] = struct{}{}
 
+	// Pi writes a new session's file only after its first prompt.
 	snapshots := server.snapshots()
-	if len(snapshots) != 1 || snapshots[0].AgentSessionTitle != "Native prompt" {
-		t.Fatalf("native snapshots = %+v, want the Pi session title", snapshots)
+	if len(snapshots) != 1 || snapshots[0].AgentSessionTitle != "" {
+		t.Fatalf("native snapshots before the first prompt = %+v", snapshots)
+	}
+	appendPiTitleTestRecords(t, filepath.Join(bucket, "2026-10-01T23-29-17-785Z_"+sessionID+".jsonl"),
+		piTitleTestHeader,
+		`{"type":"message","message":{"role":"user","content":"Native prompt"}}`+"\n",
+	)
+	// The window prints nothing, so the quiet-window refresh finds the file once
+	// the bridge lookup is due again.
+	expireMetadataRefresh(server, window)
+	window.piTitleMu.Lock()
+	window.piNativeSessionCheckedAt = time.Time{}
+	window.piTitleMu.Unlock()
+	if !server.refreshQuietWindowMetadata() {
+		t.Fatal("quiet refresh reported a closed server")
+	}
+	if !strings.Contains(control.String(), `"agentSessionTitle":"Native prompt"`) {
+		t.Fatalf("native label was not broadcast: %s", control.String())
 	}
 }

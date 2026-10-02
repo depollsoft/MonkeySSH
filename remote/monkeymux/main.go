@@ -74,6 +74,7 @@ const (
 	oscBufferLimitBytes               = 4096
 	processMetadataTimeout            = 500 * time.Millisecond
 	processMetadataInterval           = 500 * time.Millisecond
+	windowMetadataRefreshInterval     = 2 * time.Second
 	runCommandOutputMaxBytes          = 8 * 1024 * 1024
 	runCommandTimeout                 = 20 * time.Second
 	socketTimeout                     = 2 * time.Second
@@ -6016,6 +6017,7 @@ func serveSession(
 		server.close()
 	}()
 	server.startSocketRepublisher()
+	server.startWindowMetadataRefresher()
 
 	for {
 		conn, err := server.acceptConnection()
@@ -6791,7 +6793,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	after := window.broadcastIdentityLocked()
-	piRetitled := after.agentTool == "pi" && after.paneTitle != before.paneTitle
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
@@ -6914,45 +6915,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			Window:  snapshot,
 		})
 	}
-	if piRetitled {
-		s.refreshPiSessionTitle(windowID)
-	}
 	if refreshPendingFocus || refreshPendingResize {
 		s.refreshPendingClientViewport(refreshPendingFocus, refreshPendingResize)
 	}
-}
-
-// refreshPiSessionTitle rereads a Pi window's session label outside the
-// metadata interval. Pi records a new session name before it retitles its
-// terminal, and an idle window would otherwise keep the old label until it
-// prints again.
-func (s *muxServer) refreshPiSessionTitle(windowID string) {
-	s.mu.Lock()
-	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed {
-		s.mu.Unlock()
-		return
-	}
-	sessionPath, bridgeID := window.agentSessionPath, window.nativeAcpBridgeID
-	s.mu.Unlock()
-	title := window.piSessionTitle(sessionPath, bridgeID, time.Now())
-	s.mu.Lock()
-	if s.windowByIDLocked(windowID) != window || window.closed ||
-		window.agentSessionPath != sessionPath ||
-		window.nativeAcpBridgeID != bridgeID ||
-		window.agentSessionTitle == title {
-		s.mu.Unlock()
-		return
-	}
-	window.agentSessionTitle = title
-	snapshot := s.snapshotLocked(window)
-	window.lastBroadcast = time.Now()
-	s.mu.Unlock()
-	s.broadcast(controlResponse{
-		Type:    "window_updated",
-		Session: s.session,
-		Window:  &snapshot,
-	})
 }
 
 // wrapSynchronizedTerminalOutput builds the resume write for one attach client.
@@ -17170,6 +17135,63 @@ func (s *muxServer) startSocketRepublisher() {
 		defer s.socketRepublishers.Done()
 		s.republishSocketLoop()
 	}()
+}
+
+func (s *muxServer) startWindowMetadataRefresher() {
+	go func() {
+		ticker := time.NewTicker(windowMetadataRefreshInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !s.refreshQuietWindowMetadata() {
+				return
+			}
+		}
+	}()
+}
+
+// refreshQuietWindowMetadata refreshes every window's metadata while a control
+// client is watching and broadcasts the windows whose list entry changed.
+// Output refreshes a window as it arrives, but a window can change without
+// printing: a native agent window prints nothing, and an agent can rename its
+// session right after its last output. It reports false once the server has
+// closed.
+func (s *muxServer) refreshQuietWindowMetadata() bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	if len(s.controls) == 0 {
+		s.mu.Unlock()
+		return true
+	}
+	windows := make([]*muxWindow, 0, len(s.windows))
+	identities := make([]windowBroadcastIdentity, 0, len(s.windows))
+	for _, window := range s.windows {
+		if !window.closed {
+			windows = append(windows, window)
+			identities = append(identities, window.broadcastIdentityLocked())
+		}
+	}
+	s.mu.Unlock()
+	for i, window := range windows {
+		s.refreshProcessMetadata(window.id)
+		s.mu.Lock()
+		if s.windowByIDLocked(window.id) != window || window.closed ||
+			window.broadcastIdentityLocked() == identities[i] {
+			s.mu.Unlock()
+			continue
+		}
+		snapshot := s.snapshotLocked(window)
+		window.lastBroadcast = time.Now()
+		s.mu.Unlock()
+		s.broadcast(controlResponse{
+			Type:    "window_updated",
+			Session: s.session,
+			Window:  &snapshot,
+		})
+	}
+	return true
 }
 
 // republishSocketLoop puts the session path back when it no longer names this

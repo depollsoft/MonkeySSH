@@ -729,20 +729,14 @@ TmuxWindow _preserveActiveAgentSessionMetadata(
   if (updated.hasUnsupportedAgentTool || updated.agentSessionTitle != null) {
     return updated;
   }
-  // MonkeyMux reports Pi's session ID and title in every snapshot, so a
-  // missing Pi title is a clear. A native Pi window has no session ID, and a
-  // kept title would outlive a bridge's switch to a new session.
-  if (updated.foregroundAgentTool == AgentLaunchTool.pi) return updated;
-  // Other agents' snapshots report the live session ID but omit its title,
+  // MonkeyMux snapshots can report the live session ID but omit its title,
   // which arrives in a separate metadata probe. Keep that title for the same
   // session so each snapshot does not switch the UI back to the terminal
-  // title.
+  // title. The probe always reports a session ID with a title. A title
+  // without one came from the snapshot itself, so its absence clears it.
+  if (existing.activeAgentSessionId == null) return updated;
   if (updated.activeAgentSessionId != null &&
       updated.activeAgentSessionId != existing.activeAgentSessionId) {
-    return updated;
-  }
-  if (existing.activeAgentSessionId == null &&
-      existing.agentSessionTitle == null) {
     return updated;
   }
   if (existing.panePid != updated.panePid ||

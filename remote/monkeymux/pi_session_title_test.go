@@ -132,3 +132,29 @@ func TestNativePiSessionPathFindsTheBridgeSessionFile(t *testing.T) {
 		t.Fatalf("unsafe session id path = %q, want empty", got)
 	}
 }
+
+func TestNativePiSessionPathSearchesAConfiguredSessionDir(t *testing.T) {
+	sessionDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", sessionDir)
+	cwd := filepath.Join(t.TempDir(), "project")
+	sessionID := "01a0f9cd-03d9-75cd-9ffa-8b89ede923c4"
+	bridgeID := "0123456789abcdef0123456789abcdef"
+	stubPiTitleBridgeStatus(t, func(id string) (acpBridgeInfo, error) {
+		return acpBridgeInfo{ID: id, SessionID: sessionID, Cwd: cwd}, nil
+	})
+	direct := filepath.Join(sessionDir, "2026-10-01T23-29-17-785Z_"+sessionID+".jsonl")
+	appendPiTitleTestRecords(t, direct, piTitleTestHeader)
+	if got := nativePiSessionPath(bridgeID); got != direct {
+		t.Fatalf("configured session dir path = %q, want %q", got, direct)
+	}
+
+	// A second file for the same id in the cwd bucket makes the match ambiguous.
+	bucket := filepath.Join(sessionDir, piEncodedSessionDirName(cwd))
+	if err := os.MkdirAll(bucket, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendPiTitleTestRecords(t, filepath.Join(bucket, filepath.Base(direct)), piTitleTestHeader)
+	if got := nativePiSessionPath(bridgeID); got != "" {
+		t.Fatalf("ambiguous session path = %q, want empty", got)
+	}
+}

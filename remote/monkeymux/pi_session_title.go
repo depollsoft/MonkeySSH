@@ -174,7 +174,9 @@ func summarizePiSessionTitle(text string) string {
 
 // nativePiSessionPath finds the session file behind a native Pi window. Its
 // ACP bridge reports pi-acp's session id, which is Pi's own session id, and Pi
-// stores that session as `<timestamp>_<id>.jsonl` in the bucket for its cwd.
+// names that session's file `<timestamp>_<id>.jsonl`. By default the file sits
+// in the bucket for the session's cwd; a configured session directory holds it
+// directly. Both places are searched and the id must match exactly one file.
 func nativePiSessionPath(bridgeID string) string {
 	if !validAcpBridgeID(bridgeID) {
 		return ""
@@ -188,33 +190,37 @@ func nativePiSessionPath(bridgeID string) string {
 		return ""
 	}
 	root := piSessionRootForWorkingDirectory(info.Cwd)
-	bucket := piEncodedSessionDirName(info.Cwd)
-	if root == "" || bucket == "" {
+	if root == "" {
 		return ""
 	}
-	directory := filepath.Join(root, bucket)
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return ""
+	directories := []string{root}
+	if bucket := piEncodedSessionDirName(info.Cwd); bucket != "" {
+		directories = append(directories, filepath.Join(root, bucket))
 	}
 	suffix := "_" + sessionID + ".jsonl"
 	match := ""
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), suffix) {
+	for _, directory := range directories {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
 			continue
 		}
-		if match != "" {
-			return ""
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), suffix) {
+				continue
+			}
+			if match != "" {
+				return ""
+			}
+			match = filepath.Join(directory, entry.Name())
 		}
-		match = filepath.Join(directory, entry.Name())
 	}
 	return match
 }
 
 // piSessionTitle returns the label for a Pi window's session: the exact file a
 // terminal window's Pi reported, or the file behind a native window's bridge.
-// It serializes on the window's own lock because snapshots and terminal output
-// both refresh metadata.
+// It serializes on the window's own lock because snapshots, terminal output,
+// and the quiet-window refresh all refresh metadata.
 func (w *muxWindow) piSessionTitle(sessionPath string, bridgeID string, now time.Time) string {
 	w.piTitleMu.Lock()
 	defer w.piTitleMu.Unlock()

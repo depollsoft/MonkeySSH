@@ -774,6 +774,7 @@ void main() {
         name: 'first',
         isActive: false,
         currentCommand: 'copilot',
+        activeAgentSessionId: 'session-1',
         agentSessionTitle: 'First title',
       );
       final windows = [
@@ -989,7 +990,7 @@ void main() {
         expect(updated.agentSessionTitle, isNull);
       });
 
-      test('a Pi snapshot without a title clears it, list=$fullList', () {
+      test('a snapshot drops a title with no session ID, list=$fullList', () {
         const native = TmuxWindow(
           index: 4,
           id: '@4',
