@@ -217,6 +217,43 @@ void main() {
     expect(calls.log, isEmpty);
   });
 
+  testWidgets('submit checks patterns off the UI isolate', (tester) async {
+    final calls = _Calls();
+    final slug = _item('s:slug', {
+      'sessionId': 's',
+      'mode': 'form',
+      'message': 'Name the branch',
+      'requestedSchema': {
+        'type': 'object',
+        'properties': {
+          'slug': {'type': 'string', 'title': 'Slug', 'pattern': r'^[a-z-]+$'},
+        },
+        'required': ['slug'],
+      },
+    });
+    await tester.pumpWidget(_host(calls, items: [slug]));
+    await tester.tap(find.text('Respond'));
+    await tester.pumpAndSettle();
+
+    Future<void> submit(String value) async {
+      await tester.enterText(find.byType(TextFormField), value);
+      await tester.tap(find.text('Submit'));
+      // The pattern runs in a worker isolate, which needs real time.
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 300)),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await submit('Not A Slug');
+    expect(find.text('Does not match the expected format'), findsOneWidget);
+    expect(calls.log, isEmpty);
+
+    await submit('fix-payments');
+    expect(calls.log, ['accept:s:slug']);
+    expect(calls.accepted.single.$2, {'slug': 'fix-payments'});
+  });
+
   testWidgets('withdrawal closes the sheet even with a date picker open', (
     tester,
   ) async {

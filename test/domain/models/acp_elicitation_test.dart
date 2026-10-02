@@ -296,6 +296,31 @@ void main() {
       bool req = false,
     }) => AcpElicitationField.parse('f', schema, isRequired: req);
 
+    test('checks patterns in a worker and abandons runaway ones', () async {
+      final form = _parse(
+        _form({
+          'slug': {'type': 'string', 'pattern': r'^[a-z]+$'},
+          'evil': {'type': 'string', 'pattern': r'^(a+)+$'},
+        }),
+      ) as AcpFormElicitation;
+      expect(
+        await form.patternMismatches({'slug': 'abc', 'evil': 'aaa'}),
+        isEmpty,
+      );
+      expect(await form.patternMismatches({'slug': 'AB', 'evil': 'aaa'}), {
+        'slug',
+      });
+
+      // Catastrophic backtracking would run for minutes on the UI isolate.
+      final elapsed = Stopwatch()..start();
+      final abandoned = await form.patternMismatches({
+        'slug': 'AB',
+        'evil': '${'a' * 40}!',
+      }, budget: const Duration(milliseconds: 200));
+      expect(abandoned, isEmpty);
+      expect(elapsed.elapsed, lessThan(const Duration(seconds: 5)));
+    });
+
     test('strings honor required, length, pattern, and formats', () {
       final text = field({
         'type': 'string',
@@ -307,7 +332,8 @@ void main() {
       expect(text.validate(''), 'Required');
       expect(text.validate('a'), isNotNull);
       expect(text.validate('abcde'), isNotNull);
-      expect(text.validate('AB'), isNotNull);
+      // Patterns are checked off the UI isolate at submit, not here.
+      expect(text.validate('AB'), isNull);
       expect(text.validate('abc'), isNull);
       // Lengths count code points, not UTF-16 units.
       expect(

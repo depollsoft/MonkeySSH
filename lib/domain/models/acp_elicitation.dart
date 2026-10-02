@@ -9,6 +9,7 @@ library;
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
+import 'acp_elicitation_patterns.dart';
 import 'acp_json.dart';
 
 /// Largest accepted `elicitation/create` params object, in UTF-8 JSON bytes.
@@ -225,10 +226,33 @@ final class AcpFormElicitation extends AcpElicitationRequest {
     (field) => !field.isRequired || field is! AcpUnsupportedElicitationField,
   );
 
+  /// Message for a value that fails its field's `pattern`.
+  static const patternMismatchMessage = 'Does not match the expected format';
+
+  /// Fields in [content] whose value fails its `pattern`, checked in a worker
+  /// isolate that is abandoned after [budget] (see
+  /// [acpElicitationPatternMismatches]).
+  Future<Set<String>> patternMismatches(
+    Map<String, Object?> content, {
+    Duration budget = kAcpElicitationPatternBudget,
+  }) => acpElicitationPatternMismatches([
+    for (final field in schema.fields)
+      if (field is AcpStringElicitationField)
+        if ((field.pattern, content[field.name])
+            case (final regex?, final String value) when value.isNotEmpty)
+          (
+            field: field.name,
+            pattern: regex.pattern,
+            unicode: regex.isUnicode,
+            value: value,
+          ),
+  ], budget: budget);
+
   /// Validates a submitted `content` map against [schema].
   ///
   /// Returns a field-name-to-message map; empty means valid. Unknown keys are
   /// rejected so a caller can never send values the agent did not request.
+  /// Field patterns are not evaluated here; see [patternMismatches].
   Map<String, String> validateContent(Map<String, Object?> content) {
     final errors = <String, String>{};
     final known = <String, AcpElicitationField>{
@@ -635,9 +659,9 @@ final class AcpStringElicitationField extends AcpElicitationField {
       case null:
         break;
     }
-    if (pattern case final regex? when !regex.hasMatch(value)) {
-      return 'Does not match the expected format';
-    }
+    // [pattern] is checked off the UI isolate, at submit, by
+    // [AcpFormElicitation.patternMismatches]: an agent pattern can backtrack
+    // for minutes on a short input.
     return null;
   }
 }

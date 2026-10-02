@@ -69,7 +69,10 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
   final _choices = <String, String?>{};
   final _toggles = <String, bool>{};
   final _selections = <String, Set<String>>{};
+  // Pattern failures found at submit; a field's entry clears when it changes.
+  final _patternErrors = <String, String>{};
   var _submitted = false;
+  var _checkingPatterns = false;
 
   List<AcpElicitationField> get _fields => widget.request.schema.fields;
 
@@ -136,11 +139,29 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
     return content;
   }
 
-  void _submit() {
-    setState(() => _submitted = true);
+  Future<void> _submit() async {
+    if (_checkingPatterns) return;
+    setState(() {
+      _submitted = true;
+      _patternErrors.clear();
+    });
     final valid = _formKey.currentState?.validate() ?? false;
     final content = _content();
     if (!valid || widget.request.validateContent(content).isNotEmpty) {
+      unawaited(HapticFeedback.mediumImpact());
+      return;
+    }
+    setState(() => _checkingPatterns = true);
+    final mismatched = await widget.request.patternMismatches(content);
+    if (!mounted) return;
+    setState(() {
+      _checkingPatterns = false;
+      for (final name in mismatched) {
+        _patternErrors[name] = AcpFormElicitation.patternMismatchMessage;
+      }
+    });
+    if (mismatched.isNotEmpty) {
+      _formKey.currentState?.validate();
       unawaited(HapticFeedback.mediumImpact());
       return;
     }
@@ -230,7 +251,7 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
                 child: const Text('Decline'),
               ),
               primary: FilledButton(
-                onPressed: canSubmit ? _submit : null,
+                onPressed: canSubmit && !_checkingPatterns ? _submit : null,
                 child: const Text('Submit'),
               ),
             ),
@@ -295,8 +316,12 @@ class _AcpElicitationFormSheetState extends State<AcpElicitationFormSheet> {
                 )
               : null,
         ),
+        onChanged: (_) {
+          if (_patternErrors.remove(field.name) != null) setState(() {});
+        },
         validator: (text) =>
-            field.validate(text == null || text.isEmpty ? null : text),
+            field.validate(text == null || text.isEmpty ? null : text) ??
+            _patternErrors[field.name],
       ),
     );
   }
