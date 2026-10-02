@@ -28,6 +28,13 @@ void main() {
       ),
       'PASS a\n100%\ndone',
     );
+    // A carriage return moves the cursor; it does not erase the line.
+    expect(acpPlainTerminalText('abc\rX'), 'Xbc');
+    expect(acpPlainTerminalText('loading 50%\rdone\x1B[K'), 'done');
+    expect(acpPlainTerminalText('old line\r\x1B[2Knew'), 'new');
+    expect(acpPlainTerminalText('ab\x08c'), 'ac');
+    expect(acpPlainTerminalText('12345\x1B[3Gx'), '12x45');
+    expect(acpPlainTerminalText('😀😀\rA'), 'A😀');
   });
 
   testWidgets('shows live output and exit status for an embedded terminal', (

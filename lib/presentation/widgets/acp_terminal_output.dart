@@ -31,26 +31,76 @@ class AcpTerminalOutputScope extends InheritedWidget {
       resolver != oldWidget.resolver;
 }
 
-final _escapeSequence = RegExp(
-  // OSC ... BEL/ST, CSI ... final byte, then any other two-byte escape.
-  '\x1B\\][^\x07\x1B]*(?:\x07|\x1B\\\\)|\x1B\\[[0-?]*[ -/]*[@-~]|\x1B[@-Z\\\\-_]',
+final _terminalToken = RegExp(
+  // CSI with its parameters and final byte, other escapes (OSC ... BEL/ST,
+  // two-byte), line breaks, carriage return, backspace, then plain text.
+  '\x1B\\[([0-?]*)[ -/]*([@-~])'
+  '|\x1B\\][^\x07\x1B]*(?:\x07|\x1B\\\\)|\x1B[@-Z\\\\-_]|\x1B'
+  '|(\r\n|\n)|(\r)|(\x08)'
+  '|([^\x1B\r\n\x08]+)',
 );
 
 /// Converts raw terminal output to plain text for display.
 ///
-/// Strips ANSI escape sequences and resolves carriage-return overwrites
-/// (progress bars redraw a line with `\r`) so each line shows its final state.
+/// Replays what a terminal does with each line so the final state shows:
+/// a carriage return moves to the start of the line and later text
+/// overwrites it (progress bars redraw this way), backspace and horizontal
+/// cursor moves shift where text lands, and erase-in-line clears. Other
+/// escape sequences are dropped.
 String acpPlainTerminalText(String raw) {
-  final withoutEscapes = raw.replaceAll(_escapeSequence, '');
-  final lines = withoutEscapes.replaceAll('\r\n', '\n').split('\n');
-  for (var index = 0; index < lines.length; index++) {
-    // A trailing `\r` only returns the cursor; text after an earlier `\r`
-    // replaced what came before it on the same line.
-    var line = lines[index];
-    if (line.endsWith('\r')) line = line.substring(0, line.length - 1);
-    final overwrite = line.lastIndexOf('\r');
-    lines[index] = overwrite >= 0 ? line.substring(overwrite + 1) : line;
+  final lines = <String>[];
+  var line = <int>[];
+  var cursor = 0;
+  void write(int rune) {
+    while (line.length < cursor) {
+      line.add(0x20);
+    }
+    if (cursor < line.length) {
+      line[cursor] = rune;
+    } else {
+      line.add(rune);
+    }
+    cursor++;
   }
+
+  for (final token in _terminalToken.allMatches(raw)) {
+    final finalByte = token.group(2);
+    if (finalByte != null) {
+      final count = int.tryParse(token.group(1)!.split(';').first) ?? 0;
+      switch (finalByte) {
+        case 'K':
+          // Erase in line: 0 (default) to the end, 1 to the cursor, 2 all.
+          switch (count) {
+            case 0:
+              if (cursor < line.length) line = line.sublist(0, cursor);
+            case 1:
+              for (var i = 0; i <= cursor && i < line.length; i++) {
+                line[i] = 0x20;
+              }
+            case 2:
+              line = <int>[];
+          }
+        case 'G':
+          cursor = (count < 1 ? 1 : count) - 1;
+        case 'C':
+          cursor += count < 1 ? 1 : count;
+        case 'D':
+          cursor -= count < 1 ? 1 : count;
+          if (cursor < 0) cursor = 0;
+      }
+    } else if (token.group(3) != null) {
+      lines.add(String.fromCharCodes(line).trimRight());
+      line = <int>[];
+      cursor = 0;
+    } else if (token.group(4) != null) {
+      cursor = 0;
+    } else if (token.group(5) != null) {
+      if (cursor > 0) cursor--;
+    } else if (token.group(6) case final text?) {
+      text.runes.forEach(write);
+    }
+  }
+  lines.add(String.fromCharCodes(line).trimRight());
   return lines.join('\n');
 }
 
