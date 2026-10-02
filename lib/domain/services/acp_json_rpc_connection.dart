@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
+
+import 'package:uuid/uuid.dart';
 
 import '../models/acp_json.dart';
 import 'acp_transport.dart';
@@ -242,6 +243,11 @@ final class _PendingResponse {
   final Completer<Object?> completer;
   final Timer? timer;
   final AcpRequestCancellation? cancellation;
+
+  /// Whether the request's frame started reaching the peer. A request that
+  /// expires while still queued is never written, so the peer needs no
+  /// `$/cancel_request` for it.
+  bool writeStarted = false;
 }
 
 /// Default bounded ACP JSON-RPC frame size, large enough for a 10 MiB image
@@ -257,7 +263,7 @@ final class AcpJsonRpcConnection {
     this.maxFrameSize = acpJsonRpcDefaultMaxFrameBytes,
     AcpRequestIdFactory? requestIdFactory,
   }) : _transport = transport,
-       _requestIdFactory = requestIdFactory ?? _newUuid {
+       _requestIdFactory = requestIdFactory ?? const Uuid().v4 {
     if (maxFrameSize <= 0) {
       throw ArgumentError.value(maxFrameSize, 'maxFrameSize');
     }
@@ -279,7 +285,7 @@ final class AcpJsonRpcConnection {
   /// Default deadline applied to requests.
   final Duration defaultRequestTimeout;
 
-  /// Maximum encoded size of one NDJSON frame.
+  /// Maximum UTF-8 size of one JSON frame, excluding its LF or CRLF delimiter.
   final int maxFrameSize;
 
   final AcpTransport _transport;
@@ -318,7 +324,8 @@ final class AcpJsonRpcConnection {
   /// When the deadline passes, the request fails with
   /// [AcpRequestTimeoutException] and a best-effort `$/cancel_request` asks the
   /// peer to stop working on it. [cancellation] lets the caller cancel it
-  /// explicitly; see [cancelRequest].
+  /// explicitly; see [cancelRequest]. Requests that expire or are cancelled
+  /// before their queued write begins are not sent, and need no cancel.
   Future<Object?> request(
     String method, {
     Object? params,
@@ -352,13 +359,11 @@ final class AcpJsonRpcConnection {
     final timer = effectiveTimeout == null
         ? null
         : Timer(effectiveTimeout, () {
-            if (!_removePending(pending) || pending.completer.isCompleted) {
-              return;
-            }
+            if (!_removePending(pending)) return;
             pending.completer.completeError(
               AcpRequestTimeoutException(requestId, method, effectiveTimeout),
             );
-            _sendCancelRequest(requestId);
+            if (pending.writeStarted) _sendCancelRequest(requestId);
           });
     pending = _PendingResponse(
       id: requestId,
@@ -374,8 +379,8 @@ final class AcpJsonRpcConnection {
         'id': requestId,
         'method': method,
         'params': ?params,
-      }).catchError((Object error, StackTrace stackTrace) {
-        if (_removePending(pending) && !pending.completer.isCompleted) {
+      }, pending: pending).catchError((Object error, StackTrace stackTrace) {
+        if (_removePending(pending)) {
           pending.completer.completeError(error, stackTrace);
         }
       }),
@@ -397,8 +402,9 @@ final class AcpJsonRpcConnection {
   ///
   /// The request's future fails immediately with a locally cancelled
   /// [AcpRequestCancelledException], and a best-effort `$/cancel_request` asks
-  /// the peer to stop. Any late peer response for [id] is ignored. Returns
-  /// whether a pending request with exactly [id] (type included) was found.
+  /// the peer to stop. A request still queued behind other writes is dropped
+  /// instead. Any late peer response for [id] is ignored. Returns whether a
+  /// pending request with exactly [id] (type included) was found.
   bool cancelRequest(AcpRequestId id) {
     final pending = _pending[id];
     if (pending == null || !_removePending(pending)) return false;
@@ -407,7 +413,7 @@ final class AcpJsonRpcConnection {
         const AcpRequestCancelledException(cancelledLocally: true),
       );
     }
-    _sendCancelRequest(id);
+    if (pending.writeStarted) _sendCancelRequest(id);
     return true;
   }
 
@@ -436,26 +442,15 @@ final class AcpJsonRpcConnection {
         continue;
       }
       _frameBytes.add(byte);
-      if (_frameBytes.length > maxFrameSize) {
-        _protocolFailure(
-          AcpProtocolException(
-            'ACP frame exceeds maximum size of $maxFrameSize bytes',
-          ),
-        );
+      // A trailing CR may be the first byte of a split CRLF delimiter.
+      final frameSize = _frameBytes.length - (byte == 0x0d ? 1 : 0);
+      if (!_validateIncomingFrameSize(frameSize)) {
         return;
       }
     }
   }
 
   void _handleFrame(List<int> bytes) {
-    if (bytes.length > maxFrameSize) {
-      _protocolFailure(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
-      );
-      return;
-    }
     late final Object? decoded;
     try {
       decoded = jsonDecode(utf8.decode(bytes, allowMalformed: false));
@@ -468,15 +463,18 @@ final class AcpJsonRpcConnection {
 
   void _handleDecodedFrame(AcpDecodedFrame frame) {
     if (_closed) return;
-    if (frame.byteLength > maxFrameSize || frame.byteLength < 0) {
-      _protocolFailure(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
-      );
-      return;
-    }
+    if (!_validateIncomingFrameSize(frame.byteLength)) return;
     _handleMessage(frame.message, immutable: true);
+  }
+
+  bool _validateIncomingFrameSize(int byteLength) {
+    if (byteLength >= 0 && byteLength <= maxFrameSize) return true;
+    _protocolFailure(
+      AcpProtocolException(
+        'ACP frame exceeds maximum size of $maxFrameSize bytes',
+      ),
+    );
+    return false;
   }
 
   void _handleMessage(AcpJsonMap? message, {bool immutable = false}) {
@@ -610,19 +608,26 @@ final class AcpJsonRpcConnection {
     );
   }
 
-  Future<void> _writeMessage(AcpJsonMap message) async {
+  Future<void> _writeMessage(
+    AcpJsonMap message, {
+    _PendingResponse? pending,
+  }) async {
     _ensureOpen();
     final bytes = utf8.encode('${jsonEncode(message)}\n');
-    if (bytes.length > maxFrameSize) {
-      return Future<void>.error(
-        AcpProtocolException(
-          'ACP frame exceeds maximum size of $maxFrameSize bytes',
-        ),
+    if (bytes.length - 1 > maxFrameSize) {
+      throw AcpProtocolException(
+        'ACP frame exceeds maximum size of $maxFrameSize bytes',
       );
     }
-    final operation = _writeTail.then((_) {
+    final operation = _writeTail.then<void>((_) async {
       _ensureOpen();
-      return _transport.write(bytes);
+      // A request may expire while waiting for an earlier write. Check the
+      // pending object as well as its ID because callers can reuse expired IDs.
+      if (pending != null) {
+        if (!identical(_pending[pending.id], pending)) return;
+        pending.writeStarted = true;
+      }
+      await _transport.write(bytes);
     });
     _writeTail = operation.then<void>(
       (_) {},
@@ -692,19 +697,4 @@ final class AcpJsonRpcConnection {
   void _ensureOpen() {
     if (_closed) throw const AcpConnectionClosedException();
   }
-}
-
-final _secureRandom = Random.secure();
-
-AcpRequestId _newUuid() {
-  final bytes = List<int>.generate(16, (_) => _secureRandom.nextInt(256));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  String hex(int value) => value.toRadixString(16).padLeft(2, '0');
-  final encoded = bytes.map(hex).join();
-  return '${encoded.substring(0, 8)}-'
-      '${encoded.substring(8, 12)}-'
-      '${encoded.substring(12, 16)}-'
-      '${encoded.substring(16, 20)}-'
-      '${encoded.substring(20)}';
 }

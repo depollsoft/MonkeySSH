@@ -234,6 +234,11 @@ void registerTerminalScreenSelectionTests() {
         );
       });
 
+      test('keeps an L-number that ends a name without an extension', () {
+        expect(trimTerminalFilePathCandidate('/data/MODEL12'), '/data/MODEL12');
+        expect(trimTerminalFilePathCandidate('/www/HTML5:3'), '/www/HTML5');
+      });
+
       test('drops trailing shell operators from file paths', () {
         expect(
           trimTerminalFilePathCandidate(
@@ -1360,6 +1365,10 @@ void registerTerminalScreenSelectionTests() {
 
       test('returns null for a file URI without a path', () {
         expect(resolveTerminalFileUriPath('file://build-host'), isNull);
+      });
+
+      test('returns null instead of throwing for invalid UTF-8 escapes', () {
+        expect(resolveTerminalFileUriPath('file:///tmp/%FF.log'), isNull);
       });
     });
 

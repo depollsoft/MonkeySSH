@@ -234,6 +234,7 @@ void main() {
               .having((e) => e.code, 'code', -32800),
         ),
       );
+      await _settle();
       expect(connection.cancelRequest(9), isTrue);
       expect(connection.cancelRequest(9), isFalse);
       expect(connection.cancelRequest('9'), isFalse);
@@ -267,6 +268,7 @@ void main() {
         pending,
         throwsA(isA<AcpRequestCancelledException>()),
       );
+      await _settle();
       cancellation
         ..cancel()
         ..cancel();
@@ -285,6 +287,24 @@ void main() {
       );
       await _settle();
       expect(transport.messages.where((m) => m['id'] == 'late'), isEmpty);
+    });
+
+    test('a request cancelled while queued is dropped unsent', () async {
+      final transport = _Transport();
+      final connection = AcpJsonRpcConnection(transport: transport);
+      addTearDown(connection.close);
+      final pending = connection.request('authenticate', id: 'queued');
+      final failure = expectLater(
+        pending,
+        throwsA(isA<AcpRequestCancelledException>()),
+      );
+      // The frame's write has not started, so the agent never sees the
+      // request and needs no cancel for it.
+      expect(connection.cancelRequest('queued'), isTrue);
+      await failure;
+      await _settle();
+      expect(transport.messages.where((m) => m['id'] == 'queued'), isEmpty);
+      expect(transport.notifications(acpCancelRequestMethod), isEmpty);
     });
 
     test('a settled request unbinds its cancellation handle', () async {

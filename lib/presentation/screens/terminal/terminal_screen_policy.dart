@@ -1269,8 +1269,10 @@ final _terminalFilePathLineSuffixPattern = RegExp(
   r'''(?:[A-Za-z]:[\\/](?:[^\s<>"'$#&|;]+)?|~(?:/[^\s<>"'$#&|;]+)?/?|/(?:[^\s<>"'$#&|;]+)?|\.\.?/(?:[^\s<>"'$#&|;]+)?|[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+/?)$''',
 );
 
+// A wrapped `L360:430` range only follows an extension (`main.dartL360:430`);
+// a bare `L12` belongs to the name (`/data/MODEL12`).
 final _terminalFilePathStackTraceSuffixPattern = RegExp(
-  r'(?:L\d+(?::\d+)?|:\d+(?::\d+)?)$',
+  r'(?:(?<=\.[A-Za-z0-9]+)L\d+(?::\d+)?|:\d+(?::\d+)?)$',
 );
 
 final _terminalFilePathShellOperatorSuffixPattern = RegExp(
@@ -2586,13 +2588,18 @@ bool isResolvableTerminalLinkUri(Uri uri) =>
 ///
 /// The URI host (if any) is ignored: the path is opened on the host the
 /// terminal session is connected to. Percent-encoding is decoded so the SFTP
-/// browser receives the literal path (e.g. `%20` becomes a space).
+/// browser receives the literal path (e.g. `%20` becomes a space); escapes that
+/// are not valid UTF-8 make the link unusable rather than throwing.
 String? resolveTerminalFileUriPath(String link) {
   final uri = Uri.tryParse(normalizeTerminalLinkCandidate(link));
   if (uri == null || !isTerminalFileUri(uri)) {
     return null;
   }
-  return Uri.decodeComponent(uri.path);
+  try {
+    return Uri.decodeComponent(uri.path);
+  } on FormatException {
+    return null;
+  }
 }
 
 /// Applies pasted or rendered text at the terminal cursor within a wrapped line.

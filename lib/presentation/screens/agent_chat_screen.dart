@@ -663,11 +663,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   AcpComposerAttachmentActions _attachmentActions(AcpSessionState session) {
-    final connectionId = ref
-        .read(sshServiceProvider)
-        .getSessionsForHost(widget.hostId)
-        .firstOrNull
-        ?.connectionId;
+    final connectionId = _currentConnectionId();
     final builder = widget.attachmentActionsBuilder;
     if (builder != null) {
       return builder(widget.hostId, connectionId);
@@ -947,12 +943,17 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     );
   }
 
-  void _openMarkdownLink(String text, String? href, String title) {
+  void _openMarkdownLink(String text, String? href, String title) =>
+      _openLink(href);
+
+  /// Opens remote paths and `file:` URIs in SFTP, and web or mail links
+  /// externally. Other schemes, such as local attachments, are ignored.
+  void _openLink(String? href) {
     final target = href?.trim();
     if (target == null || target.isEmpty) return;
     final path = resolveAcpMarkdownPath(target);
     if (path != null) {
-      _openRemotePath(path);
+      unawaited(_openRemotePath(path));
       return;
     }
     final uri = Uri.tryParse(target);
@@ -968,21 +969,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   ValueListenable<AcpTerminalDisplay?> _terminalDisplay(String terminalId) =>
       ref.read(acpSessionManagerProvider).terminalDisplay(_key, terminalId);
 
+  /// Shows embedded text in a viewer and opens linked resources like links.
   void _openResource(ui.AcpResourceRef resource) {
     final text = resource.text;
     if (text != null) {
       unawaited(_showResourceText(resource, text));
       return;
     }
-    final uri = resource.uri;
-    if (uri.startsWith('http://') || uri.startsWith('https://')) {
-      final parsed = Uri.tryParse(uri);
-      if (parsed != null) {
-        unawaited(launchUrl(parsed, mode: LaunchMode.externalApplication));
-      }
-      return;
-    }
-    _openRemotePath(uri.startsWith('file:') ? Uri.parse(uri).path : uri);
+    _openLink(resource.uri);
   }
 
   /// Shows a resource whose contents the agent embedded, which may have no
@@ -998,21 +992,17 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           onCopy: () => _copyToClipboard(text, 'Contents'),
           onOpenPath: (path) {
             Navigator.of(sheetContext).pop();
-            _openRemotePath(path);
+            unawaited(_openRemotePath(path));
           },
         ),
       );
 
-  void _openRemotePath(String path) {
+  Future<void> _openRemotePath(String path) async {
     final session = ref
         .read(acpSessionManagerProvider)
         .state
         .byKeyValue(_key.value);
-    final connectionId = ref
-        .read(sshServiceProvider)
-        .getSessionsForHost(widget.hostId)
-        .firstOrNull
-        ?.connectionId;
+    final connectionId = _currentConnectionId();
     final location = Uri(
       path: '/sftp/${widget.hostId}',
       queryParameters: {
@@ -1021,7 +1011,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         if (connectionId != null) 'connectionId': '$connectionId',
       },
     ).toString();
-    context.push<void>(location);
+    // The browser closes with a message when the path cannot be opened.
+    final error = await context.push<String>(location);
+    if (error != null) _showSnack(error);
   }
 
   void _copyToClipboard(String value, String label) {
@@ -1356,7 +1348,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                   onCopyCode: (code) =>
                                       _copyToClipboard(code, 'Code'),
                                   onOpenLocation: (location) =>
-                                      _openRemotePath(location.path),
+                                      unawaited(_openRemotePath(location.path)),
                                 ),
                               ),
                             ),

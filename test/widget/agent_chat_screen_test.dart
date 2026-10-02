@@ -138,12 +138,53 @@ Widget _wrap(
   );
 }
 
+/// Pumps the chat for [session] under a router whose SFTP route records the
+/// opened location and closes with an error when its button is tapped.
+Future<void> _pumpWithSftpRoute(
+  WidgetTester tester,
+  AcpSessionState session,
+  ValueSetter<Uri> onOpen,
+) async {
+  FluttyTheme.debugUseSystemFonts = true;
+  final manager = FakeAcpSessionManager(sessions: [session]);
+  final router = GoRouter(
+    routes: [
+      GoRoute(
+        path: '/',
+        builder: (_, _) =>
+            _wrap(manager, connectOnMount: false, hasActiveSshSession: true),
+      ),
+      GoRoute(
+        path: '/sftp/:hostId',
+        builder: (context, state) {
+          onOpen(state.uri);
+          return Scaffold(
+            body: TextButton(
+              onPressed: () => context.pop('Could not open in SFTP'),
+              child: const Text('SFTP browser'),
+            ),
+          );
+        },
+      ),
+    ],
+  );
+  addTearDown(() {
+    router.dispose();
+    manager.dispose();
+    FluttyTheme.debugUseSystemFonts = false;
+  });
+  await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   for (final (markdown, path) in [
     ('lib/main.dart:42', 'lib/main.dart'),
     ('`lib/main.dart`', 'lib/main.dart'),
     ('```text\nlib/main.dart:42\n```', 'lib/main.dart'),
     ('[source](lib/main.dart)', 'lib/main.dart'),
+    ('[source](./main.dart)', 'main.dart'),
+    ('[source](/tmp/report%21)', '/tmp/report!'),
     ('[source](lib/my%20file.dart)', 'lib/my file.dart'),
     ('[source](lib/my%2520file.dart)', 'lib/my%20file.dart'),
     ('`/tmp/my%20file.dart`', '/tmp/my%20file.dart'),
@@ -154,36 +195,9 @@ void main() {
     testWidgets('native path $markdown opens SFTP with the session cwd', (
       tester,
     ) async {
-      FluttyTheme.debugUseSystemFonts = true;
       final session = fakeAcpSession(timeline: fakeAcpTimeline(markdown));
-      final manager = FakeAcpSessionManager(sessions: [session]);
       Uri? opened;
-      final router = GoRouter(
-        routes: [
-          GoRoute(
-            path: '/',
-            builder: (_, _) => _wrap(
-              manager,
-              connectOnMount: false,
-              hasActiveSshSession: true,
-            ),
-          ),
-          GoRoute(
-            path: '/sftp/:hostId',
-            builder: (_, state) {
-              opened = state.uri;
-              return const Scaffold(body: Text('SFTP browser'));
-            },
-          ),
-        ],
-      );
-      addTearDown(() {
-        router.dispose();
-        manager.dispose();
-        FluttyTheme.debugUseSystemFonts = false;
-      });
-      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
-      await tester.pumpAndSettle();
+      await _pumpWithSftpRoute(tester, session, (uri) => opened = uri);
       final label = markdown.startsWith('[source]')
           ? 'source'
           : markdown.startsWith('```')
@@ -201,6 +215,37 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('a file resource opens its decoded path and reports failures', (
+    tester,
+  ) async {
+    final session = fakeAcpSession(
+      timeline: AcpTimeline(
+        entries: [
+          AcpMessageEntry(
+            order: 0,
+            role: AcpMessageRole.user,
+            content: const [
+              AcpResourceLinkContent(
+                name: 'my notes.txt',
+                uri: 'file:///tmp/my%20notes.txt',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    Uri? opened;
+    await _pumpWithSftpRoute(tester, session, (uri) => opened = uri);
+    await tester.tap(find.text('my notes.txt'));
+    await tester.pumpAndSettle();
+    expect(opened?.queryParameters['path'], '/tmp/my notes.txt');
+
+    await tester.tap(find.text('SFTP browser'));
+    await tester.pumpAndSettle();
+    expect(find.text('Could not open in SFTP'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   for (final width in [390.0, 1100.0]) {
     testWidgets(

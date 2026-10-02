@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
 import 'acp_code_block.dart';
+import 'acp_markdown_paths.dart';
 import 'syntax_highlight_language.dart';
 
 /// Bottom-sheet body for reading a resource whose contents an agent embedded.
@@ -34,15 +35,7 @@ class AcpResourceTextSheet extends StatelessWidget {
   final ValueChanged<String>? onOpenPath;
 
   /// The remote path [resource] names, if it is one the file browser can open.
-  String? get remotePath {
-    final uri = resource.uri;
-    final path = uri.startsWith('file:')
-        ? Uri.tryParse(uri)?.path
-        : uri.startsWith('/')
-        ? uri
-        : null;
-    return path == null || path.isEmpty ? null : path;
-  }
+  String? get remotePath => resolveAcpMarkdownPath(resource.uri);
 
   @override
   Widget build(BuildContext context) {
