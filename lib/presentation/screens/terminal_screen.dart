@@ -32,6 +32,7 @@ import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_session_workspace.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_runtime_info.dart';
 import '../../domain/models/agent_usage_rings.dart';
@@ -8964,12 +8965,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           :final providerId,
           :final acpSessionId,
           :final workingDirectory,
+          :final additionalDirectories,
         ):
           await _startNativeAcpSession(
             session,
             providerId: providerId,
             workingDirectory: workingDirectory,
             resumeSessionId: acpSessionId,
+            additionalDirectories: additionalDirectories,
           );
         case TmuxResumeSessionAction(
           :final resumeCommand,
@@ -9156,6 +9159,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? providerId,
     String? workingDirectory,
     String? resumeSessionId,
+    List<String> additionalDirectories = const <String>[],
   }) async {
     if (providerId == null || _activeMuxBackend != RemoteMuxBackend.monkeyMux) {
       return _performNativeAcpSessionStart(
@@ -9163,6 +9167,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         providerId: providerId,
         workingDirectory: workingDirectory,
         resumeSessionId: resumeSessionId,
+        additionalDirectories: additionalDirectories,
       );
     }
     if (_nativeAcpLaunchState != null) return;
@@ -9187,6 +9192,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         providerId: providerId,
         workingDirectory: workingDirectory,
         resumeSessionId: resumeSessionId,
+        additionalDirectories: additionalDirectories,
         launchGeneration: generation,
       );
     } finally {
@@ -9199,6 +9205,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? providerId,
     String? workingDirectory,
     String? resumeSessionId,
+    List<String> additionalDirectories = const <String>[],
     int? launchGeneration,
   }) async {
     if (_activeMuxBackend != RemoteMuxBackend.monkeyMux) {
@@ -9288,6 +9295,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             ),
             autoApprovePermissions: _startClisInYoloMode,
             replace: replace,
+            // Re-send the roots the agent reported via session/list; MCP
+            // servers fall back to the configured defaults.
+            workspace: additionalDirectories.isEmpty
+                ? null
+                : AcpSessionWorkspaceOptions(
+                    additionalDirectories: additionalDirectories,
+                  ),
           );
 
     var result = await launch();

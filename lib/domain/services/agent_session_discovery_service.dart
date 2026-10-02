@@ -140,6 +140,7 @@ ToolSessionInfo? normalizeDiscoveredSessionInfo(
     originWorkingDirectory: info.originWorkingDirectory,
     lastActive: info.lastActive,
     summary: normalizedSummary,
+    additionalDirectories: info.additionalDirectories,
   );
 }
 
@@ -3974,6 +3975,7 @@ class AgentSessionDiscoveryService {
               summary:
                   sessionInfo.title ??
                   _truncateSessionIdValue(sessionInfo.sessionId),
+              additionalDirectories: sessionInfo.additionalDirectories,
             );
             sessionsById.putIfAbsent(info.sessionId, () => info);
           }

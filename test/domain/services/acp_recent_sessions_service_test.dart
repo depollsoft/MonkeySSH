@@ -104,6 +104,81 @@ void main() {
     });
   });
 
+  group('workspace choices', () {
+    test('round-trips MCP server ids and additional directories', () async {
+      await service.record(
+        AcpRecentSessionRef(
+          hostId: 1,
+          providerId: 'copilot',
+          bridgeId: 'bridge-1',
+          acpSessionId: 's1',
+          cwd: '/repo',
+          mcpServerIds: const ['mcp-a', 'mcp-b', 'mcp-a', ''],
+          additionalDirectories: const ['/shared', '/docs', '/shared'],
+          createdAt: DateTime.utc(2024),
+          lastActivityAt: DateTime.utc(2024),
+        ),
+      );
+      final restored = (await service.list()).single;
+      expect(restored.mcpServerIds, ['mcp-a', 'mcp-b']);
+      expect(restored.additionalDirectories, ['/shared', '/docs']);
+      expect(restored.workspace.mcpServerIds, ['mcp-a', 'mcp-b']);
+      expect(restored.workspace.additionalDirectories, ['/shared', '/docs']);
+    });
+
+    test(
+      'keeps an explicit empty server choice distinct from legacy',
+      () async {
+        await service.record(
+          AcpRecentSessionRef(
+            hostId: 1,
+            providerId: 'copilot',
+            bridgeId: 'bridge-1',
+            acpSessionId: 's1',
+            mcpServerIds: const <String>[],
+            createdAt: DateTime.utc(2024),
+            lastActivityAt: DateTime.utc(2024),
+          ),
+        );
+        await service.record(ref(2, 's2'));
+        final list = await service.list();
+        final explicit = list.firstWhere((r) => r.acpSessionId == 's1');
+        final legacy = list.firstWhere((r) => r.acpSessionId == 's2');
+        expect(explicit.mcpServerIds, isEmpty);
+        expect(legacy.mcpServerIds, isNull);
+        expect(legacy.additionalDirectories, isEmpty);
+      },
+    );
+
+    test('drops overlong directories instead of truncating them', () async {
+      final overlong = '/${'a' * kAcpRecentCwdMaxCharacters}';
+      await service.record(
+        AcpRecentSessionRef(
+          hostId: 1,
+          providerId: 'copilot',
+          bridgeId: 'bridge-1',
+          acpSessionId: 's1',
+          additionalDirectories: [overlong, '/ok'],
+          createdAt: DateTime.utc(2024),
+          lastActivityAt: DateTime.utc(2024),
+        ),
+      );
+      expect((await service.list()).single.additionalDirectories, ['/ok']);
+    });
+
+    test('ignores malformed workspace fields on older entries', () async {
+      await settings.setString(
+        SettingKeys.acpRecentSessions,
+        '[{"hostId":2,"providerId":"copilot","bridgeId":"b",'
+        '"acpSessionId":"s","createdAt":"2024-01-01T00:00:00Z",'
+        '"mcpServerIds":"oops","additionalDirectories":[1,"/x"]}]',
+      );
+      final restored = (await service.list()).single;
+      expect(restored.mcpServerIds, isEmpty);
+      expect(restored.additionalDirectories, ['/x']);
+    });
+  });
+
   group('last selected', () {
     test('persists and clears the last selected key', () async {
       final key = AcpSessionKey.of(

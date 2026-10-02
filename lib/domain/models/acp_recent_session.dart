@@ -1,7 +1,9 @@
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
 import 'acp_json.dart';
 import 'acp_session_keys.dart';
+import 'acp_session_workspace.dart';
 
 /// Maximum persisted provider-title characters for one recent session.
 const kAcpRecentTitleMaxCharacters = 256;
@@ -12,8 +14,9 @@ const kAcpRecentCwdMaxCharacters = 1024;
 /// A persistable navigation reference to a recently used ACP session.
 ///
 /// This stores identifiers, bounded display metadata (provider title and
-/// working directory), and timestamps. It never stores transcript messages,
-/// attachments, tool payloads, or reasoning.
+/// working directory), the session's workspace choices (local MCP server ids
+/// and additional directories), and timestamps. It never stores transcript
+/// messages, attachments, tool payloads, reasoning, or MCP secrets.
 @immutable
 final class AcpRecentSessionRef {
   /// Creates a recent-session reference.
@@ -26,6 +29,8 @@ final class AcpRecentSessionRef {
     required this.lastActivityAt,
     this.title,
     this.cwd,
+    this.mcpServerIds,
+    this.additionalDirectories = const <String>[],
   });
 
   /// Attempts to parse a stored reference, returning `null` when the shape or
@@ -57,6 +62,12 @@ final class AcpRecentSessionRef {
       lastActivityAt: lastActivityAt,
       title: _readOptionalString(json['title'], kAcpRecentTitleMaxCharacters),
       cwd: _readOptionalString(json['cwd'], kAcpRecentCwdMaxCharacters),
+      mcpServerIds: json.containsKey('mcpServerIds')
+          ? boundedMcpServerIds(_readStrings(json['mcpServerIds']))
+          : null,
+      additionalDirectories: boundedAdditionalDirectories(
+        _readStrings(json['additionalDirectories']),
+      ),
     );
   }
 
@@ -77,6 +88,20 @@ final class AcpRecentSessionRef {
 
   /// Optional working directory.
   final String? cwd;
+
+  /// Local ids of the MCP servers attached to this session, or `null` for a
+  /// reference recorded before MCP servers were configurable (reconnecting
+  /// such a session attaches the current defaults).
+  final List<String>? mcpServerIds;
+
+  /// Additional absolute workspace directories sent with this session.
+  final List<String> additionalDirectories;
+
+  /// The workspace choices to re-send when this session is reconnected.
+  AcpSessionWorkspaceOptions get workspace => AcpSessionWorkspaceOptions(
+    mcpServerIds: mcpServerIds,
+    additionalDirectories: additionalDirectories,
+  );
 
   /// When the session was first created.
   final DateTime createdAt;
@@ -100,21 +125,56 @@ final class AcpRecentSessionRef {
     'acpSessionId': acpSessionId,
     if (title != null) 'title': title,
     if (cwd != null) 'cwd': cwd,
+    if (mcpServerIds != null) 'mcpServerIds': mcpServerIds,
+    if (additionalDirectories.isNotEmpty)
+      'additionalDirectories': additionalDirectories,
     'createdAt': createdAt.toUtc().toIso8601String(),
     'lastActivityAt': lastActivityAt.toUtc().toIso8601String(),
   };
 
   /// Returns a copy with selected fields replaced.
-  AcpRecentSessionRef copyWith({String? title, String? cwd}) =>
-      AcpRecentSessionRef(
-        hostId: hostId,
-        providerId: providerId,
-        bridgeId: bridgeId,
-        acpSessionId: acpSessionId,
-        title: title ?? this.title,
-        cwd: cwd ?? this.cwd,
-        createdAt: createdAt,
-        lastActivityAt: lastActivityAt,
+  AcpRecentSessionRef copyWith({
+    String? title,
+    String? cwd,
+    List<String>? mcpServerIds,
+    List<String>? additionalDirectories,
+  }) => AcpRecentSessionRef(
+    hostId: hostId,
+    providerId: providerId,
+    bridgeId: bridgeId,
+    acpSessionId: acpSessionId,
+    title: title ?? this.title,
+    cwd: cwd ?? this.cwd,
+    mcpServerIds: mcpServerIds ?? this.mcpServerIds,
+    additionalDirectories: additionalDirectories ?? this.additionalDirectories,
+    createdAt: createdAt,
+    lastActivityAt: lastActivityAt,
+  );
+
+  /// Bounds persisted MCP server ids to valid, unique identifiers.
+  static List<String> boundedMcpServerIds(Iterable<String> ids) =>
+      List.unmodifiable(
+        ids
+            .map((id) => id.trim())
+            .where(
+              (id) => id.isNotEmpty && id.length <= acpMaxIdentifierCharacters,
+            )
+            .toSet()
+            .take(kAcpMaxSessionMcpServers),
+      );
+
+  /// Bounds persisted additional directories. Overlong paths are dropped
+  /// rather than truncated, since a truncated path names another directory.
+  static List<String> boundedAdditionalDirectories(Iterable<String> paths) =>
+      List.unmodifiable(
+        paths
+            .where(
+              (path) =>
+                  path.trim().isNotEmpty &&
+                  path.length <= kAcpRecentCwdMaxCharacters,
+            )
+            .toSet()
+            .take(kAcpMaxAdditionalDirectories),
       );
 
   @override
@@ -127,6 +187,14 @@ final class AcpRecentSessionRef {
           acpSessionId == other.acpSessionId &&
           title == other.title &&
           cwd == other.cwd &&
+          const ListEquality<String>().equals(
+            mcpServerIds,
+            other.mcpServerIds,
+          ) &&
+          const ListEquality<String>().equals(
+            additionalDirectories,
+            other.additionalDirectories,
+          ) &&
           createdAt == other.createdAt &&
           lastActivityAt == other.lastActivityAt;
 
@@ -138,6 +206,10 @@ final class AcpRecentSessionRef {
     acpSessionId,
     title,
     cwd,
+    mcpServerIds == null
+        ? null
+        : const ListEquality<String>().hash(mcpServerIds),
+    const ListEquality<String>().hash(additionalDirectories),
     createdAt,
     lastActivityAt,
   );
@@ -156,6 +228,13 @@ final class AcpRecentSessionRef {
         ? null
         : trimmed;
   }
+
+  static List<String> _readStrings(Object? value) => value is List
+      ? <String>[
+          for (final item in value.take(kAcpMaxAdditionalDirectories * 4))
+            if (item is String) item,
+        ]
+      : const <String>[];
 
   static String? _readOptionalString(Object? value, int maxCharacters) {
     if (value is! String) return null;

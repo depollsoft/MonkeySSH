@@ -756,6 +756,7 @@ class TmuxResumeAcpSessionAction extends TmuxNavigatorAction {
     required this.providerId,
     required this.acpSessionId,
     this.workingDirectory,
+    this.additionalDirectories = const <String>[],
   });
 
   /// Stable built-in ACP provider identifier.
@@ -766,6 +767,9 @@ class TmuxResumeAcpSessionAction extends TmuxNavigatorAction {
 
   /// Working directory in which the provider session was created.
   final String? workingDirectory;
+
+  /// Additional workspace roots the agent reported for the session.
+  final List<String> additionalDirectories;
 }
 
 /// Resume an AI tool session in a new tmux window.
@@ -2259,6 +2263,7 @@ class _MuxRecentSessionsSectionState
             providerId: providerId,
             acpSessionId: info.sessionId,
             workingDirectory: info.workingDirectory,
+            additionalDirectories: info.additionalDirectories,
           ),
         );
         return;

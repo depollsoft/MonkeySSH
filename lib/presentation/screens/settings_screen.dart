@@ -27,6 +27,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
+import 'acp_mcp_servers_screen.dart';
 import 'settings_labels.dart';
 import 'transfer_screen.dart';
 
@@ -49,6 +50,7 @@ class SettingsScreen extends ConsumerWidget {
         const _SecuritySection(),
         const _PrivacySection(),
         const _TerminalSection(),
+        const _AgentsSection(),
         const _ImportExportSection(),
         if (BackgroundSshService.supportsBatteryOptimizationControls)
           const _AndroidBackgroundSection(),
@@ -626,6 +628,19 @@ class _PrivacySection extends ConsumerWidget {
       ],
     );
   }
+}
+
+class _AgentsSection extends StatelessWidget {
+  const _AgentsSection();
+
+  @override
+  Widget build(BuildContext context) => const Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _SectionHeader(title: 'agents', subtitle: 'Native agent chat sessions'),
+      AcpMcpServersSettingsTile(),
+    ],
+  );
 }
 
 class _TerminalSection extends ConsumerWidget {

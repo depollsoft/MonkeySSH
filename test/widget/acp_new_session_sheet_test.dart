@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_mcp_server.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
@@ -566,5 +567,154 @@ void main() {
       find.text('Authentication failed. Check this host’s credentials.'),
       findsOneWidget,
     );
+  });
+
+  group('workspace options', () {
+    final defaultServer = AcpMcpServerConfig(
+      id: 'mcp-a',
+      name: 'filesystem',
+      transport: AcpMcpServerTransport.stdio,
+      command: '/usr/local/bin/mcp-fs',
+      useByDefault: true,
+    );
+    final optionalServer = AcpMcpServerConfig(
+      id: 'mcp-b',
+      name: 'github',
+      transport: AcpMcpServerTransport.http,
+      url: 'https://mcp.example.com/mcp',
+    );
+
+    Future<void> tapVisible(WidgetTester tester, Finder finder) async {
+      await tester.ensureVisible(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+    }
+
+    FilterChip chip(WidgetTester tester, String id) => tester
+        .widget<FilterChip>(find.byKey(ValueKey('acp-workspace-mcp-$id')));
+
+    testWidgets('preselects default MCP servers and launches with the '
+        'adjusted set and additional directories', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..mcpServers = [defaultServer, optionalServer]
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      expect(chip(tester, 'mcp-a').selected, isTrue);
+      expect(chip(tester, 'mcp-b').selected, isFalse);
+      expect(find.text('1 of 2'), findsOneWidget);
+      // No directory fields until the user asks for one.
+      expect(find.byType(TextField), findsOneWidget);
+
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-mcp-mcp-b')),
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-mcp-mcp-a')),
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-add-directory')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('acp-workspace-directory-0')),
+        '  ~/shared-lib  ',
+      );
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('acp-workspace-add-directory')),
+      );
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Start session'),
+      );
+
+      final workspace = manager.startWorkspaces.single!;
+      expect(workspace.mcpServerIds, ['mcp-b']);
+      // The blank second draft is ignored.
+      expect(workspace.additionalDirectories, ['~/shared-lib']);
+    });
+
+    testWidgets('collapses to one row with a setup shortcut when no MCP '
+        'servers are configured', (tester) async {
+      final manager = FakeAcpSessionManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      expect(find.text('none'), findsOneWidget);
+      expect(find.text('Set up'), findsOneWidget);
+      expect(find.byType(FilterChip), findsNothing);
+
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Start session'),
+      );
+      final workspace = manager.startWorkspaces.single!;
+      expect(workspace.mcpServerIds, isEmpty);
+      expect(workspace.additionalDirectories, isEmpty);
+    });
+
+    testWidgets('selecting a recent session applies its saved workspace', (
+      tester,
+    ) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-1',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        mcpServerIds: const ['mcp-b'],
+        additionalDirectories: const ['/home/docs'],
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..mcpServers = [defaultServer, optionalServer]
+        ..reconnectSessionResult = AcpSessionLaunchStarted(key);
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      await tapVisible(tester, find.text('Resume …/repo'));
+      expect(chip(tester, 'mcp-a').selected, isFalse);
+      expect(chip(tester, 'mcp-b').selected, isTrue);
+      expect(find.text('/home/docs'), findsOneWidget);
+
+      await tapVisible(
+        tester,
+        find.widgetWithText(FilledButton, 'Resume session'),
+      );
+      final workspace = manager.reconnectWorkspaces.single!;
+      expect(workspace.mcpServerIds, ['mcp-b']);
+      expect(workspace.additionalDirectories, ['/home/docs']);
+    });
+
+    testWidgets('returning to a new session restores the defaults', (
+      tester,
+    ) async {
+      final now = DateTime(2026);
+      final recent = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: 'bridge-1',
+        acpSessionId: 'session-1',
+        cwd: '/home/repo',
+        mcpServerIds: const <String>[],
+        additionalDirectories: const ['/home/docs'],
+        createdAt: now,
+        lastActivityAt: now,
+      );
+      final manager = FakeAcpSessionManager(recents: [recent])
+        ..mcpServers = [defaultServer, optionalServer];
+      await _pumpAndLaunch(tester, manager, startSession: false);
+
+      await tapVisible(tester, find.text('Resume …/repo'));
+      expect(chip(tester, 'mcp-a').selected, isFalse);
+      await tapVisible(tester, find.text('Start a new session'));
+      expect(chip(tester, 'mcp-a').selected, isTrue);
+      expect(find.text('/home/docs'), findsNothing);
+    });
   });
 }

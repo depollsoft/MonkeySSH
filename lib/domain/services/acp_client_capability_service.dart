@@ -432,12 +432,13 @@ final class AcpClientCapabilityService {
   AcpClientCapabilityService({
     required this.fileSystem,
     required this.terminalExecutor,
-    required this.allowedRoots,
+    required List<String> allowedRoots,
     required this.registry,
     this.autoApprovePermissions = false,
     this.limits = const AcpClientCapabilityLimits(),
     DiagnosticsLogger? diagnostics,
-  }) : _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+  }) : _allowedRoots = List<String>.unmodifiable(allowedRoots),
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   /// Filesystem implementation for the current remote host.
   final AcpRemoteFileSystem? fileSystem;
@@ -445,8 +446,15 @@ final class AcpClientCapabilityService {
   /// Terminal implementation for the current remote host.
   final AcpTerminalExecutor? terminalExecutor;
 
-  /// Roots that file and terminal working-directory requests may access.
-  final List<String> allowedRoots;
+  /// Roots that file and terminal working-directory requests may access:
+  /// the session working directory plus any additional workspace directories.
+  List<String> get allowedRoots => _allowedRoots;
+
+  /// Replaces the allowed roots, for example when a reconnect re-sends a
+  /// different set of additional workspace directories.
+  set allowedRoots(List<String> roots) =>
+      _allowedRoots = List<String>.unmodifiable(roots);
+  List<String> _allowedRoots;
 
   /// User-decision registry. It may be retained over bridge detach/reconnect.
   final AcpPendingRequestRegistry registry;
@@ -1006,15 +1014,19 @@ final class AcpClientCapabilityService {
       final resolved = forWrite
           ? await fileSystem!.canonicalizeWritePath(normalized)
           : await fileSystem!.canonicalizeExistingPath(normalized);
-      final canonicalRoots = await Future.wait(
+      // Resolve each root independently: one missing additional directory
+      // must not make every other root (including the cwd) unusable.
+      final canonicalRoots = (await Future.wait(
         allowedRoots.map((root) async {
           final normalizedRoot = normalizeSftpAbsolutePath(root);
-          if (normalizedRoot == null) {
-            throw const AcpClientCapabilityException('Path is not allowed');
+          if (normalizedRoot == null) return null;
+          try {
+            return await fileSystem!.canonicalizeExistingPath(normalizedRoot);
+          } on Object {
+            return null;
           }
-          return fileSystem!.canonicalizeExistingPath(normalizedRoot);
         }),
-      );
+      )).nonNulls;
       if (!_isAllowedPath(resolved, canonicalRoots)) {
         throw const AcpClientCapabilityException('Path is not allowed');
       }

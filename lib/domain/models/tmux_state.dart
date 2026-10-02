@@ -824,6 +824,7 @@ class ToolSessionInfo {
     this.originWorkingDirectory,
     this.lastActive,
     this.summary,
+    this.additionalDirectories = const <String>[],
   });
 
   /// Human-readable tool name (e.g., "Claude Code", "Codex").
@@ -848,6 +849,10 @@ class ToolSessionInfo {
 
   /// A brief summary or title for the session, if available.
   final String? summary;
+
+  /// Additional workspace roots an ACP agent reported for this session via
+  /// `session/list`, re-sent when the session is resumed natively.
+  final List<String> additionalDirectories;
 
   /// How long ago this session was active, as a human-readable string.
   String get timeAgoLabel {

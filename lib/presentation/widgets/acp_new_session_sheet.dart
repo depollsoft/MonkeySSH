@@ -40,6 +40,7 @@ import '../providers/entity_list_providers.dart';
 import 'acp_concurrency_choice.dart';
 import 'acp_connection_support.dart';
 import 'acp_session_presentation.dart';
+import 'acp_session_workspace_section.dart';
 
 /// Opens the staged new-session sheet, returning the launched session key when
 /// a session starts (so the caller can open its chat), or `null` otherwise.
@@ -235,6 +236,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   var _hostDefaultsGeneration = 0;
   String? _error;
   late final Future<List<AcpRecentSessionRef>> _recents;
+  late final AcpSessionWorkspaceController _workspace;
 
   @override
   void initState() {
@@ -248,11 +250,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     }
     _recents = ref.read(acpSessionManagerProvider).loadRecentSessions();
     _recents.ignore();
+    _workspace = AcpSessionWorkspaceController(
+      loadServers: ref.read(acpSessionManagerProvider).loadMcpServers,
+    );
+    unawaited(_workspace.refresh());
   }
 
   @override
   void dispose() {
     _cwd.dispose();
+    _workspace.dispose();
     super.dispose();
   }
 
@@ -345,6 +352,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       _selectedRecent = null;
       _loadingDefaults = hostId != null;
     });
+    _workspace.clearRecent();
     final host = hosts.where((candidate) => candidate.id == hostId).firstOrNull;
     if (host == null) {
       setState(() => _loadingDefaults = false);
@@ -506,6 +514,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             : null,
         autoApprovePermissions: launchPreferences.startInYoloMode,
         replace: replace,
+        workspace: _workspace.options,
       );
     }
     return manager.startNewSession(
@@ -519,6 +528,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           : null,
       autoApprovePermissions: launchPreferences.startInYoloMode,
       replace: replace,
+      workspace: _workspace.options,
     );
   }
 
@@ -812,6 +822,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                 onChanged: (_) => _cwdEdited = true,
                 decoration: const InputDecoration(hintText: '~'),
               ),
+              AcpSessionWorkspaceSection(
+                controller: _workspace,
+                enabled: !controlsDisabled,
+              ),
               _buildRecentSessions(),
               if (_error != null) ...[
                 const SizedBox(height: FluttyTheme.spacingMd),
@@ -886,10 +900,13 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           selected: provider.id == _providerId,
           onSelected: (_busy || _loadingDefaults)
               ? null
-              : () => setState(() {
-                  _providerId = provider.id;
-                  _selectedRecent = null;
-                }),
+              : () {
+                  setState(() {
+                    _providerId = provider.id;
+                    _selectedRecent = null;
+                  });
+                  _workspace.clearRecent();
+                },
         ),
     ],
   );
@@ -921,6 +938,13 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                   return;
                 }
                 setState(() => _selectedRecent = value);
+                // A resumed session re-sends its own MCP servers and
+                // directories; starting fresh restores the defaults.
+                if (value == null) {
+                  _workspace.clearRecent();
+                } else {
+                  _workspace.applyRecent(value.workspace);
+                }
               },
               child: Column(
                 children: [

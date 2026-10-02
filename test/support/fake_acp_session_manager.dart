@@ -4,11 +4,13 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_mcp_server.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -53,6 +55,13 @@ class FakeAcpSessionManager extends AcpSessionManager {
   final List<({int hostId, String providerId, String cwd})> starts = [];
   final List<AcpLaunchCommand?> startLaunchOverrides = <AcpLaunchCommand?>[];
   final List<bool> startAutoApprovePermissions = <bool>[];
+  final List<AcpSessionWorkspaceOptions?> startWorkspaces =
+      <AcpSessionWorkspaceOptions?>[];
+  final List<AcpSessionWorkspaceOptions?> reconnectWorkspaces =
+      <AcpSessionWorkspaceOptions?>[];
+
+  /// MCP servers returned by [loadMcpServers].
+  List<AcpMcpServerConfig> mcpServers = const <AcpMcpServerConfig>[];
   final List<AcpLaunchCommand?> reconnectLaunchOverrides =
       <AcpLaunchCommand?>[];
   final List<bool> reconnectSelectOnSuccess = <bool>[];
@@ -142,6 +151,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
   Future<AcpSessionKey?> loadLastSelected() async => lastSelected;
 
   @override
+  Future<List<AcpMcpServerConfig>> loadMcpServers() async => mcpServers;
+
+  @override
   Future<void> selectSession(AcpSessionKey key) async {
     selected.add(key.value);
   }
@@ -222,10 +234,12 @@ class FakeAcpSessionManager extends AcpSessionManager {
     String? providerLabelOverride,
     bool autoApprovePermissions = false,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) async {
     starts.add((hostId: hostId, providerId: providerId, cwd: cwd));
     startLaunchOverrides.add(launchCommandOverride);
     startAutoApprovePermissions.add(autoApprovePermissions);
+    startWorkspaces.add(workspace);
     return startNewSessionResult;
   }
 
@@ -243,7 +257,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
     bool selectOnSuccess = true,
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
   }) async {
+    reconnectWorkspaces.add(workspace);
     reconnectLaunchOverrides.add(launchCommandOverride);
     reconnectSelectOnSuccess.add(selectOnSuccess);
     reconnectReplaceKeys.add(List<AcpSessionKey>.unmodifiable(replace));
