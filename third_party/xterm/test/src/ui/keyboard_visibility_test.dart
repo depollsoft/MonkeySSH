@@ -3,6 +3,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/ui.dart';
 
 void main() {
+  testWidgets('a metrics change without an ancestor View is ignored',
+      (tester) async {
+    final key = GlobalKey<KeyboardVisibilityState>();
+    var notifications = 0;
+
+    await tester.pumpWidget(
+      KeyboardVisibility(
+        key: key,
+        onKeyboardShow: () => notifications++,
+        onKeyboardHide: () => notifications++,
+        child: View(view: tester.view, child: const SizedBox()),
+      ),
+      wrapWithView: false,
+    );
+
+    expect(key.currentState!.mounted, isTrue);
+    expect(key.currentState!.didChangeMetrics, returnsNormally);
+    expect(notifications, 0);
+  });
+
   testWidgets('a metrics change after removal is ignored', (tester) async {
     // Closing a terminal tab while the keyboard is hiding removes the widget
     // before the queued metrics notification is delivered. `View.of(context)`

@@ -100,8 +100,39 @@ out of scope.
     The atomic apply and its timeout safeguard live in the MonkeySSH session
     runtime, which withholds a transaction's bytes until its end marker
     arrives; the core stays stateless and timer-free.
+* kterm.dart 1.5.5 -> 1.5.10 reconciliation, reviewed on 2026-10-01 through
+  [`27a5b2b`](https://github.com/lbp0200/kterm.dart/commit/27a5b2b7bb79379c41cfb5b660d95e47b4eb283f).
+  PR #870 already ported RIS/DECSTR and viewport-clamped cursor restoration.
+  The remaining applicable fixes are:
+  * Tab-stop writes and queries ignore indexes outside the 1,024-column table
+    (`007c755`), so HTS/TBC on wider terminal grids cannot crash. Existing stops
+    remain intact.
+  * Keyboard metrics use `View.maybeOf` and ignore a missing ancestor view
+    (`9a4ac33`), retaining the existing unmounted-state guard.
+  * Shortcut dispatch tolerates a detached focus node (`19af2ba`). Apply the
+    same guard to MonkeySSH's own `MonkeyTerminalView` input handler; attached
+    shortcuts still take precedence over Kitty key encoding.
+  * Regression tests reproduce the failures before each fix, including HTS/TBC
+    at column 1,024, missing-view metrics, and detached-focus input in both views.
 
 ### Evaluated but intentionally not ported
+* kterm.dart 1.5.6 -> 1.5.10 changes already covered or absent from this fork:
+  * The erase-at-column-zero crash (`939ba66`) is already prevented by
+    `BufferLine.eraseRange`'s empty-range guard. EL/ED already erase the cursor
+    cell inclusively and have column-zero regressions.
+  * HTS already sets a stop, and all writes pass through the stateful parser,
+    so the `007c755` HTS no-op and split-sequence bypass fixes are already covered.
+  * Kitty key releases already require the protocol's event-reporting flag,
+    and Enter/flag-stack encoding uses our own encoder. Keep that behavior
+    rather than upstream's `reportAllKeysAsEscape` release gate and external
+    encoder-wrapper changes (`92e64e8`, `2814520`).
+  * KTerm's search-bar focus tree is absent from this vendored API. Our renderer
+    has no deferred editable-rectangle callback to guard (`9a4ac33`).
+  * `graphicsCommandEnd` is a synchronous submission API here; asynchronous
+    image operations are queued separately with explicit `unawaited` calls.
+    Upstream's async return-type correction (`e33899e`) does not apply.
+    Its `image` dependency and regenerated Flutter 3.44 goldens are also specific
+    to KTerm's decoder/renderer; retain our Flutter codecs and existing goldens.
 * Unicode width tables remain at v11. Bumping them can either help or hurt
   cursor alignment depending on the host's own `wcwidth`, so it is left as a
   separate, deliberate change.

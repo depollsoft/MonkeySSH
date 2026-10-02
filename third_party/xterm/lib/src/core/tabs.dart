@@ -47,19 +47,19 @@ class TabStops {
   }
 
   /// Sets the tab stop at [index]. If there is already a tab stop at [index],
-  /// this method does nothing.
+  /// this method does nothing. Out-of-range indexes are ignored.
   ///
   /// See also:
   /// * [clearAt] which does the opposite.
   void setAt(int index) {
-    assert(index >= 0 && index < _kMaxColumns);
+    if (index < 0 || index >= _kMaxColumns) return;
     _stops[index] = true;
   }
 
   /// Clears the tab stop at [index]. If there is no tab stop at [index], this
-  /// method does nothing.
+  /// method does nothing. Out-of-range indexes are ignored.
   void clearAt(int index) {
-    assert(index >= 0 && index < _kMaxColumns);
+    if (index < 0 || index >= _kMaxColumns) return;
     _stops[index] = false;
   }
 
@@ -71,6 +71,7 @@ class TabStops {
 
   /// Returns true if there is a tab stop at [index].
   bool isSetAt(int index) {
+    if (index < 0 || index >= _kMaxColumns) return false;
     return _stops[index];
   }
 
