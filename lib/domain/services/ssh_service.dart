@@ -8198,7 +8198,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
           usedBackgroundService: false,
         ),
       );
-      if (host == null || !isAppReviewDemoHost(host)) {
+      // The session's client identifies demo connections even when the
+      // best-effort host lookup above failed.
+      if (session != null && !isAppReviewDemoSession(session)) {
         unawaited(
           ref.read(appReviewPromptServiceProvider).recordSuccessfulConnection(),
         );

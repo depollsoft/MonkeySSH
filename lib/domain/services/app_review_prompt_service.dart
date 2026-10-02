@@ -143,23 +143,30 @@ class AppReviewPromptService {
         _diagnosticsLogger.info('app_review', 'review_unavailable');
         return false;
       }
-      // The sheet cannot appear over a backgrounded app, and claiming the
-      // request then would spend the whole interval on nothing.
-      if (!_isAppActive()) {
-        return false;
-      }
       // Claim the request before making it, so a failed or repeated call
       // cannot ask again inside the interval.
       var claimed = false;
+      DateTime? previousRequestAt;
       await _settingsService.updateJson(SettingKeys.appReviewPrompt, (json) {
         final state = _AppReviewPromptState.fromJson(json);
         if (!_isEligible(state, now)) {
           return json;
         }
         claimed = true;
+        previousRequestAt = state.lastRequestedAt;
         return state.copyWith(lastRequestedAt: now).toJson();
       });
       if (!claimed) {
+        return false;
+      }
+      // Check after the claim, with no await before the platform call. The
+      // sheet cannot appear over a backgrounded app, so release the claim
+      // rather than spend the whole interval on nothing.
+      if (!_isAppActive()) {
+        await _releaseClaim(
+          claimedAt: now,
+          previousRequestAt: previousRequestAt,
+        );
         return false;
       }
       await _client.requestReview();
@@ -183,6 +190,19 @@ class AppReviewPromptService {
       _requestInFlight = false;
     }
   }
+
+  /// Restores [previousRequestAt] if this call's claim is still the latest.
+  Future<void> _releaseClaim({
+    required DateTime claimedAt,
+    required DateTime? previousRequestAt,
+  }) => _settingsService.updateJson(SettingKeys.appReviewPrompt, (json) {
+    final state = _AppReviewPromptState.fromJson(json);
+    if (state.lastRequestedAt?.millisecondsSinceEpoch !=
+        claimedAt.millisecondsSinceEpoch) {
+      return json;
+    }
+    return state.withLastRequestedAt(previousRequestAt).toJson();
+  });
 
   bool _isEligible(_AppReviewPromptState state, DateTime now) {
     final firstConnectionAt = state.firstConnectionAt;
@@ -245,6 +265,14 @@ class _AppReviewPromptState {
     lastConnectionDay: lastConnectionDay ?? this.lastConnectionDay,
     lastRequestedAt: lastRequestedAt ?? this.lastRequestedAt,
   );
+
+  _AppReviewPromptState withLastRequestedAt(DateTime? requestedAt) =>
+      _AppReviewPromptState(
+        connectionDays: connectionDays,
+        firstConnectionAt: firstConnectionAt,
+        lastConnectionDay: lastConnectionDay,
+        lastRequestedAt: requestedAt,
+      );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'connectionDays': connectionDays,

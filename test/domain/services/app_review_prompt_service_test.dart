@@ -154,6 +154,27 @@ void main() {
     },
   );
 
+  test('releases only its own claim when backgrounded mid-request', () async {
+    final service = createService();
+    await becomeEligible(service);
+    final firstRequest = now;
+    expect(await service.maybeRequestReview(), isTrue);
+
+    now = firstRequest.add(AppReviewPromptService.minimumRequestInterval);
+    appActive = false;
+    expect(await service.maybeRequestReview(), isFalse);
+    expect(
+      (await settings.getJson(
+        SettingKeys.appReviewPrompt,
+      ))?['lastRequestedAtMs'],
+      firstRequest.millisecondsSinceEpoch,
+    );
+
+    appActive = true;
+    expect(await service.maybeRequestReview(), isTrue);
+    expect(client.requestCount, 2);
+  });
+
   test('keeps the request window across service instances', () async {
     await becomeEligible(createService());
     expect(await createService().maybeRequestReview(), isTrue);
