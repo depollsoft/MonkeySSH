@@ -39,24 +39,25 @@ String? resolveAcpMarkdownPath(String href) {
     final path = uri.queryParameters['path'];
     return path == null || path.isEmpty ? null : path;
   }
-  if (uri.scheme.toLowerCase() == 'file') {
-    return resolveTerminalFileUriPath(href);
-  }
+  final fileUri = uri.scheme.toLowerCase() == 'file';
   final windowsDrivePath = RegExp(r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])')
       .hasMatch(href);
-  if (uri.hasScheme && !windowsDrivePath) {
+  if (uri.hasScheme && !windowsDrivePath && !fileUri) {
     return null;
   }
   // Explicit Markdown destinations are URIs, not literal detected paths.
   // Decode once, omitting URI fragments/queries without losing drive letters.
-  final String decodedPath;
+  final String? decodedPath;
   try {
-    decodedPath = Uri.decodeComponent(
-      windowsDrivePath ? '${href.substring(0, 2)}${uri.path}' : uri.path,
-    );
+    decodedPath = fileUri
+        ? resolveTerminalFileUriPath(href)
+        : Uri.decodeComponent(
+            windowsDrivePath ? '${href.substring(0, 2)}${uri.path}' : uri.path,
+          );
   } on FormatException {
     return null;
   }
+  if (decodedPath == null) return null;
   final path = trimTerminalFilePathCandidate(decodedPath);
   return isSupportedTerminalFilePath(path) ? path : null;
 }

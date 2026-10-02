@@ -129,6 +129,8 @@ https://example.com/lib/main.dart
   });
 
   for (final (href, path) in [
+    ('file:///tmp/my%20file.dart:42', '/tmp/my file.dart'),
+    ('file:///tmp/my%2520file.dart', '/tmp/my%20file.dart'),
     ('lib/my%20file.dart', 'lib/my file.dart'),
     ('./lib/my%20file.dart', 'lib/my file.dart'),
     ('../lib/my%20file.dart:42', '../lib/my file.dart'),
@@ -164,6 +166,7 @@ https://example.com/lib/main.dart
 
   test('ignores invalid UTF-8 in a percent-encoded path', () {
     expect(resolveAcpMarkdownPath('lib/%FF.dart'), isNull);
+    expect(resolveAcpMarkdownPath('file:///tmp/%FF.dart'), isNull);
   });
 
   test('resolves file URLs and relative Markdown destinations', () {
@@ -185,6 +188,8 @@ https://example.com/lib/main.dart
       '#heading',
       '',
       'monkeyssh-sftp-path:',
+      'file:',
+      'file://remote-host',
     ]) {
       expect(resolveAcpMarkdownPath(href), isNull, reason: href);
     }

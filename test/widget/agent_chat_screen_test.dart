@@ -145,6 +145,7 @@ void main() {
     ('[source](lib/my%2520file.dart)', 'lib/my%20file.dart'),
     ('`/tmp/my%20file.dart`', '/tmp/my%20file.dart'),
     ('[source](file:///tmp/a%20b.txt)', '/tmp/a b.txt'),
+    ('[source](file:///tmp/a%20b.txt:42)', '/tmp/a b.txt'),
     (r'C:\Users\dev\main.dart', 'C:/Users/dev/main.dart'),
   ]) {
     testWidgets('native path $markdown opens SFTP with the session cwd', (
