@@ -273,6 +273,43 @@ void main() {
       expect(server.env.single.value, isEmpty);
     });
 
+    test('an unrelated edit keeps a secret that cannot be decrypted', () async {
+      await service.saveServer(_stdio());
+      String storedEnvValue(String? raw) =>
+          ((((jsonDecode(raw!) as List).single as Map)['env'] as List).single
+                  as Map)['value']
+              as String;
+      final original = storedEnvValue(
+        await settings.getString(SettingKeys.acpMcpServers),
+      );
+      final otherDevice = AcpMcpServerService(
+        settings,
+        SecretEncryptionService.forTesting(),
+      );
+      final unreadable = (await otherDevice.listServers()).single;
+
+      // Renaming saves the blank value the editor was given.
+      await otherDevice.saveServer(unreadable.copyWith(name: 'renamed'));
+      expect(
+        storedEnvValue(await settings.getString(SettingKeys.acpMcpServers)),
+        original,
+      );
+      final renamed = (await otherDevice.listServers()).single;
+      expect(renamed.name, 'renamed');
+      expect(renamed.hasUnreadableSecrets, isTrue);
+      expect((await service.listServers()).single.env, _stdio().env);
+
+      // Entering a value replaces it.
+      await otherDevice.saveServer(
+        renamed.copyWith(
+          env: const [AcpMcpNameValue(name: 'API_KEY', value: 'new-key')],
+        ),
+      );
+      final replaced = (await otherDevice.listServers()).single;
+      expect(replaced.hasUnreadableSecrets, isFalse);
+      expect(replaced.env.single.value, 'new-key');
+    });
+
     test('skips malformed entries', () async {
       await settings.setString(
         SettingKeys.acpMcpServers,

@@ -265,17 +265,29 @@ class AcpAudioClipCache {
 
   Future<Directory> _prepareDirectory() async {
     final base = await _baseDirectory();
-    final directory = Directory(path.join(base.path, _cacheDirectoryName));
     // Clips from an earlier process are stale; never let them accumulate.
+    // Links are skipped, so a planted one is never followed.
     try {
-      if (directory.existsSync()) {
-        await directory.delete(recursive: true);
+      await for (final entry in base.list(followLinks: false)) {
+        final name = path.basename(entry.path);
+        if (entry is! Directory ||
+            (name != _cacheDirectoryName &&
+                !name.startsWith('$_cacheDirectoryName-'))) {
+          continue;
+        }
+        try {
+          await entry.delete(recursive: true);
+        } on FileSystemException {
+          // Another user's directory in a shared temp, or already gone.
+        }
       }
     } on FileSystemException {
-      // Best effort: a leftover file only wastes temporary storage.
+      // Best effort: a leftover clip only wastes temporary storage.
     }
-    await directory.create(recursive: true);
-    return directory;
+    // On Linux the temporary directory is the shared /tmp. A new temp
+    // directory is created owner-only (0700) under an unpredictable name, so
+    // other local users can neither read clips nor claim the path first.
+    return base.createTemp('$_cacheDirectoryName-');
   }
 
   /// SHA-256 of [data], hashed in slices so a large clip never needs a

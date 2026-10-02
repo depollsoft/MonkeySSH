@@ -84,8 +84,11 @@ class AcpMcpServerService {
         otherNames: otherNames,
       );
       if (error != null) throw AcpMcpServerValidationException(error);
-      final encoded = await _encode(normalized);
       final index = entries.indexWhere((entry) => entry['id'] == normalized.id);
+      final encoded = await _encode(
+        normalized,
+        previous: index >= 0 ? entries[index] : null,
+      );
       if (index >= 0) {
         entries[index] = encoded;
       } else {
@@ -150,14 +153,31 @@ class AcpMcpServerService {
           );
   }
 
-  Future<AcpJsonMap> _encode(AcpMcpServerConfig server) async {
-    Future<List<AcpJsonMap>> encodePairs(List<AcpMcpNameValue> pairs) async => [
-      for (final pair in pairs)
-        <String, Object?>{
-          'name': pair.name,
-          'value': await _encryption.encryptRequired(pair.value),
-        },
-    ];
+  /// Encodes [server] for storage, encrypting its secret values.
+  ///
+  /// A secret that could not be decrypted is loaded blank. If it is still
+  /// blank when [previous] (the stored entry being replaced) is saved over,
+  /// its original ciphertext is kept, so an unrelated edit never erases it.
+  Future<AcpJsonMap> _encode(
+    AcpMcpServerConfig server, {
+    AcpJsonMap? previous,
+  }) async {
+    Future<List<AcpJsonMap>> encodePairs(
+      List<AcpMcpNameValue> pairs,
+      Object? previousPairs,
+    ) async {
+      final unreadable = await _unreadableStoredValues(previousPairs);
+      return [
+        for (final pair in pairs)
+          <String, Object?>{
+            'name': pair.name,
+            'value': pair.value.isEmpty && unreadable.containsKey(pair.name)
+                ? unreadable[pair.name]
+                : await _encryption.encryptRequired(pair.value),
+          },
+      ];
+    }
+
     return <String, Object?>{
       'id': server.id,
       'name': server.name,
@@ -165,13 +185,31 @@ class AcpMcpServerService {
       if (!server.transport.isRemote) ...<String, Object?>{
         'command': server.command,
         'args': server.args,
-        'env': await encodePairs(server.env),
+        'env': await encodePairs(server.env, previous?['env']),
       } else ...<String, Object?>{
         'url': server.url,
-        'headers': await encodePairs(server.headers),
+        'headers': await encodePairs(server.headers, previous?['headers']),
       },
       'useByDefault': server.useByDefault,
     };
+  }
+
+  /// Stored ciphertexts in [pairs] that cannot be decrypted, by pair name.
+  Future<Map<String, String>> _unreadableStoredValues(Object? pairs) async {
+    final unreadable = <String, String>{};
+    if (pairs is! List) return unreadable;
+    for (final item in pairs) {
+      if (item is! Map) continue;
+      final name = _string(item['name'])?.trim();
+      final stored = _string(item['value']) ?? '';
+      if (name == null || name.isEmpty || stored.isEmpty) continue;
+      try {
+        await _encryption.decryptNullable(stored);
+      } on Object {
+        unreadable[name] = stored;
+      }
+    }
+    return unreadable;
   }
 
   Future<List<AcpMcpServerConfig>> _decode(String? raw) async {

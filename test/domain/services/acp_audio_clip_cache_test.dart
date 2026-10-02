@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/acp_audio_clip_cache.dart';
+import 'package:path/path.dart' as path;
 
 import '../../helpers/recording_diagnostics_logger.dart';
 
@@ -16,6 +17,15 @@ void main() {
   tearDown(() async {
     if (base.existsSync()) await base.delete(recursive: true);
   });
+
+  List<Directory> cacheDirectories() => base
+      .listSync()
+      .whereType<Directory>()
+      .where(
+        (directory) =>
+            path.basename(directory.path).startsWith('monkeyssh-acp-audio'),
+      )
+      .toList();
 
   AcpAudioClipCache cache({
     int maxFiles = 6,
@@ -91,7 +101,7 @@ void main() {
       subject.acquire(data: base64.encode(List<int>.filled(64, 1))),
       throwsA(isA<AcpAudioClipException>()),
     );
-    expect(Directory('${base.path}/monkeyssh-acp-audio').existsSync(), isFalse);
+    expect(cacheDirectories(), isEmpty);
   });
 
   test('cleans up a partial file when the payload is malformed', () async {
@@ -102,8 +112,7 @@ void main() {
       subject.acquire(data: 'not*base64!', mimeType: 'audio/mpeg'),
       throwsA(isA<AcpAudioClipException>()),
     );
-    final directory = Directory('${base.path}/monkeyssh-acp-audio');
-    expect(directory.listSync(), isEmpty);
+    expect(cacheDirectories().single.listSync(), isEmpty);
     expect(subject.length, 0);
     expect(diagnostics.events.single.message, 'clip_decode_failed');
   });
@@ -134,17 +143,37 @@ void main() {
   });
 
   test('clears clips left by an earlier process on first use', () async {
-    final stale = File('${base.path}/monkeyssh-acp-audio/clip-99.mp3')
-      ..createSync(recursive: true)
-      ..writeAsStringSync('stale');
+    final stale = [
+      File('${base.path}/monkeyssh-acp-audio/clip-99.mp3'),
+      File('${base.path}/monkeyssh-acp-audio-old/clip-98.mp3'),
+    ];
+    for (final file in stale) {
+      file
+        ..createSync(recursive: true)
+        ..writeAsStringSync('stale');
+    }
+    final unrelated = Directory('${base.path}/other-app')..createSync();
 
     final lease = await cache().acquire(
       data: base64.encode(utf8.encode('fresh')),
       mimeType: 'audio/mpeg',
     );
 
-    expect(stale.existsSync(), isFalse);
+    expect(stale.where((file) => file.existsSync()), isEmpty);
+    expect(unrelated.existsSync(), isTrue);
     expect(lease.file.existsSync(), isTrue);
     lease.release();
   });
+
+  test('keeps clips in a directory only this user can open', () async {
+    final lease = await cache().acquire(
+      data: base64.encode(utf8.encode('private')),
+      mimeType: 'audio/mpeg',
+    );
+    final directory = lease.file.parent;
+    expect(path.basename(directory.path), startsWith('monkeyssh-acp-audio-'));
+    // Owner read, write, and search only, even in a shared /tmp.
+    expect(directory.statSync().mode & 0x1ff, 0x1c0);
+    lease.release();
+  }, skip: Platform.isWindows ? 'POSIX permissions only' : false);
 }
