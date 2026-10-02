@@ -278,9 +278,7 @@ class _AcpCodeBlockBuilder extends MarkdownElementBuilder {
         language: language,
         syntaxTheme: syntaxTheme,
         onCopy: onCopy,
-        onTapPath: onTapLink == null
-            ? null
-            : (path) => onTapLink!(path, acpMarkdownPathHref(path), ''),
+        onTapPath: acpPathTapHandler(onTapLink),
       ),
     );
   }

@@ -683,9 +683,6 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
   }
 
-  void _openPath(String path) =>
-      widget.onTapLink?.call(path, acpMarkdownPathHref(path), '');
-
   Widget _buildEntry(BuildContext context, AcpTimelineEntry entry) {
     switch (entry) {
       case AcpUserPromptEntry():
@@ -695,7 +692,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           onTapImage: widget.onTapImage,
           onOpenResource: widget.onOpenResource,
           onCopyResource: widget.onCopyResource,
-          onTapPath: widget.onTapLink == null ? null : _openPath,
+          onTapPath: acpPathTapHandler(widget.onTapLink),
         );
       case AcpAssistantMessageEntry():
         return _AssistantMessage(
@@ -770,7 +767,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         onTapImage: widget.onTapImage,
         onOpenResource: widget.onOpenResource,
         onCopyResource: widget.onCopyResource,
-        onTapPath: widget.onTapLink == null ? null : _openPath,
+        onTapPath: acpPathTapHandler(widget.onTapLink),
       );
     } else if (entry is AcpAssistantMessageEntry &&
         threadChild.markdown != null) {

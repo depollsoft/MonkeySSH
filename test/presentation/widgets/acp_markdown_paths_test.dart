@@ -27,6 +27,7 @@ void main() {
     ('lib/main.dart:42:3', 'lib/main.dart'),
     (r'C:\Users\dev\main.dart:12', 'C:/Users/dev/main.dart'),
     ('(/tmp/output.log).', '/tmp/output.log'),
+    ('/data/MODEL12', '/data/MODEL12'),
   ]) {
     test('links $source without changing the displayed text', () {
       final nodes = parse('See $source now.');
@@ -128,11 +129,25 @@ https://example.com/lib/main.dart
     expect(elements(nodes, 'table'), hasLength(1));
   });
 
+  for (final source in [r'**/tmp/a\_b.dart**', '**/srv/_data/x.py**']) {
+    test('links the whole path when emphasis ends the paragraph: $source', () {
+      final link = elements(parse(source), 'a').single;
+      expect(
+        resolveAcpMarkdownPath(link.attributes['href']!),
+        link.textContent,
+      );
+    });
+  }
+
   for (final (href, path) in [
     ('file:///tmp/my%20file.dart:42', '/tmp/my file.dart'),
     ('file:///tmp/my%2520file.dart', '/tmp/my%20file.dart'),
     ('lib/my%20file.dart', 'lib/my file.dart'),
     ('./lib/my%20file.dart', 'lib/my file.dart'),
+    ('./main.dart', 'main.dart'),
+    ('/tmp/report%21', '/tmp/report!'),
+    ('file:///tmp/report!', '/tmp/report!'),
+    ('/data/MODEL12', '/data/MODEL12'),
     ('../lib/my%20file.dart:42', '../lib/my file.dart'),
     ('/tmp/my%20file.dart', '/tmp/my file.dart'),
     ('~/my%20project/main.dart', '~/my project/main.dart'),
@@ -188,8 +203,10 @@ https://example.com/lib/main.dart
       '#heading',
       '',
       'monkeyssh-sftp-path:',
+      'monkeyssh-sftp-path:?path=%FF',
       'file:',
       'file://remote-host',
+      '//remote-host/srv/main.dart',
     ]) {
       expect(resolveAcpMarkdownPath(href), isNull, reason: href);
     }

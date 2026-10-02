@@ -508,9 +508,7 @@ class _ToolPayloadStream extends StatelessWidget {
           scrollDirection: Axis.horizontal,
           child: AcpPathText(
             text: _text,
-            onTapPath: onTapLink == null
-                ? null
-                : (path) => onTapLink!(path, acpMarkdownPathHref(path), ''),
+            onTapPath: acpPathTapHandler(onTapLink),
             style: AcpChatTypography.monoStyleOf(
               context,
             ).copyWith(fontSize: 11.5, color: scheme.onSurface, height: 1.35),
