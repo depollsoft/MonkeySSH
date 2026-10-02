@@ -23,6 +23,7 @@ class TerminalSessionController {
     required bool Function() isBackgrounded,
     required VoidCallback onSessionMetadataChanged,
     Duration sessionMetadataDebounce = const Duration(milliseconds: 75),
+    Stopwatch? connectedTimeStopwatch,
   }) : _wakeLockService = wakeLockService,
        _wakeLockOwnerId = wakeLockOwnerId,
        _readCurrentConnectionState = readCurrentConnectionState,
@@ -32,7 +33,8 @@ class TerminalSessionController {
        _hasError = hasError,
        _isBackgrounded = isBackgrounded,
        _onSessionMetadataChanged = onSessionMetadataChanged,
-       _sessionMetadataDebounce = sessionMetadataDebounce;
+       _sessionMetadataDebounce = sessionMetadataDebounce,
+       _connectedTime = connectedTimeStopwatch ?? Stopwatch();
 
   final TerminalWakeLockService _wakeLockService;
   final int _wakeLockOwnerId;
@@ -44,6 +46,7 @@ class TerminalSessionController {
   final bool Function() _isBackgrounded;
   final VoidCallback _onSessionMetadataChanged;
   final Duration _sessionMetadataDebounce;
+  final Stopwatch _connectedTime;
 
   SshSession? _observedSession;
   Timer? _sessionMetadataDebounceTimer;
@@ -51,6 +54,12 @@ class TerminalSessionController {
 
   /// Whether the user setting allows the terminal to hold a wake lock.
   bool wakeLockEnabled = false;
+
+  /// Foreground time this screen has spent on a live, connected shell.
+  Duration get connectedForegroundTime => _connectedTime.elapsed;
+
+  /// Whether the last sync found a live, connected shell in the foreground.
+  bool get isOnLiveConnection => _connectedTime.isRunning;
 
   /// The SSH session currently driving terminal metadata in the UI.
   SshSession? get observedSession => _observedSession;
@@ -164,18 +173,27 @@ class TerminalSessionController {
   }
 
   /// Synchronizes wake-lock ownership with the current terminal state.
+  ///
+  /// The same live-connection state drives [connectedForegroundTime].
   void syncWakeLock([SshConnectionState? connectionState]) {
     final connectionId = _connectionId();
-    final shouldHold =
-        wakeLockEnabled &&
+    final isLive =
         !_isBackgrounded() &&
         connectionId != null &&
         _hasActiveShell() &&
         !_hasError() &&
         (connectionState ?? _readCurrentConnectionState()) ==
             SshConnectionState.connected;
+    if (isLive) {
+      _connectedTime.start();
+    } else {
+      _connectedTime.stop();
+    }
     unawaited(
-      _wakeLockService.setOwnerActive(_wakeLockOwnerId, active: shouldHold),
+      _wakeLockService.setOwnerActive(
+        _wakeLockOwnerId,
+        active: wakeLockEnabled && isLive,
+      ),
     );
   }
 

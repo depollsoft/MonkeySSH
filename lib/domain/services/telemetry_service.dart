@@ -612,6 +612,14 @@ class TelemetryService {
     ),
   });
 
+  /// Records that the system rating sheet was requested.
+  ///
+  /// The OS decides whether the sheet appears, so this is not a display count.
+  Future<void> logReviewPromptRequested({required int connectionDays}) =>
+      _logEvent('review_prompt_requested', <String, Object?>{
+        'connection_days_bucket': countBucket(connectionDays),
+      });
+
   /// Records terminal paste usage without paste contents.
   Future<void> logTerminalPasteUsed({
     required String source,

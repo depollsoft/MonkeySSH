@@ -25,6 +25,7 @@ import '../models/terminal_progress.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart' show isValidTmuxWindowId;
 import 'app_review_demo_service.dart';
+import 'app_review_prompt_service.dart';
 import 'background_ssh_service.dart';
 import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
@@ -8197,6 +8198,13 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
           usedBackgroundService: false,
         ),
       );
+      // The session's client identifies demo connections even when the
+      // best-effort host lookup above failed.
+      if (session != null && !isAppReviewDemoSession(session)) {
+        unawaited(
+          ref.read(appReviewPromptServiceProvider).recordSuccessfulConnection(),
+        );
+      }
     } else {
       _updateConnectionAttempt(
         hostId,

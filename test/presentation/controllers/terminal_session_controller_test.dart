@@ -105,5 +105,63 @@ void main() {
       expect(callbacks, 0);
     });
   });
+
+  group('connected foreground time', () {
+    late Stopwatch stopwatch;
+    late TerminalSessionController controller;
+    var connectionState = SshConnectionState.connected;
+    var backgrounded = false;
+    var hasError = false;
+
+    setUp(() {
+      stopwatch = Stopwatch();
+      connectionState = SshConnectionState.connected;
+      backgrounded = false;
+      hasError = false;
+      final session = _session(1);
+      controller = TerminalSessionController(
+        wakeLockService: TerminalWakeLockService(),
+        wakeLockOwnerId: 0,
+        readCurrentConnectionState: () => connectionState,
+        getSession: (_) => session,
+        connectionId: () => 1,
+        hasActiveShell: () => true,
+        hasError: () => hasError,
+        isBackgrounded: () => backgrounded,
+        onSessionMetadataChanged: () {},
+        connectedTimeStopwatch: stopwatch,
+      );
+    });
+
+    tearDown(() => controller.dispose());
+
+    test('runs only while the shell is live in the foreground', () {
+      controller.syncWakeLock();
+      expect(stopwatch.isRunning, isTrue);
+
+      backgrounded = true;
+      controller.syncWakeLock();
+      expect(stopwatch.isRunning, isFalse);
+
+      backgrounded = false;
+      controller.syncWakeLock();
+      expect(stopwatch.isRunning, isTrue);
+
+      hasError = true;
+      controller.syncWakeLock();
+      expect(stopwatch.isRunning, isFalse);
+
+      hasError = false;
+      controller.syncWakeLock(SshConnectionState.disconnected);
+      expect(stopwatch.isRunning, isFalse);
+    });
+
+    test('does not depend on the wake lock setting', () {
+      controller
+        ..wakeLockEnabled = false
+        ..syncWakeLock();
+      expect(stopwatch.isRunning, isTrue);
+    });
+  });
   registerTerminalWakeLockServiceTests();
 }
