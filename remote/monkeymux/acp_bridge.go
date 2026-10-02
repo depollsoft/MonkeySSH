@@ -48,6 +48,11 @@ const (
 	// not preallocate a huge channel for every connected client.
 	acpClientLiveQueueCapacity = 1024 + 4
 	acpAttachQueueSafetyMargin = 4
+	// Provider requests the bridge answered as cancelled, remembered so a
+	// late client response is not forwarded as a second answer.
+	acpCancelledRequestMemory = 1024
+	acpCancelRequestMethod    = "$/cancel_request"
+	acpRequestCancelledCode   = -32800
 )
 
 var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -153,6 +158,8 @@ type acpBridge struct {
 	clients              map[string]*acpBridgeClient
 	writerClientID       string
 	pendingRequests      map[string]struct{}
+	cancelledRequests    map[string]struct{}
+	cancelledOrder       []string
 	inFlightTurns        map[string]struct{}
 	sessionSetupRequests map[string]string
 	initializeRequestIDs map[string]struct{}
@@ -802,6 +809,8 @@ func (b *acpBridge) waitForProvider() {
 		b.lastActivity = time.Now()
 	}
 	b.pendingRequests = map[string]struct{}{}
+	b.cancelledRequests = nil
+	b.cancelledOrder = nil
 	b.inFlightTurns = map[string]struct{}{}
 	b.releaseAllPendingReplayLocked()
 	b.mu.Unlock()
@@ -904,6 +913,53 @@ type acpEnvelope struct {
 	method string
 }
 
+// acpRequestKey canonicalizes a JSON-RPC id so equivalent spellings of one
+// string match while the string "1" and the number 1 stay distinct. Ids that
+// are neither strings nor numbers keep their raw bytes.
+func acpRequestKey(raw json.RawMessage) string {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) == nil {
+		switch typed := value.(type) {
+		case string:
+			if encoded, err := json.Marshal(typed); err == nil {
+				return string(encoded)
+			}
+		case json.Number:
+			return typed.String()
+		}
+	}
+	return string(raw)
+}
+
+// parseAcpProviderOutput parses one provider frame. It returns the request or
+// response envelope, or, for a `$/cancel_request` notification, the key of the
+// provider request it withdraws.
+func parseAcpProviderOutput(raw json.RawMessage) (acpEnvelope, string) {
+	var envelope acpEnvelope
+	if json.Unmarshal(raw, &envelope) != nil {
+		return acpEnvelope{}, ""
+	}
+	if len(envelope.Method) > 0 {
+		_ = json.Unmarshal(envelope.Method, &envelope.method)
+	}
+	if len(envelope.ID) > 0 && string(envelope.ID) != "null" {
+		return envelope, ""
+	}
+	if envelope.method != acpCancelRequestMethod {
+		return acpEnvelope{}, ""
+	}
+	var params struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(envelope.Params, &params) != nil || len(params.RequestID) == 0 ||
+		string(params.RequestID) == "null" {
+		return acpEnvelope{}, ""
+	}
+	return acpEnvelope{}, acpRequestKey(params.RequestID)
+}
+
 func parseAcpEnvelope(raw json.RawMessage) acpEnvelope {
 	var envelope acpEnvelope
 	if json.Unmarshal(raw, &envelope) != nil || len(envelope.ID) == 0 || string(envelope.ID) == "null" {
@@ -984,11 +1040,69 @@ func (b *acpBridge) observeClientMessage(envelope acpEnvelope) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(envelope.Method) == 0 {
-		id := string(envelope.ID)
+		id := acpRequestKey(envelope.ID)
 		delete(b.pendingRequests, id)
 		b.releasePendingReplayLocked(id)
 	}
 	b.lastActivity = time.Now()
+}
+
+// claimClientResponse reports whether a client frame may reach the provider.
+// A response to a provider request the bridge already answered as cancelled
+// is dropped, so the provider never sees two answers. Any other response
+// claims its request before the write, so a racing provider cancellation
+// cannot also answer it.
+func (b *acpBridge) claimClientResponse(envelope acpEnvelope) bool {
+	if len(envelope.ID) == 0 || len(envelope.Method) > 0 {
+		return true
+	}
+	key := acpRequestKey(envelope.ID)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, cancelled := b.cancelledRequests[key]; cancelled {
+		delete(b.cancelledRequests, key)
+		return false
+	}
+	delete(b.pendingRequests, key)
+	return true
+}
+
+// cancelPendingRequestLocked handles a provider `$/cancel_request` for one of
+// its own requests that no client has answered. The bridge answers it with
+// -32800 on the client's behalf, because the app may be detached for a long
+// time, and unpins its replay event so a reconnecting app is never shown a
+// withdrawn prompt as live. The cancel notification itself is still published
+// in sequence after the request, so a client resuming from before both sees
+// the request and then its cancellation, and drops the prompt.
+func (b *acpBridge) cancelPendingRequestLocked(key string) json.RawMessage {
+	if _, pending := b.pendingRequests[key]; !pending {
+		return nil
+	}
+	response, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(key),
+		"error": map[string]any{
+			"code":    acpRequestCancelledCode,
+			"message": "Request cancelled",
+		},
+	})
+	if err != nil {
+		return nil
+	}
+	delete(b.pendingRequests, key)
+	b.releasePendingReplayLocked(key)
+	if b.cancelledRequests == nil {
+		b.cancelledRequests = map[string]struct{}{}
+	}
+	if _, known := b.cancelledRequests[key]; !known {
+		for len(b.cancelledOrder) >= acpCancelledRequestMemory {
+			delete(b.cancelledRequests, b.cancelledOrder[0])
+			b.cancelledOrder = b.cancelledOrder[1:]
+		}
+		b.cancelledOrder = append(b.cancelledOrder, key)
+	}
+	b.cancelledRequests[key] = struct{}{}
+	return response
 }
 
 func isAcpSessionSetupMethod(method string) bool {
@@ -1013,12 +1127,13 @@ func (b *acpBridge) publish(
 ) bool {
 	pendingID := ""
 	providerResponseID := ""
+	cancelledID := ""
 	var envelope acpEnvelope
 	if eventType == "output" {
-		envelope = parseAcpEnvelope(data)
+		envelope, cancelledID = parseAcpProviderOutput(data)
 		if len(envelope.ID) > 0 {
 			if len(envelope.Method) > 0 {
-				pendingID = string(envelope.ID)
+				pendingID = acpRequestKey(envelope.ID)
 			} else {
 				providerResponseID = string(envelope.ID)
 			}
@@ -1034,6 +1149,12 @@ func (b *acpBridge) publish(
 	}
 	if pendingID != "" {
 		b.pendingRequests[pendingID] = struct{}{}
+		// A reused id names a new request; only an older one was cancelled.
+		delete(b.cancelledRequests, pendingID)
+	}
+	var cancelResponse json.RawMessage
+	if cancelledID != "" {
+		cancelResponse = b.cancelPendingRequestLocked(cancelledID)
 	}
 	if providerResponseID != "" {
 		delete(b.inFlightTurns, providerResponseID)
@@ -1083,6 +1204,11 @@ func (b *acpBridge) publish(
 	b.mu.Unlock()
 	for _, client := range detached {
 		client.cancel()
+	}
+	if cancelResponse != nil {
+		// Never block the provider-output reader on provider stdin: a provider
+		// blocked writing output while its input pipe is full would deadlock.
+		go func() { _ = b.writeProvider(cancelResponse) }()
 	}
 	return true
 }
@@ -1393,6 +1519,11 @@ func (b *acpBridge) handleAttach(
 			envelope := parseAcpEnvelope(message.Data)
 			if response := b.cachedInitializeResponse(envelope); len(response) > 0 {
 				b.publish("output", response, "", nil)
+				continue
+			}
+			if !b.claimClientResponse(envelope) {
+				// The provider already received -32800 for this request.
+				b.observeClientMessage(envelope)
 				continue
 			}
 			requestID, trackedRequest := b.trackClientRequest(envelope)
