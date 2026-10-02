@@ -60,6 +60,15 @@ The default prefix is `Ctrl-B`:
 Use `monkeymux attach --no-prefix <session>` when an application must receive
 every `Ctrl-B` unchanged.
 
+Prefix keys also work after a program switches the terminal to the kitty
+keyboard protocol or xterm `modifyOtherKeys`, as Claude Code, Codex, Copilot
+CLI, and OpenCode do. MonkeyMux tracks those keyboard modes per window, for the
+main and alternate screens separately, and restores the selected window's modes
+on every switch, so a shell selected after an agent gets plain keys again. When
+an attach ends, MonkeyMux leaves the alternate screen and switches those
+keyboard modes, mouse and focus reporting, bracketed paste, and application
+cursor keys back off, and shows the cursor again.
+
 Ordinary foreground output is relayed directly without terminal emulation.
 MonkeyMux observes metadata and routes response-producing terminal queries only
 to the primary client so simultaneous terminals cannot send duplicate replies.
