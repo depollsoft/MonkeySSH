@@ -116,10 +116,18 @@ func TestReplayKeepsKeyboardModeSequencesAfterLastReset(t *testing.T) {
 	}
 }
 
-func TestReplayLeavesUntrackedEightBitKeyboardSequences(t *testing.T) {
-	history := "a\x9b>5ub"
-	if got := string(stripTerminalQueriesFromReplay([]byte(history))); got != history {
-		t.Fatalf("replay = %q, want %q", got, history)
+func TestReplayStripsEightBitKeyboardSequencesWithoutTrackingThem(t *testing.T) {
+	// Dropping both forms keeps a terminal that reads 0x9b as CSI from
+	// re-applying the push after the restore, while UTF-8 terminals never
+	// treated it as a mode change, so tracking ignores it.
+	history := "a\x9b>5ub\x1b[<uc"
+	if got := string(stripTerminalQueriesFromReplay([]byte(history))); got != "abc" {
+		t.Fatalf("replay = %q, want %q", got, "abc")
+	}
+	window := &muxWindow{}
+	window.observeTerminalModesLocked([]byte("\x9b>5u"))
+	if window.keyboardModesUsed || window.kittyKeyboard[0].flags != 0 {
+		t.Fatalf("eight-bit push tracked: %+v", window.kittyKeyboard)
 	}
 }
 
