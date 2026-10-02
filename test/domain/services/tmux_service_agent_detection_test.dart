@@ -295,6 +295,62 @@ void main() {
       expect(await title(), 'Renamed');
     });
 
+    test(
+      'Codex titles fall back to the first prompt in either format',
+      () async {
+        final home = await Directory.systemTemp.createTemp(
+          'monkeyssh-codex-title-test-',
+        );
+        addTearDown(() => home.delete(recursive: true));
+        await Directory('${home.path}/.codex').create();
+        final rollout = File('${home.path}/rollout.jsonl');
+        final command = buildAgentActiveSessionMetadataCommand(const {42});
+        // Run only the probe's title helpers against a sample rollout.
+        final helpers = command.substring(
+          command.indexOf('flutty_json_string_field_from_stdin() {'),
+          command.indexOf('flutty_process_cwd() {'),
+        );
+        Future<String> title() async {
+          final result = await Process.run('/bin/sh', [
+            '-c',
+            'home=\$2\n$helpers\nflutty_codex_session_title "\$1" thread-1',
+            'probe',
+            rollout.path,
+            home.path,
+          ]);
+          expect(result.exitCode, 0, reason: '${result.stderr}');
+          return (result.stdout as String).trim();
+        }
+
+        // Codex before 0.160 logged each prompt as an event.
+        await rollout.writeAsString(
+          '{"type":"session_meta","payload":{"id":"thread-1"}}\n'
+          '{"type":"event_msg","payload":{"type":"user_message",'
+          r'"message":"Fix the \"flaky\" test"}}'
+          '\n',
+        );
+        expect(await title(), 'Fix the "flaky" test');
+
+        // Codex 0.160 logs only user messages, after injected context.
+        await rollout.writeAsString(
+          [
+            '{"type":"session_meta","payload":{"id":"thread-1"}}',
+            '{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer text"}]}}',
+            r'{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work\n\"quoted\" rules"},{"type":"input_text","text":"<environment_context>\n</environment_context>"}]}}',
+            r'{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:"},{"type":"input_text","text":"\n  Tighten the retry loop"}]}}',
+            '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second prompt"}]}}',
+            '',
+          ].join('\n'),
+        );
+        expect(await title(), 'Tighten the retry loop');
+
+        // A thread name wins over either prompt.
+        await File('${home.path}/.codex/session_index.jsonl')
+            .writeAsString('{"id":"thread-1","thread_name":"Retry loop"}\n');
+        expect(await title(), 'Retry loop');
+      },
+    );
+
     test('ignores stale Copilot locks when a pane PID is reused', () async {
       final home = await Directory.systemTemp.createTemp(
         'monkeyssh-copilot-lock-test-',
