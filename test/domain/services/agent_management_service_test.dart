@@ -2641,6 +2641,259 @@ exit "$result"
       );
     }
 
+    for (final windows in [false, true]) {
+      for (final outcome in [
+        'healthy',
+        'repair fails',
+        'still broken',
+        'transport error',
+      ]) {
+        test('finishes OpenCode update setup: $outcome, windows=$windows', () async {
+          final client = _MockSshClient();
+          final discovery = _MockDiscovery();
+          final session = _remoteSession(client);
+          when(() => client.remoteVersion).thenReturn(
+            windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.9',
+          );
+          final definition = agentCliRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'cli:opencode',
+          );
+          // The updater may replace the launcher. Repair must use the fresh
+          // probe's path rather than the path supplied when Update was tapped.
+          final oldPath = windows
+              ? 'C:/tools/opencode2.cmd'
+              : '/home/dev/.bun/bin/opencode2';
+          final newPath = windows
+              ? 'C:/bun/bin/opencode2.cmd'
+              : '/home/dev/.bun/install/global/node_modules/@opencode/cli/bin/opencode2';
+          final current = AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.updateAvailable,
+            installedVersion: '2.0.19',
+            executablePath: oldPath,
+          );
+          final updateCommand = buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: true,
+            executablePath: oldPath,
+            installedVersion: current.installedVersion,
+          );
+          final repairCommand = buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: false,
+            repair: true,
+            executablePath: newPath,
+          );
+          final probeCommand = buildAgentBatchProbeCommand([
+            definition,
+          ], windows: windows);
+          final commands = <String>[];
+          final management = _unlockedManagementService(discovery);
+          var repaired = false;
+          when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+            call,
+          ) async {
+            final command = call.positionalArguments.first as String;
+            commands.add(command);
+            if (command == updateCommand) {
+              return _execOutput('\x1B[32mupdated OpenCode\x1B[0m\n');
+            }
+            if (command == repairCommand) {
+              repaired = true;
+              final duplicate = await management.installOrUpdate(
+                session,
+                definition,
+                update: true,
+                current: current,
+              );
+              expect(duplicate.succeeded, isFalse);
+              expect(duplicate.output, contains('already running'));
+              if (outcome == 'transport error') {
+                throw StateError('repair transport error');
+              }
+              return _execOutput(
+                '\x1B[32msetup output\x1B[0m\n',
+                exitCode: outcome == 'repair fails' ? 1 : 0,
+              );
+            }
+            if (command == probeCommand) {
+              return _execOutput(
+                '__monkeyssh_agent_runtime__=cli:opencode\n'
+                '__monkeyssh_agent_path__=$newPath\n'
+                '${repaired && outcome == 'healthy' ? '__monkeyssh_agent_version__=2.0.20\n' : '__monkeyssh_agent_repair__\n'}'
+                '__monkeyssh_agent_runtime_end__\n',
+              );
+            }
+            expect(
+              command,
+              buildAgentMetadataProbeCommand([definition], windows: windows),
+            );
+            return _execOutput('');
+          });
+          when(() => discovery.invalidateSession(session)).thenReturn(null);
+          final streamed = StringBuffer();
+          final result = await management.installOrUpdate(
+            session,
+            definition,
+            update: true,
+            current: current,
+            onOutput: streamed.write,
+          );
+
+          expect(result.succeeded, outcome == 'healthy');
+          expect(
+            result.exitCode,
+            outcome == 'transport error'
+                ? null
+                : outcome == 'repair fails'
+                ? 1
+                : 0,
+          );
+          expect(
+            commands.where((command) => command == repairCommand),
+            hasLength(1),
+          );
+          expect(
+            commands.where((command) => command == probeCommand),
+            hasLength(
+              outcome == 'repair fails' || outcome == 'transport error' ? 1 : 2,
+            ),
+          );
+          expect(result.output, contains('updated OpenCode'));
+          expect(result.output, contains('Repairing OpenCode automatically'));
+          if (outcome == 'transport error') {
+            expect(result.output, contains('repair transport error'));
+          } else {
+            expect(result.output, contains('setup output'));
+            expect(streamed.toString(), contains('setup output'));
+          }
+          expect(result.output, isNot(contains('\x1B')));
+          if (outcome != 'healthy') {
+            expect(result.output, contains('could not be verified'));
+          }
+          verify(() => discovery.invalidateSession(session)).called(1);
+        });
+      }
+    }
+
+    for (final outcome in ['success', 'failure', 'exception']) {
+      test(
+        'blocks duplicate actions and releases the guard after $outcome',
+        () async {
+          final client = _MockSshClient();
+          final discovery = _MockDiscovery();
+          final session = _remoteSession(client);
+          final management = _unlockedManagementService(discovery);
+          final definition = agentStandaloneAcpRuntimeDefinitions.first;
+          final started = Completer<void>();
+          final pending = Completer<SSHSession>();
+          var executions = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((_) {
+                if (++executions == 1) {
+                  started.complete();
+                  return pending.future;
+                }
+                return Future.value(_execOutput('installed'));
+              });
+          when(() => discovery.invalidateSession(session)).thenReturn(null);
+          final first = management.installOrUpdate(
+            session,
+            definition,
+            update: false,
+          );
+          await started.future;
+          final duplicate = await management.installOrUpdate(
+            session,
+            definition,
+            update: false,
+          );
+          expect(duplicate.succeeded, isFalse);
+          expect(duplicate.output, contains('already running'));
+          expect(executions, 1);
+          final otherSession = _remoteSession(client, connectionId: 78);
+          when(() => discovery.invalidateSession(otherSession))
+              .thenReturn(null);
+          expect(
+            (await management.installOrUpdate(
+              otherSession,
+              definition,
+              update: false,
+            )).succeeded,
+            isTrue,
+          );
+          if (outcome == 'exception') {
+            final assertion = expectLater(first, throwsStateError);
+            pending.completeError(StateError('transport failed'));
+            await assertion;
+          } else {
+            pending.complete(
+              _execOutput(
+                'installer output',
+                exitCode: outcome == 'failure' ? 1 : 0,
+              ),
+            );
+            expect((await first).succeeded, outcome == 'success');
+          }
+          expect(
+            (await management.installOrUpdate(
+              session,
+              definition,
+              update: false,
+            )).succeeded,
+            isTrue,
+          );
+          expect(executions, 3);
+        },
+      );
+    }
+
+    for (final exitCode in [0, 1]) {
+      test(
+        'does not repair a healthy or failed update, exit=$exitCode',
+        () async {
+          final client = _MockSshClient();
+          final discovery = _MockDiscovery();
+          final session = _remoteSession(client);
+          final definition = agentCliRuntimeDefinitions.firstWhere(
+            (d) => d.id == 'cli:opencode',
+          );
+          var executions = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((_) async {
+                executions++;
+                if (executions == 1) {
+                  return _execOutput('update output', exitCode: exitCode);
+                }
+                return _execOutput(
+                  '__monkeyssh_agent_runtime__=cli:opencode\n'
+                  '__monkeyssh_agent_path__=/tools/opencode2\n'
+                  '__monkeyssh_agent_version__=2.0.20\n'
+                  '__monkeyssh_agent_runtime_end__\n',
+                );
+              });
+          when(() => discovery.invalidateSession(session)).thenReturn(null);
+          final result = await _unlockedManagementService(discovery)
+              .installOrUpdate(
+                session,
+                definition,
+                update: true,
+                current: AgentRuntimeInfo(
+                  definition: definition,
+                  status: AgentRuntimeStatus.updateAvailable,
+                  installedVersion: '2.0.19',
+                  executablePath: '/tools/opencode2',
+                ),
+              );
+          expect(result.succeeded, exitCode == 0);
+          expect(executions, exitCode == 0 ? 3 : 1);
+          expect(result.output, 'update output');
+        },
+      );
+    }
+
     test('zero exit does not mean a broken CLI was repaired', () async {
       final client = _MockSshClient();
       final discovery = _MockDiscovery();

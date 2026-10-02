@@ -44,8 +44,22 @@ void main() {
     ).thenAnswer((_) async => runtimes);
     when(() => service.readUsage(session, any())).thenAnswer((_) async => {});
     model = AgentManagementViewModel(
-      session: () => session,
-      service: () => service,
+      session: () {
+        expect(
+          model.mounted,
+          isTrue,
+          reason: 'Do not read the dismissed screen',
+        );
+        return session;
+      },
+      service: () {
+        expect(
+          model.mounted,
+          isTrue,
+          reason: 'Do not read the dismissed screen',
+        );
+        return service;
+      },
       canManageAgents: () async => permitted,
       onRuntimesRefreshed: (_) {},
       onProvidersRefreshed: () {},
@@ -260,6 +274,118 @@ void main() {
       expect(model.runningActions, isEmpty);
       expect(model.queuedActions, isEmpty);
       expect(model.busy, isFalse);
+    },
+  );
+
+  for (final outcome in ['success', 'failure', 'access revoked']) {
+    test(
+      'dismissed bulk updates preserve the queue and access checks: $outcome',
+      () async {
+        await model.refresh();
+        final firstStarted = Completer<void>();
+        final firstResult = Completer<AgentRuntimeActionResult>();
+        final calls = <String>[];
+        late void Function(String) output;
+        for (final runtime in runtimes) {
+          when(
+            () => service.installOrUpdate(
+              session,
+              runtime.definition,
+              update: true,
+              current: runtime,
+              onOutput: any(named: 'onOutput'),
+            ),
+          ).thenAnswer((invocation) {
+            calls.add(runtime.definition.id);
+            output =
+                invocation.namedArguments[#onOutput] as void Function(String);
+            if (runtime == runtimes.first) {
+              firstStarted.complete();
+              return firstResult.future;
+            }
+            output('second update output');
+            return Future.value(
+              const AgentRuntimeActionResult(succeeded: true, output: 'done'),
+            );
+          });
+        }
+        final batch = model.updateAll();
+        await firstStarted.future;
+        var notifications = 0;
+        model
+          ..addListener(() => notifications++)
+          ..dispose();
+        output('output after dismissal');
+        if (outcome == 'access revoked') permitted = false;
+        if (outcome == 'failure') {
+          firstResult.completeError(StateError('failed command'));
+        } else {
+          firstResult.complete(
+            const AgentRuntimeActionResult(succeeded: true, output: 'done'),
+          );
+        }
+        await batch;
+        expect(
+          calls,
+          (outcome == 'access revoked' ? runtimes.take(1) : runtimes).map(
+            (runtime) => runtime.definition.id,
+          ),
+        );
+        expect(notifications, 0);
+        expect(failures, isEmpty);
+        expect(bulkFailures, isEmpty);
+        // Dismissal stops UI probes and dialogs, not the remote commands.
+        verify(
+          () => service.refreshAll(
+            session,
+            onDiscovered: any(named: 'onDiscovered'),
+          ),
+        ).called(1);
+      },
+    );
+  }
+
+  test(
+    'a single update finishes without UI callbacks after dismissal',
+    () async {
+      await model.refresh();
+      final runtime = runtimes.first;
+      final started = Completer<void>();
+      final result = Completer<AgentRuntimeActionResult>();
+      late void Function(String) output;
+      when(
+        () => service.installOrUpdate(
+          session,
+          runtime.definition,
+          update: true,
+          current: runtime,
+          onOutput: any(named: 'onOutput'),
+        ),
+      ).thenAnswer((invocation) {
+        output = invocation.namedArguments[#onOutput] as void Function(String);
+        started.complete();
+        return result.future;
+      });
+      final action = model.runAction(runtime);
+      await started.future;
+      var notifications = 0;
+      model
+        ..addListener(() => notifications++)
+        ..dispose();
+      output('late output');
+      result.complete(
+        const AgentRuntimeActionResult(succeeded: false, output: 'failed'),
+      );
+      await action;
+      expect(notifications, 0);
+      expect(failures, isEmpty);
+      expect(bulkFailures, isEmpty);
+      verify(
+        () => service.refreshAll(
+          session,
+          onDiscovered: any(named: 'onDiscovered'),
+        ),
+      ).called(1);
     },
   );
 

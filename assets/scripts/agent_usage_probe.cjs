@@ -471,7 +471,34 @@ function nousUsage(data) {
   if (number(access.member_spend_cap_usd) > 0 && number(access.member_spend_usd) != null) windows.push(budget('Member spending limit', access.member_spend_usd, access.member_spend_cap_usd, null, 'USD'));
   return {windows};
 }
-async function providerUsage(id, credential, fetch = requestJson) {
+// Claims are only read to pick an account; tokens are never verified or emitted.
+function jwtClaims(token) {
+  try { return JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString()) || {}; } catch { return {}; }
+}
+function chatGPTAccount(credential) {
+  const c = credential?.tokens || credential || {};
+  const token = c.access || c.access_token || c.accessToken;
+  const claims = jwtClaims(token), auth = claims['https://api.openai.com/auth'] || {};
+  const account = c.accountId || c.account_id || auth.chatgpt_account_id;
+  // The probe never refreshes. Pi stops refreshing its legacy Codex sign-in once unused.
+  if (!token || !account || (number(claims.exp) != null && claims.exp * 1000 <= Date.now())) return null;
+  return {token, account, users: [auth.user_id, auth.chatgpt_user_id].filter(x => typeof x === 'string')};
+}
+// Pi 0.99+ signs in with ChatGPT on its `openai` provider. That token only reaches
+// the Responses API, which the Codex backend serves from the plan's allowance, so
+// read that allowance through a Codex sign-in for the same ChatGPT user.
+async function chatGPTPlanUsage(token, accounts, fetch) {
+  const me = await fetch('https://api.openai.com/v1/me', {token});
+  let codexCli = {};
+  try { codexCli = readJson(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json')); } catch {}
+  const codex = [...accounts.filter(([id]) => id === 'openai' || id === 'openai-codex').map(([, c]) => c), codexCli]
+    .map(chatGPTAccount).find(a => a &&typeof me?.id === 'string' && a.users.includes(me.id));
+  if (!codex) return {windows: [], status: 'notReported'};
+  return codexOAuthUsage(await fetch('https://chatgpt.com/backend-api/wham/usage', {
+    token: codex.token, headers: {'ChatGPT-Account-Id': codex.account},
+  }));
+}
+async function providerUsage(id, credential, fetch = requestJson, accounts = []) {
   const c = credential.tokens || credential;
   const token = c.access || c.access_token || c.accessToken;
   const oauth = credential.type === 'oauth' || credential.auth_type === 'oauth' || Boolean(token);
@@ -480,8 +507,11 @@ async function providerUsage(id, credential, fetch = requestJson) {
       token, headers: {'anthropic-beta': 'oauth-2025-04-20'},
     }));
     if (id === 'openai' || id === 'openai-codex') {
-      let account = c.accountId || c.account_id;
-      if (!account) { try { account = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())['https://api.openai.com/auth']?.chatgpt_account_id; } catch {} }
+      const claims = jwtClaims(token);
+      if (String(claims.scope || '').split(/\s+/).includes('chatgpt.tokens.use.direct')) {
+        return chatGPTPlanUsage(token, accounts, fetch);
+      }
+      const account = c.accountId || c.account_id || claims['https://api.openai.com/auth']?.chatgpt_account_id;
       return codexOAuthUsage(await fetch('https://chatgpt.com/backend-api/wham/usage', {
         token, headers: account ? {'ChatGPT-Account-Id': account} : {},
       }));
@@ -538,7 +568,7 @@ async function multiProvider(id, accounts = configuredAccounts(id), reader = pro
     const index = (seen.get(provider) || 0) + 1; seen.set(provider, index);
     const name = (providerNames[provider] || 'Custom provider') + (totals.get(provider) > 1 ? ` · Account ${index}` : '');
     try {
-      const result = await reader(provider, credential);
+      const result = await reader(provider, credential, requestJson, accounts);
       return {windows: result.windows.map(w => ({...w, label: `${name} · ${w.label}`.slice(0, 100)})),
         notices: result.windows.length ? [] : [{provider: name, status: result.status || 'unavailable'}]};
     } catch (error) { return {windows: [], notices: [{provider: name, status: statusOf(error)}], ...retryFields(error)}; }

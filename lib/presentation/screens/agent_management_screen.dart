@@ -49,12 +49,13 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
   @override
   void initState() {
     super.initState();
+    // Access checks for a started batch must outlive this widget's ref.
+    final monetization = ref.read(monetizationServiceProvider);
     _model = AgentManagementViewModel(
       session: () => widget.session,
       service: () => widget.service ?? ref.read(agentManagementServiceProvider),
-      canManageAgents: () => ref
-          .read(monetizationServiceProvider)
-          .canUseFeature(MonetizationFeature.agentManagement),
+      canManageAgents: () =>
+          monetization.canUseFeature(MonetizationFeature.agentManagement),
       onRuntimesRefreshed: (runtimes) =>
           widget.onRuntimesRefreshed?.call(runtimes),
       onProvidersRefreshed: () => widget.onProvidersRefreshed?.call(),
