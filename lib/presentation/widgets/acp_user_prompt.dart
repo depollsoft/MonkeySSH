@@ -4,6 +4,7 @@ import '../../app/theme.dart';
 import '../models/acp_timeline.dart';
 import 'acp_chat_typography.dart';
 import 'acp_inline_image.dart';
+import 'acp_path_text.dart';
 import 'acp_resource_chip.dart';
 
 /// Renders a user prompt, preserving the order of its content parts.
@@ -20,6 +21,7 @@ class AcpUserPromptView extends StatelessWidget {
     this.onTapImage,
     this.onOpenResource,
     this.onCopyResource,
+    this.onTapPath,
     this.parts,
     this.segmentIndex,
     this.segmentCount,
@@ -40,6 +42,9 @@ class AcpUserPromptView extends StatelessWidget {
   /// Called when a resource part is copied.
   final ValueChanged<AcpResourceRef>? onCopyResource;
 
+  /// Opens detected remote paths in literal prompt text.
+  final ValueChanged<String>? onTapPath;
+
   /// Ordered content rendered by this virtual segment.
   final List<AcpPromptPart>? parts;
 
@@ -53,8 +58,9 @@ class AcpUserPromptView extends StatelessWidget {
     switch (part) {
       case AcpTextPart(:final text):
         final theme = Theme.of(context);
-        return SelectableText(
-          text,
+        return AcpPathText(
+          text: text,
+          onTapPath: onTapPath,
           style: theme.textTheme.bodyMedium?.copyWith(
             color: theme.colorScheme.onSurface,
             fontSize: 15,

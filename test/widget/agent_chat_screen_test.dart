@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
@@ -36,6 +37,7 @@ import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
 import '../helpers/keyboard_visibility_channel.dart';
+import '../helpers/tap_selectable_text.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _MockSshService extends Mock implements SshService {}
@@ -134,6 +136,69 @@ Widget _wrap(
 }
 
 void main() {
+  for (final (markdown, path) in [
+    ('lib/main.dart:42', 'lib/main.dart'),
+    ('`lib/main.dart`', 'lib/main.dart'),
+    ('```text\nlib/main.dart:42\n```', 'lib/main.dart'),
+    ('[source](lib/main.dart)', 'lib/main.dart'),
+    ('[source](lib/my%20file.dart)', 'lib/my file.dart'),
+    ('[source](lib/my%2520file.dart)', 'lib/my%20file.dart'),
+    ('`/tmp/my%20file.dart`', '/tmp/my%20file.dart'),
+    ('[source](file:///tmp/a%20b.txt)', '/tmp/a b.txt'),
+    ('[source](file:///tmp/a%20b.txt:42)', '/tmp/a b.txt'),
+    (r'C:\Users\dev\main.dart', 'C:/Users/dev/main.dart'),
+  ]) {
+    testWidgets('native path $markdown opens SFTP with the session cwd', (
+      tester,
+    ) async {
+      FluttyTheme.debugUseSystemFonts = true;
+      final session = fakeAcpSession(timeline: fakeAcpTimeline(markdown));
+      final manager = FakeAcpSessionManager(sessions: [session]);
+      Uri? opened;
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (_, _) => _wrap(
+              manager,
+              connectOnMount: false,
+              hasActiveSshSession: true,
+            ),
+          ),
+          GoRoute(
+            path: '/sftp/:hostId',
+            builder: (_, state) {
+              opened = state.uri;
+              return const Scaffold(body: Text('SFTP browser'));
+            },
+          ),
+        ],
+      );
+      addTearDown(() {
+        router.dispose();
+        manager.dispose();
+        FluttyTheme.debugUseSystemFonts = false;
+      });
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      final label = markdown.startsWith('[source]')
+          ? 'source'
+          : markdown.startsWith('```')
+          ? 'lib/main.dart'
+          : markdown.replaceAll('`', '');
+      await tapSelectableSubstring(tester, label);
+      await tester.pumpAndSettle();
+      expect(find.text('SFTP browser'), findsOneWidget);
+      expect(opened?.path, '/sftp/${session.key.hostId}');
+      expect(opened?.queryParameters, {
+        'path': path,
+        'cwd': session.cwd,
+        'connectionId': '7',
+      });
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final width in [390.0, 1100.0]) {
     testWidgets(
       'standalone chat clears a stale keyboard inset at width $width',

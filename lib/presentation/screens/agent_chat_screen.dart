@@ -52,6 +52,7 @@ import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_config_option_controls.dart';
 import '../widgets/acp_connection_support.dart';
 import '../widgets/acp_inline_image.dart';
+import '../widgets/acp_markdown_paths.dart';
 import '../widgets/acp_message_thread.dart';
 import '../widgets/acp_permission_surface.dart';
 import '../widgets/acp_session_presentation.dart';
@@ -880,20 +881,16 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   void _openMarkdownLink(String text, String? href, String title) {
     final target = href?.trim();
     if (target == null || target.isEmpty) return;
+    final path = resolveAcpMarkdownPath(target);
+    if (path != null) {
+      _openRemotePath(path);
+      return;
+    }
     final uri = Uri.tryParse(target);
     if (uri == null) return;
     switch (uri.scheme.toLowerCase()) {
       case 'http' || 'https' || 'mailto':
         unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
-      case 'file':
-        _openRemotePath(uri.path);
-      case '':
-        if (target.startsWith('/') ||
-            target.startsWith('~/') ||
-            target.startsWith('./') ||
-            target.startsWith('../')) {
-          _openRemotePath(target);
-        }
       default:
         return;
     }
@@ -912,6 +909,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   void _openRemotePath(String path) {
+    final session = ref
+        .read(acpSessionManagerProvider)
+        .state
+        .byKeyValue(_key.value);
     final connectionId = ref
         .read(sshServiceProvider)
         .getSessionsForHost(widget.hostId)
@@ -921,6 +922,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       path: '/sftp/${widget.hostId}',
       queryParameters: {
         'path': path,
+        if (session != null) 'cwd': session.cwd,
         if (connectionId != null) 'connectionId': '$connectionId',
       },
     ).toString();
