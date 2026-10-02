@@ -52,6 +52,7 @@ import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/agent_management_service.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
 import '../../domain/services/app_review_demo_service.dart';
+import '../../domain/services/app_review_prompt_service.dart';
 import '../../domain/services/clipboard_content_service.dart';
 import '../../domain/services/device_debug_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
@@ -126,6 +127,9 @@ bool _isPromptReturnWhitespaceCodeUnit(int codeUnit) =>
     codeUnit == 0x09 ||
     codeUnit == 0x0A ||
     codeUnit == 0x0D;
+
+/// Lets the pop transition back to home finish before the rating sheet.
+const _appReviewAfterLeavingDelay = Duration(milliseconds: 700);
 
 const _redactStoreScreenshotIdentities = bool.fromEnvironment(
   'STORE_SCREENSHOT_REDACT_IDENTITIES',
@@ -10960,6 +10964,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Offers the system rating sheet once the user is back on the home screen
+  /// after real use of this connection. Waiting out the pop transition also
+  /// confirms they landed on home rather than another terminal.
+  void _offerAppReviewAfterLeaving() {
+    final reviewPrompt = ref.read(appReviewPromptServiceProvider);
+    final router = GoRouter.maybeOf(context);
+    if (router == null ||
+        !reviewPrompt.isQualifyingConnectedTime(
+          _sessionController.connectedForegroundTime,
+        )) {
+      return;
+    }
+    unawaited(
+      Future<void>.delayed(_appReviewAfterLeavingDelay, () async {
+        if (router.routerDelegate.currentConfiguration.uri.path != '/') {
+          return;
+        }
+        await reviewPrompt.maybeRequestReview();
+      }),
+    );
+  }
+
   /// Abandons the in-flight connection attempt for this terminal's host.
   void _cancelConnectionAttempt() {
     _forcedMonkeyMuxReloadRequest?.cancel();
@@ -11418,6 +11444,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
         if (didPop) {
           _clearAppThemeOverride();
+          _offerAppReviewAfterLeaving();
           return;
         }
         _collapseTmuxBarIfExpanded();

@@ -134,6 +134,9 @@ abstract final class SettingKeys {
 
   /// Count of foreground app launches used to delay the telemetry prompt.
   static const telemetryAppLaunchCount = 'telemetry_app_launch_count';
+
+  /// Connection days and last request time for the system rating prompt.
+  static const appReviewPrompt = 'app_review_prompt';
 }
 
 /// Service for managing app settings.

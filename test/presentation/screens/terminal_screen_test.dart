@@ -42,6 +42,7 @@ import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
@@ -3501,6 +3502,108 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(sftpOpenCount, 2);
+    });
+
+    Future<GoRouter> pumpTerminalOverRoute(
+      WidgetTester tester, {
+      required String baseLocation,
+      required _RecordingAppReviewPromptService reviewPrompt,
+    }) async {
+      final router = GoRouter(
+        initialLocation: baseLocation,
+        routes: [
+          GoRoute(path: '/', builder: (context, state) => const Text('Home')),
+          GoRoute(
+            path: '/hosts',
+            builder: (context, state) => const Text('Hosts'),
+          ),
+          GoRoute(
+            path: '/terminal/:hostId',
+            name: Routes.terminal,
+            builder: (context, state) => TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+            ),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(
+        buildScreen(
+          overrides: [
+            appReviewPromptServiceProvider.overrideWithValue(reviewPrompt),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+      unawaited(
+        router.push<void>(
+          '/terminal/${host.id}?connectionId=${session.connectionId}',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalScreen), findsOneWidget);
+      return router;
+    }
+
+    testWidgets('offers a rating after returning home from a used terminal', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('Home'), findsOneWidget);
+      expect(reviewPrompt.requestCount, 0);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(reviewPrompt.requestCount, 1);
+      // The live connection was metered, not just the screen's lifetime.
+      expect(
+        reviewPrompt.checkedConnectedTimes.single,
+        greaterThan(Duration.zero),
+      );
+    });
+
+    testWidgets('does not offer a rating after a brief terminal visit', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService(qualifies: false);
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/',
+        reviewPrompt: reviewPrompt,
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(reviewPrompt.checkedConnectedTimes, hasLength(1));
+      expect(reviewPrompt.requestCount, 0);
+    });
+
+    testWidgets('does not offer a rating when leaving lands outside home', (
+      tester,
+    ) async {
+      final reviewPrompt = _RecordingAppReviewPromptService();
+      final router = await pumpTerminalOverRoute(
+        tester,
+        baseLocation: '/hosts',
+        reviewPrompt: reviewPrompt,
+      );
+
+      router.pop();
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('Hosts'), findsOneWidget);
+      expect(reviewPrompt.requestCount, 0);
     });
 
     testWidgets(
@@ -12831,4 +12934,27 @@ void main() {
       );
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   });
+}
+
+class _RecordingAppReviewPromptService implements AppReviewPromptService {
+  _RecordingAppReviewPromptService({this.qualifies = true});
+
+  final bool qualifies;
+  final checkedConnectedTimes = <Duration>[];
+  int requestCount = 0;
+
+  @override
+  bool isQualifyingConnectedTime(Duration connectedTime) {
+    checkedConnectedTimes.add(connectedTime);
+    return qualifies;
+  }
+
+  @override
+  Future<void> recordSuccessfulConnection() async {}
+
+  @override
+  Future<bool> maybeRequestReview() async {
+    requestCount += 1;
+    return true;
+  }
 }
