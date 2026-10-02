@@ -824,3 +824,9 @@ func writeAgentIdentityMarker(marker string) {
 	}
 	_, _ = unix.Write(fd, []byte(marker))
 }
+
+// isFileInUseError reports whether a file operation failed only because
+// another handle has the file open. POSIX unlinks open files, so it never does.
+func isFileInUseError(error) bool {
+	return false
+}
