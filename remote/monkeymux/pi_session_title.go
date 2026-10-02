@@ -217,10 +217,21 @@ func nativePiSessionPath(bridgeID string) string {
 	return match
 }
 
+// readAgentSessionTitle returns the label of a window's agent session. Pi is
+// the only agent whose label MonkeyMux reads from its session store; other
+// agents title their sessions through their terminal title or the client's
+// metadata probe.
+func (w *muxWindow) readAgentSessionTitle(tool, sessionPath, bridgeID string, now time.Time) string {
+	if tool != "pi" {
+		return ""
+	}
+	return w.piSessionTitle(sessionPath, bridgeID, now)
+}
+
 // piSessionTitle returns the label for a Pi window's session: the exact file a
 // terminal window's Pi reported, or the file behind a native window's bridge.
 // It serializes on the window's own lock because snapshots, terminal output,
-// and the quiet-window refresh all refresh metadata.
+// and the quiet title refresh all read it.
 func (w *muxWindow) piSessionTitle(sessionPath string, bridgeID string, now time.Time) string {
 	w.piTitleMu.Lock()
 	defer w.piTitleMu.Unlock()

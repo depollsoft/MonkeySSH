@@ -74,7 +74,7 @@ const (
 	oscBufferLimitBytes               = 4096
 	processMetadataTimeout            = 500 * time.Millisecond
 	processMetadataInterval           = 500 * time.Millisecond
-	windowMetadataRefreshInterval     = 2 * time.Second
+	agentSessionTitleRefreshInterval  = 2 * time.Second
 	runCommandOutputMaxBytes          = 8 * 1024 * 1024
 	runCommandTimeout                 = 20 * time.Second
 	socketTimeout                     = 2 * time.Second
@@ -6017,7 +6017,7 @@ func serveSession(
 		server.close()
 	}()
 	server.startSocketRepublisher()
-	server.startWindowMetadataRefresher()
+	server.startAgentSessionTitleRefresher()
 
 	for {
 		conn, err := server.acceptConnection()
@@ -15668,10 +15668,7 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	if command != "" {
 		tool = firstNonEmptyString(agentToolFromCommandName(command), fallbackTool)
 	}
-	sessionTitle := ""
-	if tool == "pi" {
-		sessionTitle = w.piSessionTitle(sessionPath, bridgeID, now)
-	}
+	sessionTitle := w.readAgentSessionTitle(tool, sessionPath, bridgeID, now)
 	if sessionID == "" && tool == "cursor-agent" && pgrp > 0 {
 		if started := processStartedAtForMetadata(pgrp); !started.IsZero() {
 			sessionID = cursorSessionIDForWorkspace(readCursorChatEntries(), identity.cwd, started)
@@ -17137,25 +17134,32 @@ func (s *muxServer) startSocketRepublisher() {
 	}()
 }
 
-func (s *muxServer) startWindowMetadataRefresher() {
+func (s *muxServer) startAgentSessionTitleRefresher() {
 	go func() {
-		ticker := time.NewTicker(windowMetadataRefreshInterval)
+		ticker := time.NewTicker(agentSessionTitleRefreshInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			if !s.refreshQuietWindowMetadata() {
+			if !s.refreshQuietAgentSessionTitles() {
 				return
 			}
 		}
 	}()
 }
 
-// refreshQuietWindowMetadata refreshes every window's metadata while a control
-// client is watching and broadcasts the windows whose list entry changed.
-// Output refreshes a window as it arrives, but a window can change without
-// printing: a native agent window prints nothing, and an agent can rename its
-// session right after its last output. It reports false once the server has
-// closed.
-func (s *muxServer) refreshQuietWindowMetadata() bool {
+// refreshQuietAgentSessionTitles rereads every window's agent session title
+// while a control client is watching and broadcasts the windows whose title
+// changed. Output refreshes a busy window's title with the rest of its
+// metadata, but a native agent window prints nothing and an agent can rename
+// its session right after its last output. Only titles are read here: a full
+// metadata refresh scans the process table, which quiet windows do not need.
+// It reports false once the server has closed.
+func (s *muxServer) refreshQuietAgentSessionTitles() bool {
+	type titleSource struct {
+		window      *muxWindow
+		tool        string
+		sessionPath string
+		bridgeID    string
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -17165,23 +17169,32 @@ func (s *muxServer) refreshQuietWindowMetadata() bool {
 		s.mu.Unlock()
 		return true
 	}
-	windows := make([]*muxWindow, 0, len(s.windows))
-	identities := make([]windowBroadcastIdentity, 0, len(s.windows))
+	sources := make([]titleSource, 0, len(s.windows))
 	for _, window := range s.windows {
 		if !window.closed {
-			windows = append(windows, window)
-			identities = append(identities, window.broadcastIdentityLocked())
+			sources = append(sources, titleSource{
+				window:      window,
+				tool:        window.agentToolLocked(),
+				sessionPath: window.agentSessionPath,
+				bridgeID:    window.nativeAcpBridgeID,
+			})
 		}
 	}
 	s.mu.Unlock()
-	for i, window := range windows {
-		s.refreshProcessMetadata(window.id)
+	now := time.Now()
+	for _, source := range sources {
+		window := source.window
+		title := window.readAgentSessionTitle(source.tool, source.sessionPath, source.bridgeID, now)
 		s.mu.Lock()
 		if s.windowByIDLocked(window.id) != window || window.closed ||
-			window.broadcastIdentityLocked() == identities[i] {
+			window.agentToolLocked() != source.tool ||
+			window.agentSessionPath != source.sessionPath ||
+			window.nativeAcpBridgeID != source.bridgeID ||
+			window.agentSessionTitle == title {
 			s.mu.Unlock()
 			continue
 		}
+		window.agentSessionTitle = title
 		snapshot := s.snapshotLocked(window)
 		window.lastBroadcast = time.Now()
 		s.mu.Unlock()
