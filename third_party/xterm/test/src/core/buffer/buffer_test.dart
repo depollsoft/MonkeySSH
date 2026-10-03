@@ -99,6 +99,29 @@ void main() {
         'git status  --short\necho hello world',
       );
     });
+
+    test('wraps a wide character that does not fit in the last column', () {
+      final terminal = Terminal();
+      terminal.resize(4, 2);
+
+      terminal.write('abc界Z');
+
+      expect(terminal.buffer.lines[0].getCodePoint(3), 0);
+      expect(terminal.buffer.lines[1].isWrapped, isTrue);
+      expect(terminal.buffer.lines[1].getText(), '界Z');
+      expect(terminal.buffer.cursorX, 3);
+      expect(terminal.buffer.getText(), 'abc界Z');
+    });
+
+    test('keeps a wide character in the last two columns without autowrap', () {
+      final terminal = Terminal();
+      terminal.resize(4, 2);
+
+      terminal.write('\x1b[?7labc界');
+
+      expect(terminal.buffer.lines[0].getText(), 'ab界');
+      expect(terminal.buffer.lines[1].getText(), isEmpty);
+    });
   });
 
   group('Buffer.resize()', () {
