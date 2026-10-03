@@ -389,13 +389,22 @@ int _encodeRgbCellColor(Color color) =>
 /// Keep effective horizontal safe-area insets in landscape, but avoid adding
 /// extra blank rows at the bottom or side gutters in portrait.
 ///
+/// iOS reports a portrait side inset only for hardware along that edge, such
+/// as the status bar and camera strip beside iPhone Duo's outer display, so
+/// iOS keeps side insets in portrait too.
+///
 /// Some devices report larger lateral insets through [MediaQueryData.padding]
 /// than [MediaQueryData.viewPadding] while the keyboard is visible. Use the
 /// larger inset so the terminal stays aligned with the rest of the UI.
-EdgeInsets resolveTerminalRenderPadding(MediaQueryData mediaQuery) {
+EdgeInsets resolveTerminalRenderPadding(
+  MediaQueryData mediaQuery, {
+  TargetPlatform? platform,
+}) {
   final viewportHeight = mediaQuery.size.height + mediaQuery.viewInsets.bottom;
   final isLandscape = mediaQuery.size.width > viewportHeight;
-  if (!isLandscape) {
+  final isIOS =
+      !kIsWeb && (platform ?? defaultTargetPlatform) == TargetPlatform.iOS;
+  if (!isLandscape && !isIOS) {
     return EdgeInsets.zero;
   }
   final leftInset = math.max(

@@ -10152,6 +10152,111 @@ void main() {
       expect(tester.getSize(handleFinder).width, tmuxSidebarCollapsedWidth);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+    // iPhone Duo's inner display, open wide and open tall, in points.
+    void useFoldedDisplay(
+      WidgetTester tester, {
+      required Size size,
+      required Rect fold,
+      DisplayFeatureState state = DisplayFeatureState.postureHalfOpened,
+    }) {
+      tester.view
+        ..physicalSize = size
+        ..devicePixelRatio = 1
+        ..displayFeatures = [
+          DisplayFeature(
+            bounds: fold,
+            type: DisplayFeatureType.fold,
+            state: state,
+          ),
+        ];
+      addTearDown(tester.view.reset);
+    }
+
+    testWidgets('pins the tmux navigator to the left page of a book fold', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+      );
+      final tmuxService = _MockTmuxService();
+      await pumpTmuxScreen(tester, tmuxService);
+
+      final handleFinder = find.byKey(const ValueKey('tmux-handle-bar'));
+      expect(tester.getRect(handleFinder).left, closeTo(0, 0.1));
+      expect(tester.getSize(handleFinder).width, closeTo(475, 0.1));
+      expect(find.text('shell'), findsOneWidget);
+      expect(find.text('agent'), findsOneWidget);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).left,
+        greaterThanOrEqualTo(475),
+      );
+      final popScope = find.byWidgetPredicate((widget) => widget is PopScope);
+      expect(tester.widget<PopScope<Object?>>(popScope).canPop, isTrue);
+
+      // Switching windows keeps the navigator page open.
+      await tester.tap(find.text('agent'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      verify(
+        () => tmuxService.selectWindow(
+          session,
+          'work',
+          1,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+        ),
+      ).called(1);
+      expect(tester.getSize(handleFinder).width, closeTo(475, 0.1));
+      expect(find.text('shell'), findsOneWidget);
+
+      // Tapping the pinned handle does not collapse the page.
+      await tester.tap(handleFinder);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(tester.getSize(handleFinder).width, closeTo(475, 0.1));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps the terminal above a fold propped up like a laptop', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTWH(0, 475, 669, 0),
+      );
+      final tmuxService = _MockTmuxService();
+      await pumpTmuxScreen(tester, tmuxService);
+
+      final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
+      expect(terminalRect.bottom, lessThanOrEqualTo(475));
+      final handleFinder = find.byKey(const ValueKey('tmux-handle-bar'));
+      expect(tester.getRect(handleFinder).top, greaterThanOrEqualTo(475));
+      expect(tester.getSize(handleFinder).width, closeTo(669, 0.1));
+      expect(find.text('shell'), findsOneWidget);
+      expect(find.text('agent'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a flat fold keeps the single-page terminal layout', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+        state: DisplayFeatureState.postureFlat,
+      );
+      final tmuxService = _MockTmuxService();
+      await pumpTmuxScreen(tester, tmuxService);
+
+      final handleFinder = find.byKey(const ValueKey('tmux-handle-bar'));
+      expect(tester.getSize(handleFinder).width, tmuxSidebarCollapsedWidth);
+      expect(find.text('shell'), findsNothing);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,
     ) async {

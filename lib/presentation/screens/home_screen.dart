@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -50,6 +51,7 @@ import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/connection_preview_snippet.dart';
 import '../widgets/connection_status_dot.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/display_fold.dart';
 import '../widgets/file_picker_helpers.dart';
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
@@ -446,72 +448,138 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       });
     });
 
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isWide = screenWidth >= _mobileBreakpoint;
+    final mediaQuery = MediaQuery.of(context);
+    final fold = resolveDisplayFold(mediaQuery);
+    if (fold != null && fold.isVertical) {
+      return _buildBookLayout(mediaQuery, fold);
+    }
+    final isWide = mediaQuery.size.width >= _mobileBreakpoint;
 
     return isWide ? _buildDesktopLayout() : _buildMobileLayout();
   }
 
-  Widget _buildMobileLayout() => Scaffold(
-    // This shell has no text input. Ignore stale IME insets left behind by
-    // input-heavy routes.
-    resizeToAvoidBottomInset: false,
-    appBar: AppBar(
-      title: Row(
-        mainAxisSize: MainAxisSize.min,
+  /// Splits home across a fold held like a book: the phone layout on the
+  /// left page and live connections on the right page.
+  ///
+  /// Each iPhone Duo page is about the size of its outer display, so the
+  /// left page is exactly the closed-device layout minus its Connections
+  /// tab, which the right page now shows permanently.
+  Widget _buildBookLayout(MediaQueryData mediaQuery, DisplayFold fold) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final leadingPage = fold.leadingPage(mediaQuery.size);
+    final trailingPage = fold.trailingPage(mediaQuery.size);
+
+    return ColoredBox(
+      color: colorScheme.surface,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: Image.asset(
-              'assets/icons/monkeyssh_icon.png',
-              width: 28,
-              height: 28,
+          SizedBox(
+            width: leadingPage.width,
+            child: MediaQuery(
+              data: displayFoldPageMediaQuery(mediaQuery, leadingPage),
+              child: _buildMobileLayout(showsConnectionsTab: false),
             ),
           ),
-          const SizedBox(width: 8),
-          Text(ref.watch(appDisplayNameProvider)),
+          SizedBox(width: fold.thickness),
+          SizedBox(
+            width: trailingPage.width,
+            child: MediaQuery(
+              data: displayFoldPageMediaQuery(mediaQuery, trailingPage),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: BorderSide(color: colorScheme.outline.withAlpha(60)),
+                  ),
+                ),
+                child: const Scaffold(
+                  resizeToAvoidBottomInset: false,
+                  body: SafeArea(child: _ConnectionsPanel()),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.settings_outlined),
-          onPressed: () => context.push('/settings'),
+    );
+  }
+
+  Widget _buildMobileLayout({bool showsConnectionsTab = true}) {
+    // With connections on their own page, the tab bar skips that tab while
+    // the selection keeps its place for when the page goes away.
+    final tabIndexes = showsConnectionsTab
+        ? const [0, 1, 2, 3]
+        : const [0, 2, 3];
+    final selectedTab = max(0, tabIndexes.indexOf(_selectedIndex));
+    return Scaffold(
+      // This shell has no text input. Ignore stale IME insets left behind by
+      // input-heavy routes.
+      resizeToAvoidBottomInset: false,
+      appBar: AppBar(
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.asset(
+                'assets/icons/monkeyssh_icon.png',
+                width: 28,
+                height: 28,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(ref.watch(appDisplayNameProvider)),
+          ],
         ),
-      ],
-    ),
-    body: _buildContent(),
-    bottomNavigationBar: NavigationBar(
-      // Keep destinations clear of edge-to-edge system navigation while an
-      // IME inset temporarily reduces MediaQuery.padding.
-      maintainBottomViewPadding: true,
-      selectedIndex: _selectedIndex,
-      onDestinationSelected: (index) => setState(() => _selectedIndex = index),
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      height: 65,
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.dns_outlined),
-          selectedIcon: Icon(Icons.dns_rounded),
-          label: 'Hosts',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.link_outlined),
-          selectedIcon: Icon(Icons.link),
-          label: 'Connections',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.key_outlined),
-          selectedIcon: Icon(Icons.key_rounded),
-          label: 'Keys',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.code_outlined),
-          selectedIcon: Icon(Icons.code_rounded),
-          label: 'Snippets',
-        ),
-      ],
-    ),
-  );
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => context.push('/settings'),
+          ),
+        ],
+      ),
+      // Rows clear a side status bar strip, as on iPhone Duo's outer display;
+      // the app bar and tab bar already pad themselves.
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: _buildContent(index: tabIndexes[selectedTab]),
+      ),
+      bottomNavigationBar: NavigationBar(
+        // Keep destinations clear of edge-to-edge system navigation while an
+        // IME inset temporarily reduces MediaQuery.padding.
+        maintainBottomViewPadding: true,
+        selectedIndex: selectedTab,
+        onDestinationSelected: (tab) =>
+            setState(() => _selectedIndex = tabIndexes[tab]),
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+        height: 65,
+        destinations: [
+          const NavigationDestination(
+            icon: Icon(Icons.dns_outlined),
+            selectedIcon: Icon(Icons.dns_rounded),
+            label: 'Hosts',
+          ),
+          if (showsConnectionsTab)
+            const NavigationDestination(
+              icon: Icon(Icons.link_outlined),
+              selectedIcon: Icon(Icons.link),
+              label: 'Connections',
+            ),
+          const NavigationDestination(
+            icon: Icon(Icons.key_outlined),
+            selectedIcon: Icon(Icons.key_rounded),
+            label: 'Keys',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.code_outlined),
+            selectedIcon: Icon(Icons.code_rounded),
+            label: 'Snippets',
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildDesktopLayout() {
     final appName = ref.watch(appDisplayNameProvider);
@@ -530,7 +598,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 right: BorderSide(color: colorScheme.outline.withAlpha(60)),
               ),
             ),
+            // The right inset belongs to the window edge beyond the content,
+            // not to this column; applying it here squeezes the sidebar.
             child: SafeArea(
+              right: false,
               bottom: false,
               child: Column(
                 children: [
@@ -636,25 +707,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
           ),
 
-          // Main content
+          // Main content. The sidebar owns the left inset; the right one can
+          // hold the status bar and camera, as on an open iPhone Duo.
           Expanded(
-            child: SafeArea(
-              left: false,
-              right: false,
-              bottom: false,
-              child: _buildContent(),
-            ),
+            child: SafeArea(left: false, bottom: false, child: _buildContent()),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildContent() => Column(
+  Widget _buildContent({int? index}) => Column(
     children: [
       const _TelemetryOptInPromptCard(),
       Expanded(
-        child: switch (_selectedIndex) {
+        child: switch (index ?? _selectedIndex) {
           0 => const HostsPanel(),
           1 => const _ConnectionsPanel(),
           2 => const _KeysPanel(),

@@ -20,6 +20,7 @@ import '../../../domain/services/remote_file_service.dart';
 import '../../../domain/services/shell_completion_service.dart';
 import '../../../domain/services/ssh_service.dart';
 import '../../models/app_platform_file.dart';
+import '../../widgets/display_fold.dart';
 import '../../widgets/monkey_terminal_view.dart';
 import '../../widgets/system_bottom_inset.dart';
 import '../../widgets/terminal_selection_text.dart' as terminal_selection_text;
@@ -654,6 +655,36 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
           tmuxSidebarExpandedWidth + tmuxSidebarMinTerminalWidth
       ? TmuxBarPlacement.sidebar
       : TmuxBarPlacement.bottomOverlay;
+}
+
+/// How the connection screen splits across a fold, such as iPhone Duo's.
+enum TerminalFoldLayout {
+  /// No fold splits the screen, or there is nothing for a second page.
+  none,
+
+  /// Held like a book: the window navigator stays open on the left page and
+  /// the terminal fills the right page, clear of the fold.
+  book,
+
+  /// Propped up like a laptop: the terminal fills the top page to read at a
+  /// distance; the window navigator and keyboard toolbar sit on the bottom
+  /// page, where the hand rests.
+  propped,
+}
+
+/// Resolves the fold layout for the connection screen.
+///
+/// Only a mux session gives the second page something to show (its window
+/// navigator), so a plain shell keeps the single-page layout and simply
+/// spans the fold.
+TerminalFoldLayout resolveTerminalFoldLayout(
+  DisplayFold? fold, {
+  required bool showsMuxNavigator,
+}) {
+  if (fold == null || !showsMuxNavigator) {
+    return TerminalFoldLayout.none;
+  }
+  return fold.isVertical ? TerminalFoldLayout.book : TerminalFoldLayout.propped;
 }
 
 /// Whether Back should leave the connection screen.

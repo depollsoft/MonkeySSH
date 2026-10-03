@@ -46,6 +46,14 @@ through this maintenance workflow when required.
 
 Local Xcode builds with automatic signing pick up the new entitlement on next build without any extra step (Xcode regenerates dev profiles via the developer portal automatically).
 
+## iOS scene lifecycle and iPhone Duo
+
+The iOS runner uses the UIScene lifecycle (`UIApplicationSceneManifest` with `SceneDelegate`), which the iOS 27 SDK requires for an app to launch. UIKit no longer calls `application(_:didFinishLaunchingWithOptions:)` with a URL, `application(_:open:options:)`, or `applicationDidEnterBackground`/`WillEnterForeground`. Register plugins and method channels in `AppDelegate.didInitializeImplicitFlutterEngine`, and handle URL opens and background/foreground in the `FlutterSceneLifeCycleDelegate` extension on `AppDelegate`.
+
+iPhone Duo layout facts: the outer display is 466×678 pt (compact width) and the inner display is 951×669 pt open wide (regular width and height). The status bar and camera sit in a strip along one side, so safe areas are asymmetric. Honor left and right insets independently and never assume they are zero in portrait. Fold-aware layouts read `resolveDisplayFold(MediaQuery.of(context))` (`lib/presentation/widgets/display_fold.dart`). Android foldables report the fold through the engine. On iOS the fold is a UIKit reserved region (iOS 27.1 SDK) that native code forwards over `xyz.depollsoft.monkeyssh/display_features` to `PlatformDisplayFeaturesController`. Widget tests simulate a fold with `tester.view.displayFeatures`.
+
+The iPhone Duo simulator ships only with Xcode 27.1 beta and the iOS 27.1 runtime. Its Device Hub has Closed, Book, Open, and Rotate controls; `simctl` has no pose command.
+
 ## MonkeyMux Go tests on a Windows dev machine
 
 CI runs the MonkeyMux Go suite on both Linux and Windows (the `go-test` job), because the two platforms cover disjoint sets: most of the suite is `//go:build !windows` and needs `creack/pty` plus the `unixPty` type, while the ConPTY backend tests are `//go:build windows`.
