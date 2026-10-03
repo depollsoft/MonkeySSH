@@ -76,6 +76,39 @@ void main() {
       terminal.write('Hello World');
       expect(terminal.buffer.lines[0].getText(5, 0), '');
     });
+
+    test('reads cells skipped by cursor movement as spaces', () {
+      final terminal = Terminal();
+      terminal.write('Hello\x1b[1CWorld\x1b[3Cagain');
+      expect(terminal.buffer.lines[0].getText(), 'Hello World   again');
+    });
+
+    test('reads erased cells between text as spaces', () {
+      final terminal = Terminal();
+      terminal.write('Hello_World\x1b[6G\x1b[X');
+      expect(terminal.buffer.lines[0].getText(), 'Hello World');
+    });
+
+    test('keeps leading blank cells before text', () {
+      final terminal = Terminal();
+      terminal.write('\x1b[3CHello');
+      expect(terminal.buffer.lines[0].getText(), '   Hello');
+      expect(terminal.buffer.lines[0].getText(1), '  Hello');
+    });
+
+    test('drops trailing blank cells', () {
+      final terminal = Terminal();
+      terminal.write('Hello\x1b[3CWorld');
+      expect(terminal.buffer.lines[0].getText(0, 7), 'Hello');
+    });
+
+    test('does not read the second half of a wide character as a space', () {
+      final terminal = Terminal();
+      terminal.write('界\x1b[1CZ界Y');
+      expect(terminal.buffer.lines[0].getText(), '界 Z界Y');
+      expect(terminal.buffer.lines[0].getText(1), ' Z界Y');
+      expect(terminal.buffer.lines[0].getText(5), 'Y');
+    });
   });
 
   group('BufferLine.getTrimmedLength()', () {

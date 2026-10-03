@@ -351,12 +351,26 @@ class BufferLine with IndexedItem {
     }
 
     final builder = StringBuffer();
+    var pendingBlankCells = 0;
     for (var i = from; i < to; i++) {
       final codePoint = getCodePoint(i);
-      final width = getWidth(i);
-      if (codePoint != 0 && i + width <= to) {
-        builder.writeCharCode(codePoint);
+      if (codePoint == 0) {
+        // The right half of a wide character carries no text of its own. Any
+        // other empty cell was skipped by cursor movement or erased, which
+        // TUIs and tmux use in place of writing spaces, so it reads as a
+        // space when text follows it. Trailing empty cells stay padding.
+        if (i == 0 || getWidth(i - 1) != 2) {
+          pendingBlankCells++;
+        }
+        continue;
       }
+      if (i + getWidth(i) > to) {
+        continue;
+      }
+      for (; pendingBlankCells > 0; pendingBlankCells--) {
+        builder.writeCharCode(0x20);
+      }
+      builder.writeCharCode(codePoint);
     }
 
     return builder.toString();

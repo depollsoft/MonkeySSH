@@ -82,6 +82,23 @@ void main() {
         startsWith('llo\nce '),
       );
     });
+
+    test('keeps spaces a TUI drew with cursor movement and erases', () {
+      final terminal = Terminal();
+      terminal.resize(20, 4);
+
+      // Redraws that skip or erase blank runs instead of writing spaces.
+      terminal.write('\x1b[1;1Hgit\x1b[1Cstatus\x1b[2C--short');
+      terminal
+          .write('\x1b[2;1Hecho_hello_world\x1b[2;5H\x1b[X\x1b[2;11H\x1b[X');
+
+      expect(
+        terminal.buffer.getText(
+          BufferRangeLine(CellOffset(0, 0), CellOffset(20, 1)),
+        ),
+        'git status  --short\necho hello world',
+      );
+    });
   });
 
   group('Buffer.resize()', () {
