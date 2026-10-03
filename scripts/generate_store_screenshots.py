@@ -627,8 +627,8 @@ class StoreDemoEnvironment:
         opencode_flags = _opencode_capture_flags(self._opencode)
         _configure_opencode_capture(self._opencode, opencode_home, opencode_flags)
         opencode_environment = ' '.join(
-            f'{name}={self._shell_quote(value)}'
-            for name, value in _opencode_capture_environment(opencode_home).items()
+            self._shell_quote(argument)
+            for argument in _opencode_capture_environment_arguments(opencode_home)
         )
         self._write_pane_script(
             'opencode',
@@ -2262,6 +2262,22 @@ def _opencode_capture_environment(home: Path) -> dict[str, str]:
     }
 
 
+def _opencode_capture_removed_environment() -> list[str]:
+    # Config, auth, and database overrides take precedence over HOME/XDG. Keep
+    # the updater opt-out, but let the temporary home supply all other settings.
+    return sorted(name for name in os.environ
+                  if name.startswith('OPENCODE_') and name != 'OPENCODE_DISABLE_AUTOUPDATE')
+
+
+def _opencode_capture_environment_arguments(home: Path) -> list[str]:
+    arguments = []
+    for name in _opencode_capture_removed_environment():
+        arguments.extend(['-u', name])
+    arguments.extend(f'{name}={value}'
+                     for name, value in _opencode_capture_environment(home).items())
+    return arguments
+
+
 def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None:
     model = os.environ.get('STORE_SCREENSHOT_OPENCODE_MODEL')
     if model:
@@ -2274,6 +2290,8 @@ def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None
     if flags != '--standalone':
         raise RuntimeError('OpenCode credential import requires private-server mode.')
     env = os.environ.copy()
+    for name in _opencode_capture_removed_environment():
+        env.pop(name, None)
     env.update(_opencode_capture_environment(home))
     # Import into the temporary HOME through stdin, never argv or capture logs.
     subprocess.run(

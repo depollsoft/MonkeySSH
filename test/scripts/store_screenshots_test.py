@@ -50,6 +50,11 @@ class LiveAgentCaptureTest(unittest.TestCase):
                 'XDG_DATA_HOME': '/developer/data',
                 'XDG_STATE_HOME': '/developer/state',
                 'XDG_CACHE_HOME': '/developer/cache',
+                'OPENCODE_CONFIG_DIR': '/developer/config/opencode',
+                'OPENCODE_DB': '/developer/session.db',
+                'OPENCODE_AUTH_CONTENT': 'test-secret',
+                'OPENCODE_FUTURE_CONFIG_PATH': '/developer/future',
+                'OPENCODE_DISABLE_AUTOUPDATE': '1',
             }), patch.object(capture.subprocess, 'run') as run:
                 capture._configure_opencode_capture('/tools/opencode', home, '--standalone')
             self.assertEqual(run.call_args.args[0],
@@ -64,6 +69,10 @@ class LiveAgentCaptureTest(unittest.TestCase):
                 ('XDG_CACHE_HOME', '.cache'),
             ):
                 self.assertEqual(options['env'][key], str(home / relative))
+            for key in ('OPENCODE_CONFIG_DIR', 'OPENCODE_DB', 'OPENCODE_AUTH_CONTENT',
+                        'OPENCODE_FUTURE_CONFIG_PATH'):
+                self.assertNotIn(key, options['env'])
+            self.assertEqual(options['env']['OPENCODE_DISABLE_AUTOUPDATE'], '1')
             self.assertEqual(options['stdout'], subprocess.DEVNULL)
             self.assertEqual(options['stderr'], subprocess.DEVNULL)
             self.assertTrue(options['check'])
@@ -76,15 +85,23 @@ class LiveAgentCaptureTest(unittest.TestCase):
             env = capture._opencode_capture_environment(home)
             demo = object.__new__(capture.StoreDemoEnvironment)
             demo._tmpdir = demo.demo_dir = home
-            assignments = ' '.join(f'{key}={demo._shell_quote(value)}'
-                                   for key, value in env.items())
-            demo._write_pane_script('opencode', f'exec env {assignments} /usr/bin/env')
-            inherited = {**capture.os.environ, **{key: '/developer/private' for key in env}}
-            result = subprocess.run([str(home / 'opencode-pane.sh')],
-                                    env=inherited, capture_output=True, text=True, check=True)
+            overrides = {'OPENCODE_CONFIG_DIR': '/developer/config/opencode',
+                         'OPENCODE_DB': '/developer/session.db',
+                         'OPENCODE_AUTH_CONTENT': 'test-secret',
+                         'OPENCODE_DISABLE_AUTOUPDATE': '1'}
+            with patch.dict(capture.os.environ, overrides):
+                arguments = ' '.join(demo._shell_quote(argument) for argument in
+                                     capture._opencode_capture_environment_arguments(home))
+                demo._write_pane_script('opencode', f'exec env {arguments} /usr/bin/env')
+                inherited = {**capture.os.environ, **{key: '/developer/private' for key in env}}
+                result = subprocess.run([str(home / 'opencode-pane.sh')],
+                                        env=inherited, capture_output=True, text=True, check=True)
             actual = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
             for key, value in env.items():
                 self.assertEqual(actual[key], value)
+            for key in ('OPENCODE_CONFIG_DIR', 'OPENCODE_DB', 'OPENCODE_AUTH_CONTENT'):
+                self.assertNotIn(key, actual)
+            self.assertEqual(actual['OPENCODE_DISABLE_AUTOUPDATE'], '1')
 
     def test_opencode_auth_requires_supported_import_and_stops_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
