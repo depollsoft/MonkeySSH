@@ -121,6 +121,7 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onAction,
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
+    this.pinnedOpen = false,
     this.tmuxExtraFlags,
     this.hostLabel,
     this.scopeWorkingDirectory,
@@ -163,6 +164,13 @@ class _TmuxExpandableBar extends StatefulWidget {
 
   /// Whether the tmux window list should start expanded.
   final bool initiallyExpanded;
+
+  /// Keeps the sidebar window list open on a page of its own, as when a fold
+  /// splits the screen. The handle and drags no longer collapse it.
+  ///
+  /// The expanded state underneath still follows selections, so the bar
+  /// returns to it once the page goes away.
+  final bool pinnedOpen;
 
   /// Riverpod ref.
   final WidgetRef ref;
@@ -276,7 +284,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   bool get _emptyWindowListEndsSession =>
       widget.activeMuxBackend == RemoteMuxBackend.monkeyMux;
 
-  bool get _showsExpandedSidebarContent => _expanded || _dragOffset > 0;
+  bool get _showsExpandedSidebarContent =>
+      widget.pinnedOpen || _expanded || _dragOffset > 0;
 
   List<TmuxWindow>? get _displayedWindows {
     final visibleWindows = _windows
@@ -722,7 +731,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   bool collapseIfExpanded() {
-    if (!_expanded) {
+    if (!_expanded || widget.pinnedOpen) {
       return false;
     }
     setState(() {
@@ -1074,7 +1083,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _onSidebarPointerDown(PointerDownEvent event) {
-    if (!_isSidebar || _sidebarDragPointer != null) {
+    if (!_isSidebar || widget.pinnedOpen || _sidebarDragPointer != null) {
       return;
     }
     _sidebarDragPointer = event.pointer;
@@ -1259,6 +1268,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _toggleExpanded() {
+    if (widget.pinnedOpen) return;
     final wasExpanded = _expanded;
     setState(() => _expanded = !_expanded);
     widget.onExpandedChanged(!wasExpanded);
@@ -1389,6 +1399,51 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           : _nativeAcpWindowIndex(activeNative),
       nativeWindowTool: activeNativeTool,
     );
+    final handle = SizedBox(
+      height: 56,
+      width: double.infinity,
+      child: _showsExpandedSidebarContent
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  icon,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      handleLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  // A pinned page has nothing to collapse into.
+                  if (!widget.pinnedOpen) ...[
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.chevron_left,
+                      size: 20,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ],
+              ),
+            )
+          : Center(child: icon),
+    );
+    if (widget.pinnedOpen) {
+      return Semantics(
+        header: true,
+        label: 'tmux windows: $handleLabel',
+        child: ExcludeSemantics(
+          key: const ValueKey('tmux-handle-bar'),
+          child: handle,
+        ),
+      );
+    }
 
     return Semantics(
       button: true,
@@ -1403,38 +1458,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           key: const ValueKey('tmux-handle-bar'),
           behavior: HitTestBehavior.opaque,
           onTap: _toggleExpanded,
-          child: SizedBox(
-            height: 56,
-            width: double.infinity,
-            child: _showsExpandedSidebarContent
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Row(
-                      children: [
-                        icon,
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            handleLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Icon(
-                          Icons.chevron_left,
-                          size: 20,
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ],
-                    ),
-                  )
-                : Center(child: icon),
-          ),
+          child: handle,
         ),
       ),
     );

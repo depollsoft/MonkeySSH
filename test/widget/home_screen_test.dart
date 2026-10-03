@@ -1,6 +1,7 @@
 // ignore_for_file: public_member_api_docs, directives_ordering, avoid_redundant_argument_values
 
 import 'dart:async';
+import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
@@ -39,6 +40,7 @@ import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
+import 'package:monkeyssh/presentation/widgets/panel_header.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
 import '../support/fake_acp_session_manager.dart';
@@ -684,6 +686,161 @@ void main() {
 
       expect(bodyRect.bottom, closeTo(navigationBarRect.top, 0.01));
     });
+
+    // iPhone Duo lays the status bar and camera out in a strip along one side.
+    const sideStripPadding = EdgeInsets.only(right: 84, bottom: 34);
+
+    void useViewSize(WidgetTester tester, Size size) {
+      tester.view
+        ..physicalSize = size
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+    }
+
+    testWidgets('keeps rows clear of a side status bar strip', (tester) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      useViewSize(tester, const Size(466, 678));
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          size: const Size(466, 678),
+          mediaQueryData: const MediaQueryData(
+            padding: sideStripPadding,
+            viewPadding: sideStripPadding,
+          ),
+          overrides: [
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+              ]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        tester.getRect(find.byTooltip('Reorder')).right,
+        lessThanOrEqualTo(466 - 84),
+      );
+      expect(
+        tester.getRect(find.text('Add Host')).right,
+        lessThanOrEqualTo(466 - 84),
+      );
+    });
+
+    testWidgets('keeps the wide sidebar whole beside a side strip', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      useViewSize(tester, const Size(951, 669));
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          size: const Size(951, 669),
+          mediaQueryData: const MediaQueryData(
+            padding: sideStripPadding,
+            viewPadding: sideStripPadding,
+          ),
+          overrides: [
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value(const <Host>[]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+
+      // The sidebar keeps its full width; only the content clears the strip.
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.text('Connections')).right,
+        lessThanOrEqualTo(230),
+      );
+      // The panel header's Add Host action, ahead of the empty state's.
+      expect(
+        tester.getRect(find.text('Add Host').first).right,
+        lessThanOrEqualTo(951 - 84),
+      );
+    });
+
+    testWidgets(
+      'splits home across a book fold with connections on the right',
+      (tester) async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        useViewSize(tester, const Size(951, 669));
+
+        await tester.pumpWidget(
+          buildMobileHomeScreen(
+            db: db,
+            size: const Size(951, 669),
+            initialTab: HomeScreenTab.connections,
+            mediaQueryData: const MediaQueryData(
+              padding: sideStripPadding,
+              viewPadding: sideStripPadding,
+              displayFeatures: [
+                DisplayFeature(
+                  bounds: Rect.fromLTWH(475, 0, 0, 669),
+                  type: DisplayFeatureType.fold,
+                  state: DisplayFeatureState.postureHalfOpened,
+                ),
+              ],
+            ),
+            overrides: [
+              activeSessionsProvider.overrideWith(
+                _TestActiveSessionsNotifier.new,
+              ),
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value(const <Host>[]),
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        // The left page is the phone layout without its Connections tab.
+        final navigationBar = find.byType(NavigationBar);
+        expect(tester.getRect(navigationBar).right, closeTo(475, 0.01));
+        expect(
+          find.descendant(
+            of: navigationBar,
+            matching: find.text('Connections'),
+          ),
+          findsNothing,
+        );
+        expect(
+          tester.widget<NavigationBar>(navigationBar).selectedIndex,
+          0,
+          reason: 'the hidden Connections tab falls back to Hosts',
+        );
+        expect(
+          tester.getRect(find.text('no hosts yet')).right,
+          lessThanOrEqualTo(475),
+        );
+
+        // The right page always shows connections, clear of the side strip.
+        final connectionsEmpty = find.text('no active sessions');
+        expect(
+          tester.getRect(connectionsEmpty).left,
+          greaterThanOrEqualTo(475),
+        );
+        expect(
+          tester.getRect(find.byType(PanelHeader).last).right,
+          lessThanOrEqualTo(951 - 84),
+        );
+      },
+    );
   });
 
   group('HomeScreen reorder affordance', () {
