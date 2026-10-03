@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.219"
+	monkeyMuxVersion                  = "0.1.220"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -116,6 +116,10 @@ const (
 	// with the guard free and the file either gone or live.
 	takeoverGuardWaitAttempts = 20
 	takeoverGuardWaitInterval = 5 * time.Millisecond
+	// How long removing a session file waits out another helper's read of it.
+	// A read holds the file open for microseconds; see removePIDFileIfUnchanged.
+	pidFileRemoveRetryAttempts = 50
+	pidFileRemoveRetryInterval = 2 * time.Millisecond
 	// How long a session file that cannot be parsed at all must sit untouched
 	// before it is treated as abandoned. Kept well under the lock timeout so a
 	// waiter can still reclaim it, and well over the gap between creating a
@@ -2895,14 +2899,36 @@ func clearAbandonedTakeoverGuard(guard string) {
 // hold the same session at once. The re-read and the unlink are still two
 // steps, so a holder uses this on its own file, and anything reclaiming
 // another helper's file goes through reclaimPIDFileIfUnchanged.
+//
+// On Windows a helper reading the file, to check its holder, has it open
+// without delete sharing (os.Open does not ask for it), and the unlink fails
+// with a sharing violation for as long as that read lasts. Giving up there
+// would leave a holder's own lock installed under its live pid, blocking every
+// other helper for the session until it exits, so the removal is retried
+// while the read finishes.
 func removePIDFileIfUnchanged(path string, record pidRecord) bool {
-	current, err := readPIDRecord(path)
-	if err != nil ||
-		current.pid != record.pid ||
-		!current.writtenAt.Equal(record.writtenAt) {
-		return false
+	for attempt := 0; ; attempt++ {
+		current, err := readPIDRecord(path)
+		if err != nil ||
+			current.pid != record.pid ||
+			!current.writtenAt.Equal(record.writtenAt) {
+			return false
+		}
+		err = os.Remove(path)
+		if err == nil {
+			return true
+		}
+		if !isFileInUseError(err) || attempt >= pidFileRemoveRetryAttempts {
+			return false
+		}
+		waitForFileInUse()
 	}
-	return os.Remove(path) == nil
+}
+
+// waitForFileInUse pauses before retrying a removal that another handle
+// blocked; tests replace it to observe the retry.
+var waitForFileInUse = func() {
+	time.Sleep(pidFileRemoveRetryInterval)
 }
 
 // clearAbandonedPIDFile removes a session file that cannot be parsed at all,

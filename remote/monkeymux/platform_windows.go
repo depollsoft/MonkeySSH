@@ -1060,3 +1060,9 @@ func isStaleUnixSocketError(err error) bool {
 
 // ConPTY has no Unix slave device path for detached hooks.
 func writeAgentIdentityMarker(marker string) {}
+
+// isFileInUseError reports whether a file operation failed only because
+// another handle has the file open without the sharing it needs.
+func isFileInUseError(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+}
