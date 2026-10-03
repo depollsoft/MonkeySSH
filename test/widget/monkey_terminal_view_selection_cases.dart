@@ -47,6 +47,32 @@ void registerMonkeyTerminalViewSelectionTests() {
       );
     }
 
+    testWidgets('copies spaces a TUI drew with cursor movement and erases', (
+      tester,
+    ) async {
+      // TUIs and tmux skip or erase blank runs instead of writing spaces.
+      final terminal = Terminal()
+        ..resize(40, 3)
+        ..write('\x1b[1;1H\$\x1b[1Cgit\x1b[1Cstatus')
+        ..write('\x1b[2;3Hon_branch_main\x1b[2;5H\x1b[X\x1b[2;12H\x1b[X');
+      final controller = TerminalController();
+      addTearDown(controller.dispose);
+      final render = await pumpTerminal(
+        tester,
+        terminal,
+        controller,
+        useSystemSelection: true,
+      );
+
+      render.dispatchSelectionEvent(const SelectAllSelectionEvent());
+      await tester.pump();
+
+      expect(
+        render.getSelectedContent()?.plainText,
+        '\$ git status\n  on branch main\n',
+      );
+    });
+
     for (final useSystemSelection in [true, false]) {
       for (final change in [
         'grid resize',

@@ -2521,13 +2521,14 @@ void registerTerminalScreenSelectionTests() {
       });
 
       test('preserves wrapped padding after a wide character at the row edge', () {
-        // The trailing space wraps the cursor onto a third row, past the colon.
+        // The wide character wraps past a padding cell at the end of the first
+        // row, and the colon wraps onto a third row.
         final terminal = Terminal()
           ..resize(10, 24)
           ..write('123456789界Password: ');
         expect(
           terminalSensitivePromptTextBeforeCursor(terminal),
-          '123456789界 Password:',
+          '123456789 界Password:',
         );
         terminal.write('\x1b[2A\x1b[10G');
         expect(terminalSensitivePromptTextBeforeCursor(terminal), '123456789');

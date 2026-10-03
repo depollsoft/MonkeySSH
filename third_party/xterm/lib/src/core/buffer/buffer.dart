@@ -116,6 +116,19 @@ class Buffer {
     codePoint = charset.translate(codePoint);
 
     final cellWidth = unicodeV11.wcwidth(codePoint);
+    if (cellWidth == 2 && viewWidth >= 2 && _cursorX == viewWidth - 1) {
+      // A wide character does not fit in the last column. Like xterm and the
+      // MonkeyMux screen model, blank that cell and wrap (or, without
+      // autowrap, take the last two columns) instead of splitting it across
+      // rows.
+      if (terminal.autoWrapMode) {
+        graphics.removePlaceholderAt(currentLine, _cursorX);
+        currentLine.eraseCell(_cursorX, terminal.cursor);
+        _cursorX = viewWidth;
+      } else {
+        _cursorX = viewWidth - 2;
+      }
+    }
     if (_cursorX >= terminal.viewWidth) {
       index();
       setCursorX(0);
