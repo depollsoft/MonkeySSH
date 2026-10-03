@@ -1,5 +1,6 @@
 """Store caption and scene-contract checks. Run on macOS with Pillow."""
 
+import json
 import re
 import subprocess
 import sys
@@ -18,6 +19,106 @@ import store_media
 
 
 class LiveAgentCaptureTest(unittest.TestCase):
+    def test_opencode_capture_uses_private_server_when_supported(self):
+        for help_text, expected in (
+            ('FLAGS\n  --standalone  Run with a private server\n', '--standalone'),
+            ('Options:\n  --prompt  Prompt to use\n', ''),
+            ('See --standalone in the documentation.\n', ''),
+        ):
+            with self.subTest(help_text=help_text), \
+                 patch.object(capture.subprocess, 'check_output', return_value=help_text):
+                self.assertEqual(capture._opencode_capture_flags('/tools/opencode'), expected)
+
+    def test_opencode_help_failure_stops_capture(self):
+        with patch.object(capture.subprocess, 'check_output',
+                          side_effect=subprocess.CalledProcessError(1, ['opencode', '--help'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                capture._opencode_capture_flags('/tools/opencode')
+
+    def test_opencode_credentials_stay_in_temporary_home_and_out_of_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'home'
+            (home / '.config/opencode').mkdir(parents=True)
+            auth = root / 'auth.json'
+            secret = b'{"test-provider":{"token":"test-secret"}}'
+            auth.write_bytes(secret)
+            with patch.dict(capture.os.environ, {
+                'STORE_SCREENSHOT_OPENCODE_AUTH_FILE': str(auth),
+                'STORE_SCREENSHOT_OPENCODE_MODEL': 'test-provider/test-model',
+                'XDG_CONFIG_HOME': '/developer/config',
+                'XDG_DATA_HOME': '/developer/data',
+                'XDG_STATE_HOME': '/developer/state',
+                'XDG_CACHE_HOME': '/developer/cache',
+                'OPENCODE_CONFIG_DIR': '/developer/config/opencode',
+                'OPENCODE_DB': '/developer/session.db',
+                'OPENCODE_AUTH_CONTENT': 'test-secret',
+                'OPENCODE_FUTURE_CONFIG_PATH': '/developer/future',
+                'OPENCODE_DISABLE_AUTOUPDATE': '1',
+            }), patch.object(capture.subprocess, 'run') as run:
+                capture._configure_opencode_capture('/tools/opencode', home, '--standalone')
+            self.assertEqual(run.call_args.args[0],
+                             ['/tools/opencode', 'auth', 'import', '--standalone'])
+            options = run.call_args.kwargs
+            self.assertEqual(options['input'], secret)
+            self.assertEqual(options['env']['HOME'], str(home))
+            for key, relative in (
+                ('XDG_CONFIG_HOME', '.config'),
+                ('XDG_DATA_HOME', '.local/share'),
+                ('XDG_STATE_HOME', '.local/state'),
+                ('XDG_CACHE_HOME', '.cache'),
+            ):
+                self.assertEqual(options['env'][key], str(home / relative))
+            for key in ('OPENCODE_CONFIG_DIR', 'OPENCODE_DB', 'OPENCODE_AUTH_CONTENT',
+                        'OPENCODE_FUTURE_CONFIG_PATH'):
+                self.assertNotIn(key, options['env'])
+            self.assertEqual(options['env']['OPENCODE_DISABLE_AUTOUPDATE'], '1')
+            self.assertEqual(options['stdout'], subprocess.DEVNULL)
+            self.assertEqual(options['stderr'], subprocess.DEVNULL)
+            self.assertTrue(options['check'])
+            self.assertEqual(json.loads((home / '.config/opencode/opencode.json').read_text()),
+                             {'model': 'test-provider/test-model'})
+
+    def test_opencode_pane_environment_is_isolated_from_inherited_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            env = capture._opencode_capture_environment(home)
+            demo = object.__new__(capture.StoreDemoEnvironment)
+            demo._tmpdir = demo.demo_dir = home
+            overrides = {'OPENCODE_CONFIG_DIR': '/developer/config/opencode',
+                         'OPENCODE_DB': '/developer/session.db',
+                         'OPENCODE_AUTH_CONTENT': 'test-secret',
+                         'OPENCODE_DISABLE_AUTOUPDATE': '1'}
+            with patch.dict(capture.os.environ, overrides):
+                arguments = ' '.join(demo._shell_quote(argument) for argument in
+                                     capture._opencode_capture_environment_arguments(home))
+                demo._write_pane_script('opencode', f'exec env {arguments} /usr/bin/env')
+                inherited = {**capture.os.environ, **{key: '/developer/private' for key in env}}
+                result = subprocess.run([str(home / 'opencode-pane.sh')],
+                                        env=inherited, capture_output=True, text=True, check=True)
+            actual = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            for key, value in env.items():
+                self.assertEqual(actual[key], value)
+            for key in ('OPENCODE_CONFIG_DIR', 'OPENCODE_DB', 'OPENCODE_AUTH_CONTENT'):
+                self.assertNotIn(key, actual)
+            self.assertEqual(actual['OPENCODE_DISABLE_AUTOUPDATE'], '1')
+
+    def test_opencode_auth_requires_supported_import_and_stops_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth = root / 'auth.json'
+            auth.write_text('{}')
+            with patch.dict(capture.os.environ, {
+                'STORE_SCREENSHOT_OPENCODE_AUTH_FILE': str(auth),
+                'STORE_SCREENSHOT_OPENCODE_MODEL': '',
+            }), patch.object(capture.subprocess, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'private-server mode'):
+                    capture._configure_opencode_capture('/tools/opencode', root, '')
+                run.assert_not_called()
+                run.side_effect = subprocess.CalledProcessError(1, ['opencode', 'auth', 'import'])
+                with self.assertRaises(subprocess.CalledProcessError):
+                    capture._configure_opencode_capture('/tools/opencode', root, '--standalone')
+
     def test_staging_helper_preserves_open_old_binary_and_reuses_matching_build(self):
         demo = object.__new__(capture.StoreDemoEnvironment)
         with tempfile.TemporaryDirectory() as directory, \

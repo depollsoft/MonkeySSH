@@ -624,14 +624,21 @@ class StoreDemoEnvironment:
         (opencode_home / '.config/opencode').mkdir(parents=True, exist_ok=True)
         (opencode_home / '.config/opencode/tui.json').write_text('{"theme":"system"}\n')
         (opencode_home / '.config/opencode/cli.json').write_text('{"theme":{"mode":"system"}}\n')
+        opencode_flags = _opencode_capture_flags(self._opencode)
+        _configure_opencode_capture(self._opencode, opencode_home, opencode_flags)
+        opencode_environment = ' '.join(
+            self._shell_quote(argument)
+            for argument in _opencode_capture_environment_arguments(opencode_home)
+        )
         self._write_pane_script(
             'opencode',
             f"""
             exec env \\
-              HOME={self._shell_quote(str(opencode_home))} \\
+              {opencode_environment} \\
               PATH={self._shell_quote(os.environ.get('PATH', ''))} \\
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
+              {opencode_flags} \\
               --prompt 'Explain in two short bullets how a persistent SSH workspace helps when switching between phone and desktop. Keep the answer under 40 words. Do not use tools, read files, or search for images.'
             """,
         )
@@ -2232,6 +2239,65 @@ def _adb_path() -> Path:
             return candidate
     raise RuntimeError(
         'adb not found. Set ANDROID_HOME or ANDROID_SDK_ROOT, or put adb on PATH.',
+    )
+
+
+def _opencode_capture_flags(executable: str) -> str:
+    # OpenCode 2 otherwise starts a background service on a fixed port. A
+    # temporary capture HOME can collide with the developer's existing service.
+    # Older versions do not expose this flag and keep their normal TUI launch.
+    help_text = subprocess.check_output(
+        [executable, '--help'], text=True, stderr=subprocess.PIPE, timeout=10,
+    )
+    return '--standalone' if re.search(r'^\s*--standalone\b', help_text, re.MULTILINE) else ''
+
+
+def _opencode_capture_environment(home: Path) -> dict[str, str]:
+    return {
+        'HOME': str(home),
+        'XDG_CONFIG_HOME': str(home / '.config'),
+        'XDG_DATA_HOME': str(home / '.local/share'),
+        'XDG_STATE_HOME': str(home / '.local/state'),
+        'XDG_CACHE_HOME': str(home / '.cache'),
+    }
+
+
+def _opencode_capture_removed_environment() -> list[str]:
+    # Config, auth, and database overrides take precedence over HOME/XDG. Keep
+    # the updater opt-out, but let the temporary home supply all other settings.
+    return sorted(name for name in os.environ
+                  if name.startswith('OPENCODE_') and name != 'OPENCODE_DISABLE_AUTOUPDATE')
+
+
+def _opencode_capture_environment_arguments(home: Path) -> list[str]:
+    arguments = []
+    for name in _opencode_capture_removed_environment():
+        arguments.extend(['-u', name])
+    arguments.extend(f'{name}={value}'
+                     for name, value in _opencode_capture_environment(home).items())
+    return arguments
+
+
+def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None:
+    model = os.environ.get('STORE_SCREENSHOT_OPENCODE_MODEL')
+    if model:
+        (home / '.config/opencode/opencode.json').write_text(
+            json.dumps({'model': model}) + '\n',
+        )
+    auth_file = os.environ.get('STORE_SCREENSHOT_OPENCODE_AUTH_FILE')
+    if not auth_file:
+        return
+    if flags != '--standalone':
+        raise RuntimeError('OpenCode credential import requires private-server mode.')
+    env = os.environ.copy()
+    for name in _opencode_capture_removed_environment():
+        env.pop(name, None)
+    env.update(_opencode_capture_environment(home))
+    # Import into the temporary HOME through stdin, never argv or capture logs.
+    subprocess.run(
+        [executable, 'auth', 'import', '--standalone'],
+        input=Path(auth_file).expanduser().read_bytes(), env=env, check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
     )
 
 

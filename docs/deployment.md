@@ -358,6 +358,31 @@ Exited agent panes also fail capture; no shell or printed-transcript fallback
 is used. Configure the capture host beforehand, including any required logins
 and the OpenClaw gateway if OpenClaw is installed. The generators never install or update those tools.
 
+OpenCode runs with a temporary home and system theme. When supported, capture
+uses `--standalone` to avoid conflicts with an existing background service.
+For an authenticated OpenCode 2 capture, export credentials into a protected
+temporary file and set `STORE_SCREENSHOT_OPENCODE_MODEL` to an available
+`provider/model`. For example, with an authenticated OpenAI integration:
+
+```bash
+(
+  set -e
+  umask 077
+  capture_auth="$(mktemp -t monkeyssh-opencode-auth)"
+  trap 'rm -f "$capture_auth"' EXIT
+  opencode auth export openai > "$capture_auth"
+  export STORE_SCREENSHOT_OPENCODE_AUTH_FILE="$capture_auth"
+  export STORE_SCREENSHOT_OPENCODE_MODEL=openai/gpt-6.1-sol
+  python3 scripts/generate_store_screenshots.py both
+  python3 scripts/generate_store_demo_videos.py both
+)
+```
+
+The redirect keeps the credential export out of terminal output. The generators
+import credentials through stdin into the temporary capture home, outside the
+published media, and remove that home when capture ends. The trap deletes the
+exported file when the subshell exits, including on failure.
+
 The MonkeyMux screenshot scene shows the start of the live list on phones and
 the end on tablets. Videos scroll through both ends. OCR validation requires
 all seven required agent labels across each platform's screenshots and within every
