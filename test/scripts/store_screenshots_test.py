@@ -18,6 +18,22 @@ import store_media
 
 
 class LiveAgentCaptureTest(unittest.TestCase):
+    def test_opencode_capture_uses_private_server_when_supported(self):
+        for help_text, expected in (
+            ('FLAGS\n  --standalone  Run with a private server\n', '--standalone'),
+            ('Options:\n  --prompt  Prompt to use\n', ''),
+            ('See --standalone in the documentation.\n', ''),
+        ):
+            with self.subTest(help_text=help_text), \
+                 patch.object(capture.subprocess, 'check_output', return_value=help_text):
+                self.assertEqual(capture._opencode_capture_flags('/tools/opencode'), expected)
+
+    def test_opencode_help_failure_stops_capture(self):
+        with patch.object(capture.subprocess, 'check_output',
+                          side_effect=subprocess.CalledProcessError(1, ['opencode', '--help'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                capture._opencode_capture_flags('/tools/opencode')
+
     def test_staging_helper_preserves_open_old_binary_and_reuses_matching_build(self):
         demo = object.__new__(capture.StoreDemoEnvironment)
         with tempfile.TemporaryDirectory() as directory, \

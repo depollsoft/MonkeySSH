@@ -624,6 +624,7 @@ class StoreDemoEnvironment:
         (opencode_home / '.config/opencode').mkdir(parents=True, exist_ok=True)
         (opencode_home / '.config/opencode/tui.json').write_text('{"theme":"system"}\n')
         (opencode_home / '.config/opencode/cli.json').write_text('{"theme":{"mode":"system"}}\n')
+        opencode_flags = _opencode_capture_flags(self._opencode)
         self._write_pane_script(
             'opencode',
             f"""
@@ -632,6 +633,7 @@ class StoreDemoEnvironment:
               PATH={self._shell_quote(os.environ.get('PATH', ''))} \\
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
+              {opencode_flags} \\
               --prompt 'Explain in two short bullets how a persistent SSH workspace helps when switching between phone and desktop. Keep the answer under 40 words. Do not use tools, read files, or search for images.'
             """,
         )
@@ -2233,6 +2235,16 @@ def _adb_path() -> Path:
     raise RuntimeError(
         'adb not found. Set ANDROID_HOME or ANDROID_SDK_ROOT, or put adb on PATH.',
     )
+
+
+def _opencode_capture_flags(executable: str) -> str:
+    # OpenCode 2 otherwise starts a background service on a fixed port. A
+    # temporary capture HOME can collide with the developer's existing service.
+    # Older versions do not expose this flag and keep their normal TUI launch.
+    help_text = subprocess.check_output(
+        [executable, '--help'], text=True, stderr=subprocess.PIPE, timeout=10,
+    )
+    return '--standalone' if re.search(r'^\s*--standalone\b', help_text, re.MULTILINE) else ''
 
 
 def _java_home_17() -> str | None:
