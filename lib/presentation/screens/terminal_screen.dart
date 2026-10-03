@@ -115,6 +115,7 @@ import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/device_debug_sheet.dart';
+import '../widgets/display_fold.dart';
 import '../widgets/keyboard_list_navigation.dart';
 import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
@@ -970,6 +971,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   AcpSessionKey? _pendingInitialNativeAcpSessionKey;
   bool _showTmuxBar = true;
   bool _isTmuxBarExpanded = false;
+  // Whether a fold layout keeps the mux navigator open on its own page.
+  bool _tmuxNavigatorPinned = false;
   double _tmuxSidebarDragOffset = 0;
   AcpSessionKey? _activeNativeAcpSessionKey;
   String? _autoOpenedNativeAcpBridgeId;
@@ -9274,6 +9277,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     ThemeData theme,
     double availableHeight, {
     required TmuxBarPlacement placement,
+    bool pinnedOpen = false,
   }) {
     final connectionId = _connectionId;
     if (connectionId == null || _tmuxSessionName == null) {
@@ -9300,6 +9304,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       tmuxExtraFlags: _activeTmuxExtraFlags,
       availableHeight: availableHeight,
       placement: placement,
+      pinnedOpen: pinnedOpen,
       recoveryGeneration: _tmuxBarRecoveryGeneration,
       isProUser: isProUser,
       startClisInYoloMode: _startClisInYoloMode,
@@ -9436,7 +9441,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   bool _collapseTmuxBarIfExpanded() {
-    if (!_isTmuxBarExpanded) {
+    if (!_isTmuxBarExpanded || _tmuxNavigatorPinned) {
       return false;
     }
     final collapsed = _tmuxBarKey.currentState?.collapseIfExpanded() ?? false;
@@ -12267,12 +12272,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final isOpeningTmuxNavigator = _isExclusiveTerminalActionRunning(
       _TerminalExclusiveAction.tmuxNavigator,
     );
+    final displayFold = resolveDisplayFold(MediaQuery.of(context));
+    final terminalFoldLayout = resolveTerminalFoldLayout(
+      displayFold,
+      showsMuxNavigator:
+          _isTmuxActive &&
+          _showTmuxBar &&
+          connectionState == SshConnectionState.connected &&
+          !showsDisconnectedOverlay,
+    );
+    // A navigator pinned to its own page is not an expanded overlay, so Back
+    // leaves the screen instead of trying to collapse it.
+    _tmuxNavigatorPinned = terminalFoldLayout != TerminalFoldLayout.none;
 
     // A native chat hides the find bar without closing it.
     final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
     return PopScope(
       canPop: resolveTerminalScreenCanPop(
-        isTmuxBarExpanded: _isTmuxBarExpanded,
+        isTmuxBarExpanded: _isTmuxBarExpanded && !_tmuxNavigatorPinned,
         isFindBarOpen: showsFindBar,
       ),
       onPopInvokedWithResult: (didPop, _) {
@@ -12647,18 +12664,62 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 _scrollbackSearch == null || showsNativeAgent
                 ? 0
                 : terminalSearchBarObscuredHeight(
-                    showsKeyboardToolbar
+                    showsKeyboardToolbar ||
+                            terminalFoldLayout == TerminalFoldLayout.propped
                         ? removeSystemBottomInset(MediaQuery.of(bodyContext))
                         : MediaQuery.of(bodyContext),
                     reservedBottom: _terminalViewportReservedBottomPadding,
                   );
-            final terminalArea = TerminalScrollbackSearchOverlay(
-              search: showsNativeAgent ? null : _scrollbackSearch,
-              scrollController: _terminalScrollController,
-              lineHeight: () => _terminalLineHeight,
-              onClose: _closeScrollbackSearch,
-              reservedBottom: _terminalViewportReservedBottomPadding,
-              child: _buildTerminalWithTmuxBar(
+            Widget withFindBar(Widget terminal) =>
+                TerminalScrollbackSearchOverlay(
+                  search: showsNativeAgent ? null : _scrollbackSearch,
+                  scrollController: _terminalScrollController,
+                  lineHeight: () => _terminalLineHeight,
+                  onClose: _closeScrollbackSearch,
+                  reservedBottom: _terminalViewportReservedBottomPadding,
+                  child: terminal,
+                );
+            final keyboardToolbar = showsKeyboardToolbar
+                ? ListenableBuilder(
+                    // Switches the toolbar to the find field while that has
+                    // focus.
+                    listenable: Listenable.merge([findField]),
+                    builder: (context, _) => _buildKeyboardToolbar(
+                      showsNativeAgent: showsNativeAgent,
+                      findField: (findField?.hasFocus ?? false)
+                          ? findField
+                          : null,
+                    ),
+                  )
+                : null;
+            switch (terminalFoldLayout) {
+              case TerminalFoldLayout.book:
+                return _buildBookTerminalLayout(
+                  bodyContext,
+                  displayFold!,
+                  terminalTheme,
+                  isMobile,
+                  theme,
+                  connectionState,
+                  keyboardToolbar: keyboardToolbar,
+                  withFindBar: withFindBar,
+                );
+              case TerminalFoldLayout.propped:
+                return _buildProppedTerminalLayout(
+                  bodyContext,
+                  displayFold!,
+                  terminalTheme,
+                  isMobile,
+                  theme,
+                  connectionState,
+                  keyboardToolbar: keyboardToolbar,
+                  withFindBar: withFindBar,
+                );
+              case TerminalFoldLayout.none:
+                break;
+            }
+            final terminalArea = withFindBar(
+              _buildTerminalWithTmuxBar(
                 terminalTheme,
                 isMobile,
                 theme,
@@ -12680,18 +12741,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                         )
                       : terminalArea,
                 ),
-                if (showsKeyboardToolbar)
-                  ListenableBuilder(
-                    // Switches the toolbar to the find field while that has
-                    // focus.
-                    listenable: Listenable.merge([findField]),
-                    builder: (context, _) => _buildKeyboardToolbar(
-                      showsNativeAgent: showsNativeAgent,
-                      findField: (findField?.hasFocus ?? false)
-                          ? findField
-                          : null,
-                    ),
-                  ),
+                ?keyboardToolbar,
               ],
             );
           },
@@ -12752,6 +12802,190 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       snippets: _keyboardToolbarSnippets,
       snippetFolders: _keyboardToolbarSnippetFolders,
       terminalFocusNode: showsNativeAgent ? null : _terminalFocusNode,
+    );
+  }
+
+  /// Lays the connection screen out across a fold running top to bottom.
+  ///
+  /// The mux navigator fills the left page and stays open while windows
+  /// change. The terminal and its keyboard toolbar share the right page, so
+  /// no keys or terminal columns sit on the fold.
+  Widget _buildBookTerminalLayout(
+    BuildContext bodyContext,
+    DisplayFold fold,
+    TerminalThemeData terminalTheme,
+    bool isMobile,
+    ThemeData theme,
+    SshConnectionState connectionState, {
+    required Widget? keyboardToolbar,
+    required Widget Function(Widget terminal) withFindBar,
+  }) {
+    // The connection route fills the window, so the fold's window
+    // coordinates map onto the body directly.
+    final mediaQuery = MediaQuery.of(bodyContext);
+    final leadingPage = fold.leadingPage(mediaQuery.size);
+    final trailingPage = fold.trailingPage(mediaQuery.size);
+    final navigatorMediaQuery = displayFoldPageMediaQuery(
+      mediaQuery,
+      leadingPage,
+    );
+    final terminalPageMediaQuery = displayFoldPageMediaQuery(
+      mediaQuery,
+      trailingPage,
+    );
+    final safeLeft = resolveTmuxBarSafeInsets(navigatorMediaQuery).left;
+
+    return ColoredBox(
+      color: terminalTheme.background,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(width: safeLeft),
+          SizedBox(
+            width: max(0, leadingPage.width - safeLeft).toDouble(),
+            child: MediaQuery(
+              // The spacer above already clears the left inset.
+              data: navigatorMediaQuery.removePadding(removeLeft: true),
+              child: _buildTmuxExpandableBar(
+                theme,
+                double.infinity,
+                placement: TmuxBarPlacement.sidebar,
+                pinnedOpen: true,
+              ),
+            ),
+          ),
+          SizedBox(width: fold.thickness + displayFoldContentGutter),
+          Expanded(
+            child: MediaQuery(
+              data: terminalPageMediaQuery,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        _terminalViewportLayoutSize = constraints.biggest;
+                        _terminalViewportReservedWidth = 0;
+                        _terminalViewportReservedBottomPadding = 0;
+                        final terminalView = withFindBar(
+                          _overlayUploadProgressStrip(
+                            _buildTerminalView(
+                              terminalTheme,
+                              isMobile,
+                              connectionState,
+                            ),
+                            applyBottomSafeArea: keyboardToolbar == null,
+                          ),
+                        );
+                        // The toolbar below absorbs the bottom inset.
+                        return keyboardToolbar == null
+                            ? terminalView
+                            : MediaQuery(
+                                data: removeSystemBottomInset(
+                                  terminalPageMediaQuery,
+                                ),
+                                child: terminalView,
+                              );
+                      },
+                    ),
+                  ),
+                  ?keyboardToolbar,
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Lays the connection screen out across a fold running left to right.
+  ///
+  /// The terminal fills the top page and never reaches past the fold, so it
+  /// stays readable while the device is propped up. The mux navigator takes
+  /// the bottom page above the keyboard toolbar. A tall system keyboard
+  /// shrinks the navigator first and only then the terminal.
+  Widget _buildProppedTerminalLayout(
+    BuildContext bodyContext,
+    DisplayFold fold,
+    TerminalThemeData terminalTheme,
+    bool isMobile,
+    ThemeData theme,
+    SshConnectionState connectionState, {
+    required Widget? keyboardToolbar,
+    required Widget Function(Widget terminal) withFindBar,
+  }) {
+    // The connection route fills the window, so the body starts below the
+    // app bar and the fold's window coordinates map onto it directly.
+    final bodyTop = Scaffold.of(bodyContext).appBarMaxHeight ?? 0;
+    final topPageHeight = max(0, fold.leadingPageExtent - bodyTop).toDouble();
+    final mediaQuery = MediaQuery.of(bodyContext);
+    final pageMediaQuery = removeSystemBottomInset(mediaQuery);
+    final safeInsets = resolveTmuxBarSafeInsets(mediaQuery);
+
+    return ColoredBox(
+      color: terminalTheme.background,
+      child: CustomMultiChildLayout(
+        delegate: _ProppedTerminalLayoutDelegate(
+          topPageHeight: topPageHeight,
+          foldThickness: fold.thickness,
+          onTerminalSize: (size) {
+            _terminalViewportLayoutSize = size;
+            _terminalViewportReservedWidth = 0;
+            _terminalViewportReservedBottomPadding = 0;
+          },
+        ),
+        children: [
+          LayoutId(
+            id: _ProppedTerminalSlot.terminal,
+            child: MediaQuery(
+              data: pageMediaQuery,
+              child: withFindBar(
+                _overlayUploadProgressStrip(
+                  _buildTerminalView(terminalTheme, isMobile, connectionState),
+                  applyBottomSafeArea: false,
+                ),
+              ),
+            ),
+          ),
+          LayoutId(
+            id: _ProppedTerminalSlot.navigator,
+            child: MediaQuery(
+              // The padding below already clears the side insets.
+              data: (keyboardToolbar == null ? mediaQuery : pageMediaQuery)
+                  .removePadding(removeLeft: true, removeRight: true),
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: safeInsets.left,
+                  right: safeInsets.right,
+                ),
+                // The bar watches the mux windows, so it stays mounted even
+                // when a tall keyboard leaves the page too short to show it.
+                child: ClipRect(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) => OverflowBox(
+                      alignment: Alignment.topCenter,
+                      minHeight:
+                          _ProppedTerminalLayoutDelegate.navigatorMinHeight,
+                      maxHeight: max(
+                        _ProppedTerminalLayoutDelegate.navigatorMinHeight,
+                        constraints.maxHeight,
+                      ),
+                      child: _buildTmuxExpandableBar(
+                        theme,
+                        double.infinity,
+                        placement: TmuxBarPlacement.sidebar,
+                        pinnedOpen: true,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (keyboardToolbar != null)
+            LayoutId(id: _ProppedTerminalSlot.toolbar, child: keyboardToolbar),
+        ],
+      ),
     );
   }
 
@@ -17618,6 +17852,76 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ),
     );
   }
+}
+
+enum _ProppedTerminalSlot { terminal, navigator, toolbar }
+
+/// Stacks the terminal above the fold and the navigator and keyboard toolbar
+/// below it.
+class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
+  _ProppedTerminalLayoutDelegate({
+    required this.topPageHeight,
+    required this.foldThickness,
+    required this.onTerminalSize,
+  });
+
+  /// Height of the navigator's handle row, the least it is laid out at.
+  static const double navigatorMinHeight = 56;
+
+  /// Distance from the top of the body to the fold.
+  final double topPageHeight;
+
+  /// Height of the fold itself, left empty.
+  final double foldThickness;
+
+  /// Reports the terminal's size for the pre-layout viewport estimate.
+  final ValueChanged<Size> onTerminalSize;
+
+  @override
+  void performLayout(Size size) {
+    var toolbarHeight = 0.0;
+    if (hasChild(_ProppedTerminalSlot.toolbar)) {
+      toolbarHeight = layoutChild(
+        _ProppedTerminalSlot.toolbar,
+        BoxConstraints(
+          minWidth: size.width,
+          maxWidth: size.width,
+          maxHeight: size.height,
+        ),
+      ).height;
+      positionChild(
+        _ProppedTerminalSlot.toolbar,
+        Offset(0, size.height - toolbarHeight),
+      );
+    }
+    final aboveToolbar = max(0, size.height - toolbarHeight).toDouble();
+    // The last terminal row stays a gutter clear of the crease. A keyboard
+    // taller than the bottom page pushes the toolbar above the fold; the
+    // terminal then ends at the toolbar instead.
+    final terminalHeight = max(
+      0,
+      min(topPageHeight - displayFoldContentGutter, aboveToolbar),
+    ).toDouble();
+    final terminalSize = Size(size.width, terminalHeight);
+    layoutChild(
+      _ProppedTerminalSlot.terminal,
+      BoxConstraints.tight(terminalSize),
+    );
+    positionChild(_ProppedTerminalSlot.terminal, Offset.zero);
+    onTerminalSize(terminalSize);
+
+    final navigatorTop = min(topPageHeight + foldThickness, aboveToolbar);
+    layoutChild(
+      _ProppedTerminalSlot.navigator,
+      BoxConstraints.tight(Size(size.width, aboveToolbar - navigatorTop)),
+    );
+    positionChild(_ProppedTerminalSlot.navigator, Offset(0, navigatorTop));
+  }
+
+  @override
+  bool shouldRelayout(_ProppedTerminalLayoutDelegate oldDelegate) =>
+      oldDelegate.topPageHeight != topPageHeight ||
+      oldDelegate.foldThickness != foldThickness;
 }
 
 class _TerminalConnectionStatusIcon extends StatelessWidget {
