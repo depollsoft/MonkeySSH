@@ -1,9 +1,4 @@
-What's new
+Terminal fixes
 
-- Sign in to supported agents from native chat.
-- Add MCP servers and extra working directories to native sessions.
-- Send and play audio, answer agent forms, and view tool output when supported.
-- Swipe up on toolbar keys for shortcuts and symbols.
-- Added OpenCode 2 support and MonkeyMux setup progress.
-- Fixed Android dictation, completion, Backspace, keyboard layout, and remote file links.
-- Improved Pi session titles, agent updates, and MonkeyMux prefix keys.
+- Copied terminal text now preserves spaces between words and columns.
+- Wide characters wrap correctly when they reach the right edge of the terminal.
