@@ -358,6 +358,15 @@ Exited agent panes also fail capture; no shell or printed-transcript fallback
 is used. Configure the capture host beforehand, including any required logins
 and the OpenClaw gateway if OpenClaw is installed. The generators never install or update those tools.
 
+OpenCode runs with a temporary home and system theme. When supported, capture
+uses `--standalone` to avoid conflicts with an existing background service.
+For an authenticated OpenCode 2 capture, set
+`STORE_SCREENSHOT_OPENCODE_AUTH_FILE` to a protected temporary file created with
+`opencode auth export <integration>`, and set `STORE_SCREENSHOT_OPENCODE_MODEL`
+to an available `provider/model`. Credentials are imported through stdin into
+the capture's temporary home, outside the published media, and removed when
+capture ends. Delete the exported credential file after the run.
+
 The MonkeyMux screenshot scene shows the start of the live list on phones and
 the end on tablets. Videos scroll through both ends. OCR validation requires
 all seven required agent labels across each platform's screenshots and within every

@@ -1,5 +1,6 @@
 """Store caption and scene-contract checks. Run on macOS with Pillow."""
 
+import json
 import re
 import subprocess
 import sys
@@ -33,6 +34,46 @@ class LiveAgentCaptureTest(unittest.TestCase):
                           side_effect=subprocess.CalledProcessError(1, ['opencode', '--help'])):
             with self.assertRaises(subprocess.CalledProcessError):
                 capture._opencode_capture_flags('/tools/opencode')
+
+    def test_opencode_credentials_stay_in_temporary_home_and_out_of_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'home'
+            (home / '.config/opencode').mkdir(parents=True)
+            auth = root / 'auth.json'
+            secret = b'{"test-provider":{"token":"test-secret"}}'
+            auth.write_bytes(secret)
+            with patch.dict(capture.os.environ, {
+                'STORE_SCREENSHOT_OPENCODE_AUTH_FILE': str(auth),
+                'STORE_SCREENSHOT_OPENCODE_MODEL': 'test-provider/test-model',
+            }), patch.object(capture.subprocess, 'run') as run:
+                capture._configure_opencode_capture('/tools/opencode', home, '--standalone')
+            self.assertEqual(run.call_args.args[0],
+                             ['/tools/opencode', 'auth', 'import', '--standalone'])
+            options = run.call_args.kwargs
+            self.assertEqual(options['input'], secret)
+            self.assertEqual(options['env']['HOME'], str(home))
+            self.assertEqual(options['stdout'], subprocess.DEVNULL)
+            self.assertEqual(options['stderr'], subprocess.DEVNULL)
+            self.assertTrue(options['check'])
+            self.assertEqual(json.loads((home / '.config/opencode/opencode.json').read_text()),
+                             {'model': 'test-provider/test-model'})
+
+    def test_opencode_auth_requires_supported_import_and_stops_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth = root / 'auth.json'
+            auth.write_text('{}')
+            with patch.dict(capture.os.environ, {
+                'STORE_SCREENSHOT_OPENCODE_AUTH_FILE': str(auth),
+                'STORE_SCREENSHOT_OPENCODE_MODEL': '',
+            }), patch.object(capture.subprocess, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'private-server mode'):
+                    capture._configure_opencode_capture('/tools/opencode', root, '')
+                run.assert_not_called()
+                run.side_effect = subprocess.CalledProcessError(1, ['opencode', 'auth', 'import'])
+                with self.assertRaises(subprocess.CalledProcessError):
+                    capture._configure_opencode_capture('/tools/opencode', root, '--standalone')
 
     def test_staging_helper_preserves_open_old_binary_and_reuses_matching_build(self):
         demo = object.__new__(capture.StoreDemoEnvironment)

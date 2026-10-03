@@ -625,6 +625,7 @@ class StoreDemoEnvironment:
         (opencode_home / '.config/opencode/tui.json').write_text('{"theme":"system"}\n')
         (opencode_home / '.config/opencode/cli.json').write_text('{"theme":{"mode":"system"}}\n')
         opencode_flags = _opencode_capture_flags(self._opencode)
+        _configure_opencode_capture(self._opencode, opencode_home, opencode_flags)
         self._write_pane_script(
             'opencode',
             f"""
@@ -2245,6 +2246,27 @@ def _opencode_capture_flags(executable: str) -> str:
         [executable, '--help'], text=True, stderr=subprocess.PIPE, timeout=10,
     )
     return '--standalone' if re.search(r'^\s*--standalone\b', help_text, re.MULTILINE) else ''
+
+
+def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None:
+    model = os.environ.get('STORE_SCREENSHOT_OPENCODE_MODEL')
+    if model:
+        (home / '.config/opencode/opencode.json').write_text(
+            json.dumps({'model': model}) + '\n',
+        )
+    auth_file = os.environ.get('STORE_SCREENSHOT_OPENCODE_AUTH_FILE')
+    if not auth_file:
+        return
+    if flags != '--standalone':
+        raise RuntimeError('OpenCode credential import requires private-server mode.')
+    env = os.environ.copy()
+    env['HOME'] = str(home)
+    # Import into the temporary HOME through stdin, never argv or capture logs.
+    subprocess.run(
+        [executable, 'auth', 'import', '--standalone'],
+        input=Path(auth_file).expanduser().read_bytes(), env=env, check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+    )
 
 
 def _java_home_17() -> str | None:
