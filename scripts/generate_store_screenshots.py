@@ -626,11 +626,15 @@ class StoreDemoEnvironment:
         (opencode_home / '.config/opencode/cli.json').write_text('{"theme":{"mode":"system"}}\n')
         opencode_flags = _opencode_capture_flags(self._opencode)
         _configure_opencode_capture(self._opencode, opencode_home, opencode_flags)
+        opencode_environment = ' '.join(
+            f'{name}={self._shell_quote(value)}'
+            for name, value in _opencode_capture_environment(opencode_home).items()
+        )
         self._write_pane_script(
             'opencode',
             f"""
             exec env \\
-              HOME={self._shell_quote(str(opencode_home))} \\
+              {opencode_environment} \\
               PATH={self._shell_quote(os.environ.get('PATH', ''))} \\
               TERM=xterm-256color \\
               {self._shell_quote(self._opencode)} \\
@@ -2248,6 +2252,16 @@ def _opencode_capture_flags(executable: str) -> str:
     return '--standalone' if re.search(r'^\s*--standalone\b', help_text, re.MULTILINE) else ''
 
 
+def _opencode_capture_environment(home: Path) -> dict[str, str]:
+    return {
+        'HOME': str(home),
+        'XDG_CONFIG_HOME': str(home / '.config'),
+        'XDG_DATA_HOME': str(home / '.local/share'),
+        'XDG_STATE_HOME': str(home / '.local/state'),
+        'XDG_CACHE_HOME': str(home / '.cache'),
+    }
+
+
 def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None:
     model = os.environ.get('STORE_SCREENSHOT_OPENCODE_MODEL')
     if model:
@@ -2260,7 +2274,7 @@ def _configure_opencode_capture(executable: str, home: Path, flags: str) -> None
     if flags != '--standalone':
         raise RuntimeError('OpenCode credential import requires private-server mode.')
     env = os.environ.copy()
-    env['HOME'] = str(home)
+    env.update(_opencode_capture_environment(home))
     # Import into the temporary HOME through stdin, never argv or capture logs.
     subprocess.run(
         [executable, 'auth', 'import', '--standalone'],

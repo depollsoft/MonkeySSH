@@ -46,6 +46,10 @@ class LiveAgentCaptureTest(unittest.TestCase):
             with patch.dict(capture.os.environ, {
                 'STORE_SCREENSHOT_OPENCODE_AUTH_FILE': str(auth),
                 'STORE_SCREENSHOT_OPENCODE_MODEL': 'test-provider/test-model',
+                'XDG_CONFIG_HOME': '/developer/config',
+                'XDG_DATA_HOME': '/developer/data',
+                'XDG_STATE_HOME': '/developer/state',
+                'XDG_CACHE_HOME': '/developer/cache',
             }), patch.object(capture.subprocess, 'run') as run:
                 capture._configure_opencode_capture('/tools/opencode', home, '--standalone')
             self.assertEqual(run.call_args.args[0],
@@ -53,11 +57,34 @@ class LiveAgentCaptureTest(unittest.TestCase):
             options = run.call_args.kwargs
             self.assertEqual(options['input'], secret)
             self.assertEqual(options['env']['HOME'], str(home))
+            for key, relative in (
+                ('XDG_CONFIG_HOME', '.config'),
+                ('XDG_DATA_HOME', '.local/share'),
+                ('XDG_STATE_HOME', '.local/state'),
+                ('XDG_CACHE_HOME', '.cache'),
+            ):
+                self.assertEqual(options['env'][key], str(home / relative))
             self.assertEqual(options['stdout'], subprocess.DEVNULL)
             self.assertEqual(options['stderr'], subprocess.DEVNULL)
             self.assertTrue(options['check'])
             self.assertEqual(json.loads((home / '.config/opencode/opencode.json').read_text()),
                              {'model': 'test-provider/test-model'})
+
+    def test_opencode_pane_environment_is_isolated_from_inherited_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            env = capture._opencode_capture_environment(home)
+            demo = object.__new__(capture.StoreDemoEnvironment)
+            demo._tmpdir = demo.demo_dir = home
+            assignments = ' '.join(f'{key}={demo._shell_quote(value)}'
+                                   for key, value in env.items())
+            demo._write_pane_script('opencode', f'exec env {assignments} /usr/bin/env')
+            inherited = {**capture.os.environ, **{key: '/developer/private' for key in env}}
+            result = subprocess.run([str(home / 'opencode-pane.sh')],
+                                    env=inherited, capture_output=True, text=True, check=True)
+            actual = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            for key, value in env.items():
+                self.assertEqual(actual[key], value)
 
     def test_opencode_auth_requires_supported_import_and_stops_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
