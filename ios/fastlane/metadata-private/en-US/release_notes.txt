@@ -1,7 +1,11 @@
 What's new in this beta
 
-- Agent Management puts installed tools first. Expand the not-installed section to find more agents and adapters.
-- Reduced layout jumps while versions, updates, and usage load or refresh.
-- Fixed freshness checks for cached agent usage.
+- Sign in to supported agents from native chat.
+- Add MCP servers and extra working directories to native sessions.
+- Send and play audio, answer agent forms, and view tool output when supported.
+- Swipe up on toolbar keys for shortcuts and symbols.
+- Added OpenCode 2 support and MonkeyMux setup progress.
+- Fixed Android dictation, completion, Backspace, keyboard layout, and remote file links.
+- Improved Pi session titles, agent updates, and MonkeyMux prefix keys.
 
 Please report rough edges through the support link.
