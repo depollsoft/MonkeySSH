@@ -1715,6 +1715,8 @@ func (s *terminalScreen) screenAlignment() {
 		for c := range g.rows[r] {
 			g.rows[r][c] = vtCell{r: 'E', width: 1}
 		}
+		// Every row is written anew, so none continues the one above.
+		g.wrapped[r] = false
 	}
 	s.top = 0
 	s.bottom = s.height - 1

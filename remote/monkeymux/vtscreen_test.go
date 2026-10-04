@@ -730,9 +730,14 @@ func TestVTScreenRepeatSoftResetAndAlignment(t *testing.T) {
 	if s.top != 0 || s.bottom != 2 || s.originMode || s.insertMode || s.attrs != (vtAttrs{}) {
 		t.Fatal("DECSTR did not reset region, modes and rendition")
 	}
-	s.Write([]byte("\x1b#8"))
+	s.Write([]byte("\x1b[H0123456789ab\x1b#8"))
 	if got := s.TextRows(); got[0] != "EEEEEEEEEE" || got[2] != "EEEEEEEEEE" {
 		t.Fatalf("DECALN: %q", got)
+	}
+	// The rows it writes are separate lines, so a width change keeps them.
+	s.Resize(12, 3)
+	if got := s.TextRows(); got[0] != "EEEEEEEEEE" || got[1] != "EEEEEEEEEE" {
+		t.Fatalf("DECALN rows joined by a reflow: %q", got)
 	}
 }
 
