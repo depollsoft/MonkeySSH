@@ -272,3 +272,45 @@ func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
 		t.Fatalf("narrowing without autowrap: %q", got)
 	}
 }
+
+// A row that a scroll, a line insertion or a deletion moves next to a
+// different row starts a line of its own, as in the client, so a later width
+// change does not join it to its new neighbour.
+func TestVTScreenRowMovesEndSoftWraps(t *testing.T) {
+	for name, seq := range map[string]string{
+		"region scroll up":   "\x1b[2;4r\x1b[S\x1b[r",
+		"delete line":        "\x1b[2;1H\x1b[M",
+		"region scroll down": "\x1b[3;4r\x1b[T\x1b[r",
+		"insert line":        "\x1b[3;1H\x1b[L",
+	} {
+		s := newTerminalScreen(4, 4)
+		s.Write([]byte("HEAD\r\nabcdefgh"))
+		if !s.main.wrapped[2] {
+			t.Fatalf("%s: setup wrapped %v", name, s.main.wrapped)
+		}
+		s.Write([]byte(seq))
+		for r, row := range s.TextRows() {
+			if row == "efgh" && s.main.wrapped[r] {
+				t.Fatalf("%s: efgh still continues row %d: %q", name, r-1, s.TextRows())
+			}
+		}
+		s.Resize(8, 4)
+		if got := strings.Join(s.TextRows(), "|"); strings.Contains(got, "HEADefgh") || strings.Contains(got, "|efgh") == false {
+			t.Fatalf("%s: widening joined moved rows: %q", name, got)
+		}
+	}
+}
+
+// An erased row that still continues the text above it (ECH keeps the wrap)
+// stays after that text when a reflow joins them.
+func TestVTScreenReflowKeepsErasedContinuationAfterItsText(t *testing.T) {
+	s := newTerminalScreen(4, 3)
+	s.Write([]byte("abcde\x1b[2;1H\x1b[4X"))
+	if !s.main.wrapped[1] {
+		t.Fatalf("setup: wrapped %v", s.main.wrapped)
+	}
+	s.Resize(8, 3)
+	if got := s.TextRows(); got[0] != "abcd" || s.main.wrapped[0] {
+		t.Fatalf("reflow put the erased row first: %q wrapped %v", got, s.main.wrapped)
+	}
+}

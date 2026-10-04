@@ -250,6 +250,18 @@ class Buffer {
       for (var i = top; i <= bottom - count; i++) this.lines[i],
     ];
     this.lines.reassignRange(top, reordered);
+    _endContinuation(top + count);
+    _endContinuation(bottom + 1);
+  }
+
+  /// Marks the line at [index], if any, as no longer continuing the line
+  /// above it. A row a scroll or line insertion or deletion moves next to a
+  /// different row is a line of its own; keeping the flag made the next
+  /// reflow join it to whatever now sits above it.
+  void _endContinuation(int index) {
+    if (index >= 0 && index < lines.length) {
+      lines[index].isWrapped = false;
+    }
   }
 
   /// Scrolls the region up by [lines] rows. On the main screen a region whose
@@ -280,6 +292,7 @@ class Buffer {
         }
         this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
       }
+      _endContinuation(absoluteMarginBottom + 1);
       return;
     }
     for (var i = top; i < top + count; i++) {
@@ -290,6 +303,8 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     this.lines.reassignRange(top, reordered);
+    _endContinuation(top);
+    _endContinuation(bottom + 1);
   }
 
   /// https://vt100.net/docs/vt100-ug/chapter3.html#IND IND – Index
@@ -505,6 +520,8 @@ class Buffer {
       graphics.removeGraphicsAnchoredToLine(lines[index]);
       lines[index] = _newEmptyLine();
     }
+    _endContinuation(absoluteCursorY + linesToInsert);
+    _endContinuation(absoluteMarginBottom + 1);
   }
 
   /// Remove [count] lines starting at the current cursor position. Lines below
@@ -528,6 +545,8 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     lines.reassignRange(absoluteCursorY, reordered);
+    _endContinuation(absoluteCursorY);
+    _endContinuation(absoluteMarginBottom + 1);
   }
 
   void resize(int oldWidth, int oldHeight, int newWidth, int newHeight) {

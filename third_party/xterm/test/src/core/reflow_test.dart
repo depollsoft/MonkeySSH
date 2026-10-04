@@ -208,6 +208,46 @@ void main() {
     expect(text, contains('9. some answe'));
   });
 
+  // An erased row that still continues the text above it (ECH keeps the
+  // wrap) stays after that text when a reflow joins them.
+  test('reflow() keeps an erased continuation after its text', () {
+    final terminal = Terminal()..resize(4, 3);
+    terminal.write('abcde\x1b[2;1H\x1b[4X');
+    expect(terminal.buffer.lines[1].isWrapped, isTrue);
+
+    terminal.resize(8, 3);
+
+    expect(terminal.buffer.lines[0].toString(), 'abcd');
+    expect(terminal.buffer.lines[0].isWrapped, isFalse);
+  });
+
+  // A row that a scroll, a line insertion or a deletion moves next to a
+  // different row starts a line of its own, so a later width change does not
+  // join it to its new neighbour.
+  for (final entry in {
+    'region scroll up': '\x1b[2;4r\x1b[S\x1b[r',
+    'delete line': '\x1b[2;1H\x1b[M',
+    'region scroll down': '\x1b[3;4r\x1b[T\x1b[r',
+    'insert line': '\x1b[3;1H\x1b[L',
+  }.entries) {
+    test('reflow() does not join rows moved by ${entry.key}', () {
+      final terminal = Terminal()..resize(4, 4);
+      terminal.write('HEAD\r\nabcdefgh');
+      expect(terminal.buffer.lines[2].isWrapped, isTrue);
+
+      terminal.write(entry.value);
+      final lines = terminal.buffer.lines;
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].toString() == 'efgh') {
+          expect(lines[i].isWrapped, isFalse);
+        }
+      }
+
+      terminal.resize(8, 4);
+      expect(terminal.buffer.getText(), isNot(contains('HEADefgh')));
+    });
+  }
+
   test('lines has correct length after reflow', () {
     final terminal = Terminal();
 

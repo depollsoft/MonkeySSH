@@ -22,7 +22,7 @@ type vtReflowCursor struct {
 //
 // This is a port of reflow() in third_party/xterm/lib/src/core/reflow.dart,
 // including its corners, because the model has to land on the rows the
-// client shows: an empty line keeps its place even inside a logical line, a
+// client shows: an empty line keeps its place inside a logical line, a
 // line that only grows keeps its cells past its content, and a wide glyph
 // that would straddle the new edge moves whole to the next line. The cursor
 // follows the rules for the CellAnchor the client puts on its cell.
@@ -69,6 +69,12 @@ type vtLineReflow struct {
 func (r *vtLineReflow) add(line vtLine) {
 	trimmed := vtTrimmedLength(line.cells, r.oldWidth)
 	if trimmed == 0 {
+		// Cells still waiting in the builder come before an empty line, or
+		// an erased continuation row would land ahead of the text it
+		// continued.
+		if r.filled > 0 {
+			r.lines = append(r.lines, r.take())
+		}
 		r.lines = append(r.lines, line)
 		return
 	}

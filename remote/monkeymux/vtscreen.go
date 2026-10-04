@@ -1283,6 +1283,23 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 		g.rows[bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[bottom-n+1+i] = false
 	}
+	// Rows leaving a region at the top of the main screen stay right above
+	// it in the scrollback; otherwise the row moved to the top follows a
+	// different row now.
+	if s.altActive || top > 0 {
+		g.endContinuation(top)
+	}
+	g.endContinuation(bottom + 1)
+}
+
+// endContinuation marks the row at index, if any, as no longer continuing the
+// row above it, as the client does: a row a scroll or a line insertion or
+// deletion moves next to a different row is a line of its own, and keeping
+// the flag made the next reflow join it to whatever sits above it now.
+func (g *vtGrid) endContinuation(index int) {
+	if index >= 0 && index < len(g.wrapped) {
+		g.wrapped[index] = false
+	}
 }
 
 func (s *terminalScreen) scrollDown(n int) {
@@ -1306,6 +1323,8 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 		g.rows[top+i] = s.clearRow(recycled[i])
 		g.wrapped[top+i] = false
 	}
+	g.endContinuation(top + n)
+	g.endContinuation(bottom + 1)
 }
 
 func (s *terminalScreen) tabForward(n int) {
@@ -1935,6 +1954,8 @@ func (s *terminalScreen) deleteLines(n int) {
 		g.rows[s.bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[s.bottom-n+1+i] = false
 	}
+	g.endContinuation(g.cursorRow)
+	g.endContinuation(s.bottom + 1)
 	g.cursorCol = 0
 	g.pendingWrap = false
 }
