@@ -1348,9 +1348,10 @@ func (s *terminalScreen) print(r rune) {
 		g.pendingWrap = false
 	}
 	if width == 2 && g.cursorCol == s.width-1 {
-		// A wide glyph does not fit in the last column.
+		// A wide glyph does not fit in the last column, which is erased like
+		// any other, keeping only the background.
 		if s.autowrap {
-			g.rows[g.cursorRow][g.cursorCol] = vtCell{width: 1, attrs: s.attrs}
+			g.rows[g.cursorRow][g.cursorCol] = s.blankCell()
 			s.wrapToNextLine()
 		} else {
 			g.cursorCol = s.width - 2

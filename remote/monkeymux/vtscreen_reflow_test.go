@@ -158,3 +158,35 @@ func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
 		}
 	}
 }
+
+// On a one-row screen the row a frame wraps from has already scrolled into
+// the history, out of reach of anything that would erase a stand-in glyph
+// there. A wide glyph that did not fit is reproduced the way it arose; any
+// other wrap from a never-written cell is dropped rather than leave a space
+// the client would keep.
+func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
+	s := newTerminalScreen(4, 1)
+	s.Write([]byte("abc界"))
+	replica := vtRoundTrip(t, s)
+	s.Resize(8, 1)
+	replica.Resize(8, 1)
+	if got := replica.TextRows(); !slices.Equal(got, []string{"abc界"}) || !slices.Equal(got, s.TextRows()) {
+		t.Fatalf("widened replica %q, model %q", got, s.TextRows())
+	}
+
+	s = newTerminalScreen(8, 1)
+	s.Write([]byte("abc\x1b[3Cde"))
+	s.Resize(4, 1)
+	if !s.main.wrapped[0] || s.main.rows[0][0].r != 0 {
+		t.Fatalf("setup: wrapped %v, row %q", s.main.wrapped, s.TextRows())
+	}
+	replica = newTerminalScreen(4, 1)
+	replica.Write([]byte("\x1b[?7h"))
+	replica.Write(s.RenderFrame())
+	if got := replica.scrollback; len(got) != 1 || string(got[0]) != "abc" {
+		t.Fatalf("frame left a stand-in in the history: %q", got)
+	}
+	if replica.main.wrapped[0] {
+		t.Fatal("frame kept a wrap it could not reproduce faithfully")
+	}
+}

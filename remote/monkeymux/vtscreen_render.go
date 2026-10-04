@@ -46,7 +46,7 @@ func (s *terminalScreen) RenderFrame() []byte {
 					prev = decoder.decode(s.scrollback[i-1], s.width)
 				}
 				cells = decoder.decode(line, s.width)
-				out = appendVTSoftWrap(out, prev, cells)
+				out = appendVTSoftWrap(out, prev, cells, s.height > 1)
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
@@ -57,7 +57,7 @@ func (s *terminalScreen) RenderFrame() []byte {
 			if prev == nil {
 				prev = decoder.decode(s.scrollback[len(s.scrollback)-1], s.width)
 			}
-			out = appendVTSoftWrap(out, prev, g.rows[0])
+			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
 		} else {
 			out = append(out, "\x1b[0m\r\n"...)
 		}
@@ -67,7 +67,7 @@ func (s *terminalScreen) RenderFrame() []byte {
 	}
 	for r, row := range g.rows {
 		if r > 0 && g.wrapped[r] {
-			out = appendVTSoftWrap(out, g.rows[r-1], row)
+			out = appendVTSoftWrap(out, g.rows[r-1], row, true)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
@@ -175,8 +175,25 @@ func (s *terminalScreen) renderedSoftWraps() bool {
 // and stands in a space for a cell that has no glyph to print, erasing it
 // again afterwards. The cursor ends in column 0 of the new row with the
 // rendition reset, ready for next's cells to be painted over what is there.
-func appendVTSoftWrap(out []byte, prev, next []vtCell) []byte {
+//
+// prevOnScreen reports whether prev's row is still on the screen once the
+// wrap has scrolled: on a one-row screen it is in the history, out of reach of
+// the erase, so a stand-in there would stay written. That wrap is dropped
+// instead, unless it needs no stand-in.
+func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool) []byte {
 	width := len(prev)
+	if last := prev[width-1]; last.unwritten() && width > 1 && len(next) > 1 &&
+		next[0].r != 0 && next[0].width == 2 && last.attrs == (vtAttrs{bg: next[0].attrs.bg}) {
+		// How the client gets here itself: a wide glyph printed in the last
+		// column erases that cell with the glyph's background and wraps.
+		out = append(out, "\x1b[0m"...)
+		out = appendVTCSICount(out, width, 'G')
+		out = renderVTGlyphs(out, next[:2])
+		return append(out, "\x1b[0m\r"...)
+	}
+	if !prevOnScreen && !vtSoftWrapEdgePrintable(prev) {
+		return append(out, "\x1b[0m\r\n"...)
+	}
 	out = append(out, "\x1b[0m"...)
 	eraseLast := false
 	switch last := prev[width-1]; {
@@ -214,6 +231,15 @@ func appendVTSoftWrap(out []byte, prev, next []vtCell) []byte {
 		out = appendVTErase(out, next[0].attrs)
 	}
 	return append(out, '\r')
+}
+
+// vtSoftWrapEdgePrintable reports whether the cell that ends row can be
+// printed again as itself to reach the deferred wrap.
+func vtSoftWrapEdgePrintable(row []vtCell) bool {
+	width := len(row)
+	last := row[width-1]
+	return (last.width == 1 && last.r != 0) ||
+		(last.width == 0 && width > 1 && row[width-2].width == 2)
 }
 
 // appendVTErase erases the cell under the cursor back to never-written, with
