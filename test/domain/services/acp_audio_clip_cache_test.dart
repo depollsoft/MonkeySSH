@@ -134,6 +134,12 @@ void main() {
     second.release();
     await pumpEventQueue();
     expect(subject.length, 2);
+    // Eviction deletes the file in the background, and real file I/O can
+    // outlast a pumped event queue on a loaded machine.
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (second.file.existsSync() && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
     expect(second.file.existsSync(), isFalse);
     expect(first.file.existsSync(), isTrue);
     expect(third.file.existsSync(), isTrue);
