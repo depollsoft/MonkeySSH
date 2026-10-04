@@ -48,7 +48,7 @@ jobs:
     runs-on: macos-latest
     # Full video OCR samples every half second across five exports.
     # Hosted macOS runners can exceed 15 minutes before artifact upload starts.
-    timeout-minutes: 45
+    timeout-minutes: 30
     outputs:
       sync: ${{ steps.inputs.outputs.sync }}
       platform: ${{ steps.inputs.outputs.platform }}
