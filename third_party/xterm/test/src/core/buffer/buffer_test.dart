@@ -349,6 +349,23 @@ void main() {
       );
     });
 
+    // Scrolling during a shrink does not move the cursor off its line, so an
+    // empty row the cursor sits on is never one of the rows below it. Dropping
+    // it moved the cursor onto the content above, and the next output
+    // overwrote that content.
+    test('shrinking keeps the cursor on its own empty row', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(20, 6);
+      terminal.write('one\r\ntwo\r\nthree\r\n');
+
+      terminal.resize(20, 2);
+      terminal.write('next');
+
+      final lines = terminal.buffer.lines;
+      expect(lines[lines.length - 2].toString().trimRight(), 'three');
+      expect(lines[lines.length - 1].toString().trimRight(), 'next');
+    });
+
     // Trailing blank rows are the rows a shrink should consume first: real
     // terminals reclaim them instead of scrolling live content into scrollback.
     test('shrinking reclaims trailing blank rows before scrolling', () {

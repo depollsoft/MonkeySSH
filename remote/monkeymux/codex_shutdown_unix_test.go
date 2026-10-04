@@ -126,8 +126,16 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 				if !errors.Is(cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone) {
 					t.Fatal("process still alive")
 				}
-				if mode == "lookup-failed" && foreground > 0 && inspectProcess(foreground).running {
-					t.Fatal("foreground agent survived failed image lookup")
+				if mode == "lookup-failed" && foreground > 0 {
+					// That path SIGKILLs the agent without waiting for it, so
+					// a loaded runner can still list it for a moment.
+					deadline := time.Now().Add(2 * time.Second)
+					for inspectProcess(foreground).running && time.Now().Before(deadline) {
+						time.Sleep(10 * time.Millisecond)
+					}
+					if inspectProcess(foreground).running {
+						t.Fatal("foreground agent survived failed image lookup")
+					}
 				}
 				if _, err := os.Stat(relaunched); !os.IsNotExist(err) {
 					t.Fatalf("fresh fallback ran: %v", err)

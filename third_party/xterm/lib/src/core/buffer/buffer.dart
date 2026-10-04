@@ -578,6 +578,13 @@ class Buffer {
       // then sits at an offset the app never applies, so its cursor-relative
       // repaints land on the wrong rows and leave stale bands behind.
       //
+      // Neither dropping the last line nor scrolling moves the cursor off its
+      // line, so the line is fixed for the whole loop. [absoluteCursorY] is
+      // not: [viewHeight] keeps the old height until the resize ends, so after
+      // each scroll step it names the line above the cursor's, and the next
+      // step would drop the cursor's own empty row and leave the cursor on the
+      // content above it.
+      final cursorLine = absoluteCursorY;
       for (var i = 0; i < oldHeight - newHeight; i++) {
         final lastIndex = lines.length - 1;
         if (isAltBuffer) {
@@ -608,7 +615,7 @@ class Buffer {
           }
           continue;
         }
-        final canDropLast = lastIndex > absoluteCursorY;
+        final canDropLast = lastIndex > cursorLine;
         if (canDropLast && _isReclaimableRow(lastIndex)) {
           graphics.removeGraphicsAnchoredToLine(lines[lastIndex]);
           lines.pop();

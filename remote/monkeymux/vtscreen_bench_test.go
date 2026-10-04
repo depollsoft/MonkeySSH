@@ -99,3 +99,20 @@ func TestVTScreenMemoryProbe(t *testing.T) {
 		runtime.KeepAlive(screens)
 	}
 }
+
+// BenchmarkVTScreenReflowFullScrollback measures a rotation of a window whose
+// scrollback is full: every stored line is decoded, reflowed and stored again.
+func BenchmarkVTScreenReflowFullScrollback(b *testing.B) {
+	line := []byte("\x1b[38;2;200;200;200mTranscript line — the quick brown fox jumps over the lazy dog, again and again.\x1b[0m\r\n")
+	base := newTerminalScreen(146, 26)
+	for i := 0; i < vtScrollbackLimit+26; i++ {
+		base.Write(line)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s := base.Clone()
+		s.Resize(69, 55)
+		s.Resize(146, 26)
+	}
+}

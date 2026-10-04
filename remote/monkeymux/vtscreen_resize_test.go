@@ -106,12 +106,15 @@ func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 		t.Fatalf("restored row lost its wide glyph: %+v %+v", cell, s.main.rows[0][5])
 	}
 
-	// A line restored into a narrower screen is cut like any other row.
+	// A line restored into a narrower screen is reflowed like any other.
 	s = newTerminalScreen(12, 1)
 	s.Write([]byte("abcdefghij\r\nx"))
 	s.Resize(4, 2)
-	if got := s.TextRows(); got[0] != "abcd" || got[1] != "x" {
+	if got := s.TextRows(); got[0] != "ij" || got[1] != "x" {
 		t.Fatalf("narrow restore: %q", got)
+	}
+	if len(s.scrollback) != 2 || vtScrollbackText(s.scrollback[1]) != "efgh" || !s.main.wrapped[0] {
+		t.Fatalf("narrow restore scrollback: %d lines, wrapped %v", len(s.scrollback), s.main.wrapped)
 	}
 }
 

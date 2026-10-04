@@ -23,6 +23,9 @@ class _LineBuilder {
   void add(BufferLine src, int start, int length) {
     _result.copyFrom(src, start, _length, length);
     _length += length;
+    // A line reused by [setBuffer] ends at the added cells; the cells it had
+    // past them must not reappear when it is resized to the new width.
+    _result.truncate(_length);
   }
 
   /// Reuses the given [line] as the initial buffer for this builder.
@@ -92,7 +95,12 @@ class _LineReflow {
       }
     }
 
-    line.resize(newWidth);
+    if (newWidth >= oldWidth) {
+      line.resize(newWidth);
+    } else {
+      // Whatever lay past the new width now continues on the next line.
+      line.truncate(newWidth);
+    }
 
     if (line.getWidth(newWidth - 1) == 2) {
       line.resetCell(newWidth - 1);
@@ -121,13 +129,20 @@ class _LineReflow {
 
       // Leave the last cell to the next iteration if it's a wide char.
       if (lineFilled && line.getWidth(from + cellsToCopy - 1) == 2) {
-        // When newWidth is 1, the wide cell cannot be deferred: copying zero
-        // cells would make the loop spin forever. Keep one cell so the reflow
-        // always makes progress; the one-column display is inherently lossy for
-        // full-width glyphs, but it must never hang the terminal.
         if (cellsToCopy > 1) {
           cellsToCopy--;
+        } else if (_builder.isNotEmpty) {
+          // One cell is left on this line and the wide char needs two: end
+          // the line here and start the next one with it. Copying only its
+          // first half put it in the last column with its second half on the
+          // next line, which no terminal can print.
+          cellsToCopy = 0;
         }
+        // When newWidth is 1, the wide cell cannot be deferred: copying zero
+        // cells into an empty line would make the loop spin forever. Keep one
+        // cell so the reflow always makes progress; the one-column display is
+        // inherently lossy for full-width glyphs, but it must never hang the
+        // terminal.
       }
 
       for (var anchor in line.anchors.toList()) {
@@ -198,7 +213,11 @@ List<BufferLine> reflow(
   }
 
   for (var line in result) {
-    line.resize(newWidth);
+    if (line.length > newWidth) {
+      line.truncate(newWidth);
+    } else {
+      line.resize(newWidth);
+    }
   }
 
   return result;
