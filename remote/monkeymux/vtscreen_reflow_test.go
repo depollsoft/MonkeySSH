@@ -23,10 +23,12 @@ func inlineAgentChrome(width int) string {
 // After the width change Hermes erases its input area and draws it again: it
 // moves the cursor up over the rows that area takes once a reflowing terminal
 // has rewrapped its full-width rules, then erases to the end of the screen.
-// The client reflows, so that lands inside the old input area. A model that
-// only cut rows to the new width kept that area short, so the same move went
-// past it into the transcript, and the frame painted from the model on the
-// switch back showed the transcript without its last lines.
+// The client reflows, so that lands on the old input area. A model that only
+// cut rows to the new width kept that area short, so the same move went past
+// it into the transcript, and the frame painted from the model on the switch
+// back showed the transcript without its last lines. The move starts from the
+// cell Hermes left the cursor on, so the cursor has to stay on that cell for
+// the erase to take the whole old input area and nothing above it.
 func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
 	const wide, narrow = 30, 13
 	s := newTerminalScreen(wide, 8)
@@ -50,6 +52,9 @@ func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
 	if got := s.TextRows()[row]; got != "❯ hi" {
 		t.Fatalf("cursor row %d is %q, want the prompt", row, got)
 	}
+	if got := strings.Count(text, " status"); got != 1 {
+		t.Fatalf("redraw left the old input area behind (%d status bars):\n%s", got, text)
+	}
 	vtRoundTrip(t, s)
 }
 
@@ -70,7 +75,7 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 	}
 
 	// Narrowing splits the long line again and the split parts push the top
-	// into the scrollback; the cursor keeps its row on the screen.
+	// into the scrollback; the cursor stays after "next".
 	s.Resize(4, 3)
 	if got := s.TextRows(); !slices.Equal(got, []string{"89ab", "cd", "next"}) {
 		t.Fatalf("narrow: %q", got)
@@ -78,8 +83,8 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 	if got := vtScrollbackTexts(s); !slices.Equal(got, []string{"0123", "4567"}) {
 		t.Fatalf("narrow scrollback: %q", got)
 	}
-	if row, col := s.CursorPosition(); row != 2 || col != 3 {
-		t.Fatalf("narrow cursor (%d,%d)", row, col)
+	if row, col := s.CursorPosition(); row != 2 || col != 3 || !s.main.pendingWrap {
+		t.Fatalf("narrow cursor (%d,%d) pending %v", row, col, s.main.pendingWrap)
 	}
 	vtRoundTrip(t, s)
 
@@ -224,4 +229,27 @@ func TestVTScreenFrameSoftWrapsUnderInsertMode(t *testing.T) {
 		t.Fatalf("setup: wrapped %v insert %v", s.main.wrapped, s.insertMode)
 	}
 	vtRoundTrip(t, s)
+}
+
+// The cursor stays on the cell it was on, wherever the reflow moves it, as in
+// the client: after the text on its line, or past the last column with the
+// wrap still pending when that text filled the line.
+func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
+	s := newTerminalScreen(20, 5)
+	s.Write([]byte("0123456789abcdef\r\nxy"))
+	s.Resize(8, 5)
+	if row, col := s.CursorPosition(); s.TextRows()[row] != "xy" || col != 2 {
+		t.Fatalf("cursor (%d,%d) on %q", row, col, s.TextRows()[row])
+	}
+
+	s = newTerminalScreen(8, 5)
+	s.Write([]byte("abcdefgh"))
+	s.Resize(4, 5)
+	if row, col := s.CursorPosition(); s.TextRows()[row] != "efgh" || col != 3 || !s.main.pendingWrap {
+		t.Fatalf("cursor (%d,%d) pending %v on %q", row, col, s.main.pendingWrap, s.TextRows()[row])
+	}
+	s.Write([]byte("i"))
+	if got := s.TextRows(); !slices.Equal(got[:2], []string{"efgh", "i"}) || !s.main.wrapped[1] {
+		t.Fatalf("pending wrap lost: %q wrapped %v", got, s.main.wrapped)
+	}
 }

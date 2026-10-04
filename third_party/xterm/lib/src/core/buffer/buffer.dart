@@ -628,6 +628,10 @@ class Buffer {
       }
     }
 
+    // The cursor's cell before it is clamped, past the last column when a
+    // wrap is pending, for a reflow to carry along.
+    final cursorCellX = min(_cursorX, oldWidth);
+
     // Ensure cursor is within the screen.
     _cursorX = _cursorX.clamp(0, newWidth - 1);
     _cursorY = _cursorY.clamp(0, newHeight - 1);
@@ -637,6 +641,18 @@ class Buffer {
     // 2. Adjust the width.
     if (newWidth != oldWidth) {
       if (terminal.reflowEnabled && !isAltBuffer) {
+        // The cursor stays on its cell, as in most reflowing terminals, rather
+        // than on its screen row. An application that redraws after a resize
+        // by moving up over what it drew counts the rows its output takes once
+        // rewrapped, from the cell it left the cursor on; keeping the row
+        // instead moved that redraw onto the wrong rows and left part of the
+        // old picture behind. The anchor travels with its cell through
+        // [reflow]; one left on a line the reflow drops keeps the row, as does
+        // a buffer holding fewer lines than the screen has rows.
+        final cursorLine = _cursorY + lines.length - newHeight;
+        final cursorAnchor = cursorLine >= 0 && cursorLine < lines.length
+            ? lines[cursorLine].createAnchor(cursorCellX)
+            : null;
         final reflowResult = reflow(lines, oldWidth, newWidth);
 
         while (reflowResult.length < newHeight) {
@@ -653,6 +669,12 @@ class Buffer {
           }
         }
         lines.replaceWith(reflowResult);
+        if (cursorAnchor != null && cursorAnchor.attached) {
+          final row = cursorAnchor.y - (lines.length - newHeight);
+          _cursorY = row.clamp(0, newHeight - 1);
+          _cursorX = cursorAnchor.x.clamp(0, newWidth);
+        }
+        cursorAnchor?.dispose();
       } else {
         lines.forEach((item) => item.resize(newWidth));
       }

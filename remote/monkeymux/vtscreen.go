@@ -385,9 +385,15 @@ func (s *terminalScreen) resizeMain(width, height int) {
 		g.rows = append(g.rows, newVTRow(s.width))
 		g.wrapped = append(g.wrapped, false)
 	}
+	// The cursor's cell, past the last column when a wrap is pending, for
+	// the reflow to carry along.
+	cursorX := g.cursorCol
+	if g.pendingWrap {
+		cursorX = s.width
+	}
 	s.clampVTCursor(g, width, height)
 	if width != s.width {
-		s.reflowMain(width, height)
+		s.reflowMain(width, height, cursorX)
 	}
 }
 
@@ -495,14 +501,15 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 // client's Buffer.resize does once it has changed the height: every logical
 // line, a row and the soft-wrapped rows under it, is joined and split again at
 // the new width (vtReflow), the screen is the last rows of the result, and the
-// cursor keeps its place on the screen instead of following its cell.
+// cursor stays on its cell, cursorX on its row; it keeps its screen row only
+// when the reflow drops that cell.
 //
 // An application that redraws after a width change by moving the cursor up
 // over what it drew, as Hermes's prompt_toolkit UI does, counts the rows a
 // reflowing terminal lays out. Cutting rows to the new width instead put that
 // redraw rows away from where the client put it, so the frame painted from the
 // model on the next switch back erased the transcript lines above the prompt.
-func (s *terminalScreen) reflowMain(width, height int) {
+func (s *terminalScreen) reflowMain(width, height, cursorX int) {
 	g := &s.main
 	lines := make([]vtLine, 0, len(s.scrollback)+len(g.rows))
 	var decoder vtLineDecoder
@@ -512,6 +519,7 @@ func (s *terminalScreen) reflowMain(width, height int) {
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i]})
 	}
+	lines[len(s.scrollback)+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
 	lines = vtReflow(lines, s.width, width)
 	for len(lines) < height {
 		lines = append(lines, vtLine{cells: newVTRow(width)})
@@ -532,6 +540,15 @@ func (s *terminalScreen) reflowMain(width, height int) {
 	for i, line := range lines[screenStart:] {
 		g.rows[i] = line.cells
 		g.wrapped[i] = line.wrapped
+	}
+	for i, line := range lines {
+		if !line.cursor.set {
+			continue
+		}
+		g.cursorRow = clampInt(i-screenStart, 0, height-1)
+		g.cursorCol = min(line.cursor.x, width-1)
+		g.pendingWrap = line.cursor.x >= width
+		break
 	}
 }
 

@@ -131,6 +131,57 @@ void main() {
     expect(terminal.buffer.getText(), isNot(contains('B')));
   });
 
+  // The cursor stays on the cell it was on, wherever the reflow moves it.
+  test('reflow() keeps the cursor on its cell', () {
+    final terminal = Terminal()..resize(20, 5);
+    terminal.write('0123456789abcdef\r\nxy');
+
+    terminal.resize(8, 5);
+
+    final buffer = terminal.buffer;
+    expect(buffer.lines[buffer.absoluteCursorY].toString(), 'xy');
+    expect(buffer.cursorX, 2);
+  });
+
+  test('reflow() keeps a wrap pending after text that fills the line', () {
+    final terminal = Terminal()..resize(8, 5);
+    terminal.write('abcdefgh');
+
+    terminal.resize(4, 5);
+    terminal.write('i');
+
+    final lines = terminal.buffer.lines;
+    final row = terminal.buffer.absoluteCursorY;
+    expect(lines[row - 1].toString(), 'efgh');
+    expect(lines[row].toString(), 'i');
+    expect(lines[row].isWrapped, isTrue);
+  });
+
+  // An application that redraws after a resize moves up from the cursor over
+  // the rows its output takes once rewrapped. With the cursor kept on its
+  // cell, that move covers exactly the old input area: nothing of it is left
+  // behind and nothing above it is erased.
+  test('reflow() lets a redraw from the cursor replace what it drew', () {
+    final terminal = Terminal()..resize(30, 8);
+    for (var line = 1; line <= 9; line++) {
+      terminal.write('$line. some answer text\r\n');
+    }
+    String chrome(int width) {
+      final rule = '─' * width;
+      final status = ' status${' ' * (width - 8)}!';
+      return '$status\r\n$rule\r\n❯ hi\r\n$rule\x1b[A\r\x1b[2C';
+    }
+
+    terminal.write('END-OF-ANSWER\r\n${chrome(30)}');
+    terminal.resize(13, 16);
+    terminal.write('\x1b[2D\x1b[6A\x1b[J${chrome(13)}');
+
+    final text = terminal.buffer.getText();
+    expect(' status'.allMatches(text).length, 1);
+    expect(text, contains('END-OF-ANSWER'));
+    expect(text, contains('9. some answe'));
+  });
+
   test('lines has correct length after reflow', () {
     final terminal = Terminal();
 
