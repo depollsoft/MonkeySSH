@@ -13181,3 +13181,53 @@ func TestActiveReplayKeepsHyperlinksUnderLineJobs(t *testing.T) {
 		t.Fatalf("replay dropped the hyperlink: %q", replay)
 	}
 }
+
+func stubForegroundProcessGroup(t *testing.T, pgrp func() int) {
+	t.Helper()
+	original := foregroundProcessGroupForWindow
+	t.Cleanup(func() { foregroundProcessGroupForWindow = original })
+	foregroundProcessGroupForWindow = func(*muxWindow) int { return pgrp() }
+}
+
+// A shell's redraws do not make a program it exec's into own the screen: the
+// process group stays, the program changes, and a job that only prints lines
+// keeps the raw replay with the shell's links. A program that redraws after
+// the exec owns it again.
+func TestInPlaceRedrawOwnershipEndsWhenTheGroupExecs(t *testing.T) {
+	stubForegroundProcessGroup(t, func() int { return 42 })
+	server := newMuxServer("test")
+	window := &muxWindow{
+		id: "@1", command: "zsh", interactiveShell: true, proc: bindingTestProcess{pid: 42},
+		foregroundPid: 42, foregroundCommand: "-zsh", foregroundCommandPid: 42, lastActivity: time.Now(),
+	}
+	window.appendHistoryLocked([]byte("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\\r\n$ \x1b[A\r\n$ "))
+	window.noteForegroundCommandLocked(42, "sleep")
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	if window.foregroundAppOwnsScreenLocked() {
+		t.Fatal("sleep exec'd from a shell that redrew its prompt owns the screen")
+	}
+	if replay := string(server.activeReplayLocked()); !strings.Contains(replay, "\x1b]8;;https://example.com/a") {
+		t.Fatalf("replay dropped the hyperlink: %q", replay)
+	}
+	window.appendHistoryLocked([]byte("\x1b[A\rredrawn"))
+	if !window.foregroundAppOwnsScreenLocked() {
+		t.Fatal("a program redrawing after the exec does not own the screen")
+	}
+}
+
+// A redraw is credited to the foreground group at that moment, not to the one
+// the throttled metadata last saw, so a program that redrew right after it
+// started owns the screen once the metadata catches up.
+func TestInPlaceRedrawIsCreditedToTheLiveForegroundGroup(t *testing.T) {
+	stubForegroundProcessGroup(t, func() int { return 43 })
+	window := &muxWindow{
+		id: "@1", command: "zsh", interactiveShell: true, proc: bindingTestProcess{pid: 42},
+		foregroundPid: 42, foregroundCommand: "-zsh", foregroundCommandPid: 42, lastActivity: time.Now(),
+	}
+	window.appendHistoryLocked([]byte("inline program\r\n\x1b[A\rframe"))
+	window.noteForegroundCommandLocked(43, "some-inline-tui")
+	if !window.foregroundAppOwnsScreenLocked() {
+		t.Fatalf("redraw credited to %d, foreground %d", window.inPlaceRedrawPid, window.foregroundPid)
+	}
+}

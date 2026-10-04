@@ -788,7 +788,10 @@ type muxWindow struct {
 	interactiveShell bool
 	// inPlaceRedrawPid is the foreground process group that last moved the
 	// cursor back up to redraw what it had drawn.
-	inPlaceRedrawPid            int
+	inPlaceRedrawPid int
+	// foregroundCommandPid is the process group foregroundCommand was read
+	// for.
+	foregroundCommandPid        int
 	foregroundCommand           string
 	paneTitle                   string
 	pty                         muxPty
@@ -6643,6 +6646,7 @@ func (s *muxServer) createWindowWithStarter(
 		nativeAcpProviderID:       options.nativeAcpProviderID,
 		foregroundPid:             proc.Pid(),
 		foregroundCommand:         filepath.Base(cmd.Path),
+		foregroundCommandPid:      proc.Pid(),
 		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
@@ -11015,6 +11019,20 @@ func (w *muxWindow) supportsForegroundRedrawLocked() bool {
 	return w != nil && (w.alternateScreenModeActiveLocked() || w.foregroundAppOwnsScreenLocked())
 }
 
+// noteForegroundCommandLocked records the program the foreground process
+// group runs. The same group running a different program has exec'd into it,
+// so redraws seen before belong to the program it replaced: a shell that
+// redrew its prompt and then exec'd a job that only prints lines must keep
+// the raw replay.
+func (w *muxWindow) noteForegroundCommandLocked(pgrp int, command string) {
+	if pgrp > 0 && pgrp == w.foregroundCommandPid && pgrp == w.inPlaceRedrawPid &&
+		shellProcessName(command) != shellProcessName(w.foregroundCommand) {
+		w.inPlaceRedrawPid = 0
+	}
+	w.foregroundCommand = command
+	w.foregroundCommandPid = pgrp
+}
+
 // foregroundAppOwnsScreenLocked reports whether a program other than the
 // window's shell owns its normal screen: a recognized agent, or any other
 // foreground program that has redrawn in place, moving the cursor back up
@@ -12759,8 +12777,16 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 	}
 	screen := w.screenLocked()
 	screen.Write(chunk)
-	if screen.TakeRedrewInPlace() && w.foregroundPid > 0 {
-		w.inPlaceRedrawPid = w.foregroundPid
+	if screen.TakeRedrewInPlace() {
+		// Ask for the foreground group now: the cached one lags a program
+		// that just started by up to the metadata refresh interval.
+		pgrp := w.foregroundProcessGroupLocked()
+		if pgrp <= 0 {
+			pgrp = w.foregroundPid
+		}
+		if pgrp > 0 {
+			w.inPlaceRedrawPid = pgrp
+		}
 	}
 	limit := w.historyLimitLocked()
 	if len(chunk) >= limit {
@@ -15944,7 +15970,7 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 		return
 	}
 	if command != "" {
-		w.foregroundCommand = command
+		w.noteForegroundCommandLocked(pgrp, command)
 		w.resetWheelGovernorIfInactiveLocked()
 	}
 	if w.agentSessionPath == sessionPath && w.nativeAcpBridgeID == bridgeID {
