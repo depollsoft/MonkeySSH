@@ -7147,23 +7147,45 @@ func TestActiveReplayUsesForegroundRedrawForVimAlternateScreenHistory(t *testing
 	}
 }
 
-func TestActiveReplayPreservesNonRedrawForegroundHistory(t *testing.T) {
-	server := newMuxServer("test")
-	history := []byte("tail output\nlatest line\n")
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "tail",
-		history:           history,
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
+// Any program other than the shell is restored from the screen model rather
+// than from a tail of its bytes, whether or not the helper knows it by name:
+// an inline TUI repaints only deltas, which a tail replays onto a cleared
+// client as a nearly blank screen. The shell itself keeps the raw replay.
+func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
+	history := []byte("tail output\r\nlatest line\r\n")
+	for _, tc := range []struct {
+		command   string
+		rawReplay bool
+	}{
+		{command: "tail"},
+		{command: "some-inline-tui"},
+		{command: "zsh", rawReplay: true},
+		{command: "", rawReplay: true},
+	} {
+		server := newMuxServer("test")
+		window := &muxWindow{
+			id:                "@1",
+			index:             0,
+			foregroundCommand: tc.command,
+			history:           append([]byte(nil), history...),
+			lastActivity:      time.Now(),
+		}
+		server.windows = []*muxWindow{window}
+		server.activeID = "@1"
 
-	replay := string(server.activeReplayLocked())
-
-	if !strings.Contains(replay, string(history)) {
-		t.Fatalf("line-oriented foreground replay = %q, want history", replay)
+		replay := string(server.activeReplayLocked())
+		if got := strings.Contains(replay, "latest line"); got != tc.rawReplay {
+			t.Fatalf("%q: replay carries the raw history = %v, want %v: %q", tc.command, got, tc.rawReplay, replay)
+		}
+		if tc.rawReplay {
+			continue
+		}
+		if !window.usesForegroundRedrawReplayLocked() {
+			t.Fatalf("%q is not restored by a foreground redraw", tc.command)
+		}
+		if frame := server.foregroundHistoryFallbackHistoryLocked(window); !strings.Contains(string(frame), "latest line") {
+			t.Fatalf("%q: frame from the screen model = %q, want the output", tc.command, frame)
+		}
 	}
 }
 

@@ -11005,7 +11005,24 @@ func buildWindowReplay(
 // Explicit theme/restore redraws still repaint normal-screen console agents.
 // Switching back to their retained screen does not require that repaint.
 func (w *muxWindow) supportsForegroundRedrawLocked() bool {
-	return w != nil && (w.alternateScreenModeActiveLocked() || w.agentToolLocked() != "")
+	return w != nil && (w.alternateScreenModeActiveLocked() || w.foregroundAppOwnsScreenLocked())
+}
+
+// foregroundAppOwnsScreenLocked reports whether a program other than the
+// window's shell is drawing on its normal screen: a recognized agent, or any
+// foreground process that is not a shell. Such a program may draw inline and
+// repaint in place with relative cursor moves, as Hermes's prompt_toolkit UI,
+// OpenClaw and other inline TUIs do, so a tail of its bytes replayed onto a
+// cleared client paints only its latest deltas. It is restored like an agent:
+// asked to redraw, over a frame painted from the screen model. A shell's
+// output reads the same from any point, and the raw tail also carries the
+// hyperlinks, command marks and images the model does not keep.
+func (w *muxWindow) foregroundAppOwnsScreenLocked() bool {
+	if w.agentToolLocked() != "" {
+		return true
+	}
+	command := strings.TrimSpace(w.foregroundCommand)
+	return command != "" && !isShellCommandName(command)
 }
 
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
@@ -11017,7 +11034,7 @@ func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
 	// transcript. A temporary resize on every return makes normal-buffer TUIs
 	// reflow/reinsert history, visibly scrolling the restored window again.
 	return w.alternateScreenModeActiveLocked() ||
-		(!w.retainsConPtyNormalScreenLocked() && w.agentToolLocked() != "")
+		(!w.retainsConPtyNormalScreenLocked() && w.foregroundAppOwnsScreenLocked())
 }
 
 func (w *muxWindow) retainsConPtyNormalScreenLocked() bool {
