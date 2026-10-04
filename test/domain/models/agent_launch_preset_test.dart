@@ -555,6 +555,21 @@ void main() {
           ),
           'hermes --tui --skills cli-tools',
         );
+        // Only an argument Hermes receives on its own picks the interface.
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '-z "explain --cli mode"',
+          ),
+          'hermes --tui -z "explain --cli mode"',
+        );
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: "-z 'say hi' '--cli'",
+          ),
+          "hermes -z 'say hi' '--cli'",
+        );
       },
     );
 

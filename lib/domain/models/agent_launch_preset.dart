@@ -452,7 +452,6 @@ final _openCodeAutoApprovalPattern = RegExp(
 );
 final _cursorForcePattern = RegExp(r'(?<!\S)(?:--force|--yolo|-f)(?=\s|$)');
 final _hermesYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
-final _hermesInterfacePattern = RegExp(r'(?<!\S)--(?:tui|cli)(?=\s|$)');
 final _grokYoloPattern = RegExp(
   r'(?<!\S)(?:--always-approve|--yolo|--dangerously-skip-permissions)(?=\s|$)',
 );
@@ -599,17 +598,73 @@ String buildAgentToolCommand(
 
 /// [AgentLaunchTool.launchArguments], unless the user's own arguments already
 /// choose Hermes's interface: `--cli` keeps the classic REPL, and an explicit
-/// `--tui` is not repeated.
+/// `--tui` is not repeated. Only an argument Hermes receives on its own
+/// counts, not the same text inside a quoted value.
 List<String> _launchArgumentsFor(
   AgentLaunchTool tool,
   String? additionalArguments,
 ) {
   if (tool == AgentLaunchTool.hermes &&
       additionalArguments != null &&
-      _hermesInterfacePattern.hasMatch(additionalArguments)) {
+      _splitShellWords(additionalArguments)
+          .any((word) => word == '--tui' || word == '--cli')) {
     return const [];
   }
   return tool.launchArguments;
+}
+
+/// Splits [value] into the words a POSIX shell would pass as arguments,
+/// removing quotes and backslash escapes. Unlike the tmux flag tokenizer it
+/// never rejects input: an unterminated quote runs to the end.
+List<String> _splitShellWords(String value) {
+  final words = <String>[];
+  final word = StringBuffer();
+  var started = false;
+  var quote = _ShellQuoteMode.none;
+  for (var index = 0; index < value.length; index++) {
+    final character = value[index];
+    switch (quote) {
+      case _ShellQuoteMode.single:
+        if (character == "'") {
+          quote = _ShellQuoteMode.none;
+        } else {
+          word.write(character);
+        }
+      case _ShellQuoteMode.double:
+        if (character == '"') {
+          quote = _ShellQuoteMode.none;
+        } else if (character == r'\' &&
+            index + 1 < value.length &&
+            r'"\$`'.contains(value[index + 1])) {
+          word.write(value[++index]);
+        } else {
+          word.write(character);
+        }
+      case _ShellQuoteMode.none:
+        if (character.trim().isEmpty) {
+          if (started) {
+            words.add(word.toString());
+            word.clear();
+            started = false;
+          }
+          continue;
+        }
+        started = true;
+        if (character == "'") {
+          quote = _ShellQuoteMode.single;
+        } else if (character == '"') {
+          quote = _ShellQuoteMode.double;
+        } else if (character == r'\' && index + 1 < value.length) {
+          word.write(value[++index]);
+        } else {
+          word.write(character);
+        }
+    }
+  }
+  if (started) {
+    words.add(word.toString());
+  }
+  return words;
 }
 
 /// Substitutes a detected executable in a generated agent command.
