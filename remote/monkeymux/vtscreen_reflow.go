@@ -38,10 +38,24 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 		out = append(out, r.finish()...)
 	}
 	for i := range out {
-		out[i].cells = resizeVTRow(out[i].cells, newWidth)
+		out[i].cells = vtCloseSplitGlyphs(resizeVTRow(out[i].cells, newWidth))
 		out[i].cursor.clamp(newWidth)
 	}
 	return out
+}
+
+// vtCloseSplitGlyphs blanks a wide glyph's half left alone at either edge of
+// a row: a first half in the last column, or a second half in the first. Only
+// a one-column screen splits a wide glyph so, and a glyph wider than its row
+// would make the next reflow read past the row's end.
+func vtCloseSplitGlyphs(row []vtCell) []vtCell {
+	if last := len(row) - 1; last >= 0 && row[last].width == 2 {
+		row[last] = blankedHalf(row[last])
+	}
+	if len(row) > 0 && row[0].width == 0 {
+		row[0] = blankedHalf(row[0])
+	}
+	return row
 }
 
 // clamp keeps the cursor within a line cut or grown to length, as resizing a
@@ -164,7 +178,7 @@ func (r *vtLineReflow) finish() []vtLine {
 func vtTrimmedLength(row []vtCell, width int) int {
 	for i := min(width, len(row)) - 1; i >= 0; i-- {
 		if row[i].r != 0 {
-			return i + max(int(row[i].width), 1)
+			return min(i+max(int(row[i].width), 1), len(row))
 		}
 	}
 	return 0

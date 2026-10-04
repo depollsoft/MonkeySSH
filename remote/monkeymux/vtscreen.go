@@ -1420,7 +1420,9 @@ func (s *terminalScreen) print(r rune) {
 			row[g.cursorCol-1] = blankedHalf(row[g.cursorCol-1])
 			row[g.cursorCol] = blankedHalf(row[g.cursorCol])
 		}
-		copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
+		if g.cursorCol+width <= len(row) {
+			copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
+		}
 		for i := g.cursorCol; i < g.cursorCol+width && i < len(row); i++ {
 			row[i] = vtCell{width: 1}
 		}
@@ -1438,7 +1440,8 @@ func (s *terminalScreen) print(r rune) {
 	}
 	row[col] = vtCell{r: r, width: uint8(width), attrs: s.attrs}
 	s.lastPrinted = r
-	if width == 2 {
+	// A one-column screen has no room for the second half.
+	if width == 2 && col+1 < len(row) {
 		if col+2 < len(row) && row[col+1].width == 2 {
 			row[col+2] = blankedHalf(row[col+2])
 		}

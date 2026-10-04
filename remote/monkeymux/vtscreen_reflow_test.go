@@ -333,3 +333,49 @@ func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
 		}
 	}
 }
+
+// A one-column screen splits a wide glyph across rows; the halves are blanked
+// so a later widening does not read past a row's end.
+func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
+	// Printing a wide glyph on one column, plain or in insert mode, has no
+	// room for its second half; it must not write past the row.
+	for _, seq := range []string{"界a", "\x1b[4h界a"} {
+		s := newTerminalScreen(1, 3)
+		s.Write([]byte(seq))
+		s.Resize(3, 3)
+		if got := strings.Join(s.TextRows(), "|"); !strings.Contains(got, "a") {
+			t.Fatalf("%q: %q", seq, got)
+		}
+	}
+
+	s := newTerminalScreen(4, 3)
+	s.Write([]byte("\x1b[3;1H界x"))
+	s.Resize(1, 3)
+	s.Resize(2, 3)
+	s.Resize(4, 3)
+	for r, row := range s.main.rows {
+		if row[len(row)-1].width == 2 || row[0].width == 0 {
+			t.Fatalf("row %d keeps a split glyph: %+v", r, row)
+		}
+	}
+	vtRoundTrip(t, s)
+}
+
+// A wrap a tab left pending over an empty last column is restored by a tab,
+// not by printing a space there, so a client painted from the frame lays the
+// line out the same on the next resize.
+func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
+	for _, tab := range []string{"\t", "\x1b[I"} {
+		s := newTerminalScreen(8, 3)
+		s.Write([]byte("hi" + tab))
+		if !s.main.pendingWrap {
+			t.Fatalf("%q: setup did not leave a wrap pending", tab)
+		}
+		replica := vtRoundTrip(t, s)
+		s.Resize(4, 3)
+		replica.Resize(4, 3)
+		if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) || len(replica.scrollback) != len(s.scrollback) {
+			t.Fatalf("%q: replica %q (%d history), model %q (%d history)", tab, got, len(replica.scrollback), want, len(s.scrollback))
+		}
+	}
+}
