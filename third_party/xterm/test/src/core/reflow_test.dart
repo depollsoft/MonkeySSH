@@ -100,6 +100,37 @@ void main() {
     }
   });
 
+  // With one cell left on a line, a wide character goes to the next line
+  // whole instead of leaving its first half in the last column.
+  test('reflow() moves a wide character whole when one cell is left', () {
+    final terminal = Terminal()..resize(3, 5);
+    terminal.write('abc床');
+    expect(terminal.buffer.lines[1].isWrapped, isTrue);
+
+    terminal.resize(4, 5);
+
+    expect(terminal.buffer.lines[0].toString(), 'abc');
+    expect(terminal.buffer.lines[1].toString(), '床');
+    expect(terminal.buffer.lines[1].isWrapped, isTrue);
+    expect(terminal.buffer.lines[1].getWidth(0), 2);
+  });
+
+  // A narrowing moves the end of a long line onto a wrapped line of its own.
+  // Once an application erases that line, widening must not show its text
+  // again at the end of the line it came from.
+  test('reflow() does not bring back text erased after a narrowing', () {
+    final terminal = Terminal()..resize(20, 4);
+    terminal.write('AAAAAAAAAABBBBBBBBBB\r\n');
+    terminal.resize(10, 4);
+    expect(terminal.buffer.lines[1].toString(), 'BBBBBBBBBB');
+
+    terminal.write('\x1b[1;1H\x1b[2K'); // the first row on screen is lines[1]
+    terminal.resize(20, 4);
+
+    expect(terminal.buffer.lines[0].toString(), 'AAAAAAAAAA');
+    expect(terminal.buffer.getText(), isNot(contains('B')));
+  });
+
   test('lines has correct length after reflow', () {
     final terminal = Terminal();
 

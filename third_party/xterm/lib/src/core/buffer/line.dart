@@ -275,6 +275,15 @@ class BufferLine with IndexedItem {
     }
   }
 
+  /// Shrinks the line to [length] and drops the cells past it. [resize] keeps
+  /// them, so that a width that only hides them can bring them back; a reflow
+  /// has moved them to the next line instead, and a line that kept its copy
+  /// showed it again, erased or not, once it grew.
+  void truncate(int length) {
+    resize(length);
+    _data.fillRange(length * _cellSize, _data.length, 0);
+  }
+
   /// Returns the offset of the last cell that has content from the start of
   /// the line.
   int getTrimmedLength([int? cols]) {
