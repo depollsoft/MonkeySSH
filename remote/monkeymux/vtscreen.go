@@ -27,9 +27,11 @@ type terminalScreen struct {
 	// scrollback holds main-screen lines that scrolled off the top, already
 	// rendered to escape sequences (attributes included, rendition left at
 	// default). Bytes are far cheaper than cell rows and are exactly what
-	// RenderFrame needs to emit.
-	scrollback      [][]byte
-	scrollbackBytes int
+	// RenderFrame needs to emit. scrollbackWrapped parallels it: whether each
+	// line is the soft-wrapped continuation of the one before it.
+	scrollback        [][]byte
+	scrollbackWrapped []bool
+	scrollbackBytes   int
 
 	attrs      vtAttrs
 	top        int // scroll region, 0-based inclusive
@@ -132,7 +134,12 @@ func clampVTSize(width, height int) (int, int) {
 }
 
 type vtGrid struct {
-	rows        [][]vtCell
+	rows [][]vtCell
+	// wrapped[i] marks rows[i] as the soft-wrapped continuation of the row
+	// above it, as BufferLine.isWrapped does in the client: autowrap sets it
+	// and erasing the row clears it. A width change reflows the main grid
+	// along it.
+	wrapped     []bool
 	cursorRow   int
 	cursorCol   int
 	pendingWrap bool
@@ -216,7 +223,7 @@ func newTerminalScreen(width, height int) *terminalScreen {
 }
 
 func newVTGrid(width, height int) vtGrid {
-	g := vtGrid{rows: make([][]vtCell, height)}
+	g := vtGrid{rows: make([][]vtCell, height), wrapped: make([]bool, height)}
 	for i := range g.rows {
 		g.rows[i] = newVTRow(width)
 	}
@@ -296,6 +303,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.alt = s.alt.clone()
 	// Rendered lines are never mutated, so the clone may share them.
 	c.scrollback = append([][]byte(nil), s.scrollback...)
+	c.scrollbackWrapped = append([]bool(nil), s.scrollbackWrapped...)
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
@@ -314,6 +322,7 @@ func (g vtGrid) clone() vtGrid {
 	for i, row := range g.rows {
 		c.rows[i] = cloneVTRow(row)
 	}
+	c.wrapped = append([]bool(nil), g.wrapped...)
 	return c
 }
 
@@ -328,7 +337,9 @@ func cloneVTRow(row []vtCell) []vtCell {
 	return out
 }
 
-// Resize changes both grids to width x height without reflow.
+// Resize changes both grids to width x height. The main grid reflows its
+// soft-wrapped lines to a new width as the client does (reflowMain); the
+// alternate grid is cut.
 func (s *terminalScreen) Resize(width, height int) {
 	if width <= 0 || height <= 0 {
 		return
@@ -337,8 +348,8 @@ func (s *terminalScreen) Resize(width, height int) {
 	if width == s.width && height == s.height {
 		return
 	}
-	s.resizeGrid(&s.main, width, height, true)
-	s.resizeGrid(&s.alt, width, height, false)
+	s.resizeMain(width, height)
+	s.resizeAlt(width, height)
 	if width != s.width {
 		tabs := make([]bool, width)
 		for i := range tabs {
@@ -364,16 +375,31 @@ func (s *terminalScreen) Resize(width, height int) {
 	}
 }
 
-func (s *terminalScreen) resizeGrid(g *vtGrid, width, height int, keepScrollback bool) {
+// resizeMain follows the client's Buffer.resize for the main screen: the
+// height changes first, at the old width, and only then is every line
+// reflowed to the new width.
+func (s *terminalScreen) resizeMain(width, height int) {
+	g := &s.main
+	s.resizeMainRows(g, s.width, height)
+	for len(g.rows) < height {
+		g.rows = append(g.rows, newVTRow(s.width))
+		g.wrapped = append(g.wrapped, false)
+	}
+	s.clampVTCursor(g, width, height)
+	if width != s.width {
+		s.reflowMain(width, height)
+	}
+}
+
+// resizeAlt cuts the alternate grid to the new size. It has no scrollback, so
+// the rows below the cursor go first, blank or not, and then rows leave the
+// top so the cursor row survives. This is what tmux and the client do there.
+func (s *terminalScreen) resizeAlt(width, height int) {
+	g := &s.alt
 	for i := range g.rows {
 		g.rows[i] = resizeVTRow(g.rows[i], width)
 	}
-	if keepScrollback {
-		s.resizeMainRows(g, width, height)
-	} else if height < len(g.rows) {
-		// The alternate screen has no scrollback, so the rows below the
-		// cursor go first, blank or not, and then rows leave the top so the
-		// cursor row survives. This is what tmux and the client do there.
+	if height < len(g.rows) {
 		drop := len(g.rows) - height
 		fromTop := 0
 		if g.cursorRow >= height {
@@ -381,15 +407,28 @@ func (s *terminalScreen) resizeGrid(g *vtGrid, width, height int, keepScrollback
 		}
 		if fromTop > 0 {
 			g.rows = g.rows[fromTop:]
+			g.wrapped = g.wrapped[fromTop:]
 			g.cursorRow -= fromTop
 			drop -= fromTop
 		}
 		if drop > 0 {
 			g.rows = g.rows[:len(g.rows)-drop]
+			g.wrapped = g.wrapped[:len(g.wrapped)-drop]
 		}
 	}
 	for len(g.rows) < height {
 		g.rows = append(g.rows, newVTRow(width))
+		g.wrapped = append(g.wrapped, false)
+	}
+	s.clampVTCursor(g, width, height)
+}
+
+// clampVTCursor keeps the cursor on the resized grid. A deferred wrap counts
+// as the column past the old edge, where the client keeps its cursor, so a
+// wider screen leaves the cursor after the glyph that filled the line.
+func (s *terminalScreen) clampVTCursor(g *vtGrid, width, height int) {
+	if g.pendingWrap {
+		g.cursorCol = s.width
 	}
 	if g.cursorCol >= width {
 		g.cursorCol = width - 1
@@ -421,12 +460,15 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 		switch {
 		case belowCursor && vtRowReclaimable(g.rows[last]):
 			g.rows = g.rows[:last]
+			g.wrapped = g.wrapped[:last]
 		case g.cursorRow > 0:
-			s.pushScrollback(g.rows[0])
+			s.pushScrollback(g.rows[0], g.wrapped[0])
 			g.rows = g.rows[1:]
+			g.wrapped = g.wrapped[1:]
 			g.cursorRow--
 		default:
 			g.rows = g.rows[:last]
+			g.wrapped = g.wrapped[:last]
 		}
 	}
 	restore := min(height-len(g.rows), len(s.scrollback))
@@ -435,14 +477,59 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 	}
 	keep := len(s.scrollback) - restore
 	rows := make([][]vtCell, 0, height)
+	var decoder vtLineDecoder
 	for i, line := range s.scrollback[keep:] {
-		rows = append(rows, restoreScrollbackRow(line, width))
+		rows = append(rows, decoder.decode(line, width))
 		s.scrollbackBytes -= len(line)
 		s.scrollback[keep+i] = nil
 	}
+	wrapped := append(append(make([]bool, 0, height), s.scrollbackWrapped[keep:]...), g.wrapped...)
 	s.scrollback = s.scrollback[:keep]
+	s.scrollbackWrapped = s.scrollbackWrapped[:keep]
 	g.rows = append(rows, g.rows...)
+	g.wrapped = wrapped
 	g.cursorRow += restore
+}
+
+// reflowMain rewraps the main screen and its scrollback to a new width as the
+// client's Buffer.resize does once it has changed the height: every logical
+// line, a row and the soft-wrapped rows under it, is joined and split again at
+// the new width (vtReflow), the screen is the last rows of the result, and the
+// cursor keeps its place on the screen instead of following its cell.
+//
+// An application that redraws after a width change by moving the cursor up
+// over what it drew, as Hermes's prompt_toolkit UI does, counts the rows a
+// reflowing terminal lays out. Cutting rows to the new width instead put that
+// redraw rows away from where the client put it, so the frame painted from the
+// model on the next switch back erased the transcript lines above the prompt.
+func (s *terminalScreen) reflowMain(width, height int) {
+	g := &s.main
+	lines := make([]vtLine, 0, len(s.scrollback)+len(g.rows))
+	var decoder vtLineDecoder
+	for i, text := range s.scrollback {
+		lines = append(lines, vtLine{cells: decoder.decode(text, s.width), wrapped: s.scrollbackWrapped[i]})
+	}
+	for i, row := range g.rows {
+		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i]})
+	}
+	lines = vtReflow(lines, s.width, width)
+	for len(lines) < height {
+		lines = append(lines, vtLine{cells: newVTRow(width)})
+	}
+	screenStart := len(lines) - height
+	s.scrollback = s.scrollback[:0]
+	s.scrollbackWrapped = s.scrollbackWrapped[:0]
+	s.scrollbackBytes = 0
+	for _, line := range lines[:screenStart] {
+		s.appendScrollback(line.cells, line.wrapped)
+	}
+	s.trimScrollback()
+	g.rows = make([][]vtCell, height)
+	g.wrapped = make([]bool, height)
+	for i, line := range lines[screenStart:] {
+		g.rows[i] = line.cells
+		g.wrapped[i] = line.wrapped
+	}
 }
 
 // vtRowReclaimable reports whether a row holds nothing a shrink must keep. As
@@ -458,15 +545,29 @@ func vtRowReclaimable(row []vtCell) bool {
 	return true
 }
 
-// restoreScrollbackRow turns a stored scrollback line back into cells at the
-// given width. The line is what renderVTCells produced: SGR runs and glyphs,
-// with no cursor movement, so writing it onto a scratch row wide enough to
+// vtLineDecoder turns stored scrollback lines back into cells. A line is what
+// renderVTCells produced: SGR runs and glyphs, with no cursor movement other
+// than skips within the row, so writing it onto a scratch row wide enough to
 // hold all of it reproduces the cells, which are then cut to width like any
-// other row.
-func restoreScrollbackRow(line []byte, width int) []vtCell {
-	scratch := newTerminalScreen(max(width, renderedLineColumns(line)), 1)
-	scratch.Write(line)
-	return resizeVTRow(scratch.main.rows[0], width)
+// other row. One scratch row serves every line a decoder reads.
+type vtLineDecoder struct {
+	scratch *terminalScreen
+}
+
+func (d *vtLineDecoder) decode(line []byte, width int) []vtCell {
+	columns := max(width, renderedLineColumns(line))
+	if d.scratch == nil || d.scratch.width < columns {
+		d.scratch = newTerminalScreen(columns, 1)
+	} else {
+		g := &d.scratch.main
+		for i := range g.rows[0] {
+			g.rows[0][i] = vtCell{width: 1}
+		}
+		g.cursorRow, g.cursorCol, g.pendingWrap = 0, 0, false
+		d.scratch.attrs = vtAttrs{}
+	}
+	d.scratch.Write(line)
+	return resizeVTRow(cloneVTRow(d.scratch.main.rows[0]), width)
 }
 
 // renderedLineColumns bounds the columns a rendered scrollback line covers:
@@ -512,10 +613,22 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 	return out
 }
 
-func (s *terminalScreen) pushScrollback(row []vtCell) {
+func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool) {
+	s.appendScrollback(row, wrapped)
+	s.trimScrollback()
+}
+
+func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool) {
 	line := renderVTCells(make([]byte, 0, 64), row)
 	s.scrollback = append(s.scrollback, line)
+	s.scrollbackWrapped = append(s.scrollbackWrapped, wrapped)
 	s.scrollbackBytes += len(line)
+}
+
+// trimScrollback drops the oldest lines beyond the line and byte limits. The
+// oldest line left has nothing above it to continue, as in a client painted
+// from a frame, so it is no longer marked as wrapped.
+func (s *terminalScreen) trimScrollback() {
 	excess := 0
 	for len(s.scrollback)-excess > vtScrollbackLimit ||
 		(excess < len(s.scrollback) && s.scrollbackBytes > vtScrollbackByteLimit) {
@@ -528,6 +641,11 @@ func (s *terminalScreen) pushScrollback(row []vtCell) {
 			s.scrollback[i] = nil
 		}
 		s.scrollback = s.scrollback[:len(s.scrollback)-excess]
+		copy(s.scrollbackWrapped, s.scrollbackWrapped[excess:])
+		s.scrollbackWrapped = s.scrollbackWrapped[:len(s.scrollbackWrapped)-excess]
+		if len(s.scrollbackWrapped) > 0 {
+			s.scrollbackWrapped[0] = false
+		}
 	}
 }
 
@@ -1124,7 +1242,7 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	// frame rendered from this model. A region that starts lower drops them.
 	if !s.altActive && top == 0 {
 		for i := 0; i < n; i++ {
-			s.pushScrollback(g.rows[top+i])
+			s.pushScrollback(g.rows[top+i], g.wrapped[top+i])
 		}
 	}
 	// Recycle the rows leaving the region as the fresh rows entering it, so
@@ -1132,8 +1250,10 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	recycled := make([][]vtCell, n)
 	copy(recycled, g.rows[top:top+n])
 	copy(g.rows[top:bottom+1], g.rows[top+n:bottom+1])
+	copy(g.wrapped[top:bottom+1], g.wrapped[top+n:bottom+1])
 	for i := 0; i < n; i++ {
 		g.rows[bottom-n+1+i] = s.clearRow(recycled[i])
+		g.wrapped[bottom-n+1+i] = false
 	}
 }
 
@@ -1153,8 +1273,10 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 	recycled := make([][]vtCell, n)
 	copy(recycled, g.rows[bottom+1-n:bottom+1])
 	copy(g.rows[top+n:bottom+1], g.rows[top:bottom+1-n])
+	copy(g.wrapped[top+n:bottom+1], g.wrapped[top:bottom+1-n])
 	for i := 0; i < n; i++ {
 		g.rows[top+i] = s.clearRow(recycled[i])
+		g.wrapped[top+i] = false
 	}
 }
 
@@ -1221,8 +1343,7 @@ func (s *terminalScreen) print(r rune) {
 	}
 	if g.pendingWrap {
 		if s.autowrap {
-			g.cursorCol = 0
-			s.index()
+			s.wrapToNextLine()
 		}
 		g.pendingWrap = false
 	}
@@ -1230,8 +1351,7 @@ func (s *terminalScreen) print(r rune) {
 		// A wide glyph does not fit in the last column.
 		if s.autowrap {
 			g.rows[g.cursorRow][g.cursorCol] = vtCell{width: 1, attrs: s.attrs}
-			g.cursorCol = 0
-			s.index()
+			s.wrapToNextLine()
 		} else {
 			g.cursorCol = s.width - 2
 			if g.cursorCol < 0 {
@@ -1277,6 +1397,15 @@ func (s *terminalScreen) print(r rune) {
 	} else {
 		g.cursorCol = col + width
 	}
+}
+
+// wrapToNextLine is autowrap: the cursor moves to the start of the next line,
+// which becomes the soft-wrapped continuation of the one it left.
+func (s *terminalScreen) wrapToNextLine() {
+	g := s.grid()
+	g.cursorCol = 0
+	s.index()
+	g.wrapped[g.cursorRow] = true
 }
 
 func (s *terminalScreen) attachCombining(r rune) {
@@ -1617,23 +1746,28 @@ func (s *terminalScreen) switchScreen(toAlt bool, saveCursor bool, clear bool) {
 
 func (s *terminalScreen) eraseDisplay(mode int) {
 	g := s.grid()
+	// Erased rows stop continuing the row above them, as in the client.
 	switch mode {
 	case 0:
 		s.eraseLine(0)
 		for r := g.cursorRow + 1; r < s.height; r++ {
 			s.clearRow(g.rows[r])
+			g.wrapped[r] = false
 		}
 	case 1:
 		s.eraseLine(1)
 		for r := 0; r < g.cursorRow; r++ {
 			s.clearRow(g.rows[r])
+			g.wrapped[r] = false
 		}
 	case 2:
 		for r := range g.rows {
 			s.clearRow(g.rows[r])
+			g.wrapped[r] = false
 		}
 	case 3:
 		s.scrollback = nil
+		s.scrollbackWrapped = nil
 		s.scrollbackBytes = 0
 	}
 	g.pendingWrap = false
@@ -1670,6 +1804,7 @@ func (s *terminalScreen) eraseLine(mode int) {
 		to = g.cursorCol + 1
 	}
 	s.eraseCells(row, from, to)
+	g.wrapped[g.cursorRow] = false
 	g.pendingWrap = false
 }
 
@@ -1756,8 +1891,10 @@ func (s *terminalScreen) deleteLines(n int) {
 	recycled := make([][]vtCell, n)
 	copy(recycled, g.rows[g.cursorRow:g.cursorRow+n])
 	copy(g.rows[g.cursorRow:s.bottom+1], g.rows[g.cursorRow+n:s.bottom+1])
+	copy(g.wrapped[g.cursorRow:s.bottom+1], g.wrapped[g.cursorRow+n:s.bottom+1])
 	for i := 0; i < n; i++ {
 		g.rows[s.bottom-n+1+i] = s.clearRow(recycled[i])
+		g.wrapped[s.bottom-n+1+i] = false
 	}
 	g.cursorCol = 0
 	g.pendingWrap = false

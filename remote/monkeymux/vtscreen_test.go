@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -46,14 +47,16 @@ func vtRowsEqual(a, b [][]vtCell) bool {
 
 // vtRoundTrip feeds RenderFrame into a fresh screen the way the real replay
 // does (after the reset prefix and the window's private modes) and asserts the
-// picture, cursor, region and scrollback survive.
-func vtRoundTrip(t *testing.T, s *terminalScreen) {
+// picture, cursor, region, scrollback and soft wraps survive.
+func vtRoundTrip(t *testing.T, s *terminalScreen) *terminalScreen {
 	t.Helper()
 	w, h := s.Size()
 	replica := newTerminalScreen(w, h)
 	preamble := "\x1b[?6l\x1b[r\x1b[0m"
 	if s.autowrap {
 		preamble += "\x1b[?7h"
+	} else {
+		preamble += "\x1b[?7l"
 	}
 	if s.AlternateScreenActive() {
 		preamble += "\x1b[?1049h"
@@ -62,6 +65,18 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) {
 	replica.Write(s.RenderFrame())
 	if !vtRowsEqual(s.grid().rows, replica.grid().rows) {
 		t.Fatalf("round trip changed the grid:\nwant:\n%s\ngot:\n%s", vtText(t, s), vtText(t, replica))
+	}
+	if s.autowrap != replica.autowrap {
+		t.Fatalf("round trip changed autowrap: %v vs %v", s.autowrap, replica.autowrap)
+	}
+	// A first row has no row above it to wrap from unless the frame emits
+	// scrollback before it.
+	firstRow := 1
+	if !s.AlternateScreenActive() && len(s.scrollback) > 0 {
+		firstRow = 0
+	}
+	if want, got := s.grid().wrapped[firstRow:], replica.grid().wrapped[firstRow:]; !slices.Equal(want, got) {
+		t.Fatalf("round trip changed the soft wraps: want %v got %v", want, got)
 	}
 	r1, c1 := s.CursorPosition()
 	r2, c2 := replica.CursorPosition()
@@ -100,7 +115,12 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) {
 				t.Fatalf("scrollback line %d differs: %q vs %q", i, s.scrollback[i], replica.scrollback[i])
 			}
 		}
+		if !slices.Equal(s.scrollbackWrapped, replica.scrollbackWrapped) {
+			t.Fatalf("round trip changed the scrollback's soft wraps: want %v got %v",
+				s.scrollbackWrapped, replica.scrollbackWrapped)
+		}
 	}
+	return replica
 }
 
 func boolStrings(values []bool) []string {
@@ -449,22 +469,27 @@ func TestVTScreenResize(t *testing.T) {
 	s := newTerminalScreen(10, 4)
 	s.Write([]byte("one\r\ntwo\r\nthree\r\nfour"))
 	s.Resize(3, 2)
-	if got := s.TextRows(); len(got) != 2 || got[0] != "thr" || got[1] != "fou" {
-		t.Fatalf("shrink keeps the cursor row: %q", got)
+	// The height goes first: the top rows scroll into the scrollback. Then
+	// every line is reflowed to the new width, and the cursor stays on its
+	// screen row, as in the client.
+	if got := s.TextRows(); !slices.Equal(got, []string{"fou", "r"}) || !slices.Equal(s.main.wrapped, []bool{false, true}) {
+		t.Fatalf("shrink: %q wrapped %v", got, s.main.wrapped)
 	}
 	if r, c := s.CursorPosition(); r != 1 || c != 2 {
 		t.Fatalf("cursor after shrink: (%d,%d)", r, c)
 	}
-	if len(s.scrollback) != 2 || vtScrollbackText(s.scrollback[1]) != "two" {
+	if len(s.scrollback) != 4 || vtScrollbackText(s.scrollback[1]) != "two" ||
+		vtScrollbackText(s.scrollback[3]) != "ee" || !s.scrollbackWrapped[3] {
 		t.Fatalf("rows leaving the top enter the scrollback: %d", len(s.scrollback))
 	}
 	s.Resize(8, 5)
-	// Growth brings the scrolled-off rows back above the content, and adds
-	// blank rows below only once the scrollback runs out.
-	if got := s.TextRows(); len(got) != 5 || got[0] != "one" || got[2] != "thr" || got[4] != "" {
+	// Growth brings the scrolled-off rows back above the content, adds blank
+	// rows below only once the scrollback runs out, and the wider lines join
+	// their wrapped parts again.
+	if got := s.TextRows(); !slices.Equal(got, []string{"one", "two", "three", "four", ""}) {
 		t.Fatalf("grow restores the scrollback first: %q", got)
 	}
-	if r, c := s.CursorPosition(); r != 3 || c != 2 {
+	if r, c := s.CursorPosition(); r != 4 || c != 2 {
 		t.Fatalf("cursor after grow: (%d,%d)", r, c)
 	}
 	if len(s.scrollback) != 0 || s.scrollbackBytes != 0 {

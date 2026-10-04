@@ -16,6 +16,10 @@ import (
 // On the main screen the retained scrollback is emitted first, one line per
 // "\r\n", followed by enough blank lines to push all of it above the visible
 // area, so the client's scrollback matches the server's.
+//
+// A line that soft-wraps from the one above is reached by wrapping onto it
+// instead (appendVTSoftWrap), so the client marks it as a continuation just as
+// the model does and reflows it the same way on the next width change.
 func (s *terminalScreen) RenderFrame() []byte {
 	if s == nil {
 		return nil
@@ -23,20 +27,50 @@ func (s *terminalScreen) RenderFrame() []byte {
 	out := make([]byte, 0, 4096)
 	out = append(out, "\x1b[?6l\x1b[r\x1b[0m"...)
 	out = s.appendTabStops(out)
+	g := s.grid()
+	softWraps := s.renderedSoftWraps()
+	if softWraps && !s.autowrap {
+		out = append(out, "\x1b[?7h"...)
+	}
 	if !s.altActive && len(s.scrollback) > 0 {
 		out = append(out, "\x1b[H"...)
-		for _, line := range s.scrollback {
+		// Stored lines are decoded only around a soft wrap; prev keeps the
+		// last line's cells when its own wrap needed them.
+		var decoder vtLineDecoder
+		var prev []vtCell
+		for i, line := range s.scrollback {
+			var cells []vtCell
+			switch {
+			case i > 0 && s.scrollbackWrapped[i]:
+				if prev == nil {
+					prev = decoder.decode(s.scrollback[i-1], s.width)
+				}
+				cells = decoder.decode(line, s.width)
+				out = appendVTSoftWrap(out, prev, cells)
+			case i > 0:
+				out = append(out, "\x1b[0m\r\n"...)
+			}
 			out = append(out, line...)
+			prev = cells
+		}
+		if g.wrapped[0] {
+			if prev == nil {
+				prev = decoder.decode(s.scrollback[len(s.scrollback)-1], s.width)
+			}
+			out = appendVTSoftWrap(out, prev, g.rows[0])
+		} else {
 			out = append(out, "\x1b[0m\r\n"...)
 		}
 		for i := 1; i < s.height; i++ {
 			out = append(out, "\r\n"...)
 		}
 	}
-	for r, row := range s.grid().rows {
-		out = append(out, "\x1b["...)
-		out = strconv.AppendInt(out, int64(r+1), 10)
-		out = append(out, ";1H"...)
+	for r, row := range g.rows {
+		if r > 0 && g.wrapped[r] {
+			out = appendVTSoftWrap(out, g.rows[r-1], row)
+		} else {
+			out = appendVTCursorPosition(out, r, 0)
+		}
 		before := len(out)
 		out = renderVTCells(out, row)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
@@ -44,11 +78,18 @@ func (s *terminalScreen) RenderFrame() []byte {
 			out = append(out, "\x1b[0m"...)
 		}
 		if !full {
-			out = append(out, "\x1b[K"...)
+			if g.wrapped[r] {
+				// EL would also clear the client's wrap flag.
+				out = appendVTCSICount(out, s.width, 'X')
+			} else {
+				out = append(out, "\x1b[K"...)
+			}
 		}
 	}
+	if softWraps && !s.autowrap {
+		out = append(out, "\x1b[?7l"...)
+	}
 	out = append(out, "\x1b[0m"...)
-	g := s.grid()
 	if sco := s.scoCursor; sco.valid {
 		// SCOSC state for a later CSI u.
 		out = appendVTCursorPosition(out, sco.row, sco.col)
@@ -104,6 +145,83 @@ func (s *terminalScreen) RenderFrame() []byte {
 	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
 	out = appendVTSGR(out, s.attrs)
 	return out
+}
+
+// renderedSoftWraps reports whether a frame has to reproduce a soft wrap: in
+// the scrollback it emits, or on the screen below its first row, or into the
+// first row from the scrollback.
+func (s *terminalScreen) renderedSoftWraps() bool {
+	g := s.grid()
+	for r, wrapped := range g.wrapped {
+		if wrapped && (r > 0 || (!s.altActive && len(s.scrollback) > 0)) {
+			return true
+		}
+	}
+	if s.altActive {
+		return false
+	}
+	for _, wrapped := range s.scrollbackWrapped[min(1, len(s.scrollbackWrapped)):] {
+		if wrapped {
+			return true
+		}
+	}
+	return false
+}
+
+// appendVTSoftWrap moves the client from the row prev was painted on to the
+// start of the next row by autowrap, so the client marks that row as the
+// soft-wrapped continuation of prev, as BufferLine.isWrapped. It prints the
+// glyph in prev's last column and next's first glyph after it, which wraps,
+// and stands in a space for a cell that has no glyph to print, erasing it
+// again afterwards. The cursor ends in column 0 of the new row with the
+// rendition reset, ready for next's cells to be painted over what is there.
+func appendVTSoftWrap(out []byte, prev, next []vtCell) []byte {
+	width := len(prev)
+	out = append(out, "\x1b[0m"...)
+	eraseLast := false
+	switch last := prev[width-1]; {
+	case last.width == 0 && width > 1 && prev[width-2].width == 2:
+		out = appendVTCSICount(out, width-1, 'G')
+		out = renderVTGlyphs(out, prev[width-2:])
+	case last.width == 1 && last.r != 0:
+		out = appendVTCSICount(out, width, 'G')
+		out = renderVTGlyphs(out, prev[width-1:])
+	default:
+		out = appendVTCSICount(out, width, 'G')
+		out = append(out, ' ')
+		eraseLast = true
+	}
+	out = append(out, "\x1b[0m"...)
+	eraseFirst := false
+	switch first := next[0]; {
+	case first.r != 0 && first.width == 2 && len(next) > 1:
+		out = renderVTGlyphs(out, next[:2])
+	case first.r != 0 && first.width == 1:
+		out = renderVTGlyphs(out, next[:1])
+	default:
+		out = append(out, ' ')
+		eraseFirst = true
+	}
+	out = append(out, "\x1b[0m"...)
+	if eraseLast {
+		out = append(out, "\x1b[A"...)
+		out = appendVTCSICount(out, width, 'G')
+		out = appendVTErase(out, prev[width-1].attrs)
+		out = append(out, "\x1b[B"...)
+	}
+	if eraseFirst {
+		out = append(out, '\r')
+		out = appendVTErase(out, next[0].attrs)
+	}
+	return append(out, '\r')
+}
+
+// appendVTErase erases the cell under the cursor back to never-written, with
+// the background it had, and resets the rendition.
+func appendVTErase(out []byte, attrs vtAttrs) []byte {
+	out = appendVTSGR(out, attrs)
+	out = append(out, "\x1b[X"...)
+	return append(out, "\x1b[0m"...)
 }
 
 func appendVTRegion(out []byte, top, bottom int) []byte {
