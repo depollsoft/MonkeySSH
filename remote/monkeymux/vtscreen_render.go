@@ -38,8 +38,8 @@ func (s *terminalScreen) RenderFrame() []byte {
 		out = strconv.AppendInt(out, int64(r+1), 10)
 		out = append(out, ";1H"...)
 		before := len(out)
-		out = renderVTCells(out, row, true)
-		full := len(row) > 0 && !row[len(row)-1].isDefaultBlank()
+		out = renderVTCells(out, row)
+		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
 		if len(out) != before || full {
 			out = append(out, "\x1b[0m"...)
 		}
@@ -97,7 +97,7 @@ func (s *terminalScreen) RenderFrame() []byte {
 			col--
 		}
 		out = appendVTCursorPosition(out, row, col)
-		out = renderVTCells(out, cells[col:], false)
+		out = renderVTGlyphs(out, cells[col:])
 	} else {
 		out = appendVTCursorPosition(out, row, g.cursorCol)
 	}
@@ -134,17 +134,64 @@ func appendVTCharsets(out []byte, g0Graphics, g1Graphics, shiftOut bool) []byte 
 // renderVTCells appends a row's cells. Trailing default blanks are omitted
 // when trimTrailing is set. Attributes are tracked from "default" at the start
 // of the row, so the caller must reset the rendition before each row.
-func renderVTCells(out []byte, row []vtCell, trimTrailing bool) []byte {
+// renderVTCells serialises one row onto a destination row that is still
+// blank: a cleared screen, a fresh scrollback line, or a scratch row. Cells
+// nothing was written to are skipped with CUF, or erased with ECH when they
+// carry a background, rather than printed as spaces, so the destination ends
+// up with the same never-written cells as the source. Which cells were written
+// decides which rows a resize may reclaim, in the model and in the client
+// alike, so a repainted or restored row has to keep it. Never-written default
+// cells at the end of the row are left out.
+func renderVTCells(out []byte, row []vtCell) []byte {
 	end := len(row)
-	if trimTrailing {
-		for end > 0 && row[end-1].isDefaultBlank() {
-			end--
-		}
+	for end > 0 && row[end-1].isDefaultUnwritten() {
+		end--
 	}
 	current := vtAttrs{}
 	var buf [utf8Max]byte
-	for i := 0; i < end; i++ {
+	for i := 0; i < end; {
 		cell := row[i]
+		if cell.width == 0 {
+			i++
+			continue
+		}
+		if cell.unwritten() {
+			run := i + 1
+			for run < end && row[run].unwritten() && row[run].attrs == cell.attrs {
+				run++
+			}
+			if cell.attrs != (vtAttrs{}) {
+				if cell.attrs != current {
+					out = appendVTSGR(out, cell.attrs)
+					current = cell.attrs
+				}
+				out = appendVTCSICount(out, run-i, 'X')
+			}
+			if run < len(row) {
+				out = appendVTCSICount(out, run-i, 'C')
+			}
+			i = run
+			continue
+		}
+		if cell.attrs != current {
+			out = appendVTSGR(out, cell.attrs)
+			current = cell.attrs
+		}
+		out = append(out, encodeRune(buf[:], cell.r)...)
+		for _, comb := range cell.comb {
+			out = append(out, encodeRune(buf[:], comb)...)
+		}
+		i++
+	}
+	return out
+}
+
+// renderVTGlyphs prints cells as glyphs, a space for a never-written cell, so
+// the cursor ends up after them with any deferred wrap the last one causes.
+func renderVTGlyphs(out []byte, cells []vtCell) []byte {
+	current := vtAttrs{}
+	var buf [utf8Max]byte
+	for _, cell := range cells {
 		if cell.width == 0 {
 			continue
 		}
@@ -162,6 +209,12 @@ func renderVTCells(out []byte, row []vtCell, trimTrailing bool) []byte {
 		}
 	}
 	return out
+}
+
+func appendVTCSICount(out []byte, count int, final byte) []byte {
+	out = append(out, "\x1b["...)
+	out = strconv.AppendInt(out, int64(count), 10)
+	return append(out, final)
 }
 
 const utf8Max = 4

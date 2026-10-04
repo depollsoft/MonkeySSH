@@ -162,8 +162,14 @@ func (c vtCell) blank() bool {
 	return (c.r == 0 || c.r == ' ') && len(c.comb) == 0 && c.width != 0
 }
 
-func (c vtCell) isDefaultBlank() bool {
-	return c.blank() && c.attrs == (vtAttrs{})
+// unwritten reports a cell nothing was written to, or one an erase cleared;
+// a written space does not count.
+func (c vtCell) unwritten() bool {
+	return c.r == 0 && len(c.comb) == 0 && c.width != 0
+}
+
+func (c vtCell) isDefaultUnwritten() bool {
+	return c.unwritten() && c.attrs == (vtAttrs{})
 }
 
 type vtColorKind uint8
@@ -362,21 +368,18 @@ func (s *terminalScreen) resizeGrid(g *vtGrid, width, height int, keepScrollback
 	for i := range g.rows {
 		g.rows[i] = resizeVTRow(g.rows[i], width)
 	}
-	if height < len(g.rows) {
+	if keepScrollback {
+		s.resizeMainRows(g, width, height)
+	} else if height < len(g.rows) {
+		// The alternate screen has no scrollback, so the rows below the
+		// cursor go first, blank or not, and then rows leave the top so the
+		// cursor row survives. This is what tmux and the client do there.
 		drop := len(g.rows) - height
-		// Prefer dropping blank rows below the cursor; otherwise the top rows
-		// leave the grid (and, on the main screen, enter the scrollback) so
-		// the cursor row survives.
 		fromTop := 0
 		if g.cursorRow >= height {
 			fromTop = g.cursorRow - height + 1
 		}
 		if fromTop > 0 {
-			if keepScrollback {
-				for _, row := range g.rows[:fromTop] {
-					s.pushScrollback(row)
-				}
-			}
 			g.rows = g.rows[fromTop:]
 			g.cursorRow -= fromTop
 			drop -= fromTop
@@ -395,6 +398,98 @@ func (s *terminalScreen) resizeGrid(g *vtGrid, width, height int, keepScrollback
 		g.cursorRow = height - 1
 	}
 	g.pendingWrap = false
+}
+
+// resizeMainRows changes the main grid's height the way the client terminal
+// changes its own (third_party/xterm Buffer.resize). The client keeps its
+// picture between frames, so every frame painted from this model has to land
+// on the rows the client already shows:
+//
+//   - Shrinking gives up empty rows below the cursor first, then scrolls rows
+//     into the scrollback, keeping rows an application drew below its cursor,
+//     such as an agent's input box border.
+//   - Growing brings scrolled-off lines back above the content, as tmux and
+//     xterm.js do, and adds blank rows only once the scrollback runs out.
+//
+// Appending blank rows on growth left an inline agent's input box mid-screen,
+// with blank rows under it, on every switch back after the phone keyboard
+// closed.
+func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
+	for len(g.rows) > height {
+		last := len(g.rows) - 1
+		belowCursor := last > g.cursorRow
+		switch {
+		case belowCursor && vtRowReclaimable(g.rows[last]):
+			g.rows = g.rows[:last]
+		case g.cursorRow > 0:
+			s.pushScrollback(g.rows[0])
+			g.rows = g.rows[1:]
+			g.cursorRow--
+		default:
+			g.rows = g.rows[:last]
+		}
+	}
+	restore := min(height-len(g.rows), len(s.scrollback))
+	if restore <= 0 {
+		return
+	}
+	keep := len(s.scrollback) - restore
+	rows := make([][]vtCell, 0, height)
+	for i, line := range s.scrollback[keep:] {
+		rows = append(rows, restoreScrollbackRow(line, width))
+		s.scrollbackBytes -= len(line)
+		s.scrollback[keep+i] = nil
+	}
+	s.scrollback = s.scrollback[:keep]
+	g.rows = append(rows, g.rows...)
+	g.cursorRow += restore
+}
+
+// vtRowReclaimable reports whether a row holds nothing a shrink must keep. As
+// in the client, a cell counts once anything was written to it, a space
+// included; only never-written and erased cells are empty, whatever their
+// background.
+func vtRowReclaimable(row []vtCell) bool {
+	for _, cell := range row {
+		if cell.r != 0 || len(cell.comb) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// restoreScrollbackRow turns a stored scrollback line back into cells at the
+// given width. The line is what renderVTCells produced: SGR runs and glyphs,
+// with no cursor movement, so writing it onto a scratch row wide enough to
+// hold all of it reproduces the cells, which are then cut to width like any
+// other row.
+func restoreScrollbackRow(line []byte, width int) []vtCell {
+	scratch := newTerminalScreen(max(width, renderedLineColumns(line)), 1)
+	scratch.Write(line)
+	return resizeVTRow(scratch.main.rows[0], width)
+}
+
+// renderedLineColumns bounds the columns a rendered scrollback line covers:
+// two per glyph, skipping its SGR sequences.
+func renderedLineColumns(line []byte) int {
+	columns := 0
+	for i := 0; i < len(line); {
+		if line[i] == 0x1b {
+			i++
+			if i < len(line) && line[i] == '[' {
+				i++
+				for i < len(line) && (line[i] < 0x40 || line[i] > 0x7e) {
+					i++
+				}
+			}
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRune(line[i:])
+		i += size
+		columns += 2
+	}
+	return columns
 }
 
 func resizeVTRow(row []vtCell, width int) []vtCell {
@@ -418,7 +513,7 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 }
 
 func (s *terminalScreen) pushScrollback(row []vtCell) {
-	line := renderVTCells(make([]byte, 0, 64), row, true)
+	line := renderVTCells(make([]byte, 0, 64), row)
 	s.scrollback = append(s.scrollback, line)
 	s.scrollbackBytes += len(line)
 	excess := 0
