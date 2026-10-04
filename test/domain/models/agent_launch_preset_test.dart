@@ -570,6 +570,23 @@ void main() {
           ),
           "hermes -z 'say hi' '--cli'",
         );
+        // Words after the end of the Hermes command are not its arguments.
+        for (final tail in ['# --cli', '; echo --cli', '&& echo --cli']) {
+          expect(
+            buildAgentToolCommand(
+              AgentLaunchTool.hermes,
+              additionalArguments: '--skills review $tail',
+            ),
+            'hermes --tui --skills review $tail',
+          );
+        }
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '--skills a#b --cli',
+          ),
+          'hermes --skills a#b --cli',
+        );
       },
     );
 

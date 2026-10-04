@@ -614,8 +614,10 @@ List<String> _launchArgumentsFor(
 }
 
 /// Splits [value] into the words a POSIX shell would pass as arguments,
-/// removing quotes and backslash escapes. Unlike the tmux flag tokenizer it
-/// never rejects input: an unterminated quote runs to the end.
+/// removing quotes and backslash escapes, and stops where the command ends:
+/// at an unquoted `;`, `&`, `|` or newline, or a `#` that starts a word.
+/// Unlike the tmux flag tokenizer it never rejects input: an unterminated
+/// quote runs to the end.
 List<String> _splitShellWords(String value) {
   final words = <String>[];
   final word = StringBuffer();
@@ -641,6 +643,10 @@ List<String> _splitShellWords(String value) {
           word.write(character);
         }
       case _ShellQuoteMode.none:
+        if (';&|\n\r'.contains(character) || (character == '#' && !started)) {
+          index = value.length;
+          continue;
+        }
         if (character.trim().isEmpty) {
           if (started) {
             words.add(word.toString());
