@@ -131,6 +131,141 @@ void main() {
     expect(terminal.buffer.getText(), isNot(contains('B')));
   });
 
+  // The cursor stays on the cell it was on, wherever the reflow moves it.
+  test('reflow() keeps the cursor on its cell', () {
+    final terminal = Terminal()..resize(20, 5);
+    terminal.write('0123456789abcdef\r\nxy');
+
+    terminal.resize(8, 5);
+
+    final buffer = terminal.buffer;
+    expect(buffer.lines[buffer.absoluteCursorY].toString(), 'xy');
+    expect(buffer.cursorX, 2);
+  });
+
+  test('reflow() keeps a wrap pending after text that fills the line', () {
+    final terminal = Terminal()..resize(8, 5);
+    terminal.write('abcdefgh');
+
+    terminal.resize(4, 5);
+    terminal.write('i');
+
+    final lines = terminal.buffer.lines;
+    final row = terminal.buffer.absoluteCursorY;
+    expect(lines[row - 1].toString(), 'efgh');
+    expect(lines[row].toString(), 'i');
+    expect(lines[row].isWrapped, isTrue);
+  });
+
+  // A cursor past the new edge on a line its text does not fill sits on the
+  // last column; no wrap is pending there.
+  test('reflow() does not make a wrap pending for a cursor it cuts short', () {
+    final terminal = Terminal()..resize(8, 3);
+    terminal.write('\x1b[1;8H');
+
+    terminal.resize(4, 3);
+    terminal.write('X');
+
+    final buffer = terminal.buffer;
+    expect(buffer.lines[buffer.absoluteCursorY].toString(), '   X');
+    expect(buffer.lines[buffer.absoluteCursorY].isWrapped, isFalse);
+  });
+
+  // Nor with autowrap off: the next character replaces the last one.
+  test('reflow() does not make a wrap pending with autowrap off', () {
+    final terminal = Terminal()..resize(8, 3);
+    terminal.write('\x1b[?7labcd');
+
+    terminal.resize(4, 3);
+    terminal.write('X');
+
+    final buffer = terminal.buffer;
+    expect(buffer.lines[buffer.absoluteCursorY].toString(), 'abcX');
+  });
+
+  // An application that redraws after a resize moves up from the cursor over
+  // the rows its output takes once rewrapped. With the cursor kept on its
+  // cell, that move covers exactly the old input area: nothing of it is left
+  // behind and nothing above it is erased.
+  test('reflow() lets a redraw from the cursor replace what it drew', () {
+    final terminal = Terminal()..resize(30, 8);
+    for (var line = 1; line <= 9; line++) {
+      terminal.write('$line. some answer text\r\n');
+    }
+    String chrome(int width) {
+      final rule = '─' * width;
+      final status = ' status${' ' * (width - 8)}!';
+      return '$status\r\n$rule\r\n❯ hi\r\n$rule\x1b[A\r\x1b[2C';
+    }
+
+    terminal.write('END-OF-ANSWER\r\n${chrome(30)}');
+    terminal.resize(13, 16);
+    terminal.write('\x1b[2D\x1b[6A\x1b[J${chrome(13)}');
+
+    final text = terminal.buffer.getText();
+    expect(' status'.allMatches(text).length, 1);
+    expect(text, contains('END-OF-ANSWER'));
+    expect(text, contains('9. some answe'));
+  });
+
+  // An erased row that still continues the text above it (ECH keeps the
+  // wrap) stays after that text when a reflow joins them.
+  test('reflow() keeps an erased continuation after its text', () {
+    final terminal = Terminal()..resize(4, 3);
+    terminal.write('abcde\x1b[2;1H\x1b[4X');
+    expect(terminal.buffer.lines[1].isWrapped, isTrue);
+
+    terminal.resize(8, 3);
+
+    expect(terminal.buffer.lines[0].toString(), 'abcd');
+    expect(terminal.buffer.lines[0].isWrapped, isFalse);
+  });
+
+  // A row that a scroll, a line insertion or a deletion moves next to a
+  // different row starts a line of its own, so a later width change does not
+  // join it to its new neighbour.
+  for (final entry in {
+    'region scroll up': '\x1b[2;4r\x1b[S\x1b[r',
+    'delete line': '\x1b[2;1H\x1b[M',
+    'region scroll down': '\x1b[3;4r\x1b[T\x1b[r',
+    'insert line': '\x1b[3;1H\x1b[L',
+  }.entries) {
+    test('reflow() does not join rows moved by ${entry.key}', () {
+      final terminal = Terminal()..resize(4, 4);
+      terminal.write('HEAD\r\nabcdefgh');
+      expect(terminal.buffer.lines[2].isWrapped, isTrue);
+
+      terminal.write(entry.value);
+      final lines = terminal.buffer.lines;
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].toString() == 'efgh') {
+          expect(lines[i].isWrapped, isFalse);
+        }
+      }
+
+      terminal.resize(8, 4);
+      expect(terminal.buffer.getText(), isNot(contains('HEADefgh')));
+    });
+  }
+
+  // A tab with no stop left leaves the cursor past the edge with a wrap
+  // pending; a reflow keeps that state, so the next character starts the
+  // next line.
+  for (final tab in ['\t', '\x1b[I']) {
+    test(
+        'reflow() keeps the wrap an exhausted ${tab == '\t' ? 'HT' : 'CHT'} left pending',
+        () {
+      final terminal = Terminal()..resize(8, 3);
+      terminal.write(tab);
+
+      terminal.resize(4, 3);
+      terminal.write('X');
+
+      expect(terminal.buffer.lines[0].toString(), '');
+      expect(terminal.buffer.lines[1].toString(), 'X');
+    });
+  }
+
   test('lines has correct length after reflow', () {
     final terminal = Terminal();
 

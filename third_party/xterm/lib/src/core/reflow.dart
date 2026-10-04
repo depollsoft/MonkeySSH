@@ -67,8 +67,13 @@ class _LineReflow {
   void add(BufferLine line) {
     final trimmedLength = line.getTrimmedLength(oldWidth);
 
-    // A fast path for empty lines
+    // A fast path for empty lines. Cells still waiting in the builder come
+    // before it; adding it first put an erased continuation row ahead of the
+    // text it continued.
     if (trimmedLength == 0) {
+      if (_builder.isNotEmpty) {
+        _lines.add(_builder.take(wrapped: _lines.isNotEmpty));
+      }
       _lines.add(line);
       return;
     }

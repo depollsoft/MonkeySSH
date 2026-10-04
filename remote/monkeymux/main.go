@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.223"
+	monkeyMuxVersion                  = "0.1.224"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -754,35 +754,44 @@ type muxServer struct {
 }
 
 type muxWindow struct {
-	agentSessionWatch           *agentSessionWatch
-	inputMu                     sync.Mutex
-	wheelGovernor               wheelGovernor // guarded by s.mu; draining also requires inputMu
-	nativePaste                 nativeConsolePasteFilter
-	nativeResponse              nativeConsoleResponseFilter
-	id                          string
-	index                       int
-	name                        string
-	cwd                         string
-	command                     string
-	agentTool                   string
-	agentToolConfirmed          bool
-	agentModelProvider          string
-	agentSessionID              string
-	agentSessionDir             string
-	agentSessionPath            string
-	agentSessionAssigned        bool
-	agentIdentityServer         *muxServer
-	agentSessionIdentityExact   bool
-	agentSessionTitle           string
-	piTitleMu                   sync.Mutex
-	piTitleScan                 piSessionTitleScan
-	piNativeSessionBridgeID     string
-	piNativeSessionPath         string
-	piNativeSessionCheckedAt    time.Time
-	nativeAgentTitle            nativeAgentSessionTitle
-	nativeAcpBridgeID           string
-	nativeAcpProviderID         string
-	foregroundPid               int
+	agentSessionWatch         *agentSessionWatch
+	inputMu                   sync.Mutex
+	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
+	nativePaste               nativeConsolePasteFilter
+	nativeResponse            nativeConsoleResponseFilter
+	id                        string
+	index                     int
+	name                      string
+	cwd                       string
+	command                   string
+	agentTool                 string
+	agentToolConfirmed        bool
+	agentModelProvider        string
+	agentSessionID            string
+	agentSessionDir           string
+	agentSessionPath          string
+	agentSessionAssigned      bool
+	agentIdentityServer       *muxServer
+	agentSessionIdentityExact bool
+	agentSessionTitle         string
+	piTitleMu                 sync.Mutex
+	piTitleScan               piSessionTitleScan
+	piNativeSessionBridgeID   string
+	piNativeSessionPath       string
+	piNativeSessionCheckedAt  time.Time
+	nativeAgentTitle          nativeAgentSessionTitle
+	nativeAcpBridgeID         string
+	nativeAcpProviderID       string
+	foregroundPid             int
+	// interactiveShell marks a window started as the user's shell rather than
+	// with a command.
+	interactiveShell bool
+	// inPlaceRedrawPid is the foreground process group that last moved the
+	// cursor back up to redraw what it had drawn.
+	inPlaceRedrawPid int
+	// foregroundCommandPid is the process group foregroundCommand was read
+	// for.
+	foregroundCommandPid        int
 	foregroundCommand           string
 	paneTitle                   string
 	pty                         muxPty
@@ -6637,6 +6646,8 @@ func (s *muxServer) createWindowWithStarter(
 		nativeAcpProviderID:       options.nativeAcpProviderID,
 		foregroundPid:             proc.Pid(),
 		foregroundCommand:         filepath.Base(cmd.Path),
+		foregroundCommandPid:      proc.Pid(),
+		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,
@@ -11005,7 +11016,48 @@ func buildWindowReplay(
 // Explicit theme/restore redraws still repaint normal-screen console agents.
 // Switching back to their retained screen does not require that repaint.
 func (w *muxWindow) supportsForegroundRedrawLocked() bool {
-	return w != nil && (w.alternateScreenModeActiveLocked() || w.agentToolLocked() != "")
+	return w != nil && (w.alternateScreenModeActiveLocked() || w.foregroundAppOwnsScreenLocked())
+}
+
+// noteForegroundCommandLocked records the program the foreground process
+// group runs. The same group running a different program has exec'd into it,
+// so redraws seen before belong to the program it replaced: a shell that
+// redrew its prompt and then exec'd a job that only prints lines must keep
+// the raw replay.
+func (w *muxWindow) noteForegroundCommandLocked(pgrp int, command string) {
+	if pgrp > 0 && pgrp == w.foregroundCommandPid && pgrp == w.inPlaceRedrawPid &&
+		shellProcessName(command) != shellProcessName(w.foregroundCommand) {
+		w.inPlaceRedrawPid = 0
+	}
+	w.foregroundCommand = command
+	w.foregroundCommandPid = pgrp
+}
+
+// foregroundAppOwnsScreenLocked reports whether a program other than the
+// window's shell owns its normal screen: a recognized agent, or any other
+// foreground program that has redrawn in place, moving the cursor back up
+// over what it drew, as Hermes's prompt_toolkit UI, OpenClaw and other
+// inline TUIs do. A tail of such a program's bytes replayed onto a cleared
+// client paints only its latest deltas, so it is restored like an agent:
+// asked to redraw, over a frame painted from the screen model. Output from a
+// shell, or from a job that only prints lines, reads the same from any point,
+// and its raw tail also carries the hyperlinks, command marks and images the
+// model does not keep.
+func (w *muxWindow) foregroundAppOwnsScreenLocked() bool {
+	if w.agentToolLocked() != "" {
+		return true
+	}
+	command := strings.TrimSpace(w.foregroundCommand)
+	if command == "" || isShellCommandName(command) {
+		return false
+	}
+	// The shell the window was started with, whatever $SHELL names it, owns
+	// the screen while it is in the foreground itself.
+	if w.interactiveShell && w.foregroundPid > 0 && w.foregroundPid == w.processID() &&
+		shellProcessName(command) == shellProcessName(w.command) {
+		return false
+	}
+	return w.foregroundPid > 0 && w.inPlaceRedrawPid == w.foregroundPid
 }
 
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
@@ -11017,7 +11069,7 @@ func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
 	// transcript. A temporary resize on every return makes normal-buffer TUIs
 	// reflow/reinsert history, visibly scrolling the restored window again.
 	return w.alternateScreenModeActiveLocked() ||
-		(!w.retainsConPtyNormalScreenLocked() && w.agentToolLocked() != "")
+		(!w.retainsConPtyNormalScreenLocked() && w.foregroundAppOwnsScreenLocked())
 }
 
 func (w *muxWindow) retainsConPtyNormalScreenLocked() bool {
@@ -12709,6 +12761,8 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 			)
 			if start < len(w.history) {
 				w.screen.Write(w.history[start:])
+				// Earlier output says nothing about today's foreground.
+				w.screen.TakeRedrewInPlace()
 			}
 		}
 	} else {
@@ -12721,7 +12775,19 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
-	w.screenLocked().Write(chunk)
+	screen := w.screenLocked()
+	screen.Write(chunk)
+	if screen.TakeRedrewInPlace() {
+		// Ask for the foreground group now: the cached one lags a program
+		// that just started by up to the metadata refresh interval.
+		pgrp := w.foregroundProcessGroupLocked()
+		if pgrp <= 0 {
+			pgrp = w.foregroundPid
+		}
+		if pgrp > 0 {
+			w.inPlaceRedrawPid = pgrp
+		}
+	}
 	limit := w.historyLimitLocked()
 	if len(chunk) >= limit {
 		parser := w.historyStartTerminalOutput
@@ -15904,7 +15970,7 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 		return
 	}
 	if command != "" {
-		w.foregroundCommand = command
+		w.noteForegroundCommandLocked(pgrp, command)
 		w.resetWheelGovernorIfInactiveLocked()
 	}
 	if w.agentSessionPath == sessionPath && w.nativeAcpBridgeID == bridgeID {
@@ -16319,13 +16385,20 @@ func isGenericRuntimeCommandName(command string) bool {
 }
 
 func isShellCommandName(command string) bool {
-	switch strings.ToLower(cleanProcessCommandName(command)) {
-	case "sh", "bash", "zsh", "fish", "dash", "ksh",
+	switch shellProcessName(command) {
+	case "sh", "bash", "zsh", "fish", "dash", "ksh", "ash", "mksh", "oksh",
+		"yash", "csh", "tcsh", "nu", "elvish", "xonsh",
 		"cmd", "powershell", "pwsh":
 		return true
 	default:
 		return false
 	}
+}
+
+// shellProcessName is a command name with the leading dash a login shell's
+// process name carries removed: macOS reports MonkeyMux's own shell as -zsh.
+func shellProcessName(command string) string {
+	return strings.TrimPrefix(strings.ToLower(cleanProcessCommandName(command)), "-")
 }
 
 func commandNameFromShellCommand(command string) string {

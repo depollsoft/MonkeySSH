@@ -60,15 +60,16 @@ func inlineTUIHistory(width int) []byte {
 }
 
 // TestInlineAgentWindowSwitchKeepsTranscript is the regression test for
-// switching back to a Hermes window and finding the transcript gone. The
-// status ticks push the transcript out of the shell replay tail within a
-// minute or two, and replaying those relative moves onto a cleared client
-// paints nothing but the status line.
+// switching back to a Hermes window, or any other inline TUI, and finding the
+// transcript gone. The status ticks push the transcript out of the shell
+// replay tail within a minute or two, and replaying those relative moves onto
+// a cleared client paints nothing but the status line.
 func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
-	for _, tool := range []string{"hermes", "openclaw"} {
+	// The last one is a program the helper does not know by name.
+	for _, tool := range []string{"hermes", "openclaw", "some-inline-tui"} {
 		t.Run(tool, func(t *testing.T) {
 			server := newMuxServerWithSize("test", 80, 24)
-			window := &muxWindow{id: "@2", index: 1, foregroundCommand: tool}
+			window := &muxWindow{id: "@2", index: 1, foregroundCommand: tool, foregroundPid: 42}
 			window.appendHistoryLocked(inlineTUIHistory(80))
 			server.windows = []*muxWindow{{id: "@1"}, window}
 			server.activeID = "@1"

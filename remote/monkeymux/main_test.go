@@ -7147,23 +7147,69 @@ func TestActiveReplayUsesForegroundRedrawForVimAlternateScreenHistory(t *testing
 	}
 }
 
-func TestActiveReplayPreservesNonRedrawForegroundHistory(t *testing.T) {
-	server := newMuxServer("test")
-	history := []byte("tail output\nlatest line\n")
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "tail",
-		history:           history,
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
+// A program that redraws in place is restored from the screen model rather
+// than from a tail of its bytes, whether or not the helper knows it by name:
+// an inline TUI repaints only deltas, which a tail replays onto a cleared
+// client as a nearly blank screen. A shell, or a job that only prints lines,
+// keeps the raw replay, which also carries the hyperlinks and command marks
+// the model does not keep.
+func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
+	const lines = "tail output\r\nlatest line\r\n"
+	const redraw = lines + "\x1b[A\rlatest line\r\n"
+	for _, tc := range []struct {
+		name      string
+		command   string
+		shell     string
+		output    string
+		laterJob  bool
+		rawReplay bool
+	}{
+		{name: "line job", command: "tail", output: lines, rawReplay: true},
+		{name: "inline program", command: "some-inline-tui", output: redraw},
+		// A job started after an inline program prints lines only.
+		{name: "later line job", command: "tail", output: redraw, laterJob: true, rawReplay: true},
+		{name: "zsh", command: "zsh", output: redraw, rawReplay: true},
+		// macOS names MonkeyMux's own login shell this way.
+		{name: "login zsh", command: "-zsh", output: redraw, rawReplay: true},
+		{name: "ash", command: "ash", output: redraw, rawReplay: true},
+		{name: "login tcsh", command: "-tcsh", output: redraw, rawReplay: true},
+		{name: "nu", command: "nu", output: redraw, rawReplay: true},
+		{name: "unknown command", command: "", output: redraw, rawReplay: true},
+		// Any shell the window was started with, in the foreground itself.
+		{name: "own shell", command: "-myshell", shell: "myshell", output: redraw, rawReplay: true},
+	} {
+		server := newMuxServer("test")
+		pid := 42
+		window := &muxWindow{
+			id:                "@1",
+			index:             0,
+			command:           tc.shell,
+			interactiveShell:  tc.shell != "",
+			proc:              bindingTestProcess{pid: pid},
+			foregroundPid:     pid,
+			foregroundCommand: tc.command,
+			lastActivity:      time.Now(),
+		}
+		window.appendHistoryLocked([]byte(tc.output))
+		if tc.laterJob {
+			window.foregroundPid = pid + 1
+		}
+		server.windows = []*muxWindow{window}
+		server.activeID = "@1"
 
-	replay := string(server.activeReplayLocked())
-
-	if !strings.Contains(replay, string(history)) {
-		t.Fatalf("line-oriented foreground replay = %q, want history", replay)
+		replay := string(server.activeReplayLocked())
+		if got := strings.Contains(replay, "latest line"); got != tc.rawReplay {
+			t.Fatalf("%s: replay carries the raw history = %v, want %v: %q", tc.name, got, tc.rawReplay, replay)
+		}
+		if tc.rawReplay {
+			continue
+		}
+		if !window.usesForegroundRedrawReplayLocked() {
+			t.Fatalf("%s is not restored by a foreground redraw", tc.name)
+		}
+		if frame := server.foregroundHistoryFallbackHistoryLocked(window); !strings.Contains(string(frame), "latest line") {
+			t.Fatalf("%s: frame from the screen model = %q, want the output", tc.name, frame)
+		}
 	}
 }
 
@@ -13118,5 +13164,70 @@ func TestScreenModelIgnoresSyntheticResize(t *testing.T) {
 	window.screenWidth = 12
 	if w, _ := window.screenLocked().Size(); w != 12 {
 		t.Fatal("model did not follow the real geometry")
+	}
+}
+
+// Links a shell printed stay clickable after a switch back while a job that
+// does not redraw, such as sleep or tail -f, is in the foreground: the raw
+// replay carries their OSC 8 destinations, which the screen model drops.
+func TestActiveReplayKeepsHyperlinksUnderLineJobs(t *testing.T) {
+	server := newMuxServer("test")
+	window := &muxWindow{id: "@1", foregroundPid: 7, foregroundCommand: "zsh", lastActivity: time.Now()}
+	window.appendHistoryLocked([]byte("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\\r\n$ sleep 100\r\n"))
+	window.foregroundPid, window.foregroundCommand = 8, "sleep"
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	if replay := string(server.activeReplayLocked()); !strings.Contains(replay, "\x1b]8;;https://example.com/a") {
+		t.Fatalf("replay dropped the hyperlink: %q", replay)
+	}
+}
+
+func stubForegroundProcessGroup(t *testing.T, pgrp func() int) {
+	t.Helper()
+	original := foregroundProcessGroupForWindow
+	t.Cleanup(func() { foregroundProcessGroupForWindow = original })
+	foregroundProcessGroupForWindow = func(*muxWindow) int { return pgrp() }
+}
+
+// A shell's redraws do not make a program it exec's into own the screen: the
+// process group stays, the program changes, and a job that only prints lines
+// keeps the raw replay with the shell's links. A program that redraws after
+// the exec owns it again.
+func TestInPlaceRedrawOwnershipEndsWhenTheGroupExecs(t *testing.T) {
+	stubForegroundProcessGroup(t, func() int { return 42 })
+	server := newMuxServer("test")
+	window := &muxWindow{
+		id: "@1", command: "zsh", interactiveShell: true, proc: bindingTestProcess{pid: 42},
+		foregroundPid: 42, foregroundCommand: "-zsh", foregroundCommandPid: 42, lastActivity: time.Now(),
+	}
+	window.appendHistoryLocked([]byte("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\\r\n$ \x1b[A\r\n$ "))
+	window.noteForegroundCommandLocked(42, "sleep")
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	if window.foregroundAppOwnsScreenLocked() {
+		t.Fatal("sleep exec'd from a shell that redrew its prompt owns the screen")
+	}
+	if replay := string(server.activeReplayLocked()); !strings.Contains(replay, "\x1b]8;;https://example.com/a") {
+		t.Fatalf("replay dropped the hyperlink: %q", replay)
+	}
+	window.appendHistoryLocked([]byte("\x1b[A\rredrawn"))
+	if !window.foregroundAppOwnsScreenLocked() {
+		t.Fatal("a program redrawing after the exec does not own the screen")
+	}
+}
+
+// A redraw is credited to the foreground group at that moment, not to the one
+// the throttled metadata last saw, so a program that redrew right after it
+// started owns the screen once the metadata catches up.
+func TestInPlaceRedrawIsCreditedToTheLiveForegroundGroup(t *testing.T) {
+	stubForegroundProcessGroup(t, func() int { return 43 })
+	window := &muxWindow{
+		id: "@1", command: "zsh", interactiveShell: true, proc: bindingTestProcess{pid: 42},
+		foregroundPid: 42, foregroundCommand: "-zsh", foregroundCommandPid: 42, lastActivity: time.Now(),
+	}
+	window.appendHistoryLocked([]byte("inline program\r\n\x1b[A\rframe"))
+	window.noteForegroundCommandLocked(43, "some-inline-tui")
+	if !window.foregroundAppOwnsScreenLocked() {
+		t.Fatalf("redraw credited to %d, foreground %d", window.inPlaceRedrawPid, window.foregroundPid)
 	}
 }

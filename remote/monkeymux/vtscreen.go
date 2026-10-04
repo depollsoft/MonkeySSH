@@ -51,6 +51,11 @@ type terminalScreen struct {
 
 	lastPrinted rune
 
+	// redrewInPlace records that output moved the cursor back up to an
+	// earlier row, which a program printing line after line never does; see
+	// TakeRedrewInPlace.
+	redrewInPlace bool
+
 	// Kitty unicode-placeholder bookkeeping. A rendered frame reproduces the
 	// placeholder cells but never the APC image transmissions that fill them
 	// (the parser skips APC strings), so a replay built from RenderFrame must
@@ -385,9 +390,19 @@ func (s *terminalScreen) resizeMain(width, height int) {
 		g.rows = append(g.rows, newVTRow(s.width))
 		g.wrapped = append(g.wrapped, false)
 	}
+	// The cursor's cell, past the last column when a wrap is pending, for
+	// the reflow to carry along.
+	cursorX := g.cursorCol
+	if g.pendingWrap {
+		cursorX = s.width
+	}
 	s.clampVTCursor(g, width, height)
 	if width != s.width {
-		s.reflowMain(width, height)
+		// A cursor right after its line's text, or with a wrap pending, is
+		// where printing that text at the new width leaves it.
+		followsText := cursorX >= s.width ||
+			cursorX == vtTrimmedLength(g.rows[g.cursorRow], s.width)
+		s.reflowMain(width, height, cursorX, followsText)
 	}
 }
 
@@ -495,14 +510,15 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 // client's Buffer.resize does once it has changed the height: every logical
 // line, a row and the soft-wrapped rows under it, is joined and split again at
 // the new width (vtReflow), the screen is the last rows of the result, and the
-// cursor keeps its place on the screen instead of following its cell.
+// cursor stays on its cell, cursorX on its row; it keeps its screen row only
+// when the reflow drops that cell.
 //
 // An application that redraws after a width change by moving the cursor up
 // over what it drew, as Hermes's prompt_toolkit UI does, counts the rows a
 // reflowing terminal lays out. Cutting rows to the new width instead put that
 // redraw rows away from where the client put it, so the frame painted from the
 // model on the next switch back erased the transcript lines above the prompt.
-func (s *terminalScreen) reflowMain(width, height int) {
+func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsText bool) {
 	g := &s.main
 	lines := make([]vtLine, 0, len(s.scrollback)+len(g.rows))
 	var decoder vtLineDecoder
@@ -512,6 +528,7 @@ func (s *terminalScreen) reflowMain(width, height int) {
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i]})
 	}
+	lines[len(s.scrollback)+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
 	lines = vtReflow(lines, s.width, width)
 	for len(lines) < height {
 		lines = append(lines, vtLine{cells: newVTRow(width)})
@@ -532,6 +549,19 @@ func (s *terminalScreen) reflowMain(width, height int) {
 	for i, line := range lines[screenStart:] {
 		g.rows[i] = line.cells
 		g.wrapped[i] = line.wrapped
+	}
+	for i, line := range lines {
+		if !line.cursor.set {
+			continue
+		}
+		g.cursorRow = clampInt(i-screenStart, 0, height-1)
+		g.cursorCol = min(line.cursor.x, width-1)
+		// Past the last column a wrap is pending only for a cursor that
+		// follows its text, which now fills the row, and only with autowrap
+		// on; any other cursor the new edge cut short sits on the last
+		// column.
+		g.pendingWrap = line.cursor.x >= width && cursorFollowsText && s.autowrap
+		break
 	}
 }
 
@@ -1172,9 +1202,26 @@ func (s *terminalScreen) saveCursor() {
 	}
 }
 
+// TakeRedrewInPlace reports whether output since the last call moved the
+// cursor back up to an earlier row, as an application that redraws what it
+// drew does, and clears the record.
+func (s *terminalScreen) TakeRedrewInPlace() bool {
+	redrew := s.redrewInPlace
+	s.redrewInPlace = false
+	return redrew
+}
+
+// noteCursorRow records an upward cursor move from row before.
+func (s *terminalScreen) noteCursorRow(before int) {
+	if s.grid().cursorRow < before {
+		s.redrewInPlace = true
+	}
+}
+
 func (s *terminalScreen) restoreCursor() {
 	saved := *s.saved()
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	if !saved.valid {
 		g.cursorRow, g.cursorCol = 0, 0
 		s.attrs = vtAttrs{}
@@ -1214,6 +1261,7 @@ func (s *terminalScreen) index() {
 
 func (s *terminalScreen) reverseIndex() {
 	g := s.grid()
+	s.redrewInPlace = true
 	if g.cursorRow == s.top {
 		s.scrollDown(1)
 	} else if g.cursorRow > 0 {
@@ -1258,6 +1306,23 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 		g.rows[bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[bottom-n+1+i] = false
 	}
+	// Rows leaving a region at the top of the main screen stay right above
+	// it in the scrollback; otherwise the row moved to the top follows a
+	// different row now.
+	if s.altActive || top > 0 {
+		g.endContinuation(top)
+	}
+	g.endContinuation(bottom + 1)
+}
+
+// endContinuation marks the row at index, if any, as no longer continuing the
+// row above it, as the client does: a row a scroll or a line insertion or
+// deletion moves next to a different row is a line of its own, and keeping
+// the flag made the next reflow join it to whatever sits above it now.
+func (g *vtGrid) endContinuation(index int) {
+	if index >= 0 && index < len(g.wrapped) {
+		g.wrapped[index] = false
+	}
 }
 
 func (s *terminalScreen) scrollDown(n int) {
@@ -1281,6 +1346,8 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 		g.rows[top+i] = s.clearRow(recycled[i])
 		g.wrapped[top+i] = false
 	}
+	g.endContinuation(top + n)
+	g.endContinuation(bottom + 1)
 }
 
 func (s *terminalScreen) tabForward(n int) {
@@ -1291,7 +1358,12 @@ func (s *terminalScreen) tabForward(n int) {
 			col++
 		}
 		if col >= s.width {
-			col = s.width - 1
+			// With no stop left the client leaves its cursor past the edge,
+			// in its pending-wrap state (Terminal.tab), so the next glyph
+			// starts the next line there; a reflow carries that state too.
+			g.cursorCol = s.width - 1
+			g.pendingWrap = true
+			return
 		}
 		g.cursorCol = col
 	}
@@ -1371,7 +1443,9 @@ func (s *terminalScreen) print(r rune) {
 			row[g.cursorCol-1] = blankedHalf(row[g.cursorCol-1])
 			row[g.cursorCol] = blankedHalf(row[g.cursorCol])
 		}
-		copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
+		if g.cursorCol+width <= len(row) {
+			copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
+		}
 		for i := g.cursorCol; i < g.cursorCol+width && i < len(row); i++ {
 			row[i] = vtCell{width: 1}
 		}
@@ -1389,7 +1463,8 @@ func (s *terminalScreen) print(r rune) {
 	}
 	row[col] = vtCell{r: r, width: uint8(width), attrs: s.attrs}
 	s.lastPrinted = r
-	if width == 2 {
+	// A one-column screen has no room for the second half.
+	if width == 2 && col+1 < len(row) {
 		if col+2 < len(row) && row[col+1].width == 2 {
 			row[col+2] = blankedHalf(row[col+2])
 		}
@@ -1522,6 +1597,7 @@ func (s *terminalScreen) PlaceholderImageIDs() []string {
 
 func (s *terminalScreen) moveCursor(row, col int) {
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	minRow, maxRow := 0, s.height-1
 	if s.originMode {
 		minRow, maxRow = s.top, s.bottom
@@ -1650,6 +1726,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol}
 	case 'u':
 		if s.scoCursor.valid {
+			defer s.noteCursorRow(g.cursorRow)
 			g.cursorRow = clampInt(s.scoCursor.row, 0, s.height-1)
 			g.cursorCol = clampInt(s.scoCursor.col, 0, s.width-1)
 			g.pendingWrap = false
@@ -1659,6 +1736,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 
 func (s *terminalScreen) moveCursorRelative(dRow, dCol int) {
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	row := g.cursorRow + dRow
 	col := g.cursorCol + dCol
 	minRow, maxRow := 0, s.height-1
@@ -1910,6 +1988,8 @@ func (s *terminalScreen) deleteLines(n int) {
 		g.rows[s.bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[s.bottom-n+1+i] = false
 	}
+	g.endContinuation(g.cursorRow)
+	g.endContinuation(s.bottom + 1)
 	g.cursorCol = 0
 	g.pendingWrap = false
 }

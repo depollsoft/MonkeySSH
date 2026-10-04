@@ -250,6 +250,18 @@ class Buffer {
       for (var i = top; i <= bottom - count; i++) this.lines[i],
     ];
     this.lines.reassignRange(top, reordered);
+    _endContinuation(top + count);
+    _endContinuation(bottom + 1);
+  }
+
+  /// Marks the line at [index], if any, as no longer continuing the line
+  /// above it. A row a scroll or line insertion or deletion moves next to a
+  /// different row is a line of its own; keeping the flag made the next
+  /// reflow join it to whatever now sits above it.
+  void _endContinuation(int index) {
+    if (index >= 0 && index < lines.length) {
+      lines[index].isWrapped = false;
+    }
   }
 
   /// Scrolls the region up by [lines] rows. On the main screen a region whose
@@ -280,6 +292,7 @@ class Buffer {
         }
         this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
       }
+      _endContinuation(absoluteMarginBottom + 1);
       return;
     }
     for (var i = top; i < top + count; i++) {
@@ -290,6 +303,8 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     this.lines.reassignRange(top, reordered);
+    _endContinuation(top);
+    _endContinuation(bottom + 1);
   }
 
   /// https://vt100.net/docs/vt100-ug/chapter3.html#IND IND – Index
@@ -505,6 +520,8 @@ class Buffer {
       graphics.removeGraphicsAnchoredToLine(lines[index]);
       lines[index] = _newEmptyLine();
     }
+    _endContinuation(absoluteCursorY + linesToInsert);
+    _endContinuation(absoluteMarginBottom + 1);
   }
 
   /// Remove [count] lines starting at the current cursor position. Lines below
@@ -528,6 +545,8 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     lines.reassignRange(absoluteCursorY, reordered);
+    _endContinuation(absoluteCursorY);
+    _endContinuation(absoluteMarginBottom + 1);
   }
 
   void resize(int oldWidth, int oldHeight, int newWidth, int newHeight) {
@@ -628,6 +647,10 @@ class Buffer {
       }
     }
 
+    // The cursor's cell before it is clamped, past the last column when a
+    // wrap is pending, for a reflow to carry along.
+    final cursorCellX = min(_cursorX, oldWidth);
+
     // Ensure cursor is within the screen.
     _cursorX = _cursorX.clamp(0, newWidth - 1);
     _cursorY = _cursorY.clamp(0, newHeight - 1);
@@ -637,6 +660,23 @@ class Buffer {
     // 2. Adjust the width.
     if (newWidth != oldWidth) {
       if (terminal.reflowEnabled && !isAltBuffer) {
+        // The cursor stays on its cell, as in most reflowing terminals, rather
+        // than on its screen row. An application that redraws after a resize
+        // by moving up over what it drew counts the rows its output takes once
+        // rewrapped, from the cell it left the cursor on; keeping the row
+        // instead moved that redraw onto the wrong rows and left part of the
+        // old picture behind. The anchor travels with its cell through
+        // [reflow]; one left on a line the reflow drops keeps the row, as does
+        // a buffer holding fewer lines than the screen has rows.
+        final cursorLine = _cursorY + lines.length - newHeight;
+        final cursorAnchor = cursorLine >= 0 && cursorLine < lines.length
+            ? lines[cursorLine].createAnchor(cursorCellX)
+            : null;
+        // A cursor right after its line's text, or with a wrap pending, is
+        // where printing that text at the new width leaves it.
+        final cursorFollowsText = cursorAnchor != null &&
+            (cursorCellX >= oldWidth ||
+                cursorCellX == lines[cursorLine].getTrimmedLength(oldWidth));
         final reflowResult = reflow(lines, oldWidth, newWidth);
 
         while (reflowResult.length < newHeight) {
@@ -653,6 +693,21 @@ class Buffer {
           }
         }
         lines.replaceWith(reflowResult);
+        if (cursorAnchor != null && cursorAnchor.attached) {
+          final row = cursorAnchor.y - (lines.length - newHeight);
+          _cursorY = row.clamp(0, newHeight - 1);
+          // Past the last column a wrap is pending only for a cursor that
+          // follows its text, which now fills the row, and only with
+          // autowrap on; any other cursor the new edge cut short sits on
+          // the last column.
+          _cursorX = cursorAnchor.x.clamp(
+            0,
+            cursorFollowsText && terminal.autoWrapMode
+                ? newWidth
+                : newWidth - 1,
+          );
+        }
+        cursorAnchor?.dispose();
       } else {
         lines.forEach((item) => item.resize(newWidth));
       }

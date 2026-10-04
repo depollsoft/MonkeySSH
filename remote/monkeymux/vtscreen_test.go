@@ -368,8 +368,10 @@ func TestVTScreenTabs(t *testing.T) {
 	if got := s.TextRows()[0]; got != "        A  C" {
 		t.Fatalf("CBT: %q", got)
 	}
+	// With no stops left a tab leaves the cursor past the edge with a wrap
+	// pending, as in the client, so D starts the next line.
 	s.Write([]byte("\x1b[3g\x1b[1;1H\tD"))
-	if got := s.TextRows()[0]; got != "        A  C"+strings.Repeat(" ", 11)+"D" {
+	if got := s.TextRows()[0]; got != "D" || len(s.scrollback) != 1 || vtScrollbackText(s.scrollback[0]) != "        A  C" {
 		t.Fatalf("TBC 3 leaves no stops: %q", got)
 	}
 }
@@ -474,11 +476,11 @@ func TestVTScreenResize(t *testing.T) {
 	s.Resize(3, 2)
 	// The height goes first: the top rows scroll into the scrollback. Then
 	// every line is reflowed to the new width, and the cursor stays on its
-	// screen row, as in the client.
+	// cell, past the r that moved to a line of its own, as in the client.
 	if got := s.TextRows(); !slices.Equal(got, []string{"fou", "r"}) || !slices.Equal(s.main.wrapped, []bool{false, true}) {
 		t.Fatalf("shrink: %q wrapped %v", got, s.main.wrapped)
 	}
-	if r, c := s.CursorPosition(); r != 1 || c != 2 {
+	if r, c := s.CursorPosition(); r != 1 || c != 1 {
 		t.Fatalf("cursor after shrink: (%d,%d)", r, c)
 	}
 	if len(s.scrollback) != 4 || vtScrollbackText(s.scrollback[1]) != "two" ||
@@ -492,7 +494,7 @@ func TestVTScreenResize(t *testing.T) {
 	if got := s.TextRows(); !slices.Equal(got, []string{"one", "two", "three", "four", ""}) {
 		t.Fatalf("grow restores the scrollback first: %q", got)
 	}
-	if r, c := s.CursorPosition(); r != 4 || c != 2 {
+	if r, c := s.CursorPosition(); r != 3 || c != 4 {
 		t.Fatalf("cursor after grow: (%d,%d)", r, c)
 	}
 	if len(s.scrollback) != 0 || s.scrollbackBytes != 0 {

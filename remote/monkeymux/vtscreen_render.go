@@ -142,13 +142,21 @@ func (s *terminalScreen) RenderFrame() []byte {
 	if g.pendingWrap && s.width > 0 {
 		// A deferred wrap cannot be addressed directly: re-print the glyph in
 		// the last column so the client defers the wrap exactly as the model.
+		// A last column with nothing in it, which a tab with no stop left
+		// reaches, is reached by that tab again rather than by printing a
+		// space into it.
 		cells := g.rows[g.cursorRow]
-		col := s.width - 1
-		if cells[col].width == 0 && col > 0 {
-			col--
+		if vtSoftWrapEdgePrintable(cells) {
+			col := s.width - 1
+			if cells[col].width == 0 && col > 0 {
+				col--
+			}
+			out = appendVTCursorPosition(out, row, col)
+			out = renderVTGlyphs(out, cells[col:])
+		} else {
+			out = appendVTCursorPosition(out, row, s.width-1)
+			out = append(out, '\t')
 		}
-		out = appendVTCursorPosition(out, row, col)
-		out = renderVTGlyphs(out, cells[col:])
 	} else {
 		out = appendVTCursorPosition(out, row, g.cursorCol)
 	}

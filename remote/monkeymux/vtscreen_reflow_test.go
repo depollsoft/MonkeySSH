@@ -23,10 +23,12 @@ func inlineAgentChrome(width int) string {
 // After the width change Hermes erases its input area and draws it again: it
 // moves the cursor up over the rows that area takes once a reflowing terminal
 // has rewrapped its full-width rules, then erases to the end of the screen.
-// The client reflows, so that lands inside the old input area. A model that
-// only cut rows to the new width kept that area short, so the same move went
-// past it into the transcript, and the frame painted from the model on the
-// switch back showed the transcript without its last lines.
+// The client reflows, so that lands on the old input area. A model that only
+// cut rows to the new width kept that area short, so the same move went past
+// it into the transcript, and the frame painted from the model on the switch
+// back showed the transcript without its last lines. The move starts from the
+// cell Hermes left the cursor on, so the cursor has to stay on that cell for
+// the erase to take the whole old input area and nothing above it.
 func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
 	const wide, narrow = 30, 13
 	s := newTerminalScreen(wide, 8)
@@ -50,6 +52,9 @@ func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
 	if got := s.TextRows()[row]; got != "❯ hi" {
 		t.Fatalf("cursor row %d is %q, want the prompt", row, got)
 	}
+	if got := strings.Count(text, " status"); got != 1 {
+		t.Fatalf("redraw left the old input area behind (%d status bars):\n%s", got, text)
+	}
 	vtRoundTrip(t, s)
 }
 
@@ -70,7 +75,7 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 	}
 
 	// Narrowing splits the long line again and the split parts push the top
-	// into the scrollback; the cursor keeps its row on the screen.
+	// into the scrollback; the cursor stays after "next".
 	s.Resize(4, 3)
 	if got := s.TextRows(); !slices.Equal(got, []string{"89ab", "cd", "next"}) {
 		t.Fatalf("narrow: %q", got)
@@ -78,8 +83,8 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 	if got := vtScrollbackTexts(s); !slices.Equal(got, []string{"0123", "4567"}) {
 		t.Fatalf("narrow scrollback: %q", got)
 	}
-	if row, col := s.CursorPosition(); row != 2 || col != 3 {
-		t.Fatalf("narrow cursor (%d,%d)", row, col)
+	if row, col := s.CursorPosition(); row != 2 || col != 3 || !s.main.pendingWrap {
+		t.Fatalf("narrow cursor (%d,%d) pending %v", row, col, s.main.pendingWrap)
 	}
 	vtRoundTrip(t, s)
 
@@ -224,4 +229,153 @@ func TestVTScreenFrameSoftWrapsUnderInsertMode(t *testing.T) {
 		t.Fatalf("setup: wrapped %v insert %v", s.main.wrapped, s.insertMode)
 	}
 	vtRoundTrip(t, s)
+}
+
+// The cursor stays on the cell it was on, wherever the reflow moves it, as in
+// the client: after the text on its line, or past the last column with the
+// wrap still pending when that text filled the line.
+func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
+	s := newTerminalScreen(20, 5)
+	s.Write([]byte("0123456789abcdef\r\nxy"))
+	s.Resize(8, 5)
+	if row, col := s.CursorPosition(); s.TextRows()[row] != "xy" || col != 2 {
+		t.Fatalf("cursor (%d,%d) on %q", row, col, s.TextRows()[row])
+	}
+
+	s = newTerminalScreen(8, 5)
+	s.Write([]byte("abcdefgh"))
+	s.Resize(4, 5)
+	if row, col := s.CursorPosition(); s.TextRows()[row] != "efgh" || col != 3 || !s.main.pendingWrap {
+		t.Fatalf("cursor (%d,%d) pending %v on %q", row, col, s.main.pendingWrap, s.TextRows()[row])
+	}
+	s.Write([]byte("i"))
+	if got := s.TextRows(); !slices.Equal(got[:2], []string{"efgh", "i"}) || !s.main.wrapped[1] {
+		t.Fatalf("pending wrap lost: %q wrapped %v", got, s.main.wrapped)
+	}
+
+	// A cursor past the new edge on a line its text does not fill sits on
+	// the last column; no wrap is pending there.
+	s = newTerminalScreen(8, 3)
+	s.Write([]byte("\x1b[1;8H"))
+	s.Resize(4, 3)
+	s.Write([]byte("X"))
+	if got := s.TextRows(); got[0] != "   X" || s.main.wrapped[1] {
+		t.Fatalf("narrowing made a wrap pending: %q wrapped %v", got, s.main.wrapped)
+	}
+
+	// Nor with autowrap off: the next glyph replaces the last one.
+	s = newTerminalScreen(8, 3)
+	s.Write([]byte("\x1b[?7labcd"))
+	s.Resize(4, 3)
+	s.Write([]byte("X"))
+	if got := s.TextRows(); got[0] != "abcX" || got[1] != "" {
+		t.Fatalf("narrowing without autowrap: %q", got)
+	}
+}
+
+// A row that a scroll, a line insertion or a deletion moves next to a
+// different row starts a line of its own, as in the client, so a later width
+// change does not join it to its new neighbour.
+func TestVTScreenRowMovesEndSoftWraps(t *testing.T) {
+	for name, seq := range map[string]string{
+		"region scroll up":   "\x1b[2;4r\x1b[S\x1b[r",
+		"delete line":        "\x1b[2;1H\x1b[M",
+		"region scroll down": "\x1b[3;4r\x1b[T\x1b[r",
+		"insert line":        "\x1b[3;1H\x1b[L",
+	} {
+		s := newTerminalScreen(4, 4)
+		s.Write([]byte("HEAD\r\nabcdefgh"))
+		if !s.main.wrapped[2] {
+			t.Fatalf("%s: setup wrapped %v", name, s.main.wrapped)
+		}
+		s.Write([]byte(seq))
+		for r, row := range s.TextRows() {
+			if row == "efgh" && s.main.wrapped[r] {
+				t.Fatalf("%s: efgh still continues row %d: %q", name, r-1, s.TextRows())
+			}
+		}
+		s.Resize(8, 4)
+		if got := strings.Join(s.TextRows(), "|"); strings.Contains(got, "HEADefgh") || strings.Contains(got, "|efgh") == false {
+			t.Fatalf("%s: widening joined moved rows: %q", name, got)
+		}
+	}
+}
+
+// An erased row that still continues the text above it (ECH keeps the wrap)
+// stays after that text when a reflow joins them.
+func TestVTScreenReflowKeepsErasedContinuationAfterItsText(t *testing.T) {
+	s := newTerminalScreen(4, 3)
+	s.Write([]byte("abcde\x1b[2;1H\x1b[4X"))
+	if !s.main.wrapped[1] {
+		t.Fatalf("setup: wrapped %v", s.main.wrapped)
+	}
+	s.Resize(8, 3)
+	if got := s.TextRows(); got[0] != "abcd" || s.main.wrapped[0] {
+		t.Fatalf("reflow put the erased row first: %q wrapped %v", got, s.main.wrapped)
+	}
+}
+
+// A tab with no stop left leaves the client's cursor past the edge with a
+// wrap pending, so the next glyph starts the next line, with or without a
+// resize in between.
+func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
+	for _, tab := range []string{"\t", "\x1b[I"} {
+		for _, resize := range []bool{false, true} {
+			s := newTerminalScreen(8, 3)
+			s.Write([]byte(tab))
+			if resize {
+				s.Resize(4, 3)
+			}
+			s.Write([]byte("X"))
+			if got := s.TextRows(); got[0] != "" || got[1] != "X" {
+				t.Fatalf("%q resize %v: %q", tab, resize, got)
+			}
+		}
+	}
+}
+
+// A one-column screen splits a wide glyph across rows; the halves are blanked
+// so a later widening does not read past a row's end.
+func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
+	// Printing a wide glyph on one column, plain or in insert mode, has no
+	// room for its second half; it must not write past the row.
+	for _, seq := range []string{"界a", "\x1b[4h界a"} {
+		s := newTerminalScreen(1, 3)
+		s.Write([]byte(seq))
+		s.Resize(3, 3)
+		if got := strings.Join(s.TextRows(), "|"); !strings.Contains(got, "a") {
+			t.Fatalf("%q: %q", seq, got)
+		}
+	}
+
+	s := newTerminalScreen(4, 3)
+	s.Write([]byte("\x1b[3;1H界x"))
+	s.Resize(1, 3)
+	s.Resize(2, 3)
+	s.Resize(4, 3)
+	for r, row := range s.main.rows {
+		if row[len(row)-1].width == 2 || row[0].width == 0 {
+			t.Fatalf("row %d keeps a split glyph: %+v", r, row)
+		}
+	}
+	vtRoundTrip(t, s)
+}
+
+// A wrap a tab left pending over an empty last column is restored by a tab,
+// not by printing a space there, so a client painted from the frame lays the
+// line out the same on the next resize.
+func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
+	for _, tab := range []string{"\t", "\x1b[I"} {
+		s := newTerminalScreen(8, 3)
+		s.Write([]byte("hi" + tab))
+		if !s.main.pendingWrap {
+			t.Fatalf("%q: setup did not leave a wrap pending", tab)
+		}
+		replica := vtRoundTrip(t, s)
+		s.Resize(4, 3)
+		replica.Resize(4, 3)
+		if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) || len(replica.scrollback) != len(s.scrollback) {
+			t.Fatalf("%q: replica %q (%d history), model %q (%d history)", tab, got, len(replica.scrollback), want, len(s.scrollback))
+		}
+	}
 }
