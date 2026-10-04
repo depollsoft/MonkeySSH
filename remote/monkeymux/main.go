@@ -4922,10 +4922,11 @@ func agentToolForRestore(window restoreWindowState) string {
 }
 
 // agentToolRelaunchable reports whether a restore can start this agent again.
-// Hermes is recognized while it runs, so its window replays like any other
-// agent, but it has no launch entry: the app can start it with --profile, and
-// the restore state keeps only the command name, so relaunching it could open
-// the wrong profile. Such a window restores as a plain shell instead.
+// Hermes and OpenClaw are recognized while they run, so their windows replay
+// like any other agent, but they have no launch entry: the app can start them
+// with --profile, and the restore state keeps only the command name, so
+// relaunching them could open the wrong profile. Such a window restores as a
+// plain shell instead.
 func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
@@ -16123,6 +16124,8 @@ func agentToolFromCommandName(command string) string {
 		return "pi"
 	case "hermes", "hermes-agent":
 		return "hermes"
+	case "openclaw":
+		return "openclaw"
 	default:
 		return ""
 	}
