@@ -7155,20 +7155,39 @@ func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
 	history := []byte("tail output\r\nlatest line\r\n")
 	for _, tc := range []struct {
 		command   string
+		shell     string
+		job       bool
 		rawReplay bool
 	}{
 		{command: "tail"},
 		{command: "some-inline-tui"},
 		{command: "zsh", rawReplay: true},
+		// macOS names MonkeyMux's own login shell this way.
+		{command: "-zsh", rawReplay: true},
+		{command: "ash", rawReplay: true},
+		{command: "-tcsh", rawReplay: true},
+		{command: "nu", rawReplay: true},
 		{command: "", rawReplay: true},
+		// Any shell the window was started with, in the foreground itself.
+		{command: "-myshell", shell: "myshell", rawReplay: true},
+		// The same name running as a job under that shell is a program.
+		{command: "myshell", shell: "myshell", job: true},
 	} {
 		server := newMuxServer("test")
+		pid := 42
 		window := &muxWindow{
 			id:                "@1",
 			index:             0,
+			command:           tc.shell,
+			interactiveShell:  tc.shell != "",
+			proc:              bindingTestProcess{pid: pid},
+			foregroundPid:     pid,
 			foregroundCommand: tc.command,
 			history:           append([]byte(nil), history...),
 			lastActivity:      time.Now(),
+		}
+		if tc.job {
+			window.foregroundPid = pid + 1
 		}
 		server.windows = []*muxWindow{window}
 		server.activeID = "@1"

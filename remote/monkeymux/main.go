@@ -754,35 +754,38 @@ type muxServer struct {
 }
 
 type muxWindow struct {
-	agentSessionWatch           *agentSessionWatch
-	inputMu                     sync.Mutex
-	wheelGovernor               wheelGovernor // guarded by s.mu; draining also requires inputMu
-	nativePaste                 nativeConsolePasteFilter
-	nativeResponse              nativeConsoleResponseFilter
-	id                          string
-	index                       int
-	name                        string
-	cwd                         string
-	command                     string
-	agentTool                   string
-	agentToolConfirmed          bool
-	agentModelProvider          string
-	agentSessionID              string
-	agentSessionDir             string
-	agentSessionPath            string
-	agentSessionAssigned        bool
-	agentIdentityServer         *muxServer
-	agentSessionIdentityExact   bool
-	agentSessionTitle           string
-	piTitleMu                   sync.Mutex
-	piTitleScan                 piSessionTitleScan
-	piNativeSessionBridgeID     string
-	piNativeSessionPath         string
-	piNativeSessionCheckedAt    time.Time
-	nativeAgentTitle            nativeAgentSessionTitle
-	nativeAcpBridgeID           string
-	nativeAcpProviderID         string
-	foregroundPid               int
+	agentSessionWatch         *agentSessionWatch
+	inputMu                   sync.Mutex
+	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
+	nativePaste               nativeConsolePasteFilter
+	nativeResponse            nativeConsoleResponseFilter
+	id                        string
+	index                     int
+	name                      string
+	cwd                       string
+	command                   string
+	agentTool                 string
+	agentToolConfirmed        bool
+	agentModelProvider        string
+	agentSessionID            string
+	agentSessionDir           string
+	agentSessionPath          string
+	agentSessionAssigned      bool
+	agentIdentityServer       *muxServer
+	agentSessionIdentityExact bool
+	agentSessionTitle         string
+	piTitleMu                 sync.Mutex
+	piTitleScan               piSessionTitleScan
+	piNativeSessionBridgeID   string
+	piNativeSessionPath       string
+	piNativeSessionCheckedAt  time.Time
+	nativeAgentTitle          nativeAgentSessionTitle
+	nativeAcpBridgeID         string
+	nativeAcpProviderID       string
+	foregroundPid             int
+	// interactiveShell marks a window started as the user's shell rather than
+	// with a command.
+	interactiveShell            bool
 	foregroundCommand           string
 	paneTitle                   string
 	pty                         muxPty
@@ -6637,6 +6640,7 @@ func (s *muxServer) createWindowWithStarter(
 		nativeAcpProviderID:       options.nativeAcpProviderID,
 		foregroundPid:             proc.Pid(),
 		foregroundCommand:         filepath.Base(cmd.Path),
+		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,
@@ -11022,7 +11026,13 @@ func (w *muxWindow) foregroundAppOwnsScreenLocked() bool {
 		return true
 	}
 	command := strings.TrimSpace(w.foregroundCommand)
-	return command != "" && !isShellCommandName(command)
+	if command == "" || isShellCommandName(command) {
+		return false
+	}
+	// The shell the window was started with, whatever $SHELL names it, owns
+	// the screen while it is in the foreground itself.
+	return !w.interactiveShell || w.foregroundPid <= 0 || w.foregroundPid != w.processID() ||
+		shellProcessName(command) != shellProcessName(w.command)
 }
 
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
@@ -16336,13 +16346,20 @@ func isGenericRuntimeCommandName(command string) bool {
 }
 
 func isShellCommandName(command string) bool {
-	switch strings.ToLower(cleanProcessCommandName(command)) {
-	case "sh", "bash", "zsh", "fish", "dash", "ksh",
+	switch shellProcessName(command) {
+	case "sh", "bash", "zsh", "fish", "dash", "ksh", "ash", "mksh", "oksh",
+		"yash", "csh", "tcsh", "nu", "elvish", "xonsh",
 		"cmd", "powershell", "pwsh":
 		return true
 	default:
 		return false
 	}
+}
+
+// shellProcessName is a command name with the leading dash a login shell's
+// process name carries removed: macOS reports MonkeyMux's own shell as -zsh.
+func shellProcessName(command string) string {
+	return strings.TrimPrefix(strings.ToLower(cleanProcessCommandName(command)), "-")
 }
 
 func commandNameFromShellCommand(command string) string {
