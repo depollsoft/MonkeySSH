@@ -517,6 +517,9 @@ func (s *terminalScreen) reflowMain(width, height int) {
 		lines = append(lines, vtLine{cells: newVTRow(width)})
 	}
 	screenStart := len(lines) - height
+	// The old lines are decoded into lines above; drop them from the backing
+	// array too, or rows a widening no longer needs stay allocated there.
+	clear(s.scrollback)
 	s.scrollback = s.scrollback[:0]
 	s.scrollbackWrapped = s.scrollbackWrapped[:0]
 	s.scrollbackBytes = 0
