@@ -214,3 +214,14 @@ func TestVTScreenFrameKeepsDefaultPaddingAfterWrappedScrollback(t *testing.T) {
 	s.Write([]byte("\r\n"))
 	vtRoundTrip(t, s)
 }
+
+// The replay restores insert mode before the frame. Painting under it would
+// shift the glyph a soft wrap prints instead of painting over it.
+func TestVTScreenFrameSoftWrapsUnderInsertMode(t *testing.T) {
+	s := newTerminalScreen(6, 3)
+	s.Write([]byte("abcdefg\x1b[2Ci\x1b[4h"))
+	if !s.main.wrapped[1] || !s.insertMode {
+		t.Fatalf("setup: wrapped %v insert %v", s.main.wrapped, s.insertMode)
+	}
+	vtRoundTrip(t, s)
+}

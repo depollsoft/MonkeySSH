@@ -25,7 +25,10 @@ func (s *terminalScreen) RenderFrame() []byte {
 		return nil
 	}
 	out := make([]byte, 0, 4096)
-	out = append(out, "\x1b[?6l\x1b[r\x1b[0m"...)
+	// Insert mode is restored at the end; painting under it would shift
+	// cells instead of replacing them, such as the glyphs a soft wrap prints
+	// and the row then paints over.
+	out = append(out, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l"...)
 	out = s.appendTabStops(out)
 	g := s.grid()
 	softWraps := s.renderedSoftWraps()

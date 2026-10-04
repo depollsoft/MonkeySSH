@@ -61,6 +61,9 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) *terminalScreen {
 	if s.AlternateScreenActive() {
 		preamble += "\x1b[?1049h"
 	}
+	if s.insertMode {
+		preamble += "\x1b[4h"
+	}
 	replica.Write([]byte(preamble))
 	replica.Write(s.RenderFrame())
 	if !vtRowsEqual(s.grid().rows, replica.grid().rows) {
