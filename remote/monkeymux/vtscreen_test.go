@@ -368,8 +368,10 @@ func TestVTScreenTabs(t *testing.T) {
 	if got := s.TextRows()[0]; got != "        A  C" {
 		t.Fatalf("CBT: %q", got)
 	}
+	// With no stops left a tab leaves the cursor past the edge with a wrap
+	// pending, as in the client, so D starts the next line.
 	s.Write([]byte("\x1b[3g\x1b[1;1H\tD"))
-	if got := s.TextRows()[0]; got != "        A  C"+strings.Repeat(" ", 11)+"D" {
+	if got := s.TextRows()[0]; got != "D" || len(s.scrollback) != 1 || vtScrollbackText(s.scrollback[0]) != "        A  C" {
 		t.Fatalf("TBC 3 leaves no stops: %q", got)
 	}
 }

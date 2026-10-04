@@ -248,6 +248,24 @@ void main() {
     });
   }
 
+  // A tab with no stop left leaves the cursor past the edge with a wrap
+  // pending; a reflow keeps that state, so the next character starts the
+  // next line.
+  for (final tab in ['\t', '\x1b[I']) {
+    test(
+        'reflow() keeps the wrap an exhausted ${tab == '\t' ? 'HT' : 'CHT'} left pending',
+        () {
+      final terminal = Terminal()..resize(8, 3);
+      terminal.write(tab);
+
+      terminal.resize(4, 3);
+      terminal.write('X');
+
+      expect(terminal.buffer.lines[0].toString(), '');
+      expect(terminal.buffer.lines[1].toString(), 'X');
+    });
+  }
+
   test('lines has correct length after reflow', () {
     final terminal = Terminal();
 

@@ -1335,7 +1335,12 @@ func (s *terminalScreen) tabForward(n int) {
 			col++
 		}
 		if col >= s.width {
-			col = s.width - 1
+			// With no stop left the client leaves its cursor past the edge,
+			// in its pending-wrap state (Terminal.tab), so the next glyph
+			// starts the next line there; a reflow carries that state too.
+			g.cursorCol = s.width - 1
+			g.pendingWrap = true
+			return
 		}
 		g.cursorCol = col
 	}

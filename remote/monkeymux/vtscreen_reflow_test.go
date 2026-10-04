@@ -314,3 +314,22 @@ func TestVTScreenReflowKeepsErasedContinuationAfterItsText(t *testing.T) {
 		t.Fatalf("reflow put the erased row first: %q wrapped %v", got, s.main.wrapped)
 	}
 }
+
+// A tab with no stop left leaves the client's cursor past the edge with a
+// wrap pending, so the next glyph starts the next line, with or without a
+// resize in between.
+func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
+	for _, tab := range []string{"\t", "\x1b[I"} {
+		for _, resize := range []bool{false, true} {
+			s := newTerminalScreen(8, 3)
+			s.Write([]byte(tab))
+			if resize {
+				s.Resize(4, 3)
+			}
+			s.Write([]byte("X"))
+			if got := s.TextRows(); got[0] != "" || got[1] != "X" {
+				t.Fatalf("%q resize %v: %q", tab, resize, got)
+			}
+		}
+	}
+}
