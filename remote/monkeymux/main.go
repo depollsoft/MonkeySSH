@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.220"
+	monkeyMuxVersion                  = "0.1.221"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -4915,7 +4915,31 @@ func agentToolForRestore(window restoreWindowState) string {
 		!window.AgentToolConfirmed {
 		return ""
 	}
+	if !agentToolRelaunchable(tool) {
+		return ""
+	}
 	return tool
+}
+
+// agentToolRelaunchable reports whether a restore can start this agent again.
+// Hermes is recognized while it runs, so its window replays like any other
+// agent, but it has no launch entry: the app can start it with --profile, and
+// the restore state keeps only the command name, so relaunching it could open
+// the wrong profile. Such a window restores as a plain shell instead.
+func agentToolRelaunchable(tool string) bool {
+	if tool == "pi" {
+		return true
+	}
+	_, ok := agentCommands[tool]
+	return ok
+}
+
+// agentToolRestoredAsShell reports whether restore recognized an agent in this
+// window that it cannot relaunch. The new shell is then confirmed as a shell,
+// so a window still named after the agent is not mistaken for it again.
+func agentToolRestoredAsShell(window restoreWindowState) bool {
+	tool := agentToolCandidateForRestore(window)
+	return tool != "" && !agentToolRelaunchable(tool)
 }
 
 type processInfo struct {
@@ -6412,6 +6436,9 @@ func createWindowOptionsForRestore(
 		)
 		history = stripTerminalProgressFromRestoreHistory(history)
 	}
+	agentToolConfirmed := state.AgentToolConfirmed ||
+		strings.TrimSpace(state.AgentTool) != "" ||
+		agentToolRestoredAsShell(state)
 	// CLI and shell restoration starts a new process. Its old task progress is
 	// stale until the new process reports its own OSC 9;4 state. The native ACP
 	// branch above preserves progress because its agent process keeps running.
@@ -6422,7 +6449,7 @@ func createWindowOptionsForRestore(
 		history:                   history,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
-		agentToolConfirmed:        state.AgentToolConfirmed || strings.TrimSpace(state.AgentTool) != "",
+		agentToolConfirmed:        agentToolConfirmed,
 		agentSessionID:            state.AgentSessionID,
 		agentSessionDir:           state.AgentSessionDir,
 		agentSessionPath:          state.AgentSessionPath,
@@ -16094,6 +16121,8 @@ func agentToolFromCommandName(command string) string {
 		return "cursor-agent"
 	case "pi", "pi-agent":
 		return "pi"
+	case "hermes", "hermes-agent":
+		return "hermes"
 	default:
 		return ""
 	}
