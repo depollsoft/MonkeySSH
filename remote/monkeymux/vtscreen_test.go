@@ -34,14 +34,9 @@ func vtRowsEqual(a, b [][]vtCell) bool {
 			if x.width != y.width || x.attrs != y.attrs || string(x.comb) != string(y.comb) {
 				return false
 			}
-			xr, yr := x.r, y.r
-			if xr == 0 {
-				xr = ' '
-			}
-			if yr == 0 {
-				yr = ' '
-			}
-			if xr != yr {
+			// Rendering keeps never-written cells apart from written
+			// spaces, so the round trip must too.
+			if x.r != y.r {
 				return false
 			}
 		}

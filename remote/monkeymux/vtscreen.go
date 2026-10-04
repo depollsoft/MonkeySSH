@@ -162,8 +162,14 @@ func (c vtCell) blank() bool {
 	return (c.r == 0 || c.r == ' ') && len(c.comb) == 0 && c.width != 0
 }
 
-func (c vtCell) isDefaultBlank() bool {
-	return c.blank() && c.attrs == (vtAttrs{})
+// unwritten reports a cell nothing was written to, or one an erase cleared;
+// a written space does not count.
+func (c vtCell) unwritten() bool {
+	return c.r == 0 && len(c.comb) == 0 && c.width != 0
+}
+
+func (c vtCell) isDefaultUnwritten() bool {
+	return c.unwritten() && c.attrs == (vtAttrs{})
 }
 
 type vtColorKind uint8
@@ -507,7 +513,7 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 }
 
 func (s *terminalScreen) pushScrollback(row []vtCell) {
-	line := renderVTCells(make([]byte, 0, 64), row, true)
+	line := renderVTCells(make([]byte, 0, 64), row)
 	s.scrollback = append(s.scrollback, line)
 	s.scrollbackBytes += len(line)
 	excess := 0

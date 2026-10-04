@@ -114,3 +114,31 @@ func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 		t.Fatalf("narrow restore: %q", got)
 	}
 }
+
+// Restoring a scrollback line and painting a frame both go through the
+// rendered row, so it must keep which cells were written: a resize reclaims
+// only rows nothing was written to, in the model and in the client.
+func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
+	s := newTerminalScreen(12, 2)
+	s.Write([]byte("ab   \r\n\x1b[44m\x1b[K\x1b[0m\r\nx\r\ny"))
+	if len(s.scrollback) != 2 {
+		t.Fatalf("setup scrollback: %d", len(s.scrollback))
+	}
+	vtRoundTrip(t, s)
+
+	s.Resize(12, 4)
+	spaces, erased := s.main.rows[0], s.main.rows[1]
+	if spaces[2].r != ' ' || spaces[4].r != ' ' || spaces[5].r != 0 {
+		t.Fatalf("written spaces came back as %q", []rune{spaces[2].r, spaces[4].r, spaces[5].r})
+	}
+	if vtRowReclaimable(spaces) {
+		t.Fatal("a row of written spaces became reclaimable")
+	}
+	if !vtRowReclaimable(erased) {
+		t.Fatal("a row erased with a background became written")
+	}
+	if bg := erased[11].attrs.bg; bg.kind != vtColorIndexed || bg.index != 4 {
+		t.Fatalf("erased row lost its background: %+v", bg)
+	}
+	vtRoundTrip(t, s)
+}
