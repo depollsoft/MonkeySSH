@@ -464,8 +464,16 @@ func TestVTScreenResize(t *testing.T) {
 		t.Fatalf("rows leaving the top enter the scrollback: %d", len(s.scrollback))
 	}
 	s.Resize(8, 5)
-	if got := s.TextRows(); len(got) != 5 || got[0] != "thr" || got[4] != "" {
-		t.Fatalf("grow extends with blanks: %q", got)
+	// Growth brings the scrolled-off rows back above the content, and adds
+	// blank rows below only once the scrollback runs out.
+	if got := s.TextRows(); len(got) != 5 || got[0] != "one" || got[2] != "thr" || got[4] != "" {
+		t.Fatalf("grow restores the scrollback first: %q", got)
+	}
+	if r, c := s.CursorPosition(); r != 3 || c != 2 {
+		t.Fatalf("cursor after grow: (%d,%d)", r, c)
+	}
+	if len(s.scrollback) != 0 || s.scrollbackBytes != 0 {
+		t.Fatalf("restored rows must leave the scrollback: %d lines, %d bytes", len(s.scrollback), s.scrollbackBytes)
 	}
 	if s.bottom != 4 {
 		t.Fatal("resize must reset the scroll region")
@@ -475,8 +483,10 @@ func TestVTScreenResize(t *testing.T) {
 	if got := s.TextRows(); got[0] != "ALT" {
 		t.Fatalf("alternate grid resize: %q", got)
 	}
-	if len(s.scrollback) != 2 {
-		t.Fatal("alternate grid rows must not enter the scrollback")
+	for _, line := range s.scrollback {
+		if vtScrollbackText(line) == "ALT" {
+			t.Fatal("alternate grid rows must not enter the scrollback")
+		}
 	}
 }
 
