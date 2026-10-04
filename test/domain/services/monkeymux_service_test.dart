@@ -1587,6 +1587,56 @@ void main() {
     );
   });
 
+  group('MonkeyMuxService.runningServerStatusFromInstalledHelpers', () {
+    setUpAll(() => registerFallbackValue(Uint8List(0)));
+
+    for (final nativeAcp in [false, true]) {
+      test('retains the responding helper path, native ACP=$nativeAcp', () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(
+          client,
+          connectionId: nativeAcp ? 919 : 918,
+        );
+        const helperPath =
+            '/home/test user/.monkeyssh/bin/monkeymux/0.2.4/linux-amd64/monkeymux';
+        final commands = <String>[];
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              commands.add(invocation.positionalArguments.single as String);
+              return _buildOutputSession(
+                'Login banner\n'
+                '__monkeymux_helper__:/home/test user/.monkeyssh/bin/monkeymux/0.1.0/linux-amd64/monkeymux\n'
+                '__monkeymux_helper__:$helperPath\n'
+                '${jsonEncode({
+                  "type": "hello",
+                  "status": "ok",
+                  "version": "0.2.4",
+                  "capabilities": nativeAcp ? ["acp-window-v1"] : <String>[],
+                })}\n'
+                '{"type":"window_list","status":"ok","windows":['
+                '{"id":"@1","index":0,"name":"Pi","active":true,'
+                '"nativeAcpBridgeId":"0123456789abcdef0123456789abcdef"}]}\n',
+              );
+            });
+        final status = await MonkeyMuxService(installer: installer)
+            .runningServerStatusFromInstalledHelpers(session, 'work');
+
+        expect(status?.version, '0.2.4');
+        expect(status?.installation?.executablePath, helperPath);
+        expect(status?.installation?.version, '0.2.4');
+        expect(status?.installation?.platform, 'linux-amd64');
+        expect(status?.installation?.installedDuringCall, isFalse);
+        expect(status?.nativeAcpWindowCount, nativeAcp ? 1 : 0);
+        expect(
+          commands.single,
+          contains(r'''printf '__monkeymux_helper__:%s\n' "$helper"'''),
+        );
+        verifyNever(() => installer.ensureInstalled(session));
+      });
+    }
+  });
+
   group('MonkeyMuxService.installedHelperVersion', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));
 

@@ -6552,6 +6552,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         configuredBackend == RemoteMuxBackend.auto) {
       try {
         MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
+        MonkeyMuxInstallation? deferredInstallation;
         final installation = await _monkeyMuxInstallerService.ensureInstalled(
           session,
           priority: SshExecPriority.normal,
@@ -6565,8 +6566,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ),
             );
             requestedUpdatePolicy = decision.updatePolicy;
+            deferredInstallation = decision.reuseInstallation;
             return decision.install;
           },
+          reuseInstallation: () => deferredInstallation,
         );
         final updatePolicy = await _resolveMonkeyMuxServerUpdatePolicy(
           session,
@@ -7086,19 +7089,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  Future<({bool install, MonkeyMuxServerUpdatePolicy? updatePolicy})>
+  Future<
+    ({
+      bool install,
+      MonkeyMuxServerUpdatePolicy? updatePolicy,
+      MonkeyMuxInstallation? reuseInstallation,
+    })
+  >
   _confirmMonkeyMuxInstall(
     MonkeyMuxInstallRequest request, {
     Future<MonkeyMuxServerStatus?> Function()? resolveRunningStatus,
   }) async {
     if (!mounted) {
-      return (install: false, updatePolicy: null);
+      return (install: false, updatePolicy: null, reuseInstallation: null);
     }
     MonkeyMuxServerStatus? runningStatus;
     if (resolveRunningStatus != null) {
       runningStatus = await resolveRunningStatus();
       if (!mounted) {
-        return (install: false, updatePolicy: null);
+        return (install: false, updatePolicy: null, reuseInstallation: null);
       }
     }
     final updateStatus =
@@ -7118,9 +7127,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         installRequest: request,
       );
       if (!mounted) {
-        return (install: false, updatePolicy: null);
+        return (install: false, updatePolicy: null, reuseInstallation: null);
       }
-      return (install: true, updatePolicy: updatePolicy);
+      return (
+        install: updatePolicy == MonkeyMuxServerUpdatePolicy.always,
+        updatePolicy: updatePolicy,
+        reuseInstallation: updatePolicy == MonkeyMuxServerUpdatePolicy.never
+            ? updateStatus.installation
+            : null,
+      );
     }
     final title = switch ((updateStatus, bundledVersionIsNewer)) {
       (null, _) => 'Install MonkeyMux helper?',
@@ -7180,7 +7195,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ],
       ),
     );
-    return (install: confirmed ?? false, updatePolicy: null);
+    return (
+      install: confirmed ?? false,
+      updatePolicy: null,
+      reuseInstallation: null,
+    );
   }
 
   String _formatMonkeyMuxInstallSize(int bytes) {
@@ -7278,6 +7297,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     late String attachCommand;
     try {
       MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
+      MonkeyMuxInstallation? deferredInstallation;
       final installation = await _monkeyMuxInstallerService.ensureInstalled(
         session,
         priority: SshExecPriority.normal,
@@ -7288,8 +7308,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 .runningServerStatusFromInstalledHelpers(session, sessionName),
           );
           requestedUpdatePolicy = decision.updatePolicy;
+          deferredInstallation = decision.reuseInstallation;
           return decision.install;
         },
+        reuseInstallation: () => deferredInstallation,
       );
       DiagnosticsLogService.instance.info(
         'terminal.agent_launch',

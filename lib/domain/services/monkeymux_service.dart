@@ -84,7 +84,13 @@ class MonkeyMuxServerStatus {
     required this.version,
     required this.capabilities,
     this.nativeAcpWindowCount = 0,
+    this.installation,
   });
+
+  /// Already-installed helper that successfully opened this control channel.
+  ///
+  /// Available on the pre-install probe so a deferred update can reuse it.
+  final MonkeyMuxInstallation? installation;
 
   /// Running helper version reported by the server.
   final String? version;
@@ -1115,12 +1121,17 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     final command =
         r'for helper in "$HOME"/.monkeyssh/bin/monkeymux/*/*/monkeymux; do '
         r'[ -x "$helper" ] || continue; '
+        r'''printf '__monkeymux_helper__:%s\n' "$helper"; '''
         r'"$helper" control --json '
         '${shellEscapePosix(sessionName)}'
         ' 2>/dev/null && exit 0; done; exit 1';
     try {
       final status = await session.runQueuedExec(
-        () => _readRunningServerStatus(session, command),
+        () => _readRunningServerStatus(
+          session,
+          command,
+          discoverInstallation: true,
+        ),
         priority: priority,
       );
       if (status != null) {
@@ -1484,8 +1495,9 @@ Duration _oneShotResponseTimeout(Map<String, Object?> request) =>
 
 Future<MonkeyMuxServerStatus?> _readRunningServerStatus(
   SshSession session,
-  String command,
-) async {
+  String command, {
+  bool discoverInstallation = false,
+}) async {
   final execSession = await openSshExec(
     session.execute(command),
     const Duration(seconds: 5),
@@ -1497,11 +1509,25 @@ Future<MonkeyMuxServerStatus?> _readRunningServerStatus(
         .transform(const LineSplitter()),
   );
   MonkeyMuxServerStatus? status;
+  MonkeyMuxInstallation? installation;
   try {
     execSession.stderr.drain<void>().ignore();
     return await (() async {
       while (await lines.moveNext()) {
         final line = lines.current;
+        const helperMarker = '__monkeymux_helper__:';
+        if (discoverInstallation && line.startsWith(helperMarker)) {
+          final executablePath = line.substring(helperMarker.length);
+          final parts = executablePath.split('/');
+          installation = parts.length >= 4 && parts.last == 'monkeymux'
+              ? MonkeyMuxInstallation(
+                  executablePath: executablePath,
+                  platform: parts[parts.length - 2],
+                  version: parts[parts.length - 3],
+                )
+              : null;
+          continue;
+        }
         final response = _MonkeyMuxControlResponse.tryParse(line);
         if (response == null) {
           continue;
@@ -1510,6 +1536,7 @@ Future<MonkeyMuxServerStatus?> _readRunningServerStatus(
           final helloStatus = MonkeyMuxServerStatus(
             version: response.version,
             capabilities: response.capabilities.toSet(),
+            installation: installation,
           );
           status = helloStatus;
           // Helpers without native ACP window support cannot own an in-process
@@ -1524,6 +1551,7 @@ Future<MonkeyMuxServerStatus?> _readRunningServerStatus(
           return MonkeyMuxServerStatus(
             version: currentStatus.version,
             capabilities: currentStatus.capabilities,
+            installation: currentStatus.installation,
             nativeAcpWindowCount: response.windows
                 .where(
                   (window) => window.nativeAcpBridgeId?.isNotEmpty ?? false,

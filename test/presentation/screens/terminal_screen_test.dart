@@ -507,6 +507,7 @@ class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
     SshSession session, {
     SshExecPriority priority = SshExecPriority.low,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    MonkeyMuxInstallation? Function()? reuseInstallation,
   }) async {
     ensureInstalledCalls++;
     if (confirmInstall == null) {
@@ -515,6 +516,10 @@ class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
     final accepted = await confirmInstall(request);
     acceptedConfirmations.add(accepted);
     if (!accepted) {
+      final existingInstallation = reuseInstallation?.call();
+      if (existingInstallation != null) {
+        return existingInstallation;
+      }
       throw const MonkeyMuxInstallDeclinedException();
     }
     final upload = this.upload;
@@ -4576,6 +4581,7 @@ void main() {
           session,
           priority: any(named: 'priority'),
           confirmInstall: any(named: 'confirmInstall'),
+          reuseInstallation: any(named: 'reuseInstallation'),
         ),
       ).thenAnswer(
         (_) async => const MonkeyMuxInstallation(
@@ -4745,6 +4751,7 @@ void main() {
           session,
           priority: any(named: 'priority'),
           confirmInstall: any(named: 'confirmInstall'),
+          reuseInstallation: any(named: 'reuseInstallation'),
         ),
       ).thenAnswer(
         (_) async => const MonkeyMuxInstallation(
@@ -10381,6 +10388,7 @@ void main() {
               testSession,
               priority: any(named: 'priority'),
               confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
             ),
           ).thenAnswer(
             (_) async => const MonkeyMuxInstallation(
@@ -10488,6 +10496,7 @@ void main() {
             session,
             priority: SshExecPriority.normal,
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).called(1);
         verifyNever(
@@ -10937,18 +10946,29 @@ void main() {
       ),
     ]) {
       testWidgets(testCase.name, (tester) async {
+        final deferred =
+            testCase.showsUpgradeDecision &&
+            testCase.updatePolicy == MonkeyMuxServerUpdatePolicy.never;
         final monkeyMuxInstallerService = _PromptingMonkeyMuxInstallerService(
           request: const MonkeyMuxInstallRequest(
             platform: 'darwin-arm64',
             version: '0.1.14',
             size: 1536,
           ),
+          // A deferred update must attach without ever starting this upload.
+          upload: deferred ? Completer<void>() : null,
         );
+        addTearDown(monkeyMuxInstallerService.progress.dispose);
         final monkeyMuxService = _MockMonkeyMuxService()
           ..installedHelpersStatus = MonkeyMuxServerStatus(
             version: testCase.runningVersion,
             capabilities: testCase.capabilities,
             nativeAcpWindowCount: testCase.nativeAcpWindowCount,
+            installation: MonkeyMuxInstallation(
+              executablePath: '/tmp/existing-monkeymux',
+              platform: 'darwin-arm64',
+              version: testCase.runningVersion ?? '0.1.13',
+            ),
           )
           ..runningStatus = MonkeyMuxServerStatus(
             version: testCase.runningVersion,
@@ -11051,13 +11071,22 @@ void main() {
             .toList(growable: false);
         expect(attachCommands, hasLength(1));
         final startupCommand = attachCommands.single;
-        expect(startupCommand, contains('/tmp/monkeymux'));
+        expect(
+          startupCommand,
+          contains(deferred ? '/tmp/existing-monkeymux' : '/tmp/monkeymux'),
+        );
         expect(
           startupCommand,
           contains('--update-policy ${testCase.updatePolicy.cliValue}'),
         );
         expect(shellWrites.map(utf8.decode).join(), isEmpty);
-        expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[true]);
+        expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[
+          !deferred,
+        ]);
+        expect(
+          find.byKey(const ValueKey('terminal-paste-upload-line')),
+          findsNothing,
+        );
         expect(
           monkeyMuxService.runningServerStatusFromInstalledHelpersCalls,
           1,
@@ -11117,6 +11146,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
           // The manifest labels this install 0.1.14 while the binary it
           // shipped still reports 0.1.13.
@@ -11204,6 +11234,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).thenAnswer(
           (_) async => const MonkeyMuxInstallation(
@@ -11371,6 +11402,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).thenThrow(Exception('install failed'));
         when(() => tmuxService.prefetchInstalledAgentTools(session))
@@ -11402,6 +11434,7 @@ void main() {
             session,
             priority: SshExecPriority.normal,
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).called(1);
         await tester.pumpWidget(const SizedBox.shrink());
