@@ -824,13 +824,13 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 			count = s.width - col
 		}
 		if row[col].width == 0 && col > 0 {
-			row[col-1] = vtCell{width: 1, attrs: row[col-1].attrs}
+			row[col-1] = blankedHalf(row[col-1])
 		}
 		for j := 0; j < count; j++ {
 			row[col+j] = vtCell{r: rune(data[i+j]), width: 1, attrs: s.attrs}
 		}
 		if col+count < len(row) && row[col+count].width == 0 {
-			row[col+count] = vtCell{width: 1, attrs: row[col+count].attrs}
+			row[col+count] = blankedHalf(row[col+count])
 		}
 		s.lastPrinted = rune(data[i+count-1])
 		i += count
@@ -1365,30 +1365,30 @@ func (s *terminalScreen) print(r rune) {
 		// Never split a wide glyph: blank the pair straddling the insertion
 		// point, and the pair whose continuation falls off the right edge.
 		if row[g.cursorCol].width == 0 && g.cursorCol > 0 {
-			row[g.cursorCol-1] = vtCell{width: 1, attrs: row[g.cursorCol-1].attrs}
-			row[g.cursorCol] = vtCell{width: 1, attrs: row[g.cursorCol].attrs}
+			row[g.cursorCol-1] = blankedHalf(row[g.cursorCol-1])
+			row[g.cursorCol] = blankedHalf(row[g.cursorCol])
 		}
 		copy(row[g.cursorCol+width:], row[g.cursorCol:len(row)-width])
 		for i := g.cursorCol; i < g.cursorCol+width && i < len(row); i++ {
 			row[i] = vtCell{width: 1}
 		}
 		if last := len(row) - 1; last >= 0 && row[last].width == 2 {
-			row[last] = vtCell{width: 1, attrs: row[last].attrs}
+			row[last] = blankedHalf(row[last])
 		}
 	}
 	col := g.cursorCol
 	// Overwriting half of a wide glyph blanks the other half.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = vtCell{width: 1, attrs: row[col-1].attrs}
+		row[col-1] = blankedHalf(row[col-1])
 	}
 	if width == 1 && row[col].width == 2 && col+1 < len(row) {
-		row[col+1] = vtCell{width: 1, attrs: row[col+1].attrs}
+		row[col+1] = blankedHalf(row[col+1])
 	}
 	row[col] = vtCell{r: r, width: uint8(width), attrs: s.attrs}
 	s.lastPrinted = r
 	if width == 2 {
 		if col+2 < len(row) && row[col+1].width == 2 {
-			row[col+2] = vtCell{width: 1, attrs: row[col+2].attrs}
+			row[col+2] = blankedHalf(row[col+2])
 		}
 		row[col+1] = vtCell{width: 0, attrs: s.attrs}
 	}
@@ -1788,6 +1788,14 @@ func (s *terminalScreen) clearRow(row []vtCell) []vtCell {
 	return row
 }
 
+// blankedHalf is what remains of a wide glyph's other half when one half is
+// overwritten or cut: an erased cell with the glyph's background, the only
+// part of its rendition a blank cell shows and the only part a frame can
+// erase it with.
+func blankedHalf(c vtCell) vtCell {
+	return vtCell{width: 1, attrs: vtAttrs{bg: c.attrs.bg}}
+}
+
 func (s *terminalScreen) blankCell() vtCell {
 	cell := vtCell{width: 1}
 	cell.attrs.bg = s.attrs.bg
@@ -1813,10 +1821,10 @@ func (s *terminalScreen) eraseCells(row []vtCell, from, to int) {
 	from = clampInt(from, 0, len(row))
 	to = clampInt(to, 0, len(row))
 	if from > 0 && from < len(row) && row[from].width == 0 {
-		row[from-1] = vtCell{width: 1, attrs: row[from-1].attrs}
+		row[from-1] = blankedHalf(row[from-1])
 	}
 	if to < len(row) && row[to].width == 0 {
-		row[to] = vtCell{width: 1, attrs: row[to].attrs}
+		row[to] = blankedHalf(row[to])
 	}
 	for i := from; i < to; i++ {
 		row[i] = s.blankCell()
@@ -1837,15 +1845,15 @@ func (s *terminalScreen) insertChars(n int) {
 		n = s.width - col
 	}
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = vtCell{width: 1, attrs: row[col-1].attrs}
-		row[col] = vtCell{width: 1, attrs: row[col].attrs}
+		row[col-1] = blankedHalf(row[col-1])
+		row[col] = blankedHalf(row[col])
 	}
 	copy(row[col+n:], row[col:s.width-n])
 	for i := col; i < col+n; i++ {
 		row[i] = s.blankCell()
 	}
 	if row[s.width-1].width == 2 {
-		row[s.width-1] = vtCell{width: 1, attrs: row[s.width-1].attrs}
+		row[s.width-1] = blankedHalf(row[s.width-1])
 	}
 	g.pendingWrap = false
 }
@@ -1858,14 +1866,14 @@ func (s *terminalScreen) deleteChars(n int) {
 		n = s.width - col
 	}
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = vtCell{width: 1, attrs: row[col-1].attrs}
+		row[col-1] = blankedHalf(row[col-1])
 	}
 	copy(row[col:], row[col+n:])
 	for i := s.width - n; i < s.width; i++ {
 		row[i] = s.blankCell()
 	}
 	if row[col].width == 0 {
-		row[col] = vtCell{width: 1, attrs: row[col].attrs}
+		row[col] = blankedHalf(row[col])
 	}
 	g.pendingWrap = false
 }

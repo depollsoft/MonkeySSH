@@ -190,3 +190,27 @@ func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 		t.Fatal("frame kept a wrap it could not reproduce faithfully")
 	}
 }
+
+// A soft wrap in the scrollback scrolls its row in while the wrapping glyph's
+// rendition is set, which fills the row with that background on a terminal
+// that erases with it, as the model does. The default cells the stored line
+// leaves out must not come back coloured.
+func TestVTScreenFrameKeepsDefaultPaddingAfterWrappedScrollback(t *testing.T) {
+	s := newTerminalScreen(3, 2)
+	s.Write([]byte("\x1b[44mabcdefghij\r\nx\r\nx"))
+	s.Resize(4, 2)
+	if !slices.Contains(s.scrollbackWrapped, true) {
+		t.Fatalf("setup: scrollback wrapped %v", s.scrollbackWrapped)
+	}
+	vtRoundTrip(t, s)
+
+	// The same for default cells inside a line, and for the first row on the
+	// screen when it continues the scrollback.
+	s = newTerminalScreen(4, 2)
+	s.Write([]byte("\x1b[44mabcd\x1b[0me\x1b[2C\x1b[44mf\x1b[0m"))
+	if !s.main.wrapped[1] {
+		t.Fatalf("setup: wrapped %v", s.main.wrapped)
+	}
+	s.Write([]byte("\r\n"))
+	vtRoundTrip(t, s)
+}

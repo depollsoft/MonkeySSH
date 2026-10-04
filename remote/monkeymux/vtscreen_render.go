@@ -47,6 +47,11 @@ func (s *terminalScreen) RenderFrame() []byte {
 				}
 				cells = decoder.decode(line, s.width)
 				out = appendVTSoftWrap(out, prev, cells, s.height > 1)
+				// The wrap scrolled this row in while the glyph it printed set
+				// the rendition, so the row may be filled with that background,
+				// and the stored line skips the cells it leaves default. Erase
+				// the row first, with ECH since EL would also clear the wrap.
+				out = appendVTCSICount(out, s.width, 'X')
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
@@ -58,6 +63,8 @@ func (s *terminalScreen) RenderFrame() []byte {
 				prev = decoder.decode(s.scrollback[len(s.scrollback)-1], s.width)
 			}
 			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
+			// Erased for the same reason; the row is painted below.
+			out = appendVTCSICount(out, s.width, 'X')
 		} else {
 			out = append(out, "\x1b[0m\r\n"...)
 		}
