@@ -88,13 +88,18 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.museCode => 'muse',
   };
 
-  /// Subcommand arguments required to open this tool's interactive terminal
-  /// UI, inserted immediately after [commandName].
+  /// Arguments that open this tool's interactive terminal UI, inserted
+  /// immediately after [commandName].
   ///
-  /// Most agent CLIs start their TUI when invoked bare, so this is empty. It
-  /// exists for tools whose interactive UI lives behind a subcommand.
+  /// Most agent CLIs start their TUI when invoked bare, so this is empty.
+  /// OpenClaw's UI lives behind its `tui` subcommand. Hermes defaults to its
+  /// classic REPL, which draws inline and repaints only its input box when the
+  /// terminal is resized, so a window switch, the phone keyboard, or a
+  /// rotation can leave its transcript stale; its full-screen `--tui`
+  /// repaints itself.
   List<String> get launchArguments => switch (this) {
     AgentLaunchTool.openclaw => const ['tui'],
+    AgentLaunchTool.hermes => const ['--tui'],
     _ => const <String>[],
   };
 
@@ -447,6 +452,7 @@ final _openCodeAutoApprovalPattern = RegExp(
 );
 final _cursorForcePattern = RegExp(r'(?<!\S)(?:--force|--yolo|-f)(?=\s|$)');
 final _hermesYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
+final _hermesInterfacePattern = RegExp(r'(?<!\S)--(?:tui|cli)(?=\s|$)');
 final _grokYoloPattern = RegExp(
   r'(?<!\S)(?:--always-approve|--yolo|--dangerously-skip-permissions)(?=\s|$)',
 );
@@ -566,7 +572,7 @@ String buildAgentToolCommand(
       launchProfile: launchProfile,
       windows: windows,
     ),
-    ...tool.launchArguments,
+    ..._launchArgumentsFor(tool, additionalArguments),
   ];
   final normalizedArguments = _normalizeAgentToolArguments(
     tool: tool,
@@ -589,6 +595,21 @@ String buildAgentToolCommand(
     return buildWindowsPowerShellCommand('$environment$command');
   }
   return command;
+}
+
+/// [AgentLaunchTool.launchArguments], unless the user's own arguments already
+/// choose Hermes's interface: `--cli` keeps the classic REPL, and an explicit
+/// `--tui` is not repeated.
+List<String> _launchArgumentsFor(
+  AgentLaunchTool tool,
+  String? additionalArguments,
+) {
+  if (tool == AgentLaunchTool.hermes &&
+      additionalArguments != null &&
+      _hermesInterfacePattern.hasMatch(additionalArguments)) {
+    return const [];
+  }
+  return tool.launchArguments;
 }
 
 /// Substitutes a detected executable in a generated agent command.
