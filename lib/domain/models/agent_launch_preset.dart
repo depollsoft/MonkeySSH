@@ -88,13 +88,18 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.museCode => 'muse',
   };
 
-  /// Subcommand arguments required to open this tool's interactive terminal
-  /// UI, inserted immediately after [commandName].
+  /// Arguments that open this tool's interactive terminal UI, inserted
+  /// immediately after [commandName].
   ///
-  /// Most agent CLIs start their TUI when invoked bare, so this is empty. It
-  /// exists for tools whose interactive UI lives behind a subcommand.
+  /// Most agent CLIs start their TUI when invoked bare, so this is empty.
+  /// OpenClaw's UI lives behind its `tui` subcommand. Hermes defaults to its
+  /// classic REPL, which draws inline and repaints only its input box when the
+  /// terminal is resized, so a window switch, the phone keyboard, or a
+  /// rotation can leave its transcript stale; its full-screen `--tui`
+  /// repaints itself.
   List<String> get launchArguments => switch (this) {
     AgentLaunchTool.openclaw => const ['tui'],
+    AgentLaunchTool.hermes => const ['--tui'],
     _ => const <String>[],
   };
 
@@ -566,7 +571,7 @@ String buildAgentToolCommand(
       launchProfile: launchProfile,
       windows: windows,
     ),
-    ...tool.launchArguments,
+    ..._launchArgumentsFor(tool, additionalArguments),
   ];
   final normalizedArguments = _normalizeAgentToolArguments(
     tool: tool,
@@ -589,6 +594,83 @@ String buildAgentToolCommand(
     return buildWindowsPowerShellCommand('$environment$command');
   }
   return command;
+}
+
+/// [AgentLaunchTool.launchArguments], unless the user's own arguments already
+/// choose Hermes's interface: `--cli` keeps the classic REPL, and an explicit
+/// `--tui` is not repeated. Only an argument Hermes receives on its own
+/// counts, not the same text inside a quoted value.
+List<String> _launchArgumentsFor(
+  AgentLaunchTool tool,
+  String? additionalArguments,
+) {
+  if (tool == AgentLaunchTool.hermes &&
+      additionalArguments != null &&
+      _splitShellWords(additionalArguments)
+          .any((word) => word == '--tui' || word == '--cli')) {
+    return const [];
+  }
+  return tool.launchArguments;
+}
+
+/// Splits [value] into the words a POSIX shell would pass as arguments,
+/// removing quotes and backslash escapes, and stops where the command ends:
+/// at an unquoted `;`, `&`, `|` or newline, or a `#` that starts a word.
+/// Unlike the tmux flag tokenizer it never rejects input: an unterminated
+/// quote runs to the end.
+List<String> _splitShellWords(String value) {
+  final words = <String>[];
+  final word = StringBuffer();
+  var started = false;
+  var quote = _ShellQuoteMode.none;
+  for (var index = 0; index < value.length; index++) {
+    final character = value[index];
+    switch (quote) {
+      case _ShellQuoteMode.single:
+        if (character == "'") {
+          quote = _ShellQuoteMode.none;
+        } else {
+          word.write(character);
+        }
+      case _ShellQuoteMode.double:
+        if (character == '"') {
+          quote = _ShellQuoteMode.none;
+        } else if (character == r'\' &&
+            index + 1 < value.length &&
+            r'"\$`'.contains(value[index + 1])) {
+          word.write(value[++index]);
+        } else {
+          word.write(character);
+        }
+      case _ShellQuoteMode.none:
+        if (';&|\n\r'.contains(character) || (character == '#' && !started)) {
+          index = value.length;
+          continue;
+        }
+        if (character.trim().isEmpty) {
+          if (started) {
+            words.add(word.toString());
+            word.clear();
+            started = false;
+          }
+          continue;
+        }
+        started = true;
+        if (character == "'") {
+          quote = _ShellQuoteMode.single;
+        } else if (character == '"') {
+          quote = _ShellQuoteMode.double;
+        } else if (character == r'\' && index + 1 < value.length) {
+          word.write(value[++index]);
+        } else {
+          word.write(character);
+        }
+    }
+  }
+  if (started) {
+    words.add(word.toString());
+  }
+  return words;
 }
 
 /// Substitutes a detected executable in a generated agent command.

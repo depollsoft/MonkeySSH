@@ -33,9 +33,9 @@ void main() {
       (AgentLaunchTool.antigravity, true, 'agy --dangerously-skip-permissions'),
       (AgentLaunchTool.cursorAgent, true, 'cursor-agent --force'),
       (AgentLaunchTool.pi, false, 'pi'),
-      (AgentLaunchTool.hermes, false, 'hermes'),
+      (AgentLaunchTool.hermes, false, 'hermes --tui'),
       (AgentLaunchTool.openclaw, false, 'openclaw tui'),
-      (AgentLaunchTool.hermes, true, 'hermes --yolo'),
+      (AgentLaunchTool.hermes, true, 'hermes --yolo --tui'),
       (AgentLaunchTool.pi, true, 'pi'),
       (AgentLaunchTool.openclaw, true, 'openclaw tui'),
       (AgentLaunchTool.grokBuild, false, 'grok'),
@@ -55,7 +55,7 @@ void main() {
             launchProfile: 'work',
             startInYoloMode: true,
           ),
-          "hermes --profile 'work' --yolo",
+          "hermes --profile 'work' --yolo --tui",
         );
         expect(
           buildAgentToolCommand(
@@ -144,9 +144,14 @@ void main() {
         AgentLaunchTool.hermes,
         '20250305_091523_a1b2',
         false,
-        "hermes --resume '20250305_091523_a1b2'",
+        "hermes --tui --resume '20250305_091523_a1b2'",
       ),
-      (AgentLaunchTool.hermes, '_continue', true, 'hermes --yolo --continue'),
+      (
+        AgentLaunchTool.hermes,
+        '_continue',
+        true,
+        'hermes --tui --yolo --continue',
+      ),
       (
         AgentLaunchTool.openclaw,
         'main',
@@ -524,6 +529,66 @@ void main() {
         });
       }
     });
+
+    test(
+      'lets explicit Hermes interface arguments replace the TUI default',
+      () {
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '--cli',
+          ),
+          'hermes --cli',
+        );
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '--tui --skills review',
+            startInYoloMode: true,
+          ),
+          'hermes --yolo --tui --skills review',
+        );
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '--skills cli-tools',
+          ),
+          'hermes --tui --skills cli-tools',
+        );
+        // Only an argument Hermes receives on its own picks the interface.
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '-z "explain --cli mode"',
+          ),
+          'hermes --tui -z "explain --cli mode"',
+        );
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: "-z 'say hi' '--cli'",
+          ),
+          "hermes -z 'say hi' '--cli'",
+        );
+        // Words after the end of the Hermes command are not its arguments.
+        for (final tail in ['# --cli', '; echo --cli', '&& echo --cli']) {
+          expect(
+            buildAgentToolCommand(
+              AgentLaunchTool.hermes,
+              additionalArguments: '--skills review $tail',
+            ),
+            'hermes --tui --skills review $tail',
+          );
+        }
+        expect(
+          buildAgentToolCommand(
+            AgentLaunchTool.hermes,
+            additionalArguments: '--skills a#b --cli',
+          ),
+          'hermes --skills a#b --cli',
+        );
+      },
+    );
 
     test('does not duplicate an explicit Hermes yolo argument', () {
       expect(
