@@ -252,4 +252,14 @@ func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
 	if got := s.TextRows(); !slices.Equal(got[:2], []string{"efgh", "i"}) || !s.main.wrapped[1] {
 		t.Fatalf("pending wrap lost: %q wrapped %v", got, s.main.wrapped)
 	}
+
+	// A cursor past the new edge on a line its text does not fill sits on
+	// the last column; no wrap is pending there.
+	s = newTerminalScreen(8, 3)
+	s.Write([]byte("\x1b[1;8H"))
+	s.Resize(4, 3)
+	s.Write([]byte("X"))
+	if got := s.TextRows(); got[0] != "   X" || s.main.wrapped[1] {
+		t.Fatalf("narrowing made a wrap pending: %q wrapped %v", got, s.main.wrapped)
+	}
 }

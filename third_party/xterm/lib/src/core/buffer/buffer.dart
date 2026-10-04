@@ -653,6 +653,11 @@ class Buffer {
         final cursorAnchor = cursorLine >= 0 && cursorLine < lines.length
             ? lines[cursorLine].createAnchor(cursorCellX)
             : null;
+        // A cursor right after its line's text, or with a wrap pending, is
+        // where printing that text at the new width leaves it.
+        final cursorFollowsText = cursorAnchor != null &&
+            (cursorCellX >= oldWidth ||
+                cursorCellX == lines[cursorLine].getTrimmedLength(oldWidth));
         final reflowResult = reflow(lines, oldWidth, newWidth);
 
         while (reflowResult.length < newHeight) {
@@ -672,7 +677,13 @@ class Buffer {
         if (cursorAnchor != null && cursorAnchor.attached) {
           final row = cursorAnchor.y - (lines.length - newHeight);
           _cursorY = row.clamp(0, newHeight - 1);
-          _cursorX = cursorAnchor.x.clamp(0, newWidth);
+          // Past the last column a wrap is pending only for a cursor that
+          // follows its text, which now fills the row; any other cursor the
+          // new edge cut short sits on the last column.
+          _cursorX = cursorAnchor.x.clamp(
+            0,
+            cursorFollowsText ? newWidth : newWidth - 1,
+          );
         }
         cursorAnchor?.dispose();
       } else {

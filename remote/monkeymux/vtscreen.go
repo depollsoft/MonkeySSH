@@ -393,7 +393,11 @@ func (s *terminalScreen) resizeMain(width, height int) {
 	}
 	s.clampVTCursor(g, width, height)
 	if width != s.width {
-		s.reflowMain(width, height, cursorX)
+		// A cursor right after its line's text, or with a wrap pending, is
+		// where printing that text at the new width leaves it.
+		followsText := cursorX >= s.width ||
+			cursorX == vtTrimmedLength(g.rows[g.cursorRow], s.width)
+		s.reflowMain(width, height, cursorX, followsText)
 	}
 }
 
@@ -509,7 +513,7 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 // reflowing terminal lays out. Cutting rows to the new width instead put that
 // redraw rows away from where the client put it, so the frame painted from the
 // model on the next switch back erased the transcript lines above the prompt.
-func (s *terminalScreen) reflowMain(width, height, cursorX int) {
+func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsText bool) {
 	g := &s.main
 	lines := make([]vtLine, 0, len(s.scrollback)+len(g.rows))
 	var decoder vtLineDecoder
@@ -547,7 +551,10 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int) {
 		}
 		g.cursorRow = clampInt(i-screenStart, 0, height-1)
 		g.cursorCol = min(line.cursor.x, width-1)
-		g.pendingWrap = line.cursor.x >= width
+		// Past the last column a wrap is pending only for a cursor that
+		// follows its text, which now fills the row; any other cursor the new
+		// edge cut short sits on the last column.
+		g.pendingWrap = line.cursor.x >= width && cursorFollowsText
 		break
 	}
 }
