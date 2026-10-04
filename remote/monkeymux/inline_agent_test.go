@@ -69,7 +69,7 @@ func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
 	for _, tool := range []string{"hermes", "openclaw", "some-inline-tui"} {
 		t.Run(tool, func(t *testing.T) {
 			server := newMuxServerWithSize("test", 80, 24)
-			window := &muxWindow{id: "@2", index: 1, foregroundCommand: tool}
+			window := &muxWindow{id: "@2", index: 1, foregroundCommand: tool, foregroundPid: 42}
 			window.appendHistoryLocked(inlineTUIHistory(80))
 			server.windows = []*muxWindow{{id: "@1"}, window}
 			server.activeID = "@1"

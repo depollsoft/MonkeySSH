@@ -7147,31 +7147,36 @@ func TestActiveReplayUsesForegroundRedrawForVimAlternateScreenHistory(t *testing
 	}
 }
 
-// Any program other than the shell is restored from the screen model rather
+// A program that redraws in place is restored from the screen model rather
 // than from a tail of its bytes, whether or not the helper knows it by name:
 // an inline TUI repaints only deltas, which a tail replays onto a cleared
-// client as a nearly blank screen. The shell itself keeps the raw replay.
+// client as a nearly blank screen. A shell, or a job that only prints lines,
+// keeps the raw replay, which also carries the hyperlinks and command marks
+// the model does not keep.
 func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
-	history := []byte("tail output\r\nlatest line\r\n")
+	const lines = "tail output\r\nlatest line\r\n"
+	const redraw = lines + "\x1b[A\rlatest line\r\n"
 	for _, tc := range []struct {
+		name      string
 		command   string
 		shell     string
-		job       bool
+		output    string
+		laterJob  bool
 		rawReplay bool
 	}{
-		{command: "tail"},
-		{command: "some-inline-tui"},
-		{command: "zsh", rawReplay: true},
+		{name: "line job", command: "tail", output: lines, rawReplay: true},
+		{name: "inline program", command: "some-inline-tui", output: redraw},
+		// A job started after an inline program prints lines only.
+		{name: "later line job", command: "tail", output: redraw, laterJob: true, rawReplay: true},
+		{name: "zsh", command: "zsh", output: redraw, rawReplay: true},
 		// macOS names MonkeyMux's own login shell this way.
-		{command: "-zsh", rawReplay: true},
-		{command: "ash", rawReplay: true},
-		{command: "-tcsh", rawReplay: true},
-		{command: "nu", rawReplay: true},
-		{command: "", rawReplay: true},
+		{name: "login zsh", command: "-zsh", output: redraw, rawReplay: true},
+		{name: "ash", command: "ash", output: redraw, rawReplay: true},
+		{name: "login tcsh", command: "-tcsh", output: redraw, rawReplay: true},
+		{name: "nu", command: "nu", output: redraw, rawReplay: true},
+		{name: "unknown command", command: "", output: redraw, rawReplay: true},
 		// Any shell the window was started with, in the foreground itself.
-		{command: "-myshell", shell: "myshell", rawReplay: true},
-		// The same name running as a job under that shell is a program.
-		{command: "myshell", shell: "myshell", job: true},
+		{name: "own shell", command: "-myshell", shell: "myshell", output: redraw, rawReplay: true},
 	} {
 		server := newMuxServer("test")
 		pid := 42
@@ -7183,10 +7188,10 @@ func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
 			proc:              bindingTestProcess{pid: pid},
 			foregroundPid:     pid,
 			foregroundCommand: tc.command,
-			history:           append([]byte(nil), history...),
 			lastActivity:      time.Now(),
 		}
-		if tc.job {
+		window.appendHistoryLocked([]byte(tc.output))
+		if tc.laterJob {
 			window.foregroundPid = pid + 1
 		}
 		server.windows = []*muxWindow{window}
@@ -7194,16 +7199,16 @@ func TestActiveReplayRestoresForegroundProgramsFromScreenModel(t *testing.T) {
 
 		replay := string(server.activeReplayLocked())
 		if got := strings.Contains(replay, "latest line"); got != tc.rawReplay {
-			t.Fatalf("%q: replay carries the raw history = %v, want %v: %q", tc.command, got, tc.rawReplay, replay)
+			t.Fatalf("%s: replay carries the raw history = %v, want %v: %q", tc.name, got, tc.rawReplay, replay)
 		}
 		if tc.rawReplay {
 			continue
 		}
 		if !window.usesForegroundRedrawReplayLocked() {
-			t.Fatalf("%q is not restored by a foreground redraw", tc.command)
+			t.Fatalf("%s is not restored by a foreground redraw", tc.name)
 		}
 		if frame := server.foregroundHistoryFallbackHistoryLocked(window); !strings.Contains(string(frame), "latest line") {
-			t.Fatalf("%q: frame from the screen model = %q, want the output", tc.command, frame)
+			t.Fatalf("%s: frame from the screen model = %q, want the output", tc.name, frame)
 		}
 	}
 }
@@ -13159,5 +13164,20 @@ func TestScreenModelIgnoresSyntheticResize(t *testing.T) {
 	window.screenWidth = 12
 	if w, _ := window.screenLocked().Size(); w != 12 {
 		t.Fatal("model did not follow the real geometry")
+	}
+}
+
+// Links a shell printed stay clickable after a switch back while a job that
+// does not redraw, such as sleep or tail -f, is in the foreground: the raw
+// replay carries their OSC 8 destinations, which the screen model drops.
+func TestActiveReplayKeepsHyperlinksUnderLineJobs(t *testing.T) {
+	server := newMuxServer("test")
+	window := &muxWindow{id: "@1", foregroundPid: 7, foregroundCommand: "zsh", lastActivity: time.Now()}
+	window.appendHistoryLocked([]byte("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\\r\n$ sleep 100\r\n"))
+	window.foregroundPid, window.foregroundCommand = 8, "sleep"
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	if replay := string(server.activeReplayLocked()); !strings.Contains(replay, "\x1b]8;;https://example.com/a") {
+		t.Fatalf("replay dropped the hyperlink: %q", replay)
 	}
 }

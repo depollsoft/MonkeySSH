@@ -51,6 +51,11 @@ type terminalScreen struct {
 
 	lastPrinted rune
 
+	// redrewInPlace records that output moved the cursor back up to an
+	// earlier row, which a program printing line after line never does; see
+	// TakeRedrewInPlace.
+	redrewInPlace bool
+
 	// Kitty unicode-placeholder bookkeeping. A rendered frame reproduces the
 	// placeholder cells but never the APC image transmissions that fill them
 	// (the parser skips APC strings), so a replay built from RenderFrame must
@@ -1197,9 +1202,26 @@ func (s *terminalScreen) saveCursor() {
 	}
 }
 
+// TakeRedrewInPlace reports whether output since the last call moved the
+// cursor back up to an earlier row, as an application that redraws what it
+// drew does, and clears the record.
+func (s *terminalScreen) TakeRedrewInPlace() bool {
+	redrew := s.redrewInPlace
+	s.redrewInPlace = false
+	return redrew
+}
+
+// noteCursorRow records an upward cursor move from row before.
+func (s *terminalScreen) noteCursorRow(before int) {
+	if s.grid().cursorRow < before {
+		s.redrewInPlace = true
+	}
+}
+
 func (s *terminalScreen) restoreCursor() {
 	saved := *s.saved()
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	if !saved.valid {
 		g.cursorRow, g.cursorCol = 0, 0
 		s.attrs = vtAttrs{}
@@ -1239,6 +1261,7 @@ func (s *terminalScreen) index() {
 
 func (s *terminalScreen) reverseIndex() {
 	g := s.grid()
+	s.redrewInPlace = true
 	if g.cursorRow == s.top {
 		s.scrollDown(1)
 	} else if g.cursorRow > 0 {
@@ -1574,6 +1597,7 @@ func (s *terminalScreen) PlaceholderImageIDs() []string {
 
 func (s *terminalScreen) moveCursor(row, col int) {
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	minRow, maxRow := 0, s.height-1
 	if s.originMode {
 		minRow, maxRow = s.top, s.bottom
@@ -1702,6 +1726,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol}
 	case 'u':
 		if s.scoCursor.valid {
+			defer s.noteCursorRow(g.cursorRow)
 			g.cursorRow = clampInt(s.scoCursor.row, 0, s.height-1)
 			g.cursorCol = clampInt(s.scoCursor.col, 0, s.width-1)
 			g.pendingWrap = false
@@ -1711,6 +1736,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 
 func (s *terminalScreen) moveCursorRelative(dRow, dCol int) {
 	g := s.grid()
+	defer s.noteCursorRow(g.cursorRow)
 	row := g.cursorRow + dRow
 	col := g.cursorCol + dCol
 	minRow, maxRow := 0, s.height-1

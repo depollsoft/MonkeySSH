@@ -785,7 +785,10 @@ type muxWindow struct {
 	foregroundPid             int
 	// interactiveShell marks a window started as the user's shell rather than
 	// with a command.
-	interactiveShell            bool
+	interactiveShell bool
+	// inPlaceRedrawPid is the foreground process group that last moved the
+	// cursor back up to redraw what it had drawn.
+	inPlaceRedrawPid            int
 	foregroundCommand           string
 	paneTitle                   string
 	pty                         muxPty
@@ -11013,14 +11016,15 @@ func (w *muxWindow) supportsForegroundRedrawLocked() bool {
 }
 
 // foregroundAppOwnsScreenLocked reports whether a program other than the
-// window's shell is drawing on its normal screen: a recognized agent, or any
-// foreground process that is not a shell. Such a program may draw inline and
-// repaint in place with relative cursor moves, as Hermes's prompt_toolkit UI,
-// OpenClaw and other inline TUIs do, so a tail of its bytes replayed onto a
-// cleared client paints only its latest deltas. It is restored like an agent:
-// asked to redraw, over a frame painted from the screen model. A shell's
-// output reads the same from any point, and the raw tail also carries the
-// hyperlinks, command marks and images the model does not keep.
+// window's shell owns its normal screen: a recognized agent, or any other
+// foreground program that has redrawn in place, moving the cursor back up
+// over what it drew, as Hermes's prompt_toolkit UI, OpenClaw and other
+// inline TUIs do. A tail of such a program's bytes replayed onto a cleared
+// client paints only its latest deltas, so it is restored like an agent:
+// asked to redraw, over a frame painted from the screen model. Output from a
+// shell, or from a job that only prints lines, reads the same from any point,
+// and its raw tail also carries the hyperlinks, command marks and images the
+// model does not keep.
 func (w *muxWindow) foregroundAppOwnsScreenLocked() bool {
 	if w.agentToolLocked() != "" {
 		return true
@@ -11031,8 +11035,11 @@ func (w *muxWindow) foregroundAppOwnsScreenLocked() bool {
 	}
 	// The shell the window was started with, whatever $SHELL names it, owns
 	// the screen while it is in the foreground itself.
-	return !w.interactiveShell || w.foregroundPid <= 0 || w.foregroundPid != w.processID() ||
-		shellProcessName(command) != shellProcessName(w.command)
+	if w.interactiveShell && w.foregroundPid > 0 && w.foregroundPid == w.processID() &&
+		shellProcessName(command) == shellProcessName(w.command) {
+		return false
+	}
+	return w.foregroundPid > 0 && w.inPlaceRedrawPid == w.foregroundPid
 }
 
 func (w *muxWindow) usesForegroundRedrawReplayLocked() bool {
@@ -12736,6 +12743,8 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 			)
 			if start < len(w.history) {
 				w.screen.Write(w.history[start:])
+				// Earlier output says nothing about today's foreground.
+				w.screen.TakeRedrewInPlace()
 			}
 		}
 	} else {
@@ -12748,7 +12757,11 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
-	w.screenLocked().Write(chunk)
+	screen := w.screenLocked()
+	screen.Write(chunk)
+	if screen.TakeRedrewInPlace() && w.foregroundPid > 0 {
+		w.inPlaceRedrawPid = w.foregroundPid
+	}
 	limit := w.historyLimitLocked()
 	if len(chunk) >= limit {
 		parser := w.historyStartTerminalOutput
