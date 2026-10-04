@@ -3481,7 +3481,7 @@ HEAD b
       expect(
         discovery.buildResumeCommand(info),
         "cd '/Users/depoll/Code/flutty' && "
-        "hermes --tui --resume '20250305_091523_a1b2c3'",
+        "hermes --resume '20250305_091523_a1b2c3'",
       );
       // Gateway chats from messaging platforms must stay out of the picker,
       // and HERMES_HOME must be honoured when set. The SQL is shell-quoted,
