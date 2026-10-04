@@ -171,6 +171,18 @@ void main() {
     expect(buffer.lines[buffer.absoluteCursorY].isWrapped, isFalse);
   });
 
+  // Nor with autowrap off: the next character replaces the last one.
+  test('reflow() does not make a wrap pending with autowrap off', () {
+    final terminal = Terminal()..resize(8, 3);
+    terminal.write('\x1b[?7labcd');
+
+    terminal.resize(4, 3);
+    terminal.write('X');
+
+    final buffer = terminal.buffer;
+    expect(buffer.lines[buffer.absoluteCursorY].toString(), 'abcX');
+  });
+
   // An application that redraws after a resize moves up from the cursor over
   // the rows its output takes once rewrapped. With the cursor kept on its
   // cell, that move covers exactly the old input area: nothing of it is left

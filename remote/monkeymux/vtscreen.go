@@ -552,9 +552,10 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 		g.cursorRow = clampInt(i-screenStart, 0, height-1)
 		g.cursorCol = min(line.cursor.x, width-1)
 		// Past the last column a wrap is pending only for a cursor that
-		// follows its text, which now fills the row; any other cursor the new
-		// edge cut short sits on the last column.
-		g.pendingWrap = line.cursor.x >= width && cursorFollowsText
+		// follows its text, which now fills the row, and only with autowrap
+		// on; any other cursor the new edge cut short sits on the last
+		// column.
+		g.pendingWrap = line.cursor.x >= width && cursorFollowsText && s.autowrap
 		break
 	}
 }

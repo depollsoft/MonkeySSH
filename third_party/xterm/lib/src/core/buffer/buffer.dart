@@ -678,11 +678,14 @@ class Buffer {
           final row = cursorAnchor.y - (lines.length - newHeight);
           _cursorY = row.clamp(0, newHeight - 1);
           // Past the last column a wrap is pending only for a cursor that
-          // follows its text, which now fills the row; any other cursor the
-          // new edge cut short sits on the last column.
+          // follows its text, which now fills the row, and only with
+          // autowrap on; any other cursor the new edge cut short sits on
+          // the last column.
           _cursorX = cursorAnchor.x.clamp(
             0,
-            cursorFollowsText ? newWidth : newWidth - 1,
+            cursorFollowsText && terminal.autoWrapMode
+                ? newWidth
+                : newWidth - 1,
           );
         }
         cursorAnchor?.dispose();

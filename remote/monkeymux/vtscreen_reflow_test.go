@@ -262,4 +262,13 @@ func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
 	if got := s.TextRows(); got[0] != "   X" || s.main.wrapped[1] {
 		t.Fatalf("narrowing made a wrap pending: %q wrapped %v", got, s.main.wrapped)
 	}
+
+	// Nor with autowrap off: the next glyph replaces the last one.
+	s = newTerminalScreen(8, 3)
+	s.Write([]byte("\x1b[?7labcd"))
+	s.Resize(4, 3)
+	s.Write([]byte("X"))
+	if got := s.TextRows(); got[0] != "abcX" || got[1] != "" {
+		t.Fatalf("narrowing without autowrap: %q", got)
+	}
 }
