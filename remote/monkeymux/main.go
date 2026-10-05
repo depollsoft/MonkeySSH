@@ -6231,10 +6231,6 @@ type createWindowOptions struct {
 	cursorVisibilityKnown     bool
 	privateModes              map[string]bool
 	terminalProgress          *terminalProgressSnapshot
-	insertModeEnabled         bool
-	insertModeKnown           bool
-	applicationKeypadEnabled  bool
-	applicationKeypadKnown    bool
 	themeHint                 []byte
 	capabilityHint            []byte
 }
@@ -6380,10 +6376,6 @@ func (s *muxServer) createWindowWithStarter(
 		cursorVisibilityKnown:     options.cursorVisibilityKnown,
 		privateModes:              copyPrivateModes(options.privateModes),
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
-		insertModeEnabled:         options.insertModeEnabled,
-		insertModeKnown:           options.insertModeKnown,
-		applicationKeypadEnabled:  options.applicationKeypadEnabled,
-		applicationKeypadKnown:    options.applicationKeypadKnown,
 	}
 	s.windows = append(s.windows, window)
 	if s.activeID != "" && s.activeID != window.id {

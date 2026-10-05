@@ -9246,12 +9246,6 @@ func TestRestoreWindowOptionsDropProcessOwnedTerminalModes(t *testing.T) {
 	if enabled, ok := options.privateModes["7"]; !ok || enabled {
 		t.Fatalf("restored options wrap mode = %v, %v, want present false", enabled, ok)
 	}
-	if options.insertModeKnown || options.insertModeEnabled {
-		t.Fatalf("restored options retained insert mode: known=%v enabled=%v", options.insertModeKnown, options.insertModeEnabled)
-	}
-	if options.applicationKeypadKnown || options.applicationKeypadEnabled {
-		t.Fatalf("restored options retained application keypad: known=%v enabled=%v", options.applicationKeypadKnown, options.applicationKeypadEnabled)
-	}
 	window := &muxWindow{privateModes: options.privateModes}
 	if got := window.themeHintRefreshDataLocked([]byte("\x1b[?997;1n")); len(got) != 0 {
 		t.Fatalf("restored shell received stale theme reply %q", got)
@@ -9576,12 +9570,6 @@ func TestRestoreSnapshotPreservesDisplayModesAndDropsProcessModes(t *testing.T) 
 	}
 	if !options.privateModes["1049"] {
 		t.Fatalf("restored options private modes = %#v", options.privateModes)
-	}
-	if options.insertModeKnown || options.insertModeEnabled {
-		t.Fatal("restored options retained process-owned insert mode")
-	}
-	if options.applicationKeypadKnown || options.applicationKeypadEnabled {
-		t.Fatal("restored options retained process-owned application keypad mode")
 	}
 }
 
