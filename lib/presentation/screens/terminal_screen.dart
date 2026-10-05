@@ -6701,6 +6701,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       return forcedPolicy;
     }
+    // A deferred update has already been decided in the install dialog. Do not
+    // compare the reused helper as if it were the bundled update or prompt again.
+    if (preferredUpdatePolicy == MonkeyMuxServerUpdatePolicy.never) {
+      return MonkeyMuxServerUpdatePolicy.never;
+    }
     if (status == null || !status.needsUpdate(installation.version)) {
       return MonkeyMuxServerUpdatePolicy.never;
     }
@@ -6951,6 +6956,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final currentVersionLabel = runningVersion == null || runningVersion.isEmpty
         ? 'current version'
         : runningVersion;
+    final canKeepWorkspace =
+        installRequest == null || status.hasMatchingInstallation;
     final warning = status.hasNativeAcpWindows
         ? 'Native agent windows stay connected to their running sessions while '
               'MonkeySSH recreates the terminal windows in the new helper.'
@@ -7021,8 +7028,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Use $currentVersionLabel for now to connect without '
-                    'changing the running workspace.',
+                    canKeepWorkspace
+                        ? 'Use $currentVersionLabel for now to connect without '
+                              'changing the running workspace.'
+                        : 'No installed helper matches the running version. '
+                              'You can open a shell without uploading the update.',
                   ),
                   if (installRequest case final request?) ...[
                     const SizedBox(height: 16),
@@ -7046,7 +7056,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             TextButton(
               onPressed: () =>
                   Navigator.pop(context, MonkeyMuxServerUpdatePolicy.never),
-              child: Text('Use $currentVersionLabel for now'),
+              child: Text(
+                canKeepWorkspace
+                    ? 'Use $currentVersionLabel for now'
+                    : 'Open shell for now',
+              ),
             ),
             FilledButton(
               onPressed: () =>
@@ -7132,7 +7146,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return (
         install: updatePolicy == MonkeyMuxServerUpdatePolicy.always,
         updatePolicy: updatePolicy,
-        reuseInstallation: updatePolicy == MonkeyMuxServerUpdatePolicy.never
+        reuseInstallation:
+            updatePolicy == MonkeyMuxServerUpdatePolicy.never &&
+                updateStatus.hasMatchingInstallation
             ? updateStatus.installation
             : null,
       );
@@ -7348,6 +7364,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         startInYoloMode: _startClisInYoloMode,
         windows: installation.isWindows,
       );
+    } on MonkeyMuxInstallDeclinedException {
+      // Opening a shell instead of installing is a user choice, not a failure.
+      _suppressRemoteMuxDetectionConnectionId = session.connectionId;
+      return null;
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
         rethrow;
