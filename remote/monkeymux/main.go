@@ -3122,6 +3122,8 @@ func commandLineRelaunchCommand(tool string, argv []string) string {
 // again from the commands the app created the window with, or "" when the
 // window has none or its foreground program is no longer the one launched:
 // the user quit it and ran something else, or it exited to the shell. The
+// foreground command decides, not the window's agent metadata, which an
+// agent that failed at launch leaves on the recovery shell it falls back to. The
 // app's restore command continues the program's latest session; the launch
 // command, which is also the fallback when nothing is left to continue,
 // starts it afresh. Either keeps every flag the app launched it with.
@@ -3130,12 +3132,12 @@ func launchedCommandForRestore(window restoreWindowState) string {
 	if launch == "" {
 		return ""
 	}
+	current := cleanProcessCommandName(window.CurrentCommand)
 	if tool := agentToolFromCommandText(launch); tool != "" {
-		if tool != agentToolCandidateForRestore(window) {
+		if tool != agentToolFromCommandName(current) {
 			return ""
 		}
-	} else if program := commandNameFromShellCommand(launch); program == "" ||
-		program != cleanProcessCommandName(window.CurrentCommand) {
+	} else if program := commandNameFromShellCommand(launch); program == "" || program != current {
 		return ""
 	}
 	if restore := strings.TrimSpace(window.RestoreCommand); restore != "" {

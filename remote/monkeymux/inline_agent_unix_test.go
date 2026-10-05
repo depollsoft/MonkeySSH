@@ -228,6 +228,11 @@ func TestLaunchedWindowRunningSomethingElseRestoresAsShell(t *testing.T) {
 			CurrentCommand: "zsh", AgentTool: "", AgentToolConfirmed: true,
 			LaunchCommand: "openclaw tui",
 		},
+		// A failed launch leaves the agent's metadata on its recovery shell.
+		"openclaw failed at launch": {
+			CurrentCommand: "zsh", AgentTool: "openclaw", AgentToolConfirmed: true,
+			LaunchCommand: "openclaw tui",
+		},
 		"a different agent": {
 			CurrentCommand: "hermes", AgentTool: "hermes", AgentToolConfirmed: true,
 			LaunchCommand: "openclaw tui",
@@ -239,6 +244,11 @@ func TestLaunchedWindowRunningSomethingElseRestoresAsShell(t *testing.T) {
 			options := createWindowOptionsForRestore(state, true)
 			if options.command != "" || options.agentTool != "" {
 				t.Fatalf("relaunched %q as %q", options.command, options.agentTool)
+			}
+			// A shell keeps its history; another program starts afresh.
+			atShell := isShellCommandName(cleanProcessCommandName(state.CurrentCommand))
+			if got := string(options.history); (got == "$ ") != atShell {
+				t.Fatalf("history = %q with %q in the foreground", got, state.CurrentCommand)
 			}
 		})
 	}

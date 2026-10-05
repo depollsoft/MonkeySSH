@@ -657,7 +657,7 @@ String? buildAgentRestoreCommand(String? command) {
     if (prefix == null) break;
     agentCommand = agentCommand.substring(prefix.end);
   }
-  if (_shellControlPattern.hasMatch(agentCommand)) return null;
+  if (_chainsOutsideQuotes(agentCommand)) return null;
   final sessionFlags = {
     ...continueArguments,
     _buildAgentResumeArguments(tool, 'id').first,
@@ -673,7 +673,32 @@ String? buildAgentRestoreCommand(String? command) {
   return '$trimmed ${continueArguments.join(' ')}';
 }
 
-final _shellControlPattern = RegExp(r'[;&|<>`]|\$\(');
+/// Whether [command] chains, pipes or redirects outside its quoted
+/// arguments, so arguments appended to its end would not reach its first
+/// command. Quotes as the launch builders write them for POSIX shells,
+/// PowerShell and cmd keep `work & review` inside a profile argument.
+/// Unbalanced quotes count as chaining, since the command cannot be read.
+bool _chainsOutsideQuotes(String command) {
+  String? quote;
+  for (var i = 0; i < command.length; i++) {
+    final char = command[i];
+    if (quote != null) {
+      if (char == quote) {
+        quote = null;
+      } else if (quote == '"' && char == r'\') {
+        i++;
+      }
+    } else if (char == "'" || char == '"') {
+      quote = char;
+    } else if (char == r'\') {
+      i++;
+    } else if (';&|<>`'.contains(char) ||
+        (char == r'$' && command.startsWith('(', i + 1))) {
+      return true;
+    }
+  }
+  return quote != null;
+}
 
 /// Builds the base shell command for resuming a saved [tool] session.
 String buildAgentResumeCommand(

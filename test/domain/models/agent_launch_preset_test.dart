@@ -191,8 +191,22 @@ void main() {
       ('claude --dangerously-skip-permissions', null),
       ('codex --yolo', null),
       ('htop', null),
+      (
+        "hermes --profile 'work & review'",
+        "hermes --profile 'work & review' --continue",
+      ),
+      (
+        'hermes --profile "work & review"',
+        'hermes --profile "work & review" --continue',
+      ),
+      (
+        "hermes --profile 'it'\"'\"'s; mine'",
+        "hermes --profile 'it'\"'\"'s; mine' --continue",
+      ),
       ('hermes; echo done', null),
       ('hermes | tee log', null),
+      (r'hermes $(echo -p) x', null),
+      ("hermes --profile 'open", null),
       ("tmux new-session -A -s 'work' 'hermes'", null),
       ('', null),
       (null, null),
