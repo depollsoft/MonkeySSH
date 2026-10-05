@@ -833,7 +833,6 @@ type muxWindow struct {
 	redrawForwardingPaused               bool
 	redrawForwardingGeneration           int
 	redrawForwardingReplay               []byte
-	redrawForwardingFallbackHistory      []byte
 	redrawForwardingFallbackScreen       *terminalScreen
 	redrawForwardingBuffer               []byte
 	redrawForwardingFailoverBuffer       []byte
@@ -9831,7 +9830,7 @@ func (s *muxServer) resizeWithRedraw(
 			s.writeAllAttachesLocked(modeReplay)
 		}
 	} else {
-		s.writeAttach(attach, modeReplay)
+		s.writeAttach(modeReplay)
 	}
 	if shouldSignal {
 		signalForegroundResize(foregroundProcessGroup)
@@ -10041,34 +10040,23 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	window.redrawForwardingPrimaryNeedsFailover =
 		len(preservedQueries) > 0 &&
 			!s.isAttachConnectionLocked(preservedPrimary)
-	if !window.redrawForwardingPaused ||
-		len(window.redrawForwardingFallbackHistory) == 0 {
-		// Snapshot the pre-resize frame for every redraw pause, not just
-		// deferred window-switch replays: restore and theme redraws start the
-		// same transaction directly and hit the same coalesced-SIGWINCH
-		// failure. Only a frame with visible content is worth retaining: a
-		// snapshot taken in the instant after the child cleared but before it
-		// repainted would hand the user exactly the emptiness this fallback
-		// exists to avoid.
-		if snapshot := s.foregroundHistoryFallbackHistoryLocked(
-			window,
-		); terminalOutputHasVisibleContent(snapshot) {
-			window.redrawForwardingFallbackHistory = snapshot
-			window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
-		} else {
-			window.redrawForwardingFallbackHistory = nil
-			window.redrawForwardingFallbackScreen = nil
-		}
-	} else if refreshed := s.foregroundHistoryFallbackHistoryLocked(
-		window,
-	); terminalOutputHasVisibleContent(refreshed) {
-		// A pause restarted while another is in flight only re-snapshots when
-		// the history still holds a complete frame. If the first (empty) redraw
-		// already cleared the screen, re-reading it would capture that blank
-		// frame and hand the user exactly the emptiness this fallback exists to
-		// avoid, so the original snapshot is kept instead.
-		window.redrawForwardingFallbackHistory = refreshed
-		window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
+	// Snapshot the pre-resize screen for every redraw pause, not just
+	// deferred window-switch replays: restore and theme redraws start the
+	// same transaction directly and hit the same coalesced-SIGWINCH failure.
+	// The clone is the whole snapshot; the frame bytes are rendered from it
+	// only if the resume actually needs the fallback, which the common
+	// (child repainted) case never does. Only a screen with visible content
+	// is worth retaining: a snapshot taken in the instant after the child
+	// cleared but before it repainted would hand the user exactly the
+	// emptiness this fallback exists to avoid. A frame that paints only a
+	// background color counts as visible: it is the picture the user saw.
+	// A pause restarted while another is in flight likewise keeps the
+	// original snapshot when the first (empty) redraw already cleared the
+	// screen.
+	if screen := window.screenLocked(); screen.HasVisibleContent() {
+		window.redrawForwardingFallbackScreen = screen.Clone()
+	} else if !window.redrawForwardingPaused {
+		window.redrawForwardingFallbackScreen = nil
 	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
@@ -10200,17 +10188,17 @@ func (s *muxServer) resumePausedAttachForwarding(
 		// foreground replay clears the client, so the update needs its base
 		// frame restored first. Paint the retained history and any delta inside
 		// one synchronized transaction so the user sees a complete frame.
-		fallbackReplay := s.foregroundHistoryFallbackReplayLocked(
-			window,
-			window.redrawForwardingFallbackHistory,
-		)
-		// Substitute only a frame that actually paints something. An
-		// escape-only snapshot (a clear the child had just emitted) is long
-		// enough to look like a frame while rendering exactly the blank screen
-		// this fallback exists to prevent.
-		if terminalOutputHasVisibleContent(
-			window.redrawForwardingFallbackHistory,
-		) && len(fallbackReplay) > 0 {
+		// The pause retained the screen only when it had something to paint,
+		// so an escape-only snapshot (a clear the child had just emitted) never
+		// substitutes for the redraw.
+		var fallbackReplay []byte
+		if window.redrawForwardingFallbackScreen != nil {
+			fallbackReplay = s.foregroundHistoryFallbackReplayLocked(
+				window,
+				window.redrawForwardingFallbackScreen.RenderFrame(),
+			)
+		}
+		if len(fallbackReplay) > 0 {
 			if visibleRedraw {
 				// A normal TUI update (for example a spinner tick) can arrive
 				// while the child coalesces both resize notifications. It relies
@@ -10230,12 +10218,9 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// to finish the frame with; the queries are re-attached to the
 					// primary and failover deliveries exactly as the other branches
 					// do, so the response wait still has something to wait for.
-					frame := fallbackReplay
-					if window.redrawForwardingFallbackScreen != nil {
-						screen := window.redrawForwardingFallbackScreen.Clone()
-						screen.Write(secondaryBuffered)
-						frame = s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
-					}
+					screen := window.redrawForwardingFallbackScreen.Clone()
+					screen.Write(secondaryBuffered)
+					frame := s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
 					buffered = append(append([]byte(nil), frame...), queryData...)
 					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 					secondaryBuffered = append([]byte(nil), frame...)
@@ -10290,141 +10275,29 @@ func (s *muxServer) resumePausedAttachForwarding(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
-	if len(queryData) > 0 {
-		type queryFallback struct {
-			client              *attachClient
-			queryCompletion     <-chan error
-			queryGate           *attachWriteGate
-			secondaryOutputGate *attachWriteGate
-		}
-		responseCount := terminalQueryResponseCount(queryData)
-		initialOutput := primaryOutput
-		if primaryNeedsFailover {
-			initialOutput = failoverOutput
-		}
-		var primaryCompletion <-chan error
-		primaryQueued := false
-		if primaryClient != nil {
-			primaryCompletion, primaryQueued =
-				primaryClient.enqueueWrite(
-					initialOutput,
-					true,
-					windowID,
-					responseCount,
-					nil,
-				)
-		}
-		sortedClients := append([]*attachClient(nil), clients...)
-		sort.Slice(sortedClients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(
-				sortedClients[i],
-				sortedClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(sortedClients))
-		for _, client := range sortedClients {
-			if client == primaryClient {
-				continue
-			}
-			queryGate := &attachWriteGate{done: make(chan struct{})}
-			queryCompletion, queued :=
-				client.enqueueWrite(
-					failoverOutput,
-					true,
-					windowID,
-					responseCount,
-					queryGate,
-				)
-			if !queued {
-				continue
-			}
-			fallback := queryFallback{
-				client:          client,
-				queryCompletion: queryCompletion,
-				queryGate:       queryGate,
-			}
-			if len(secondaryOutput) > 0 {
-				secondaryGate := &attachWriteGate{done: make(chan struct{})}
-				if _, queued := client.enqueueWrite(
-					secondaryOutput,
-					false,
-					"",
-					0,
-					secondaryGate,
-				); queued {
-					fallback.secondaryOutputGate = secondaryGate
-				}
-			}
-			fallbacks = append(fallbacks, fallback)
-		}
-		s.attachMu.Unlock()
-		primaryDelivered := primaryQueued &&
-			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
-			tryFallback := !primaryDelivered
-			fallback.queryGate.deliver.Store(tryFallback)
-			close(fallback.queryGate.done)
-			if tryFallback &&
-				fallback.client.waitForWrite(fallback.queryCompletion) {
-				primaryDelivered = true
-			}
-			if fallback.secondaryOutputGate != nil {
-				fallback.secondaryOutputGate.deliver.Store(!tryFallback)
-				close(fallback.secondaryOutputGate.done)
-			}
-		}
-		if !primaryDelivered {
-			s.redeliverTerminalQueries(
-				windowID,
-				queryData,
-				nil,
-				nil,
-			)
-		}
-		if refreshPendingFocus || refreshPendingResize {
-			go s.refreshPendingClientViewport(
-				refreshPendingFocus,
-				refreshPendingResize,
-			)
-		}
-		return
+	initialOutput := primaryOutput
+	if primaryNeedsFailover {
+		initialOutput = failoverOutput
 	}
-	if primaryClient != nil {
-		_, queued := primaryClient.enqueue(primaryOutput, false)
-		if queued {
-			deliveredPrimary = primaryClient
-		}
-	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			_, queued := client.enqueue(failoverOutput, false)
-			if !queued {
-				continue
-			}
-			deliveredPrimary = client
-			break
-		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary || len(secondaryOutput) == 0 {
-			continue
-		}
-		_, _ = client.enqueue(secondaryOutput, false)
-	}
+	sort.Slice(clients, func(i int, j int) bool {
+		return moreRecentlyFocusedAttachClient(clients[i], clients[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		initialOutput,
+		clients,
+		queryData,
+		func(*attachClient) ([]byte, []byte) {
+			return failoverOutput, secondaryOutput
+		},
+	)
 	if refreshPendingFocus || refreshPendingResize {
 		go s.refreshPendingClientViewport(
 			refreshPendingFocus,
 			refreshPendingResize,
 		)
 	}
-	s.attachMu.Unlock()
 }
 
 func (w *muxWindow) foregroundProcessGroupLocked() int {
@@ -10451,35 +10324,14 @@ func (w *muxWindow) modeReplayForAttachedTerminalLocked() []byte {
 	return replay
 }
 
-func (s *muxServer) activeReplayLocked() []byte {
-	replay, _ := s.activeReplayWithImageFollowUpLocked()
-	return replay
-}
-
-// activeReplayWithImageFollowUpLocked is activeReplayLocked plus the separate
-// store-only Kitty transmissions to enqueue behind that replay.
+// activeReplayWithImageFollowUpLocked returns the active window's reattach
+// replay plus the separate store-only Kitty transmissions to enqueue behind it.
 func (s *muxServer) activeReplayWithImageFollowUpLocked() ([]byte, []byte) {
 	window := s.windowByIDLocked(s.activeID)
 	if window == nil || window.closed {
 		return nil, nil
 	}
 	return s.replayBytesWithImageFollowUpLocked(window, nil)
-}
-
-func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
-	return replay
-}
-
-// replayBytesLockedWithSkip builds the reattach replay, omitting retained Kitty
-// images whose id/signature the client reports already holding in clientHas
-// (nil replays every retained image, as a fresh attach does).
-func (s *muxServer) replayBytesLockedWithSkip(
-	window *muxWindow,
-	clientHas map[string]uint32,
-) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, clientHas)
-	return replay
 }
 
 // replayBytesWithImageFollowUpLocked returns the reattach replay plus the
@@ -10565,7 +10417,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	}
 	w.redrawForwardingPaused = false
 	w.redrawForwardingReplay = nil
-	w.redrawForwardingFallbackHistory = nil
 	w.redrawForwardingFallbackScreen = nil
 	w.redrawForwardingBuffer = nil
 	w.redrawForwardingFailoverBuffer = nil
@@ -10574,32 +10425,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
-}
-
-// foregroundHistoryFallbackHistoryLocked snapshots the frame bytes to fall back
-// to if the redraw about to be triggered produces nothing. The result must be a
-// copy: these helpers can return slices aliasing window.history, which
-// appendHistoryLocked rewrites in place as output arrives during the pause,
-// which would mutate the snapshot into the very redraw it exists to recover
-// from.
-func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
-	window *muxWindow,
-) []byte {
-	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
-		return nil
-	}
-	// This is a TUI frame recovery. A tail of the raw byte history is not a
-	// frame: an application that streams incremental updates evicts its last
-	// full repaint from that tail, and replaying the remainder onto a cleared
-	// client paints only the rows the updates touched. Render the complete
-	// picture from the screen model instead, which reproduces every visible
-	// cell, the cursor and the main-screen scrollback regardless of how the
-	// application drew them.
-	screen := window.screenLocked()
-	if !screen.HasVisibleContent() {
-		return nil
-	}
-	return screen.RenderFrame()
 }
 
 // foregroundHistoryFallbackReplayLocked renders the snapshot taken when the
@@ -10953,7 +10778,7 @@ func containsString(values []string, value string) bool {
 	return false
 }
 
-func (s *muxServer) writeAttach(conn net.Conn, data []byte) {
+func (s *muxServer) writeAttach(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -11102,62 +10927,93 @@ func (s *muxServer) writeAttachOutputIfActive(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
+	data := primaryData
+	if primaryClient != nil &&
+		primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		data = queryData
+	}
+	// Every client can answer a query, but only the ones attached before this
+	// output was produced are missing it.
+	fallbacks := clients
 	if len(queryData) > 0 {
-		responseCount := terminalQueryResponseCount(queryData)
+		fallbacks = allClients
+	}
+	sort.Slice(fallbacks, func(i int, j int) bool {
+		iCurrent := fallbacks[i].conn == currentPrimary
+		jCurrent := fallbacks[j].conn == currentPrimary
+		if iCurrent != jCurrent {
+			return iCurrent
+		}
+		return moreRecentlyFocusedAttachClient(fallbacks[i], fallbacks[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		data,
+		fallbacks,
+		queryData,
+		func(client *attachClient) ([]byte, []byte) {
+			if client.sequence > maxAttachSequence ||
+				client.suppressesReplayedOutput(windowID, outputGeneration) {
+				return queryData, nil
+			}
+			return failoverPrimaryData, secondaryData
+		},
+	)
+}
+
+// deliverWithQueryFallback hands one window's output to the attached clients
+// so that the terminal queries in queryData are answered by exactly one of
+// them. primaryClient (nil once it is gone) gets primaryData; when it is
+// absent or its write fails, the first client in fallbacks (in preference
+// order; primaryClient itself is skipped) whose failover write succeeds takes
+// over, and every other client gets its secondary output. fallbackData picks
+// both per client; an empty failover means the client already holds the
+// output and counts as delivered without a write.
+//
+// With queries pending, the primary's write is awaited before any fallback
+// is released: the conditional query writes are queued behind gates while
+// attachMu is still held, which fixes their order ahead of later output,
+// and the gates are flipped once the primary's outcome is known. Called with
+// s.attachMu held; it is released before returning.
+func (s *muxServer) deliverWithQueryFallback(
+	windowID string,
+	primaryClient *attachClient,
+	primaryData []byte,
+	fallbacks []*attachClient,
+	queryData []byte,
+	fallbackData func(client *attachClient) (failover []byte, secondary []byte),
+) {
+	if len(queryData) > 0 {
 		type queryFallback struct {
 			client              *attachClient
 			queryCompletion     <-chan error
 			queryGate           *attachWriteGate
 			secondaryOutputGate *attachWriteGate
 		}
+		responseCount := terminalQueryResponseCount(queryData)
 		var primaryCompletion <-chan error
 		primaryQueued := false
 		if primaryClient != nil {
-			data := primaryData
-			if primaryClient.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			) {
-				data = queryData
-			}
 			primaryCompletion, primaryQueued =
 				primaryClient.enqueueWrite(
-					data,
+					primaryData,
 					true,
 					windowID,
 					responseCount,
 					nil,
 				)
 		}
-		sort.Slice(allClients, func(i int, j int) bool {
-			iCurrent := allClients[i].conn == currentPrimary
-			jCurrent := allClients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(
-				allClients[i],
-				allClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(allClients))
-		for _, client := range allClients {
+		gated := make([]queryFallback, 0, len(fallbacks))
+		for _, client := range fallbacks {
 			if client == primaryClient {
 				continue
 			}
-			suppressesOutput := client.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			)
-			data := queryData
-			if client.sequence <= maxAttachSequence && !suppressesOutput {
-				data = failoverPrimaryData
-			}
+			failover, secondary := fallbackData(client)
 			queryGate := &attachWriteGate{done: make(chan struct{})}
 			queryCompletion, queued :=
 				client.enqueueWrite(
-					data,
+					failover,
 					true,
 					windowID,
 					responseCount,
@@ -11171,12 +11027,10 @@ func (s *muxServer) writeAttachOutputIfActive(
 				queryCompletion: queryCompletion,
 				queryGate:       queryGate,
 			}
-			if client.sequence <= maxAttachSequence &&
-				len(secondaryData) > 0 &&
-				!suppressesOutput {
+			if len(secondary) > 0 {
 				secondaryGate := &attachWriteGate{done: make(chan struct{})}
 				if _, queued := client.enqueueWrite(
-					secondaryData,
+					secondary,
 					false,
 					"",
 					0,
@@ -11185,13 +11039,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 					fallback.secondaryOutputGate = secondaryGate
 				}
 			}
-			fallbacks = append(fallbacks, fallback)
+			gated = append(gated, fallback)
 		}
 		s.attachMu.Unlock()
-
 		primaryDelivered := primaryQueued &&
 			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
+		for _, fallback := range gated {
 			tryFallback := !primaryDelivered
 			fallback.queryGate.deliver.Store(tryFallback)
 			close(fallback.queryGate.done)
@@ -11214,47 +11067,31 @@ func (s *muxServer) writeAttachOutputIfActive(
 		}
 		return
 	}
+	var deliveredPrimary *attachClient
 	if primaryClient != nil {
-		if primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		if _, queued := primaryClient.enqueue(primaryData, false); queued {
 			deliveredPrimary = primaryClient
-		} else {
-			_, queued := primaryClient.enqueue(primaryData, false)
-			if queued {
-				deliveredPrimary = primaryClient
-			}
 		}
 	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			iCurrent := clients[i].conn == currentPrimary
-			jCurrent := clients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			if client.suppressesReplayedOutput(windowID, outputGeneration) {
-				deliveredPrimary = client
-				break
-			}
-			_, queued := client.enqueue(failoverPrimaryData, false)
-			if queued {
-				deliveredPrimary = client
-				break
-			}
+	for _, client := range fallbacks {
+		if deliveredPrimary != nil {
+			break
 		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary ||
-			len(secondaryData) == 0 ||
-			client.suppressesReplayedOutput(windowID, outputGeneration) {
+		if client == primaryClient {
 			continue
 		}
-		_, _ = client.enqueue(secondaryData, false)
+		failover, _ := fallbackData(client)
+		if _, queued := client.enqueue(failover, false); queued {
+			deliveredPrimary = client
+		}
+	}
+	for _, client := range fallbacks {
+		if client == deliveredPrimary {
+			continue
+		}
+		if _, secondary := fallbackData(client); len(secondary) > 0 {
+			_, _ = client.enqueue(secondary, false)
+		}
 	}
 	s.attachMu.Unlock()
 }
@@ -13120,25 +12957,6 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 	}.isGround()
 }
 
-// stripLocallyAnsweredThemeQueries removes OSC 10/11/12/17/19 background-color
-// queries and OSC 4 palette queries from chunk when MonkeyMux can answer them
-// locally from hint. The daemon already writes the cached responses directly
-// to the window PTY in handleWindowOutput, so forwarding the same queries to
-// the SSH client would produce a duplicate reply. That duplicate would travel
-// back through the attach socket as keyboard input and surface inside the
-// active TUI as literal text (the user-visible "spew" bug). Queries we cannot
-// answer (no cached response for every queried key) are left in place so the
-// client can still reply.
-func stripLocallyAnsweredThemeQueries(chunk []byte, hint []byte) []byte {
-	window := &muxWindow{}
-	output := window.stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
-	if len(window.attachOscBuffer) == 0 {
-		return output
-	}
-	output = append(output, window.attachOscBuffer...)
-	return output
-}
-
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
 		return chunk
@@ -13332,6 +13150,18 @@ func terminalQueryResponseCount(data []byte) int {
 	return count
 }
 
+// dcsCapabilityCount counts the ";"-separated capability names in an XTGETTCAP
+// query or reply payload after its prefix.
+func dcsCapabilityCount(fields []byte) int {
+	count := 0
+	for _, capability := range bytes.Split(fields, []byte{';'}) {
+		if len(capability) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func terminalQuerySequenceResponseCount(sequence []byte) int {
 	payloadStart := 0
 	osc := false
@@ -13369,16 +13199,7 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 		if !bytes.HasPrefix(payload, []byte("+q")) {
 			return 1
 		}
-		count := 0
-		for _, capability := range bytes.Split(payload[2:], []byte{';'}) {
-			if len(capability) > 0 {
-				count++
-			}
-		}
-		if count > 0 {
-			return count
-		}
-		return 0
+		return dcsCapabilityCount(payload[2:])
 	}
 	code, value, ok := strings.Cut(
 		string(payload),
@@ -13426,13 +13247,7 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 		!bytes.HasPrefix(payload, []byte("1+r")) {
 		return 1
 	}
-	count := 0
-	for _, capability := range bytes.Split(payload[3:], []byte{';'}) {
-		if len(capability) > 0 {
-			count++
-		}
-	}
-	if count > 0 {
+	if count := dcsCapabilityCount(payload[3:]); count > 0 {
 		return count
 	}
 	return 1
@@ -14109,24 +13924,18 @@ func computeKittyImageGlobalBudgetBytes() int {
 	return budget
 }
 
-// kittyImageReplayLocked returns the most-recent retained image transmissions,
-// bounded by count and bytes, so a reattaching client repopulates the images
-// most likely still on screen without decoding many megabytes on its UI thread.
-// Older retained transmissions are omitted; the foreground app re-emits them on
-// its next redraw if they are still visible.
+// kittyImageReplaySelectionLocked returns the most-recent retained image
+// transmissions, bounded by count and bytes, so a reattaching client
+// repopulates the images most likely still on screen without decoding many
+// megabytes on its UI thread. Older retained transmissions are omitted; the
+// foreground app re-emits them on its next redraw if they are still visible.
+// The set of roots it emitted lets a caller that needs more images (a rendered
+// frame whose placeholder cells point at older roots) skip the ones covered.
 //
 // Images whose id maps to a matching signature in clientHas are omitted: the
 // client already holds identical bytes and would re-parse (then discard) them,
 // so re-sending only adds switch latency. The id still counts against the caps
 // so the "most recent N" window is unchanged whether or not the client has them.
-func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
-	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
-	return out
-}
-
-// kittyImageReplaySelectionLocked is kittyImageReplayLocked plus the set of
-// roots it emitted, so a caller that needs more images (a rendered frame whose
-// placeholder cells point at older roots) can skip the ones already covered.
 func (w *muxWindow) kittyImageReplaySelectionLocked(
 	clientHas map[string]uint32,
 ) ([]byte, map[string]struct{}) {
@@ -14140,14 +13949,17 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		return w.kittyImageSeq[candidates[i]] > w.kittyImageSeq[candidates[j]]
 	})
 	selected := make([]string, 0, maxReplayedKittyImages)
+	numberReplays := make(map[string][]byte, maxReplayedKittyImages)
 	total := 0
 	for _, id := range candidates {
-		imageBytes := len(w.kittyImages[id]) +
-			len(w.kittyImageNumberReplayLocked(id)) +
-			len(w.kittyImageAnimations[id])
 		if len(selected) >= maxReplayedKittyImages {
 			break
 		}
+		numberReplay := w.kittyImageNumberReplayLocked(id)
+		numberReplays[id] = numberReplay
+		imageBytes := len(w.kittyImages[id]) +
+			len(numberReplay) +
+			len(w.kittyImageAnimations[id])
 		if imageBytes > maxReplayedKittyImageBytes ||
 			total+imageBytes > maxReplayedKittyImageBytes {
 			continue
@@ -14176,7 +13988,7 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		if !clientHasRoot {
 			out = append(out, w.kittyImageRootReplayLocked(id)...)
 		}
-		out = append(out, w.kittyImageNumberReplayLocked(id)...)
+		out = append(out, numberReplays[id]...)
 		out = append(out, w.kittyImageAnimations[id]...)
 	}
 	return out, selectedSet
@@ -14446,20 +14258,15 @@ func decodeLenientBase64(payload []byte) []byte {
 	return out
 }
 
-// kittyTransmissionPayloadSignature returns the FNV-1a-32 signature of the
-// base64-decoded payload of a stored Kitty transmission, matching the client's
-// terminalGraphicsSourceSignature over the same bytes. Returns 0 when there is
-// no payload, which never matches a client-reported signature.
-//
-// A transmission larger than a single APC is split into m=1 continuation chunks
-// (Kitty caps each APC payload at 4096 base64 bytes), and a stored image buffer
-// concatenates every chunk's full APC. The client appends each chunk's decoded
-// payload into one buffer before hashing, so the signature MUST cover the whole
-// concatenated payload — hashing only the first chunk would never match a
-// multi-chunk image (i.e. every non-trivial screenshot), defeating the switch
-// replay skip and forcing the whole image set to be re-sent on every switch.
 func kittyTransmissionPayloadSignature(buf []byte) uint32 {
-	var payload []byte
+	// Every chunk's base64 body, padding trimmed. The decoded bytes are a
+	// plain 6-bit-per-character bit stream when no other non-base64 byte is
+	// present, which is how Kitty clients emit them, so the sampled bytes
+	// are read straight out of the bodies instead of decoding the whole
+	// image. Any stray byte (whitespace) falls back to the lenient decode.
+	var bodies [][]byte
+	total := 0
+	direct := true
 	for i := 0; i+2 < len(buf); {
 		if buf[i] != '\x1b' || buf[i+1] != '_' || buf[i+2] != 'G' {
 			i++
@@ -14478,21 +14285,55 @@ func kittyTransmissionPayloadSignature(buf []byte) uint32 {
 			if bel := bytes.IndexByte(body, '\a'); bel >= 0 {
 				body = body[:bel]
 			}
-			payload = append(payload, decodeLenientBase64(body)...)
+			body = bytes.TrimRight(body, "=")
+			for _, c := range body {
+				if base64DecodeValue[c] < 0 {
+					direct = false
+					break
+				}
+			}
+			bodies = append(bodies, body)
+			total += len(body) * 6 / 8
 		}
 		i = apcEnd
 	}
-	if len(payload) == 0 {
+	if !direct {
+		var payload []byte
+		for _, body := range bodies {
+			payload = append(payload, decodeLenientBase64(body)...)
+		}
+		return fnv32ImageSignature(payload)
+	}
+	if total == 0 {
 		return 0
 	}
-	return fnv32ImageSignature(payload)
+	body, offset := 0, 0
+	return fnv32SampledSignature(total, func(index int) byte {
+		// Samples are requested in increasing order, so the chunk cursor
+		// only ever moves forward.
+		for index-offset >= len(bodies[body])*6/8 {
+			offset += len(bodies[body]) * 6 / 8
+			body++
+		}
+		bit := (index - offset) * 8
+		chars := bodies[body]
+		pair := uint32(base64DecodeValue[chars[bit/6]])<<6 |
+			uint32(base64DecodeValue[chars[bit/6+1]])
+		return byte(pair >> (4 - uint(bit%6)))
+	})
 }
 
 // fnv32ImageSignature mirrors the client's terminalGraphicsSourceSignature: an
 // FNV-1a-32 over the exact length (4 little-endian bytes) plus an evenly-spaced
 // sample of at most ~4096 bytes. Returns a non-zero value for non-empty input.
 func fnv32ImageSignature(b []byte) uint32 {
-	if len(b) == 0 {
+	return fnv32SampledSignature(len(b), func(index int) byte { return b[index] })
+}
+
+// fnv32SampledSignature is fnv32ImageSignature over a payload of the given
+// length read through byteAt, which is called with increasing indexes.
+func fnv32SampledSignature(length int, byteAt func(index int) byte) uint32 {
+	if length == 0 {
 		return 0
 	}
 	const (
@@ -14500,17 +14341,17 @@ func fnv32ImageSignature(b []byte) uint32 {
 		fnvPrime  = uint32(0x01000193)
 	)
 	hash := fnvOffset
-	length := len(b)
+	remaining := length
 	for i := 0; i < 4; i++ {
-		hash = (hash ^ uint32(length&0xFF)) * fnvPrime
-		length >>= 8
+		hash = (hash ^ uint32(remaining&0xFF)) * fnvPrime
+		remaining >>= 8
 	}
 	step := 1
-	if len(b) > 4096 {
-		step = len(b) / 4096
+	if length > 4096 {
+		step = length / 4096
 	}
-	for i := 0; i < len(b); i += step {
-		hash = (hash ^ uint32(b[i])) * fnvPrime
+	for i := 0; i < length; i += step {
+		hash = (hash ^ uint32(byteAt(i))) * fnvPrime
 	}
 	if hash == 0 {
 		return 1
@@ -14655,120 +14496,114 @@ func terminalQuerySequenceAt(
 	return terminalQuerySequenceAtWithUtf8Prefix(data, index, 0)
 }
 
+// controlString locates one ESC- or C1-introduced control string: kind is the
+// 7-bit introducer ('[' CSI, ']' OSC, 'P' DCS, '_' APC; 0 for a bare trailing
+// ESC), data[payloadStart:payloadEnd] is the payload (the whole sequence for a
+// CSI) and end is the index just past the terminator. incomplete reports a
+// string whose terminator has not arrived yet.
+type controlString struct {
+	kind         byte
+	payloadStart int
+	payloadEnd   int
+	end          int
+	incomplete   bool
+}
+
+// controlStringAt recognises the control string starting at index. It reports
+// false for any other byte, including a continuation byte that belongs to the
+// leading UTF-8 prefix carried over from the previous chunk and a C1 byte that
+// continues a multi-byte character.
+func controlStringAt(
+	data []byte,
+	index int,
+	leadingUtf8Prefix int,
+) (controlString, bool) {
+	if index < 0 || index >= len(data) {
+		return controlString{}, false
+	}
+	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
+		return controlString{}, false
+	}
+	introducer := data[index]
+	payloadStart := index + 1
+	if introducer == '\x1b' {
+		if index+1 >= len(data) {
+			return controlString{incomplete: true}, true
+		}
+		switch data[index+1] {
+		case '[', ']', 'P', '_':
+			introducer = data[index+1]
+			payloadStart = index + 2
+		default:
+			return controlString{}, false
+		}
+	} else if isUtf8ContinuationAt(data, index) {
+		return controlString{}, false
+	} else {
+		switch introducer {
+		case 0x9b:
+			introducer = '['
+		case 0x9d:
+			introducer = ']'
+		case 0x90:
+			introducer = 'P'
+		case 0x9f:
+			introducer = '_'
+		default:
+			return controlString{}, false
+		}
+	}
+	result := controlString{kind: introducer, payloadStart: payloadStart}
+	if introducer == '[' {
+		end := csiSequenceEnd(data, payloadStart)
+		if end < 0 {
+			result.incomplete = true
+			return result, true
+		}
+		result.payloadStart = index
+		result.payloadEnd = end + 1
+		result.end = end + 1
+		return result, true
+	}
+	findTerminator := findStringTerminator
+	if introducer == ']' {
+		findTerminator = findOscTerminator
+	}
+	end, terminatorLength, ok := findTerminator(data[payloadStart:])
+	if !ok {
+		result.incomplete = true
+		return result, true
+	}
+	result.payloadEnd = payloadStart + end
+	result.end = payloadStart + end + terminatorLength
+	return result, true
+}
+
 func terminalQuerySequenceAtWithUtf8Prefix(
 	data []byte,
 	index int,
 	leadingUtf8Prefix int,
 ) (int, bool, bool, bool) {
-	if index < 0 || index >= len(data) {
+	sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+	if !ok {
 		return -1, false, false, false
 	}
-	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
-		return -1, false, false, false
+	if sequence.incomplete {
+		return -1, false, true, true
 	}
-	introducer := data[index]
-	payloadStart := index + 1
-	escaped := false
-	if introducer == '\x1b' {
-		if index+1 >= len(data) {
-			return -1, false, true, true
-		}
-		escaped = true
-		introducer = data[index+1]
-		payloadStart = index + 2
-	} else if isUtf8ContinuationAt(data, index) {
-		return -1, false, false, false
-	}
-	switch introducer {
+	payload := data[sequence.payloadStart:sequence.payloadEnd]
+	query := false
+	switch sequence.kind {
 	case '[':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
-	case 0x9b:
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
+		query = isReplayUnsafeCsiQuery(payload)
 	case ']':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9d:
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeOscQuery(payload)
 	case 'P':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x90:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeDcsQuery(payload)
 	case '_':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9f:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	default:
-		return -1, false, false, false
+		query = isReplayUnsafeKittyQuery(payload)
 	}
+	return sequence.end, query, false, true
 }
 
 func leadingUtf8ContinuationPrefix(data []byte, remaining int) int {
@@ -15103,120 +14938,34 @@ func scanTerminalResponseInput(
 	}
 	var responseEnds []int
 	for index := 0; index < len(data); {
-		if index < leadingUtf8Prefix &&
-			data[index]&0xc0 == 0x80 {
+		sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+		if !ok {
 			return responseEnds, -1, 0, index
 		}
-		sequenceEnd := -1
+		if sequence.incomplete {
+			kind := sequence.kind
+			if kind == '[' {
+				kind = 0
+			}
+			return responseEnds, index, kind, len(data)
+		}
+		payload := data[sequence.payloadStart:sequence.payloadEnd]
 		isResponse := false
-		introducer := data[index]
-		payloadStart := index + 1
-		escaped := false
-		if introducer == '\x1b' {
-			if index+1 >= len(data) {
-				return responseEnds, index, 0, len(data)
-			}
-			escaped = true
-			introducer = data[index+1]
-			payloadStart = index + 2
-		}
-		switch introducer {
+		switch sequence.kind {
 		case '[':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
-		case 0x9b:
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
+			isResponse = isTerminalResponseCsi(payload)
 		case ']':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9d:
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseOsc(payload)
 		case 'P':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x90:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseDcs(payload)
 		case '_':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9f:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		default:
-			return responseEnds, -1, 0, index
+			isResponse = isTerminalResponseKitty(payload)
 		}
 		if !isResponse {
 			return responseEnds, -1, 0, index
 		}
-		responseEnds = append(responseEnds, sequenceEnd)
-		index = sequenceEnd
+		responseEnds = append(responseEnds, sequence.end)
+		index = sequence.end
 	}
 	return responseEnds, -1, 0, len(data)
 }
@@ -15377,6 +15126,17 @@ func terminalResponseNumericParams(value string) bool {
 	return true
 }
 
+// isTerminalColorOscCode reports the OSC codes whose "?" form queries the
+// terminal's palette, colors, or clipboard and whose reply carries the value.
+func isTerminalColorOscCode(code string) bool {
+	switch code {
+	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalResponseOsc(payload []byte) bool {
 	if len(payload) > 0 && (payload[0] == 'L' || payload[0] == 'l') {
 		return true
@@ -15385,12 +15145,7 @@ func isTerminalResponseOsc(payload []byte) bool {
 	if !ok || value == "?" {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isTerminalResponseDcs(payload []byte) bool {
@@ -15421,12 +15176,7 @@ func isReplayUnsafeOscQuery(payload []byte) bool {
 	if !ok || !strings.Contains(value, "?") {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isReplayUnsafeDcsQuery(payload []byte) bool {
@@ -15522,18 +15272,32 @@ func (w *muxWindow) agentToolLocked() string {
 	if tool := agentToolFromCommandName(w.currentCommandLocked()); tool != "" {
 		return tool
 	}
-	if tool := strings.TrimSpace(w.agentTool); tool != "" {
+	return agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
+}
+
+// agentToolFromRetainedMetadata identifies the agent from what a window
+// retains when no live command names it: the recorded tool, then the pane
+// title and window name unless the tool was confirmed to have retired.
+func agentToolFromRetainedMetadata(
+	agentTool string,
+	confirmed bool,
+	paneTitle string,
+	name string,
+) string {
+	if tool := strings.TrimSpace(agentTool); tool != "" {
 		return tool
 	}
 	// A restored retired agent is now a known shell, even if its retained
 	// title/name resembles another tool. Live commands still win above.
-	if w.agentToolConfirmed {
+	if confirmed {
 		return ""
 	}
-	if tool := agentToolFromTerminalTitle(w.paneTitle); tool != "" {
+	if tool := agentToolFromTerminalTitle(paneTitle); tool != "" {
 		return tool
 	}
-	return agentToolFromCommandName(w.name)
+	return agentToolFromCommandName(name)
 }
 
 func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
@@ -15586,10 +15350,9 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	pgrp := w.foregroundProcessGroupLocked()
 	pty, process := w.pty, w.proc
 	identity := w.broadcastIdentityLocked()
-	fallbackTool := (&muxWindow{
-		agentTool: w.agentTool, agentToolConfirmed: w.agentToolConfirmed,
-		paneTitle: w.paneTitle, name: w.name,
-	}).agentToolLocked()
+	fallbackTool := agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
 	sessionID := w.agentSessionID
 	sessionPath := w.agentSessionPath
 	bridgeID := w.nativeAcpBridgeID

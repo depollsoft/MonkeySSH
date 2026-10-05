@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -1416,12 +1417,11 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
 	server.mu.Lock()
-	window.redrawForwardingFallbackHistory =
-		server.foregroundHistoryFallbackHistoryLocked(window)
+	window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
 	fallback := string(
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
-			window.redrawForwardingFallbackHistory,
+			redrawFallbackHistory(window),
 		),
 	)
 	server.mu.Unlock()
@@ -4962,12 +4962,12 @@ func TestRestartedRedrawPauseKeepsOriginalFallback(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	first := string(window.redrawForwardingFallbackHistory)
+	first := string(redrawFallbackHistory(window))
 	// The first redraw produced only a clear, so the screen no longer holds a
 	// usable frame.
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2J"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(first, "oldest complete frame") {
@@ -5004,7 +5004,7 @@ func TestRestartedRedrawPauseRefreshesUsableFallback(t *testing.T) {
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2Jnewer complete frame"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(second, "newer complete frame") {
@@ -5070,7 +5070,7 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.redrawForwardingBuffer = []byte("buffered")
-	captured := len(window.redrawForwardingFallbackHistory)
+	captured := len(redrawFallbackHistory(window))
 	server.mu.Unlock()
 	if captured == 0 {
 		t.Fatal("pause captured no fallback history to release")
@@ -5080,12 +5080,12 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if window.redrawForwardingFallbackHistory != nil ||
+	if window.redrawForwardingFallbackScreen != nil ||
 		window.redrawForwardingBuffer != nil ||
 		window.redrawForwardingPaused {
 		t.Fatalf(
 			"closed window retained redraw state: history=%d buffer=%d paused=%v",
-			len(window.redrawForwardingFallbackHistory),
+			len(redrawFallbackHistory(window)),
 			len(window.redrawForwardingBuffer),
 			window.redrawForwardingPaused,
 		)
@@ -5177,13 +5177,13 @@ func TestRedrawFallbackSnapshotSurvivesHistoryRewrite(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	snapshot := string(window.redrawForwardingFallbackHistory)
+	snapshot := string(redrawFallbackHistory(window))
 	// Output landing while the pause is in flight rewrites the history buffer
 	// starting at index 0, over the bytes an aliased snapshot would point at.
 	window.appendHistoryLocked(
 		bytes.Repeat([]byte("x"), windowFullReplayHistoryLimitBytes),
 	)
-	after := string(window.redrawForwardingFallbackHistory)
+	after := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(snapshot, "last known tui screen") {
@@ -6960,7 +6960,7 @@ func TestActiveReplayIncludesWindowHistory(t *testing.T) {
 	server.mu.Lock()
 	replay := server.activeReplayLocked()
 	server.mu.Unlock()
-	server.writeAttach(attach, replay)
+	server.writeAttach(replay)
 
 	window := server.windows[0]
 	want := replayPrefixForTest(window) + "previous screen" +
@@ -8131,6 +8131,32 @@ func TestKittyTransmissionPayloadSignatureMatchesClientHash(t *testing.T) {
 	}
 }
 
+func TestKittyTransmissionPayloadSignatureSamplesWithoutDecoding(t *testing.T) {
+	// The direct read of the base64 bit stream must agree with the lenient
+	// decode for every chunk split and padding shape Kitty produces.
+	random := rand.New(rand.NewSource(7))
+	for _, size := range []int{1, 2, 3, 4, 5, 3071, 3072, 3073, 4096, 5000, 12289, 70000} {
+		raw := make([]byte, size)
+		random.Read(raw)
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		var buf []byte
+		for start := 0; start < len(encoded); start += 4096 {
+			end := start + 4096
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			more := "1"
+			if end == len(encoded) {
+				more = "0"
+			}
+			buf = append(buf, "\x1b_Ga=t,i=1,f=100,m="+more+";"+encoded[start:end]+"\x1b\\"...)
+		}
+		if got, want := kittyTransmissionPayloadSignature(buf), fnv32ImageSignature(raw); got != want {
+			t.Fatalf("size %d: signature = %d, want %d", size, got, want)
+		}
+	}
+}
+
 func TestGlobalKittyImageBudgetEvictsAcrossWindows(t *testing.T) {
 	saved := kittyImageGlobalBudgetBytes
 	defer func() { kittyImageGlobalBudgetBytes = saved }()
@@ -8427,7 +8453,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 	chunk := []byte("plain text without queries\x1b]2;Title\x07")
 	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8436,7 +8462,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 func TestStripLocallyAnsweredThemeQueriesIsNoopWithoutHint(t *testing.T) {
 	chunk := []byte("\x1b]11;?\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, nil)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, nil)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8449,7 +8475,7 @@ func TestStripLocallyAnsweredThemeQueriesStripsAnsweredQuery(t *testing.T) {
 			"\x1b]4;5;rgb:aaaa/bbbb/cccc\x1b\\",
 	)
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != "beforemiddleafter" {
 		t.Fatalf("got = %q, want %q", got, "beforemiddleafter")
 	}
@@ -8510,7 +8536,7 @@ func TestStripLocallyAnsweredThemeQueriesPreservesOsc8Hyperlinks(t *testing.T) {
 
 	want := "\x1b]8;;https://example.com/a\x07A\x1b]8;;\x07 " +
 		"\x1b]8;id=1;file:///tmp/x\x1b\\B\x1b]8;;\x1b\\"
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != want {
 		t.Fatalf("got = %q, want %q", got, want)
 	}
