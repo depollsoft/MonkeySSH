@@ -87,7 +87,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	// wrap prints and the row then paints over.
 	out = append(out, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l"...)
 	out = s.appendTabStops(out)
-	withScrollback = withScrollback && len(s.scrollback) > 0
+	withScrollback = withScrollback && s.scrollback.len() > 0
 	softWraps := s.renderedSoftWraps(g, withScrollback)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
@@ -98,14 +98,16 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		// last line's cells when its own wrap needed them.
 		var decoder vtLineDecoder
 		var prev []vtCell
-		for i, line := range s.scrollback {
+		history := s.scrollback.len()
+		for i := range history {
+			line := s.scrollback.at(i)
 			var cells []vtCell
 			switch {
-			case i > 0 && s.scrollbackWrapped[i]:
+			case i > 0 && line.wrapped:
 				if prev == nil {
-					prev = decoder.decode(s.scrollback[i-1], s.width)
+					prev = decoder.decode(s.scrollback.at(i-1).text, s.width)
 				}
-				cells = decoder.decode(line, s.width)
+				cells = decoder.decode(line.text, s.width)
 				out = appendVTSoftWrap(out, prev, cells, s.height > 1)
 				// The wrap scrolled this row in while the glyph it printed set
 				// the rendition, so the row may be filled with that background,
@@ -115,12 +117,12 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			out = append(out, line...)
+			out = append(out, line.text...)
 			prev = cells
 		}
 		if g.wrapped[0] {
 			if prev == nil {
-				prev = decoder.decode(s.scrollback[len(s.scrollback)-1], s.width)
+				prev = decoder.decode(s.scrollback.at(history-1).text, s.width)
 			}
 			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
 			// Erased for the same reason; the row is painted below.
@@ -216,8 +218,8 @@ func (s *terminalScreen) renderedSoftWraps(g *vtGrid, withScrollback bool) bool 
 	if !withScrollback {
 		return false
 	}
-	for _, wrapped := range s.scrollbackWrapped[min(1, len(s.scrollbackWrapped)):] {
-		if wrapped {
+	for i := 1; i < s.scrollback.len(); i++ {
+		if s.scrollback.at(i).wrapped {
 			return true
 		}
 	}

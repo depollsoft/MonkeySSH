@@ -60,8 +60,8 @@ func TestVTScreenKeyboardCycleKeepsInlineAgentAnchored(t *testing.T) {
 	if got := client.TextRows(); !slices.Equal(got, before) {
 		t.Fatalf("frame after the cycle:\nwant %q\ngot  %q", before, got)
 	}
-	if len(client.scrollback) != len(s.scrollback) || vtScrollbackText(client.scrollback[0]) != "line 1" {
-		t.Fatalf("frame scrollback: %d lines, want %d", len(client.scrollback), len(s.scrollback))
+	if client.scrollback.len() != s.scrollback.len() || vtScrollbackText(client.scrollback.at(0).text) != "line 1" {
+		t.Fatalf("frame scrollback: %d lines, want %d", client.scrollback.len(), s.scrollback.len())
 	}
 }
 
@@ -72,8 +72,8 @@ func TestVTScreenShrinkGivesUpEmptyRowsBelowCursorFirst(t *testing.T) {
 	if got := s.TextRows(); got[0] != "one" || got[2] != "three" || got[3] != "" {
 		t.Fatalf("shrink scrolled instead of dropping empty rows: %q", got)
 	}
-	if len(s.scrollback) != 0 {
-		t.Fatalf("empty rows below the cursor reached the scrollback: %d", len(s.scrollback))
+	if s.scrollback.len() != 0 {
+		t.Fatalf("empty rows below the cursor reached the scrollback: %d", s.scrollback.len())
 	}
 
 	// Written spaces are content, as in the client, so that row is kept and
@@ -84,16 +84,16 @@ func TestVTScreenShrinkGivesUpEmptyRowsBelowCursorFirst(t *testing.T) {
 	if got := s.TextRows(); got[0] != "two" {
 		t.Fatalf("shrink dropped a row of written spaces: %q", got)
 	}
-	if len(s.scrollback) != 1 || vtScrollbackText(s.scrollback[0]) != "one" {
-		t.Fatalf("scrollback: %d lines", len(s.scrollback))
+	if s.scrollback.len() != 1 || vtScrollbackText(s.scrollback.at(0).text) != "one" {
+		t.Fatalf("scrollback: %d lines", s.scrollback.len())
 	}
 }
 
 func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 	s := newTerminalScreen(12, 2)
 	s.Write([]byte("\x1b[31mred 界\x1b[0m\r\nplain\r\nlast"))
-	if len(s.scrollback) != 1 {
-		t.Fatalf("setup scrollback: %d", len(s.scrollback))
+	if s.scrollback.len() != 1 {
+		t.Fatalf("setup scrollback: %d", s.scrollback.len())
 	}
 	s.Resize(12, 3)
 	if got := s.TextRows(); got[0] != "red 界" || got[2] != "last" {
@@ -113,8 +113,8 @@ func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 	if got := s.TextRows(); got[0] != "ij" || got[1] != "x" {
 		t.Fatalf("narrow restore: %q", got)
 	}
-	if len(s.scrollback) != 2 || vtScrollbackText(s.scrollback[1]) != "efgh" || !s.main.wrapped[0] {
-		t.Fatalf("narrow restore scrollback: %d lines, wrapped %v", len(s.scrollback), s.main.wrapped)
+	if s.scrollback.len() != 2 || vtScrollbackText(s.scrollback.at(1).text) != "efgh" || !s.main.wrapped[0] {
+		t.Fatalf("narrow restore scrollback: %d lines, wrapped %v", s.scrollback.len(), s.main.wrapped)
 	}
 }
 
@@ -124,8 +124,8 @@ func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
 	s := newTerminalScreen(12, 2)
 	s.Write([]byte("ab   \r\n\x1b[44m\x1b[K\x1b[0m\r\nx\r\ny"))
-	if len(s.scrollback) != 2 {
-		t.Fatalf("setup scrollback: %d", len(s.scrollback))
+	if s.scrollback.len() != 2 {
+		t.Fatalf("setup scrollback: %d", s.scrollback.len())
 	}
 	vtRoundTrip(t, s)
 

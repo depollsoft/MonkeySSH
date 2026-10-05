@@ -30,14 +30,8 @@ type terminalScreen struct {
 	// recycled as the rows entering it, so scrolling allocates nothing.
 	scratchRows [][]vtCell
 
-	// scrollback holds main-screen lines that scrolled off the top, already
-	// rendered to escape sequences (attributes included, rendition left at
-	// default). Bytes are far cheaper than cell rows and are exactly what
-	// RenderFrame needs to emit. scrollbackWrapped parallels it: whether each
-	// line is the soft-wrapped continuation of the one before it.
-	scrollback        [][]byte
-	scrollbackWrapped []bool
-	scrollbackBytes   int
+	// scrollback holds main-screen lines that scrolled off the top.
+	scrollback vtScrollback
 
 	attrs      vtAttrs
 	top        int // scroll region, 0-based inclusive
@@ -142,6 +136,78 @@ func clampVTSize(width, height int) (int, int) {
 		}
 	}
 	return width, height
+}
+
+// vtScrollback holds scrolled-off lines, oldest first, in a ring, so evicting
+// the oldest line from a full history costs the same however long it is.
+type vtScrollback struct {
+	lines []vtScrollbackLine
+	head  int // index in lines of the oldest line
+	n     int
+	bytes int
+}
+
+// vtScrollbackLine is one line rendered to escape sequences (attributes
+// included, rendition left at default), far cheaper than cell rows and exactly
+// what RenderFrame emits, and whether it is the soft-wrapped continuation of
+// the line before it.
+type vtScrollbackLine struct {
+	text    []byte
+	wrapped bool
+}
+
+func (b *vtScrollback) len() int { return b.n }
+
+// at returns the i-th line, oldest first.
+func (b *vtScrollback) at(i int) *vtScrollbackLine {
+	return &b.lines[(b.head+i)%len(b.lines)]
+}
+
+func (b *vtScrollback) push(line vtScrollbackLine) {
+	if b.n == len(b.lines) {
+		grown := make([]vtScrollbackLine, max(16, 2*b.n))
+		for i := range b.n {
+			grown[i] = *b.at(i)
+		}
+		b.lines, b.head = grown, 0
+	}
+	b.n++
+	*b.at(b.n - 1) = line
+	b.bytes += len(line.text)
+}
+
+// popFront evicts the oldest line.
+func (b *vtScrollback) popFront() {
+	line := b.at(0)
+	b.bytes -= len(line.text)
+	*line = vtScrollbackLine{}
+	b.head = (b.head + 1) % len(b.lines)
+	b.n--
+}
+
+// popBack removes and returns the newest line.
+func (b *vtScrollback) popBack() vtScrollbackLine {
+	line := b.at(b.n - 1)
+	out := *line
+	*line = vtScrollbackLine{}
+	b.n--
+	b.bytes -= len(out.text)
+	return out
+}
+
+// clear empties the ring, keeping its storage.
+func (b *vtScrollback) clear() {
+	clear(b.lines)
+	b.head, b.n, b.bytes = 0, 0, 0
+}
+
+// clone copies the ring; the rendered lines are never mutated and are shared.
+func (b *vtScrollback) clone() vtScrollback {
+	c := vtScrollback{lines: make([]vtScrollbackLine, b.n), n: b.n, bytes: b.bytes}
+	for i := range c.lines {
+		c.lines[i] = *b.at(i)
+	}
+	return c
 }
 
 type vtGrid struct {
@@ -316,9 +382,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.main = s.main.clone()
 	c.alt = s.alt.clone()
 	c.scratchRows = nil
-	// Rendered lines are never mutated, so the clone may share them.
-	c.scrollback = append([][]byte(nil), s.scrollback...)
-	c.scrollbackWrapped = append([]bool(nil), s.scrollbackWrapped...)
+	c.scrollback = s.scrollback.clone()
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
@@ -503,23 +567,20 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 			g.wrapped = g.wrapped[:last]
 		}
 	}
-	restore := min(height-len(g.rows), len(s.scrollback))
+	restore := min(height-len(g.rows), s.scrollback.len())
 	if restore <= 0 {
 		return
 	}
-	keep := len(s.scrollback) - restore
-	rows := make([][]vtCell, 0, height)
+	rows := make([][]vtCell, restore, height)
+	wrapped := make([]bool, restore, height)
 	var decoder vtLineDecoder
-	for i, line := range s.scrollback[keep:] {
-		rows = append(rows, decoder.decode(line, width))
-		s.scrollbackBytes -= len(line)
-		s.scrollback[keep+i] = nil
+	for i := restore - 1; i >= 0; i-- {
+		line := s.scrollback.popBack()
+		rows[i] = decoder.decode(line.text, width)
+		wrapped[i] = line.wrapped
 	}
-	wrapped := append(append(make([]bool, 0, height), s.scrollbackWrapped[keep:]...), g.wrapped...)
-	s.scrollback = s.scrollback[:keep]
-	s.scrollbackWrapped = s.scrollbackWrapped[:keep]
 	g.rows = append(rows, g.rows...)
-	g.wrapped = wrapped
+	g.wrapped = append(wrapped, g.wrapped...)
 	g.cursorRow += restore
 }
 
@@ -537,26 +598,25 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 // model on the next switch back erased the transcript lines above the prompt.
 func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsText bool) {
 	g := &s.main
-	lines := make([]vtLine, 0, len(s.scrollback)+len(g.rows))
+	history := s.scrollback.len()
+	lines := make([]vtLine, 0, history+len(g.rows))
 	var decoder vtLineDecoder
-	for i, text := range s.scrollback {
-		lines = append(lines, vtLine{cells: decoder.decode(text, s.width), wrapped: s.scrollbackWrapped[i]})
+	for i := range history {
+		line := s.scrollback.at(i)
+		lines = append(lines, vtLine{cells: decoder.decode(line.text, s.width), wrapped: line.wrapped})
 	}
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i]})
 	}
-	lines[len(s.scrollback)+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
+	lines[history+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
 	lines = vtReflow(lines, s.width, width)
 	for len(lines) < height {
 		lines = append(lines, vtLine{cells: newVTRow(width)})
 	}
 	screenStart := len(lines) - height
-	// The old lines are decoded into lines above; drop them from the backing
-	// array too, or rows a widening no longer needs stay allocated there.
-	clear(s.scrollback)
-	s.scrollback = s.scrollback[:0]
-	s.scrollbackWrapped = s.scrollbackWrapped[:0]
-	s.scrollbackBytes = 0
+	// The old lines are decoded into lines above; drop them from the ring's
+	// storage too, or rows a widening no longer needs stay allocated there.
+	s.scrollback.clear()
 	for _, line := range lines[:screenStart] {
 		s.appendScrollback(line.cells, line.wrapped)
 	}
@@ -669,33 +729,21 @@ func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool) {
 }
 
 func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool) {
-	line := renderVTCells(make([]byte, 0, 64), row)
-	s.scrollback = append(s.scrollback, line)
-	s.scrollbackWrapped = append(s.scrollbackWrapped, wrapped)
-	s.scrollbackBytes += len(line)
+	s.scrollback.push(vtScrollbackLine{text: renderVTCells(make([]byte, 0, 64), row), wrapped: wrapped})
 }
 
 // trimScrollback drops the oldest lines beyond the line and byte limits. The
 // oldest line left has nothing above it to continue, as in a client painted
 // from a frame, so it is no longer marked as wrapped.
 func (s *terminalScreen) trimScrollback() {
-	excess := 0
-	for len(s.scrollback)-excess > vtScrollbackLimit ||
-		(excess < len(s.scrollback) && s.scrollbackBytes > vtScrollbackByteLimit) {
-		s.scrollbackBytes -= len(s.scrollback[excess])
-		excess++
+	b := &s.scrollback
+	trimmed := false
+	for b.len() > vtScrollbackLimit || (b.len() > 0 && b.bytes > vtScrollbackByteLimit) {
+		b.popFront()
+		trimmed = true
 	}
-	if excess > 0 {
-		copy(s.scrollback, s.scrollback[excess:])
-		for i := len(s.scrollback) - excess; i < len(s.scrollback); i++ {
-			s.scrollback[i] = nil
-		}
-		s.scrollback = s.scrollback[:len(s.scrollback)-excess]
-		copy(s.scrollbackWrapped, s.scrollbackWrapped[excess:])
-		s.scrollbackWrapped = s.scrollbackWrapped[:len(s.scrollbackWrapped)-excess]
-		if len(s.scrollbackWrapped) > 0 {
-			s.scrollbackWrapped[0] = false
-		}
+	if trimmed && b.len() > 0 {
+		b.at(0).wrapped = false
 	}
 }
 
@@ -1877,9 +1925,7 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		// Only the main screen has a scrollback; on the alternate screen
 		// this erases nothing, as in the client's Buffer.clearScrollback.
 		if !s.altActive {
-			s.scrollback = nil
-			s.scrollbackWrapped = nil
-			s.scrollbackBytes = 0
+			s.scrollback = vtScrollback{}
 		}
 	}
 	g.pendingWrap = false
