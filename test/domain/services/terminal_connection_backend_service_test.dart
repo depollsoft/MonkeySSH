@@ -82,8 +82,7 @@ void main() {
 
       expect(backend.type, TerminalBackendType.direct);
       expect(backend.remoteMuxBackend, isNull);
-      expect(backend.capabilities.supportsWindows, isFalse);
-      expect(backend.capabilities.supportsClientCommands, isTrue);
+      expect(backend.capabilities.clientCommandsUseControlChannel, isFalse);
     });
 
     test('runs direct client commands through the SSH exec queue', () async {
@@ -92,7 +91,7 @@ void main() {
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
             commands.add(invocation.positionalArguments.single as String);
-            return _buildExecSession(stdout: 'ok');
+            return _buildExecSession(stdout: 'ok', exitCode: 3);
           });
       final service = TerminalConnectionBackendService(
         tmuxMultiplexer: _FakeRemoteMultiplexerService(),
@@ -106,8 +105,42 @@ void main() {
       );
 
       expect(result.output, 'ok');
-      expect(result.exitCode, isNull);
+      expect(result.exitCode, 3);
       expect(commands, contains(r"cd '/tmp/user'\''s repo' && ( printf hi )"));
+    });
+
+    testWidgets('stalled client command output releases the queue', (
+      tester,
+    ) async {
+      final client = _MockSshClient();
+      final exec = _MockSshExecSession();
+      final stdout = StreamController<Uint8List>();
+      when(() => exec.stdout).thenAnswer((_) => stdout.stream);
+      when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+      when(() => exec.done).thenAnswer((_) => Completer<void>().future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => exec);
+      final session = _buildSession(client);
+      final backend = TerminalConnectionBackendService(
+        tmuxMultiplexer: _FakeRemoteMultiplexerService(),
+        monkeyMuxService: _MockMonkeyMuxService(),
+      ).resolve(session);
+
+      // A command that opened fine but never exits used to hold its exec slot
+      // forever; MonkeyMux's run_command path already gave up after 25 s.
+      final failed = expectLater(
+        backend.runClientCommand('probe'),
+        throwsA(isA<TimeoutException>()),
+      );
+      await tester.pump();
+      stdout.add(Uint8List.fromList(utf8.encode('partial')));
+      await tester.pump(const Duration(seconds: 24));
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 1);
+      await tester.pump(const Duration(seconds: 1));
+      await failed;
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 0);
+      verify(exec.channel.destroy).called(1);
+      await stdout.close();
     });
 
     test('delegates tmux window operations through the multiplexer', () async {
@@ -139,7 +172,7 @@ void main() {
       await backend.killWindow(3, windowId: '@8');
 
       expect(backend.type, TerminalBackendType.tmux);
-      expect(backend.capabilities.supportsWindows, isTrue);
+      expect(backend.capabilities.clientCommandsUseControlChannel, isFalse);
       expect(context?.currentPath, '/repo');
       expect(
         tmuxMultiplexer.calls,
@@ -207,8 +240,13 @@ SshSession _buildSession(SSHClient client) => SshSession(
   ),
 );
 
-SSHSession _buildExecSession({String stdout = '', String stderr = ''}) {
+SSHSession _buildExecSession({
+  String stdout = '',
+  String stderr = '',
+  int? exitCode,
+}) {
   final exec = _MockSshExecSession();
+  when(() => exec.exitCode).thenReturn(exitCode);
   when(() => exec.stdout).thenAnswer(
     (_) => Stream<Uint8List>.fromIterable([
       Uint8List.fromList(utf8.encode(stdout)),

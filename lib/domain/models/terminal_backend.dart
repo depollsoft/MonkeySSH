@@ -29,16 +29,8 @@ extension TerminalBackendTypePresentation on TerminalBackendType {
 class TerminalBackendCapabilities {
   /// Creates a terminal backend capability set.
   const TerminalBackendCapabilities({
-    required this.supportsWindows,
-    required this.supportsClientCommands,
     required this.clientCommandsUseControlChannel,
   });
-
-  /// Whether the backend can list, create, select, and close windows.
-  final bool supportsWindows;
-
-  /// Whether the backend can run short-lived client command probes.
-  final bool supportsClientCommands;
 
   /// Whether client commands run through the backend control channel.
   final bool clientCommandsUseControlChannel;
@@ -58,4 +50,10 @@ class TerminalClientCommandResult {
 
   /// Whether the command reported a successful exit.
   bool get succeeded => exitCode == null || exitCode == 0;
+}
+
+/// Returns [value] trimmed, or null when it is null or blank.
+String? trimmedOrNull(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
 }
