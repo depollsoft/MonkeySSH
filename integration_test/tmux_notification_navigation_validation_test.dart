@@ -120,8 +120,6 @@ void main() {
           .thenAnswer((_) => Future<void>.value());
       when(() => monetizationService.canUseFeature(any()))
           .thenAnswer((_) async => true);
-      when(() => tmuxService.hasSessionOrThrow(session, tmuxSessionName))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(index: 1, id: '@8', name: 'shell', isActive: true),
@@ -141,8 +139,6 @@ void main() {
           windowId: targetWindowId,
         ),
       ).thenAnswer((_) async {});
-      when(() => tmuxService.hasForegroundClient(session, tmuxSessionName))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.watchWindowChanges(session, tmuxSessionName))
           .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
       when(() => tmuxService.prefetchInstalledAgentTools(session))

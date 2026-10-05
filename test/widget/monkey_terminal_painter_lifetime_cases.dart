@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:xterm/xterm.dart';
 
@@ -118,7 +119,7 @@ void registerMonkeyTerminalPainterLifetimeTests() {
       expect(painter.readableColorResolutions, 6);
 
       painter
-        ..theme = TerminalThemes.whiteOnBlack
+        ..theme = monkey_themes.TerminalThemes.defaultLightTheme.toXtermTheme()
         ..paintLineBackgrounds(canvas, Offset.zero, lines[0]);
       expect(
         painter.readableColorResolutions,

@@ -225,7 +225,11 @@ class MuxBadgeController extends ChangeNotifier {
       final nextWindows = currentWindows == null
           ? event.windows
           : applyTmuxWindowChangeEvent(currentWindows, event);
-      if (identical(nextWindows, currentWindows)) return;
+      if (identical(nextWindows, currentWindows) &&
+          this.sessionName == sessionName &&
+          this.muxBackend == muxBackend) {
+        return;
+      }
       _change(() {
         windows = nextWindows;
         this.sessionName = sessionName;
@@ -249,7 +253,11 @@ class MuxBadgeController extends ChangeNotifier {
     _tmuxRetryTimer?.cancel();
     _tmuxRetryTimer = null;
     final nextWindows = applyTmuxWindowChangeEvent(currentWindows, event);
-    if (identical(nextWindows, currentWindows)) return;
+    if (identical(nextWindows, currentWindows) &&
+        this.sessionName == sessionName &&
+        this.muxBackend == muxBackend) {
+      return;
+    }
     _change(() {
       windows = nextWindows;
       this.sessionName = sessionName;
@@ -305,7 +313,11 @@ class MuxBadgeController extends ChangeNotifier {
         _tmuxRetryTimer?.cancel();
         _tmuxRetryTimer = null;
       }
-      if (identical(windows, this.windows)) return;
+      if (identical(windows, this.windows) &&
+          this.sessionName == sessionName &&
+          this.muxBackend == muxBackend) {
+        return;
+      }
       _change(() {
         this.windows = windows;
         this.sessionName = sessionName;
