@@ -2143,12 +2143,31 @@ void main() {
       await tester.pumpAndSettle();
       final terminalView = find.byType(MonkeyTerminalView);
       final before = tester.widget<MonkeyTerminalView>(terminalView).textStyle;
+      tester.widget<MonkeyTerminalView>(terminalView).terminal.write('hello');
+      await tester.pump();
+      final renderTerminal = tester.renderObject<MonkeyRenderTerminal>(
+        find.descendant(
+          of: terminalView,
+          matching: find.byElementPredicate(
+            (element) =>
+                element is RenderObjectElement &&
+                element.renderObject is MonkeyRenderTerminal,
+          ),
+        ),
+      );
+      final cachedRuns = renderTerminal.runParagraphCacheLength;
+      expect(cachedRuns, greaterThan(0));
 
       final screenState = tester.state<State<TerminalScreen>>(
         find.byType(TerminalScreen),
       );
       // ignore: invalid_use_of_protected_member, cascade_invocations
       screenState.setState(() {});
+      // Stop before paint: a replaced style clears the cache in
+      // updateRenderObject (the view is built during layout), and the next
+      // paint would refill it.
+      await tester.pump(null, EnginePhase.layout);
+      expect(renderTerminal.runParagraphCacheLength, cachedRuns);
       await tester.pump();
 
       // The render object drops its glyph and style-run caches whenever it is

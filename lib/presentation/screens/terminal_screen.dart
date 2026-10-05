@@ -110,6 +110,7 @@ import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_paste_upload_strip.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_port_forwards_sheet.dart';
+import '../widgets/terminal_prompt_tail.dart' show scanPromptTail;
 import '../widgets/terminal_text_input_handler.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
@@ -126,12 +127,6 @@ import 'terminal/terminal_screen_policy.dart';
 export 'terminal/terminal_screen_policy.dart';
 
 part '../widgets/tmux_expandable_bar.dart';
-
-bool _isPromptReturnWhitespaceCodeUnit(int codeUnit) =>
-    codeUnit == 0x20 ||
-    codeUnit == 0x09 ||
-    codeUnit == 0x0A ||
-    codeUnit == 0x0D;
 
 /// Lets the pop transition back to home finish before the rating sheet.
 const _appReviewAfterLeavingDelay = Duration(milliseconds: 700);
@@ -173,11 +168,6 @@ final _storeDemoClipboardImageBytes = base64Decode(
 /// path inserted into the terminal, so the harness can wait instead of racing
 /// a fixed delay.
 Completer<void>? storeDemoImagePasteCompleter;
-
-bool _isPromptReturnAsciiLetterOrDigit(int codeUnit) =>
-    (codeUnit >= 0x30 && codeUnit <= 0x39) ||
-    (codeUnit >= 0x41 && codeUnit <= 0x5A) ||
-    (codeUnit >= 0x61 && codeUnit <= 0x7A);
 
 /// Whether a completed MonkeyMux startup should return to a usable login shell.
 @visibleForTesting
@@ -2037,9 +2027,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       return;
     }
-    final didThemeChange =
-        previousTheme != null &&
-        !_terminalThemesMatchForRemoteRefresh(previousTheme, theme);
+    final didThemeChange = previousTheme != null && previousTheme != theme;
     final plainTuiRefreshAllowed = _shouldRefreshPlainTerminalTui(
       targetSession,
     );
@@ -3302,22 +3290,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         refreshGeneration == _terminalThemeRefreshGeneration &&
         session.terminal == _terminal &&
         activeTheme != null &&
-        _terminalThemesMatchForRemoteRefresh(activeTheme, theme);
-  }
-
-  bool _terminalThemesMatchForRemoteRefresh(
-    TerminalThemeData previous,
-    TerminalThemeData next,
-  ) => terminalThemesMatchForColors(previous, next);
-
-  bool _sameTerminalTheme(
-    TerminalThemeData? previous,
-    TerminalThemeData? next,
-  ) {
-    if (previous == null || next == null) {
-      return previous == next;
-    }
-    return _terminalThemesMatchForRemoteRefresh(previous, next);
+        activeTheme == theme;
   }
 
   bool _sameTerminalThemeSettings(
@@ -4499,7 +4472,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
-    final didThemeChange = !_sameTerminalTheme(_currentTheme, theme);
+    final didThemeChange = _currentTheme != theme;
     DiagnosticsLogService.instance.info(
       'terminal.theme',
       'loaded',
@@ -4565,7 +4538,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       return false;
     }
-    if (!_sameTerminalTheme(_sessionThemeOverride, resolvedTheme)) {
+    if (_sessionThemeOverride != resolvedTheme) {
       setState(() => _sessionThemeOverride = resolvedTheme);
     } else {
       _sessionThemeOverride = resolvedTheme;
@@ -6151,48 +6124,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // Only the text after the last line break can be a prompt, so strip
     // escape sequences from that tail rather than the whole chunk.
     final lineBreak = max(data.lastIndexOf('\n'), data.lastIndexOf('\r'));
-    final sanitizedData = stripTerminalPromptEscapeSequences(
-      lineBreak < 0 ? data : data.substring(lineBreak + 1),
+    final tail = scanPromptTail(
+      stripTerminalPromptEscapeSequences(
+        lineBreak < 0 ? data : data.substring(lineBreak + 1),
+      ),
     );
-    if (sanitizedData.isEmpty) {
-      return false;
-    }
-
-    var index = sanitizedData.length - 1;
-    while (index >= 0) {
-      final codeUnit = sanitizedData.codeUnitAt(index);
-      if (codeUnit == 0x0A || codeUnit == 0x0D) {
-        return false;
-      }
-      if (!_isPromptReturnWhitespaceCodeUnit(codeUnit)) {
-        break;
-      }
-      index--;
-    }
-
-    if (index < 0) {
-      return false;
-    }
-
-    var visibleCodeUnitCount = 0;
-    while (index >= 0) {
-      final codeUnit = sanitizedData.codeUnitAt(index);
-      if (codeUnit == 0x0A || codeUnit == 0x0D) {
-        break;
-      }
-      if (!_isPromptReturnWhitespaceCodeUnit(codeUnit)) {
-        visibleCodeUnitCount++;
-        if (visibleCodeUnitCount > 4) {
-          return false;
-        }
-        if (_isPromptReturnAsciiLetterOrDigit(codeUnit)) {
-          return false;
-        }
-      }
-      index--;
-    }
-
-    return visibleCodeUnitCount > 0;
+    return !tail.endsAtLineStart && (tail.promptMarkerLength ?? 0) > 0;
   }
 
   /// Starts auto-start port forwards for this host.
@@ -11008,18 +10945,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  /// Disconnects [connectionId] and drops its mux caches. `ref` asserts once
-  /// the screen is unmounted, which these call sites can be after their
-  /// awaits, so the unmounted path uses the cached services instead.
-  Future<void> _disconnectConnection(int connectionId) async {
-    if (mounted) {
-      await disconnectConnectionAndClearMuxCaches(ref, connectionId);
-      return;
-    }
-    await _tmuxService.clearCache(connectionId);
-    await _monkeyMuxService.clearCache(connectionId);
-    await _sessionsNotifier?.disconnect(connectionId);
-  }
+  /// Disconnects [connectionId] and drops its mux caches. These call sites
+  /// can run after the screen is unmounted, when `ref` asserts, so they use
+  /// the cached services. [_sessionsNotifier] is set before any connection id.
+  Future<void> _disconnectConnection(int connectionId) =>
+      disconnectAndClearMuxCaches(
+        connectionId,
+        tmuxService: _tmuxService,
+        monkeyMuxService: _monkeyMuxService,
+        sessions:
+            _sessionsNotifier ?? ref.read(activeSessionsProvider.notifier),
+      );
 
   Future<void> _cleanupUnexpectedDisconnect(
     int connectionId, {
@@ -11447,7 +11383,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // Keep the user-selected theme as the session base. Remote OSC color
     // setters are applied only to the session's effective terminal theme.
     final configuredTerminalTheme = _resolveEffectiveTerminalTheme();
-    if (!_sameTerminalTheme(configuredTerminalTheme, _lastBuildAppliedTheme)) {
+    if (configuredTerminalTheme != _lastBuildAppliedTheme) {
       _lastBuildAppliedTheme = configuredTerminalTheme;
       _applyTerminalThemeToSession(configuredTerminalTheme, reason: 'build');
     }

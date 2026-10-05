@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
+import 'terminal_backend.dart';
 import 'terminal_progress.dart';
 
 /// Field separator used for tmux format strings.
@@ -122,7 +123,7 @@ class TmuxWindow {
     }
 
     final activityEpoch = fields.length > 7 ? int.tryParse(fields[7]) : null;
-    final storedTool = fields.length > 9 ? nonEmptyTmuxField(fields[9]) : null;
+    final storedTool = fields.length > 9 ? trimmedOrNull(fields[9]) : null;
     final agentTool = _agentToolFromMetadata(storedTool);
     final unsupportedTool = storedTool != null && agentTool == null;
 
@@ -134,21 +135,21 @@ class TmuxWindow {
           ? fields[10]
           : null,
       panePid: fields.length > 11 ? int.tryParse(fields[11]) : null,
-      currentCommand: fields.length > 3 ? nonEmptyTmuxField(fields[3]) : null,
-      currentPath: fields.length > 4 ? nonEmptyTmuxField(fields[4]) : null,
-      flags: fields.length > 5 ? nonEmptyTmuxField(fields[5]) : null,
-      paneTitle: fields.length > 6 ? nonEmptyTmuxField(fields[6]) : null,
+      currentCommand: fields.length > 3 ? trimmedOrNull(fields[3]) : null,
+      currentPath: fields.length > 4 ? trimmedOrNull(fields[4]) : null,
+      flags: fields.length > 5 ? trimmedOrNull(fields[5]) : null,
+      paneTitle: fields.length > 6 ? trimmedOrNull(fields[6]) : null,
       lastActivityEpochSeconds: activityEpoch != null && activityEpoch > 0
           ? activityEpoch
           : null,
-      paneStartCommand: fields.length > 8 ? nonEmptyTmuxField(fields[8]) : null,
+      paneStartCommand: fields.length > 8 ? trimmedOrNull(fields[8]) : null,
       agentTool: agentTool,
       hasUnsupportedAgentTool: unsupportedTool,
       activeAgentSessionId: !unsupportedTool && fields.length > 12
-          ? nonEmptyTmuxField(fields[12])
+          ? trimmedOrNull(fields[12])
           : null,
       agentSessionTitle: !unsupportedTool && fields.length > 13
-          ? nonEmptyTmuxField(fields[13])
+          ? trimmedOrNull(fields[13])
           : null,
       activeAgentSessionConfidence: unsupportedTool
           ? null
@@ -946,12 +947,6 @@ final _agentStatusTitlePattern = RegExp(
   r'^(?:idle|ready|running|thinking|waiting|working)(?:\s+\(([^)]+)\))?$',
 );
 
-/// Returns the trimmed tmux format field, or `null` when it is blank.
-String? nonEmptyTmuxField(String value) {
-  final trimmed = value.trim();
-  return trimmed.isEmpty ? null : trimmed;
-}
-
 String? _normalizedTmuxTitle(
   String? value, {
   bool stripPlaceholderPrefix = false,
@@ -1143,8 +1138,8 @@ AgentSessionConfidence? _agentSessionConfidenceFromWindowFields(
       ? _agentSessionConfidenceFromMetadata(fields[14])
       : null;
   if (confidence != null) return confidence;
-  final sessionId = fields.length > 12 ? nonEmptyTmuxField(fields[12]) : null;
-  final title = fields.length > 13 ? nonEmptyTmuxField(fields[13]) : null;
+  final sessionId = fields.length > 12 ? trimmedOrNull(fields[12]) : null;
+  final title = fields.length > 13 ? trimmedOrNull(fields[13]) : null;
   if (sessionId != null || title != null) return AgentSessionConfidence.high;
   return null;
 }

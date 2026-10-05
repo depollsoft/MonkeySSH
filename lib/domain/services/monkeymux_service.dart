@@ -922,7 +922,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     }, priority: priority);
   }
 
+  @override
+  bool get clientCommandsUseControlChannel => true;
+
   /// Runs a short-lived command through the MonkeyMux control client.
+  @override
   Future<TerminalClientCommandResult> runClientCommand(
     SshSession session,
     String sessionName,

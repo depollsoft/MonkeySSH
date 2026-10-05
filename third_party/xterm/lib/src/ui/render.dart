@@ -445,8 +445,6 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       }
     }
 
-    _paintHighlights(canvas, effectFirstLine, effectLastLine);
-
     if (_controller.selection != null) {
       _paintSelection(
         canvas,
@@ -507,30 +505,6 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       }
 
       _paintSegment(canvas, segment, _painter.theme.selection);
-    }
-  }
-
-  void _paintHighlights(Canvas canvas, int firstLine, int lastLine) {
-    for (var highlight in _controller.highlights) {
-      final range = highlight.range?.normalized;
-
-      if (range == null ||
-          range.begin.y > lastLine ||
-          range.end.y < firstLine) {
-        continue;
-      }
-
-      for (var segment in range.toSegments()) {
-        if (segment.line < firstLine) {
-          continue;
-        }
-
-        if (segment.line > lastLine) {
-          break;
-        }
-
-        _paintSegment(canvas, segment, highlight.color);
-      }
     }
   }
 

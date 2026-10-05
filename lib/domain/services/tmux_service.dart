@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
 import '../models/command_names.dart';
+import '../models/terminal_backend.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
 import 'command_output_marker_reader.dart';
@@ -1799,6 +1800,17 @@ class TmuxService implements RemoteMultiplexerService {
   bool isExecChannelCoolingDown(SshSession session) =>
       _isExecSessionClosed(session) || _isExecChannelCoolingDown(session);
 
+  @override
+  bool get clientCommandsUseControlChannel => false;
+
+  @override
+  Future<TerminalClientCommandResult> runClientCommand(
+    SshSession session,
+    String sessionName,
+    String command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => runSshClientCommand(session, command, priority: priority);
+
   void _recordExecChannelFailure(int connectionId, Object error) {
     final state = _connectionStates[connectionId];
     if (state == null) return;
@@ -2487,6 +2499,55 @@ class TmuxService implements RemoteMultiplexerService {
   }
 }
 
+/// Deadline for opening the exec channel of a client command.
+const _clientCommandOpenTimeout = Duration(seconds: 10);
+
+/// Deadline for a client command to finish once its channel is open, matching
+/// the MonkeyMux `run_command` budget so a hung command cannot hold a queued
+/// exec slot forever.
+const _clientCommandResponseTimeout = Duration(seconds: 25);
+
+/// Runs [command] on a short-lived SSH exec channel and collects its output.
+///
+/// Used by tmux and direct terminals, which have no control channel.
+/// [command] must already carry any working-directory wrapping.
+Future<TerminalClientCommandResult> runSshClientCommand(
+  SshSession session,
+  String command, {
+  required SshExecPriority priority,
+}) => session.runQueuedExec(() async {
+  final exec = await openSshExec(
+    session.execute(command),
+    _clientCommandOpenTimeout,
+  );
+  try {
+    final stdout = StringBuffer();
+    final stderr = StringBuffer();
+    final stdoutFuture = exec.stdout
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .forEach(stdout.write);
+    final stderrFuture = exec.stderr
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .forEach(stderr.write);
+    await Future.wait<void>([stdoutFuture, stderrFuture, exec.done])
+        .timeout(_clientCommandResponseTimeout);
+    final stdoutText = stdout.toString();
+    return TerminalClientCommandResult(
+      output: stdoutText.isNotEmpty ? stdoutText : stderr.toString(),
+      exitCode: exec.exitCode,
+    );
+  } on TimeoutException {
+    // close() only sends EOF; a command that ignores it would keep the exec
+    // slot occupied, so tear the channel down.
+    exec.channel.destroy();
+    rethrow;
+  } finally {
+    exec.close();
+  }
+}, priority: priority);
+
 int? _parseCreatedWindowIndex(String output) {
   for (final rawLine in output.split('\n')) {
     final index = int.tryParse(rawLine.trim());
@@ -2809,8 +2870,8 @@ TmuxPaneContext? parseTmuxCurrentPaneContext(String output) {
     final line = rawLine.trim();
     if (line.isNotEmpty) {
       final fields = line.split(tmuxWindowFieldSeparator);
-      final path = nonEmptyTmuxField(fields.first);
-      final command = fields.length > 1 ? nonEmptyTmuxField(fields[1]) : null;
+      final path = trimmedOrNull(fields.first);
+      final command = fields.length > 1 ? trimmedOrNull(fields[1]) : null;
       if (path != null || command != null) {
         return TmuxPaneContext(currentPath: path, currentCommand: command);
       }

@@ -511,8 +511,8 @@ void registerMonkeyTerminalViewLayoutTests() {
         );
       });
 
-      test('style-run batching falls back to per-cell for combining marks, '
-          'complex scripts, and emoji', () async {
+      test('style-run batching falls back to per-cell for complex scripts '
+          'and emoji', () async {
         final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
         final painter = MonkeyTerminalPainter(
           theme: theme,
@@ -520,14 +520,14 @@ void registerMonkeyTerminalViewLayoutTests() {
           textScaler: TextScaler.noScaling,
         );
         const columns = 32;
-        // Cells that must NOT be coalesced into a run: a combining mark (width
-        // 0, which would shape with its neighbour and desync the grid), a
-        // cursive-joining script (Arabic, which would connect when concatenated
-        // but is drawn isolated per cell), and an emoji (wide, non-monospace
-        // fallback). All must fall back to the per-cell path unchanged.
+        // Cells that must NOT be coalesced into a run: a cursive-joining script
+        // (Arabic, which would connect when concatenated but is drawn isolated
+        // per cell) and an emoji (wide, non-monospace fallback). Both must fall
+        // back to the per-cell path unchanged. (The buffer drops combining
+        // marks, so they never reach the painter.)
         final terminal = Terminal()
           ..resize(columns, 2)
-          ..write('\x1b[37mabc e\u0301f \u0627\u0644\u0645 \u{1F600} xyz');
+          ..write('\x1b[37mabc \u0627\u0644\u0645 \u{1F600} xyz');
         final line = terminal.buffer.lines[0];
 
         final width = (painter.cellSize.width * columns).ceil();
