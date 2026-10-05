@@ -69,6 +69,14 @@ class MuxWindowNotification {
 
 /// Represents a single window within a tmux session.
 @immutable
+/// Returns the active window of [windows], if any.
+TmuxWindow? activeTmuxWindow(Iterable<TmuxWindow> windows) {
+  for (final window in windows) {
+    if (window.isActive) return window;
+  }
+  return null;
+}
+
 class TmuxWindow {
   /// Creates a new [TmuxWindow].
   const TmuxWindow({
@@ -159,6 +167,10 @@ class TmuxWindow {
 
   /// The window name (often set by the running program or user).
   final String name;
+
+  /// A key that stays stable across reloads: the tmux window ID when
+  /// reported, otherwise the index.
+  String get stableKey => id ?? '#$index';
 
   /// Whether this is the currently active window in the session.
   final bool isActive;

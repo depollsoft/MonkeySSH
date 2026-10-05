@@ -117,6 +117,12 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.museCode => const ['muse'],
   };
 
+  /// Whether the preferred executable for this tool differs from
+  /// [commandName], so a launch should probe the host for the binary that is
+  /// actually installed (for example `opencode2` versus `opencode`) instead of
+  /// assuming the canonical name.
+  bool get needsExecutableProbe => candidateCommandNames.first != commandName;
+
   /// Matching discovered-session provider name, if this tool supports recent
   /// session discovery.
   String? get discoveredSessionToolName => switch (this) {
