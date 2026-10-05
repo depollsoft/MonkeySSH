@@ -2,6 +2,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
+import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 
 void main() {
   group('AcpLaunchCommand', () {
@@ -255,6 +256,22 @@ void main() {
       expect(acpBuiltinProviders, contains(acpHermesProvider));
       expect(acpBuiltinProviders, contains(acpOpenClawProvider));
       expect(acpBuiltinProviders, contains(acpGrokBuildProvider));
+    });
+
+    test('built-in providers map one tool and one telemetry category each', () {
+      final snakeCase = RegExp(r'^[a-z][a-z0-9_]*$');
+      final categories = <String>{};
+      final tools = <AgentLaunchTool>{};
+      for (final provider in acpBuiltinProviders) {
+        expect(provider.telemetryCategory, matches(snakeCase));
+        expect(categories.add(provider.telemetryCategory), isTrue);
+        expect(tools.add(provider.tool), isTrue);
+        expect(
+          agentLaunchToolForBuiltinAcpProviderId(provider.id),
+          provider.tool,
+        );
+      }
+      expect(agentLaunchToolForBuiltinAcpProviderId('custom-id'), isNull);
     });
 
     test('built-in provider IDs are stable and reserved', () {
