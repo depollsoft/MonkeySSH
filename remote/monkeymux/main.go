@@ -3765,7 +3765,7 @@ func discoverPiSessions(
 			fallbackWindows[key] = append(fallbackWindows[key], i)
 		}
 	}
-	entriesByRoot := map[string][]piSessionEntry{}
+	sessionsByRoot := map[string]*piRootSessions{}
 	keys := make([]fallbackKey, 0, len(fallbackWindows))
 	for key := range fallbackWindows {
 		keys = append(keys, key)
@@ -3778,10 +3778,10 @@ func discoverPiSessions(
 	})
 	for _, key := range keys {
 		indices := fallbackWindows[key]
-		entries, ok := entriesByRoot[key.root]
+		rootSessions, ok := sessionsByRoot[key.root]
 		if !ok {
-			entries = readPiSessionEntries(key.root)
-			entriesByRoot[key.root] = entries
+			rootSessions = &piRootSessions{entries: readPiSessionEntries(key.root)}
+			sessionsByRoot[key.root] = rootSessions
 		}
 		// Pi's interactive /resume picker can switch to a session recorded in a
 		// different working directory without putting the selected path in argv
@@ -3789,7 +3789,10 @@ func discoverPiSessions(
 		// cwd filtering so Pi's published title can retain that exact cross-cwd
 		// candidate. Unnamed titles retain every matching cwd basename and rely
 		// on the existing one-to-one activity/process evidence below.
-		entries = piSessionsWithLatestNamesForTitles(restore, indices, entries)
+		entries := rootSessions.entries
+		if piPaneTitlesMayBeNamed(restore, indices) {
+			entries = rootSessions.withLatestNames()
+		}
 		encodedCwd := piEncodedSessionDirName(key.cwd)
 		candidates := []piSessionEntry{}
 		for _, entry := range entries {
@@ -4169,32 +4172,40 @@ func uniquePiSessionsByPaneTitle(
 	return uniqueAssignments(matchesByWindow, piSessionEntryID)
 }
 
-func piSessionsWithLatestNamesForTitles(
-	restore *serverRestore,
-	indices []int,
-	candidates []piSessionEntry,
-) []piSessionEntry {
-	if len(candidates) == 0 {
-		return candidates
-	}
-	hasNamedTitle := false
+func piPaneTitlesMayBeNamed(restore *serverRestore, indices []int) bool {
 	for _, index := range indices {
 		title := cleanTerminalTitle(restore.Windows[index].PaneTitle)
 		if strings.HasPrefix(title, "π - ") || strings.HasPrefix(title, "Pi - ") {
-			hasNamedTitle = true
-			break
+			return true
 		}
 	}
-	if !hasNamedTitle {
-		return candidates
+	return false
+}
+
+// piRootSessions holds one session root's entries for a single discovery pass.
+// Latest names need a full transcript scan, so they are loaded at most once per
+// root no matter how many cwd buckets share it.
+type piRootSessions struct {
+	entries []piSessionEntry
+	named   []piSessionEntry
+	loaded  bool
+}
+
+func (r *piRootSessions) withLatestNames() []piSessionEntry {
+	if r.loaded {
+		return r.named
 	}
-	result := append([]piSessionEntry(nil), candidates...)
-	for i := range result {
-		if name, found := piLatestSessionName(result[i].path); found {
-			result[i].sessionName = name
+	r.loaded = true
+	r.named = append([]piSessionEntry(nil), r.entries...)
+	var scratch []byte
+	for i := range r.named {
+		name, found, reused := piLatestSessionName(r.named[i].path, scratch)
+		if found {
+			r.named[i].sessionName = name
 		}
+		scratch = reused
 	}
-	return result
+	return r.named
 }
 
 func piSessionMatchesPaneTitle(entry piSessionEntry, paneTitle string) bool {
@@ -4518,11 +4529,14 @@ func readPiSessionEntry(path string) (piSessionEntry, bool) {
 	}
 	reader := bufio.NewReaderSize(file, 64*1024)
 	scannedBytes := 0
+	var scratch []byte
 	for scannedBytes < piSessionHeaderScanLimitBytes {
-		line, truncated, bytesRead, readErr := readBoundedLine(
+		line, truncated, bytesRead, readErr := readBoundedLineInto(
 			reader,
 			piSessionMetadataRecordLimitBytes,
+			scratch,
 		)
+		scratch = line[:0]
 		scannedBytes += bytesRead
 		if readErr != nil {
 			return piSessionEntry{}, false
@@ -4568,7 +4582,14 @@ func readPiSessionEntry(path string) (piSessionEntry, bool) {
 // limit bytes. Oversized message/image records are drained through their newline
 // so later metadata remains readable.
 func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, bool, int, error) {
-	line := make([]byte, 0, min(limit, 64*1024))
+	return readBoundedLineInto(reader, limit, nil)
+}
+
+// readBoundedLineInto is readBoundedLine reusing scratch's storage, so a scan
+// over many records allocates only when a record outgrows every earlier one.
+// The returned line aliases scratch and is valid until the next call.
+func readBoundedLineInto(reader *bufio.Reader, limit int, scratch []byte) ([]byte, bool, int, error) {
+	line := scratch[:0]
 	truncated := false
 	bytesRead := 0
 	for {
@@ -4600,25 +4621,30 @@ func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, bool, int, error)
 // piLatestSessionName mirrors Pi's last-session_info-wins behavior. Empty names
 // are authoritative clears. Oversized unrelated records are skipped, while an
 // actual I/O error makes the name unusable rather than accepting stale metadata.
-func piLatestSessionName(path string) (string, bool) {
+// scratch is reused across records and returned for the next file.
+func piLatestSessionName(path string, scratch []byte) (string, bool, []byte) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", false
+		return "", false, scratch
 	}
 	defer file.Close()
 	reader := bufio.NewReaderSize(file, 64*1024)
 	name := ""
 	found := false
 	for {
-		line, truncated, _, readErr := readBoundedLine(
+		line, truncated, _, readErr := readBoundedLineInto(
 			reader,
 			piSessionMetadataRecordLimitBytes,
+			scratch,
 		)
+		if line != nil {
+			scratch = line[:0]
+		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return name, found
+				return name, found, scratch
 			}
-			return "", false
+			return "", false, scratch
 		}
 		if truncated {
 			continue
@@ -4686,34 +4712,74 @@ func piSessionCreatedAtFromFileName(name string) time.Time {
 // the old file) or may be gone (worktree relocation deletes it); a missing
 // link terminates the chain with the directory name and file-name timestamp
 // taken from the dangling path itself.
+//
+// Each chain is walked once: every entry on a walk shares the walk's result.
+// An entry whose chain loops keeps its own origin.
 func annotatePiSessionOrigins(entries []piSessionEntry) {
-	byPath := map[string]int{}
+	type origin struct {
+		keepOwn      bool
+		hasCreatedAt bool
+		dir          string
+		createdAt    time.Time
+	}
+	const ( // the zero state is unvisited
+		visiting = iota + 1
+		resolved
+	)
+	byPath := make(map[string]int, len(entries))
 	for i := range entries {
 		byPath[entries[i].path] = i
 	}
+	origins := make([]origin, len(entries))
+	states := make([]uint8, len(entries))
+	var walk []int
 	for i := range entries {
-		seen := map[int]struct{}{}
-		current := i
-		for {
-			if _, ok := seen[current]; ok {
+		walk = walk[:0]
+		var result origin
+		for current := i; ; {
+			if states[current] == resolved {
+				result = origins[current]
 				break
 			}
-			seen[current] = struct{}{}
+			if states[current] == visiting {
+				result = origin{keepOwn: true}
+				break
+			}
+			states[current] = visiting
+			walk = append(walk, current)
 			parent := entries[current].parentPath
 			if parent == "" {
-				entries[i].originDir = filepath.Base(filepath.Dir(entries[current].path))
-				entries[i].originCreatedAt = entries[current].createdAt
+				result = origin{
+					hasCreatedAt: true,
+					dir:          filepath.Base(filepath.Dir(entries[current].path)),
+					createdAt:    entries[current].createdAt,
+				}
 				break
 			}
-			if next, ok := byPath[parent]; ok {
-				current = next
-				continue
+			next, ok := byPath[parent]
+			if !ok {
+				createdAt := piSessionCreatedAtFromFileName(filepath.Base(parent))
+				result = origin{
+					hasCreatedAt: !createdAt.IsZero(),
+					dir:          filepath.Base(filepath.Dir(parent)),
+					createdAt:    createdAt,
+				}
+				break
 			}
-			entries[i].originDir = filepath.Base(filepath.Dir(parent))
-			if createdAt := piSessionCreatedAtFromFileName(filepath.Base(parent)); !createdAt.IsZero() {
-				entries[i].originCreatedAt = createdAt
-			}
-			break
+			current = next
+		}
+		for _, index := range walk {
+			origins[index] = result
+			states[index] = resolved
+		}
+	}
+	for i, origin := range origins {
+		if origin.keepOwn {
+			continue
+		}
+		entries[i].originDir = origin.dir
+		if origin.hasCreatedAt {
+			entries[i].originCreatedAt = origin.createdAt
 		}
 	}
 }

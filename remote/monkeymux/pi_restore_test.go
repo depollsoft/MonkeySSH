@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -275,6 +276,89 @@ func TestPiSessionOriginResolvesChainAndFileNameTimestamp(t *testing.T) {
 		if !entry.originCreatedAt.Equal(created) {
 			t.Fatalf("%s origin createdAt = %s, want %s", entry.sessionID, entry.originCreatedAt, created)
 		}
+	}
+}
+
+// Long retained histories must resolve in linear work: the old per-entry walk
+// allocated a visited set for every entry and re-walked every chain.
+func TestPiSessionOriginWalksEachChainOnce(t *testing.T) {
+	const chainLength = 2000
+	created := time.Date(2026, 8, 15, 6, 56, 17, 0, time.UTC)
+	chain := make([]piSessionEntry, chainLength)
+	for i := range chain {
+		// Leaf first, so the first walk resolves the whole chain.
+		index := chainLength - 1 - i
+		chain[i] = piSessionEntry{
+			path:      fmt.Sprintf("/root/bucket/%04d.jsonl", index),
+			createdAt: created.Add(time.Duration(index) * time.Minute),
+		}
+		if index > 0 {
+			chain[i].parentPath = fmt.Sprintf("/root/bucket/%04d.jsonl", index-1)
+		}
+	}
+	chain[chainLength-1].path = "/root/origin/0000.jsonl"
+	chain[chainLength-2].parentPath = chain[chainLength-1].path
+	cycleCreated := created.Add(-time.Hour)
+	entries := append(chain,
+		piSessionEntry{path: "/root/a/loop.jsonl", parentPath: "/root/b/loop.jsonl", originDir: "own-a", originCreatedAt: cycleCreated},
+		piSessionEntry{path: "/root/b/loop.jsonl", parentPath: "/root/a/loop.jsonl", originDir: "own-b"},
+		piSessionEntry{path: "/root/c/x.jsonl", parentPath: "/root/gone/x.jsonl", originDir: "own-c", originCreatedAt: cycleCreated},
+	)
+	allocs := testing.AllocsPerRun(1, func() {
+		annotatePiSessionOrigins(entries)
+	})
+	if allocs > chainLength/10 {
+		t.Fatalf("annotate allocated %.0f times for a %d-link chain, want linear work", allocs, chainLength)
+	}
+	for _, entry := range entries[:chainLength] {
+		if entry.originDir != "origin" || !entry.originCreatedAt.Equal(created) {
+			t.Fatalf("%s origin = %q %s, want origin %s", entry.path, entry.originDir, entry.originCreatedAt, created)
+		}
+	}
+	if got := entries[chainLength]; got.originDir != "own-a" || !got.originCreatedAt.Equal(cycleCreated) {
+		t.Fatalf("cyclic entry origin = %q %s, want its own", got.originDir, got.originCreatedAt)
+	}
+	if got := entries[chainLength+2]; got.originDir != "gone" || !got.originCreatedAt.Equal(cycleCreated) {
+		t.Fatalf("dangling entry origin = %q %s, want dangling dir and own time", got.originDir, got.originCreatedAt)
+	}
+}
+
+func TestReadBoundedLineIntoReusesScratch(t *testing.T) {
+	var records bytes.Buffer
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&records, "{\"type\":\"message\",\"id\":%q}\n", fmt.Sprintf("%08d", i))
+	}
+	reader := bufio.NewReaderSize(bytes.NewReader(records.Bytes()), 64*1024)
+	var scratch []byte
+	allocs := testing.AllocsPerRun(100, func() {
+		line, truncated, _, err := readBoundedLineInto(reader, piSessionMetadataRecordLimitBytes, scratch)
+		if err != nil || truncated || !bytes.HasPrefix(line, []byte(`{"type":"message"`)) {
+			t.Fatalf("record = %q, %v, %v", line, truncated, err)
+		}
+		scratch = line[:0]
+	})
+	if allocs != 0 {
+		t.Fatalf("reading a short record allocated %.0f times, want scratch reuse", allocs)
+	}
+}
+
+// Every cwd bucket under one root shares a single latest-name scan.
+func TestPiRootSessionsLoadsLatestNamesOnce(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, piEncodedSessionDirName("/project"), "session.jsonl")
+	writePiTestSession(t, path, "session-id", "/project", time.Now())
+	appendPiTestSessionName(t, path, "first")
+	sessions := &piRootSessions{entries: readPiSessionEntries(root)}
+	named := sessions.withLatestNames()
+	if len(named) != 1 || named[0].sessionName != "first" {
+		t.Fatalf("named entries = %#v", named)
+	}
+	appendPiTestSessionName(t, path, "second")
+	if again := sessions.withLatestNames(); &again[0] != &named[0] || again[0].sessionName != "first" {
+		t.Fatalf("second bucket rescanned names: %#v", again)
+	}
+	if sessions.entries[0].sessionName != "" {
+		t.Fatalf("name enrichment mutated the shared root entries: %#v", sessions.entries[0])
 	}
 }
 
@@ -1030,12 +1114,12 @@ func TestPiLatestSessionNameUsesLateMetadataAndSkipsOversizedRecords(t *testing.
 	if !ok || entry.sessionID != "session-id" {
 		t.Fatalf("entry after oversized message = %#v, %v", entry, ok)
 	}
-	if name, found := piLatestSessionName(path); !found || name != "renamed late" {
+	if name, found, _ := piLatestSessionName(path, nil); !found || name != "renamed late" {
 		t.Fatalf("latest session name = %q, %v, want renamed late", name, found)
 	}
 
 	appendPiTestSessionName(t, path, "")
-	if name, found := piLatestSessionName(path); !found || name != "" {
+	if name, found, _ := piLatestSessionName(path, nil); !found || name != "" {
 		t.Fatalf("cleared session name = %q, %v, want authoritative empty", name, found)
 	}
 }
