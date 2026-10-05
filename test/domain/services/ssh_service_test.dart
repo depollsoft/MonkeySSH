@@ -6,6 +6,9 @@ import 'dart:typed_data';
 // ignore_for_file: public_member_api_docs
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/message/msg_channel.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
+import 'package:dartssh2/src/ssh_message.dart';
 // SSHUserInfoRequest/SSHUserInfoPrompt are not exported from the public API,
 // but are needed to exercise the keyboard-interactive auth handler.
 // ignore: implementation_imports
@@ -43,6 +46,7 @@ import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../helpers/handshake_chunk_socket.dart';
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/powershell_test_helpers.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
@@ -197,7 +201,7 @@ class _AuthenticationFixture {
   }
 }
 
-class _MockExecSession extends Mock implements SSHSession {}
+class _MockExecSession extends MockSessionWithChannel {}
 
 class _MockSftpClient extends Mock implements SftpClient {}
 
@@ -595,9 +599,10 @@ Future<void> _waitForCondition(
 }
 
 class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
-  _ThrowOnRepeatedCloseSink(this._delegate);
+  _ThrowOnRepeatedCloseSink(this._controller);
 
-  final StreamSink<List<int>> _delegate;
+  final StreamController<List<int>> _controller;
+  StreamSink<List<int>> get _delegate => _controller.sink;
   int addAttempts = 0;
   int addStreamAttempts = 0;
   int closeAttempts = 0;
@@ -612,10 +617,28 @@ class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
   void addError(Object error, [StackTrace? stackTrace]) =>
       _delegate.addError(error, stackTrace);
 
+  /// Forwards each chunk through [add]. Like SSHForwardChannel, a sink the
+  /// channel closes ends the transfer instead of throwing at the producer.
   @override
   Future<void> addStream(Stream<List<int>> stream) {
     addStreamAttempts++;
-    return _delegate.addStream(stream);
+    final transfer = Completer<void>();
+    late final StreamSubscription<List<int>> subscription;
+    subscription = stream.listen(
+      (data) {
+        if (!_controller.isClosed) {
+          add(data);
+          return;
+        }
+        unawaited(subscription.cancel());
+        if (!transfer.isCompleted) transfer.complete();
+      },
+      onError: transfer.completeError,
+      onDone: () {
+        if (!transfer.isCompleted) transfer.complete();
+      },
+    );
+    return transfer.future;
   }
 
   @override
@@ -633,7 +656,7 @@ class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
 
 class _SingleCloseForwardChannel implements SSHForwardChannel {
   _SingleCloseForwardChannel() {
-    sink = _ThrowOnRepeatedCloseSink(_sinkController.sink);
+    sink = _ThrowOnRepeatedCloseSink(_sinkController);
   }
 
   final _streamController = StreamController<Uint8List>();
@@ -675,6 +698,64 @@ class _SingleCloseForwardChannel implements SSHForwardChannel {
       unawaited(_streamController.close());
     }
   }
+}
+
+/// Socket fake for relay tests. [incoming] feeds the relay, [pulledBytes]
+/// counts what it has read, and a pending [flushGate] models a client that
+/// stopped reading.
+class _PipeSocket extends Stream<Uint8List> implements Socket {
+  // ignore: close_sinks, each test closes it when the client should hit EOF.
+  final incoming = StreamController<Uint8List>();
+  final _done = Completer<void>();
+  Completer<void>? flushGate;
+  int pulledBytes = 0;
+  int flushes = 0;
+  bool destroyed = false;
+
+  @override
+  StreamSubscription<Uint8List> listen(
+    void Function(Uint8List event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => incoming.stream
+      .map((chunk) {
+        pulledBytes += chunk.length;
+        return chunk;
+      })
+      .listen(
+        onData,
+        onError: onError,
+        onDone: onDone,
+        cancelOnError: cancelOnError,
+      );
+
+  @override
+  void add(List<int> data) {}
+
+  @override
+  Future<void> flush() {
+    flushes++;
+    return flushGate?.future ?? Future<void>.value();
+  }
+
+  @override
+  Future<void> close() async {
+    await flush();
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  Future<void> get done => _done.future;
+
+  @override
+  void destroy() {
+    destroyed = true;
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _CancellableConnectSshService extends SshService {
@@ -1519,8 +1600,34 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
         expect(session.automaticForwardedRemotePorts, {4000});
         verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+
+        // The watcher ignores EOF (done never completes), so shutdown must
+        // destroy the channel after its grace instead of leaving it open.
+        await session.configureAutomaticPortForwarding(enabled: false);
+        await untilCalled(watcher.channel.destroy);
+        verify(watcher.close).called(1);
       },
     );
+
+    testWidgets('bounds a watcher channel open that never answers', (
+      tester,
+    ) async {
+      final client = _MockSshClient();
+      final opening = Completer<SSHSession>();
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
+      final session = _testSession(client);
+
+      final started = session.startAutomaticPortForwardWatcher(generation: 0);
+      await tester.pump(const Duration(seconds: 11));
+      expect(await started, isFalse);
+
+      final late = _MockExecSession();
+      opening.complete(late);
+      await tester.pump();
+      verify(late.channel.destroy).called(1);
+      verifyNever(() => late.stdout);
+    });
 
     test(
       'reapplies the watcher snapshot when only exclusions change',
@@ -2231,39 +2338,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(second.output, '\x1bP1+rabc\x1b\\\x1b[@Z');
     });
 
-    test(
-      'adapts reverse index at top margin to keep xterm buffer attached',
-      () {
-        final terminal = Terminal(maxLines: 100)..resize(61, 37);
-        final reverseIndexes = List.filled(9, '\x1bM').join();
-        final insertLines = List.filled(9, '\x1b[L').join();
-        final decoder = TerminalXtermOutputDecoder();
-        final result = decoder.add(
-          input: '\x1b[1;37r\x1b[1;1H$reverseIndexes',
-
-          terminalColumns: terminal.viewWidth,
-          terminalRows: terminal.viewHeight,
-          cursorColumn: terminal.buffer.cursorX,
-          cursorRow: terminal.buffer.cursorY,
-          marginTop: terminal.buffer.marginTop,
-          marginBottom: terminal.buffer.marginBottom,
-        );
-
-        terminal.write(result.output);
-
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isFalse);
-        expect(result.output, '\x1b[1;37r\x1b[1;1H$insertLines');
-        expect(
-          List.generate(
-            terminal.buffer.height,
-            (index) => terminal.buffer.lines[index].attached,
-          ),
-          everyElement(isTrue),
-        );
-      },
-    );
-
     test('insert mode shifts by the cell width the buffer uses', () {
       // U+231A is wide and U+0301 takes no cell in the buffer's width table.
       final terminal = Terminal(maxLines: 100)..resize(20, 2);
@@ -2274,104 +2348,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(terminal.buffer.cursorX, 5);
       expect(terminal.lines[0].getText(5, 11), 'abcdef');
-    });
-
-    test('tracks scroll-region cursor moves the way the buffer does', () {
-      // Each prefix ends with the cursor at the top margin or not; a reverse
-      // index after it is adapted only when the buffer agrees.
-      for (final (prefix, atTopMargin) in [
-        ('\x1b[2;1H\x1b[3;2r', false), // a one-row region is ignored
-        ('\x1b[5;1H\x1b[1;0r', true), // a valid region homes the cursor
-        ('\x1b[?6h\x1b[3;6r', true), // to the top margin in origin mode
-        ('\x1b[3;6r\x1b[?6h\x1b[4d\x1b[1d', true), // VPA in origin mode
-        ('\x1b[3;6r\x1b[4;1H\x1b[9A', true), // CUU stops at the margin
-        ('\x1b[3;6r\x1b[4;1H\x1b[9B\x1b[3A', true), // so does CUD
-        ('\x1b[3;6r\x1b[4;1H\x1b[9E\x1b[3F', true), // and CNL/CPL
-        ('\x1b[3;6r\x1b[8;1H\x1b[9F', false), // outside, the whole screen
-      ]) {
-        final terminal = Terminal(maxLines: 100)
-          ..resize(10, 8)
-          ..write(prefix);
-        expect(
-          terminal.buffer.cursorY == terminal.buffer.marginTop,
-          atTopMargin,
-          reason: 'buffer after ${prefix.replaceAll('\x1b', 'ESC')}',
-        );
-
-        final result = TerminalXtermOutputDecoder().add(
-          input: '$prefix\x1bM',
-          terminalColumns: 10,
-          terminalRows: 8,
-          cursorColumn: 0,
-          cursorRow: 0,
-          marginTop: 0,
-          marginBottom: 7,
-        );
-        expect(
-          result.output,
-          atTopMargin ? '$prefix\x1b[L' : '$prefix\x1bM',
-          reason: prefix.replaceAll('\x1b', 'ESC'),
-        );
-      }
-    });
-
-    test('preserves reverse index when cursor is below the top margin', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[5;4H\x1bM',
-
-        terminalColumns: 61,
-        terminalRows: 37,
-        cursorColumn: 0,
-        cursorRow: 0,
-        marginTop: 0,
-        marginBottom: 36,
-      );
-
-      expect(result.output, '\x1b[5;4H\x1bM');
-    });
-
-    test('restores cursor column after adapted reverse index', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[1;4H\x1bM',
-
-        terminalColumns: 61,
-        terminalRows: 37,
-        cursorColumn: 0,
-        cursorRow: 0,
-        marginTop: 0,
-        marginBottom: 36,
-      );
-
-      expect(result.output, '\x1b[1;4H\x1b[L\x1b[4G');
-    });
-
-    test('adapts origin-mode reverse index at the top margin', () {
-      final terminal = Terminal(maxLines: 100)..resize(61, 37);
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[2;10r\x1b[?6h\x1b[1;1H\x1bM',
-
-        terminalColumns: terminal.viewWidth,
-        terminalRows: terminal.viewHeight,
-        cursorColumn: terminal.buffer.cursorX,
-        cursorRow: terminal.buffer.cursorY,
-        marginTop: terminal.buffer.marginTop,
-        marginBottom: terminal.buffer.marginBottom,
-        originMode: terminal.originMode,
-      );
-
-      terminal.write(result.output);
-
-      expect(result.output, '\x1b[2;10r\x1b[?6h\x1b[1;1H\x1b[L');
-      expect(
-        List.generate(
-          terminal.buffer.height,
-          (index) => terminal.buffer.lines[index].attached,
-        ),
-        everyElement(isTrue),
-      );
     });
 
     test('unwraps complete tmux passthrough sequences', () {
@@ -3723,6 +3699,54 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     String firstLineText(Terminal terminal) => terminal.buffer.lines[0]
         .getText(0, terminal.buffer.viewWidth)
         .trimRight();
+
+    test('passes reverse index through to the buffer unchanged', () async {
+      // The vendored buffer keeps lines attached when RI scrolls a region
+      // down. Rewriting RI from a cursor model went wrong whenever that model
+      // missed a move, such as a save/restore (ESC 7, ESC 8) in the chunk.
+      for (final (input, expected) in [
+        (
+          '\x1b[6;1H\x1b7\x1b[H\x1b8\x1bMX',
+          'row0|row1|row2|row3|Xow4|row5|row6|row7',
+        ),
+        ('\x1b[1;8r\x1b[1;1H\x1bM\x1bM', '||row0|row1|row2|row3|row4|row5'),
+        (
+          '\x1b[2;6r\x1b[?6h\x1b[1;1H\x1bM',
+          'row0||row1|row2|row3|row4|row6|row7',
+        ),
+      ]) {
+        final opened = await openShell();
+        final terminal = opened.session.terminal!..resize(20, 8);
+        Future<void> feed(String data) async {
+          opened.stdout.add(Uint8List.fromList(utf8.encode(data)));
+          await pumpEventQueue();
+          opened.session.debugFlushPendingTerminalOutput();
+          await pumpEventQueue();
+        }
+
+        await feed(
+          [for (var row = 0; row < 8; row++) '\x1b[${row + 1};1Hrow$row']
+              .join(),
+        );
+        await feed(input);
+
+        final lines = terminal.buffer.lines.toList();
+        final reason = input.replaceAll('\x1b', 'ESC');
+        expect(
+          [
+            for (final line in lines.sublist(lines.length - 8))
+              line.getText().trim(),
+          ].join('|'),
+          expected,
+          reason: reason,
+        );
+        expect(
+          lines.map((line) => line.attached),
+          everyElement(isTrue),
+          reason: reason,
+        );
+      }
+    });
 
     test('answers Kitty capabilities and iTerm2 cell-size reports', () async {
       final opened = await openShell();
@@ -6114,6 +6138,146 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       }
     }
 
+    test('stopping a reverse tunnel ends its accepted connections', () async {
+      final client = _MockSshClient();
+      final forward = _SingleCloseForwardChannel();
+      final session = _testSession(client);
+      final remoteForward = _MockRemoteForward();
+      final connections = StreamController<SSHForwardChannel>();
+      final targetServer = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final accepted = Completer<Socket>();
+      final subscription = targetServer.listen(accepted.complete);
+      addTearDown(() async {
+        await connections.close();
+        await subscription.cancel();
+        await targetServer.close();
+        await forward.close();
+      });
+      when(() => remoteForward.host).thenReturn('127.0.0.1');
+      when(() => remoteForward.port).thenReturn(8022);
+      when(() => remoteForward.connections)
+          .thenAnswer((_) => connections.stream);
+      when(remoteForward.close).thenReturn(null);
+      when(() => client.forwardRemote(host: '127.0.0.1', port: 8022))
+          .thenAnswer((_) async => remoteForward);
+      expect(
+        await session.startRemoteForward(
+          portForwardId: 1,
+          remoteHost: '127.0.0.1',
+          remotePort: 8022,
+          localHost: '127.0.0.1',
+          localPort: targetServer.port,
+        ),
+        isTrue,
+      );
+      connections.add(forward);
+      // ignore: close_sinks, the relay owns closing this connection.
+      final target = await accepted.future;
+      final targetClosed = Completer<void>();
+      target.listen(
+        (_) {},
+        onDone: targetClosed.complete,
+        onError: (Object _) => targetClosed.complete(),
+      );
+
+      await session.stopForward(1);
+
+      expect(forward.destroyCalls, 1);
+      await targetClosed.future.timeout(const Duration(seconds: 5));
+    });
+
+    for (final ending in ['stop', 'remote close']) {
+      test(
+        'relay $ending does not wait on a client that stopped reading',
+        () async {
+          final socket = _PipeSocket()..flushGate = Completer<void>();
+          final forward = _SingleCloseForwardChannel();
+          final stopped = Completer<void>();
+          final relay = relayPortForward(
+            socket,
+            () => forward,
+            stopped: stopped.future,
+            closeGrace: const Duration(milliseconds: 1),
+          );
+          forward._streamController.add(Uint8List(16));
+          await pumpEventQueue();
+          expect(socket.flushes, 1);
+
+          if (ending == 'stop') {
+            stopped.complete();
+          } else {
+            await forward._sinkController.close();
+          }
+          await relay.timeout(const Duration(seconds: 1));
+
+          expect(socket.destroyed, isTrue);
+          expect(forward.destroyCalls, 1);
+        },
+      );
+    }
+
+    test(
+      'relay stops reading the socket while the SSH window is full',
+      () async {
+        // A real dartssh2 channel: its upload loop sends one window and then
+        // stops reading, and that pause must reach the local socket.
+        const window = 4096;
+        final sent = <SSHMessage>[];
+        final controller = SSHChannelController(
+          localId: 1,
+          localMaximumPacketSize: window,
+          localInitialWindowSize: 1 << 20,
+          remoteId: 2,
+          remoteInitialWindowSize: window,
+          remoteMaximumPacketSize: window,
+          sendMessage: sent.add,
+        );
+        final socket = _PipeSocket();
+        final stopped = Completer<void>();
+        final relay = relayPortForward(
+          socket,
+          () => SSHForwardChannel(controller.channel),
+          stopped: stopped.future,
+        );
+        int sentBytes() => sent.whereType<SSH_Message_Channel_Data>().fold(
+          0,
+          (total, message) => total + message.data.length,
+        );
+        final upload = [
+          for (var chunk = 0; chunk < 16; chunk++)
+            Uint8List(window)..fillRange(0, window, chunk),
+        ]..forEach(socket.incoming.add);
+        await pumpEventQueue();
+
+        expect(sentBytes(), window);
+        expect(socket.pulledBytes, lessThanOrEqualTo(3 * window));
+
+        controller.handleMessage(
+          SSH_Message_Channel_Window_Adjust(
+            recipientChannel: 1,
+            bytesToAdd: 1 << 20,
+          ),
+        );
+        await socket.incoming.close();
+        await pumpEventQueue();
+
+        expect(sentBytes(), 16 * window);
+        expect(
+          [
+            for (final message in sent.whereType<SSH_Message_Channel_Data>())
+              ...message.data,
+          ],
+          [for (final chunk in upload) ...chunk],
+        );
+        expect(sent.last, isA<SSH_Message_Channel_EOF>());
+        stopped.complete();
+        await relay;
+      },
+    );
+
     for (final scenario in [
       'closed sink',
       'sink closes during upload',
@@ -6254,7 +6418,10 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           expect(forward.sink.addAttempts, 1);
         }
         expect(forward.flushCalls, 0);
-        expect(forward.sink.addStreamAttempts, 0);
+        expect(
+          forward.sink.addStreamAttempts,
+          scenario == 'sink closes during upload' ? 1 : 0,
+        );
         if (scenario == 'stop' ||
             scenario == 'closed sink' ||
             scenario == 'sink closes during upload') {

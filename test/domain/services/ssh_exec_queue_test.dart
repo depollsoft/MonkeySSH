@@ -56,6 +56,26 @@ void main() {
       });
     }
 
+    for (final peerCloses in [true, false]) {
+      test('abandoned exec cleanup destroys the channel when the peer '
+          '${peerCloses ? 'closes' : 'ignores EOF'}', () async {
+        final session = MockSSHSession();
+        final channel = _MockChannel();
+        when(() => session.channel).thenReturn(channel);
+        when(() => session.done).thenAnswer(
+          (_) => peerCloses ? Future.value() : Completer<void>().future,
+        );
+
+        await closeAbandonedSshExec(
+          session,
+          grace: const Duration(milliseconds: 1),
+        );
+
+        verify(session.close).called(1);
+        verify(channel.destroy).called(1);
+      });
+    }
+
     test('limits normal exec jobs per connection', () async {
       final startedJobs = <int>[];
       final completers = List.generate(5, (_) => Completer<int>());

@@ -287,6 +287,19 @@ void main() {
             {42: 'dev-box-host-42', 43: 'dev-box-43'},
           );
         });
+
+        test(
+          'keeps a fallback clear of another candidate in the same pass',
+          () {
+            expect(
+              resolveGeneratedPortProxyNames(
+                [(id: 1, label: 'foo'), (id: 2, label: 'foo-1')],
+                reservedNames: const ['foo'],
+              ),
+              {1: 'foo-host-1', 2: 'foo-1'},
+            );
+          },
+        );
       });
 
       test('validates DNS labels and allows an empty generated-name field', () {

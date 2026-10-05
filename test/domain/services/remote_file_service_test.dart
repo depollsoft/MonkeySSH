@@ -26,6 +26,22 @@ void main() {
         expect(joinRemotePath('', 'example.txt'), '/example.txt');
       });
 
+      test('joins server-returned POSIX names losslessly', () {
+        // `report ` and `report`, or `a\b` and `a/b`, are distinct files; a
+        // lossy join would point delete or rename at the wrong one.
+        expect(joinRemotePath('/srv/dir', 'report '), '/srv/dir/report ');
+        expect(joinRemotePath('/srv/dir ', ' x'), '/srv/dir / x');
+        expect(joinRemotePath('/srv/dir', r'a\b'), r'/srv/dir/a\b');
+        expect(joinRemotePath('/C:/Users', r'a\b'), '/C:/Users/a/b');
+        expect(parentSftpPath(r'/srv/a\b/c '), r'/srv/a\b');
+        // User-entered paths keep their cleanup.
+        expect(
+          normalizeSftpAbsolutePath(' /srv/dir/report '),
+          '/srv/dir/report',
+        );
+        expect(normalizeSftpAbsolutePath(r'/srv/a\b'), '/srv/a/b');
+      });
+
       test('joins Windows remote paths for terminal insertion', () {
         expect(
           joinRemotePath(

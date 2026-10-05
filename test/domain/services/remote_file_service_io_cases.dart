@@ -15,6 +15,82 @@ class _MockLocalFile extends Mock implements File {}
 
 class _MockRandomAccessFile extends Mock implements RandomAccessFile {}
 
+/// In-memory SFTP server for [RemoteFileService.replaceFileBytes]. Without
+/// [posixRename], rename refuses an existing destination like SFTP v3.
+class _ReplaceSftp extends Fake implements SftpClient {
+  _ReplaceSftp(this.files);
+
+  final Map<String, List<int>> files;
+  final links = <String, String>{};
+  final setStats = <String>[];
+  bool posixRename = true;
+  Object? writeFailure;
+
+  @override
+  Future<SftpFileAttrs> stat(String path, {bool followLink = true}) async {
+    if (!followLink && links.containsKey(path)) {
+      return SftpFileAttrs(mode: const SftpFileMode.value(0xA1FF));
+    }
+    if (!files.containsKey(links[path] ?? path)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+    }
+    return SftpFileAttrs(
+      mode: const SftpFileMode.value(0x81ED),
+      userID: 7,
+      groupID: 8,
+    );
+  }
+
+  @override
+  Future<String> absolute(String path) async => links[path] ?? path;
+
+  @override
+  Future<SftpFile> open(String path, {SftpFileOpenMode? mode}) async {
+    expect(mode!.flag & SftpFileOpenMode.truncate.flag, 0);
+    files[path] = [];
+    return _ReplaceSftpFile(this, path);
+  }
+
+  @override
+  Future<void> setStat(String path, SftpFileAttrs attrs) async =>
+      setStats.add(path);
+
+  @override
+  Future<void> rename(String oldPath, String newPath) async {
+    if (!posixRename && files.containsKey(newPath)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'exists');
+    }
+    files[newPath] = files.remove(oldPath)!;
+  }
+
+  @override
+  Future<void> remove(String filename) async => files.remove(filename);
+}
+
+class _ReplaceSftpFile extends Fake implements SftpFile {
+  _ReplaceSftpFile(this.sftp, this.path);
+
+  final _ReplaceSftp sftp;
+  final String path;
+
+  @override
+  Future<void> writeBytes(
+    Uint8List data, {
+    int chunkSize = 0,
+    int maxPendingRequests = 0,
+    int offset = 0,
+  }) async {
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (sftp.writeFailure case final failure?) throw failure;
+    sftp.files[path]!.addAll(data);
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
 void registerRemoteFileServiceIoTests() {
   group('remote_file_service_io', () {
     late Directory directory;
@@ -338,6 +414,52 @@ void registerRemoteFileServiceIoTests() {
 
         expect(order, ['write 0', 'progress 1', 'write 1', 'progress 2']);
       });
+    });
+
+    group('replaceFileBytes', () {
+      test('a failed save leaves the original file intact', () async {
+        final server = _ReplaceSftp({
+          '/srv/notes.txt': [1, 2, 3],
+        })..writeFailure = SftpStatusError(SftpStatusCode.failure, 'lost');
+
+        await expectLater(
+          service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/notes.txt',
+            bytes: Uint8List.fromList([9]),
+          ),
+          throwsA(isA<SftpStatusError>()),
+        );
+
+        expect(server.files, {
+          '/srv/notes.txt': [1, 2, 3],
+        });
+      });
+
+      test(
+        'replaces a symlink target with its metadata without posix-rename',
+        () async {
+          final server =
+              _ReplaceSftp({
+                  '/srv/real.txt': [1],
+                })
+                ..links['/srv/link'] = '/srv/real.txt'
+                ..posixRename = false;
+
+          await service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/link',
+            bytes: Uint8List.fromList([9]),
+          );
+
+          expect(server.files, {
+            '/srv/real.txt': [9],
+          });
+          expect(server.links, {'/srv/link': '/srv/real.txt'});
+          expect(server.setStats, hasLength(2));
+          expect(server.setStats.toSet().single, startsWith('/srv/.real.txt.'));
+        },
+      );
     });
   });
 }

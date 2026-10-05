@@ -492,11 +492,6 @@ String normalizeTerminalOutputForRemoteShell(String data) =>
 /// before each printable cell preserves behavior from editors such as nano,
 /// while the decoder retains split escape sequences until complete.
 ///
-/// xterm.dart 4.0.0 also corrupts its line buffer when RI (`ESC M`) scrolls a
-/// vertical margin region down. When cursor state is provided, that RI is
-/// rewritten to IL (`CSI L`), which has the same effect at the top margin
-/// without reusing detached buffer lines internally.
-///
 /// xterm.dart also treats private `CSI > ... m` keyboard modifier controls as
 /// SGR attributes. Dropping those controls prevents TUIs such as OpenCode from
 /// accidentally enabling underline/bold while painting spaces.
@@ -524,32 +519,14 @@ class TerminalXtermOutputDecoder {
     materializedSequenceCodeUnits = 0;
   }
 
-  /// Adapts the next chunk using the renderer's current cursor state.
-  ({String output, bool insertMode}) add({
-    required String input,
-    int? terminalColumns,
-    int? terminalRows,
-    int? cursorColumn,
-    int? cursorRow,
-    int? marginTop,
-    int? marginBottom,
-    bool originMode = false,
-  }) {
+  /// Adapts the next chunk of remote output.
+  ({String output, bool insertMode}) add({required String input}) {
     final combinedInput = _pendingSurrogate.isEmpty
         ? input
         : _pendingSurrogate + input;
     _pendingSurrogate = '';
     final output = StringBuffer();
     var cursor = 0;
-    final cursorTracker = _TerminalOutputCursorTracker(
-      columns: terminalColumns,
-      rows: terminalRows,
-      cursorColumn: cursorColumn,
-      cursorRow: cursorRow,
-      marginTop: marginTop,
-      marginBottom: marginBottom,
-      originMode: originMode,
-    );
     while (cursor < combinedInput.length) {
       if (_state != null) {
         final start = cursor;
@@ -562,7 +539,7 @@ class TerminalXtermOutputDecoder {
         materializedSequenceCodeUnits += sequence.length;
         _sequence.clear();
         if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
-          output.write(cursorTracker.adaptEscapeSequence(sequence));
+          output.write(sequence);
           _insertMode = _terminalInsertModeUpdate(sequence) ?? _insertMode;
         }
         continue;
@@ -588,7 +565,6 @@ class TerminalXtermOutputDecoder {
         }
       }
       output.write(combinedInput.substring(cursor, cursor + runeLength));
-      cursorTracker.writeRune(rune);
       cursor += runeLength;
     }
     return (output: output.toString(), insertMode: _insertMode);
@@ -628,242 +604,6 @@ class TerminalXtermOutputDecoder {
 }
 
 enum _TerminalSequenceState { escape, csi, string, intermediate }
-
-class _TerminalOutputCursorTracker {
-  _TerminalOutputCursorTracker({
-    required int? columns,
-    required int? rows,
-    required int? cursorColumn,
-    required int? cursorRow,
-    required int? marginTop,
-    required int? marginBottom,
-    required bool originMode,
-  }) : _columns = columns != null && columns > 0 ? columns : null,
-       _rows = rows != null && rows > 0 ? rows : null,
-       _originMode = originMode {
-    final validRows = _rows;
-    final validColumns = _columns;
-    if (validRows == null ||
-        validColumns == null ||
-        cursorColumn == null ||
-        cursorRow == null) {
-      return;
-    }
-
-    _cursorColumn = cursorColumn.clamp(0, validColumns);
-    _cursorRow = cursorRow.clamp(0, validRows - 1);
-    _marginTop = (marginTop ?? 0).clamp(0, validRows - 1);
-    _marginBottom = (marginBottom ?? validRows - 1).clamp(0, validRows - 1);
-    if (_marginTop! > _marginBottom!) {
-      final top = _marginTop!;
-      _marginTop = _marginBottom;
-      _marginBottom = top;
-    }
-  }
-
-  final int? _columns;
-  final int? _rows;
-  int? _cursorColumn;
-  int? _cursorRow;
-  int? _marginTop;
-  int? _marginBottom;
-  bool _originMode;
-
-  bool get _hasPosition =>
-      _columns != null &&
-      _rows != null &&
-      _cursorColumn != null &&
-      _cursorRow != null &&
-      _marginTop != null &&
-      _marginBottom != null;
-
-  String adaptEscapeSequence(String sequence) {
-    if (sequence == _terminalReverseIndexSequence) {
-      return _adaptReverseIndex();
-    }
-
-    _applyEscapeSequence(sequence);
-    return sequence;
-  }
-
-  void writeRune(int rune) {
-    if (!_hasPosition) {
-      return;
-    }
-
-    switch (rune) {
-      case _terminalBackspaceCodeUnit:
-        _cursorColumn = math.max(_cursorColumn! - 1, 0);
-      case _terminalHorizontalTabCodeUnit:
-        _cursorColumn = math.min(((_cursorColumn! ~/ 8) + 1) * 8, _columns!);
-      case _terminalLineFeedCodeUnit:
-      case _terminalVerticalTabCodeUnit:
-      case _terminalFormFeedCodeUnit:
-        _lineFeed();
-      case _terminalCarriageReturnCodeUnit:
-        _cursorColumn = 0;
-      default:
-        final width = unicodeV11.wcwidth(rune);
-        if (width <= 0) {
-          return;
-        }
-        final columns = _columns!;
-        if (_cursorColumn! >= columns) {
-          _lineFeed();
-          _cursorColumn = 0;
-        }
-        _cursorColumn = math.min(_cursorColumn! + width, columns);
-    }
-  }
-
-  String _adaptReverseIndex() {
-    if (!_hasPosition) {
-      return _terminalReverseIndexSequence;
-    }
-
-    if (_cursorRow == _marginTop) {
-      final restoreColumn = _cursorColumn!;
-      return restoreColumn == 0
-          ? _terminalInsertLineSequence
-          : '$_terminalInsertLineSequence\x1b[${restoreColumn + 1}G';
-    }
-
-    _cursorRow = math.max(_cursorRow! - 1, 0);
-    return _terminalReverseIndexSequence;
-  }
-
-  void _applyEscapeSequence(String sequence) {
-    if (!_hasPosition || sequence.length < 2) {
-      return;
-    }
-
-    if (sequence.length == 2 &&
-        sequence.codeUnitAt(1) == _terminalFullResetFinalCodeUnit) {
-      _resetCursorState();
-      return;
-    }
-
-    if (sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-      return;
-    }
-
-    final finalCodeUnit = sequence.codeUnitAt(sequence.length - 1);
-    final params = _terminalCsiNumericParams(sequence);
-    final originModeUpdate = _terminalDecOriginModeUpdate(sequence);
-    if (originModeUpdate != null) {
-      _originMode = originModeUpdate;
-      return;
-    }
-
-    switch (finalCodeUnit) {
-      case _terminalCursorUpFinalCodeUnit:
-        _moveCursorRows(-_terminalCsiParam(params, 0, defaultValue: 1));
-      case _terminalCursorDownFinalCodeUnit:
-        _moveCursorRows(_terminalCsiParam(params, 0, defaultValue: 1));
-      case _terminalCursorForwardFinalCodeUnit:
-        _moveCursorColumns(_terminalCsiParam(params, 0, defaultValue: 1));
-      case _terminalCursorBackFinalCodeUnit:
-        _moveCursorColumns(-_terminalCsiParam(params, 0, defaultValue: 1));
-      case _terminalCursorNextLineFinalCodeUnit:
-        _moveCursorRows(_terminalCsiParam(params, 0, defaultValue: 1));
-        _cursorColumn = 0;
-      case _terminalCursorPreviousLineFinalCodeUnit:
-        _moveCursorRows(-_terminalCsiParam(params, 0, defaultValue: 1));
-        _cursorColumn = 0;
-      case _terminalCursorHorizontalAbsoluteFinalCodeUnit:
-        _setCursorColumn(_terminalCsiParam(params, 0, defaultValue: 1) - 1);
-      case _terminalCursorPositionFinalCodeUnit:
-      case _terminalHorizontalVerticalPositionFinalCodeUnit:
-        _setCursor(
-          row: _terminalCsiParam(params, 0, defaultValue: 1) - 1,
-          column: _terminalCsiParam(params, 1, defaultValue: 1) - 1,
-        );
-      case _terminalLinePositionAbsoluteFinalCodeUnit:
-        _setCursor(
-          row: _terminalCsiParam(params, 0, defaultValue: 1) - 1,
-          column: _cursorColumn!,
-        );
-      case _terminalSetMarginsFinalCodeUnit:
-        _setMargins(params);
-      case _terminalInsertLinesFinalCodeUnit:
-      case _terminalDeleteLinesFinalCodeUnit:
-        _cursorColumn = 0;
-    }
-  }
-
-  void _lineFeed() {
-    final row = _cursorRow!;
-    final marginTop = _marginTop!;
-    final marginBottom = _marginBottom!;
-    final inMargins = row >= marginTop && row <= marginBottom;
-    if (inMargins && row == marginBottom) {
-      return;
-    }
-    if (!inMargins && row >= _rows! - 1) {
-      return;
-    }
-    _cursorRow = math.min(row + 1, _rows! - 1);
-  }
-
-  /// Moves [offset] rows. Inside the scroll region the cursor stops at the
-  /// margin it moves toward; outside it, at the screen edge.
-  void _moveCursorRows(int offset) {
-    final row = _cursorRow!;
-    final inMargins = row >= _marginTop! && row <= _marginBottom!;
-    final minRow = inMargins && offset < 0 ? _marginTop! : 0;
-    final maxRow = inMargins && offset > 0 ? _marginBottom! : _rows! - 1;
-    _cursorRow = (row + offset).clamp(minRow, maxRow);
-  }
-
-  void _moveCursorColumns(int offset) {
-    _setCursorColumn(_cursorColumn! + offset);
-  }
-
-  void _setCursor({required int row, required int column}) {
-    if (_originMode) {
-      _cursorRow = (row + _marginTop!).clamp(_marginTop!, _marginBottom!);
-    } else {
-      _setCursorRow(row);
-    }
-    _setCursorColumn(column);
-  }
-
-  void _setCursorRow(int row) {
-    _cursorRow = row.clamp(0, _rows! - 1);
-  }
-
-  void _setCursorColumn(int column) {
-    _cursorColumn = column.clamp(0, _columns! - 1);
-  }
-
-  void _setMargins(List<int?> params) {
-    if (params.length > 2) {
-      return;
-    }
-
-    final rows = _rows!;
-    final top = _terminalCsiParam(params, 0, defaultValue: 1) - 1;
-    final bottom = _terminalCsiParam(params, 1, defaultValue: rows) - 1;
-    final marginTop = top.clamp(0, rows - 1);
-    final marginBottom = bottom.clamp(0, rows - 1);
-    // Like the buffer, ignore a region of fewer than two rows and home the
-    // cursor after a valid one.
-    if (marginTop >= marginBottom) {
-      return;
-    }
-    _marginTop = marginTop;
-    _marginBottom = marginBottom;
-    _setCursor(row: 0, column: 0);
-  }
-
-  void _resetCursorState() {
-    _cursorColumn = 0;
-    _cursorRow = 0;
-    _marginTop = 0;
-    _marginBottom = _rows! - 1;
-    _originMode = false;
-  }
-}
 
 final _terminalWindowQueryPattern = RegExp(r'\x1b\[([0-9;?]*)t');
 final _terminalModeReportQueryPattern = RegExp(r'\x1b\[\?([0-9;]+)\$p');
@@ -966,12 +706,6 @@ const _terminalModeReset = 2;
 const _terminalEscape = '\x1b';
 const _terminalEscapeCodeUnit = 0x1B;
 const _terminalBellCodeUnit = 0x07;
-const _terminalBackspaceCodeUnit = 0x08;
-const _terminalHorizontalTabCodeUnit = 0x09;
-const _terminalLineFeedCodeUnit = 0x0A;
-const _terminalVerticalTabCodeUnit = 0x0B;
-const _terminalFormFeedCodeUnit = 0x0C;
-const _terminalCarriageReturnCodeUnit = 0x0D;
 const _terminalCsiIntroducerCodeUnit = 0x5B;
 const _terminalDcsIntroducerCodeUnit = 0x50;
 const _terminalOscIntroducerCodeUnit = 0x5D;
@@ -979,21 +713,7 @@ const _terminalSosIntroducerCodeUnit = 0x58;
 const _terminalPmIntroducerCodeUnit = 0x5E;
 const _terminalApcIntroducerCodeUnit = 0x5F;
 const _terminalStringTerminatorCodeUnit = 0x5C;
-const _terminalCursorUpFinalCodeUnit = 0x41;
-const _terminalCursorDownFinalCodeUnit = 0x42;
-const _terminalCursorForwardFinalCodeUnit = 0x43;
-const _terminalCursorBackFinalCodeUnit = 0x44;
-const _terminalCursorNextLineFinalCodeUnit = 0x45;
-const _terminalCursorPreviousLineFinalCodeUnit = 0x46;
-const _terminalCursorHorizontalAbsoluteFinalCodeUnit = 0x47;
-const _terminalCursorPositionFinalCodeUnit = 0x48;
-const _terminalInsertLinesFinalCodeUnit = 0x4C;
-const _terminalDeleteLinesFinalCodeUnit = 0x4D;
-const _terminalHorizontalVerticalPositionFinalCodeUnit = 0x66;
-const _terminalLinePositionAbsoluteFinalCodeUnit = 0x64;
-const _terminalSetMarginsFinalCodeUnit = 0x72;
 const _terminalInsertMode = 4;
-const _terminalOriginMode = 6;
 const _terminalSetModeFinalCodeUnit = 0x68;
 const _terminalResetModeFinalCodeUnit = 0x6C;
 const _terminalSoftResetFinalCodeUnit = 0x70;
@@ -1001,8 +721,6 @@ const _terminalFullResetFinalCodeUnit = 0x63;
 const _terminalPrivateMarkerCodeUnit = 0x3E;
 const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
 const _terminalInsertBlankCharacterSequence = '\x1b[@';
-const _terminalReverseIndexSequence = '\x1bM';
-const _terminalInsertLineSequence = '\x1b[L';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
 
 String _formatTerminalModeReport(int mode, int status) =>
@@ -1047,32 +765,6 @@ bool? _terminalInsertModeUpdate(String sequence) {
   return null;
 }
 
-bool? _terminalDecOriginModeUpdate(String sequence) {
-  if (sequence.length < 5 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-    return null;
-  }
-
-  final finalCodeUnit = sequence.codeUnitAt(sequence.length - 1);
-  if (finalCodeUnit != _terminalSetModeFinalCodeUnit &&
-      finalCodeUnit != _terminalResetModeFinalCodeUnit) {
-    return null;
-  }
-
-  final params = sequence.substring(2, sequence.length - 1);
-  if (!params.startsWith('?')) {
-    return null;
-  }
-
-  for (final param in params.substring(1).split(';')) {
-    if (int.tryParse(param) == _terminalOriginMode) {
-      return finalCodeUnit == _terminalSetModeFinalCodeUnit;
-    }
-  }
-  return null;
-}
-
 bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
   if (sequence.length < 4 ||
       sequence.codeUnitAt(0) != _terminalEscapeCodeUnit ||
@@ -1085,37 +777,6 @@ bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
 
   final params = sequence.substring(3, sequence.length - 1);
   return _terminalCsiNumericParamsPattern.hasMatch(params);
-}
-
-List<int?> _terminalCsiNumericParams(String sequence) {
-  if (sequence.length < 3 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-    return const [];
-  }
-
-  final params = sequence.substring(2, sequence.length - 1);
-  if (params.isEmpty) {
-    return const [];
-  }
-  if (!_terminalCsiNumericParamsPattern.hasMatch(params)) {
-    return const [];
-  }
-  return params
-      .split(';')
-      .map((param) => param.isEmpty ? null : int.tryParse(param))
-      .toList();
-}
-
-int _terminalCsiParam(
-  List<int?> params,
-  int index, {
-  required int defaultValue,
-}) {
-  if (index >= params.length || params[index] == null || params[index] == 0) {
-    return defaultValue;
-  }
-  return params[index]!;
 }
 
 int _terminalRuneAt(String input, int index) {
@@ -3004,18 +2665,34 @@ class _PreparedHostKeySocket {
   final HostKeySource hostKeySource;
 }
 
-Future<void> _relayForward(
+/// How long a relay that ended without cancellation may keep flushing data it
+/// already accepted before it destroys the local socket.
+const _forwardRelayCloseGrace = Duration(seconds: 5);
+
+/// Relays one forwarded connection between [socket] and an SSH channel.
+///
+/// Uploads go through `addStream`, so a full SSH window pauses reads from
+/// [socket] instead of buffering the whole upload in memory. Normal EOF closes
+/// one direction and keeps the other open. Cancellation through [stopped] or a
+/// failure destroys both endpoints at once, so a client that stopped reading
+/// cannot hold the relay open; any other ending flushes what was accepted for
+/// at most [closeGrace].
+@visibleForTesting
+Future<void> relayPortForward(
   Socket socket,
   FutureOr<SSHForwardChannel?> Function() openChannel, {
   Future<void>? stopped,
   Duration? openTimeout,
   void Function(SSHForwardChannel)? destroyChannel,
+  Duration closeGrace = _forwardRelayCloseGrace,
 }) async {
   SSHForwardChannel? forward;
   StreamIterator<Uint8List>? incoming;
   StreamIterator<Uint8List>? outgoing;
   Future<void>? socketFlush;
   var finished = false;
+  var graceful = false;
+  var stopRequested = false;
   var forwardSinkClosed = false;
   var closingForwardSink = false;
   var socketClosed = false;
@@ -3039,6 +2716,9 @@ Future<void> _relayForward(
     }
   }
 
+  // Registered before any race on [stopped], so it is set by the time a race
+  // resumes.
+  unawaited(stopped?.then((_) => stopRequested = true));
   // Observe write-side errors before awaiting channel creation.
   unawaited(
     socket.done.then<void>((_) {
@@ -3070,19 +2750,36 @@ Future<void> _relayForward(
         });
     outgoing = StreamIterator(socket);
     final source = outgoing;
+    Object? readError;
+    StackTrace? readStackTrace;
+    // Continues [source] from its current chunk. A read error ends this stream
+    // rather than flowing into the channel sink, and is rethrown afterwards.
+    Stream<Uint8List> remainingUpload() async* {
+      try {
+        do {
+          yield source.current;
+        } while (await source.moveNext());
+      } on Object catch (error, stackTrace) {
+        readError = error;
+        readStackTrace = stackTrace;
+      }
+    }
+
     final socketToForward = () async {
-      while (await source.moveNext()) {
+      if (await source.moveNext()) {
         final channel = await opening;
         // A delivered channel may already have a completed sink.done future.
         // Let its observer run before writing queued socket bytes.
         await Future<void>.value();
         if (channel == null || finished || forwardSinkClosed) return;
-        // SSHForwardChannel.flush() flushes the shared SSH transport, not
-        // this channel. Dart's Socket.flush() temporarily binds its sink;
-        // concurrent shell/forward/control packets then throw while writing
-        // to it and can corrupt the encrypted packet stream. The channel's
-        // upload loop sends queued data without an explicit transport flush.
-        channel.sink.add(source.current);
+        // addStream owns the sink until the socket ends: nothing else adds to
+        // or closes it meanwhile. SSHForwardChannel pauses it while the SSH
+        // window is full, which stops the reads above. Never flush instead:
+        // SSHForwardChannel.flush() flushes the shared SSH transport.
+        await channel.sink.addStream(remainingUpload());
+        if (readError case final error?) {
+          Error.throwWithStackTrace(error, readStackTrace!);
+        }
       }
       final channel = forward;
       if (channel != null && !finished && !forwardSinkClosed) {
@@ -3100,7 +2797,10 @@ Future<void> _relayForward(
     final channel = await (openTimeout == null
         ? pending
         : pending.timeout(openTimeout));
-    if (channel == null) return;
+    if (channel == null) {
+      graceful = !stopRequested;
+      return;
+    }
     incoming = StreamIterator(channel.stream);
     final response = incoming;
     final forwardToSocket = () async {
@@ -3119,14 +2819,32 @@ Future<void> _relayForward(
       unexpectedClose.future,
       ?stopped,
     ]);
+    graceful = !stopRequested;
   } finally {
     finished = true;
+    if (!graceful) {
+      // Destroy first: a pending flush or close waits on a client that may
+      // never read again. The pumps' pending futures are already observed.
+      socket.destroy();
+      if (forward != null) destroy(forward!);
+    }
+    // Waits for [future] unless the grace expires or the tunnel stops.
+    Future<bool> settled(Future<void> future) => Future.any<bool>([
+      future.then((_) => true),
+      if (stopped != null) stopped.then((_) => false),
+    ]).timeout(closeGrace, onTimeout: () => false);
     try {
       try {
-        if (socketFlush != null) await socketFlush;
-        if (!closingSocket) {
-          closingSocket = true;
-          await socket.close();
+        if (graceful) {
+          // A remote close can win while the response is still flushing.
+          // Wait for that flush before closing the write side.
+          final flush = socketFlush;
+          if (flush != null && !await settled(flush)) {
+            socket.destroy();
+          } else if (!closingSocket) {
+            closingSocket = true;
+            if (!await settled(socket.close())) socket.destroy();
+          }
         }
       } finally {
         await Future.wait([
@@ -3138,7 +2856,7 @@ Future<void> _relayForward(
       socket.destroy();
       rethrow;
     } finally {
-      if (forward != null) destroy(forward!);
+      if (graceful && forward != null) destroy(forward!);
     }
   }
 }
@@ -3669,7 +3387,6 @@ class SshSession {
   static const _defaultPortForwardStartTimeout = Duration(seconds: 10);
   static const _automaticPortDiscoveryTimeout = Duration(seconds: 8);
   static const _automaticPortWatcherStartTimeout = Duration(seconds: 10);
-  static const _automaticPortWatcherCloseTimeout = Duration(seconds: 2);
   static const _sftpOpenRetryDelays = [
     Duration(milliseconds: 250),
     Duration(milliseconds: 750),
@@ -5278,9 +4995,26 @@ class SshSession {
     required int generation,
   }) async {
     final command = buildAutomaticPortForwardWatcherCommand();
-    SSHSession watcher;
+    // One deadline covers the channel open and the first snapshot, so a
+    // server that never answers the open still lets the fallback start.
+    final startup = Stopwatch()..start();
+    final SSHSession watcher;
     try {
-      watcher = await execute(command);
+      final opening = openSshExec(
+        execute(command),
+        _automaticPortWatcherStartTimeout,
+      );
+      final opened = await Future.any<SSHSession?>([
+        opening,
+        _closeStarted.future.then((_) => null),
+      ]);
+      if (opened == null) {
+        opening
+            .then((late) => closeAbandonedSshExec(late, grace: Duration.zero))
+            .ignore();
+        return false;
+      }
+      watcher = opened;
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
         'ssh.forward',
@@ -5326,7 +5060,7 @@ class SshSession {
         );
     try {
       final started = await ready.future.timeout(
-        _automaticPortWatcherStartTimeout,
+        _automaticPortWatcherStartTimeout - startup.elapsed,
       );
       if (started) {
         DiagnosticsLogService.instance.info(
@@ -5458,7 +5192,7 @@ class SshSession {
     _automaticPortForwardWatcherSession = null;
     _automaticPortForwardWatcherStdoutSubscription = null;
     _automaticPortForwardWatcherSnapshot = null;
-    watcher.close();
+    unawaited(_closeAutomaticPortForwardWatcherSession(watcher));
     final ready = _automaticPortForwardWatcherReady;
     _automaticPortForwardWatcherReady = null;
     if (ready != null && !ready.isCompleted) {
@@ -5500,24 +5234,27 @@ class SshSession {
     _automaticPortForwardWatcherSnapshotUnavailable = false;
     await subscription?.cancel();
     if (watcher != null) {
+      final closing = _closeAutomaticPortForwardWatcherSession(watcher);
       if (waitForClose) {
-        await _closeAutomaticPortForwardWatcherSession(watcher);
+        await closing;
       } else {
-        watcher.close();
+        unawaited(closing);
       }
     }
   }
 
+  /// The Windows watcher polls forever without reading stdin, so EOF alone
+  /// never ends it; the shared cleanup destroys the channel after the grace.
   Future<void> _closeAutomaticPortForwardWatcherSession(
     SSHSession watcher,
   ) async {
-    watcher.close();
     try {
-      await watcher.done.timeout(_automaticPortWatcherCloseTimeout);
+      await closeAbandonedSshExec(watcher);
     } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       DiagnosticsLogService.instance.warning(
         'ssh.forward',
-        'automatic_watcher_close_wait_failed',
+        'automatic_watcher_close_failed',
         fields: {
           'connectionId': connectionId,
           'hostId': hostId,
@@ -6249,10 +5986,10 @@ while($true){
         remoteHost: remoteHost,
         remotePort: remotePort,
       );
-      tunnel.localConnections.add(connection);
+      tunnel.connections.add(connection);
       unawaited(
         connection.whenComplete(() {
-          tunnel.localConnections.remove(connection);
+          tunnel.connections.remove(connection);
         }),
       );
     },
@@ -6289,7 +6026,7 @@ while($true){
     required int remotePort,
   }) async {
     try {
-      await _relayForward(
+      await relayPortForward(
         socket,
         () => _isClosing || tunnel.stopped.isCompleted
             ? null
@@ -6388,39 +6125,17 @@ while($true){
       );
 
       _activeTunnels[portForwardId] = tunnel;
-      tunnel.subscription = remoteForward.connections.listen((channel) async {
-        Socket? socket;
-        try {
-          socket = await Socket.connect(localHost, localPort);
-          await _relayForward(socket, () => channel);
-        } on Object catch (e) {
-          if (e is! Exception &&
-              e is! SSHError &&
-              !_isClosedForwardSinkError(e)) {
-            rethrow;
-          }
-          DiagnosticsLogService.instance.warning(
-            'ssh.forward',
-            'remote_connection_failed',
-            fields: {'errorType': e.runtimeType},
-          );
-          if (kDebugMode) {
-            debugPrint('Remote forward connection error: $e');
-          }
-        } finally {
-          if (socket == null) {
-            try {
-              channel.destroy();
-            } on SSHError catch (_) {
-              // The transport may already be closed during channel teardown.
-            }
-          }
-          try {
-            socket?.destroy();
-          } on Exception catch (_) {
-            // Ignore cleanup errors.
-          }
-        }
+      tunnel.subscription = remoteForward.connections.listen((channel) {
+        final connection = _handleRemoteForwardConnection(
+          channel,
+          tunnel: tunnel,
+          localHost: localHost,
+          localPort: localPort,
+        );
+        tunnel.connections.add(connection);
+        unawaited(
+          connection.whenComplete(() => tunnel.connections.remove(connection)),
+        );
       });
 
       _notifyPortForwardsChanged();
@@ -6463,6 +6178,62 @@ while($true){
     }
   }
 
+  Future<void> _handleRemoteForwardConnection(
+    SSHForwardChannel channel, {
+    required _ActiveTunnel tunnel,
+    required String localHost,
+    required int localPort,
+  }) async {
+    Socket? socket;
+    try {
+      final connecting = Socket.connect(localHost, localPort);
+      socket = await Future.any<Socket?>([
+        connecting,
+        tunnel.stopped.future.then((_) => null),
+      ]);
+      if (socket == null) {
+        // Stopped while connecting: a socket that arrives later has no relay.
+        unawaited(
+          connecting.then<void>(
+            (late) => late.destroy(),
+            onError: (Object _, StackTrace _) {},
+          ),
+        );
+        return;
+      }
+      await relayPortForward(
+        socket,
+        () => channel,
+        stopped: tunnel.stopped.future,
+      );
+    } on Object catch (e) {
+      if (e is! Exception && e is! SSHError && !_isClosedForwardSinkError(e)) {
+        rethrow;
+      }
+      DiagnosticsLogService.instance.warning(
+        'ssh.forward',
+        'remote_connection_failed',
+        fields: {'errorType': e.runtimeType},
+      );
+      if (kDebugMode) {
+        debugPrint('Remote forward connection error: $e');
+      }
+    } finally {
+      if (socket == null) {
+        try {
+          channel.destroy();
+        } on SSHError catch (_) {
+          // The transport may already be closed during channel teardown.
+        }
+      }
+      try {
+        socket?.destroy();
+      } on Exception catch (_) {
+        // Ignore cleanup errors.
+      }
+    }
+  }
+
   void _closeLateRemoteForward(Future<SSHRemoteForward?> request) {
     unawaited(
       request.then<void>(
@@ -6500,7 +6271,7 @@ while($true){
         await browserServerSocket.close();
       }
       tunnel.remoteForward?.close();
-      await Future.wait(tunnel.localConnections);
+      await Future.wait(tunnel.connections);
       _notifyPortForwardsChanged();
     }
   }
@@ -6809,7 +6580,9 @@ class _ActiveTunnel {
        isLocal = false;
 
   final stopped = Completer<void>();
-  final localConnections = <Future<void>>{};
+
+  /// Relays for accepted local or reverse connections, awaited on stop.
+  final connections = <Future<void>>{};
   final ServerSocket? serverSocket;
   final List<ServerSocket> browserServerSockets;
   final SSHRemoteForward? remoteForward;

@@ -2380,11 +2380,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
             controller: controller,
             onSave: (text) => ref
                 .read(remoteFileServiceProvider)
-                .uploadBytes(
+                .replaceFileBytes(
                   sftp: _sftp!,
                   remotePath: remotePath,
                   bytes: Uint8List.fromList(utf8.encode(text)),
-                  applyPrivateMode: false,
                 ),
             terminalTheme: editorTheme,
             fontFamily: fontFamily,
