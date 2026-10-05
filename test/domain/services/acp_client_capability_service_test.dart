@@ -11,9 +11,9 @@ import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
-import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 
 void main() {
   group('AcpClientCapabilityService', () {
@@ -54,7 +54,7 @@ void main() {
         maxTerminals: 1,
         maxTerminalLifetime: Duration(seconds: 30),
       );
-      late _MockSshSession session;
+      late MockSshSession session;
       late Completer<SSHSession> opening;
       late _MockTerminalSession channel;
 
@@ -69,7 +69,7 @@ void main() {
         });
         transport = _ServerTransport();
         client = AcpClient(AcpJsonRpcConnection(transport: transport));
-        session = _MockSshSession();
+        session = MockSshSession();
         opening = Completer<SSHSession>();
         channel = _MockTerminalSession();
         final exit = Completer<int?>();
@@ -1833,8 +1833,6 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
     files[path] = bytes;
   }
 }
-
-class _MockSshSession extends Mock implements SshSession {}
 
 class _MockTerminalSession extends MockSessionWithChannel {}
 

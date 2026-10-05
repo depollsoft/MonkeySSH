@@ -10,11 +10,11 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/domain/services/auth_service.dart';
 
+import '../helpers/mocks.dart';
+
 const _validPinHash = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 const _shortPinHash = 'AAECAwQFBgcICQoLDA0ODw==';
 const _validPinSalt = 'AAECAwQFBgcICQoLDA0ODw==';
-
-class MockFlutterSecureStorage extends Mock implements FlutterSecureStorage {}
 
 class MockLocalAuthentication extends Mock implements LocalAuthentication {}
 

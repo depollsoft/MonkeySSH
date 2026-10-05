@@ -13,10 +13,10 @@ import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/presentation/screens/port_forwards_screen.dart';
 
+import '../helpers/mocks.dart';
+
 class _MockPortForwardRepository extends Mock
     implements PortForwardRepository {}
-
-class _MockHostRepository extends Mock implements HostRepository {}
 
 PortForward _buildPortForward({
   required int id,
@@ -52,11 +52,11 @@ Host _buildHost({required int id, required String label}) => Host(
 
 void main() {
   late _MockPortForwardRepository portForwardRepository;
-  late _MockHostRepository hostRepository;
+  late MockHostRepository hostRepository;
 
   setUp(() {
     portForwardRepository = _MockPortForwardRepository();
-    hostRepository = _MockHostRepository();
+    hostRepository = MockHostRepository();
   });
 
   Widget buildWidget() => ProviderScope(

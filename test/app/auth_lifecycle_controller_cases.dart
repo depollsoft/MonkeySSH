@@ -15,11 +15,11 @@ import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
-class _MockAuthService extends Mock implements AuthService {}
+import '../helpers/mocks.dart';
 
 void registerAuthLifecycleControllerTests() {
   group('auth_lifecycle_controller', () {
-    late _MockAuthService authService;
+    late MockAuthService authService;
     late AppDatabase database;
     late ProviderContainer container;
     late DateTime now;
@@ -27,7 +27,7 @@ void registerAuthLifecycleControllerTests() {
     TestWidgetsFlutterBinding.ensureInitialized();
 
     setUp(() {
-      authService = _MockAuthService();
+      authService = MockAuthService();
       database = AppDatabase.forTesting(NativeDatabase.memory());
       now = DateTime(2026, 3, 24, 12);
 

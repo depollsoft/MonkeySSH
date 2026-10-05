@@ -10,12 +10,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
-import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/acp_sign_in_terminal.dart';
 
-class _MockSshSession extends Mock implements SshSession {}
-
-class _MockSshChannel extends Mock implements SSHSession {}
+import '../helpers/mocks.dart';
 
 final class _FakeSignInProcess implements AcpSignInProcess {
   final outputController = StreamController<List<int>>.broadcast();
@@ -96,8 +93,8 @@ Future<({List<_FakeSignInProcess> processes, bool? Function() result})> _open(
 void main() {
   test('SSH sign-in keeps output sent before the terminal listens', () async {
     registerFallbackValue(const SSHPtyConfig());
-    final session = _MockSshSession();
-    final channel = _MockSshChannel();
+    final session = MockSshSession();
+    final channel = MockSSHSession();
     final stdout = StreamController<Uint8List>()
       ..add(Uint8List.fromList(utf8.encode('Open https://example.com/dev\n')));
     when(() => channel.stdout).thenAnswer((_) => stdout.stream);

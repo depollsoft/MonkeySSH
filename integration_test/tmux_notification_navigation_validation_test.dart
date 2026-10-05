@@ -24,15 +24,8 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
+import '../test/helpers/mocks.dart';
 import '../test/helpers/terminal_session_fixture.dart';
-
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockShellChannel extends Mock implements SSHSession {}
-
-class _MockMonetizationService extends Mock implements MonetizationService {}
 
 class _MockTmuxService extends Mock implements TmuxService {}
 
@@ -77,11 +70,11 @@ void main() {
       const currentTargetWindowIndex = 3;
       const targetWindowId = '@9';
       final db = AppDatabase.forTesting(NativeDatabase.memory());
-      final hostRepository = _MockHostRepository();
-      final sshClient = _MockSshClient();
-      final shellChannel = _MockShellChannel();
+      final hostRepository = MockHostRepository();
+      final sshClient = MockSshClient();
+      final shellChannel = MockSSHSession();
       final tmuxService = _MockTmuxService();
-      final monetizationService = _MockMonetizationService();
+      final monetizationService = MockMonetizationService();
       final host = _buildHost(id: 1, tmuxSessionName: tmuxSessionName);
       final shellDoneCompleter = Completer<void>();
       final shellStdoutController = StreamController<Uint8List>.broadcast();

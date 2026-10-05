@@ -9,8 +9,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mocks.dart';
 
 class _MockExecSession extends MockSessionWithChannel {}
 
@@ -160,7 +159,7 @@ void main() {
   });
 
   group('session runtime synchronized output', () {
-    late _MockSshClient client;
+    late MockSshClient client;
     late _MockExecSession shell;
     late StreamController<Uint8List> stdout;
     late SshSession session;
@@ -173,7 +172,7 @@ void main() {
     }
 
     Future<void> start() async {
-      client = _MockSshClient();
+      client = MockSshClient();
       shell = _MockExecSession();
       stdout = StreamController<Uint8List>();
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');

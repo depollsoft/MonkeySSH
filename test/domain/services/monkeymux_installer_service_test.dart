@@ -15,13 +15,10 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 class _MockSshSession extends MockSessionWithChannel {}
-
-class _MockSftpClient extends Mock implements SftpClient {}
 
 class _FakeAssetBundle extends CachingAssetBundle {
   _FakeAssetBundle(this.assets);
@@ -1073,8 +1070,8 @@ class _InstallHarness {
   final binary = Uint8List.fromList(utf8.encode('monkeymux-binary'));
   String get digest => sha256.convert(binary).toString();
   final _FakeRemoteFileService remote;
-  final client = _MockSshClient();
-  final sftp = _MockSftpClient();
+  final client = MockSshClient();
+  final sftp = MockSftpClient();
   final commands = <String>[];
   Future<String> Function(String)? finalize;
   late final _FakeAssetBundle bundle;

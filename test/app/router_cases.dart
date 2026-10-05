@@ -11,7 +11,7 @@ import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
-class _MockAuthService extends Mock implements AuthService {}
+import '../helpers/mocks.dart';
 
 class _MockBuildContext extends Mock implements BuildContext {}
 
@@ -231,11 +231,11 @@ void registerRouterTests() {
     // Intentional routerProvider behavior: it creates a new GoRouter each time
     // authStateProvider changes, which resets the navigation back-stack.
     group('routerProvider', () {
-      late _MockAuthService authService;
+      late MockAuthService authService;
       late ProviderContainer container;
 
       setUp(() {
-        authService = _MockAuthService();
+        authService = MockAuthService();
         when(() => authService.isAuthEnabled()).thenAnswer((_) async => false);
 
         container = ProviderContainer(
