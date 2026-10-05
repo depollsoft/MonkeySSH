@@ -1185,5 +1185,43 @@ void registerMonkeyTerminalViewLayoutTests() {
         );
       });
     });
+
+    testWidgets('editable rect is only reported when the caret moves', (
+      tester,
+    ) async {
+      final terminal = Terminal()..write('abc');
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 300,
+            height: 200,
+            child: MonkeyTerminalView(terminal, hardwareKeyboardOnly: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      final state = tester.state<MonkeyTerminalViewState>(
+        find.byType(MonkeyTerminalView),
+      );
+      final reports = <Rect>[];
+      state.renderTerminal.onEditableRect = (_, caretRect) =>
+          reports.add(caretRect);
+      await tester.pump();
+
+      // The first change after a new listener reports the current caret once.
+      terminal.write('\x1b[0m');
+      expect(reports, hasLength(1));
+      final firstCaret = reports.single;
+
+      terminal.write('\x1b[0m');
+      expect(reports, hasLength(1), reason: 'the caret did not move');
+
+      terminal.write('d');
+      expect(reports, hasLength(2));
+      expect(reports.last.left, greaterThan(firstCaret.left));
+
+      terminal.write('\x1b[1m');
+      expect(reports, hasLength(2), reason: 'the caret did not move');
+    });
   });
 }

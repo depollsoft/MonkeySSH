@@ -23,6 +23,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
+import 'package:monkeyssh/domain/services/kitty_placeholder_runs.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/cell_flags.dart';
 import 'package:xterm/src/core/buffer/line.dart';
@@ -79,45 +80,6 @@ const _backgroundAlphaCandidates = <int>[
   0xB8,
   0xCC,
 ];
-
-/// A single Kitty Unicode-placeholder cell resolved for compositing.
-///
-/// Each cell carries both its on-screen position ([cellRow]/[cellCol]) and the
-/// position it represents *within the source image* ([imgRow]/[imgCol], decoded
-/// from the Kitty row/column diacritics). Painting per cell — rather than over a
-/// single bounding region — keeps the image aligned even when it is partially
-/// scrolled off, wrapped, or only sparsely redrawn by the application.
-class _KittyPlaceholderCell {
-  const _KittyPlaceholderCell({
-    required this.imageKey,
-    required this.imageId,
-    required this.bitWidth,
-    required this.cellRow,
-    required this.cellCol,
-    required this.imgRow,
-    required this.imgCol,
-  });
-
-  final String imageKey;
-  final int imageId;
-  final int bitWidth;
-  final int cellRow;
-  final int cellCol;
-  final int imgRow;
-  final int imgCol;
-}
-
-/// Stride used to fold a (row, column) pair into a single int key. Larger than
-/// any realistic terminal width or image column count so pairs never collide.
-const _kittyGridStride = 100003;
-
-/// Minimum density of live cells within their bounding box for a Kitty
-/// Unicode-placeholder image to be composited. A solidly displayed image — or a
-/// clean scroll crop where whole rows have scrolled off — fills its bounding box
-/// (~1.0). A torn-down remnant, whose cells are overwritten in a scattered
-/// pattern, leaves a box full of holes (well below this), so it is dismissed
-/// rather than drawn as stale fragments/stripes.
-const _kittyPlaceholderRenderThreshold = 0.85;
 
 double _contrastRatio(Color a, Color b) {
   final luminanceA = a.computeLuminance();
@@ -517,21 +479,16 @@ class MonkeyTerminalView extends StatefulWidget {
     this.cursorFocusNode,
     this.autofocus = false,
     this.onTapDown,
-    this.onTapUp,
     this.onDoubleTapDown,
-    this.onLongPressStart,
     this.suppressLongPressDragSelection = false,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.resolveLinkTap,
     this.onLinkTapDown,
     this.onLinkTap,
-    this.keyboardType = TextInputType.emailAddress,
     this.keyboardAppearance = Brightness.dark,
-    this.cursorType = TerminalCursorType.block,
     this.deleteDetection = false,
     this.shortcuts,
-    this.onKeyEvent,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -599,19 +556,12 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Callback for when the user taps down on the terminal.
   final void Function(TapDownDetails, CellOffset)? onTapDown;
 
-  /// Callback for when the user taps on the terminal.
-  final void Function(TapUpDetails, CellOffset)? onTapUp;
-
   /// Callback for when the user double taps on the terminal.
   final void Function(TapDownDetails, CellOffset)? onDoubleTapDown;
 
-  /// Callback for when the user long presses on the terminal.
-  final void Function(LongPressStartDetails, CellOffset)? onLongPressStart;
-
   /// When true, the terminal's built-in drag-to-extend selection on touch
-  /// long-press is suppressed. When no [onLongPressStart] override is
-  /// provided, the initial word selection on long-press start still occurs,
-  /// but subsequent move updates do not extend the selection.
+  /// long-press is suppressed. The initial word selection on long-press start
+  /// still occurs, but subsequent move updates do not extend the selection.
   final bool suppressLongPressDragSelection;
 
   /// Function called when the user taps on the terminal with a secondary
@@ -630,17 +580,10 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Called when a primary tap should open a resolved terminal link.
   final ValueChanged<String>? onLinkTap;
 
-  /// The type of information for which to optimize the text input control.
-  /// [TextInputType.emailAddress] by default.
-  final TextInputType keyboardType;
-
   /// The appearance of the keyboard. [Brightness.dark] by default.
   ///
   /// This setting is only honored on iOS devices.
   final Brightness keyboardAppearance;
-
-  /// The type of cursor to use. [TerminalCursorType.block] by default.
-  final TerminalCursorType cursorType;
 
   /// Workaround to detect delete key for platforms and IMEs that does not
   /// emit hardware delete event. Preferred on mobile platforms. [false] by
@@ -650,10 +593,6 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Shortcuts for this terminal. This has higher priority than input handler
   /// of the terminal If not provided, [defaultTerminalShortcuts] will be used.
   final Map<ShortcutActivator, Intent>? shortcuts;
-
-  /// Keyboard event handler of the terminal. This has higher priority than
-  /// [shortcuts] and input handler of the terminal.
-  final FocusOnKeyEventCallback? onKeyEvent;
 
   /// True if no input should send to the terminal.
   final bool readOnly;
@@ -725,8 +664,16 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   ScrollHoldController? _directTouchScrollHold;
   Drag? _directTouchScrollDrag;
   Offset _lastTouchScrollPosition = Offset.zero;
-  double _touchScrollRemainder = 0;
-  final _touchWheelCalibrator = TerminalWheelScrollCalibrator();
+  // One calibrator learns the application's rows-per-wheel-report for both the
+  // trackpad handler and the touch-drag path below; this state feeds it.
+  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+  late final _touchScrollAccumulator = TerminalScrollAccumulator(
+    terminal: () => widget.terminal,
+    getLineHeight: () => renderTerminal.lineHeight,
+    sendScrollEvent: _sendTouchScrollEvent,
+    calibrator: _wheelCalibrator,
+    onDrained: _drainTouchScrollInput,
+  );
   late bool _touchScrollIsAltBuffer;
   late MouseMode _touchScrollMouseMode;
   late MouseReportMode _touchScrollMouseReportMode;
@@ -869,7 +816,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _touchScrollIsAltBuffer = widget.terminal.isUsingAltBuffer;
       _touchScrollMouseMode = widget.terminal.mouseMode;
       _touchScrollMouseReportMode = widget.terminal.mouseReportMode;
-      _touchWheelCalibrator.reset(forgetEstimate: true);
+      _wheelCalibrator.reset(forgetEstimate: true);
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
       _scheduleGraphicsAnimationSync();
@@ -897,23 +844,23 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _scheduleGraphicsAnimationSync();
     }
     if (oldWidget.simulateScroll != widget.simulateScroll) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.touchScrollToTerminal != widget.touchScrollToTerminal) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _cancelDirectTouchScrollDrag();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.forceSgrTouchScroll != widget.forceSgrTouchScroll) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.scrollResetGeneration != widget.scrollResetGeneration) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _cancelDirectTouchScrollDrag();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
@@ -930,7 +877,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     widget.terminal.removeListener(_handleTerminalMetricsChanged);
     _pendingFocusInReportTimer?.cancel();
     _cancelDirectTouchScrollDrag();
-    _touchWheelCalibrator.dispose();
+    _touchScrollAccumulator.dispose();
+    _wheelCalibrator.dispose();
     _stopTouchScrollInertia();
     _resetTouchScrollDispatch();
     _touchScrollInertiaTicker.dispose();
@@ -987,11 +935,11 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _touchScrollMouseReportMode = nextMouseReportMode;
     if (transportChanged) {
       _cancelDirectTouchScrollDrag();
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _resetTouchScrollDispatch();
       _stopTouchScrollInertia();
-    } else if (_touchWheelCalibrator.observingTerminalOutput) {
-      _touchWheelCalibrator.terminalChanged(
+    } else if (_wheelCalibrator.observingTerminalOutput) {
+      _wheelCalibrator.terminalChanged(
         captureTerminalViewportLines(widget.terminal),
       );
     }
@@ -1222,7 +1170,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           terminal: widget.terminal,
           controller: _controller,
           offset: offset,
-          padding: EdgeInsets.zero,
           alignToTrailingEdges: shouldAlignTerminalToTrailingEdges(mediaQuery),
           autoResize: widget.autoResize,
           resizeTerminalToViewport: widget.resizeTerminalToViewport,
@@ -1234,7 +1181,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           theme: widget.theme,
           inlineUnderlines: widget.inlineUnderlines,
           focusNode: cursorFocusNode,
-          cursorType: widget.cursorType,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
           selectionRegistrar: SelectionContainer.maybeOf(context),
@@ -1262,6 +1208,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         forceSgr: widget.forceSgrTouchScroll,
         getCellOffset: (offset) => renderTerminal.getCellOffset(offset),
         getLineHeight: () => renderTerminal.lineHeight,
+        calibrator: _wheelCalibrator,
         child: child,
       );
     }
@@ -1278,7 +1225,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         key: _customTextEditKey,
         focusNode: _focusNode,
         autofocus: widget.autofocus,
-        inputType: widget.keyboardType,
+        inputType: TextInputType.emailAddress,
         keyboardAppearance: widget.keyboardAppearance,
         deleteDetection: widget.deleteDetection,
         onInsert: _onInsert,
@@ -1309,12 +1256,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       key: ValueKey<int>(widget.scrollResetGeneration),
       terminalView: this,
       terminalController: _controller,
-      onSingleTapUp: _onTapUp,
       onTapDown: _onTapDown,
       onDoubleTapDown: widget.onDoubleTapDown != null ? _onDoubleTapDown : null,
-      onLongPressStart: widget.onLongPressStart != null
-          ? _onLongPressStart
-          : null,
       suppressLongPressDragSelection: widget.suppressLongPressDragSelection,
       onSecondaryTapDown: widget.onSecondaryTapDown != null
           ? _onSecondaryTapDown
@@ -1410,11 +1353,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         renderTerminal.cellSize;
   }
 
-  void _onTapUp(TapUpDetails details) {
-    final offset = renderTerminal.getCellOffset(details.localPosition);
-    widget.onTapUp?.call(details, offset);
-  }
-
   void _onTapDown(TapDownDetails details) {
     _stopTouchScrollInertia();
     if (_controller.selection != null) {
@@ -1444,11 +1382,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _stopTouchScrollInertia();
     final offset = renderTerminal.getCellOffset(details.localPosition);
     widget.onLinkTapDown?.call(details, offset);
-  }
-
-  void _onLongPressStart(LongPressStartDetails details) {
-    final offset = renderTerminal.getCellOffset(details.localPosition);
-    widget.onLongPressStart?.call(details, offset);
   }
 
   void _onSecondaryTapDown(TapDownDetails details) {
@@ -1548,8 +1481,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   void _onTouchScrollStart(DragStartDetails details) {
     _stopTouchScrollInertia();
     _lastTouchScrollPosition = details.localPosition;
-    if (!_touchWheelCalibrator.waitingForResponse) {
-      _touchWheelCalibrator.beginGesture();
+    if (!_wheelCalibrator.waitingForResponse) {
+      _wheelCalibrator.beginGesture();
       _resetTouchScrollDispatch(preserveRemainder: true);
     }
   }
@@ -1575,51 +1508,35 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     );
   }
 
-  double get _touchScrollStepHeight {
-    final lineHeight = renderTerminal.lineHeight;
-    if (lineHeight <= 0) {
-      return 0;
-    }
-    return lineHeight * _touchWheelCalibrator.rowsPerEvent;
-  }
+  /// Feeds a touch-drag distance (positive moves the content down, i.e. wheel
+  /// up) through the shared accumulator.
+  void _applyTouchScrollDelta(double delta) =>
+      _touchScrollAccumulator.scrollBy(-delta);
 
-  void _applyTouchScrollDelta(double delta) {
-    _touchScrollRemainder += delta;
-    final stepHeight = _touchScrollStepHeight;
-    if (stepHeight <= 0 || _touchWheelCalibrator.waitingForResponse) {
-      return;
-    }
+  bool get _canBatchSgrTouchScroll =>
+      widget.forceSgrTouchScroll ||
+      (widget.terminal.mouseMode.reportScroll &&
+          widget.terminal.mouseReportMode == MouseReportMode.sgr);
+
+  /// Accumulator sink. SGR reports are queued and sent in per-frame batches by
+  /// [_drainTouchScrollInput]; anything else goes out immediately, falling
+  /// back to arrow keys when the application does not take mouse input.
+  bool _sendTouchScrollEvent({required bool up}) {
+    final button = up
+        ? TerminalMouseButton.wheelUp
+        : TerminalMouseButton.wheelDown;
     final position = _resolveViewportMousePosition(_lastTouchScrollPosition);
-    final canReportMouse =
-        widget.forceSgrTouchScroll || widget.terminal.mouseMode.reportScroll;
-    while (_touchScrollRemainder.abs() >= stepHeight) {
-      final scrollUp = _touchScrollRemainder > 0;
-      final scrollDirection = scrollUp ? 1 : -1;
-      final lineHeight = renderTerminal.lineHeight;
-      final calibrationStarted =
-          canReportMouse &&
-          _touchWheelCalibrator.needsMeasurement &&
-          _touchWheelCalibrator.begin(
-            before: captureTerminalViewportLines(widget.terminal),
-            onSettled: (previousRows, rows) {
-              if (!mounted) {
-                return;
-              }
-              _touchScrollRemainder -=
-                  scrollDirection * lineHeight * (rows - previousRows);
-              _applyTouchScrollDelta(0);
-            },
-          );
-      _enqueueTouchScrollRun(
-        scrollUp ? TerminalMouseButton.wheelUp : TerminalMouseButton.wheelDown,
-        position,
-      );
-      _touchScrollRemainder += scrollUp ? -stepHeight : stepHeight;
-      if (calibrationStarted) {
-        break;
-      }
+    if (_canBatchSgrTouchScroll) {
+      _enqueueTouchScrollRun(button, position);
+      return true;
     }
-    _drainTouchScrollInput();
+    final handled = _sendTouchScrollMouseInput(button, position);
+    if (!handled && widget.simulateScroll) {
+      widget.terminal.keyInput(
+        up ? TerminalKey.arrowUp : TerminalKey.arrowDown,
+      );
+    }
+    return handled;
   }
 
   void _enqueueTouchScrollRun(TerminalMouseButton button, CellOffset position) {
@@ -1652,50 +1569,25 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     if (_touchScrollDrainScheduled || _pendingTouchScrollRuns.isEmpty) {
       return;
     }
-    final canBatchSgr =
-        widget.forceSgrTouchScroll ||
-        (widget.terminal.mouseMode.reportScroll &&
-            widget.terminal.mouseReportMode == MouseReportMode.sgr);
-    if (canBatchSgr) {
-      // Start with one report so responsive applications can render each
-      // increment. Increase throughput only while requested movement remains
-      // queued across frames, then return to one as soon as caught up.
-      var budget = math.min(1 + _touchScrollBacklogFrames, 6);
-      while (budget > 0 && _pendingTouchScrollRuns.isNotEmpty) {
-        final run = _pendingTouchScrollRuns.first;
-        final count = math.min(run.count, budget);
-        _sendTouchScrollMouseInput(
-          run.button,
-          run.position,
-          repeatCount: count,
-        );
-        _consumeTouchScrollRun(count);
-        budget -= count;
-      }
-      if (_pendingTouchScrollRuns.isEmpty) {
-        _touchScrollBacklogFrames = 0;
-      } else {
-        _touchScrollBacklogFrames = math.min(_touchScrollBacklogFrames + 1, 5);
-      }
-      // Lock the frame-wide budget even when the queue is empty; pointer updates
-      // received before this callback only append runs for the next frame.
-      _scheduleTouchScrollDrain();
-      return;
-    }
-
-    _touchScrollBacklogFrames = 0;
-    while (_pendingTouchScrollRuns.isNotEmpty) {
+    // Start with one report so responsive applications can render each
+    // increment. Increase throughput only while requested movement remains
+    // queued across frames, then return to one as soon as caught up.
+    var budget = math.min(1 + _touchScrollBacklogFrames, 6);
+    while (budget > 0 && _pendingTouchScrollRuns.isNotEmpty) {
       final run = _pendingTouchScrollRuns.first;
-      final handled = _sendTouchScrollMouseInput(run.button, run.position);
-      _consumeTouchScrollRun(1);
-      if (!handled && widget.simulateScroll) {
-        widget.terminal.keyInput(
-          run.button == TerminalMouseButton.wheelUp
-              ? TerminalKey.arrowUp
-              : TerminalKey.arrowDown,
-        );
-      }
+      final count = math.min(run.count, budget);
+      _sendTouchScrollMouseInput(run.button, run.position, repeatCount: count);
+      _consumeTouchScrollRun(count);
+      budget -= count;
     }
+    if (_pendingTouchScrollRuns.isEmpty) {
+      _touchScrollBacklogFrames = 0;
+    } else {
+      _touchScrollBacklogFrames = math.min(_touchScrollBacklogFrames + 1, 5);
+    }
+    // Lock the frame-wide budget even when the queue is empty; pointer updates
+    // received before this callback only append runs for the next frame.
+    _scheduleTouchScrollDrain();
   }
 
   void _scheduleTouchScrollDrain() {
@@ -1722,7 +1614,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _pendingTouchScrollRuns.clear();
     _touchScrollBacklogFrames = 0;
     if (!preserveRemainder) {
-      _touchScrollRemainder = 0;
+      _touchScrollAccumulator.scrollRemainder = 0;
     }
   }
 
@@ -1830,11 +1722,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   }
 
   KeyEventResult _handleKeyEvent(FocusNode focusNode, KeyEvent event) {
-    final resultOverride = widget.onKeyEvent?.call(focusNode, event);
-    if (resultOverride != null && resultOverride != KeyEventResult.ignored) {
-      return resultOverride;
-    }
-
     // Match Shortcuts' guard when a focus node has been detached.
     final shortcutContext = focusNode.context;
     if (shortcutContext != null) {
@@ -1982,7 +1869,6 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.terminal,
     required this.controller,
     required this.offset,
-    required this.padding,
     required this.alignToTrailingEdges,
     required this.autoResize,
     required this.resizeTerminalToViewport,
@@ -1994,7 +1880,6 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.theme,
     required this.inlineUnderlines,
     required this.focusNode,
-    required this.cursorType,
     this.onEditableRect,
     this.composingText,
     this.selectionRegistrar,
@@ -2005,8 +1890,6 @@ class _TerminalView extends LeafRenderObjectWidget {
   final TerminalController controller;
 
   final ViewportOffset offset;
-
-  final EdgeInsets padding;
 
   final bool alignToTrailingEdges;
 
@@ -2030,8 +1913,6 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final FocusNode focusNode;
 
-  final TerminalCursorType cursorType;
-
   final EditableRectCallback? onEditableRect;
 
   final String? composingText;
@@ -2044,7 +1925,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       terminal: terminal,
       controller: controller,
       offset: offset,
-      padding: padding,
       alignToTrailingEdges: alignToTrailingEdges,
       autoResize: autoResize,
       resizeTerminalToViewport: resizeTerminalToViewport,
@@ -2056,7 +1936,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       theme: theme,
       inlineUnderlines: inlineUnderlines,
       focusNode: focusNode,
-      cursorType: cursorType,
       onEditableRect: onEditableRect,
       composingText: composingText,
       selectionRegistrar: selectionRegistrar,
@@ -2072,7 +1951,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..terminal = terminal
       ..controller = controller
       ..offset = offset
-      ..padding = padding
       ..alignToTrailingEdges = alignToTrailingEdges
       ..autoResize = autoResize
       ..resizeTerminalToViewport = resizeTerminalToViewport
@@ -2084,7 +1962,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..theme = theme
       ..inlineUnderlines = inlineUnderlines
       ..focusNode = focusNode
-      ..cursorType = cursorType
       ..onEditableRect = onEditableRect
       ..composingText = composingText
       ..selectionRegistrar = selectionRegistrar;
@@ -2106,6 +1983,8 @@ class MonkeyTerminalPainter extends TerminalPainter {
   final _runParagraphCache = ParagraphCache(4096);
   final _inlineUnderlineParagraphCache = ParagraphCache(1024);
   final _cursorCellData = CellData.empty();
+  // Scratch cell for the per-row passes. They never nest, so one is enough.
+  final _scratchCellData = CellData.empty();
 
   // OpenType features that turn adjacent glyphs into a single ligature or a
   // context-dependent alternate. A batched run concatenates several cells into
@@ -2180,6 +2059,39 @@ class MonkeyTerminalPainter extends TerminalPainter {
     _inlineUnderlineParagraphCache.clear();
     _runParagraphCache.clear();
     _foregroundPictureCache.clear();
+    _backgroundPaintColorCache.clear();
+    _cellForegroundColorCache.clear();
+  }
+
+  // Memoised results of the WCAG contrast resolvers below. Backgrounds are
+  // painted outside the picture cache, so without these every coloured cell
+  // on every frame would redo the luminance math (several `pow` calls per
+  // contrast check, dozens on the low-contrast path). Both are pure functions
+  // of the cell colours and flags once the theme is fixed, so they are cleared
+  // with the other caches. Bounded so a program cycling through true-colour
+  // gradients cannot grow them without limit.
+  final _backgroundPaintColorCache = <int, Color>{};
+  final _cellForegroundColorCache = <int, Color>{};
+  static const _maxColorCacheEntries = 4096;
+
+  /// Number of contrast resolutions that missed the memo caches.
+  @visibleForTesting
+  int readableColorResolutions = 0;
+
+  Color _memoisedColor(
+    Map<int, Color> cache,
+    int key,
+    Color Function() resolve,
+  ) {
+    final cached = cache[key];
+    if (cached != null) {
+      return cached;
+    }
+    if (cache.length >= _maxColorCacheEntries) {
+      cache.remove(cache.keys.first);
+    }
+    readableColorResolutions++;
+    return cache[key] = resolve();
   }
 
   @override
@@ -2242,7 +2154,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
     BufferLine line,
     List<TerminalTextUnderline> inlineUnderlines,
   ) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
 
     for (var i = 0; i < line.length; i++) {
@@ -2277,7 +2189,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// behind the next row's background.
   void paintLineBackgrounds(Canvas canvas, Offset offset, BufferLine line) {
     paintLineBackground(canvas, offset, line);
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     for (var i = 0; i < line.length; i++) {
       line.getCellData(i, cellData);
@@ -2332,7 +2244,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// may fall back to a non-monospace font, which would shape or advance
   /// differently once concatenated into one paragraph).
   void _paintLineForegroundsInto(Canvas canvas, BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     final length = line.length;
 
@@ -2516,7 +2428,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// `background`, since the readable-foreground resolution tints the glyph
   /// against the cell's background.
   int _lineForegroundHash(BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     const mask = 0x3FFFFFFFFFFFFFFF;
     const prime = 0x100000001b3;
     final length = line.length;
@@ -2537,7 +2449,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// below the cell, so drawing them after every line's opaque background keeps
   /// the next line's background from clipping the wave's lower edge.
   void paintLineCellUnderlines(Canvas canvas, Offset offset, BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     for (var i = 0; i < line.length; i++) {
       line.getCellData(i, cellData);
@@ -2897,11 +2809,41 @@ class MonkeyTerminalPainter extends TerminalPainter {
   Color resolveMonkeyTerminalCellForegroundColor(CellData cellData) {
     final cellFlags = cellData.flags;
     final inverse = cellFlags & CellFlags.inverse != 0;
+    final faint = cellFlags & CellFlags.faint != 0;
+    final blockElement = _isRectPaintedBlockElement(
+      cellData.content & CellContent.codepointMask,
+    );
+    // Cell colours use 27 bits (24-bit value + 2-bit type), so the pair plus
+    // three flag bits packs into a 57-bit key.
+    final key =
+        (cellData.background << 30) |
+        (cellData.foreground << 3) |
+        (inverse ? 4 : 0) |
+        (faint ? 2 : 0) |
+        (blockElement ? 1 : 0);
+    return _memoisedColor(
+      _cellForegroundColorCache,
+      key,
+      () => _resolveCellForegroundColor(
+        cellData,
+        inverse: inverse,
+        faint: faint,
+        blockElement: blockElement,
+      ),
+    );
+  }
+
+  Color _resolveCellForegroundColor(
+    CellData cellData, {
+    required bool inverse,
+    required bool faint,
+    required bool blockElement,
+  }) {
     var color = inverse
         ? resolveBackgroundColor(cellData.background)
         : resolveForegroundColor(cellData.foreground);
 
-    if (cellFlags & CellFlags.faint != 0) {
+    if (faint) {
       final background = inverse
           ? resolveForegroundColor(cellData.foreground)
           : resolveBackgroundColor(cellData.background);
@@ -2910,9 +2852,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
         background: background,
       );
     }
-    if (_isRectPaintedBlockElement(
-      cellData.content & CellContent.codepointMask,
-    )) {
+    if (blockElement) {
       return color;
     }
 
@@ -2935,8 +2875,28 @@ class MonkeyTerminalPainter extends TerminalPainter {
     CellData cellData, {
     bool toneNeutralBackgrounds = true,
   }) {
-    final cellFlags = cellData.flags;
-    final inverse = cellFlags & CellFlags.inverse != 0;
+    final inverse = cellData.flags & CellFlags.inverse != 0;
+    final key =
+        (cellData.background << 29) |
+        (cellData.foreground << 2) |
+        (inverse ? 2 : 0) |
+        (toneNeutralBackgrounds ? 1 : 0);
+    return _memoisedColor(
+      _backgroundPaintColorCache,
+      key,
+      () => _resolveCellBackgroundPaintColorUncached(
+        cellData,
+        inverse: inverse,
+        toneNeutralBackgrounds: toneNeutralBackgrounds,
+      ),
+    );
+  }
+
+  Color _resolveCellBackgroundPaintColorUncached(
+    CellData cellData, {
+    required bool inverse,
+    required bool toneNeutralBackgrounds,
+  }) {
     final background = inverse
         ? resolveForegroundColor(cellData.foreground)
         : resolveBackgroundColor(cellData.background);
@@ -2963,7 +2923,6 @@ class MonkeyRenderTerminal extends RenderBox
     required Terminal terminal,
     required TerminalController controller,
     required ViewportOffset offset,
-    required EdgeInsets padding,
     required bool alignToTrailingEdges,
     required bool autoResize,
     required bool resizeTerminalToViewport,
@@ -2975,14 +2934,12 @@ class MonkeyRenderTerminal extends RenderBox
     required TerminalTheme theme,
     required List<TerminalTextUnderline> inlineUnderlines,
     required FocusNode focusNode,
-    required TerminalCursorType cursorType,
     EditableRectCallback? onEditableRect,
     String? composingText,
     SelectionRegistrar? selectionRegistrar,
   }) : _terminal = terminal,
        _controller = controller,
        _offset = offset,
-       _padding = padding,
        _alignToTrailingEdges = alignToTrailingEdges,
        _autoResize = autoResize,
        _resizeTerminalToViewport = resizeTerminalToViewport,
@@ -2991,7 +2948,6 @@ class MonkeyRenderTerminal extends RenderBox
        _liveOutputAutoScroll = liveOutputAutoScroll,
        _inlineUnderlines = inlineUnderlines,
        _focusNode = focusNode,
-       _cursorType = cursorType,
        _onEditableRect = onEditableRect,
        _composingText = composingText,
        _selectionGeometry = SelectionGeometry(
@@ -3033,13 +2989,6 @@ class MonkeyRenderTerminal extends RenderBox
     if (attached) _offset.removeListener(_onScroll);
     _offset = value;
     if (attached) _offset.addListener(_onScroll);
-    markNeedsLayout();
-  }
-
-  EdgeInsets _padding;
-  set padding(EdgeInsets value) {
-    if (value == _padding) return;
-    _padding = value;
     markNeedsLayout();
   }
 
@@ -3136,17 +3085,11 @@ class MonkeyRenderTerminal extends RenderBox
     markNeedsPaint();
   }
 
-  TerminalCursorType _cursorType;
-  set cursorType(TerminalCursorType value) {
-    if (value == _cursorType) return;
-    _cursorType = value;
-    markNeedsPaint();
-  }
-
   EditableRectCallback? _onEditableRect;
   set onEditableRect(EditableRectCallback? value) {
     if (value == _onEditableRect) return;
     _onEditableRect = value;
+    _forgetEditableRect();
     markNeedsLayout();
   }
 
@@ -3208,9 +3151,7 @@ class MonkeyRenderTerminal extends RenderBox
     if (_hasSelectableTextSelection) {
       _updateSelectionGeometry(deferNotification: true);
     }
-    if (_onEditableRect != null) {
-      _notifyEditableRect();
-    }
+    _notifyEditableRect();
   }
 
   void _onFocusChange() {
@@ -3236,7 +3177,11 @@ class MonkeyRenderTerminal extends RenderBox
     } else {
       markNeedsPaint();
     }
-    if (_onEditableRect != null) {
+    final cursorX = _terminal.buffer.cursorX;
+    final cursorY = _terminal.buffer.absoluteCursorY;
+    if (cursorX != _lastEditableCursorX || cursorY != _lastEditableCursorY) {
+      _lastEditableCursorX = cursorX;
+      _lastEditableCursorY = cursorY;
       _notifyEditableRect();
     }
   }
@@ -3287,6 +3232,7 @@ class MonkeyRenderTerminal extends RenderBox
   @override
   void detach() {
     super.detach();
+    _forgetEditableRect();
     _offset.removeListener(_onScroll);
     _terminal.removeListener(_onTerminalChange);
     _controller.removeListener(_onControllerUpdate);
@@ -3332,6 +3278,7 @@ class MonkeyRenderTerminal extends RenderBox
   @override
   void performLayout() {
     size = constraints.biggest;
+    _forgetEditableRect();
 
     _updateViewportSize();
     _terminal.graphics.setCellPixelSize(
@@ -3358,7 +3305,6 @@ class MonkeyRenderTerminal extends RenderBox
     cellSize: _painter.cellSize,
     columns: _terminal.viewWidth,
     rows: _terminal.viewHeight,
-    padding: _padding,
     alignToTrailingEdges: _alignToTrailingEdges,
   );
 
@@ -4002,7 +3948,27 @@ class MonkeyRenderTerminal extends RenderBox
     return _terminal.mouseInput(button, buttonState, position);
   }
 
+  // The last editable/caret rects handed to the IME, and the cursor cell they
+  // were computed for. Every write and scroll tick lands here, and on desktop
+  // each notification costs an ancestor transform walk plus two platform
+  // channel messages, so unchanged rects are not re-sent.
+  Rect? _lastEditableRect;
+  Rect? _lastCaretRect;
+  int _lastEditableCursorX = -1;
+  int _lastEditableCursorY = -1;
+
+  void _forgetEditableRect() {
+    _lastEditableRect = null;
+    _lastCaretRect = null;
+    _lastEditableCursorX = -1;
+    _lastEditableCursorY = -1;
+  }
+
   void _notifyEditableRect() {
+    final onEditableRect = _onEditableRect;
+    if (onEditableRect == null) {
+      return;
+    }
     final cursor = localToGlobal(cursorOffset);
 
     final rect = Rect.fromLTRB(
@@ -4013,12 +3979,16 @@ class MonkeyRenderTerminal extends RenderBox
     );
 
     final caretRect = cursor & _painter.cellSize;
-
-    _onEditableRect?.call(rect, caretRect);
+    if (rect == _lastEditableRect && caretRect == _lastCaretRect) {
+      return;
+    }
+    _lastEditableRect = rect;
+    _lastCaretRect = caretRect;
+    onEditableRect(rect, caretRect);
   }
 
   void _updateViewportSize({bool notifyIfUnchanged = false}) {
-    final availableWidth = size.width - _padding.horizontal;
+    final availableWidth = size.width;
     final availableHeight = _viewportHeight;
     final cellWidth = _painter.cellSize.width;
     final cellHeight = _painter.cellSize.height;
@@ -4040,10 +4010,7 @@ class MonkeyRenderTerminal extends RenderBox
       availableWidth ~/ cellWidth,
       availableHeight ~/ cellHeight,
     );
-    final pixelSize = resolveTerminalResizePixelDimensions(
-      viewportSize: size,
-      padding: _padding,
-    );
+    final pixelSize = resolveTerminalResizePixelDimensions(viewportSize: size);
 
     final terminalNeedsResize =
         _terminal.viewWidth != viewportSize.width ||
@@ -4129,11 +4096,7 @@ class MonkeyRenderTerminal extends RenderBox
       return;
     }
     final nextPixelSize =
-        pixelSize ??
-        resolveTerminalResizePixelDimensions(
-          viewportSize: size,
-          padding: _padding,
-        );
+        pixelSize ?? resolveTerminalResizePixelDimensions(viewportSize: size);
 
     if (_isDebouncingKeyboardResize) {
       _pendingTerminalResize = (
@@ -4247,7 +4210,7 @@ class MonkeyRenderTerminal extends RenderBox
 
   bool get _shouldShowCursor => _terminal.cursorVisibleMode || _isComposingText;
 
-  double get _viewportHeight => size.height - _padding.vertical;
+  double get _viewportHeight => size.height;
 
   double get _maxScrollExtent =>
       math.max(_terminalHeight - _viewportHeight, 0.0);
@@ -4320,6 +4283,8 @@ class MonkeyRenderTerminal extends RenderBox
     final lines = _terminal.buffer.lines;
     final charHeight = _painter.cellSize.height;
     final origin = _contentOrigin;
+    _paintOrigin = origin;
+    _paintLineOffset = -_scrollOffset + origin.dy;
     final firstLineOffset = _scrollOffset - origin.dy;
     final lastLineOffset = _scrollOffset - origin.dy + size.height;
     final firstLine = firstLineOffset ~/ charHeight;
@@ -4416,9 +4381,15 @@ class MonkeyRenderTerminal extends RenderBox
     _paintSelectionHandleLayers(context, offset);
   }
 
+  // Grid origin and line offset of the frame being painted, resolved once at
+  // the top of [_paint] so the per-row and per-segment helpers below do not
+  // recompute them for every visible row.
+  Offset _paintOrigin = Offset.zero;
+  double _paintLineOffset = 0;
+
   Offset _linePaintOffset(Offset offset, int row) => offset.translate(
-    _contentOrigin.dx,
-    (row * _painter.cellSize.height + _lineOffset).truncateToDouble(),
+    _paintOrigin.dx,
+    (row * _painter.cellSize.height + _paintLineOffset).truncateToDouble(),
   );
 
   /// Composites Kitty-graphics-protocol images over the cell grid for the
@@ -4708,270 +4679,31 @@ class MonkeyRenderTerminal extends RenderBox
     double cellWidth,
     double cellHeight,
   ) {
-    final graphics = _terminal.graphics;
-    final buffer = _terminal.buffer;
-    final placeholders = graphics.placeholdersInRows(
-      buffer.lines,
-      firstLine,
-      lastLine,
+    // Instance grouping, density/recency filtering and run merging are shared
+    // with the connection preview (see `resolveKittyPlaceholderRuns`), so both
+    // elect the same "current" copy of an image.
+    final resolution = resolveKittyPlaceholderRuns(
+      _terminal,
+      firstRow: firstLine,
+      lastRow: lastLine,
     );
-    if (placeholders.isEmpty) {
-      return;
-    }
-
-    final lineCount = buffer.lines.length;
-
-    bool cellIsLivePlaceholder(int cellRow, int cellCol) {
-      if (cellRow < 0 || cellRow >= lineCount) {
-        return false;
-      }
-      final line = buffer.lines[cellRow];
-      if (cellCol < 0 || cellCol >= line.length) {
-        return false;
-      }
-      return line.getCodePoint(cellCol) == kittyGraphicsPlaceholderCodePoint;
-    }
-
-    // Pass 1: group live placeholder cells into display *instances* and decide
-    // which instances are coherent and current enough to paint.
-    //
-    // A Kitty Unicode-placeholder image is conceptually a solid rectangle:
-    // clients (e.g. Copilot CLI) emit every cell of the grid. The same image id
-    // can be displayed several times at different screen positions, and an image
-    // can be partially scrolled off or partially overwritten. We group cells by
-    // the placement offset they share — every cell of one on-screen placement
-    // has the same `cellRow - imgRow` and `cellCol - imgCol` — so distinct
-    // placements (and the holes punched by an app overwriting an image) fall
-    // into separate groups. Each group is then judged on two axes:
-    //
-    //  * Density — a solid image or a clean scroll crop (whole rows scrolled
-    //    off) fills its bounding box (~1.0); a torn remnant overwritten in a
-    //    scattered pattern leaves a box full of holes. Sparse groups are
-    //    dropped so stale fragments/stripes are not painted.
-    //  * Recency — when an app re-displays an image (e.g. closing its full-screen
-    //    viewer and redrawing) without clearing the previous copy's cells, the
-    //    old copy lingers as a ghost. Among the surviving dense groups of one
-    //    image id we keep only the most recently written placement.
-    //
-    // The instance grouping and lookup are scoped to visible buffer lines.
-    // GraphicsManager resolves placeholders through each line's CellAnchors, so
-    // a scroll frame never walks the thousands of off-screen cells retained by a
-    // long agent transcript. Grid dimensions remain correct for cropped images:
-    // every placeholder shares a small grid tracker that records the largest
-    // row/column ever seen for that image, while virtual placements still win
-    // when the protocol supplied explicit dimensions.
-    final gridColsByImage = <int, int>{};
-    final gridRowsByImage = <int, int>{};
-    final instanceCellCount = <String, int>{};
-    final instanceRowBounds = <String, List<int>>{};
-    final instanceColBounds = <String, List<int>>{};
-    // Recency of each instance: the highest monotonic placeholder sequence seen
-    // for it, independent of visible row/anchor traversal order. A redraw that re-displays an image
-    // elsewhere appends fresh placeholders, so the current placement has a
-    // higher recency than a stale leftover (ghost) of the same image.
-    final instanceRecency = <String, int>{};
-    final instanceImageKey = <String, String>{};
-
-    String instanceKeyFor(TerminalImagePlaceholder p, String imageKey) {
-      final offsetRow = p.cellRow - p.row;
-      final offsetCol = p.cellCol - p.col;
-      return '$imageKey@$offsetRow,$offsetCol';
-    }
-
-    for (final placeholder in placeholders) {
-      if (!placeholder.attached) {
-        continue;
-      }
-      final virtualPlacement = graphics.virtualPlacementById(
-        placeholder.imageId,
-      );
-      final imageIntKey =
-          placeholder.imageId * 64 + placeholder.imageIdBitWidth;
-      gridColsByImage[imageIntKey] = (virtualPlacement?.cols ?? 0) > 0
-          ? virtualPlacement!.cols
-          : placeholder.gridColumns;
-      gridRowsByImage[imageIntKey] = (virtualPlacement?.rows ?? 0) > 0
-          ? virtualPlacement!.rows
-          : placeholder.gridRows;
-
-      final cellRow = placeholder.cellRow;
-      if (cellRow < firstLine || cellRow > lastLine) {
-        continue;
-      }
-      if (!cellIsLivePlaceholder(cellRow, placeholder.cellCol)) {
-        continue;
-      }
-      final key = '${placeholder.imageIdBitWidth}:${placeholder.imageId}';
-      final instanceKey = instanceKeyFor(placeholder, key);
-      instanceImageKey[instanceKey] = key;
-      instanceCellCount[instanceKey] =
-          (instanceCellCount[instanceKey] ?? 0) + 1;
-      instanceRecency[instanceKey] = math.max(
-        instanceRecency[instanceKey] ?? -1,
-        placeholder.sequence,
-      );
-      final rowBounds = instanceRowBounds[instanceKey] ??= <int>[
-        placeholder.row,
-        placeholder.row,
-      ];
-      rowBounds[0] = math.min(rowBounds[0], placeholder.row);
-      rowBounds[1] = math.max(rowBounds[1], placeholder.row);
-      final colBounds = instanceColBounds[instanceKey] ??= <int>[
-        placeholder.col,
-        placeholder.col,
-      ];
-      colBounds[0] = math.min(colBounds[0], placeholder.col);
-      colBounds[1] = math.max(colBounds[1], placeholder.col);
-    }
-
-    // Filter to instances that are dense enough to be a real display (not a
-    // scattered torn remnant).
-    final denseInstances = <String>[];
-    for (final entry in instanceCellCount.entries) {
-      final rowBounds = instanceRowBounds[entry.key];
-      final colBounds = instanceColBounds[entry.key];
-      if (rowBounds == null || colBounds == null) {
-        continue;
-      }
-      final boxRows = rowBounds[1] - rowBounds[0] + 1;
-      final boxCols = colBounds[1] - colBounds[0] + 1;
-      final boxArea = boxRows * boxCols;
-      if (boxArea <= 0) {
-        continue;
-      }
-      if (entry.value >= boxArea * _kittyPlaceholderRenderThreshold) {
-        denseInstances.add(entry.key);
+    for (final miss in resolution.unresolved) {
+      _kittyUnresolvedInstances++;
+      if (_kittyFirstUnresolvedImageId == 0) {
+        _kittyFirstUnresolvedImageId = miss.imageId;
+        _kittyFirstUnresolvedBitWidth = miss.bitWidth;
       }
     }
-    if (denseInstances.isEmpty) {
-      return;
-    }
 
-    // Among dense instances of the same image id, keep only the most recently
-    // drawn one. When the app re-displays an image (e.g. closing its full-screen
-    // viewer and redrawing the conversation) without clearing the previous
-    // copy's cells, the older copy lingers as a ghost; its placeholders were
-    // written earlier, so it loses to the current placement here.
-    final newestInstanceForImage = <String, String>{};
-    for (final instanceKey in denseInstances) {
-      final imageKey = instanceImageKey[instanceKey]!;
-      final current = newestInstanceForImage[imageKey];
-      if (current == null ||
-          instanceRecency[instanceKey]! > instanceRecency[current]!) {
-        newestInstanceForImage[imageKey] = instanceKey;
-      }
-    }
-    final renderableInstances = newestInstanceForImage.values.toSet();
-    if (renderableInstances.isEmpty) {
-      return;
-    }
-
-    // Pass 2: collect the visible cells that belong to a renderable instance.
-    // Keep at most one live cell per on-screen position. The visible-range check
-    // runs first so off-screen placeholders cost nothing but an integer compare.
-    final cellByPosition = <int, _KittyPlaceholderCell>{};
-    for (final placeholder in placeholders) {
-      if (!placeholder.attached) {
-        continue;
-      }
-      final cellRow = placeholder.cellRow;
-      if (cellRow < firstLine || cellRow > lastLine) {
-        continue;
-      }
-      final key = '${placeholder.imageIdBitWidth}:${placeholder.imageId}';
-      if (!renderableInstances.contains(instanceKeyFor(placeholder, key))) {
-        continue;
-      }
-      final cellCol = placeholder.cellCol;
-      if (!cellIsLivePlaceholder(cellRow, cellCol)) {
-        continue;
-      }
-      cellByPosition[cellRow * _kittyGridStride +
-          cellCol] = _KittyPlaceholderCell(
-        imageKey: key,
-        imageId: placeholder.imageId,
-        bitWidth: placeholder.imageIdBitWidth,
-        cellRow: cellRow,
-        cellCol: cellCol,
-        imgRow: placeholder.row,
-        imgCol: placeholder.col,
-      );
-    }
-    final visible = cellByPosition.values.toList();
-    if (visible.isEmpty) {
-      return;
-    }
-
-    // Sort so contiguous cells in the same screen row can be merged into a
-    // single draw, then composite the matching slice of each source image.
-    visible.sort((a, b) {
-      final byImage = a.imageKey.compareTo(b.imageKey);
-      if (byImage != 0) return byImage;
-      if (a.cellRow != b.cellRow) return a.cellRow - b.cellRow;
-      return a.cellCol - b.cellCol;
-    });
-
-    final imageCache = <String, TerminalImage?>{};
-
-    var i = 0;
-    while (i < visible.length) {
-      final start = visible[i];
-      var end = i;
-      while (end + 1 < visible.length) {
-        final cur = visible[end];
-        final next = visible[end + 1];
-        if (next.imageKey == cur.imageKey &&
-            next.cellRow == cur.cellRow &&
-            next.cellCol == cur.cellCol + 1 &&
-            next.imgRow == cur.imgRow &&
-            next.imgCol == cur.imgCol + 1) {
-          end++;
-        } else {
-          break;
-        }
-      }
-      final last = visible[end];
-      i = end + 1;
-
-      final stored = imageCache.putIfAbsent(
-        start.imageKey,
-        () => graphics.imageByPlaceholderColorId(
-          start.imageId,
-          bitWidth: start.bitWidth,
-        ),
-      );
-      if (stored == null) {
-        _kittyUnresolvedInstances++;
-        if (_kittyFirstUnresolvedImageId == 0) {
-          _kittyFirstUnresolvedImageId = start.imageId;
-          _kittyFirstUnresolvedBitWidth = start.bitWidth;
-        }
-        continue;
-      }
+    for (final run in resolution.runs) {
       _kittyResolvedInstances++;
-      _visibleGraphicsImageIds.add(stored.id);
-      final imageIntKey = start.imageId * 64 + start.bitWidth;
-      final cols = gridColsByImage[imageIntKey] ?? 1;
-      final rows = gridRowsByImage[imageIntKey] ?? 1;
-      if (cols <= 0 || rows <= 0) {
-        continue;
-      }
-
-      final image = stored.image;
-      final srcCellWidth = image.width / cols;
-      final srcCellHeight = image.height / rows;
-      final srcRect = Rect.fromLTWH(
-        start.imgCol * srcCellWidth,
-        start.imgRow * srcCellHeight,
-        (last.imgCol - start.imgCol + 1) * srcCellWidth,
-        srcCellHeight,
-      );
-
+      _visibleGraphicsImageIds.add(run.stored.id);
+      final srcRect = run.src;
       final topLeft = _linePaintOffset(
         offset,
-        start.cellRow,
-      ).translate(start.cellCol * cellWidth, 0);
-      final dstWidth = (last.cellCol - start.cellCol + 1) * cellWidth;
+        run.cellRow,
+      ).translate(run.cellCol * cellWidth, 0);
+      final dstWidth = run.colSpan * cellWidth;
       if (!topLeft.dx.isFinite ||
           !topLeft.dy.isFinite ||
           !dstWidth.isFinite ||
@@ -4982,7 +4714,7 @@ class MonkeyRenderTerminal extends RenderBox
       }
       try {
         canvas.drawImageRect(
-          image,
+          run.stored.image,
           srcRect,
           Rect.fromLTWH(topLeft.dx, topLeft.dy, dstWidth, cellHeight),
           _imagePaint,
@@ -5000,7 +4732,7 @@ class MonkeyRenderTerminal extends RenderBox
       _painter.paintCursor(
         canvas,
         offset,
-        cursorType: _cursorType,
+        cursorType: TerminalCursorType.block,
         hasFocus: _focusNode.hasFocus,
       );
       return;
@@ -5010,7 +4742,7 @@ class MonkeyRenderTerminal extends RenderBox
       canvas,
       offset,
       cellData,
-      cursorType: _cursorType,
+      cursorType: TerminalCursorType.block,
       hasFocus: _focusNode.hasFocus,
     );
   }
@@ -5175,7 +4907,7 @@ class MonkeyRenderTerminal extends RenderBox
     int firstLine,
     int lastLine,
   ) {
-    for (final highlight in _controller.highlights) {
+    for (final highlight in highlights) {
       final range = highlight.range?.normalized;
 
       if (range == null ||
@@ -5202,8 +4934,8 @@ class MonkeyRenderTerminal extends RenderBox
     final start = segment.start ?? 0;
     final end = segment.end ?? _terminal.viewWidth;
     final startOffset = Offset(
-      _contentOrigin.dx + (start * _painter.cellSize.width),
-      (segment.line * _painter.cellSize.height) + _lineOffset,
+      _paintOrigin.dx + (start * _painter.cellSize.width),
+      (segment.line * _painter.cellSize.height) + _paintLineOffset,
     );
 
     _painter.paintHighlight(canvas, startOffset, end - start, color);
