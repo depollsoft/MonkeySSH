@@ -231,18 +231,11 @@ void main() {
       );
       expect(command, isNot(contains(r'if [ "$active" = 1 ]')));
       expect(command, isNot(contains('window_active')));
-      // Every pane in the alternate screen or running a non-shell command
-      // gets the focus transition, not only the named agents.
-      expect(
-        command,
-        contains(
-          r'elif [ "$alternate" = 1 ] || '
-          r'! flutty_is_shell_command_name "$pane_command"; then',
-        ),
-      );
-      expect(command, contains('flutty_is_shell_command_name() {'));
-      expect(command, contains('bash|'));
-      expect(command, contains('|zsh)'));
+      // Only agents known to enable focus reporting get the nudge: tmux
+      // cannot tell whether a pane opted into DECSET 1004, and send-keys -H
+      // would feed escape bytes to `cat > file` or a password prompt.
+      expect(command, isNot(contains(r'[ "$alternate" = 1 ]')));
+      expect(command, isNot(contains('flutty_is_shell_command_name')));
       expect(command, isNot(contains(r'[ "$theme_refresh_tui" = 1 ]')));
       expect(command, isNot(contains('theme_refresh_tui=0')));
       expect(command, contains('flutty_set_agent_tool_from_command_name'));

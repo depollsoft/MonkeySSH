@@ -8,7 +8,6 @@ import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
-import '../models/command_names.dart';
 import '../models/terminal_backend.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
@@ -2967,12 +2966,6 @@ String buildTmuxRefreshTerminalThemeCommand(
       'node|nodejs|npm|npx|bun|deno|python|python3) return 0 ;; '
       '*) return 1 ;; '
       'esac; }; '
-      'flutty_is_shell_command_name() { '
-      r'case "${1##*/}" in '
-      '${(shellCommandBasenames.toList()..sort()).join('|')}'
-      ') return 0 ;; '
-      '*) return 1 ;; '
-      'esac; }; '
       'flutty_set_agent_tool_from_command_text() { '
       r'command_text=$1; '
       'while :; do '
@@ -3009,13 +3002,10 @@ String buildTmuxRefreshTerminalThemeCommand(
       '( ${_buildTmuxSendPaneFocusTransitionCommand(extraFlags: extraFlags)} '
       '2>/dev/null || true ) & ;; '
       'esac; '
-      // Any other full-screen program or non-shell foreground command may be
-      // a theme-aware TUI, so nudge it the same way instead of keying on a
-      // fixed list of agent binaries.
-      r'elif [ "$alternate" = 1 ] || ! flutty_is_shell_command_name "$pane_command"; then '
-      'injected=1; '
-      '( ${_buildTmuxSendPaneFocusTransitionCommand(extraFlags: extraFlags)} '
-      '2>/dev/null || true ) & '
+      // Only programs known to enable focus reporting get the nudge: tmux
+      // cannot tell whether a pane opted into DECSET 1004, and send-keys -H
+      // writes straight to stdin, so a blanket nudge would feed escape bytes
+      // to `cat > file` or a password prompt.
       'fi; '
       r'printf "flutty_theme_refresh_pane:%s,%s,%s\n" "$active" "$alternate" "$injected"; '
       'done; wait; }; '
