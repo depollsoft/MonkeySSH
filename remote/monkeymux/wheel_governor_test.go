@@ -16,7 +16,7 @@ const (
 
 func TestWheelGovernorSlowReports(t *testing.T) {
 	for _, gap := range []time.Duration{150 * time.Millisecond, time.Second} {
-		g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+		g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 		now := time.Unix(100, 0)
 		for i := 0; i < 20; i++ {
 			report := []byte(wheelUp)
@@ -35,7 +35,7 @@ func TestWheelGovernorSlowReports(t *testing.T) {
 }
 
 func TestWheelGovernorSixReportBurst(t *testing.T) {
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	if got := string(g.process([]byte(strings.Repeat(wheelUp, 6)), now)); got != strings.Repeat(wheelUp, 3) {
 		t.Fatalf("burst = %q, want three reports", got)
@@ -87,7 +87,7 @@ func TestWheelGovernorRowConservation(t *testing.T) {
 	for _, reports := range []int{20, 2000} {
 		for _, interval := range []time.Duration{0, 16 * time.Millisecond} {
 			t.Run(fmt.Sprintf("%d/%v", reports, interval), func(t *testing.T) {
-				g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+				g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 				tui := wheelTestTUI{}
 				now := time.Unix(100, 0)
 				for i := 0; i < reports; i++ {
@@ -113,7 +113,7 @@ func TestWheelGovernorRowConservation(t *testing.T) {
 }
 
 func TestWheelGovernorDirectionCancellation(t *testing.T) {
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	g.process([]byte(wheelUp+wheelUp), now)
 	if g.owed != -1 {
@@ -129,7 +129,7 @@ func TestWheelGovernorDirectionCancellation(t *testing.T) {
 
 func TestWheelGovernorPassthroughOrder(t *testing.T) {
 	const other = "keys\x1b[A\x1b[<66;1;2M\x1b[<67;1;2M\x1b[<0;1;2M\x1b[<32;1;2M\x1b[<64;1;2m\x1b[<96;1;2M"
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	data := []byte("a" + wheelUp + "b" + wheelUp + other + wheelUp + "z")
 	want := "a" + wheelUp + "b" + other + wheelUp + "z"
@@ -156,7 +156,7 @@ func TestWheelGovernorEncodingsAndModifiers(t *testing.T) {
 					up = fmt.Sprintf("\x1b[<00%d;0012;0034M", 64+modifiers)
 					down = fmt.Sprintf("\x1b[<00%d;0012;0034M", 65+modifiers)
 				}
-				g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+				g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 				now := time.Unix(100, 0)
 				if got := string(g.process([]byte(strings.Repeat(up, 6)), now)); got != strings.Repeat(up, 3) {
 					t.Fatalf("burst=%q, want three up reports", got)
@@ -192,7 +192,7 @@ func TestWheelGovernorUnrecognizedReports(t *testing.T) {
 		"\x1b[<999999999999999999999999;1;2M", "\x1b[<64;;2M",
 		"\x1b[A", "\x1bOP",
 	} {
-		g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+		g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 		if got := string(g.process([]byte(data), time.Unix(100, 0))); got != data {
 			t.Errorf("input=%q output=%q", data, got)
 		}
@@ -209,7 +209,7 @@ func TestWheelGovernorCarriesIncompletePrefix(t *testing.T) {
 		"\x1b", "\x1b[", "\x1b[<", "\x1b[<64;", "\x1b[<64;12;34",
 		"\x1b[M", "\x1b[M`", "\x1b[M`x",
 	} {
-		g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+		g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 		if got := string(g.process([]byte("ab"+prefix), time.Unix(100, 0))); got != "ab" {
 			t.Errorf("prefix=%q output=%q, want leading bytes only", prefix, got)
 		}
@@ -225,7 +225,7 @@ func TestWheelGovernorCarriesIncompletePrefix(t *testing.T) {
 func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
 	now := time.Unix(100, 0)
 	// One wheel-up split into two reads is reassembled and governed, not lost.
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	if got := string(g.process([]byte("\x1b[<64;12"), now)); got != "" {
 		t.Fatalf("held half output=%q, want empty", got)
 	}
@@ -237,7 +237,7 @@ func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
 	}
 	// Split at the very first byte, and drive the TUI to confirm it moves
 	// exactly one row rather than leaving acceleration active for the event.
-	g.reset(wheelAccelerationProfiles["antigravity"])
+	g.reset(agentRegistry["antigravity"].wheelProfile)
 	tui := wheelTestTUI{}
 	tui.receive(t, g.process([]byte("\x1b"), now), now)
 	tui.receive(t, g.process([]byte("[<64;12;34M"), now), now)
@@ -247,7 +247,7 @@ func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
 }
 
 func TestWheelGovernorDropsReorderedDebt(t *testing.T) {
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	// A fast pair leaves one row owed for the flush.
 	g.process([]byte(wheelUp+wheelUp), now)
@@ -268,7 +268,7 @@ func TestWheelGovernorDropsReorderedDebt(t *testing.T) {
 }
 
 func TestWheelGovernorTakeOpaque(t *testing.T) {
-	g := wheelGovernor{profile: wheelAccelerationProfiles["antigravity"]}
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	g.process([]byte(wheelUp+wheelUp+"\x1b[<64;1"), now)
 	if g.owed == 0 || len(g.carry) == 0 {
@@ -528,7 +528,7 @@ func TestWheelGovernorFlushRearmsSynchronously(t *testing.T) {
 		action()
 	}
 	window.wheelGovernor = wheelGovernor{
-		profile: wheelAccelerationProfiles["antigravity"],
+		profile: agentRegistry["antigravity"].wheelProfile,
 		last:    clock.now, count: 121, owed: 11, template: []byte(wheelUp),
 	}
 	server.mu.Lock()

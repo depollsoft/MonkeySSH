@@ -472,38 +472,12 @@ const (
 )
 
 var (
-	leadingCdCommandPattern       = regexp.MustCompile(`^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*`)
-	leadingEnvPattern             = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+`)
-	restoreFileNamePattern        = regexp.MustCompile(`^monkeymux-restore-[a-f0-9]{24}-[0-9]+\.json$`)
-	codexSessionIDPattern         = regexp.MustCompile(`(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-	piSessionDirArgumentPattern   = regexp.MustCompile(`(?:^|\s)--session-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
-	safePiSessionIDPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$`)
-	agentSessionIDArgumentPattern = map[string][]*regexp.Regexp{
-		"claude": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"copilot": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"muse": {
-			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"-][^"]*)"|'([^'-][^']*)'|([^-\s]\S*))`),
-		},
-		"codex": {
-			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"opencode": {
-			regexp.MustCompile(`(?:^|\s)--session(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"pi": {
-			regexp.MustCompile(`(?:^|\s)--session(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"antigravity": {
-			regexp.MustCompile(`(?:^|\s)--conversation(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"cursor-agent": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-	}
+	leadingCdCommandPattern     = regexp.MustCompile(`^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*`)
+	leadingEnvPattern           = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+`)
+	restoreFileNamePattern      = regexp.MustCompile(`^monkeymux-restore-[a-f0-9]{24}-[0-9]+\.json$`)
+	codexSessionIDPattern       = regexp.MustCompile(`(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+	piSessionDirArgumentPattern = regexp.MustCompile(`(?:^|\s)--session-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
+	safePiSessionIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$`)
 )
 
 type controlMessage struct {
@@ -4940,8 +4914,7 @@ func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
 	}
-	_, ok := agentCommands[tool]
-	return ok
+	return agentRegistry[tool].launch.executable != ""
 }
 
 // agentToolRestoredAsShell reports whether restore recognized an agent in this
@@ -6016,7 +5989,7 @@ func sessionIDFromSelectedAgentProcessArgs(
 }
 
 func agentSessionIDFromArgs(tool string, args string) string {
-	for _, pattern := range agentSessionIDArgumentPattern[tool] {
+	for _, pattern := range agentRegistry[tool].resumeArgPatterns {
 		match := pattern.FindStringSubmatch(args)
 		if match == nil {
 			continue
@@ -16163,40 +16136,6 @@ func agentToolFromCommandText(command string) string {
 	)
 }
 
-func agentToolFromCommandName(command string) string {
-	if tool := agentLaunchToolFromCommand(command); tool != "" {
-		return tool
-	}
-	normalized := strings.ToLower(cleanProcessCommandName(command))
-	if museBinaryNamePattern.MatchString(normalized) {
-		return "muse"
-	}
-	switch normalized {
-	case "muse", "muse.cmd", "muse-code-acp", "muse-code-acp.cmd":
-		return "muse"
-	case "claude", "claude-code":
-		return "claude"
-	case "copilot", "github-copilot":
-		return "copilot"
-	case "codex", "codex-cli":
-		return "codex"
-	case "opencode", "opencode2", "open-code":
-		return "opencode"
-	case "agy", "antigravity", "antigravity-cli":
-		return "antigravity"
-	case "cursor-agent":
-		return "cursor-agent"
-	case "pi", "pi-agent":
-		return "pi"
-	case "hermes", "hermes-agent":
-		return "hermes"
-	case "openclaw":
-		return "openclaw"
-	default:
-		return ""
-	}
-}
-
 func monkeyMuxAgentLaunchCommand(command string) string {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "pi" {
@@ -16218,27 +16157,12 @@ func monkeyMuxPiAgentLaunchCommand() string {
 	return "monkeymux pi-agent"
 }
 
-var agentCommands = map[string]struct {
-	executable       string
-	permissionFlags  string
-	resumeArgument   string
-	supportsContinue bool
-}{
-	"muse":         {"muse", "--yolo", "resume", true},
-	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
-	"copilot":      {"copilot", "--yolo", "--resume", false},
-	"codex":        {"codex", "--yolo", "resume", false},
-	"opencode":     {"opencode", "--auto", "--session", true},
-	"antigravity":  {"agy", "--dangerously-skip-permissions", "--conversation", true},
-	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
-}
-
 func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string) string {
 	if tool == "pi" {
 		return monkeyMuxPiAgentLaunchCommand()
 	}
-	descriptor := agentCommands[tool]
-	command := descriptor.executable
+	launch := agentRegistry[tool].launch
+	command := launch.executable
 	if len(executables) > 0 && executables[0] != "" {
 		var ok bool
 		command, ok = shellArgument(executables[0])
@@ -16250,8 +16174,8 @@ func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string
 		if tool == "opencode" {
 			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command + " --auto"
 		}
-		if descriptor.permissionFlags != "" {
-			command += " " + descriptor.permissionFlags
+		if launch.permissionFlags != "" {
+			command += " " + launch.permissionFlags
 		}
 	}
 	return command
@@ -16302,14 +16226,14 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool, exe
 	if launch == "" {
 		return ""
 	}
-	descriptor := agentCommands[tool]
+	spec := agentRegistry[tool].launch
 	if sessionID == "_continue" && tool == "muse" {
 		return launch + " resume --last"
 	}
-	if sessionID == "_continue" && descriptor.supportsContinue {
+	if sessionID == "_continue" && spec.supportsContinue {
 		return launch + " --continue"
 	}
-	return launch + " " + descriptor.resumeArgument + " " + quotedSessionID
+	return launch + " " + spec.resumeArgument + " " + quotedSessionID
 }
 
 func canonicalAgentCommandName(command string) string {
@@ -16341,38 +16265,6 @@ func canonicalAgentCommandName(command string) string {
 // wrapping shell before TERM and leaves it stopped through the final group kill.
 func agentResumeCommandWithFreshFallback(resume string, launch string) string {
 	return piResumeCommandWithFreshFallback(resume, launch)
-}
-
-func agentToolFromTerminalTitle(title string) string {
-	normalized := strings.ToLower(strings.Join(strings.Fields(title), " "))
-	normalized = strings.Trim(normalized, "·-: ")
-	switch {
-	case normalized == "muse" || normalized == "muse code" || strings.HasPrefix(normalized, "muse code "):
-		return "muse"
-	case normalized == "claude" || normalized == "claude code" ||
-		strings.HasPrefix(normalized, "claude code "):
-		return "claude"
-	case normalized == "copilot" || normalized == "copilot cli" ||
-		strings.HasPrefix(normalized, "copilot cli "):
-		return "copilot"
-	case normalized == "codex" || strings.HasPrefix(normalized, "codex "):
-		return "codex"
-	case normalized == "opencode" || normalized == "open code" ||
-		strings.HasPrefix(normalized, "opencode "):
-		return "opencode"
-	case normalized == "agy" || normalized == "antigravity" ||
-		strings.HasPrefix(normalized, "agy ") || strings.HasPrefix(normalized, "antigravity "):
-		return "antigravity"
-	case normalized == "cursor agent" ||
-		normalized == "cursor-agent" || normalized == "cursor cli" ||
-		strings.HasPrefix(normalized, "cursor agent "):
-		return "cursor-agent"
-	case normalized == "pi" || strings.HasPrefix(normalized, "pi - ") ||
-		normalized == "π" || strings.HasPrefix(normalized, "π - "):
-		return "pi"
-	default:
-		return ""
-	}
 }
 
 func isGenericRuntimeCommandName(command string) bool {
