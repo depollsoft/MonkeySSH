@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -8119,6 +8120,32 @@ func TestKittyTransmissionPayloadSignatureMatchesClientHash(t *testing.T) {
 	multi := []byte("\x1b_Ga=t,i=1,f=100,m=1;aGVs\x1b\\\x1b_Gm=0;bG8=\x1b\\")
 	if got := kittyTransmissionPayloadSignature(multi); got != 3314369016 {
 		t.Fatalf("multi-chunk payload signature = %d, want 3314369016", got)
+	}
+}
+
+func TestKittyTransmissionPayloadSignatureSamplesWithoutDecoding(t *testing.T) {
+	// The direct read of the base64 bit stream must agree with the lenient
+	// decode for every chunk split and padding shape Kitty produces.
+	random := rand.New(rand.NewSource(7))
+	for _, size := range []int{1, 2, 3, 4, 5, 3071, 3072, 3073, 4096, 5000, 12289, 70000} {
+		raw := make([]byte, size)
+		random.Read(raw)
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		var buf []byte
+		for start := 0; start < len(encoded); start += 4096 {
+			end := start + 4096
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			more := "1"
+			if end == len(encoded) {
+				more = "0"
+			}
+			buf = append(buf, "\x1b_Ga=t,i=1,f=100,m="+more+";"+encoded[start:end]+"\x1b\\"...)
+		}
+		if got, want := kittyTransmissionPayloadSignature(buf), fnv32ImageSignature(raw); got != want {
+			t.Fatalf("size %d: signature = %d, want %d", size, got, want)
+		}
 	}
 }
 

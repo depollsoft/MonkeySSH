@@ -23,6 +23,9 @@ type terminalScreen struct {
 	main      vtGrid
 	alt       vtGrid
 	altActive bool
+	// scratchRows holds the rows leaving a scroll region while they are
+	// recycled as the rows entering it, so scrolling allocates nothing.
+	scratchRows [][]vtCell
 
 	// scrollback holds main-screen lines that scrolled off the top, already
 	// rendered to escape sequences (attributes included, rendition left at
@@ -306,6 +309,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c := *s
 	c.main = s.main.clone()
 	c.alt = s.alt.clone()
+	c.scratchRows = nil
 	// Rendered lines are never mutated, so the clone may share them.
 	c.scrollback = append([][]byte(nil), s.scrollback...)
 	c.scrollbackWrapped = append([]bool(nil), s.scrollbackWrapped...)
@@ -1298,8 +1302,7 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	}
 	// Recycle the rows leaving the region as the fresh rows entering it, so
 	// scrolling output allocates nothing per line.
-	recycled := make([][]vtCell, n)
-	copy(recycled, g.rows[top:top+n])
+	recycled := s.recycleRows(g.rows[top : top+n])
 	copy(g.rows[top:bottom+1], g.rows[top+n:bottom+1])
 	copy(g.wrapped[top:bottom+1], g.wrapped[top+n:bottom+1])
 	for i := 0; i < n; i++ {
@@ -1338,8 +1341,7 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 	if n > size {
 		n = size
 	}
-	recycled := make([][]vtCell, n)
-	copy(recycled, g.rows[bottom+1-n:bottom+1])
+	recycled := s.recycleRows(g.rows[bottom+1-n : bottom+1])
 	copy(g.rows[top+n:bottom+1], g.rows[top:bottom+1-n])
 	copy(g.wrapped[top+n:bottom+1], g.wrapped[top:bottom+1-n])
 	for i := 0; i < n; i++ {
@@ -1857,6 +1859,13 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 	g.pendingWrap = false
 }
 
+// recycleRows copies the row slice headers into the screen's scratch slice so
+// the caller can shift the grid over them and reuse them as fresh rows.
+func (s *terminalScreen) recycleRows(rows [][]vtCell) [][]vtCell {
+	s.scratchRows = append(s.scratchRows[:0], rows...)
+	return s.scratchRows
+}
+
 // clearRow blanks a row in place with the current background.
 func (s *terminalScreen) clearRow(row []vtCell) []vtCell {
 	blank := s.blankCell()
@@ -1975,8 +1984,7 @@ func (s *terminalScreen) deleteLines(n int) {
 	if n > s.bottom-g.cursorRow+1 {
 		n = s.bottom - g.cursorRow + 1
 	}
-	recycled := make([][]vtCell, n)
-	copy(recycled, g.rows[g.cursorRow:g.cursorRow+n])
+	recycled := s.recycleRows(g.rows[g.cursorRow : g.cursorRow+n])
 	copy(g.rows[g.cursorRow:s.bottom+1], g.rows[g.cursorRow+n:s.bottom+1])
 	copy(g.wrapped[g.cursorRow:s.bottom+1], g.wrapped[g.cursorRow+n:s.bottom+1])
 	for i := 0; i < n; i++ {

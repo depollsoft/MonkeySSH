@@ -14305,14 +14305,17 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		return w.kittyImageSeq[candidates[i]] > w.kittyImageSeq[candidates[j]]
 	})
 	selected := make([]string, 0, maxReplayedKittyImages)
+	numberReplays := make(map[string][]byte, maxReplayedKittyImages)
 	total := 0
 	for _, id := range candidates {
-		imageBytes := len(w.kittyImages[id]) +
-			len(w.kittyImageNumberReplayLocked(id)) +
-			len(w.kittyImageAnimations[id])
 		if len(selected) >= maxReplayedKittyImages {
 			break
 		}
+		numberReplay := w.kittyImageNumberReplayLocked(id)
+		numberReplays[id] = numberReplay
+		imageBytes := len(w.kittyImages[id]) +
+			len(numberReplay) +
+			len(w.kittyImageAnimations[id])
 		if imageBytes > maxReplayedKittyImageBytes ||
 			total+imageBytes > maxReplayedKittyImageBytes {
 			continue
@@ -14341,7 +14344,7 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		if !clientHasRoot {
 			out = append(out, w.kittyImageRootReplayLocked(id)...)
 		}
-		out = append(out, w.kittyImageNumberReplayLocked(id)...)
+		out = append(out, numberReplays[id]...)
 		out = append(out, w.kittyImageAnimations[id]...)
 	}
 	return out, selectedSet
@@ -14611,20 +14614,15 @@ func decodeLenientBase64(payload []byte) []byte {
 	return out
 }
 
-// kittyTransmissionPayloadSignature returns the FNV-1a-32 signature of the
-// base64-decoded payload of a stored Kitty transmission, matching the client's
-// terminalGraphicsSourceSignature over the same bytes. Returns 0 when there is
-// no payload, which never matches a client-reported signature.
-//
-// A transmission larger than a single APC is split into m=1 continuation chunks
-// (Kitty caps each APC payload at 4096 base64 bytes), and a stored image buffer
-// concatenates every chunk's full APC. The client appends each chunk's decoded
-// payload into one buffer before hashing, so the signature MUST cover the whole
-// concatenated payload — hashing only the first chunk would never match a
-// multi-chunk image (i.e. every non-trivial screenshot), defeating the switch
-// replay skip and forcing the whole image set to be re-sent on every switch.
 func kittyTransmissionPayloadSignature(buf []byte) uint32 {
-	var payload []byte
+	// Every chunk's base64 body, padding trimmed. The decoded bytes are a
+	// plain 6-bit-per-character bit stream when no other non-base64 byte is
+	// present, which is how Kitty clients emit them, so the sampled bytes
+	// are read straight out of the bodies instead of decoding the whole
+	// image. Any stray byte (whitespace) falls back to the lenient decode.
+	var bodies [][]byte
+	total := 0
+	direct := true
 	for i := 0; i+2 < len(buf); {
 		if buf[i] != '\x1b' || buf[i+1] != '_' || buf[i+2] != 'G' {
 			i++
@@ -14643,21 +14641,55 @@ func kittyTransmissionPayloadSignature(buf []byte) uint32 {
 			if bel := bytes.IndexByte(body, '\a'); bel >= 0 {
 				body = body[:bel]
 			}
-			payload = append(payload, decodeLenientBase64(body)...)
+			body = bytes.TrimRight(body, "=")
+			for _, c := range body {
+				if base64DecodeValue[c] < 0 {
+					direct = false
+					break
+				}
+			}
+			bodies = append(bodies, body)
+			total += len(body) * 6 / 8
 		}
 		i = apcEnd
 	}
-	if len(payload) == 0 {
+	if !direct {
+		var payload []byte
+		for _, body := range bodies {
+			payload = append(payload, decodeLenientBase64(body)...)
+		}
+		return fnv32ImageSignature(payload)
+	}
+	if total == 0 {
 		return 0
 	}
-	return fnv32ImageSignature(payload)
+	body, offset := 0, 0
+	return fnv32SampledSignature(total, func(index int) byte {
+		// Samples are requested in increasing order, so the chunk cursor
+		// only ever moves forward.
+		for index-offset >= len(bodies[body])*6/8 {
+			offset += len(bodies[body]) * 6 / 8
+			body++
+		}
+		bit := (index - offset) * 8
+		chars := bodies[body]
+		pair := uint32(base64DecodeValue[chars[bit/6]])<<6 |
+			uint32(base64DecodeValue[chars[bit/6+1]])
+		return byte(pair >> (4 - uint(bit%6)))
+	})
 }
 
 // fnv32ImageSignature mirrors the client's terminalGraphicsSourceSignature: an
 // FNV-1a-32 over the exact length (4 little-endian bytes) plus an evenly-spaced
 // sample of at most ~4096 bytes. Returns a non-zero value for non-empty input.
 func fnv32ImageSignature(b []byte) uint32 {
-	if len(b) == 0 {
+	return fnv32SampledSignature(len(b), func(index int) byte { return b[index] })
+}
+
+// fnv32SampledSignature is fnv32ImageSignature over a payload of the given
+// length read through byteAt, which is called with increasing indexes.
+func fnv32SampledSignature(length int, byteAt func(index int) byte) uint32 {
+	if length == 0 {
 		return 0
 	}
 	const (
@@ -14665,17 +14697,17 @@ func fnv32ImageSignature(b []byte) uint32 {
 		fnvPrime  = uint32(0x01000193)
 	)
 	hash := fnvOffset
-	length := len(b)
+	remaining := length
 	for i := 0; i < 4; i++ {
-		hash = (hash ^ uint32(length&0xFF)) * fnvPrime
-		length >>= 8
+		hash = (hash ^ uint32(remaining&0xFF)) * fnvPrime
+		remaining >>= 8
 	}
 	step := 1
-	if len(b) > 4096 {
-		step = len(b) / 4096
+	if length > 4096 {
+		step = length / 4096
 	}
-	for i := 0; i < len(b); i += step {
-		hash = (hash ^ uint32(b[i])) * fnvPrime
+	for i := 0; i < length; i += step {
+		hash = (hash ^ uint32(byteAt(i))) * fnvPrime
 	}
 	if hash == 0 {
 		return 1
