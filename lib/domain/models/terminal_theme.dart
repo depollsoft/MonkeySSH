@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show mapEquals;
+import 'package:flutter/foundation.dart' show listEquals, mapEquals;
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
@@ -132,40 +132,7 @@ Color? terminalThemePaletteColor(TerminalThemeData theme, int index) {
   final override = theme.paletteOverrides[index];
   if (override != null) return override;
 
-  switch (index) {
-    case 0:
-      return theme.black;
-    case 1:
-      return theme.red;
-    case 2:
-      return theme.green;
-    case 3:
-      return theme.yellow;
-    case 4:
-      return theme.blue;
-    case 5:
-      return theme.magenta;
-    case 6:
-      return theme.cyan;
-    case 7:
-      return theme.white;
-    case 8:
-      return theme.brightBlack;
-    case 9:
-      return theme.brightRed;
-    case 10:
-      return theme.brightGreen;
-    case 11:
-      return theme.brightYellow;
-    case 12:
-      return theme.brightBlue;
-    case 13:
-      return theme.brightMagenta;
-    case 14:
-      return theme.brightCyan;
-    case 15:
-      return theme.brightWhite;
-  }
+  if (index >= 0 && index < 16) return theme.ansiColors[index];
 
   if (index >= 16 && index < 232) {
     final colorIndex = index - 16;
@@ -222,36 +189,13 @@ String _formatOscRgbComponent(int value) {
 String _formatTwoDigitHex(int value) => value.toRadixString(16).padLeft(2, '0');
 
 /// Returns whether two terminal themes resolve to the same rendered colors.
+///
+/// [TerminalThemeData] compares by value, so this is plain equality; it is
+/// kept as a named entry point for call sites that document the intent.
 bool terminalThemesMatchForColors(
   TerminalThemeData previous,
   TerminalThemeData next,
-) =>
-    previous.id == next.id &&
-    previous.isDark == next.isDark &&
-    previous.foreground == next.foreground &&
-    previous.background == next.background &&
-    previous.cursor == next.cursor &&
-    previous.selection == next.selection &&
-    previous.black == next.black &&
-    previous.red == next.red &&
-    previous.green == next.green &&
-    previous.yellow == next.yellow &&
-    previous.blue == next.blue &&
-    previous.magenta == next.magenta &&
-    previous.cyan == next.cyan &&
-    previous.white == next.white &&
-    previous.brightBlack == next.brightBlack &&
-    previous.brightRed == next.brightRed &&
-    previous.brightGreen == next.brightGreen &&
-    previous.brightYellow == next.brightYellow &&
-    previous.brightBlue == next.brightBlue &&
-    previous.brightMagenta == next.brightMagenta &&
-    previous.brightCyan == next.brightCyan &&
-    previous.brightWhite == next.brightWhite &&
-    mapEquals(previous.paletteOverrides, next.paletteOverrides) &&
-    previous.searchHitBackground == next.searchHitBackground &&
-    previous.searchHitBackgroundCurrent == next.searchHitBackgroundCurrent &&
-    previous.searchHitForeground == next.searchHitForeground;
+) => previous == next;
 
 const _minimumSelectionBackgroundContrast = 1.04;
 const _minimumSelectionTextContrast = 3.5;
@@ -585,6 +529,49 @@ class TerminalThemeData {
     searchHitForeground: searchHitForeground,
   );
 
+  /// ANSI colors 0-15 in xterm palette order, as a fresh mutable list.
+  List<Color> get ansiColors => [
+    black,
+    red,
+    green,
+    yellow,
+    blue,
+    magenta,
+    cyan,
+    white,
+    brightBlack,
+    brightRed,
+    brightGreen,
+    brightYellow,
+    brightBlue,
+    brightMagenta,
+    brightCyan,
+    brightWhite,
+  ];
+
+  /// Creates a copy with ANSI colors 0-15 replaced by [colors] (xterm order).
+  TerminalThemeData copyWithAnsiColors(List<Color> colors) {
+    assert(colors.length == 16, 'Expected 16 ANSI colors.');
+    return copyWith(
+      black: colors[0],
+      red: colors[1],
+      green: colors[2],
+      yellow: colors[3],
+      blue: colors[4],
+      magenta: colors[5],
+      cyan: colors[6],
+      white: colors[7],
+      brightBlack: colors[8],
+      brightRed: colors[9],
+      brightGreen: colors[10],
+      brightYellow: colors[11],
+      brightBlue: colors[12],
+      brightMagenta: colors[13],
+      brightCyan: colors[14],
+      brightWhite: colors[15],
+    );
+  }
+
   /// Converts this theme to a JSON map for storage.
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -624,10 +611,36 @@ class TerminalThemeData {
       identical(this, other) ||
       other is TerminalThemeData &&
           runtimeType == other.runtimeType &&
-          id == other.id;
+          id == other.id &&
+          name == other.name &&
+          isDark == other.isDark &&
+          isCustom == other.isCustom &&
+          foreground == other.foreground &&
+          background == other.background &&
+          cursor == other.cursor &&
+          selection == other.selection &&
+          listEquals(ansiColors, other.ansiColors) &&
+          mapEquals(paletteOverrides, other.paletteOverrides) &&
+          searchHitBackground == other.searchHitBackground &&
+          searchHitBackgroundCurrent == other.searchHitBackgroundCurrent &&
+          searchHitForeground == other.searchHitForeground;
 
   @override
-  int get hashCode => id.hashCode;
+  int get hashCode => Object.hash(
+    id,
+    name,
+    isDark,
+    isCustom,
+    foreground,
+    background,
+    cursor,
+    selection,
+    Object.hashAll(ansiColors),
+    paletteOverrides.length,
+    searchHitBackground,
+    searchHitBackgroundCurrent,
+    searchHitForeground,
+  );
 }
 
 /// Adjusts an iTerm-style selection color for readable selected text.
@@ -675,13 +688,14 @@ bool _isUsableSelection({
   required Color selection,
 }) {
   final compositedSelection = Color.alphaBlend(selection, background);
-  return _contrastRatio(foreground, compositedSelection) >=
+  return contrastRatio(foreground, compositedSelection) >=
           _minimumSelectionTextContrast &&
-      _contrastRatio(compositedSelection, background) >=
+      contrastRatio(compositedSelection, background) >=
           _minimumSelectionBackgroundContrast;
 }
 
-double _contrastRatio(Color a, Color b) {
+/// WCAG 2.x contrast ratio between two opaque colors, from 1 to 21.
+double contrastRatio(Color a, Color b) {
   final luminanceA = a.computeLuminance();
   final luminanceB = b.computeLuminance();
   final brightest = luminanceA > luminanceB ? luminanceA : luminanceB;
