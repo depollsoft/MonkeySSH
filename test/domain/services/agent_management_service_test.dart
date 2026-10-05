@@ -3069,6 +3069,9 @@ exit "$result"
       addTearDown(() => root.delete(recursive: true));
       final launcher = File('${root.path}/copilot.cmd');
       await launcher.writeAsString('@echo off\r\necho 1.2.3\r\n');
+      await File('${root.path}/opencode.cmd').writeAsString(
+        '@echo off\r\necho postinstall script was not run 1>&2\r\nexit /b 1\r\n',
+      );
       final original = decodeEncodedPowerShell(
         buildAgentBatchProbeCommand(agentRuntimeDefinitions, windows: true),
       );
@@ -3109,6 +3112,8 @@ exit "$result"
         final copilot = snapshots['cli:copilot']!;
         expect(copilot.executablePath, launcher.path.replaceAll('/', r'\'));
         expect(parseAgentVersion(copilot.versionOutput ?? ''), '1.2.3');
+        expect(copilot.needsRepair, isFalse);
+        expect(snapshots['cli:opencode']!.needsRepair, isTrue, reason: shell);
         expect(snapshots['cli:claude']!.executablePath, isNull);
       }
     }, skip: !Platform.isWindows);
@@ -3361,7 +3366,7 @@ function New-Object([string]$TypeName) {
   $process = [pscustomobject]@{
     Id = 12345;
     HasExited = $false;
-    ExitCode = 0;
+    ExitCode = if ($script:scenario -eq 'postinstall') { 1 } else { 0 };
     StartInfo = [pscustomobject]@{
       FileName = ''; Arguments = ''; UseShellExecute = $true;
       CreateNoWindow = $false; RedirectStandardOutput = $false;
@@ -3371,12 +3376,14 @@ function New-Object([string]$TypeName) {
     StandardError = [pscustomobject]@{};
   };
   $process.StandardOutput | Add-Member ScriptMethod ReadToEndAsync { [pscustomobject]@{Result = '1.2.3'} };
-  $process.StandardError | Add-Member ScriptMethod ReadToEndAsync { [pscustomobject]@{Result = ''} };
+  $process.StandardError | Add-Member ScriptMethod ReadToEndAsync {
+    [pscustomobject]@{Result = if ($script:scenario -eq 'postinstall') { 'postinstall script was not run' } else { '' }}
+  };
   $process | Add-Member ScriptMethod Start { return $true };
   $process | Add-Member ScriptMethod WaitForExit {
     param($timeout)
     if ($timeout -ne 5000) { throw 'Unexpected timeout' };
-    return $script:scenario -eq 'completed';
+    return $script:scenario -in @('completed', 'postinstall');
   };
   $process | Add-Member ScriptMethod Kill {
     $script:events.Add('kill');
@@ -3395,11 +3402,11 @@ function taskkill.exe {
   $global:LASTEXITCODE = if ($script:probeProcess.HasExited) { 0 } else { 1 };
   'taskkill output must not become a version';
 }
-foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-race', 'completed')) {
+foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-race', 'completed', 'postinstall')) {
   $script:scenario = $scenario;
   $script:events = [System.Collections.Generic.List[string]]::new();
   $output = Invoke-AgentProbe 'unused';
-  $expected = if ($scenario -eq 'completed') { 'dispose' }
+  $expected = if ($scenario -in @('completed', 'postinstall')) { 'dispose' }
     elseif ($scenario -eq 'tree-success') { 'tree,dispose' }
     else { 'tree,kill,dispose' };
   if (($script:events -join ',') -ne $expected) {
@@ -3407,7 +3414,12 @@ foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-rac
   };
   if ($scenario -eq 'completed') {
     if ($output -ne '1.2.3') { throw 'Successful version output was lost' };
-  } elseif ($null -ne $output) { throw 'A timed-out probe returned output' };
+    if ($null -ne $script:__flProbeFailure) { throw 'A success reported a failure' };
+  } elseif ($null -ne $output) { throw 'A failed probe returned output' };
+  if ($scenario -eq 'postinstall' -and
+      $script:__flProbeFailure -ne '1.2.3postinstall script was not run') {
+    throw "Failure diagnostics were lost: $script:__flProbeFailure";
+  };
   Write-Output "${scenario}: passed";
 }
 ''',
@@ -3438,6 +3450,7 @@ foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-rac
         'unavailable',
         'exit-race',
         'completed',
+        'postinstall',
       ]) {
         expect(result.stdout, contains('$scenario: passed'));
       }
@@ -3457,6 +3470,13 @@ foreach ($scenario in @('tree-success', 'tree-failure', 'unavailable', 'exit-rac
       expect(script, contains('Invoke-AgentProbe'));
       expect(script, contains('__monkeyssh_agent_version__='));
       expect(script, contains('WaitForExit(5000)'));
+      // A failed version probe can still report skipped install scripts.
+      expect(
+        script,
+        contains(
+          r"elseif($__flProbeFailure -match ''postinstall (script )?(was )?not run|--ignore-scripts''){[void]$__flOut.AppendLine(''__monkeyssh_agent_repair__'')}",
+        ),
+      );
     });
   });
 }

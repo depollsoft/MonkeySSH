@@ -43,6 +43,7 @@ function ConvertTo-AgentLiteral([string]$Value) {
   return "'" + [regex]::Replace($Value, '[\u0027\u2018\u2019\u201a\u201b]', '$0$0') + "'";
 }
 function Invoke-AgentProbe([string]$Script) {
+  $script:__flProbeFailure = $null;
   $process = New-Object System.Diagnostics.Process;
   $process.StartInfo.FileName = 'powershell.exe';
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script));
@@ -64,7 +65,11 @@ function Invoke-AgentProbe([string]$Script) {
       };
       return;
     };
-    if ($process.ExitCode -eq 0) { $stdout.Result };
+    if ($process.ExitCode -eq 0) { $stdout.Result } else {
+      # Bounded failure diagnostics, kept apart from successful version output.
+      $failure = [string]$stdout.Result + [string]$stderr.Result;
+      $script:__flProbeFailure = $failure.Substring(0, [Math]::Min($failure.Length, 4096));
+    };
   } finally { $process.Dispose() };
 }
 ''';
@@ -140,6 +145,9 @@ const _profilePrefix =
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
+// Version-probe failure output of a package installed with skipped scripts.
+const _skippedPostinstallPattern =
+    'postinstall (script )?(was )?not run|--ignore-scripts';
 const _runtimeMarker = '__monkeyssh_agent_runtime__=';
 const _runtimeEndMarker = '__monkeyssh_agent_runtime_end__';
 const _sourceMarker = '__monkeyssh_agent_source__=';
@@ -2151,7 +2159,8 @@ String _buildWindowsProbeBody(AgentRuntimeDefinition definition) {
       if (definition.versionEnvironment.isNotEmpty)
         '\$__flScript = ${powerShellSingleQuote(_powerShellEnvironment(definition.versionEnvironment))} + \$__flScript;',
       r'$__flVersion = Invoke-AgentProbe $__flScript;',
-      'if(\$__flVersion){[void]\$__flOut.AppendLine(${powerShellSingleQuote(_versionMarker)} + ((\$__flVersion -split "`r?`n" | Select-Object -First 4) -join " "))};',
+      'if(\$__flVersion){[void]\$__flOut.AppendLine(${powerShellSingleQuote(_versionMarker)} + ((\$__flVersion -split "`r?`n" | Select-Object -First 4) -join " "))}',
+      'elseif(\$__flProbeFailure -match ${powerShellSingleQuote(_skippedPostinstallPattern)}){[void]\$__flOut.AppendLine(${powerShellSingleQuote(_repairMarker)})};',
     ] else if (definition.packageName != null &&
         definition.registry == AgentPackageRegistry.npm) ...[
       '''\$__flScript = ${powerShellSingleQuote('& node -e ${powerShellSingleQuote(_agentPackageVersionScript)} ')} + (ConvertTo-AgentLiteral \$__flCommand.Source) + ${powerShellSingleQuote(' ${powerShellSingleQuote(definition.packageName!)}; exit \$LASTEXITCODE')};''',
@@ -2176,7 +2185,7 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
             'version_output=; '
             'if __fl_agent_version $versionEnvironment"\$resolved" $versionArguments >"\$__fl_version_file" 2>&1; then '
             'version_output=\$(head -n 4 "\$__fl_version_file" | tr ${_shellQuote(r'\r\n')} ${_shellQuote('  ')}); '
-            'elif grep -Eiq ${_shellQuote('postinstall (script )?(was )?not run|--ignore-scripts')} "\$__fl_version_file"; then '
+            'elif grep -Eiq ${_shellQuote(_skippedPostinstallPattern)} "\$__fl_version_file"; then '
             'printf ${_shellQuote('$_repairMarker\n')}; '
             'fi; '
             'rm -f "\$__fl_version_file"; '
