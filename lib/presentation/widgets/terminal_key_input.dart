@@ -93,7 +93,8 @@ void _writeEnterKey(void Function(String)? output, String payload) {
 /// punctuation, at the moment Return is pressed, so that text and the Enter
 /// leave together. Prompt TUIs read input arriving that fast as a paste or
 /// dictation and take the Return for a line break inside it: Hermes inserts a
-/// newline for an Enter within 50 ms of a change to its input. The pacer holds
+/// newline for an Enter within 50 ms of a change to its input, Muse Code
+/// within about 120 ms of a burst of typed characters. The pacer holds
 /// such an Enter until [gap] after the text, so it arrives as the separate
 /// keystroke the user pressed. Output written while an Enter waits queues
 /// behind it, so the order never changes. An Enter with no recent text goes
@@ -109,8 +110,9 @@ class TerminalEnterPacer {
   }) : _write = write,
        _now = now ?? DateTime.now;
 
-  /// The default distance between text and a following Enter.
-  static const defaultGap = Duration(milliseconds: 100);
+  /// The default distance between text and a following Enter: the longest
+  /// such window among the agents the app launches, with room for jitter.
+  static const defaultGap = Duration(milliseconds: 150);
 
   /// How long after the last text an Enter is held back.
   final Duration gap;

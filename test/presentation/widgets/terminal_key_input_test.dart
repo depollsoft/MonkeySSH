@@ -217,7 +217,7 @@ void main() {
           ..add('\r', enter: true);
         expect(written, ['what?', ' ']);
 
-        async.elapse(const Duration(milliseconds: 60));
+        async.elapse(const Duration(milliseconds: 110));
         // Anything typed meanwhile waits behind the Enter.
         pacer.add('n', enter: false);
         expect(written, ['what?', ' ']);
@@ -259,7 +259,7 @@ void main() {
           ..add('\r', enter: true);
         unawaited(pacer.idle!.then((_) => idle = true));
         async
-          ..elapse(const Duration(milliseconds: 99))
+          ..elapse(const Duration(milliseconds: 149))
           ..flushMicrotasks();
         expect(idle, isFalse);
         async
