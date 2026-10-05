@@ -43,11 +43,10 @@ const (
 	acpProviderDrainTimeout   = 2 * time.Second
 	acpRequestTimeout         = 500 * time.Millisecond
 	acpWaitMaxFailures        = 5
-	// Keep the steady-state live queue modest; attach sizes it dynamically for
-	// the actual replay being primed so a high event-count retention bound does
-	// not preallocate a huge channel for every connected client.
+	// The live queue only has to absorb output published while the writer
+	// drains the retained replay, which it reads from the bridge's own event
+	// slice rather than a copy.
 	acpClientLiveQueueCapacity = 1024 + 4
-	acpAttachQueueSafetyMargin = 4
 	// Provider requests the bridge answered as cancelled, remembered so a
 	// late client response is not forwarded as a second answer.
 	acpCancelledRequestMemory = 1024
@@ -118,13 +117,18 @@ type acpReplayEvent struct {
 }
 
 type acpBridgeClient struct {
-	id         string
-	conn       net.Conn
-	send       chan acpWireMessage
-	done       chan struct{}
-	doneOnce   sync.Once
-	writerDone chan struct{}
-	ack        uint64
+	id       string
+	conn     net.Conn
+	send     chan acpWireMessage
+	done     chan struct{}
+	doneOnce sync.Once
+	// primed is written before anything else: the hello, then the markers
+	// and pending requests the attach composed. replay is the retained
+	// events snapshotted at attach, of which those after replayAfter are
+	// written next, before the live send queue is read.
+	primed      []acpWireMessage
+	replay      []acpReplayEvent
+	replayAfter uint64
 }
 
 func (c *acpBridgeClient) cancel() {
@@ -164,7 +168,9 @@ type acpBridge struct {
 	sessionSetupRequests map[string]string
 	initializeRequestIDs map[string]struct{}
 	initializeResult     json.RawMessage
-	exitCode             *int
+	// replayReaders counts attach writers still draining a replay snapshot;
+	// while any is active, trimming must not rewrite the shared event array.
+	replayReaders        int
 	providerDone         chan struct{}
 	providerDoneOnce     sync.Once
 	providerReapMu       sync.Mutex
@@ -805,7 +811,6 @@ func (b *acpBridge) waitForProvider() {
 	b.mu.Lock()
 	if b.state != "stopped" {
 		b.state = "exited"
-		b.exitCode = &exitCode
 		b.lastActivity = time.Now()
 	}
 	b.pendingRequests = map[string]struct{}{}
@@ -988,7 +993,7 @@ func (b *acpBridge) trackClientRequest(envelope acpEnvelope) (string, bool) {
 	if len(envelope.ID) == 0 || len(envelope.Method) == 0 {
 		return "", false
 	}
-	id := string(envelope.ID)
+	id := acpRequestKey(envelope.ID)
 	b.mu.Lock()
 	b.inFlightTurns[id] = struct{}{}
 	if isAcpSessionSetupMethod(envelope.method) {
@@ -1152,7 +1157,7 @@ func (b *acpBridge) publish(
 			if len(envelope.Method) > 0 {
 				pendingID = acpRequestKey(envelope.ID)
 			} else {
-				providerResponseID = string(envelope.ID)
+				providerResponseID = acpRequestKey(envelope.ID)
 			}
 		}
 	}
@@ -1198,7 +1203,7 @@ func (b *acpBridge) publish(
 		Type:     eventType,
 		BridgeID: b.id,
 		Sequence: b.nextSequence,
-		Data:     append(json.RawMessage(nil), data...),
+		Data:     data,
 		State:    state,
 		ExitCode: exitCode,
 	}
@@ -1279,13 +1284,19 @@ func (b *acpBridge) trimReplayLocked() {
 		(b.replayBytes <= acpReplayMaxBytes || len(b.replay) <= 1) {
 		return
 	}
+	// An attach writer still draining a snapshot of the array reads it
+	// without the lock, so evicted slots are left intact and compaction goes
+	// to a fresh array until it finishes.
+	shared := b.replayReaders > 0
 	for len(b.replay) > acpReplayMaxEvents ||
 		(b.replayBytes > acpReplayMaxBytes && len(b.replay) > 1) {
 		if b.replay[0].pendingID != "" {
 			break
 		}
 		b.replayBytes -= b.replay[0].bytes
-		b.replay[0] = acpReplayEvent{}
+		if !shared {
+			b.replay[0] = acpReplayEvent{}
+		}
 		b.replay = b.replay[1:]
 	}
 	if len(b.replay) <= acpReplayMaxEvents &&
@@ -1293,6 +1304,10 @@ func (b *acpBridge) trimReplayLocked() {
 		return
 	}
 	remainingEvents := len(b.replay)
+	retained := b.replay
+	if shared {
+		retained = make([]acpReplayEvent, len(b.replay))
+	}
 	kept := 0
 	for _, event := range b.replay {
 		// Leave room for streaming appends before another pinned compaction.
@@ -1304,12 +1319,12 @@ func (b *acpBridge) trimReplayLocked() {
 			b.replayBytes -= event.bytes
 			continue
 		}
-		b.replay[kept] = event
+		retained[kept] = event
 		kept++
 	}
 	// Reuse the event array without retaining evicted payloads in its tail.
-	clear(b.replay[kept:])
-	b.replay = b.replay[:kept]
+	clear(retained[kept:])
+	b.replay = retained[:kept]
 }
 
 func (b *acpBridge) releasePendingReplayLocked(id string) {
@@ -1473,22 +1488,23 @@ func (b *acpBridge) handleAttach(
 				RetainedFrom: retainedFrom,
 			})
 		}
-		for _, event := range replay {
-			if event.message.Sequence > hello.LastAck {
-				primed = append(primed, event.message)
-			}
-		}
 	}
 	client := &acpBridgeClient{
-		id:         clientID,
-		conn:       conn,
-		send:       make(chan acpWireMessage, acpClientQueueCapacityFor(len(primed))),
-		done:       make(chan struct{}),
-		writerDone: make(chan struct{}),
+		id:     clientID,
+		conn:   conn,
+		send:   make(chan acpWireMessage, acpClientLiveQueueCapacity),
+		done:   make(chan struct{}),
+		primed: primed,
 	}
-	client.ack = hello.LastAck
-	for _, message := range primed {
-		client.send <- message
+	if !pendingOnly {
+		// The writer reads the retained events straight from this snapshot:
+		// publish appends only beyond its length, and trimReplayLocked leaves
+		// its array untouched while replayReaders counts it, so nothing is
+		// copied under the lock however large the backlog is. Events
+		// published from here on reach the client through send, after it.
+		client.replay = replay
+		client.replayAfter = hello.LastAck
+		b.replayReaders++
 	}
 	if b.beforeClientVisible != nil {
 		b.beforeClientVisible()
@@ -1573,14 +1589,6 @@ func (b *acpBridge) handleAttach(
 	}
 }
 
-func acpClientQueueCapacityFor(primedCount int) int {
-	capacity := acpClientLiveQueueCapacity
-	if required := primedCount + acpAttachQueueSafetyMargin; required > capacity {
-		capacity = required
-	}
-	return capacity
-}
-
 func replayModeForAttach(
 	hello acpWireMessage,
 	replayBytes int,
@@ -1629,7 +1637,9 @@ func replayHasGap(replay []acpReplayEvent, after uint64, highWater uint64) bool 
 }
 
 func (b *acpBridge) writeClient(client *acpBridgeClient) {
-	defer close(client.writerDone)
+	if !b.writeClientReplay(client) {
+		return
+	}
 	for {
 		// Prefer cancellation when both it and a queued message are ready. This
 		// avoids retaining a writer goroutine for a disconnected idle client.
@@ -1649,6 +1659,48 @@ func (b *acpBridge) writeClient(client *acpBridgeClient) {
 			return
 		}
 	}
+}
+
+// writeClientReplay writes the attach's primed messages and the retained
+// replay snapshot, releasing the snapshot's hold on the event array when done.
+// It reports false once the client is cancelled or its connection failed.
+func (b *acpBridge) writeClientReplay(client *acpBridgeClient) bool {
+	replay := client.replay
+	client.replay = nil
+	if replay != nil {
+		defer func() {
+			b.mu.Lock()
+			b.replayReaders--
+			b.mu.Unlock()
+		}()
+	}
+	write := func(message acpWireMessage) bool {
+		select {
+		case <-client.done:
+			return false
+		default:
+		}
+		if err := writeAcpWireFrame(client.conn, message); err != nil {
+			b.detachClient(client.id)
+			return false
+		}
+		return true
+	}
+	for _, message := range client.primed {
+		if !write(message) {
+			return false
+		}
+	}
+	client.primed = nil
+	for index := range replay {
+		if replay[index].message.Sequence <= client.replayAfter {
+			continue
+		}
+		if !write(replay[index].message) {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *acpBridge) enqueue(client *acpBridgeClient, message acpWireMessage) {
@@ -1695,10 +1747,7 @@ func (b *acpBridge) clientCanSend(clientID string) bool {
 func (b *acpBridge) recordAck(clientID string, sequence uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if client, ok := b.clients[clientID]; ok && sequence <= b.nextSequence {
-		if sequence > client.ack {
-			client.ack = sequence
-		}
+	if _, ok := b.clients[clientID]; ok && sequence <= b.nextSequence {
 		b.lastActivity = time.Now()
 	}
 }

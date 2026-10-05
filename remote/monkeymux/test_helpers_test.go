@@ -349,3 +349,16 @@ func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
 	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
 	return out
 }
+
+// lastPublishedExitCode is the exit code carried by the most recent state
+// event in the bridge's retained replay, or nil before the provider exited.
+func lastPublishedExitCode(bridge *acpBridge) *int {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	for index := len(bridge.replay) - 1; index >= 0; index-- {
+		if message := bridge.replay[index].message; message.Type == "state" {
+			return message.ExitCode
+		}
+	}
+	return nil
+}
