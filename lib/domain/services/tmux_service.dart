@@ -3616,6 +3616,23 @@ TmuxWindowChangeEvent? _parseTmuxWindowChangeEvent(
   return null;
 }
 
+/// Returns whether a `%begin <time> <number> <flags>` line opens a reply to a
+/// command this control client wrote.
+///
+/// Verified against tmux 3.7c (`tmux -CC attach -t sa5probe` driven through a
+/// pty): the attach itself is answered with `%begin 1791181519 283 0` /
+/// `%end 1791181519 283 0` before any client command, and every block for a
+/// command written by the client (`%end` and `%error` alike) carries flags
+/// `1`. A line without a parsable flags field is treated as a client block so
+/// older servers keep the previous behaviour.
+@visibleForTesting
+bool isTmuxControlBlockFromClient(String line) {
+  final fields = line.split(' ');
+  if (fields.length < 4) return true;
+  final flags = int.tryParse(fields[3]);
+  return flags == null || (flags & 1) == 1;
+}
+
 /// Action the tmux control-mode heartbeat decides to take based on how long
 /// the channel has been silent.
 @visibleForTesting
@@ -3758,6 +3775,7 @@ class _TmuxWindowChangeObserver {
   final _controlCommandQueue = Queue<_TmuxControlCommandRequest>();
   _TmuxControlCommandRequest? _activeControlCommand;
   bool _disposed = false;
+  bool _inForeignControlBlock = false;
   bool _preserveScheduledReloadThroughSnapshots = false;
   int _restartAttempts = 0;
   DateTime? _lastControlActivity;
@@ -4021,15 +4039,26 @@ class _TmuxWindowChangeObserver {
   }
 
   bool _handleControlCommandLine(String trimmed) {
-    final request = _activeControlCommand;
-    if (request == null) {
-      return false;
+    if (_inForeignControlBlock) {
+      if (trimmed.startsWith('%end ') || trimmed.startsWith('%error ')) {
+        _inForeignControlBlock = false;
+      }
+      return true;
     }
+    final request = _activeControlCommand;
     if (trimmed.startsWith('%begin ')) {
+      // `%begin <time> <number> <flags>`: tmux sets the flags bit only for
+      // commands this client wrote. The attach command itself (and anything
+      // another client runs) opens a flags=0 block, which must not be taken
+      // for the reply to whatever request is active.
+      if (request == null || !isTmuxControlBlockFromClient(trimmed)) {
+        _inForeignControlBlock = true;
+        return true;
+      }
       request.started = true;
       return true;
     }
-    if (!request.started) {
+    if (request == null || !request.started) {
       return false;
     }
     if (trimmed.startsWith('%end ')) {
@@ -4279,6 +4308,7 @@ class _TmuxWindowChangeObserver {
     _doneSubscription = null;
     final controlSession = _controlSession;
     _controlSession = null;
+    _inForeignControlBlock = false;
     _lastControlActivity = null;
     return Future.wait([
       if (stdoutSubscription != null) stdoutSubscription.cancel(),

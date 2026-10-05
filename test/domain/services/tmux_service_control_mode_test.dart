@@ -1522,7 +1522,7 @@ void main() {
             if (value.startsWith('refresh-client ')) {
               scheduleMicrotask(
                 () => stdoutController.add(
-                  _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                  _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
                 ),
               );
             }
@@ -1587,7 +1587,7 @@ void main() {
             if (value.startsWith('refresh-client ')) {
               scheduleMicrotask(
                 () => stdoutController.add(
-                  _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                  _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
                 ),
               );
             }
@@ -1685,7 +1685,7 @@ void main() {
             if (value.startsWith('refresh-client ')) {
               scheduleMicrotask(
                 () => stdoutController.add(
-                  _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                  _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
                 ),
               );
             }
@@ -2090,7 +2090,7 @@ void main() {
                 if (selecting) emitSnapshot(redrawActivity);
                 final marker = selecting && failNextSelect ? '%error' : '%end';
                 stdoutController.add(
-                  _utf8Bytes('%begin 1 1 0\n$marker 1 1 0\n'),
+                  _utf8Bytes('%begin 1 1 1\n$marker 1 1 1\n'),
                 );
                 if (selecting) failNextSelect = false;
               });
@@ -2209,6 +2209,59 @@ void main() {
       },
     );
 
+    test('control replies are not shifted by the attach block', () async {
+      // Before the flags field was read, the attach block completed the
+      // subscription request, so the subscription's real reply completed the
+      // next queued command (`new-window`) with no output and the launch fell
+      // back to the session target.
+      final client = _MockSshClient();
+      final session = _buildSession(client, connectionId: 74);
+      const service = TmuxService();
+      final stdoutController = StreamController<Uint8List>();
+      final writes = <String>[];
+      final controlSession = _buildInteractiveExecSession(
+        stdoutController: stdoutController,
+        onWrite: (value) {
+          writes.add(value);
+          // tmux answers in order: the subscription reply lands while the
+          // `new-window` written right after it is still waiting for its own.
+          final (reply, delay) = value.startsWith('refresh-client ')
+              ? ('%begin 2 1 1\n%end 2 1 1\n', const Duration(milliseconds: 20))
+              : value.startsWith('new-window ')
+              ? (
+                  '%begin 2 2 1\n4\n%end 2 2 1\n',
+                  const Duration(milliseconds: 40),
+                )
+              : ('%begin 2 3 1\n%end 2 3 1\n', Duration.zero);
+          Timer(delay, () {
+            if (!stdoutController.isClosed) {
+              stdoutController.add(_utf8Bytes(reply));
+            }
+          });
+        },
+      );
+      _queueExec(client, [
+        _buildOpenExecSession(stdout: 'zsh\n/usr/bin/tmux\n${_doneMarker()}'),
+        controlSession,
+      ]);
+      final subscription = service
+          .watchWindowChanges(session, 'main')
+          .listen((_) {});
+      addTearDown(() async {
+        await subscription.cancel();
+        await service.clearCache(74);
+        await stdoutController.close();
+      });
+      await untilCalled(() => controlSession.write(any()));
+
+      await service.createWindow(session, 'main', command: 'claude');
+
+      expect(writes, contains("send-keys -t 'main:4' 'claude' Enter\n"));
+      expect(isTmuxControlBlockFromClient('%begin 1791181519 283 0'), isFalse);
+      expect(isTmuxControlBlockFromClient('%begin 1791181520 289 1'), isTrue);
+      expect(isTmuxControlBlockFromClient('%end 1'), isTrue);
+    });
+
     test('createWindow uses an active control-mode watcher', () async {
       final client = _MockSshClient();
       final session = _buildSession(client, connectionId: 71);
@@ -2222,20 +2275,20 @@ void main() {
           if (value.startsWith('refresh-client ')) {
             scheduleMicrotask(
               () => stdoutController.add(
-                _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
               ),
             );
           } else if (value.startsWith('new-window ')) {
             scheduleMicrotask(
               () => stdoutController.add(
-                _utf8Bytes('%begin 1 1 0\n4\n%end 1 1 0\n'),
+                _utf8Bytes('%begin 1 1 1\n4\n%end 1 1 1\n'),
               ),
             );
           } else if (value.startsWith('set-option ') ||
               value.startsWith('send-keys ')) {
             scheduleMicrotask(
               () => stdoutController.add(
-                _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
               ),
             );
           }
@@ -2323,13 +2376,13 @@ void main() {
             if (value.startsWith('refresh-client ')) {
               scheduleMicrotask(
                 () => stdoutController.add(
-                  _utf8Bytes('%begin 1 1 0\n%end 1 1 0\n'),
+                  _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
                 ),
               );
             } else if (value.startsWith('list-windows ')) {
               scheduleMicrotask(
                 () => stdoutController.add(
-                  _utf8Bytes('%begin 2 1 0\n$windowLine\n%end 2 1 0\n'),
+                  _utf8Bytes('%begin 2 1 1\n$windowLine\n%end 2 1 1\n'),
                 ),
               );
             }
@@ -3033,6 +3086,12 @@ SSHSession _buildClosedExecSession({String stdout = '', String stderr = ''}) {
   return session;
 }
 
+/// The block tmux 3.7c emits for the `attach-session` command itself before
+/// answering any client command (captured from a real `tmux -CC attach`):
+/// flags `0` marks it as not issued by this control client.
+const _tmuxControlAttachBlock =
+    '%begin 1791181519 283 0\n%end 1791181519 283 0\n';
+
 SSHSession _buildInteractiveExecSession({
   required StreamController<Uint8List> stdoutController,
   void Function(String)? onWrite,
@@ -3040,6 +3099,8 @@ SSHSession _buildInteractiveExecSession({
   Future<void>? done,
   Future<void>? stdinClose,
 }) {
+  // Deliver the attach block as soon as the observer listens, like tmux does.
+  stdoutController.add(_utf8Bytes(_tmuxControlAttachBlock));
   final session = _MockExecSession();
   final doneFuture = done ?? Completer<void>().future;
   final stdinSink = _MockByteSink();
