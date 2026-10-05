@@ -261,6 +261,33 @@ void main() {
       expect(tracker.resolveLinkAt(const CellOffset(4, 1)), isNull);
     });
 
+    test('keeps untouched wrapped link cells after an erase in the link', () {
+      const url = 'https://example.com/erase';
+      // CSI K after the label clears the continuation row's wrap flag.
+      terminal
+        ..resize(10, terminal.viewHeight)
+        ..write('\x1b]8;;$url\x07abcdefghijklmno\x1b]8;;\x07\x1b[K');
+
+      for (var x = 0; x < 5; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 1)), url, reason: '$x');
+      }
+      expect(tracker.resolveLinkAt(const CellOffset(5, 1)), isNull);
+
+      // Erasing the end of the first row leaves the second row's cells alone.
+      terminal
+        ..write('\x1b[2J\x1b[H')
+        ..resize(5, terminal.viewHeight)
+        ..write('\x1b]8;;$url/2\x07abcdefghij\x1b]8;;\x07\x1b[1;4H\x1b[K');
+
+      expect(tracker.resolveLinkAt(const CellOffset(2, 0)), '$url/2');
+      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), isNull);
+      // The close reads a clamped cursor, so a label ending in the last
+      // column never included `j`.
+      for (var x = 0; x < 4; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/2', reason: '$x');
+      }
+    });
+
     test('prunes detached hyperlinks while processing later OSC 8 output', () {
       terminal = Terminal(maxLines: 200);
       tracker = TerminalHyperlinkTracker()..attach(terminal);

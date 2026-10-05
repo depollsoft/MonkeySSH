@@ -312,19 +312,31 @@ class _TrackedTerminalHyperlink {
     required this.startAnchor,
     required this.lastCellAnchor,
   }) {
-    _forEachRow(lastCellAnchor.y, (line, column, y, from, to) {
-      while (_lines.length <= line) {
-        _lines.add([]);
+    final start = startAnchor.offset;
+    final end = lastCellAnchor.offset;
+    for (var y = start.y; y <= end.y; y++) {
+      final line = buffer.lines[y];
+      final from = y == start.y ? start.x : 0;
+      // Reflow drops the blank cells past the content of a row, such as the
+      // one left before a wide character that did not fit.
+      final to = y == end.y
+          ? min(end.x + 1, line.length)
+          : line.getTrimmedLength(buffer.viewWidth);
+      if (from >= to) {
+        continue;
       }
-      final cells = _lines[line];
+      final cells = <int>[];
       for (var x = from; x < to; x++) {
-        _readCell(CellOffset(x, y));
+        line.getCellData(x, _cell);
         cells
           ..add(_cell.content)
           ..add(_styleHash());
       }
-      return false;
-    });
+      _rows.add((
+        anchor: y == start.y ? startAnchor : line.createAnchor(from),
+        cells: cells,
+      ));
+    }
   }
 
   final Uri uri;
@@ -332,9 +344,11 @@ class _TrackedTerminalHyperlink {
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
 
-  /// Content and style hash of each linked cell, by logical line counted from
-  /// the start anchor's, in column order.
-  final _lines = <List<int>>[];
+  /// For each row the link covered when it closed, an anchor on its first
+  /// linked cell and the content and style hash of its cells in order. Per-row
+  /// anchors keep a row's cells found after an erase elsewhere in the link or
+  /// a change to wrap flags; reflow moves each anchor with its cell.
+  final _rows = <({CellAnchor anchor, List<int> cells})>[];
   static final _cell = CellData.empty();
 
   bool get attached => startAnchor.attached && lastCellAnchor.attached;
@@ -348,78 +362,43 @@ class _TrackedTerminalHyperlink {
   }
 
   bool contains(CellOffset offset) =>
-      attached &&
-      _containsInclusiveOffset(
-        start: startAnchor.offset,
-        end: lastCellAnchor.offset,
-        target: offset,
-      ) &&
-      _matchesRow(offset.y, offset.x, offset.x);
+      coversRowRange(offset.y, offset.x, offset.x);
 
   /// Whether a surviving linked cell lies on [row] within the inclusive
   /// column range.
-  bool coversRowRange(int row, int startColumn, int endColumn) =>
-      attached &&
-      row >= startAnchor.y &&
-      row <= lastCellAnchor.y &&
-      _matchesRow(row, startColumn, endColumn);
-
-  /// Whether a cell on [row] in the inclusive column range still holds what
-  /// the link wrote there.
-  bool _matchesRow(int row, int startColumn, int endColumn) =>
-      _forEachRow(row, (line, column, y, from, to) {
-        if (y != row || line >= _lines.length) {
-          return false;
-        }
-        final cells = _lines[line];
-        for (var x = max(from, startColumn); x < min(to, endColumn + 1); x++) {
-          final index = (column + x - from) * 2;
-          if (index < cells.length &&
-              _readCell(CellOffset(x, y)) &&
-              _cell.content == cells[index] &&
-              _styleHash() == cells[index + 1]) {
-            return true;
+  bool coversRowRange(int row, int startColumn, int endColumn) {
+    if (!attached || row < startAnchor.y || row > lastCellAnchor.y) {
+      return false;
+    }
+    final width = buffer.viewWidth;
+    for (final (:anchor, :cells) in _rows) {
+      if (!anchor.attached) {
+        continue;
+      }
+      var y = anchor.y;
+      var x = anchor.x;
+      for (var i = 0; i < cells.length && y <= row; i += 2) {
+        // A row's cells continue on the next row after a narrowing reflow,
+        // which also wraps a wide character that would reach the last column.
+        if (x >= width ||
+            (x == width - 1 &&
+                width > 1 &&
+                cells[i] >> CellContent.widthShift == 2)) {
+          y++;
+          x = 0;
+          if (y > row) {
+            break;
           }
         }
-        return false;
-      });
-
-  /// Visits the linked rows through [lastRow] with the logical line (counted
-  /// from the start anchor's), the column of the row's first visited cell on
-  /// that line, and the visited cells [from, to). Stops and returns true when
-  /// [visit] does.
-  ///
-  /// A reflow keeps logical lines and the order of their cells but drops the
-  /// cells past the content of a row that wraps, such as the blank left
-  /// before a wide character that did not fit, and pads anew at the new
-  /// width. Skipping those cells makes (line, column) name the same cell at
-  /// any width, where a reading-order index would shift after the padding.
-  bool _forEachRow(
-    int lastRow,
-    bool Function(int line, int column, int y, int from, int to) visit,
-  ) {
-    final start = startAnchor.offset;
-    final end = lastCellAnchor.offset;
-    final lines = buffer.lines;
-    final width = buffer.viewWidth;
-    var line = 0;
-    var column = 0;
-    for (var y = start.y; y <= min(lastRow, end.y); y++) {
-      final row = lines[y];
-      if (y > start.y && !row.isWrapped) {
-        line++;
-        column = 0;
-      }
-      final from = y == start.y ? start.x : 0;
-      var to = min(row.length, y == end.y ? end.x + 1 : width);
-      if (y + 1 < lines.length && lines[y + 1].isWrapped) {
-        to = min(to, row.getTrimmedLength(width));
-      }
-      if (from < to) {
-        if (visit(line, column, y, from, to)) {
+        if (y == row &&
+            x >= startColumn &&
+            x <= endColumn &&
+            _readCell(CellOffset(x, y)) &&
+            _cell.content == cells[i] &&
+            _styleHash() == cells[i + 1]) {
           return true;
         }
-        column += to - from;
+        x++;
       }
     }
     return false;
@@ -449,6 +428,9 @@ class _TrackedTerminalHyperlink {
   void dispose() {
     startAnchor.dispose();
     lastCellAnchor.dispose();
+    for (final row in _rows) {
+      row.anchor.dispose();
+    }
   }
 }
 
@@ -457,12 +439,6 @@ bool _containsExclusiveOffset({
   required CellOffset end,
   required CellOffset target,
 }) => _compareOffsets(start, target) <= 0 && _compareOffsets(target, end) < 0;
-
-bool _containsInclusiveOffset({
-  required CellOffset start,
-  required CellOffset end,
-  required CellOffset target,
-}) => _compareOffsets(start, target) <= 0 && _compareOffsets(target, end) <= 0;
 
 CellOffset? _previousCellOffset(CellOffset offset, int lineWidth) {
   if (offset.x > 0) {
