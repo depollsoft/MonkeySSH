@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/app_metadata.dart';
 import '../models/agent_launch_preset.dart';
+import '../models/monetization.dart';
 import 'diagnostics_log_service.dart';
 import 'settings_service.dart';
 
@@ -137,6 +138,7 @@ class TelemetryService {
     'declined',
     'failed',
     'host_key',
+    'invalid_name',
     'local_file',
     'network',
     'remote_status',
@@ -148,14 +150,10 @@ class TelemetryService {
   };
   static const _allowedMuxBackends = <String>{'auto', 'monkeymux', 'tmux'};
   static final Set<String> _allowedAgentTools = _buildAllowedAgentTools();
-  static const _allowedPaywallFeatures = <String>{
-    'agent_management',
-    'agent_usage_rings',
-    'agent_launch_presets',
-    'auto_connect_automation',
-    'encrypted_transfers',
-    'host_specific_themes',
-    'migration_import_export',
+  // Derived from the feature enum so a new paywall cannot drift to `unknown`.
+  static final Set<String> _allowedPaywallFeatures = <String>{
+    for (final feature in MonetizationFeature.values)
+      _normalizeToken(feature.name),
     'settings',
   };
   static const _allowedPaywallSources = <String>{'feature_gate', 'settings'};

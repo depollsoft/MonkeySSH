@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/app_metadata.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
@@ -486,6 +487,46 @@ void main() {
 
     test('logs connection funnel with coarse buckets', () async {
       final analytics = _FakeAnalyticsClient();
+    test(
+      'every paywall feature and the invalid-name failure are allowlisted',
+      () async {
+        final analytics = _FakeAnalyticsClient();
+        final service = TelemetryService(
+          status: TelemetryServiceStatus.ready,
+          collectionEnabled: true,
+          diagnosticsLogger: const NoopDiagnosticsLogger(),
+          analyticsClient: analytics,
+          crashReporter: _FakeCrashReporter(),
+        );
+
+        for (final feature in MonetizationFeature.values) {
+          await service.logPaywallShown(
+            feature: feature.name,
+            source: 'feature_gate',
+          );
+        }
+        await service.logSftpTransferFailed(
+          direction: 'upload',
+          fileCount: 1,
+          sizeBytes: 10,
+          duration: Duration.zero,
+          failureCategory: 'invalid_name',
+        );
+
+        final paywallFeatures = analytics.events
+            .where((event) => event.name == 'paywall_shown')
+            .map((event) => event.parameters['feature'])
+            .toList();
+        expect(paywallFeatures, hasLength(MonetizationFeature.values.length));
+        expect(paywallFeatures, isNot(contains('unknown')));
+        expect(paywallFeatures, contains('concurrent_acp_sessions'));
+        expect(
+          analytics.events.last.parameters['failure_category'],
+          'invalid_name',
+        );
+      },
+    );
+
       final service = TelemetryService(
         status: TelemetryServiceStatus.ready,
         collectionEnabled: true,
