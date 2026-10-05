@@ -13,7 +13,6 @@ class _SshSessionRuntime {
   Future<SSHSession>? _shellOpening;
   Future<void>? _shellClosing;
   StreamController<String>? _shellStdoutController;
-  StreamController<String>? _shellStderrController;
   StreamController<void>? _shellDoneController;
   StreamController<void>? _shellCommandCompletedController;
   StreamSubscription<String>? _shellStdoutSubscription;
@@ -42,7 +41,7 @@ class _SshSessionRuntime {
   SSHSession? _pendingShellOutputShell;
   Terminal? _pendingShellOutputTerminal;
   final _pendingShellOutputs =
-      Queue<({String stderrData, String stdoutData, String terminalData})>();
+      Queue<({String stdoutData, String terminalData})>();
   int _pendingTerminalWriteChars = 0;
   int _shellStdoutChunkCount = 0;
   int _shellStdoutCharCount = 0;
@@ -181,9 +180,6 @@ if(!$__flResolved){$__flResolved='cmd'}
 
   Stream<String> get shellStdoutStream =>
       _shellStdoutController?.stream ?? const Stream.empty();
-
-  Stream<String> get shellStderrStream =>
-      _shellStderrController?.stream ?? const Stream.empty();
 
   Stream<void> get shellDoneStream =>
       _shellDoneController?.stream ?? const Stream.empty();
@@ -606,17 +602,14 @@ if(!$__flResolved){$__flResolved='cmd'}
 
     if (waitForStreams) {
       await _shellStdoutController?.close();
-      await _shellStderrController?.close();
       await _shellDoneController?.close();
       await _shellCommandCompletedController?.close();
     } else {
       unawaited(_shellStdoutController?.close());
-      unawaited(_shellStderrController?.close());
       unawaited(_shellDoneController?.close());
       unawaited(_shellCommandCompletedController?.close());
     }
     _shellStdoutController = null;
-    _shellStderrController = null;
     _shellDoneController = null;
     _shellCommandCompletedController = null;
 
@@ -685,7 +678,6 @@ if(!$__flResolved){$__flResolved='cmd'}
 
     final terminal = getOrCreateTerminal();
     _shellStdoutController ??= StreamController<String>.broadcast();
-    _shellStderrController ??= StreamController<String>.broadcast();
     _shellDoneController ??= StreamController<void>.broadcast();
     _shellCommandCompletedController ??= StreamController<void>.broadcast();
     _attachShellStreamPipes(shell, terminal);
@@ -747,11 +739,10 @@ if(!$__flResolved){$__flResolved='cmd'}
                 shell: shell,
                 terminal: terminal,
                 terminalData: data,
-                stderrData: data,
               );
             }
           },
-          onError: (Object error, StackTrace stackTrace) {
+          onError: (Object error, StackTrace _) {
             _flushPendingShellOutput(drainAll: true);
             DiagnosticsLogService.instance.error(
               'ssh.shell',
@@ -765,12 +756,6 @@ if(!$__flResolved){$__flResolved='cmd'}
               error,
               operation: 'shell_stderr',
             );
-            final stderrController = _shellStderrController;
-            if (identical(_shell, shell) &&
-                stderrController != null &&
-                !stderrController.isClosed) {
-              stderrController.addError(error, stackTrace);
-            }
           },
         );
     _shellDoneSubscription = shell.done.asStream().listen(
@@ -1030,21 +1015,18 @@ if(!$__flResolved){$__flResolved='cmd'}
     required Terminal terminal,
     required String terminalData,
     String? stdoutData,
-    String? stderrData,
   }) {
     if (!identical(_shell, shell)) {
       return;
     }
 
     final stdoutChunk = stdoutData ?? '';
-    final stderrChunk = stderrData ?? '';
-    if (terminalData.isEmpty && stdoutChunk.isEmpty && stderrChunk.isEmpty) {
+    if (terminalData.isEmpty && stdoutChunk.isEmpty) {
       return;
     }
     _pendingShellOutputs.add((
       terminalData: terminalData,
       stdoutData: stdoutChunk,
-      stderrData: stderrChunk,
     ));
     _pendingTerminalWriteChars += terminalData.length;
     _pendingShellOutputShell = shell;
@@ -1186,13 +1168,6 @@ if(!$__flResolved){$__flResolved='cmd'}
       final stdoutController = _shellStdoutController;
       if (stdoutController != null && !stdoutController.isClosed) {
         stdoutController.add(output.stdoutData);
-      }
-    }
-
-    if (output.stderrData.isNotEmpty) {
-      final stderrController = _shellStderrController;
-      if (stderrController != null && !stderrController.isClosed) {
-        stderrController.add(output.stderrData);
       }
     }
 
@@ -1543,15 +1518,15 @@ if(!$__flResolved){$__flResolved='cmd'}
   bool _isHighSurrogate(int codeUnit) =>
       codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
 
-  ({String stderrData, String stdoutData, String terminalData})
-  _drainPendingShellOutputs({required bool drainAll}) {
+  ({String stdoutData, String terminalData}) _drainPendingShellOutputs({
+    required bool drainAll,
+  }) {
     if (_pendingShellOutputs.isEmpty) {
-      return (terminalData: '', stdoutData: '', stderrData: '');
+      return (terminalData: '', stdoutData: '');
     }
 
     final terminalOutput = StringBuffer();
     final stdoutOutput = StringBuffer();
-    final stderrOutput = StringBuffer();
     var remaining = drainAll
         ? _pendingTerminalWriteChars
         : _maxTerminalOutputFlushChars;
@@ -1568,7 +1543,6 @@ if(!$__flResolved){$__flResolved='cmd'}
       _pendingTerminalWriteChars -= terminalLength;
       terminalOutput.write(next.terminalData);
       stdoutOutput.write(next.stdoutData);
-      stderrOutput.write(next.stderrData);
       if (!drainAll) {
         remaining -= terminalLength;
         if (remaining <= 0 && terminalOutput.isNotEmpty) {
@@ -1579,7 +1553,6 @@ if(!$__flResolved){$__flResolved='cmd'}
     return (
       terminalData: terminalOutput.toString(),
       stdoutData: stdoutOutput.toString(),
-      stderrData: stderrOutput.toString(),
     );
   }
 

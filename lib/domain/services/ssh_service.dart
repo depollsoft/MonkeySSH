@@ -1642,19 +1642,6 @@ abstract interface class HostKeySource {
   Future<Uint8List> get hostKeyBytes;
 }
 
-/// Captures a host key from fragmented SSH handshake chunks using the real
-/// socket wrapper and parser path.
-@visibleForTesting
-Future<Uint8List> captureHostKeyFromHandshakeChunksForTesting(
-  Iterable<Uint8List> chunks,
-) async {
-  final capturingSocket = _HostKeyCapturingSocket(
-    _FiniteChunkSshSocket(chunks),
-  );
-  unawaited(capturingSocket.stream.drain<void>());
-  return capturingSocket.hostKeyBytes;
-}
-
 /// A single progress update emitted while an SSH connection is being created.
 class ConnectionProgressUpdate {
   /// Creates a [ConnectionProgressUpdate].
@@ -2733,7 +2720,7 @@ class SshService {
   _PreparedHostKeySocket _prepareHostKeyCapture(SSHSocket socket) {
     final verificationSocket = socket is HostKeySource
         ? socket
-        : _HostKeyCapturingSocket(socket);
+        : HostKeyCapturingSshSocket(socket);
     return _PreparedHostKeySocket(
       socket: verificationSocket,
       hostKeySource: verificationSocket as HostKeySource,
@@ -2864,22 +2851,14 @@ class SshService {
       .where((session) => session.hostId == hostId)
       .toList(growable: false);
 
-  /// Check if a connection ID is active.
-  bool isConnected(int connectionId) => _sessions.containsKey(connectionId);
-
   Future<List<SSHKeyPair>?> _parseIdentities(SshConnectionConfig config) async {
-    final identities = <SSHKeyPair>[];
-    for (final key in config.identityKeys ?? const <SshKey>[]) {
-      try {
-        identities.addAll(
-          await parseOpenSshPrivateKey(key.privateKey, key.passphrase),
-        );
-      } on FormatException {
-        continue;
-      } on SSHError {
-        continue;
-      }
-    }
+    final identities = [
+      for (final parsed in await parseOpenSshPrivateKeys([
+        for (final key in config.identityKeys ?? const <SshKey>[])
+          (key.privateKey, key.passphrase),
+      ]))
+        ...parsed,
+    ];
     if (identities.isNotEmpty) return identities;
     if (config.privateKey == null) return null;
     try {
@@ -2992,32 +2971,6 @@ class _KeepAliveSSHSocket implements SSHSocket {
 
   @override
   void destroy() => _socket.destroy();
-}
-
-class _FiniteChunkSshSocket implements SSHSocket {
-  _FiniteChunkSshSocket(Iterable<Uint8List> chunks)
-    : _stream = Stream<Uint8List>.fromIterable(chunks);
-
-  final Stream<Uint8List> _stream;
-  final _sinkController = StreamController<List<int>>();
-
-  @override
-  Stream<Uint8List> get stream => _stream;
-
-  @override
-  StreamSink<List<int>> get sink => _sinkController.sink;
-
-  @override
-  Future<void> close() => _sinkController.close();
-
-  @override
-  Future<void> flush() async {}
-
-  @override
-  Future<void> get done async {}
-
-  @override
-  void destroy() {}
 }
 
 class _PreparedHostKeySocket {
@@ -3286,8 +3239,11 @@ bool remoteVersionIndicatesWindows(String? remoteVersion) {
   return remoteVersion.toLowerCase().contains('windows');
 }
 
-class _HostKeyCapturingSocket implements SSHSocket, HostKeySource {
-  _HostKeyCapturingSocket(this._delegate)
+/// Wraps a transport and captures the server host key from the handshake.
+@visibleForTesting
+class HostKeyCapturingSshSocket implements SSHSocket, HostKeySource {
+  /// Captures the host key from the handshake that flows through [_delegate].
+  HostKeyCapturingSshSocket(this._delegate)
     : _hostKeyParser = _SshHostKeyParser() {
     _stream = _delegate.stream.map((chunk) {
       _hostKeyParser.addChunk(chunk);
@@ -3481,8 +3437,6 @@ class _SshHostKeyParser {
     return Uint8List.sublistView(bytes, start, end);
   }
 }
-
-enum _PortForwardOperationKind { start, replace, stop }
 
 const _automaticPortDiscoveryDoneMarker = '__monkeyssh_port_discovery_done__';
 const _automaticPortDiscoveryUnavailableMarker =
@@ -4117,8 +4071,8 @@ class SshSession {
   /// Active port forward tunnels.
   final Map<int, _ActiveTunnel> _activeTunnels = {};
 
-  final Map<int, ({Future<void> done, _PortForwardOperationKind kind})>
-  _portForwardOperations = {};
+  final Map<int, ({Future<void> done, bool isStop})> _portForwardOperations =
+      {};
   final _portForwardChanges = StreamController<void>.broadcast(sync: true);
   final _closeStarted = Completer<void>();
   bool _isClosing = false;
@@ -4220,7 +4174,7 @@ class SshSession {
   bool isPortForwardStarting(int portForwardId) {
     final operation = _portForwardOperations[portForwardId];
     return operation != null &&
-        operation.kind != _PortForwardOperationKind.stop &&
+        !operation.isStop &&
         !isPortForwardActive(portForwardId);
   }
 
@@ -4262,7 +4216,7 @@ class SshSession {
         return false;
       }
       return _startPortForwardUnlocked(portForward);
-    }, kind: _PortForwardOperationKind.replace);
+    });
   }
 
   Future<bool> _startPortForwardUnlocked(PortForward portForward) {
@@ -4314,9 +4268,6 @@ class SshSession {
 
   /// Shell stdout as a broadcast stream for screen re-attachment.
   Stream<String> get shellStdoutStream => _runtime.shellStdoutStream;
-
-  /// Shell stderr as a broadcast stream for screen re-attachment.
-  Stream<String> get shellStderrStream => _runtime.shellStderrStream;
 
   /// Shell done event stream for screen re-attachment.
   Stream<void> get shellDoneStream => _runtime.shellDoneStream;
@@ -5672,7 +5623,6 @@ class SshSession {
         isAutomatic: true,
         isShellRelated: isShellRelated,
       ),
-      kind: _PortForwardOperationKind.start,
     );
   }
 
@@ -6058,7 +6008,6 @@ while($true){
         remoteHost: remoteHost,
         remotePort: remotePort,
       ),
-      kind: _PortForwardOperationKind.start,
     );
   }
 
@@ -6417,7 +6366,6 @@ while($true){
         localHost: localHost,
         localPort: localPort,
       ),
-      kind: _PortForwardOperationKind.start,
     );
   }
 
@@ -6563,7 +6511,7 @@ while($true){
   Future<void> stopForward(int portForwardId) => _runPortForwardOperation(
     portForwardId,
     () => _stopForward(portForwardId),
-    kind: _PortForwardOperationKind.stop,
+    isStop: true,
   );
 
   Future<void> _stopForward(int portForwardId) async {
@@ -6606,7 +6554,7 @@ while($true){
   Future<T> _runPortForwardOperation<T>(
     int portForwardId,
     Future<T> Function() operation, {
-    required _PortForwardOperationKind kind,
+    bool isStop = false,
   }) async {
     while (true) {
       final pendingOperation = _portForwardOperations[portForwardId];
@@ -6618,7 +6566,7 @@ while($true){
 
     final gate = Completer<void>();
     final gateFuture = gate.future;
-    _portForwardOperations[portForwardId] = (done: gateFuture, kind: kind);
+    _portForwardOperations[portForwardId] = (done: gateFuture, isStop: isStop);
     try {
       return await operation();
     } finally {

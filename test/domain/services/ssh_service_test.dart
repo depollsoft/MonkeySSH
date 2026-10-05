@@ -42,6 +42,7 @@ import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../helpers/handshake_chunk_socket.dart';
 import '../../helpers/powershell_test_helpers.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
@@ -2625,7 +2626,7 @@ LISTEN ::1:4201
       );
 
       await expectLater(
-        captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
+        captureHostKeyFromHandshakeChunks(<Uint8List>[
           Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r')),
           Uint8List.fromList(utf8.encode('\n')),
           Uint8List.sublistView(kexReplyPacket, 0, 3),
@@ -2640,7 +2641,7 @@ LISTEN ::1:4201
       'fails host key capture when the handshake packet is too large',
       () async {
         await expectLater(
-          captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
+          captureHostKeyFromHandshakeChunks(<Uint8List>[
             Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r\n')),
             _oversizedPacketHeader(),
           ]),
@@ -6208,10 +6209,6 @@ LISTEN ::1:4201
       expect(sshService.sessions, isEmpty);
     });
 
-    test('isConnected returns false for unknown host', () {
-      expect(sshService.isConnected(999), isFalse);
-    });
-
     test('getSession returns null for unknown host', () {
       expect(sshService.getSession(999), isNull);
     });
@@ -6265,7 +6262,7 @@ LISTEN ::1:4201
           );
           timestamp.completeError(Exception('timestamp write failed'));
           await pumpEventQueue();
-          expect(service.isConnected(result.connectionId!), isTrue);
+          expect(service.getSession(result.connectionId!), isNotNull);
           verify(() => repository.updateLastConnected(host.id)).called(1);
         },
       );
@@ -6325,8 +6322,8 @@ LISTEN ::1:4201
           }
           await stopped;
 
-          expect(service.isConnected(first.connectionId!), isFalse);
-          expect(service.isConnected(second.connectionId!), isFalse);
+          expect(service.getSession(first.connectionId!), isNull);
+          expect(service.getSession(second.connectionId!), isNull);
           expect(service.sessions.keys, [newest.connectionId]);
           verify(clients[0].close).called(1);
           verify(clients[1].close).called(1);
