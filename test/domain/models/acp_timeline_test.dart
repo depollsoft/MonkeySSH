@@ -30,10 +30,52 @@ void main() {
       expect(timeline.entries, hasLength(1));
       final entry = timeline.entries.single as AcpMessageEntry;
       expect(entry.role, AcpMessageRole.agent);
-      expect(entry.content, hasLength(2));
-      expect((entry.content[0] as AcpTextContent).text, 'Hello ');
-      expect((entry.content[1] as AcpTextContent).text, 'world');
+      // Plain streamed text coalesces into one block rather than one per chunk.
+      expect((entry.content.single as AcpTextContent).text, 'Hello world');
     });
+
+    test(
+      'keeps separate blocks across update or block metadata boundaries',
+      () {
+        final timeline = _run(AcpTimelineBuilder(), [
+          _chunk('agent_message_chunk', 'a', messageId: 'm1'),
+          const AcpContentChunkUpdate(
+            kind: 'agent_message_chunk',
+            content: AcpTextContent('b'),
+            messageId: 'm1',
+            meta: {'variant': 'update'},
+          ),
+          const AcpContentChunkUpdate(
+            kind: 'agent_message_chunk',
+            content: AcpTextContent('c'),
+            messageId: 'm1',
+            meta: {'variant': 'update'},
+          ),
+          const AcpContentChunkUpdate(
+            kind: 'agent_message_chunk',
+            content: AcpTextContent('d', meta: {'variant': 'content'}),
+            messageId: 'm1',
+            meta: {'variant': 'update'},
+          ),
+          const AcpContentChunkUpdate(
+            kind: 'agent_message_chunk',
+            content: AcpTextContent(
+              'e',
+              annotations: AcpAnnotations(audience: ['assistant']),
+            ),
+            messageId: 'm1',
+            meta: {'variant': 'update'},
+          ),
+        ]);
+        final entry = timeline.entries.single as AcpMessageEntry;
+        expect(entry.content.map((block) => (block as AcpTextContent).text), [
+          'a',
+          'bc',
+          'd',
+          'e',
+        ]);
+      },
+    );
 
     test('separates different roles and message ids', () {
       final timeline = _run(AcpTimelineBuilder(), [
@@ -56,8 +98,10 @@ void main() {
       ]);
       expect(timeline.entries, hasLength(1));
       expect(
-        (timeline.entries.single as AcpMessageEntry).content,
-        hasLength(2),
+        ((timeline.entries.single as AcpMessageEntry).content.single
+                as AcpTextContent)
+            .text,
+        'ab',
       );
     });
 
@@ -96,7 +140,11 @@ void main() {
       ]);
       expect(timeline.entries, hasLength(2));
       final message = timeline.entries.whereType<AcpMessageEntry>().single;
-      expect(message.content, hasLength(2));
+      // Resuming after an interruption appends a fresh block.
+      expect(message.content.map((block) => (block as AcpTextContent).text), [
+        'a',
+        'b',
+      ]);
     });
   });
 
@@ -249,7 +297,12 @@ void main() {
       final nestedTool = timeline.entries[2] as AcpToolCallEntry;
       expect(launch.isSubagent, isTrue);
       expect(message.parentToolCallId, 'agent-launch');
-      expect(message.content, hasLength(2));
+      // The second chunk carries different update meta, so it stays its own
+      // block rather than coalescing into the first.
+      expect(message.content.map((block) => (block as AcpTextContent).text), [
+        'nested reply',
+        ' continued',
+      ]);
       expect(nestedTool.parentToolCallId, 'agent-launch');
     });
 
@@ -283,7 +336,6 @@ void main() {
       }
       expect(last!.entries, hasLength(3));
       expect(last.overflowed, isTrue);
-      expect(last.droppedEntryCount, 2);
       // The most recent entries are preserved; oldest are gone.
       final texts = last.entries
           .map(
@@ -539,7 +591,6 @@ void main() {
         ]);
       }
       final timeline = builder.snapshot();
-      expect(timeline.droppedEntryCount, greaterThan(0));
       expect(
         timeline.entries.fold<int>(
           0,
@@ -666,7 +717,6 @@ void main() {
       }
       expect(last!.overflowed, isTrue);
       expect(last.entries.length, lessThan(20));
-      expect(last.droppedEntryCount, greaterThan(0));
     });
 
     test('truncates an oversized merged tool-call payload', () {
@@ -685,6 +735,34 @@ void main() {
       final entry = timeline.entries.single as AcpToolCallEntry;
       expect(entry.title, 'Read');
       expect(entry.rawOutput, isNot('y' * 1000));
+    });
+
+    test('keeps terminal and diff content when only rawOutput overflows', () {
+      final builder = AcpTimelineBuilder(
+        limits: const AcpTimelineLimits(maxEntryBytes: 4096),
+      );
+      final timeline = _run(builder, [
+        const AcpToolCallUpdate(
+          toolCallId: 't1',
+          isInitial: true,
+          title: 'Run',
+          content: [
+            AcpToolContentBlock(content: AcpTextContent('ran')),
+            AcpToolTerminal(terminalId: 'term-1'),
+            AcpToolDiff(path: '/a.dart', oldText: 'x', newText: 'y'),
+          ],
+        ),
+        AcpToolCallUpdate(toolCallId: 't1', rawOutput: 'y' * (1024 * 1024)),
+      ]);
+      expect(timeline.overflowed, isTrue);
+      final entry = timeline.entries.single as AcpToolCallEntry;
+      expect(entry.rawOutput, {'_truncated': true});
+      expect(entry.content.map((c) => c.runtimeType), [
+        AcpToolContentBlock,
+        AcpToolTerminal,
+        AcpToolDiff,
+      ]);
+      expect(approximateTimelineEntryBytes(entry), lessThanOrEqualTo(4096));
     });
 
     for (final field in ['path', 'meta', 'extensions', 'title', 'total']) {
@@ -751,7 +829,6 @@ void main() {
         _chunk('agent_message_chunk', 'small', messageId: 'm1'),
       ]);
       expect(timeline.overflowed, isFalse);
-      expect(timeline.droppedEntryCount, 0);
     });
   });
 

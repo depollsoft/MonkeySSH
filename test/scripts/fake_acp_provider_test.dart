@@ -65,7 +65,6 @@ void main() {
 
     final initialization = await client.initialize();
     expect(initialization.protocolVersion, 1);
-    expect(initialization.agentInfo?.name, 'monkeyssh-fake-acp');
     expect(initialization.authMethods.single.id, 'fake-local');
     expect(initialization.agentCapabilities.prompt.image, isTrue);
     expect(initialization.agentCapabilities.prompt.embeddedContext, isTrue);

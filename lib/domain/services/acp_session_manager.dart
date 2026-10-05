@@ -326,7 +326,11 @@ class AcpSessionManager {
       return AcpSessionLaunchFailed(null, error);
     }
 
-    await _stopAll(replace);
+    try {
+      await _stopAll(replace);
+    } on Object catch (error) {
+      return AcpSessionLaunchFailed(null, _mapBridgeError(error));
+    }
 
     final decision = _evaluate(
       existingSessionId == null ? '\u0000new' : '\u0000resume',
@@ -422,7 +426,11 @@ class AcpSessionManager {
     }
     final reconnectWorkspace = resolvedWorkspace.value!;
 
-    await _stopAll(replace);
+    try {
+      await _stopAll(replace);
+    } on Object catch (error) {
+      return AcpSessionLaunchFailed(key, _mapBridgeError(error));
+    }
 
     final decision = _evaluate(key.value);
     if (decision is AcpConcurrencyRequiresChoice) {
@@ -703,11 +711,6 @@ class AcpSessionManager {
     AcpSessionKey key,
     AcpAuthMethod method,
   ) => _controllers[key.value]?.terminalAuthLaunch(method);
-
-  /// Records that a `terminal` sign-in for [key] exited successfully, so the
-  /// live session leaves the authentication-required state.
-  void markSessionSignedIn(AcpSessionKey key) =>
-      _controllers[key.value]?.clearAuthenticationRequired();
 
   /// Stops [key]'s remote bridge when no live session here uses it, so the
   /// next reconnect starts a fresh agent process.
@@ -1199,40 +1202,45 @@ class AcpSessionManager {
     List<AcpSessionKey> keys, {
     bool stopRemoteBridges = true,
   }) async {
-    for (final key in keys) {
-      final controller = _controllers[key.value];
-      if (controller == null) continue;
-      // Confirm termination before dropping local ownership. Otherwise a
-      // transient SSH/control failure makes the UI report success while an
-      // untracked provider keeps running and frees a concurrency slot.
-      final bridgeStillUsed = _controllers.values.any(
-        (other) =>
-            !identical(other, controller) && other.bridgeKey == key.bridge,
-      );
-      if (stopRemoteBridges && !bridgeStillUsed) {
-        try {
-          await _connector.stopBridge(key.hostId, key.bridgeId);
-        } on Object catch (error) {
-          _diagnostics.warning(
-            'acp.manager',
-            'bridge_stop_failed',
-            fields: {'hostId': key.hostId, 'errorType': error.runtimeType},
-          );
-          rethrow;
+    try {
+      for (final key in keys) {
+        final controller = _controllers[key.value];
+        if (controller == null) continue;
+        // Confirm termination before dropping local ownership. Otherwise a
+        // transient SSH/control failure makes the UI report success while an
+        // untracked provider keeps running and frees a concurrency slot.
+        final bridgeStillUsed = _controllers.values.any(
+          (other) =>
+              !identical(other, controller) && other.bridgeKey == key.bridge,
+        );
+        if (stopRemoteBridges && !bridgeStillUsed) {
+          try {
+            await _connector.stopBridge(key.hostId, key.bridgeId);
+          } on Object catch (error) {
+            _diagnostics.warning(
+              'acp.manager',
+              'bridge_stop_failed',
+              fields: {'hostId': key.hostId, 'errorType': error.runtimeType},
+            );
+            rethrow;
+          }
         }
-      }
 
-      _controllers.remove(key.value);
-      // Cancel only this session's own pending permission/write requests
-      // before releasing its lease. A sibling fork keeps its own requests and
-      // terminals through the shared capability service.
-      await controller.attachment.capabilityService?.closeSession(
-        key.acpSessionId,
-      );
-      await controller.disposeLocal();
-      _telemetry.sessionEnded(reason: 'stopped');
+        _controllers.remove(key.value);
+        // Cancel only this session's own pending permission/write requests
+        // before releasing its lease. A sibling fork keeps its own requests
+        // and terminals through the shared capability service.
+        await controller.attachment.capabilityService?.closeSession(
+          key.acpSessionId,
+        );
+        await controller.disposeLocal();
+        _telemetry.sessionEnded(reason: 'stopped');
+      }
+    } finally {
+      // Sessions stopped before a later failure are already gone; publish
+      // that even when the caller sees the error.
+      _emit();
     }
-    _emit();
   }
 
   /// Builds a lazy capability-service factory bound to [hostId] and [cwd].
@@ -1774,7 +1782,6 @@ class _QueuedAcpPrompt {
 const _maxSessionListEntries = 200;
 const _sessionUpdateTurnMaxCount = 16;
 const _sessionUpdateTurnTimeBudget = Duration(milliseconds: 4);
-const _maxCoalescedReplayTextChars = 32 * 1024;
 
 /// Owns the normalized state and streaming lifecycle for one ACP session.
 class _SessionController {
@@ -2562,10 +2569,9 @@ class _SessionController {
         final turn = Stopwatch()..start();
         var turnCount = 0;
         do {
-          final queued = _removeNextSessionUpdate();
-          _applySessionUpdate(queued.notification);
-          _sessionUpdatesApplied += queued.consumedCount;
-          updateCount += queued.consumedCount;
+          _applySessionUpdate(_pendingSessionUpdates.removeFirst());
+          _sessionUpdatesApplied += 1;
+          updateCount += 1;
           turnCount += 1;
         } while (_sessionUpdatesApplied < targetAppliedCount &&
             _pendingSessionUpdates.isNotEmpty &&
@@ -2607,85 +2613,6 @@ class _SessionController {
         );
       }
     }
-  }
-
-  ({AcpSessionNotification notification, int consumedCount})
-  _removeNextSessionUpdate() {
-    final first = _pendingSessionUpdates.removeFirst();
-    if (!_historyReplayPublicationHeld ||
-        first.update is! AcpContentChunkUpdate ||
-        (first.update as AcpContentChunkUpdate).content is! AcpTextContent) {
-      return (notification: first, consumedCount: 1);
-    }
-
-    final firstUpdate = first.update as AcpContentChunkUpdate;
-    final firstText = firstUpdate.content as AcpTextContent;
-    final text = StringBuffer(firstText.text);
-    var consumedCount = 1;
-    while (_pendingSessionUpdates.isNotEmpty) {
-      final next = _pendingSessionUpdates.first;
-      if (!_canCoalesceReplayText(first, next)) break;
-      final nextText =
-          ((next.update as AcpContentChunkUpdate).content as AcpTextContent)
-              .text;
-      if (text.length + nextText.length > _maxCoalescedReplayTextChars) break;
-      _pendingSessionUpdates.removeFirst();
-      text.write(nextText);
-      consumedCount += 1;
-    }
-    if (consumedCount == 1) {
-      return (notification: first, consumedCount: 1);
-    }
-    return (
-      notification: AcpSessionNotification(
-        sessionId: first.sessionId,
-        update: AcpContentChunkUpdate(
-          kind: firstUpdate.kind,
-          content: AcpTextContent(
-            text.toString(),
-            annotations: firstText.annotations,
-            meta: firstText.meta,
-            extensions: firstText.extensions,
-          ),
-          messageId: firstUpdate.messageId,
-          meta: firstUpdate.meta,
-          extensions: firstUpdate.extensions,
-        ),
-        meta: first.meta,
-        extensions: first.extensions,
-      ),
-      consumedCount: consumedCount,
-    );
-  }
-
-  bool _canCoalesceReplayText(
-    AcpSessionNotification first,
-    AcpSessionNotification next,
-  ) {
-    if (first.sessionId != next.sessionId) return false;
-    final firstUpdate = first.update;
-    final nextUpdate = next.update;
-    if (firstUpdate is! AcpContentChunkUpdate ||
-        nextUpdate is! AcpContentChunkUpdate ||
-        firstUpdate.kind != nextUpdate.kind ||
-        firstUpdate.messageId != nextUpdate.messageId ||
-        firstUpdate.content is! AcpTextContent ||
-        nextUpdate.content is! AcpTextContent) {
-      return false;
-    }
-    final firstText = firstUpdate.content as AcpTextContent;
-    final nextText = nextUpdate.content as AcpTextContent;
-    const equality = DeepCollectionEquality();
-    return equality.equals(first.meta, next.meta) &&
-        equality.equals(first.extensions, next.extensions) &&
-        equality.equals(firstUpdate.meta, nextUpdate.meta) &&
-        equality.equals(firstUpdate.extensions, nextUpdate.extensions) &&
-        equality.equals(
-          firstText.annotations?.toJson(),
-          nextText.annotations?.toJson(),
-        ) &&
-        equality.equals(firstText.meta, nextText.meta) &&
-        equality.equals(firstText.extensions, nextText.extensions);
   }
 
   void _scheduleRecentPersistence() {
@@ -2767,6 +2694,7 @@ class _SessionController {
             next = title == null
                 ? next.copyWith(clearTitle: true)
                 : next.copyWith(title: title);
+            _scheduleRecentPersistence();
           }
         case AcpContentChunkUpdate():
         case AcpToolCallUpdate():
@@ -2775,7 +2703,6 @@ class _SessionController {
       }
       return next;
     }, notifyManager: false);
-    _scheduleRecentPersistence();
   }
 
   static List<T> _bounded<T>(List<T> values, int maxLength) =>
@@ -2984,9 +2911,12 @@ class _SessionController {
       );
     }
     final snapshot = List<AcpContentBlock>.unmodifiable(content);
-    final encodedBytes = utf8
-        .encode(jsonEncode(snapshot.map((block) => block.toJson()).toList()))
-        .length;
+    // Estimate from the block payloads; the JSON-RPC connection enforces the
+    // exact frame size when it serialises the prompt once for the wire.
+    final encodedBytes = snapshot.fold<int>(
+      0,
+      (total, block) => total + approximateContentBlockBytes(block),
+    );
     final pendingCount =
         _promptQueue.length + (_promptActive || _detachedTurnInFlight ? 1 : 0);
     if (pendingCount >= acpPromptQueueMaxCount ||
@@ -3114,6 +3044,7 @@ class _SessionController {
       }
     } finally {
       _promptActive = false;
+      _scheduleRecentPersistence();
     }
   }
 
@@ -3529,6 +3460,7 @@ class _SessionController {
           lastActivityAt: _clock(),
         ),
       );
+      _scheduleRecentPersistence();
       _diagnostics.info(
         'acp.session',
         'detached_turn_complete',
