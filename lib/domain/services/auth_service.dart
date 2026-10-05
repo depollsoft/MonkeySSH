@@ -9,6 +9,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../data/security/hardened_keychain_store.dart';
+import 'serial_task_queue.dart';
+
 const _defaultAuthAppName = 'MonkeySSH';
 
 /// Authentication state.
@@ -80,10 +83,10 @@ class AuthService {
     LocalAuthentication? localAuth,
     int pinKdfIterations = 120000,
   }) : _pinKdfIterations = _checkPinKdfIterations(pinKdfIterations),
-       _storage = storage ?? _secureStorage,
+       _store = HardenedKeychainStore(storage),
        _localAuth = localAuth ?? LocalAuthentication();
 
-  final FlutterSecureStorage _storage;
+  final HardenedKeychainStore _store;
   final LocalAuthentication _localAuth;
 
   static const _pinKey = 'flutty_pin_hash';
@@ -111,26 +114,17 @@ class AuthService {
 
   static const _pinHashLength = _pinKdfBits ~/ 8;
   static const _pinSaltLength = 16;
-  static const _secureStorage = FlutterSecureStorage(
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
-  static const _hardenedIosOptions = IOSOptions(
-    accessibility: KeychainAccessibility.first_unlock_this_device,
-  );
-  static const _legacyIosOptions = IOSOptions.defaultOptions;
-  Future<void> _pinWriteQueue = Future<void>.value();
+  final _pinWriteQueue = SerialTaskQueue();
 
   /// Check if authentication is enabled.
   Future<bool> isAuthEnabled() async {
-    final value = await _readStorageValue(_authEnabledKey);
+    final value = await _store.read(_authEnabledKey);
     return value == 'true';
   }
 
   /// Check if biometric is enabled.
   Future<bool> isBiometricEnabled() async {
-    final value = await _readStorageValue(_biometricEnabledKey);
+    final value = await _store.read(_biometricEnabledKey);
     return value == 'true';
   }
 
@@ -217,37 +211,34 @@ class AuthService {
 
   /// Set up PIN authentication.
   Future<void> setupPin(String pin) async {
-    await _withPinWriteLock(() async {
+    await _pinWriteQueue.run(() async {
       final salt = await _getOrCreateSalt();
       final hash = await _derivePinHash(
         pin: pin,
         salt: salt,
         iterations: _pinKdfIterations,
       );
-      await _writeStorageValue(
-        key: _pinKey,
-        value: jsonEncode({
+      await _store.write(
+        _pinKey,
+        jsonEncode({
           'version': _pinKdfVersion,
           'iterations': _pinKdfIterations,
           'hash': hash,
         }),
       );
-      await _writeStorageValue(key: _authEnabledKey, value: 'true');
+      await _store.write(_authEnabledKey, 'true');
     });
   }
 
   /// Enable or disable biometric authentication.
   Future<void> setBiometricEnabled({required bool enabled}) async {
     final canEnable = !enabled || await isBiometricAvailable();
-    await _writeStorageValue(
-      key: _biometricEnabledKey,
-      value: (enabled && canEnable).toString(),
-    );
+    await _store.write(_biometricEnabledKey, (enabled && canEnable).toString());
   }
 
   /// Verify PIN.
   Future<bool> verifyPin(String pin) async {
-    final storedPinData = await _readStorageValue(_pinKey);
+    final storedPinData = await _store.read(_pinKey);
     if (storedPinData == null) return false;
 
     final pinRecord = _parsePinRecord(storedPinData);
@@ -299,12 +290,12 @@ class AuthService {
     if (existingSalt != null) return existingSalt;
 
     final salt = SecretKeyData.random(length: _pinSaltLength).bytes;
-    await _writeStorageValue(key: _pinSaltKey, value: base64Encode(salt));
+    await _store.write(_pinSaltKey, base64Encode(salt));
     return salt;
   }
 
   Future<List<int>?> _readSalt() async {
-    final saltData = await _readStorageValue(_pinSaltKey);
+    final saltData = await _store.read(_pinSaltKey);
     if (saltData == null) return null;
 
     try {
@@ -359,49 +350,13 @@ class AuthService {
   }
 
   Future<bool> _hasUsablePin() async {
-    final storedPinData = await _readStorageValue(_pinKey);
+    final storedPinData = await _store.read(_pinKey);
     if (storedPinData == null) return false;
 
     if (_parsePinRecord(storedPinData) == null) return false;
 
     final salt = await _readSalt();
     return salt != null;
-  }
-
-  Future<String?> _readStorageValue(String key) async {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return _storage.read(key: key);
-    }
-
-    final current = await _storage.read(
-      key: key,
-      iOptions: _hardenedIosOptions,
-    );
-    if (current != null) return current;
-
-    final legacy = await _storage.read(key: key, iOptions: _legacyIosOptions);
-    if (legacy != null) {
-      await _storage.write(
-        key: key,
-        value: legacy,
-        iOptions: _hardenedIosOptions,
-      );
-    }
-    return legacy;
-  }
-
-  Future<void> _writeStorageValue({
-    required String key,
-    required String value,
-  }) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return _storage.write(key: key, value: value);
-    }
-    return _storage.write(
-      key: key,
-      value: value,
-      iOptions: _hardenedIosOptions,
-    );
   }
 
   bool _constantTimeEquals(String a, String b) {
@@ -417,12 +372,6 @@ class AuthService {
       mismatch |= aValue ^ bValue;
     }
     return mismatch == 0;
-  }
-
-  Future<void> _withPinWriteLock(Future<void> Function() action) async {
-    final operation = _pinWriteQueue.then<void>((_) => action());
-    _pinWriteQueue = operation.catchError((_) {});
-    await operation;
   }
 }
 

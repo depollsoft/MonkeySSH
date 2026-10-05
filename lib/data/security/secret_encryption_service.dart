@@ -2,26 +2,27 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../../domain/services/serial_task_queue.dart';
+import 'hardened_keychain_store.dart';
 
 /// Service that encrypts and decrypts sensitive values stored in SQLite.
 class SecretEncryptionService {
   /// Creates a new [SecretEncryptionService].
   SecretEncryptionService({FlutterSecureStorage? storage, Random? random})
-    : _storage = storage ?? _secureStorage,
+    : _store = HardenedKeychainStore(storage),
       _random = random ?? Random.secure(),
       _testingMasterKey = null;
 
   /// Creates a [SecretEncryptionService] configured for tests.
   SecretEncryptionService.forTesting({List<int>? masterKey, Random? random})
-    : _storage = null,
+    : _store = null,
       _random = random ?? Random(1),
       _testingMasterKey = masterKey ?? SecretKeyData.random(length: 32).bytes;
 
-  final FlutterSecureStorage? _storage;
+  final HardenedKeychainStore? _store;
   final AesGcm _algorithm = AesGcm.with256bits();
   final Random _random;
   final List<int>? _testingMasterKey;
@@ -34,19 +35,9 @@ class SecretEncryptionService {
   static const _encryptedPrefix = 'ENCv1:';
   static const _masterKeyBytes = 32;
   static const _nonceBytes = 12;
-  static const _errSecDuplicateItem = -25299;
-  static const _secureStorage = FlutterSecureStorage(
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
-  static const _hardenedIosOptions = IOSOptions(
-    accessibility: KeychainAccessibility.first_unlock_this_device,
-  );
-  static const _legacyIosOptions = IOSOptions.defaultOptions;
 
   SecretKey? _cachedMasterKey;
-  Future<void> _masterKeyQueue = Future<void>.value();
+  final _masterKeyQueue = SerialTaskQueue();
 
   /// Returns whether [value] is already in encrypted envelope format.
   bool isEncryptedValue(String value) => value.startsWith(_encryptedPrefix);
@@ -140,17 +131,17 @@ class SecretEncryptionService {
       return _cachedMasterKey!;
     }
 
-    final storage = _storage;
-    if (storage == null) {
+    final store = _store;
+    if (store == null) {
       throw StateError('Secure storage is not available for secret encryption');
     }
 
-    await _withMasterKeyLock(() async {
+    await _masterKeyQueue.run(() async {
       if (_cachedMasterKey != null) {
         return;
       }
 
-      final existing = await _readStorageValue(storage, _masterKeyStorageEntry);
+      final existing = await store.read(_masterKeyStorageEntry);
       if (existing != null) {
         final decoded = base64Decode(existing);
         if (decoded.length != _masterKeyBytes) {
@@ -160,105 +151,27 @@ class SecretEncryptionService {
         return;
       }
 
-      final legacyExisting = await _readStorageValue(
-        storage,
-        _legacyMasterKeyStorageEntry,
-      );
+      final legacyExisting = await store.read(_legacyMasterKeyStorageEntry);
       if (legacyExisting != null) {
         final decoded = base64Decode(legacyExisting);
         if (decoded.length != _masterKeyBytes) {
           throw const FormatException('Invalid secret encryption key');
         }
-        await _writeStorageValue(
-          storage,
-          key: _masterKeyStorageEntry,
-          value: legacyExisting,
-        );
+        await store.write(_masterKeyStorageEntry, legacyExisting);
         _cachedMasterKey = SecretKey(decoded);
         return;
       }
 
       final generated = SecretKeyData.random(length: _masterKeyBytes).bytes;
-      await _writeStorageValue(
-        storage,
-        key: _masterKeyStorageEntry,
-        value: base64Encode(generated),
-      );
+      await store.write(_masterKeyStorageEntry, base64Encode(generated));
       _cachedMasterKey = SecretKey(generated);
     });
 
     return _cachedMasterKey!;
   }
 
-  Future<void> _withMasterKeyLock(Future<void> Function() action) {
-    final operation = _masterKeyQueue.then((_) => action());
-    _masterKeyQueue = operation.catchError((_) {});
-    return operation;
-  }
-
   List<int> _randomBytes(int length) =>
       List<int>.generate(length, (_) => _random.nextInt(256), growable: false);
-
-  Future<String?> _readStorageValue(
-    FlutterSecureStorage storage,
-    String key,
-  ) async {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return storage.read(key: key);
-    }
-
-    String? current;
-    try {
-      current = await storage.read(key: key, iOptions: _hardenedIosOptions);
-    } on PlatformException {
-      final legacy = await storage.read(key: key, iOptions: _legacyIosOptions);
-      if (legacy != null) {
-        await _migrateStorageValue(storage, key: key, value: legacy);
-        return legacy;
-      }
-      rethrow;
-    }
-    if (current != null) return current;
-
-    final legacy = await storage.read(key: key, iOptions: _legacyIosOptions);
-    if (legacy != null) {
-      await _migrateStorageValue(storage, key: key, value: legacy);
-    }
-    return legacy;
-  }
-
-  Future<void> _migrateStorageValue(
-    FlutterSecureStorage storage, {
-    required String key,
-    required String value,
-  }) async {
-    try {
-      await _writeStorageValue(storage, key: key, value: value);
-    } on PlatformException catch (error) {
-      if (!_isDuplicateKeychainItem(error)) {
-        rethrow;
-      }
-      await storage.delete(key: key, iOptions: _legacyIosOptions);
-      await _writeStorageValue(storage, key: key, value: value);
-    }
-  }
-
-  Future<void> _writeStorageValue(
-    FlutterSecureStorage storage, {
-    required String key,
-    required String value,
-  }) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return storage.write(key: key, value: value);
-    }
-    return storage.write(key: key, value: value, iOptions: _hardenedIosOptions);
-  }
-
-  bool _isDuplicateKeychainItem(PlatformException error) =>
-      error.details == _errSecDuplicateItem ||
-      error.details == _errSecDuplicateItem.toString() ||
-      (error.message?.contains(_errSecDuplicateItem.toString()) ?? false) ||
-      (error.message?.contains('already exists') ?? false);
 
   List<int> _decodeEnvelopeField(Map<String, dynamic> envelope, String key) {
     final value = envelope[key];

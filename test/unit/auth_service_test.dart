@@ -3,6 +3,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:local_auth/local_auth.dart';
@@ -123,6 +124,46 @@ void main() {
           final result = await authService.isAuthEnabled();
 
           expect(result, true);
+          verify(
+            () => mockStorage.write(
+              key: 'flutty_auth_enabled',
+              value: 'true',
+              iOptions: hardenedOptions,
+            ),
+          ).called(1);
+        },
+      );
+      test(
+        'recovers a legacy iOS keychain item when the hardened read throws',
+        () async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() {
+            debugDefaultTargetPlatformOverride = null;
+          });
+          const hardenedOptions = IOSOptions(
+            accessibility: KeychainAccessibility.first_unlock_this_device,
+          );
+          when(
+            () => mockStorage.read(
+              key: 'flutty_auth_enabled',
+              iOptions: hardenedOptions,
+            ),
+          ).thenThrow(PlatformException(code: 'read_failed'));
+          when(
+            () => mockStorage.read(
+              key: 'flutty_auth_enabled',
+              iOptions: IOSOptions.defaultOptions,
+            ),
+          ).thenAnswer((_) async => 'true');
+          when(
+            () => mockStorage.write(
+              key: 'flutty_auth_enabled',
+              value: 'true',
+              iOptions: hardenedOptions,
+            ),
+          ).thenAnswer((_) async {});
+
+          expect(await authService.isAuthEnabled(), isTrue);
           verify(
             () => mockStorage.write(
               key: 'flutty_auth_enabled',
