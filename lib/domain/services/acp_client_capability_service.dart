@@ -216,8 +216,11 @@ abstract interface class AcpTerminalProcess {
   /// Waits for the process exit status.
   Future<AcpTerminalExitStatus> waitForExit();
 
-  /// Terminates the process/channel.
-  void kill();
+  /// Terminates the process and abandons its channel.
+  ///
+  /// Idempotent. Completes once [waitForExit] has settled, or once the
+  /// process was abandoned without acknowledging termination.
+  Future<void> kill();
 }
 
 /// Starts remote non-PTY terminal processes.
@@ -233,6 +236,7 @@ final class AcpSshTerminalExecutor implements AcpTerminalExecutor {
     this._session, {
     required this.remoteIsWindows,
     required this.openTimeout,
+    this.killGrace = const Duration(seconds: 2),
   });
 
   final Future<SshSession> Function() _session;
@@ -243,11 +247,16 @@ final class AcpSshTerminalExecutor implements AcpTerminalExecutor {
   /// Deadline for opening a terminal command channel.
   final Duration openTimeout;
 
+  /// How long a killed process gets to exit after each signal before the
+  /// next escalation step.
+  final Duration killGrace;
+
   @override
   Future<AcpTerminalProcess> start(String command) async {
     try {
       return _SshAcpTerminalProcess(
         await openSshExec((await _session()).execute(command), openTimeout),
+        killGrace,
       );
     } on TimeoutException {
       throw const AcpClientCapabilityException(
@@ -1307,7 +1316,7 @@ final class AcpClientCapabilityService {
       _terminalReservations--;
     }
     if (!_activeRequests.containsKey(request) || request.isCancelled) {
-      process.kill();
+      unawaited(process.kill());
       _ensureRequestActive(request);
     }
     final id = '$_terminalIdPrefix-${++_nextTerminalId}';
@@ -1485,9 +1494,11 @@ String buildAcpRemoteTerminalCommand({
 }
 
 final class _SshAcpTerminalProcess implements AcpTerminalProcess {
-  _SshAcpTerminalProcess(this._session);
+  _SshAcpTerminalProcess(this._session, this._killGrace);
 
   final SSHSession _session;
+  final Duration _killGrace;
+  Future<void>? _killing;
 
   @override
   Stream<List<int>> get stderr => _session.stderr.cast<List<int>>();
@@ -1495,8 +1506,22 @@ final class _SshAcpTerminalProcess implements AcpTerminalProcess {
   @override
   Stream<List<int>> get stdout => _session.stdout.cast<List<int>>();
 
+  /// `SSHSession.close` only sends EOF, which a command that ignores stdin
+  /// survives. Signal it, escalate, then destroy the channel, which also
+  /// settles [waitForExit] when the server never acknowledges the signals.
   @override
-  void kill() => _session.close();
+  Future<void> kill() => _killing ??= () async {
+    final exited = _session.waitForExit().then((_) => true);
+    for (final signal in const [SSHSignal.TERM, SSHSignal.KILL]) {
+      try {
+        _session.kill(signal);
+      } on Object {
+        break;
+      }
+      if (await exited.timeout(_killGrace, onTimeout: () => false)) return;
+    }
+    _session.channel.destroy();
+  }();
 
   @override
   Future<AcpTerminalExitStatus> waitForExit() async => AcpTerminalExitStatus(
@@ -1662,14 +1687,21 @@ final class _ManagedAcpTerminal {
   Future<AcpTerminalExitStatus> wait() => _exit!.future;
 
   Future<void> kill() async {
-    if (!_exit!.isCompleted) _process.kill();
+    if (_exit!.isCompleted) return;
+    await _process.kill();
+    // An abandoned process may never report; settle local waiters anyway.
+    if (!_exit!.isCompleted) {
+      _exit!.complete(_exitStatus = const AcpTerminalExitStatus());
+      _publishDisplay();
+    }
   }
 
   Future<void> release() async {
     if (_released) return;
     _released = true;
     lifetimeTimer?.cancel();
-    await kill();
+    // Released output is gone, so escalation need not delay the response.
+    unawaited(kill());
     await Future.wait<void>([
       _stdoutSubscription.cancel(),
       _stderrSubscription.cancel(),

@@ -97,7 +97,7 @@ final class _Process implements AcpTerminalProcess {
   Future<AcpTerminalExitStatus> waitForExit() => exit.future;
 
   @override
-  void kill() {
+  Future<void> kill() async {
     if (!exit.isCompleted) {
       exit.complete(const AcpTerminalExitStatus(signal: 'KILL'));
     }

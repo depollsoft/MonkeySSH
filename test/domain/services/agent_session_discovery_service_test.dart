@@ -2279,7 +2279,10 @@ branch refs/heads/main
               snapshots,
               contains(windows ? 'byte[] 65536' : r'$HEAD_BIN -c 65536'),
             );
-            expect(snapshots, contains(windows ? '-TotalCount 20' : "'1,20p'"));
+            expect(
+              snapshots,
+              contains(windows ? r'while($n -lt 20' : r'$HEAD_BIN -n 20 '),
+            );
             // The listing already carries each `.pb` mtime, so no snapshot
             // pass reads the conversation files themselves.
             expect(snapshots, isNot(contains(RegExp(r"conv-\d+\.pb'"))));
@@ -2432,7 +2435,7 @@ worktree /Users/depoll/Code/MonkeySSH
 HEAD abc123
 branch refs/heads/main
 ''';
-        } else if (command.contains(r"$SED_BIN -n '1,1p'") &&
+        } else if (command.contains(r'$HEAD_BIN -n 1 "$path"') &&
             command.contains(sessionPath)) {
           output = _remoteSnapshotLine(sessionPath, '''
 {"type":"session","id":"REAL","timestamp":"2026-08-21T08:12:27.194Z","cwd":"/Users/depoll/Code/MonkeySSH"}
@@ -2780,6 +2783,117 @@ branch refs/heads/main
       },
     );
 
+    test('line-limited snapshot reads stop at a byte ceiling on complete records', () async {
+      final root = await Directory.systemTemp.createTemp('snapshot-ceiling-');
+      addTearDown(() => root.delete(recursive: true));
+      const sessionId = '019dcbf6-c80e-7c30-b7fa-3d352bda8c4d';
+      // A multi-byte image-sized record that the ceiling cuts mid-character.
+      final rollout =
+          File(
+            '${root.path}/rollout-2026-04-26T15-44-01-$sessionId.jsonl',
+          )..writeAsStringSync(
+            '{"timestamp":"2026-04-26T22:44:20.349Z","type":"session_meta",'
+            '"payload":{"id":"$sessionId","cwd":"/repo"}}\n'
+            '${jsonEncode({'type': 'response_item', 'text': 'é' * (3 << 20)})}\n'
+            '{"type":"event_msg","payload":{"type":"user_message",'
+            '"message":"beyond the ceiling","images":[]}}\n',
+          );
+      final client = _MockSshClient();
+      var snapshotChars = 0;
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.codex/sessions')) {
+          return _buildExecSession(
+            stdout: _listedFileLine(rollout.path, mtime: 1777000000),
+          );
+        }
+        if (!command.contains(rollout.path)) return _buildExecSession();
+        // Like a login shell, unlike `sh`, bash survives the profile
+        // sourcing of files this temporary home lacks.
+        final result = await Process.run(
+          'bash',
+          ['-c', command],
+          environment: {'HOME': root.path, 'PATH': '/usr/bin:/bin'},
+          includeParentEnvironment: false,
+        );
+        snapshotChars = (result.stdout as String).length;
+        return _buildExecSession(stdout: result.stdout as String);
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Codex',
+          )
+          .last;
+
+      final ceiling = snapshotSegmentMaxBytes(1, withTail: false);
+      expect(snapshotChars, lessThan(ceiling * 4 ~/ 3 + 4096));
+      expect(result.failedTools, isEmpty);
+      final session = result.sessions.single;
+      expect(session.sessionId, sessionId);
+      expect(session.workingDirectory, '/repo');
+      // The prompt lies past the ceiling, so the row keeps its fallback.
+      expect(session.summary, 'repo');
+    }, skip: Platform.isWindows);
+
+    test('Codex ranks sessions without an index entry by file mtime', () async {
+      final client = _MockSshClient();
+      const root = '/Users/demo/.codex/sessions/2026/04';
+      const resumedId = '019dcbf6-c80e-7c30-b7fa-3d352bda8c4d';
+      const newerId = '019dcbf6-c80e-7c30-b7fa-3d352bda8c4e';
+      const resumed = '$root/01/rollout-2026-04-01T10-00-00-$resumedId.jsonl';
+      const newer = '$root/20/rollout-2026-04-20T10-00-00-$newerId.jsonl';
+      // The older rollout was resumed after the newer one went idle.
+      final resumedMtime = DateTime.utc(2026, 4, 26);
+      final newerMtime = DateTime.utc(2026, 4, 21);
+      String rollout(String id, String created) =>
+          '{"timestamp":"$created","type":"session_meta",'
+          '"payload":{"id":"$id","cwd":"/repo"}}\n';
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.codex/sessions')) {
+          return _buildExecSession(
+            stdout: [
+              _listedFileLine(
+                newer,
+                mtime: newerMtime.millisecondsSinceEpoch ~/ 1000,
+              ),
+              _listedFileLine(
+                resumed,
+                mtime: resumedMtime.millisecondsSinceEpoch ~/ 1000,
+              ),
+            ].join('\n'),
+          );
+        }
+        if (command.contains(resumed)) {
+          return _buildExecSession(
+            stdout:
+                _remoteSnapshotLine(
+                  resumed,
+                  rollout(resumedId, '2026-04-01T10:00:00Z'),
+                ) +
+                _remoteSnapshotLine(
+                  newer,
+                  rollout(newerId, '2026-04-20T10:00:00Z'),
+                ),
+          );
+        }
+        return _buildExecSession();
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Codex',
+          )
+          .last;
+
+      expect(result.sessions.map((session) => session.sessionId), [
+        resumedId,
+        newerId,
+      ]);
+      expect(result.sessions.first.lastActive?.toUtc(), resumedMtime);
+    });
+
     test(
       'Claude discovery bounds the transcript search and reads head and tail '
       'in one round trip',
@@ -2844,7 +2958,7 @@ branch refs/heads/main
             .where((command) => command.contains('SEP='))
             .toList(growable: false);
         expect(snapshots, hasLength(1));
-        expect(snapshots.single, contains("'1,120p'"));
+        expect(snapshots.single, contains(r'$HEAD_BIN -n 120 '));
         expect(snapshots.single, contains(r'$TAIL_BIN -n 120'));
         expect(snapshots.single, isNot(contains('STAT_BIN')));
       },
@@ -3365,7 +3479,7 @@ HEAD b
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
-        if (command.contains(r"$SED_BIN -n '1,1p'") &&
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"') &&
             command.contains(sessionPath)) {
           return _buildExecSession(
             stdout: _remoteSnapshotLine(sessionPath, '''
@@ -3406,13 +3520,130 @@ HEAD b
           ),
         ),
       );
-      expect(commands, contains(contains(r"$SED_BIN -n '1,1p'")));
+      expect(commands, contains(contains(r'$HEAD_BIN -n 1 "$path"')));
       expect(commands, contains(contains('git -C')));
       expect(
         discovery.buildResumeCommand(info),
         "cd '/Users/depoll/Code/flutty' && pi --session '01JYX7ABCD'",
       );
     });
+
+    test('Pi publishes header rows first and caches labels by mtime and size', () async {
+      final client = _MockSshClient();
+      const sessionPath =
+          '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
+          '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
+      var size = 100;
+      var labelReads = 0;
+      final labelGate = Completer<void>();
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"')) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              sessionPath,
+              '{"type":"session","id":"01JYX7ABCD",'
+              '"timestamp":"2026-04-12T21:07:44.781Z",'
+              '"cwd":"/Users/depoll/Code/flutty"}\n',
+            ),
+          );
+        }
+        if (command.contains('Buffer.from(process.argv[1]')) {
+          labelReads += 1;
+          await labelGate.future;
+          return _buildExecSession(
+            stdout:
+                '$sessionPath\x1f${base64Encode(utf8.encode('Fix the navigator'))}\n',
+          );
+        }
+        if (command.contains('--Users-depoll-Code-flutty--')) {
+          return _buildExecSession(stdout: '1777000000\t$size\t$sessionPath');
+        }
+        return _buildExecSession();
+      });
+      var now = DateTime(2026, 10, 5);
+      final discovery = AgentSessionDiscoveryService(now: () => now);
+      Stream<String?> summaries() => discovery
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Pi',
+          )
+          .map((result) => result.sessions.single.summary);
+
+      final seen = <String?>[];
+      final done = summaries().listen(seen.add).asFuture<void>();
+      await pumpEventQueue();
+      expect(seen, ['Pi session 01JYX7ABCD']);
+      labelGate.complete();
+      await done;
+      expect(seen.last, 'Fix the navigator');
+
+      // Past the discovery cache, an unchanged transcript reuses its label.
+      now = now.add(const Duration(minutes: 5));
+      expect(await summaries().last, 'Fix the navigator');
+      expect(labelReads, 1);
+
+      now = now.add(const Duration(minutes: 5));
+      size = 200;
+      expect(await summaries().last, 'Fix the navigator');
+      expect(labelReads, 2);
+    });
+
+    test('Pi label extraction reads a bounded transcript prefix', () async {
+      try {
+        Process.runSync('node', ['--version']);
+      } on ProcessException {
+        markTestSkipped('Node.js is required to run the Pi label extractor');
+        return;
+      }
+      final root = await Directory.systemTemp.createTemp('pi-labels-');
+      addTearDown(() => root.delete(recursive: true));
+      final bucket = Directory(
+        '${root.path}/.pi/agent/sessions/--Users-depoll-Code-flutty--',
+      )..createSync(recursive: true);
+      String transcript(String id, {String padding = ''}) =>
+          '{"type":"session","id":"$id","timestamp":"2026-04-12T21:07:44.781Z",'
+          '"cwd":"/Users/depoll/Code/flutty"}\n'
+          '${padding.isEmpty ? '' : '${jsonEncode({'type': 'tool_result', 'output': padding})}\n'}'
+          '{"type":"message","message":{"role":"user","content":"Prompt $id"}}\n';
+      final small = File('${bucket.path}/a_SMALL.jsonl')
+        ..writeAsStringSync(transcript('SMALL'));
+      final large = File('${bucket.path}/b_LARGE.jsonl')
+        ..writeAsStringSync(transcript('LARGE', padding: 'x' * (512 << 10)));
+      final client = _MockSshClient();
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('-maxdepth 1 -name "*.jsonl"')) {
+          return _buildExecSession(
+            stdout:
+                '1777000000\t1\t${small.path}\n1777000000\t2\t${large.path}',
+          );
+        }
+        // Run snapshot and label commands for real against the fixtures.
+        final result = await Process.run(
+          'bash',
+          ['-c', command],
+          environment: {
+            'HOME': root.path,
+            'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+          },
+          includeParentEnvironment: false,
+        );
+        return _buildExecSession(stdout: result.stdout as String);
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Pi',
+          )
+          .last;
+
+      expect(
+        {for (final info in result.sessions) info.sessionId: info.summary},
+        {'SMALL': 'Prompt SMALL', 'LARGE': 'Pi session LARGE'},
+      );
+    }, skip: Platform.isWindows);
 
     test('Pi discovery does not guess without a pane cwd', () async {
       final client = _MockSshClient();
@@ -3433,7 +3664,7 @@ HEAD b
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7HEADER.jsonl';
       _stubDiscoveryExec(client, (command) async {
-        if (command.contains(r"$SED_BIN -n '1,1p'") &&
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"') &&
             command.contains(sessionPath)) {
           return _buildExecSession(
             stdout: _remoteSnapshotLine(sessionPath, '''
@@ -3468,7 +3699,7 @@ HEAD b
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
       _stubDiscoveryExec(client, (command) async {
-        if (command.contains(r"$SED_BIN -n '1,1p'") &&
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"') &&
             command.contains(projectPath)) {
           return _buildExecSession(
             stdout: _remoteSnapshotLine(projectPath, '''
@@ -3524,7 +3755,7 @@ HEAD b
 ''',
           );
         }
-        if (command.contains(r"$SED_BIN -n '1,1p'")) {
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"')) {
           return _buildExecSession(
             stdout:
                 _remoteSnapshotLine(mainPath, '''

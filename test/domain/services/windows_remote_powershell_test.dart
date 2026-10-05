@@ -329,15 +329,63 @@ exit 7;
       final head = windowsFileSnapshotScript(const [
         'C:/x/y.jsonl',
       ], maxLines: 80);
-      expect(head, contains('-TotalCount 80 -Encoding UTF8'));
-      expect(head, isNot(contains('-Tail ')));
+      expect(head, contains(r'while($n -lt 80'));
+      expect(head, isNot(contains('SeekOrigin')));
       final both = windowsFileSnapshotScript(
         const ['C:/x/y.jsonl'],
         maxLines: 80,
         tailLines: 40,
       );
-      expect(both, contains('-TotalCount 80 -Encoding UTF8'));
-      expect(both, contains('-Tail 40 -Encoding UTF8'));
+      expect(both, contains(r'while($n -lt 80'));
+      expect(both, contains(r'if($n -ge 40)'));
+    });
+
+    test('reads head and tail lines within the byte ceiling', () async {
+      final root = await Directory.systemTemp.createTemp('windows-snapshot-');
+      addTearDown(() => root.delete(recursive: true));
+      final ceiling = snapshotSegmentMaxBytes(1, withTail: true);
+      final file = File('${root.path}/s.jsonl')
+        ..writeAsStringSync('a\nb\nc\n${'x' * (ceiling * 2)}\nd\ne\n');
+      Future<List<String>?> read(int maxLines, int tailLines) async {
+        final ProcessResult result;
+        try {
+          result = await Process.run(
+            Platform.isWindows ? 'powershell.exe' : 'pwsh',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              windowsFileSnapshotScript(
+                [file.path],
+                maxLines: maxLines,
+                tailLines: tailLines,
+              ),
+            ],
+          );
+        } on ProcessException {
+          return null;
+        }
+        final line = (result.stdout as String)
+            .split('\n')
+            .firstWhere((line) => line.contains('\x1f'));
+        return [
+          for (final field in line.trim().split('\x1f').skip(1))
+            utf8.decode(base64Decode(field)),
+        ];
+      }
+
+      final small = await read(2, 2);
+      if (small == null) {
+        markTestSkipped('PowerShell is required to run the snapshot script');
+        return;
+      }
+      expect(small, ['a\nb\n', 'd\ne\n']);
+      // Both reads stop at the ceiling inside the long record, which the
+      // parser then drops as a partial boundary record.
+      final capped = (await read(10, 3))!;
+      expect(capped.map((field) => field.length), [ceiling, ceiling]);
+      expect(capped.first, startsWith('a\nb\nc\nxxx'));
+      expect(capped.last, endsWith('xxx\nd\ne\n'));
     });
   });
 

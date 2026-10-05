@@ -56,6 +56,55 @@ void main() {
     expect(chunks.last.isEntryContinuation, isTrue);
   });
 
+  test('flattens subagent transcripts into split, budgeted children', () {
+    final markdown = List.filled(1200, 'A paragraph of response.\n\n').join();
+    AcpSubagentTranscriptEntry transcript(
+      int count, {
+      bool largeTail = false,
+    }) => AcpSubagentTranscriptEntry(
+      id: 'subagent-launch',
+      launchToolCallId: 'launch',
+      entries: [
+        for (var i = 0; i < count; i++)
+          AcpAssistantMessageEntry(
+            id: 'nested-$i',
+            markdown: 'nested $i',
+            parentToolCallId: 'launch',
+          ),
+        if (largeTail)
+          AcpSubagentTranscriptEntry(
+            id: 'subagent-inner',
+            launchToolCallId: 'inner',
+            entries: [
+              AcpAssistantMessageEntry(
+                id: 'inner-large',
+                markdown: markdown,
+                parentToolCallId: 'inner',
+              ),
+            ],
+          ),
+      ],
+    );
+
+    final many = projectAcpThreadWindow([transcript(300)]);
+    expect(many.children, hasLength(301));
+    expect(many.children.first.keyValue, 'subagent-launch');
+    expect(many.children.map((child) => child.depth).toSet(), {1});
+    expect(many.children.map((child) => child.entryIndex).toSet(), {0});
+    // Hundreds of descendants share the top-level initial-render budget.
+    expect(many.initialVisibleChildren, 48);
+
+    final large = projectAcpThreadWindow([transcript(3, largeTail: true)]);
+    final inner = large.children.where((child) => child.depth == 2).toList();
+    expect(inner.first.keyValue, 'subagent-inner');
+    final segments = inner.skip(1).toList();
+    expect(segments.length, greaterThan(1));
+    expect(segments.map((child) => child.markdown).join(), markdown);
+    expect(segments.last.isEntryContinuation, isTrue);
+    // A nested oversized reply mounts only its final segment.
+    expect(large.initialVisibleChildren, 1);
+  });
+
   test('user prompt summary normalizes text and attachment-only prompts', () {
     expect(
       acpUserPromptSummary(

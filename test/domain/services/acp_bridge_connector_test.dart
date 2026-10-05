@@ -91,13 +91,16 @@ void main() {
         '/workspace',
       );
       final replacement = await binding.terminalExecutor.start('second');
-      existing.kill();
-      replacement.kill();
+      for (final terminal in [firstTerminal, secondTerminal]) {
+        when(terminal.waitForExit).thenAnswer((_) async => null);
+      }
+      await existing.kill();
+      await replacement.kill();
 
       verifyNever(first.sftp);
       verify(() => second.execute('second')).called(1);
-      verify(firstTerminal.close).called(1);
-      verify(secondTerminal.close).called(1);
+      verify(() => firstTerminal.kill(SSHSignal.TERM)).called(1);
+      verify(() => secondTerminal.kill(SSHSignal.TERM)).called(1);
     },
   );
 
