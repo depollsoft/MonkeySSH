@@ -71,20 +71,9 @@ abstract final class AcpBuiltinProviderIds {
 
 /// Resolves the terminal-agent identity sharing a built-in ACP provider.
 AgentLaunchTool? agentLaunchToolForBuiltinAcpProviderId(String providerId) =>
-    switch (providerId) {
-      AcpBuiltinProviderIds.claudeAgent => AgentLaunchTool.claudeCode,
-      AcpBuiltinProviderIds.copilotCli => AgentLaunchTool.copilotCli,
-      AcpBuiltinProviderIds.codex => AgentLaunchTool.codex,
-      AcpBuiltinProviderIds.openCode => AgentLaunchTool.openCode,
-      AcpBuiltinProviderIds.cursorAgent => AgentLaunchTool.cursorAgent,
-      AcpBuiltinProviderIds.antigravity => AgentLaunchTool.antigravity,
-      AcpBuiltinProviderIds.pi => AgentLaunchTool.pi,
-      AcpBuiltinProviderIds.hermes => AgentLaunchTool.hermes,
-      AcpBuiltinProviderIds.openClaw => AgentLaunchTool.openclaw,
-      AcpBuiltinProviderIds.grokBuild => AgentLaunchTool.grokBuild,
-      AcpBuiltinProviderIds.museCode => AgentLaunchTool.museCode,
-      _ => null,
-    };
+    acpBuiltinProviders
+        .firstWhereOrNull((provider) => provider.id == providerId)
+        ?.tool;
 
 /// Validates and normalizes a custom ACP provider ID.
 ///
@@ -443,6 +432,8 @@ class AcpBuiltinProvider implements AcpProvider {
   const AcpBuiltinProvider({
     required this.id,
     required this.label,
+    required this.tool,
+    required this.telemetryCategory,
     required this.launchCommand,
     required this.executableProbe,
     this.terminalAuthCommand,
@@ -457,6 +448,13 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Human-readable label shown in provider pickers.
   @override
   final String label;
+
+  /// Terminal-agent identity sharing this provider's icon, sessions and
+  /// launch arguments.
+  final AgentLaunchTool tool;
+
+  /// Coarse snake_case category reported to telemetry instead of the id.
+  final String telemetryCategory;
 
   /// Default stdio ACP launch command for this provider.
   @override
@@ -489,6 +487,8 @@ class AcpBuiltinProvider implements AcpProvider {
       other is AcpBuiltinProvider &&
           id == other.id &&
           label == other.label &&
+          tool == other.tool &&
+          telemetryCategory == other.telemetryCategory &&
           launchCommand == other.launchCommand &&
           executableProbe == other.executableProbe &&
           terminalAuthCommand == other.terminalAuthCommand &&
@@ -499,6 +499,8 @@ class AcpBuiltinProvider implements AcpProvider {
   int get hashCode => Object.hash(
     id,
     label,
+    tool,
+    telemetryCategory,
     launchCommand,
     executableProbe,
     terminalAuthCommand,
@@ -531,12 +533,10 @@ bool isApprovedAcpBuiltinLaunchOverride(
         baseArguments,
       ) ??
       _listEquality.equals(command.arguments, baseArguments);
-  final tool = agentLaunchToolForBuiltinAcpProviderId(provider.id);
-  final usesTerminalExecutable =
-      tool != null &&
-      tool.candidateCommandNames.any(
-        (candidate) => candidate.toLowerCase() == executableName,
-      );
+  final tool = provider.tool;
+  final usesTerminalExecutable = tool.candidateCommandNames.any(
+    (candidate) => candidate.toLowerCase() == executableName,
+  );
   if (!launchArgumentsApproved && usesTerminalExecutable) {
     String? profile;
     final profileSupport = provider.launchProfileSupport;
@@ -586,6 +586,8 @@ String? _resolvedAcpExecutableName(String executable) {
 /// Built-in Copilot CLI ACP provider.
 final acpCopilotCliProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.copilotCli,
+  tool: AgentLaunchTool.copilotCli,
+  telemetryCategory: 'copilot_cli',
   label: 'Copilot CLI',
   launchCommand: AcpLaunchCommand(
     executable: 'copilot',
@@ -611,6 +613,8 @@ final acpCopilotCliProvider = AcpBuiltinProvider(
 /// Built-in Claude Agent SDK ACP provider.
 final acpClaudeAgentProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.claudeAgent,
+  tool: AgentLaunchTool.claudeCode,
+  telemetryCategory: 'claude_agent',
   label: 'Claude Agent',
   launchCommand: AcpLaunchCommand(executable: 'claude-agent-acp'),
   executableProbe: AcpExecutableProbe(
@@ -629,6 +633,8 @@ final acpClaudeAgentProvider = AcpBuiltinProvider(
 /// Built-in Codex ACP provider.
 final acpCodexProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.codex,
+  tool: AgentLaunchTool.codex,
+  telemetryCategory: 'codex',
   label: 'Codex',
   launchCommand: AcpLaunchCommand(executable: 'codex-acp'),
   executableProbe: AcpExecutableProbe(
@@ -643,6 +649,8 @@ final acpCodexProvider = AcpBuiltinProvider(
 /// Built-in OpenCode ACP provider.
 final acpOpenCodeProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.openCode,
+  tool: AgentLaunchTool.openCode,
+  telemetryCategory: 'opencode',
   label: 'OpenCode',
   launchCommand: AcpLaunchCommand(
     executable: 'opencode',
@@ -660,6 +668,8 @@ final acpOpenCodeProvider = AcpBuiltinProvider(
 /// Built-in Cursor Agent native ACP provider.
 final acpCursorAgentProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.cursorAgent,
+  tool: AgentLaunchTool.cursorAgent,
+  telemetryCategory: 'cursor_agent',
   label: 'Cursor Agent',
   launchCommand: AcpLaunchCommand(
     executable: 'cursor-agent',
@@ -677,6 +687,8 @@ final acpCursorAgentProvider = AcpBuiltinProvider(
 /// Built-in Antigravity ACP provider.
 final acpAntigravityProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.antigravity,
+  tool: AgentLaunchTool.antigravity,
+  telemetryCategory: 'antigravity',
   label: 'Antigravity',
   launchCommand: AcpLaunchCommand(
     executable: 'npx',
@@ -695,6 +707,8 @@ final acpAntigravityProvider = AcpBuiltinProvider(
 /// Built-in Hermes ACP provider.
 final acpHermesProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.hermes,
+  tool: AgentLaunchTool.hermes,
+  telemetryCategory: 'hermes',
   label: 'Hermes',
   launchCommand: AcpLaunchCommand(
     executable: 'hermes',
@@ -717,6 +731,8 @@ final acpHermesProvider = AcpBuiltinProvider(
 /// Built-in OpenClaw ACP provider.
 final acpOpenClawProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.openClaw,
+  tool: AgentLaunchTool.openclaw,
+  telemetryCategory: 'openclaw',
   label: 'OpenClaw',
   launchCommand: AcpLaunchCommand(
     executable: 'openclaw',
@@ -738,6 +754,8 @@ final acpOpenClawProvider = AcpBuiltinProvider(
 /// Built-in Grok Build ACP provider.
 final acpGrokBuildProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.grokBuild,
+  tool: AgentLaunchTool.grokBuild,
+  telemetryCategory: 'grok_build',
   label: 'Grok Build',
   launchCommand: AcpLaunchCommand(
     executable: 'grok',
@@ -753,6 +771,8 @@ final acpGrokBuildProvider = AcpBuiltinProvider(
 /// Muse Code uses a separate community adapter; `muse serve` speaks MSP.
 final acpMuseCodeProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.museCode,
+  tool: AgentLaunchTool.museCode,
+  telemetryCategory: 'muse_code',
   label: 'Muse Code',
   launchCommand: AcpLaunchCommand(executable: 'muse-code-acp'),
   executableProbe: AcpExecutableProbe(
@@ -772,6 +792,8 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.pi,
+  tool: AgentLaunchTool.pi,
+  telemetryCategory: 'pi',
   label: 'Pi',
   launchCommand: AcpLaunchCommand(executable: 'pi-acp'),
   executableProbe: AcpExecutableProbe(
