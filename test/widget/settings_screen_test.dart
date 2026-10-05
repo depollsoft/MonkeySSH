@@ -1101,6 +1101,50 @@ void main() {
       },
     );
 
+    testWidgets('closes the change PIN dialog after a successful change', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final authService = _ChangePinAuthService()..shouldSucceed = true;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_UnlockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: SettingsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Change PIN'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Current PIN'),
+        '1234',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'New PIN'),
+        '567890',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Confirm new PIN'),
+        '567890',
+      );
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Change'));
+      // The dialog's fields rebuild while its route animates out, so the
+      // controllers must outlive the pop.
+      await tester.pumpAndSettle();
+
+      expect(authService.changePinCallCount, 1);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.text('PIN changed successfully'), findsOneWidget);
+    });
+
     testWidgets('recovers the change PIN dialog after unexpected failures', (
       tester,
     ) async {
@@ -1401,6 +1445,9 @@ void main() {
         ProviderScope(
           overrides: [
             databaseProvider.overrideWithValue(db),
+            // main.dart pins one service instance, so a reload must not rely
+            // on recreating settingsServiceProvider.
+            settingsServiceProvider.overrideWithValue(SettingsService(db)),
             authServiceProvider.overrideWithValue(FakeAuthService()),
             authStateProvider.overrideWith(MockAuthStateNotifier.new),
             themeModeNotifierProvider.overrideWith(StaticThemeModeNotifier.new),
@@ -1445,9 +1492,6 @@ void main() {
         tester.element(find.byType(EntityProviderProbe)),
       );
 
-            // main.dart pins one service instance, so a reload must not rely
-            // on recreating settingsServiceProvider.
-            settingsServiceProvider.overrideWithValue(SettingsService(db)),
       expect(
         await container
             .read(terminalNotificationsNotifierProvider.notifier)
