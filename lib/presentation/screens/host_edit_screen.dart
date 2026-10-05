@@ -13,7 +13,6 @@ import '../../data/repositories/key_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/auto_connect_command.dart';
-import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/models/remote_multiplexer.dart';
@@ -31,6 +30,7 @@ import '../../domain/services/wifi_network_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../view_models/host_edit_view_model.dart';
 import '../widgets/agent_tool_icon.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
 import '../widgets/host_port_forward_editor_sheet.dart';
 import '../widgets/premium_access.dart';
@@ -368,7 +368,6 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     disableTmuxStatusBar: _disableTmuxStatusBar,
     disableAgentTmuxStatusBar: _disableAgentTmuxStatusBar,
     startClisInYoloMode: _startClisInYoloMode,
-    agentWindowModePreference: AgentWindowModePreference.askEveryTime,
     autoForwardPorts: _autoForwardPorts,
   );
 
@@ -2255,28 +2254,13 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   }
 
   Future<void> _deletePortForward(PortForward pf) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Port Forward'),
-        content: Text('Are you sure you want to delete "${pf.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Port Forward',
+      message: 'Are you sure you want to delete "${pf.name}"?',
     );
 
-    if ((confirmed ?? false) && mounted) {
+    if (confirmed && mounted) {
       final repo = ref.read(portForwardRepositoryProvider);
       try {
         await stopPortForwardOnConnectedSessions(
@@ -2586,34 +2570,10 @@ class _SkipJumpHostOnWifiSectionState
   }
 
   Future<void> _promptForSsid() async {
-    final controller = TextEditingController();
     final entered = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Add Wi-Fi network'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'SSID',
-            hintText: 'Network name',
-          ),
-          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+      builder: (_) => const _SsidPromptDialog(),
     );
-    controller.dispose();
     if (!mounted) return;
     if (entered != null && entered.isNotEmpty) {
       _addSsid(entered);
@@ -2713,4 +2673,48 @@ class _SkipJumpHostOnWifiSectionState
       ],
     );
   }
+}
+
+/// Owns its text controller so the field survives the dialog's exit
+/// transition; disposing right after `showDialog` returns trips
+/// `ChangeNotifier` assertions while the route is still animating out.
+class _SsidPromptDialog extends StatefulWidget {
+  const _SsidPromptDialog();
+
+  @override
+  State<_SsidPromptDialog> createState() => _SsidPromptDialogState();
+}
+
+class _SsidPromptDialogState extends State<_SsidPromptDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Add Wi-Fi network'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: const InputDecoration(
+        labelText: 'SSID',
+        hintText: 'Network name',
+      ),
+      onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+        child: const Text('Add'),
+      ),
+    ],
+  );
 }

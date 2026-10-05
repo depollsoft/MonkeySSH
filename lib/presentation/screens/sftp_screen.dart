@@ -32,6 +32,7 @@ import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/connection_preview_snippet.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/syntax_highlight_controller.dart';
 import '../widgets/syntax_highlight_language.dart';
 import '../widgets/syntax_highlight_theme.dart';
@@ -566,7 +567,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
       setState(() {
         _currentPath = path;
+        // OpenSSH always lists `.` and `..`; they are not navigable rows, and
+        // keeping them would hide the empty state and skew scroll offsets.
         _files = items
+          ..removeWhere((e) => e.filename == '.' || e.filename == '..')
           ..sort((a, b) {
             // Directories first, then by name
             final aIsDir = a.attr.isDirectory;
@@ -1457,10 +1461,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         itemCount: _files.length,
         itemBuilder: (context, index) {
           final file = _files[index];
-          // Skip . and ..
-          if (file.filename == '.' || file.filename == '..') {
-            return const SizedBox.shrink();
-          }
           final selectionDisabledReason = _selectionDisabledReasonForFile(file);
           final isSelected = _isSelectionMode && _isRemoteFileSelected(file);
           return _FileListTile(
@@ -1724,28 +1724,13 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   Future<void> _deleteFile(SftpName file) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete'),
-        content: Text('Delete "${file.filename}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete',
+      message: 'Delete "${file.filename}"?',
     );
 
-    if ((confirmed ?? false) && _sftp != null) {
+    if (confirmed && _sftp != null) {
       try {
         final path = joinRemotePath(_currentPath, file.filename);
         if (file.attr.isDirectory) {
@@ -2352,12 +2337,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
             session?.terminalThemeDarkId ??
             (useHostThemeOverrides ? host?.terminalThemeDarkId : null),
       );
-      final fontFamily =
-          host?.terminalFontFamily ??
-          ref.read(fontFamilyNotifierProvider) ??
-          'monospace';
-      final initialFontSize =
-          session?.terminalFontSize ?? ref.read(fontSizeNotifierProvider) ?? 14;
+      final defaultFontFamily = ref.read(fontFamilyNotifierProvider);
+      final defaultFontSize = ref.read(fontSizeNotifierProvider);
+      final fontFamily = host?.terminalFontFamily ?? defaultFontFamily;
+      final initialFontSize = session?.terminalFontSize ?? defaultFontSize;
 
       final TextEditingController controller;
       if (useHighlighting) {
