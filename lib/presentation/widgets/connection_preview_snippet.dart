@@ -17,6 +17,20 @@ import 'monkey_terminal_view.dart';
 VoidCallback? debugOnStyledPreviewFontFit;
 
 typedef _StyledPreviewMeasurement = ({double fontSize, Size cellSize});
+typedef _StackCardLayout = ({
+  double height,
+  _StyledPreviewMeasurement? styledMeasurement,
+});
+typedef _StyledFitKey = ({
+  TerminalThemeData theme,
+  int columnCount,
+  double maxWidth,
+  TextScaler textScaler,
+});
+typedef _StyledFitCache = Map<_StyledFitKey, _StyledPreviewMeasurement>;
+
+/// Upper bound on memoised font-fit results per preview stack.
+const _styledFitCacheLimit = 32;
 
 const _previewMaxLines = 17;
 const _previewMinFontSize = 6.5;
@@ -344,7 +358,7 @@ class ConnectionPreviewStackEntry {
 }
 
 /// Renders one or more connection preview cards in a visibly offset stack.
-class ConnectionPreviewStack extends StatelessWidget {
+class ConnectionPreviewStack extends StatefulWidget {
   /// Creates a [ConnectionPreviewStack].
   const ConnectionPreviewStack({required this.entries, this.onTap, super.key});
 
@@ -355,7 +369,58 @@ class ConnectionPreviewStack extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
+  State<ConnectionPreviewStack> createState() => _ConnectionPreviewStackState();
+}
+
+class _ConnectionPreviewStackState extends State<ConnectionPreviewStack> {
+  /// Font-fit results keyed on the only inputs that affect them, so a preview
+  /// tick that changes text but not column count skips the painter bisection.
+  final _StyledFitCache _styledFits = {};
+
+  // Last measured inputs; entries equal to their previous counterpart reuse
+  // the previous layout instead of re-measuring the card chrome.
+  ({double cardWidth, TextScaler textScaler, TextDirection textDirection})?
+  _measuredContext;
+  List<ConnectionPreviewStackEntry> _measuredEntries = const [];
+  List<_StackCardLayout> _measuredLayouts = const [];
+
+  List<_StackCardLayout> _layoutCards(BuildContext context, double cardWidth) {
+    final entries = widget.entries;
+    final layoutContext = (
+      cardWidth: cardWidth,
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: Directionality.of(context),
+    );
+    final reusable = layoutContext == _measuredContext
+        ? _measuredEntries
+        : const <ConnectionPreviewStackEntry>[];
+    final layouts = [
+      for (var index = 0; index < entries.length; index++)
+        if (index < reusable.length && reusable[index] == entries[index])
+          _measuredLayouts[index]
+        else
+          _measureStackPreviewCard(
+            context: context,
+            entry: entries[index],
+            cardWidth: cardWidth,
+            maxHeight:
+                _stackPreviewCardHeight +
+                (entries[index].metadata != null
+                    ? _stackPreviewMetadataHeight
+                    : 0),
+            styledFits: _styledFits,
+          ),
+    ];
+    _measuredContext = layoutContext;
+    _measuredEntries = entries;
+    _measuredLayouts = layouts;
+    return layouts;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final onTap = widget.onTap;
     if (entries.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -366,17 +431,7 @@ class ConnectionPreviewStack extends StatelessWidget {
         final cardWidth = constraints.maxWidth > maxHorizontalInset
             ? constraints.maxWidth - maxHorizontalInset
             : 0.0;
-        final cardLayouts = [
-          for (final entry in entries)
-            _measureStackPreviewCard(
-              context: context,
-              entry: entry,
-              cardWidth: cardWidth,
-              maxHeight:
-                  _stackPreviewCardHeight +
-                  (entry.metadata != null ? _stackPreviewMetadataHeight : 0),
-            ),
-        ];
+        final cardLayouts = _layoutCards(context, cardWidth);
         final stackHeight = [
           for (var index = 0; index < cardLayouts.length; index++)
             cardLayouts[index].height + (index * 14.0),
@@ -629,12 +684,12 @@ Color _previewBorderColor(
   );
 }
 
-({double height, _StyledPreviewMeasurement? styledMeasurement})
-_measureStackPreviewCard({
+_StackCardLayout _measureStackPreviewCard({
   required BuildContext context,
   required ConnectionPreviewStackEntry entry,
   required double cardWidth,
   required double maxHeight,
+  required _StyledFitCache styledFits,
 }) {
   final textDirection = Directionality.of(context);
   final textScaler = MediaQuery.textScalerOf(context);
@@ -687,6 +742,7 @@ _measureStackPreviewCard({
       columnCount: columnCount,
       maxWidth: previewTextMaxWidth,
       textScaler: textScaler,
+      cache: styledFits,
     );
     final naturalHeight = styledMeasurement.cellSize.height * lineCount;
     previewHeight =
@@ -894,7 +950,18 @@ _StyledPreviewMeasurement _measureStyledPreview({
   required int columnCount,
   required double maxWidth,
   required TextScaler textScaler,
+  _StyledFitCache? cache,
 }) {
+  final key = (
+    theme: terminalTheme,
+    columnCount: columnCount,
+    maxWidth: maxWidth,
+    textScaler: textScaler,
+  );
+  final cached = cache?[key];
+  if (cached != null) {
+    return cached;
+  }
   debugOnStyledPreviewFontFit?.call();
   final fontSize = _fitStyledPreviewFontSize(
     terminalTheme: terminalTheme,
@@ -909,7 +976,14 @@ _StyledPreviewMeasurement _measureStyledPreview({
   );
   final cellSize = painter.cellSize;
   painter.dispose();
-  return (fontSize: fontSize, cellSize: cellSize);
+  final measurement = (fontSize: fontSize, cellSize: cellSize);
+  if (cache != null) {
+    if (cache.length >= _styledFitCacheLimit) {
+      cache.remove(cache.keys.first);
+    }
+    cache[key] = measurement;
+  }
+  return measurement;
 }
 
 int _styledContentColumns(TerminalPreviewSnapshot snapshot) {
