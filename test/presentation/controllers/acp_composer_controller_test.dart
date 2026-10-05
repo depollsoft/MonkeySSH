@@ -303,6 +303,76 @@ void main() {
     },
   );
 
+  test(
+    'parks a rejected prompt restore while a newer send is still preparing',
+    () async {
+      final manager = _RecordingManager();
+      final promptGate = Completer<void>();
+      final uploadGate = Completer<void>();
+      manager
+        ..promptGate = promptGate
+        ..throwOnPrompt = StateError('rejected');
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+        ),
+        uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+        session: _session(embeddedContext: true),
+      )..setText('first');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      controller
+        ..setText('second')
+        ..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'big.txt',
+            bytes: Uint8List.fromList('hello world'.codeUnits),
+            mimeType: 'text/plain',
+          ),
+        )
+        ..enableRemoteUploadFallback();
+      final second = controller.send();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.activity, AcpComposerActivity.preparing);
+
+      // The first prompt is rejected while the second is still uploading.
+      promptGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      uploadGate.complete();
+      expect(await second, isTrue);
+
+      expect(controller.text, 'first');
+      expect(controller.attachments, isEmpty);
+      expect(controller.error?.kind, AcpComposerErrorKind.send);
+    },
+  );
+
+  test('session snapshots notify only when composer-visible state changes', () {
+    final manager = _RecordingManager();
+    final controller = _controller(manager);
+    addTearDown(controller.dispose);
+    var notifications = 0;
+    controller
+      ..addListener(() => notifications++)
+      ..updateSession(_session());
+    expect(notifications, 0);
+
+    controller.updateSession(_session(promptStatus: AcpPromptStatus.streaming));
+    expect(notifications, 1);
+    expect(controller.activity, AcpComposerActivity.streaming);
+
+    controller.updateSession(
+      _session(status: AcpConnectionStatus.reconnecting),
+    );
+    expect(notifications, 2);
+
+    controller.updateSession(_session(image: true));
+    expect(notifications, 3);
+    expect(controller.promptCapabilities.image, isTrue);
+  });
+
   test('cancel while streaming cancels the turn', () async {
     final manager = _RecordingManager();
     final controller = _controller(
