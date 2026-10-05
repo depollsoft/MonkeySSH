@@ -28,6 +28,7 @@ import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_mux_window_status_badge.dart';
@@ -954,6 +955,131 @@ void registerTmuxWindowNavigatorTests() {
           });
         }
       }
+
+      group('bar forwarded notifications', () {
+        late _RecordingNotifications notifications;
+        late StreamController<TmuxWindowChangeEvent> events;
+        const shell = TmuxWindow(
+          index: 0,
+          id: '@1',
+          name: 'shell',
+          isActive: true,
+        );
+        TmuxWindow agent(String id, List<String> payloads, {int first = 1}) =>
+            TmuxWindow(
+              index: int.parse(id.substring(1)),
+              id: id,
+              name: 'agent',
+              isActive: false,
+              pendingNotifications: [
+                for (var i = 0; i < payloads.length; i++)
+                  MuxWindowNotification(seq: first + i, payload: payloads[i]),
+              ],
+            );
+        Future<void> show(WidgetTester tester, List<TmuxWindow> windows) async {
+          events.add(TmuxWindowListEvent([shell, ...windows]));
+          await tester.pumpAndSettle();
+        }
+
+        Future<void> pumpBar(WidgetTester tester) async {
+          notifications = _RecordingNotifications();
+          events = StreamController<TmuxWindowChangeEvent>();
+          addTearDown(events.close);
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) async => [shell]);
+          when(() => tmuxService.watchWindowChanges(session, 'main'))
+              .thenAnswer((_) => events.stream);
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                agentLaunchPresetServiceProvider.overrideWithValue(
+                  presetService,
+                ),
+                localNotificationServiceProvider.overrideWithValue(
+                  notifications,
+                ),
+              ],
+              child: MaterialApp(
+                home: Scaffold(
+                  body: Consumer(
+                    builder: (context, ref, _) =>
+                        buildTmuxExpandableBarTestHost(
+                          ref: ref,
+                          session: session,
+                          remoteMultiplexerService: tmuxService,
+                        ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        testWidgets('multipart state is not shared between windows', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['99;i=1:d=0;Title A']),
+            agent('@3', ['99;i=1:p=body:d=1;Body B']),
+          ]);
+          final shown = notifications.shown.single;
+          expect(shown.body, 'Body B');
+          expect(shown.title, isNot('Title A'));
+          expect(shown.windowId, '@3');
+        });
+
+        testWidgets('closing an older identifier keeps the newer one', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['99;i=a;A']),
+          ]);
+          await show(tester, [
+            agent('@2', ['99;i=a;A', '99;i=b;B']),
+          ]);
+          final nativeId = notifications.shown.last.id;
+          expect(notifications.shown.map((n) => n.body), ['A', 'B']);
+          await show(tester, [
+            agent('@2', ['99;i=a;A', '99;i=b;B', '99;i=a:p=close;']),
+          ]);
+          expect(notifications.cleared, isEmpty);
+          await show(tester, [
+            agent('@2', [
+              '99;i=a;A',
+              '99;i=b;B',
+              '99;i=a:p=close;',
+              '99;i=b:p=close;',
+            ]),
+          ]);
+          expect(notifications.cleared, [nativeId]);
+        });
+
+        testWidgets('a replacement server restarting sequences still notifies', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['99;i=x:d=0;Half', '99;i=y;Old'], first: 19),
+          ]);
+          expect(notifications.shown.map((n) => n.body), ['Old']);
+          // An ordinary refresh re-reports the same sequence without a repeat.
+          await show(tester, [
+            agent('@2', ['99;i=x:d=0;Half', '99;i=y;Old'], first: 19),
+          ]);
+          // The replacement server reuses @2 and counts from 1 again.
+          await show(tester, [
+            agent('@2', ['99;i=x:p=body;Fresh']),
+          ]);
+          expect(notifications.shown.map((n) => n.body), ['Old', 'Fresh']);
+          expect(notifications.shown.last.title, isNot('Half'));
+        });
+      });
 
       final windows = [
         const TmuxWindow(
@@ -2169,3 +2295,29 @@ List<AcpPlanEntry> _halfFinishedPlan(AcpPlanPriority nextPriority) => [
     status: AcpPlanStatus.inProgress,
   ),
 ];
+
+class _RecordingNotifications extends LocalNotificationService {
+  final shown = <({int id, String title, String body, String? windowId})>[];
+  final cleared = <int>[];
+
+  @override
+  Future<void> showTmuxAlert({
+    required int notificationId,
+    required String title,
+    required String body,
+    required TmuxAlertNotificationPayload payload,
+    String? subtitle,
+    TerminalNotificationUrgency? urgency,
+    TerminalNotificationSound? sound,
+    Duration? timeout,
+  }) async => shown.add((
+    id: notificationId,
+    title: title,
+    body: body,
+    windowId: payload.windowId,
+  ));
+
+  @override
+  Future<void> clearTerminalNotification(int notificationId) async =>
+      cleared.add(notificationId);
+}
