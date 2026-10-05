@@ -207,6 +207,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_checkIncomingTransferPayload());
+      // Best effort: a failed check keeps the cached entitlement.
+      unawaited(
+        ref
+            .read(monetizationServiceProvider)
+            .refreshStoreEntitlement()
+            .catchError((Object _) {}),
+      );
     }
   }
 
