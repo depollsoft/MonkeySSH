@@ -59,6 +59,14 @@ class AgentRuntimeDefinition {
     this.windowsInstallerUrl,
     this.selfUpdateArguments = const [],
     this.sharesCliInstallation = false,
+    this.versionEnvironment = const {},
+    this.updateEnvironment = const {},
+    this.syncUpdateEnvironment = const {},
+    this.posixVersionFallback,
+    this.repairScript,
+    this.officialVersionLookup,
+    this.latestVersionUrlPlatformSuffix = false,
+    this.legacyInstallation,
   });
 
   /// Stable runtime identifier.
@@ -102,6 +110,49 @@ class AgentRuntimeDefinition {
 
   /// Whether this adapter ships as part of its agent CLI.
   final bool sharesCliInstallation;
+
+  /// Environment applied to the version probe (for example to keep a launcher
+  /// from updating itself while it is only asked for its version).
+  final Map<String, String> versionEnvironment;
+
+  /// Environment applied to the POSIX self-update command.
+  final Map<String, String> updateEnvironment;
+
+  /// Environment that makes the launcher's own version probe perform a
+  /// synchronous update. When set, the launcher owns updates: MonkeySSH runs
+  /// `<executable> versionArguments` with this environment instead of
+  /// installing a second copy.
+  final Map<String, String> syncUpdateEnvironment;
+
+  /// Shell snippet that fills `version_output` when the version command
+  /// prints nothing (for example from an installer symlink).
+  final String? posixVersionFallback;
+
+  /// Node script that finishes a half-installed npm package, invoked with the
+  /// detected executable path. Runtimes with a script are auto-repaired after
+  /// an update leaves them in [AgentRuntimeStatus.needsRepair].
+  final String? repairScript;
+
+  /// Official release metadata read as data for latest-version checks.
+  final ({String url, String pattern})? officialVersionLookup;
+
+  /// Whether [officialVersionLookup] is a manifest directory that needs the
+  /// remote `<os>_<arch>.json` platform file appended.
+  final bool latestVersionUrlPlatformSuffix;
+
+  /// Installed versions below [belowVersion] cannot be updated in place; the
+  /// user is shown [message] instead.
+  final ({String belowVersion, String message})? legacyInstallation;
+
+  /// Whether the launcher performs its own updates (see
+  /// [syncUpdateEnvironment]).
+  bool get launcherOwnsUpdates => syncUpdateEnvironment.isNotEmpty;
+
+  /// Key of this runtime in usage probes, cooldowns, and the usage cache.
+  ///
+  /// The CLI and ACP definitions of one agent share the same key.
+  String? get usageId =>
+      tool == null ? null : id.substring(id.indexOf(':') + 1);
 
   /// Whether MonkeySSH can install or update this runtime automatically.
   bool get supportsManagedInstall =>
