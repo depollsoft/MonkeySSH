@@ -127,9 +127,6 @@ class _NoOpLocalNotificationService extends LocalNotificationService {
     TerminalNotificationSound? sound,
     Duration? timeout,
   }) async {}
-
-  @override
-  Future<void> clearTmuxAlert(int notificationId) async {}
 }
 
 class _ScreenshotTarget {

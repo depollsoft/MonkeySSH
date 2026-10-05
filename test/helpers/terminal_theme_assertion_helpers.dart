@@ -1,7 +1,5 @@
 // ignore_for_file: implementation_imports, public_member_api_docs
 
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
