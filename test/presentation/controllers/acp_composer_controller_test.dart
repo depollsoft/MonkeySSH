@@ -11,55 +11,9 @@ import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
-import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
-import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
-import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_controller.dart';
 
-class _FakeConnector extends Fake implements AcpBridgeConnector {}
-
-class _FakeProviderService extends Fake implements AcpProviderService {}
-
-class _FakeRecent extends Fake implements AcpRecentSessionsService {}
-
-class _RecordingManager extends AcpSessionManager {
-  _RecordingManager()
-    : super(
-        connector: _FakeConnector(),
-        providerService: _FakeProviderService(),
-        recentSessions: _FakeRecent(),
-        isProUnlocked: () => true,
-      );
-
-  final List<List<AcpContentBlock>> prompts = <List<AcpContentBlock>>[];
-  int cancelCount = 0;
-  Object? throwOnPrompt;
-  Completer<void>? promptGate;
-
-  @override
-  Future<AcpPromptResult> prompt(
-    AcpSessionKey key,
-    List<AcpContentBlock> content,
-  ) async {
-    prompts.add(content);
-    final gate = promptGate;
-    if (gate != null) {
-      await gate.future;
-    }
-    final error = throwOnPrompt;
-    if (error != null) {
-      // ignore: only_throw_errors
-      throw error;
-    }
-    return const AcpPromptResult(stopReason: AcpStopReason.endTurn);
-  }
-
-  @override
-  Future<void> cancelPrompt(AcpSessionKey key) async {
-    cancelCount++;
-  }
-}
+import '../../support/fake_acp_session_manager.dart';
 
 class _ThrowingUploader implements AcpAttachmentUploader {
   @override
@@ -157,7 +111,7 @@ AcpSessionState _session({
 }
 
 AcpComposerController _controller(
-  _RecordingManager manager, {
+  RecordingAcpSessionManager manager, {
   AcpAttachmentPreparationService? preparation,
   AcpAttachmentUploader? Function()? uploaderBuilder,
   AcpSessionState? session,
@@ -183,7 +137,7 @@ Uint8List _png() => Uint8List.fromList(<int>[
 
 void main() {
   test('cannot send without content or when disconnected', () {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(manager);
     addTearDown(controller.dispose);
     expect(controller.canSend, isFalse);
@@ -199,7 +153,7 @@ void main() {
 
   test('successful send snapshots atomically, clears on queue, and permits '
       'the next draft', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(manager, session: _session(image: true))
       ..setText('do the thing');
     addTearDown(controller.dispose);
@@ -235,7 +189,7 @@ void main() {
   });
 
   test('unexpected preparation failure preserves an editable draft', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(
       manager,
       uploaderBuilder: _ThrowingUploader.new,
@@ -260,7 +214,7 @@ void main() {
   });
 
   test('preserves mixed attachment ordering in the prepared content', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(
       manager,
       session: _session(image: true, embeddedContext: true),
@@ -291,7 +245,8 @@ void main() {
   test(
     'restores queued input and surfaces a send error when submission fails',
     () async {
-      final manager = _RecordingManager()..throwOnPrompt = StateError('boom');
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = StateError('boom');
       final controller = _controller(manager)..setText('keep me');
       addTearDown(controller.dispose);
 
@@ -304,7 +259,7 @@ void main() {
   );
 
   test('cancel while streaming cancels the turn', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(
       manager,
       session: _session(promptStatus: AcpPromptStatus.streaming),
@@ -317,7 +272,7 @@ void main() {
   });
 
   test('rejects oversize and over-count attachments before accepting', () {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(
       manager,
       preparation: const AcpAttachmentPreparationService(
@@ -362,7 +317,7 @@ void main() {
 
   group('slash commands', () {
     test('activates and inserts a command', () {
-      final manager = _RecordingManager();
+      final manager = RecordingAcpSessionManager();
       final controller = _controller(
         manager,
         session: _session(
@@ -382,7 +337,7 @@ void main() {
     });
 
     test('reflects dynamically reloaded commands', () {
-      final manager = _RecordingManager();
+      final manager = RecordingAcpSessionManager();
       final controller = _controller(manager)..setText('/b');
       addTearDown(controller.dispose);
       expect(controller.slashCommands, isEmpty);
@@ -399,7 +354,7 @@ void main() {
   });
 
   test('reports upload progress on the affected attachment', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final gate = Completer<void>();
     final controller = _controller(
       manager,
@@ -435,7 +390,7 @@ void main() {
   test(
     'cancelling during preparation retains input without an error',
     () async {
-      final manager = _RecordingManager();
+      final manager = RecordingAcpSessionManager();
       final gate = Completer<void>();
       final controller = _controller(
         manager,
@@ -470,7 +425,7 @@ void main() {
   );
 
   test('accepts a new draft while the submitted snapshot is active', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final gate = Completer<void>();
     manager.promptGate = gate;
     final controller = _controller(manager)..setText('snapshot');
@@ -499,7 +454,7 @@ void main() {
   });
 
   test('accepts draft mutations while a turn is streaming', () {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(
       manager,
       session: _session(promptStatus: AcpPromptStatus.streaming),
@@ -513,7 +468,7 @@ void main() {
   });
 
   test('does not mutate or notify after dispose mid-send', () async {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final gate = Completer<void>();
     manager.promptGate = gate;
     final controller = _controller(manager)..setText('hi');
