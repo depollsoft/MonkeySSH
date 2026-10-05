@@ -504,14 +504,6 @@ func sameAgentLaunchDevice(a, b os.FileInfo) bool {
 	return leftOK && rightOK && left == right
 }
 
-func agentLaunchToolSupported(tool string) bool {
-	switch tool {
-	case "claude", "codex", "opencode", "copilot", "cursor-agent":
-		return true
-	}
-	return false
-}
-
 // Keep offsets into the original command so prefixes and arguments survive
 // rewriting byte for byte, including shell quoting and trailing whitespace.
 func agentLaunchExecutableOffset(command string) int {
