@@ -12,6 +12,7 @@ import '../models/auto_connect_command.dart'
 import 'diagnostics_log_service.dart';
 
 final _sftpWindowsDriveRootPattern = RegExp(r'^/?[A-Za-z]:(?:/|$)');
+final _windowsDriveSftpPathPattern = RegExp(r'^/?[A-Za-z]:(?:[/\\]|$)');
 
 /// Display path for files pasted directly into a terminal session.
 const remoteClipboardUploadDirectoryDisplay = '~/.cache/monkeyssh/uploads';
@@ -126,7 +127,7 @@ bool isSftpPathRoot(String remotePath) {
 
 /// Returns the parent directory for an absolute SFTP path.
 String parentSftpPath(String remotePath) {
-  final normalizedPath = normalizeSftpAbsolutePath(remotePath);
+  final normalizedPath = _collapseSftpPath(remotePath);
   if (normalizedPath == null) {
     final parent = path.posix.dirname(_normalizeSftpPathSeparators(remotePath));
     return parent.isEmpty || parent == '.' ? '/' : parent;
@@ -155,6 +156,12 @@ String parentSftpPath(String remotePath) {
 }
 
 /// Joins a remote directory and child name into a normalized absolute path.
+///
+/// The join is lossless for names the server returns: on POSIX paths it keeps
+/// surrounding whitespace and literal backslashes, which are valid filename
+/// characters. Only Windows drive paths convert `\` to `/`. User-entered
+/// paths belong in [resolveRequestedSftpPath] or [normalizeSftpAbsolutePath],
+/// which also trim and accept either separator.
 String joinRemotePath(
   String directory,
   String name, {
@@ -164,23 +171,32 @@ String joinRemotePath(
     return _joinWindowsRemotePath(directory, name);
   }
 
-  final baseDirectory =
-      normalizeSftpAbsolutePath(directory) ??
-      (directory.isEmpty ? '/' : _normalizeSftpPathSeparators(directory));
-  final nameWithRemoteSeparators =
-      _splitSftpWindowsDriveRoot(baseDirectory) == null
-      ? name
-      : _normalizeSftpPathSeparators(name);
-  final cleanName = nameWithRemoteSeparators.replaceFirst(RegExp('^/+'), '');
-  final joined = path.posix.join(baseDirectory, cleanName);
-  final normalized = normalizeSftpAbsolutePath(joined);
-  if (normalized != null) {
-    return normalized;
+  final base = directory.startsWith('/') || _isWindowsDriveSftpPath(directory)
+      ? directory
+      : '/$directory';
+  return _collapseSftpPath('$base/${name.replaceFirst(RegExp('^/+'), '')}')!;
+}
+
+bool _isWindowsDriveSftpPath(String remotePath) =>
+    _windowsDriveSftpPathPattern.hasMatch(remotePath);
+
+/// Collapses `.`, `..`, and repeated `/` without trimming. Treats `\` as a
+/// separator only in Windows drive paths. Returns null for relative paths.
+String? _collapseSftpPath(String remotePath) {
+  if (_isWindowsDriveSftpPath(remotePath)) {
+    final windowsRoot = _splitSftpWindowsDriveRoot(
+      _normalizeSftpPathSeparators(remotePath),
+    )!;
+    final segments = _normalizeSftpPathSegments(windowsRoot.rest);
+    return segments.isEmpty
+        ? windowsRoot.root
+        : '${windowsRoot.root}${segments.join('/')}';
   }
-  final normalizedRelative = path.posix.normalize(joined);
-  return normalizedRelative.startsWith('/')
-      ? normalizedRelative
-      : '/$normalizedRelative';
+  if (!remotePath.startsWith('/')) {
+    return null;
+  }
+  final segments = _normalizeSftpPathSegments(remotePath);
+  return segments.isEmpty ? '/' : '/${segments.join('/')}';
 }
 
 String _joinWindowsRemotePath(String directory, String name) {
@@ -208,27 +224,15 @@ String remoteShellPathForSftpPath(String sftpPath, {required bool windows}) =>
     windows ? sftpPathToWindowsShellPath(sftpPath) : sftpPath;
 
 /// Normalizes an absolute remote path by collapsing `.`, `..`, and extra `/`.
+///
+/// Meant for user-entered and shell-reported paths: it trims whitespace and
+/// treats `\` as a separator. Use [joinRemotePath] for server-returned names.
 String? normalizeSftpAbsolutePath(String? remotePath) {
   final trimmedPath = remotePath?.trim();
   if (trimmedPath == null || trimmedPath.isEmpty) {
     return null;
   }
-
-  final normalizedSeparators = _normalizeSftpPathSeparators(trimmedPath);
-  final windowsRoot = _splitSftpWindowsDriveRoot(normalizedSeparators);
-  if (windowsRoot != null) {
-    final segments = _normalizeSftpPathSegments(windowsRoot.rest);
-    return segments.isEmpty
-        ? windowsRoot.root
-        : '${windowsRoot.root}${segments.join('/')}';
-  }
-
-  if (!normalizedSeparators.startsWith('/')) {
-    return null;
-  }
-
-  final segments = _normalizeSftpPathSegments(normalizedSeparators);
-  return segments.isEmpty ? '/' : '/${segments.join('/')}';
+  return _collapseSftpPath(_normalizeSftpPathSeparators(trimmedPath));
 }
 
 /// Resolves a requested SFTP path against terminal context.
@@ -612,6 +616,17 @@ class RemoteFileService {
           SftpFileOpenMode.create |
           SftpFileOpenMode.truncate,
     );
+    await _writeAndClose(remoteFile, stream, onProgress);
+    if (applyPrivateMode) {
+      await sftp.setStat(remotePath, SftpFileAttrs(mode: remoteUploadFileMode));
+    }
+  }
+
+  Future<void> _writeAndClose(
+    SftpFile remoteFile,
+    Stream<List<int>> stream,
+    FutureOr<void> Function(int uploadedBytes)? onProgress,
+  ) async {
     try {
       // dartssh2's stream writer does not forward source-stream or async
       // chunk-write failures to .done. Own both futures here instead.
@@ -643,9 +658,6 @@ class RemoteFileService {
       Error.throwWithStackTrace(error, stackTrace);
     }
     await remoteFile.close();
-    if (applyPrivateMode) {
-      await sftp.setStat(remotePath, SftpFileAttrs(mode: remoteUploadFileMode));
-    }
   }
 
   /// Uploads raw bytes into a remote file path.
