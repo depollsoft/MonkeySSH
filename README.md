@@ -80,7 +80,7 @@ Store releases target iPhone, iPad, and Android. The app is built with Flutter a
 ## Development
 
 ```bash
-./scripts/ensure_monkeymux_assets.sh
+./scripts/build_monkeymux_assets.sh
 flutter pub get
 dart run build_runner build
 flutter analyze
