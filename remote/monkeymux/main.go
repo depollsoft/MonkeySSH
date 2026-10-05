@@ -435,6 +435,9 @@ func (w *muxWindow) resizePtyIfCurrent(
 	}
 }
 
+// closePty closes ptyFile once. The Windows exit drain closes the pseudo
+// console while the window is still registered and retirement closes it
+// again, so a second close of the same handle is a no-op.
 func (w *muxWindow) closePty(ptyFile muxPty) error {
 	if w == nil || ptyFile == nil {
 		return nil
@@ -442,6 +445,10 @@ func (w *muxWindow) closePty(ptyFile muxPty) error {
 	w.resizeGeneration.Add(1)
 	w.ptyResizeMu.Lock()
 	defer w.ptyResizeMu.Unlock()
+	if w.closedPty == ptyFile {
+		return nil
+	}
+	w.closedPty = ptyFile
 	return ptyFile.Close()
 }
 
@@ -778,6 +785,8 @@ type muxWindow struct {
 	paneTitle                   string
 	pty                         muxPty
 	ptyResizeMu                 sync.Mutex
+	// closedPty is the handle closePty already closed; guarded by ptyResizeMu.
+	closedPty muxPty
 	ptyWidth                    int
 	ptyHeight                   int
 	resizeGeneration            atomic.Uint64

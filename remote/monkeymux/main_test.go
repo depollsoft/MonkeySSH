@@ -13417,3 +13417,33 @@ func TestInPlaceRedrawIsCreditedToTheLiveForegroundGroup(t *testing.T) {
 		t.Fatalf("redraw credited to %d, foreground %d", window.inPlaceRedrawPid, window.foregroundPid)
 	}
 }
+
+type countingClosePty struct {
+	muxPty
+	closes int
+}
+
+func (p *countingClosePty) Close() error { p.closes++; return nil }
+
+func TestClosePtyClosesEachHandleOnce(t *testing.T) {
+	// The Windows exit drain closes the pseudo console before retirement
+	// closes it again; the second close must not reach the handle.
+	pty := &countingClosePty{}
+	window := &muxWindow{pty: pty}
+	if err := window.closePty(pty); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.closePty(pty); err != nil {
+		t.Fatal(err)
+	}
+	if pty.closes != 1 {
+		t.Fatalf("closes = %d, want 1", pty.closes)
+	}
+	replacement := &countingClosePty{}
+	if err := window.closePty(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if replacement.closes != 1 {
+		t.Fatalf("replacement closes = %d, want 1", replacement.closes)
+	}
+}
