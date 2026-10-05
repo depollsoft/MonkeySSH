@@ -6951,7 +6951,7 @@ func TestActiveReplayIncludesWindowHistory(t *testing.T) {
 	server.mu.Lock()
 	replay := server.activeReplayLocked()
 	server.mu.Unlock()
-	server.writeAttach(attach, replay)
+	server.writeAttach(replay)
 
 	window := server.windows[0]
 	want := replayPrefixForTest(window) + "previous screen" +
@@ -8418,7 +8418,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 	chunk := []byte("plain text without queries\x1b]2;Title\x07")
 	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8427,7 +8427,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 func TestStripLocallyAnsweredThemeQueriesIsNoopWithoutHint(t *testing.T) {
 	chunk := []byte("\x1b]11;?\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, nil)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, nil)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8440,7 +8440,7 @@ func TestStripLocallyAnsweredThemeQueriesStripsAnsweredQuery(t *testing.T) {
 			"\x1b]4;5;rgb:aaaa/bbbb/cccc\x1b\\",
 	)
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != "beforemiddleafter" {
 		t.Fatalf("got = %q, want %q", got, "beforemiddleafter")
 	}
@@ -8501,7 +8501,7 @@ func TestStripLocallyAnsweredThemeQueriesPreservesOsc8Hyperlinks(t *testing.T) {
 
 	want := "\x1b]8;;https://example.com/a\x07A\x1b]8;;\x07 " +
 		"\x1b]8;id=1;file:///tmp/x\x1b\\B\x1b]8;;\x1b\\"
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != want {
 		t.Fatalf("got = %q, want %q", got, want)
 	}

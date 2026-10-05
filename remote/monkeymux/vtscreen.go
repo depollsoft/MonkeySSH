@@ -1857,11 +1857,6 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 	g.pendingWrap = false
 }
 
-// blankRow erases with the current background (bce), as xterm does.
-func (s *terminalScreen) blankRow() []vtCell {
-	return s.clearRow(newVTRow(s.width))
-}
-
 // clearRow blanks a row in place with the current background.
 func (s *terminalScreen) clearRow(row []vtCell) []vtCell {
 	blank := s.blankCell()

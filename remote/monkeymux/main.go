@@ -10172,7 +10172,7 @@ func (s *muxServer) resizeWithRedraw(
 			s.writeAllAttachesLocked(modeReplay)
 		}
 	} else {
-		s.writeAttach(attach, modeReplay)
+		s.writeAttach(modeReplay)
 	}
 	if shouldSignal {
 		signalForegroundResize(foregroundProcessGroup)
@@ -10666,35 +10666,14 @@ func (w *muxWindow) modeReplayForAttachedTerminalLocked() []byte {
 	return replay
 }
 
-func (s *muxServer) activeReplayLocked() []byte {
-	replay, _ := s.activeReplayWithImageFollowUpLocked()
-	return replay
-}
-
-// activeReplayWithImageFollowUpLocked is activeReplayLocked plus the separate
-// store-only Kitty transmissions to enqueue behind that replay.
+// activeReplayWithImageFollowUpLocked returns the active window's reattach
+// replay plus the separate store-only Kitty transmissions to enqueue behind it.
 func (s *muxServer) activeReplayWithImageFollowUpLocked() ([]byte, []byte) {
 	window := s.windowByIDLocked(s.activeID)
 	if window == nil || window.closed {
 		return nil, nil
 	}
 	return s.replayBytesWithImageFollowUpLocked(window, nil)
-}
-
-func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
-	return replay
-}
-
-// replayBytesLockedWithSkip builds the reattach replay, omitting retained Kitty
-// images whose id/signature the client reports already holding in clientHas
-// (nil replays every retained image, as a fresh attach does).
-func (s *muxServer) replayBytesLockedWithSkip(
-	window *muxWindow,
-	clientHas map[string]uint32,
-) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, clientHas)
-	return replay
 }
 
 // replayBytesWithImageFollowUpLocked returns the reattach replay plus the
@@ -11141,7 +11120,7 @@ func containsString(values []string, value string) bool {
 	return false
 }
 
-func (s *muxServer) writeAttach(conn net.Conn, data []byte) {
+func (s *muxServer) writeAttach(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -13334,25 +13313,6 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 	}.isGround()
 }
 
-// stripLocallyAnsweredThemeQueries removes OSC 10/11/12/17/19 background-color
-// queries and OSC 4 palette queries from chunk when MonkeyMux can answer them
-// locally from hint. The daemon already writes the cached responses directly
-// to the window PTY in handleWindowOutput, so forwarding the same queries to
-// the SSH client would produce a duplicate reply. That duplicate would travel
-// back through the attach socket as keyboard input and surface inside the
-// active TUI as literal text (the user-visible "spew" bug). Queries we cannot
-// answer (no cached response for every queried key) are left in place so the
-// client can still reply.
-func stripLocallyAnsweredThemeQueries(chunk []byte, hint []byte) []byte {
-	window := &muxWindow{}
-	output := window.stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
-	if len(window.attachOscBuffer) == 0 {
-		return output
-	}
-	output = append(output, window.attachOscBuffer...)
-	return output
-}
-
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
 		return chunk
@@ -14320,24 +14280,18 @@ func computeKittyImageGlobalBudgetBytes() int {
 	return budget
 }
 
-// kittyImageReplayLocked returns the most-recent retained image transmissions,
-// bounded by count and bytes, so a reattaching client repopulates the images
-// most likely still on screen without decoding many megabytes on its UI thread.
-// Older retained transmissions are omitted; the foreground app re-emits them on
-// its next redraw if they are still visible.
+// kittyImageReplaySelectionLocked returns the most-recent retained image
+// transmissions, bounded by count and bytes, so a reattaching client
+// repopulates the images most likely still on screen without decoding many
+// megabytes on its UI thread. Older retained transmissions are omitted; the
+// foreground app re-emits them on its next redraw if they are still visible.
+// The set of roots it emitted lets a caller that needs more images (a rendered
+// frame whose placeholder cells point at older roots) skip the ones covered.
 //
 // Images whose id maps to a matching signature in clientHas are omitted: the
 // client already holds identical bytes and would re-parse (then discard) them,
 // so re-sending only adds switch latency. The id still counts against the caps
 // so the "most recent N" window is unchanged whether or not the client has them.
-func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
-	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
-	return out
-}
-
-// kittyImageReplaySelectionLocked is kittyImageReplayLocked plus the set of
-// roots it emitted, so a caller that needs more images (a rendered frame whose
-// placeholder cells point at older roots) can skip the ones already covered.
 func (w *muxWindow) kittyImageReplaySelectionLocked(
 	clientHas map[string]uint32,
 ) ([]byte, map[string]struct{}) {
@@ -15642,18 +15596,32 @@ func (w *muxWindow) agentToolLocked() string {
 	if tool := agentToolFromCommandName(w.currentCommandLocked()); tool != "" {
 		return tool
 	}
-	if tool := strings.TrimSpace(w.agentTool); tool != "" {
+	return agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
+}
+
+// agentToolFromRetainedMetadata identifies the agent from what a window
+// retains when no live command names it: the recorded tool, then the pane
+// title and window name unless the tool was confirmed to have retired.
+func agentToolFromRetainedMetadata(
+	agentTool string,
+	confirmed bool,
+	paneTitle string,
+	name string,
+) string {
+	if tool := strings.TrimSpace(agentTool); tool != "" {
 		return tool
 	}
 	// A restored retired agent is now a known shell, even if its retained
 	// title/name resembles another tool. Live commands still win above.
-	if w.agentToolConfirmed {
+	if confirmed {
 		return ""
 	}
-	if tool := agentToolFromTerminalTitle(w.paneTitle); tool != "" {
+	if tool := agentToolFromTerminalTitle(paneTitle); tool != "" {
 		return tool
 	}
-	return agentToolFromCommandName(w.name)
+	return agentToolFromCommandName(name)
 }
 
 func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
@@ -15706,10 +15674,9 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	pgrp := w.foregroundProcessGroupLocked()
 	pty, process := w.pty, w.proc
 	identity := w.broadcastIdentityLocked()
-	fallbackTool := (&muxWindow{
-		agentTool: w.agentTool, agentToolConfirmed: w.agentToolConfirmed,
-		paneTitle: w.paneTitle, name: w.name,
-	}).agentToolLocked()
+	fallbackTool := agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
 	sessionID := w.agentSessionID
 	sessionPath := w.agentSessionPath
 	bridgeID := w.nativeAcpBridgeID

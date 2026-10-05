@@ -329,3 +329,23 @@ func redrawFallbackHistory(window *muxWindow) []byte {
 	}
 	return window.redrawForwardingFallbackScreen.RenderFrame()
 }
+
+// activeReplayLocked is the active window's reattach replay without the
+// store-only image follow-up.
+func (s *muxServer) activeReplayLocked() []byte {
+	replay, _ := s.activeReplayWithImageFollowUpLocked()
+	return replay
+}
+
+// replayBytesLocked is window's reattach replay without the store-only image
+// follow-up.
+func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
+	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
+	return replay
+}
+
+// kittyImageReplayLocked is the retained-image replay without its root set.
+func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
+	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
+	return out
+}
