@@ -87,6 +87,7 @@ class FakeAcpSessionManager extends AcpSessionManager {
   /// exhausted, a safe failure is returned.
   final List<AcpSessionLaunchResult> forkResults = <AcpSessionLaunchResult>[];
   int forkCount = 0;
+  final List<List<AcpSessionKey>> forkReplaceKeys = <List<AcpSessionKey>>[];
 
   /// Result returned by [startNewSession]; defaults to a safe failure.
   AcpSessionLaunchResult startNewSessionResult = const AcpSessionLaunchFailed(
@@ -282,8 +283,13 @@ class FakeAcpSessionManager extends AcpSessionManager {
   }
 
   @override
-  Future<AcpSessionLaunchResult> forkSession(AcpSessionKey key) async {
+  Future<AcpSessionLaunchResult> forkSession(
+    AcpSessionKey key, {
+    List<AcpSessionKey> replace = const <AcpSessionKey>[],
+  }) async {
     forkCount++;
+    forkReplaceKeys.add(List<AcpSessionKey>.unmodifiable(replace));
+    stopped.addAll(replace.map((key) => key.value));
     if (forkResults.isNotEmpty) {
       return forkResults.removeAt(0);
     }

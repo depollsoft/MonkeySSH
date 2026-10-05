@@ -215,10 +215,9 @@ class AcpComposerController extends ChangeNotifier {
   AcpAttachmentCancellationToken? _cancellation;
   AcpComposerError? _error;
 
-  // Monotonic id of the current send operation. Bumped when a send starts so
-  // any awaited continuation from a superseded (or post-dispose) operation can
-  // detect that it is stale and avoid mutating state or notifying listeners.
-  var _operation = 0;
+  // A rejected prompt's draft, held while a newer send is still preparing so
+  // that send's clear cannot wipe the restored text and attachments.
+  ({String text, List<AcpComposerAttachment> attachments})? _pendingRestore;
 
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
@@ -256,13 +255,8 @@ class AcpComposerController extends ChangeNotifier {
 
   /// The coarse activity state of the primary action.
   AcpComposerActivity get activity {
-    switch (_sendState) {
-      case _SendState.preparing:
-        return AcpComposerActivity.preparing;
-      case _SendState.submitting:
-        return AcpComposerActivity.sending;
-      case _SendState.idle:
-        break;
+    if (_sendState == _SendState.preparing) {
+      return AcpComposerActivity.preparing;
     }
     return switch (_session?.promptStatus) {
       AcpPromptStatus.sending => AcpComposerActivity.sending,
@@ -297,8 +291,6 @@ class AcpComposerController extends ChangeNotifier {
   /// preparation briefly locks mutation of the snapshot being prepared.
   bool get isEditable => !_disposed && _sendState == _SendState.idle;
 
-  bool _isStale(int generation) => _disposed || generation != _operation;
-
   /// Updates the composer text and caret, recomputing the slash query.
   void setText(String value, {int? caret}) {
     if (!isEditable) {
@@ -318,16 +310,35 @@ class AcpComposerController extends ChangeNotifier {
   ///
   /// Callers wire this to the session's state stream so slash commands, prompt
   /// capabilities, and the streaming/idle activity stay live.
+  ///
+  /// Listeners are only notified when something the composer reads changed:
+  /// a streaming pump that touches only the timeline is ignored.
   void updateSession(AcpSessionState? session) {
-    final commandsChanged = !identical(
-      _session?.availableCommands,
+    if (_applySession(session)) {
+      notifyListeners();
+    }
+  }
+
+  bool _applySession(AcpSessionState? session) {
+    final previous = _session;
+    _session = session;
+    // Snapshots re-wrap the command list, so compare contents rather than
+    // list identity; the commands themselves are reused between snapshots.
+    final commandsChanged = !listEquals(
+      previous?.availableCommands,
       session?.availableCommands,
     );
-    _session = session;
     if (commandsChanged) {
       _recomputeSlash();
     }
-    notifyListeners();
+    final previousPrompt = previous?.capabilities.prompt;
+    final prompt = session?.capabilities.prompt;
+    return commandsChanged ||
+        previous?.status != session?.status ||
+        previous?.promptStatus != session?.promptStatus ||
+        previousPrompt?.image != prompt?.image ||
+        previousPrompt?.audio != prompt?.audio ||
+        previousPrompt?.embeddedContext != prompt?.embeddedContext;
   }
 
   /// Rebinds this draft to [sessionKey] after a resumed ACP session recreates
@@ -337,7 +348,8 @@ class AcpComposerController extends ChangeNotifier {
     required AcpSessionState? session,
   }) {
     _sessionKey = sessionKey;
-    updateSession(session);
+    _applySession(session);
+    notifyListeners();
   }
 
   /// Adds [candidate] as an ordered attachment.
@@ -491,7 +503,6 @@ class AcpComposerController extends ChangeNotifier {
       return false;
     }
 
-    final generation = ++_operation;
     final snapshotText = _text.trim();
     final snapshotAttachments = List<AcpComposerAttachment>.of(_attachments);
     final draft = AcpPromptDraft(<AcpPromptDraftItem>[
@@ -520,64 +531,59 @@ class AcpComposerController extends ChangeNotifier {
         onUploadProgress: _onUploadProgress,
       );
     } on AcpAttachmentException catch (exception) {
-      if (_isStale(generation)) {
+      if (_disposed) {
         return false;
       }
       _cancellation = null;
       _sendState = _SendState.idle;
       _applyAttachmentFailure(exception);
+      _applyPendingRestore();
       notifyListeners();
       return false;
     } on Object {
-      if (_isStale(generation)) {
+      if (_disposed) {
         return false;
       }
       _cancellation = null;
       _sendState = _SendState.idle;
       _markAttachments(AcpComposerAttachmentStatus.ready, clearProgress: true);
-      _setError(
-        const AcpComposerError(
-          AcpComposerErrorKind.send,
-          'Your message could not be prepared. Try again.',
-        ),
+      _error = const AcpComposerError(
+        AcpComposerErrorKind.send,
+        'Your message could not be prepared. Try again.',
       );
+      _applyPendingRestore();
       notifyListeners();
       return false;
     }
 
-    if (_isStale(generation)) {
+    if (_disposed) {
       return false;
     }
     _cancellation = null;
-    _sendState = _SendState.submitting;
+    _sendState = _SendState.idle;
     _markAttachments(AcpComposerAttachmentStatus.ready, clearProgress: true);
-    notifyListeners();
 
     final Future<AcpPromptResult> promptFuture;
     try {
       promptFuture = _manager.prompt(sessionKey, content);
     } on Object {
-      if (_isStale(generation)) {
+      if (_disposed) {
         return false;
       }
-      _sendState = _SendState.idle;
-      _setError(
-        const AcpComposerError(
-          AcpComposerErrorKind.send,
-          'Your message could not be sent. Try again.',
-        ),
-      );
+      _error = _sendFailedError;
+      _applyPendingRestore();
+      notifyListeners();
       return false;
     }
 
-    if (_isStale(generation)) {
+    if (_disposed) {
       return true;
     }
-    _sendState = _SendState.idle;
     _text = '';
     _caret = 0;
     _attachments.clear();
     _error = null;
+    _applyPendingRestore();
     _recomputeSlash();
     notifyListeners();
     unawaited(
@@ -597,28 +603,54 @@ class AcpComposerController extends ChangeNotifier {
       if (_disposed) {
         return;
       }
-      if (snapshotText.isNotEmpty) {
-        _text = _text.trim().isEmpty ? snapshotText : '$snapshotText\n\n$_text';
-        _caret = _text.length;
+      if (_sendState != _SendState.idle) {
+        // A newer send is still preparing and will clear the draft when it
+        // finishes; restore after that so the rejected draft survives.
+        _pendingRestore = (
+          text: snapshotText,
+          attachments: snapshotAttachments,
+        );
+        return;
       }
-      final currentIds = _attachments
-          .map((attachment) => attachment.id)
-          .toSet();
-      _attachments.insertAll(
-        0,
-        snapshotAttachments.where(
-          (attachment) => !currentIds.contains(attachment.id),
-        ),
-      );
-      _setError(
-        const AcpComposerError(
-          AcpComposerErrorKind.send,
-          'Your message could not be sent. Try again.',
-        ),
-      );
+      _error = null;
+      _restoreSnapshot(snapshotText, snapshotAttachments);
       _recomputeSlash();
       notifyListeners();
     }
+  }
+
+  static const _sendFailedError = AcpComposerError(
+    AcpComposerErrorKind.send,
+    'Your message could not be sent. Try again.',
+  );
+
+  /// Merges a rejected prompt back into the draft. A failure the current send
+  /// already reported stays visible; otherwise the send error is shown.
+  void _restoreSnapshot(
+    String snapshotText,
+    List<AcpComposerAttachment> snapshotAttachments,
+  ) {
+    if (snapshotText.isNotEmpty) {
+      _text = _text.trim().isEmpty ? snapshotText : '$snapshotText\n\n$_text';
+      _caret = _text.length;
+    }
+    final currentIds = _attachments.map((attachment) => attachment.id).toSet();
+    _attachments.insertAll(
+      0,
+      snapshotAttachments.where(
+        (attachment) => !currentIds.contains(attachment.id),
+      ),
+    );
+    _error ??= _sendFailedError;
+  }
+
+  void _applyPendingRestore() {
+    final restore = _pendingRestore;
+    if (restore == null) {
+      return;
+    }
+    _pendingRestore = null;
+    _restoreSnapshot(restore.text, restore.attachments);
   }
 
   /// Cancels the in-flight preparation or streaming turn.
@@ -713,4 +745,4 @@ class AcpComposerController extends ChangeNotifier {
   }
 }
 
-enum _SendState { idle, preparing, submitting }
+enum _SendState { idle, preparing }

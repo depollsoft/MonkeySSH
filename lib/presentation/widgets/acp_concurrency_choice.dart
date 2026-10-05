@@ -9,12 +9,16 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/services/acp_concurrency_policy.dart';
 import '../../domain/services/acp_session_manager.dart';
+import '../../domain/services/monetization_service.dart';
 import 'acp_session_presentation.dart';
 
 /// The choice a user made in response to a concurrency block.
@@ -65,6 +69,56 @@ Future<AcpConcurrencyChoice?> showAcpConcurrencyChoice(
     }),
   );
   return sheet.whenComplete(() => sheetOpen = false);
+}
+
+/// Resolves a free-tier concurrency block the shared way: offer the choice
+/// sheet, then relaunch through [relaunch] with the blocking sessions to
+/// replace (stop-and-continue) or none (after a completed Pro unlock).
+///
+/// Returns `null` when the user dismisses the sheet, leaves the upgrade flow
+/// without unlocking, or the owning widget is gone.
+Future<AcpSessionLaunchResult?> resolveAcpConcurrencyBlock(
+  BuildContext context,
+  WidgetRef ref,
+  AcpConcurrencyRequiresChoice decision, {
+  required Future<AcpSessionLaunchResult?> Function(List<AcpSessionKey> replace)
+  relaunch,
+  bool allowStopAndContinue = true,
+  Future<void>? cancellation,
+}) async {
+  final manager = ref.read(acpSessionManagerProvider);
+  final choice = await showAcpConcurrencyChoice(
+    context,
+    decision: decision,
+    managerState: manager.state,
+    allowStopAndContinue: allowStopAndContinue,
+    cancellation: cancellation,
+  );
+  if (choice == null || !context.mounted) {
+    return null;
+  }
+  switch (choice) {
+    case AcpConcurrencyChoice.stopAndContinue:
+      final blocking = [
+        for (final value in decision.blockingSessionKeys)
+          manager.state.byKeyValue(value)?.key,
+      ].whereType<AcpSessionKey>().toList(growable: false);
+      return relaunch(blocking);
+    case AcpConcurrencyChoice.upgrade:
+      await context.push<void>(
+        Uri(
+          path: '/upgrade',
+          queryParameters: {
+            'feature': MonetizationFeature.concurrentAcpSessions.name,
+          },
+        ).toString(),
+      );
+      if (!context.mounted ||
+          !ref.read(monetizationServiceProvider).currentState.isProUnlocked) {
+        return null;
+      }
+      return relaunch(const <AcpSessionKey>[]);
+  }
 }
 
 class _ConcurrencyChoiceSheet extends StatelessWidget {
