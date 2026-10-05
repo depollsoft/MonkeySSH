@@ -137,14 +137,48 @@ final class AcpMessageEntry extends AcpTimelineEntry {
   final List<AcpContentBlock> content;
 
   /// Returns a copy with [block] appended to [content].
-  AcpMessageEntry appendContent(AcpContentBlock block) => AcpMessageEntry(
-    role: role,
-    order: order,
-    messageId: messageId,
-    parentToolCallId: parentToolCallId,
-    queued: queued,
-    content: [...content, block],
-  );
+  ///
+  /// When the last block and [block] are both text with the same annotations,
+  /// meta and extensions, and their combined length stays within
+  /// [maxCoalescedTextChars], the text is merged into the last block instead.
+  /// A message streamed in thousands of chunks then holds a handful of blocks
+  /// rather than one per chunk, keeping every later append, byte estimate,
+  /// equality check and Markdown join proportional to that small count.
+  AcpMessageEntry appendContent(
+    AcpContentBlock block, {
+    int maxCoalescedTextChars = 0,
+  }) {
+    final last = content.lastOrNull;
+    final merged =
+        last is AcpTextContent &&
+            block is AcpTextContent &&
+            last.text.length + block.text.length <= maxCoalescedTextChars &&
+            _sameTextShape(last, block)
+        ? AcpTextContent(
+            last.text + block.text,
+            annotations: last.annotations,
+            meta: last.meta,
+            extensions: last.extensions,
+          )
+        : null;
+    return AcpMessageEntry(
+      role: role,
+      order: order,
+      messageId: messageId,
+      parentToolCallId: parentToolCallId,
+      queued: queued,
+      content: merged == null
+          ? [...content, block]
+          : [...content.sublist(0, content.length - 1), merged],
+    );
+  }
+
+  static bool _sameTextShape(AcpTextContent a, AcpTextContent b) {
+    const equality = DeepCollectionEquality();
+    return equality.equals(a.meta, b.meta) &&
+        equality.equals(a.extensions, b.extensions) &&
+        equality.equals(a.annotations?.toJson(), b.annotations?.toJson());
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -294,14 +328,12 @@ final class AcpTimeline {
   AcpTimeline({
     List<AcpTimelineEntry> entries = const <AcpTimelineEntry>[],
     this.overflowed = false,
-    this.droppedEntryCount = 0,
   }) : entries = List<AcpTimelineEntry>.unmodifiable(entries);
 
   /// Creates the shared empty timeline.
   const AcpTimeline.empty()
     : entries = const <AcpTimelineEntry>[],
-      overflowed = false,
-      droppedEntryCount = 0;
+      overflowed = false;
 
   /// Ordered timeline entries.
   final List<AcpTimelineEntry> entries;
@@ -310,9 +342,6 @@ final class AcpTimeline {
   /// session. Once set, this stays `true` for the life of the session: the
   /// dropped history can never be safely reconstructed.
   final bool overflowed;
-
-  /// Cumulative number of oldest entries dropped to stay within limits.
-  final int droppedEntryCount;
 
   /// Whether the timeline currently holds no entries.
   bool get isEmpty => entries.isEmpty;
@@ -325,13 +354,11 @@ final class AcpTimeline {
       identical(this, other) ||
       other is AcpTimeline &&
           overflowed == other.overflowed &&
-          droppedEntryCount == other.droppedEntryCount &&
           const ListEquality<AcpTimelineEntry>().equals(entries, other.entries);
 
   @override
   int get hashCode => Object.hash(
     overflowed,
-    droppedEntryCount,
     const ListEquality<AcpTimelineEntry>().hash(entries),
   );
 }
@@ -487,9 +514,10 @@ class AcpTimelineBuilder {
   final Map<String, int> _toolCallIndex = <String, int>{};
   int _nextOrder = 0;
   int? _openMessageIndex;
+  AcpJsonMap? _openTailMeta;
+  AcpJsonMap? _openTailExtensions;
   int _totalBytes = 0;
   bool _overflowed = false;
-  int _droppedEntryCount = 0;
   int _nextLocalUserMessageId = 0;
   String? _pendingLocalUserMessageId;
   bool _suppressingUserEcho = false;
@@ -600,11 +628,8 @@ class AcpTimelineBuilder {
   }
 
   /// Returns an immutable snapshot of the current timeline.
-  AcpTimeline snapshot() => AcpTimeline(
-    entries: _entries,
-    overflowed: _overflowed,
-    droppedEntryCount: _droppedEntryCount,
-  );
+  AcpTimeline snapshot() =>
+      AcpTimeline(entries: _entries, overflowed: _overflowed);
 
   void _applyContentChunk(AcpContentChunkUpdate update) {
     final role = _roleFor(update.kind);
@@ -630,7 +655,18 @@ class AcpTimelineBuilder {
           open.messageId == messageId &&
           ((messageId != null && parentToolCallId == null) ||
               open.parentToolCallId == parentToolCallId)) {
-        _replaceEntry(openIndex, open.appendContent(block));
+        const equality = DeepCollectionEquality();
+        final coalesce =
+            equality.equals(update.meta, _openTailMeta) &&
+            equality.equals(update.extensions, _openTailExtensions);
+        _replaceEntry(
+          openIndex,
+          open.appendContent(
+            block,
+            maxCoalescedTextChars: coalesce ? _maxCoalescedTextChars : 0,
+          ),
+        );
+        _rememberOpenTail(update);
         return;
       }
     }
@@ -647,6 +683,7 @@ class AcpTimelineBuilder {
                 entry.parentToolCallId == parentToolCallId)) {
           _replaceEntry(i, entry.appendContent(block));
           _openMessageIndex = i;
+          _rememberOpenTail(update);
           return;
         }
       }
@@ -664,7 +701,18 @@ class AcpTimelineBuilder {
     _totalBytes += approximateTimelineEntryBytes(entry);
     _entries.add(entry);
     _openMessageIndex = _entries.length - 1;
+    _rememberOpenTail(update);
   }
+
+  void _rememberOpenTail(AcpContentChunkUpdate update) {
+    _openTailMeta = update.meta;
+    _openTailExtensions = update.extensions;
+  }
+
+  /// Cap on one coalesced text block. Keeping several blocks per bounded
+  /// entry lets [_boundedMessageEntry] still drop the oldest text first.
+  int get _maxCoalescedTextChars =>
+      math.min(32 * 1024, _limits.maxEntryBytes ~/ 4);
 
   void _applyToolCall(AcpToolCallUpdate update) {
     if (update.toolCallId.isEmpty) return;
@@ -713,18 +761,31 @@ class AcpTimelineBuilder {
   /// whole timeline drops its oldest entries), then truncates a single
   /// remaining oversized block as a last resort.
   AcpMessageEntry _boundedMessageEntry(AcpMessageEntry entry) {
-    final protectedImages = <AcpMediaContent>{
-      ..._protectedTimelineImages(entry.content, _limits.maxRetainedImageBytes),
-      ..._protectedTimelineAudio(entry.content, _limits.maxRetainedAudioBytes),
-    };
+    // Streamed text never carries media, so skip the protected-media scans
+    // (and the per-block fold inside the limit) on that hot path.
+    final protectedImages = entry.content.any((b) => b is AcpMediaContent)
+        ? <AcpMediaContent>{
+            ..._protectedMedia<AcpImageContent>(
+              entry.content,
+              _limits.maxRetainedImageBytes,
+            ),
+            ..._protectedMedia<AcpAudioContent>(
+              entry.content,
+              _limits.maxRetainedAudioBytes,
+            ),
+          }
+        : const <AcpMediaContent>{};
     int byteLimit(Iterable<AcpContentBlock> content) => math.min(
       _limits.maxTotalBytes,
       _limits.maxEntryBytes +
-          content.whereType<AcpMediaContent>().fold<int>(
-            0,
-            (sum, block) =>
-                sum + (protectedImages.contains(block) ? block.data.length : 0),
-          ),
+          (protectedImages.isEmpty
+              ? 0
+              : content.whereType<AcpMediaContent>().fold<int>(
+                  0,
+                  (sum, block) =>
+                      sum +
+                      (protectedImages.contains(block) ? block.data.length : 0),
+                )),
     );
     if (_approximateMessageBytes(entry) <= byteLimit(entry.content)) {
       return entry;
@@ -770,30 +831,16 @@ class AcpTimelineBuilder {
     );
   }
 
-  Set<AcpImageContent> _protectedTimelineImages(
+  /// Newest-first media blocks of type [T] whose decoded size fits within
+  /// [decodedByteBudget]; these are kept intact while the entry is bounded.
+  Set<T> _protectedMedia<T extends AcpMediaContent>(
     List<AcpContentBlock> content,
     int decodedByteBudget,
   ) {
     var remaining = decodedByteBudget;
-    final protected = <AcpImageContent>{};
+    final protected = <T>{};
     for (final block in content.reversed) {
-      if (block is! AcpImageContent || block.data.isEmpty) continue;
-      final decodedBytes = _approximateBase64DecodedBytes(block.data);
-      if (decodedBytes <= 0 || decodedBytes > remaining) continue;
-      protected.add(block);
-      remaining -= decodedBytes;
-    }
-    return protected;
-  }
-
-  Set<AcpAudioContent> _protectedTimelineAudio(
-    List<AcpContentBlock> content,
-    int decodedByteBudget,
-  ) {
-    var remaining = decodedByteBudget;
-    final protected = <AcpAudioContent>{};
-    for (final block in content.reversed) {
-      if (block is! AcpAudioContent || block.data.isEmpty) continue;
+      if (block is! T || block.data.isEmpty) continue;
       final decodedBytes = _approximateBase64DecodedBytes(block.data);
       if (decodedBytes <= 0 || decodedBytes > remaining) continue;
       protected.add(block);
@@ -848,6 +895,23 @@ class AcpTimelineBuilder {
       }
       remaining -= utf8.encode(name).length;
     }
+    // Terminal references and diffs are what the row renders once the raw
+    // payload is gone, so admit them before bulkier content blocks. Kept
+    // items stay in their original order.
+    final byCost = List<int>.generate(entry.content.length, (i) => i)
+      ..sort((a, b) {
+        final rank =
+            _toolContentRank(entry.content[a]) -
+            _toolContentRank(entry.content[b]);
+        return rank != 0 ? rank : a - b;
+      });
+    final keptContent = <int>{};
+    for (final index in byCost) {
+      final bytes = _approximateToolContentBytes(entry.content[index]);
+      if (bytes > remaining) continue;
+      keptContent.add(index);
+      remaining -= bytes;
+    }
     final locations = <AcpToolLocation>[];
     for (final location in entry.locations) {
       final bytes = _approximateToolLocationBytes(location);
@@ -862,6 +926,10 @@ class AcpTimelineBuilder {
       name: name,
       toolKind: entry.toolKind,
       status: entry.status,
+      content: [
+        for (var i = 0; i < entry.content.length; i++)
+          if (keptContent.contains(i)) entry.content[i],
+      ],
       locations: locations,
       rawInput: rawInput,
       rawOutput: rawOutput,
@@ -869,6 +937,13 @@ class AcpTimelineBuilder {
       isSubagent: entry.isSubagent,
     );
   }
+
+  static int _toolContentRank(AcpToolContent content) => switch (content) {
+    AcpToolTerminal() => 0,
+    AcpToolDiff() => 1,
+    AcpToolContentBlock() => 2,
+    AcpUnknownToolContent() => 3,
+  };
 
   /// Drops the oldest entries so the timeline stays within its entry-count
   /// and total-byte budgets, preserving the most recent context.
@@ -878,7 +953,6 @@ class AcpTimelineBuilder {
         (_totalBytes > _limits.maxTotalBytes && _entries.length > 1)) {
       final dropped = _entries.removeAt(0);
       _totalBytes -= approximateTimelineEntryBytes(dropped);
-      _droppedEntryCount++;
       _overflowed = true;
       droppedThisCall = true;
     }
