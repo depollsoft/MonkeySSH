@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
@@ -311,6 +312,15 @@ String? resolveSftpTextEditBlockMessage({
   }
   if (loadedBytes != null && looksLikeBinaryContent(loadedBytes)) {
     return 'Binary files cannot be edited here';
+  }
+  if (loadedBytes != null) {
+    // Saving re-encodes as UTF-8, so replacement-decoded text would
+    // permanently corrupt other encodings even without edits.
+    try {
+      utf8.decode(loadedBytes);
+    } on FormatException {
+      return 'Only UTF-8 text files can be edited here';
+    }
   }
   return null;
 }
