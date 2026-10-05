@@ -910,6 +910,11 @@ func TestAgentSessionBindingSharedStorePoll(t *testing.T) {
 	cwd, write := bindingTestStore(t, "codex")
 	now := time.Now()
 	write(bindingTestIDs[0], cwd, now)
+	// Each store read takes half a second, and its snapshot dates from completion.
+	readClock := now
+	originalClock := agentSessionStoreClock
+	agentSessionStoreClock = func() time.Time { readClock = readClock.Add(time.Second / 2); return readClock }
+	t.Cleanup(func() { agentSessionStoreClock = originalClock })
 	s := &muxServer{}
 	var results [8][]agentSessionCandidate
 	var group sync.WaitGroup
@@ -924,12 +929,43 @@ func TestAgentSessionBindingSharedStorePoll(t *testing.T) {
 		}
 	}
 	write(bindingTestIDs[1], cwd, now)
-	if got := s.agentSessionStore("codex", now.Add(time.Second)); len(got) != 1 {
-		t.Fatal("store reread before poll interval")
+	if got := s.agentSessionStore("codex", now.Add(agentSessionStorePollInterval)); len(got) != 1 {
+		t.Fatal("store reread before poll interval after the read completed")
 	}
-	if got := s.agentSessionStore("codex", now.Add(agentSessionStorePollInterval)); len(got) != 2 {
+	if got := s.agentSessionStore("codex", now.Add(time.Second/2+agentSessionStorePollInterval)); len(got) != 2 {
 		t.Fatal("store did not refresh at next interval")
 	}
+}
+
+func TestAgentSessionStoreRereadsOnlyChangedFiles(t *testing.T) {
+	cwd, write := bindingTestStore(t, "codex")
+	other := cwd[:len(cwd)-1] + "X" // same length, so the rewritten file keeps its size
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	path := write(bindingTestIDs[0], cwd, at)
+	readCwd := func(want, why string) {
+		t.Helper()
+		candidates := readAgentSessionCandidates("codex")
+		if len(candidates) != 1 || candidates[0].cwd != normalizedMetadataPath(want) {
+			t.Fatalf("%s: %+v", why, candidates)
+		}
+	}
+	readCwd(cwd, "first read")
+	write(bindingTestIDs[0], other, at)
+	readCwd(cwd, "file with unchanged identity, size and mtime was reread")
+	write(bindingTestIDs[0], other, at.Add(time.Second))
+	readCwd(other, "modified file was not reread")
+	// Same size and mtime, but another file renamed into place.
+	replacement := path + ".new"
+	if err := os.WriteFile(replacement, []byte(fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"cwd\":%q}}\n", bindingTestIDs[0], cwd)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, at.Add(time.Second), at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	readCwd(cwd, "replaced file was not reread")
 }
 
 func TestAgentSessionBindingProvisionalRegistryConfirmation(t *testing.T) {
