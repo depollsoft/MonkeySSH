@@ -150,8 +150,11 @@ SSHSession _buildAcpSessionListExecSession({
   return session;
 }
 
-String _remoteSnapshotLine(String path, String content, {int mtime = 0}) =>
-    '$path\x1f$mtime\x1f${base64Encode(utf8.encode(content))}\n';
+String _remoteSnapshotLine(String path, String content) =>
+    '$path\x1f${base64Encode(utf8.encode(content))}\n';
+
+/// A `<epoch>\t<path>` listing line as the newest-files commands emit it.
+String _listedFileLine(String path, {int mtime = 0}) => '$mtime\t$path';
 
 String _markedDiscoveryOutput(String stdout) =>
     '$stdout\n__flutty_agent_discovery_exec_done__:0\n';
@@ -223,25 +226,23 @@ void main() {
     });
   }
 
-  test(
-    'newest files are sorted across find batches with BSD and GNU stat',
-    () async {
-      final root = await Directory.systemTemp.createTemp('discovery-order-');
-      addTearDown(() => root.delete(recursive: true));
-      final older = File('${root.path}/older.jsonl')..writeAsStringSync('old');
-      final middle = File('${root.path}/middle\tname.jsonl')
-        ..writeAsStringSync('middle');
-      final newest = File("${root.path}/newest 'quoted'.jsonl")
-        ..writeAsStringSync('new');
-      for (final (index, file) in [older, middle, newest].indexed) {
-        file.setLastModifiedSync(DateTime.utc(2026, 1, index + 1));
-      }
-      final bin = Directory('${root.path}/bin')..createSync();
-      final batchLog = File('${root.path}/batches');
-      final find = File('${bin.path}/find')
-        ..writeAsStringSync(
-          '''#!/bin/sh\n'''
-          r'''
+  test('newest files are sorted across find batches with BSD and GNU stat', () async {
+    final root = await Directory.systemTemp.createTemp('discovery-order-');
+    addTearDown(() => root.delete(recursive: true));
+    final older = File('${root.path}/older.jsonl')..writeAsStringSync('old');
+    final middle = File('${root.path}/middle\tname.jsonl')
+      ..writeAsStringSync('middle');
+    final newest = File("${root.path}/newest 'quoted'.jsonl")
+      ..writeAsStringSync('new');
+    for (final (index, file) in [older, middle, newest].indexed) {
+      file.setLastModifiedSync(DateTime.utc(2026, 1, index + 1));
+    }
+    final bin = Directory('${root.path}/bin')..createSync();
+    final batchLog = File('${root.path}/batches');
+    final find = File('${bin.path}/find')
+      ..writeAsStringSync(
+        '''#!/bin/sh\n'''
+        r'''
 
 while [ "$1" != '-exec' ]; do shift; done
 shift
@@ -252,11 +253,11 @@ for file in "$OLDER" "$MIDDLE" "$NEWEST"; do
   "$runner" -c "$script" sh "$file"
 done
 ''',
-        );
-      final stat = File('${bin.path}/stat')
-        ..writeAsStringSync(
-          '''#!/bin/sh\n'''
-          r'''
+      );
+    final stat = File('${bin.path}/stat')
+      ..writeAsStringSync(
+        '''#!/bin/sh\n'''
+        r'''
 
 if [ "$STAT_STYLE" = native ]; then exec /usr/bin/stat "$@"; fi
 if [ "$STAT_STYLE" = bsd ]; then [ "$1" = -f ] || exit 1
@@ -269,47 +270,44 @@ for file do
   else printf '%s\t%s\n' "$timestamp" "$file"; fi
 done
 ''',
-        );
-      final chmod = await Process.run('chmod', ['+x', find.path, stat.path]);
-      expect(chmod.exitCode, 0, reason: '${chmod.stderr}');
-      for (final style in ['gnu', 'bsd', 'native']) {
-        batchLog.writeAsStringSync('');
-        final result = await Process.run(
-          'sh',
-          ['-c', posixListNewestFilesCommand('find unused -type f', 2)],
-          environment: {
-            'PATH': '${bin.path}:/usr/bin:/bin',
-            'STAT_STYLE': style,
-            'OLDER': older.path,
-            'MIDDLE': middle.path,
-            'NEWEST': newest.path,
-            'BATCH_LOG': batchLog.path,
-          },
-        );
-        expect(result.exitCode, 0, reason: '${result.stderr}');
-        expect(batchLog.readAsLinesSync(), ['batch', 'batch', 'batch']);
-        expect(
-          result.stdout,
-          '${newest.path}\n${middle.path}\n',
-          reason: style,
-        );
-      }
-      final filtered = await Process.run(
-        'sh',
-        [
-          '-c',
-          posixListNewestFilesCommand(
-            "find '${root.path}' -maxdepth 1 -name '*.jsonl' -type f "
-            r'-exec grep -q -x -F new {} \;',
-            2,
-          ),
-        ],
-        environment: {'PATH': '/usr/bin:/bin'},
       );
-      expect(filtered.exitCode, 0, reason: '${filtered.stderr}');
-      expect(filtered.stdout, '${newest.path}\n');
-    },
-  );
+    final chmod = await Process.run('chmod', ['+x', find.path, stat.path]);
+    expect(chmod.exitCode, 0, reason: '${chmod.stderr}');
+    String listed(File file) =>
+        '${file.lastModifiedSync().millisecondsSinceEpoch ~/ 1000}\t${file.path}\n';
+    for (final style in ['gnu', 'bsd', 'native']) {
+      batchLog.writeAsStringSync('');
+      final result = await Process.run(
+        'sh',
+        ['-c', posixListNewestFilesCommand('find unused -type f', 2)],
+        environment: {
+          'PATH': '${bin.path}:/usr/bin:/bin',
+          'STAT_STYLE': style,
+          'OLDER': older.path,
+          'MIDDLE': middle.path,
+          'NEWEST': newest.path,
+          'BATCH_LOG': batchLog.path,
+        },
+      );
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      expect(batchLog.readAsLinesSync(), ['batch', 'batch', 'batch']);
+      expect(result.stdout, listed(newest) + listed(middle), reason: style);
+    }
+    final filtered = await Process.run(
+      'sh',
+      [
+        '-c',
+        posixListNewestFilesCommand(
+          "find '${root.path}' -maxdepth 1 -name '*.jsonl' -type f "
+          r'-exec grep -q -x -F new {} \;',
+          2,
+        ),
+      ],
+      environment: {'PATH': '/usr/bin:/bin'},
+    );
+    expect(filtered.exitCode, 0, reason: '${filtered.stderr}');
+    expect(filtered.stdout, listed(newest));
+  });
 
   setUpAll(() {
     registerFallbackValue(Uint8List(0));
@@ -793,7 +791,6 @@ branch refs/heads/fix/session-resumption
       const info = ToolSessionInfo(
         toolName: 'Copilot CLI',
         sessionId: '12345678-1234-1234-1234-1234567890ab',
-        summary: '12345678…',
       );
 
       expect(normalizeDiscoveredSessionInfo(info), isNull);
@@ -1400,10 +1397,11 @@ cwd: /tmp/demo
     });
   });
 
-  group('parseHermesDbOutput', () {
+  group('parseSeparatedSessionRows', () {
     test('maps separated columns onto session metadata', () {
-      final sessions = parseHermesDbOutput(
+      final sessions = parseSeparatedSessionRows(
         '${<String>['20250305_091523_a1b2c3', 'Refactor auth', '/Users/depoll/Code/flutty', '1783405351'].join('\x1f')}\n',
+        toolName: 'Hermes',
       );
 
       expect(sessions, hasLength(1));
@@ -1418,18 +1416,23 @@ cwd: /tmp/demo
     });
 
     test('tolerates empty titles, cwd, and timestamps', () {
-      final sessions = parseHermesDbOutput(
+      final sessions = parseSeparatedSessionRows(
         '20250305_091523_a1b2c3\x1f\x1f\x1f0\n\n',
+        toolName: 'OpenCode',
       );
 
       expect(sessions, hasLength(1));
+      expect(sessions.single.toolName, 'OpenCode');
       expect(sessions.single.workingDirectory, isNull);
       expect(sessions.single.lastActive, isNull);
-      expect(sessions.single.summary, isNotEmpty);
+      expect(sessions.single.summary, isNull);
     });
 
     test('skips malformed rows without an id', () {
-      final sessions = parseHermesDbOutput('\x1fno id\x1f/tmp\x1f1\nbroken\n');
+      final sessions = parseSeparatedSessionRows(
+        '\x1fno id\x1f/tmp\x1f1\nbroken\n',
+        toolName: 'Hermes',
+      );
 
       expect(sessions, isEmpty);
     });
@@ -1558,13 +1561,11 @@ cwd: /tmp/demo
                   'C:/Users/demo/.copilot/session-state/newer/workspace.yaml',
                   'id: newer\ncwd: C:\\other\nsummary: Other project\n'
                       'updated_at: 2026-07-06T00:00:00Z\n',
-                  mtime: 1780000001,
                 ) +
                 _remoteSnapshotLine(
                   'C:/Users/demo/.copilot/session-state/abc/workspace.yaml',
                   'id: abc\ncwd: C:\\proj\nsummary: My session\n'
                       'updated_at: 2026-07-05T00:00:00Z\n',
-                  mtime: 1780000000,
                 ),
           );
         }
@@ -1644,7 +1645,7 @@ cwd: /tmp/demo
           }
           if (script.contains('[char]0x1f') && script.contains(storagePath)) {
             return _buildExecSession(
-              stdout: _remoteSnapshotLine(storagePath, sessionJson, mtime: 1),
+              stdout: _remoteSnapshotLine(storagePath, sessionJson),
             );
           }
           return _buildExecSession();
@@ -1693,7 +1694,7 @@ cwd: /tmp/demo
         }
         if (script.contains('[char]0x1f') && script.contains(antigravityPath)) {
           return _buildExecSession(
-            stdout: _remoteSnapshotLine(antigravityPath, sessionJson, mtime: 1),
+            stdout: _remoteSnapshotLine(antigravityPath, sessionJson),
           );
         }
         return _buildExecSession();
@@ -2043,8 +2044,8 @@ branch refs/heads/main
         final jsonPaths = [
           "$home/.antigravity/sessions/encoded 'path.json",
           '$home/.agy/sessions/broken.json',
-          '${windows ? home : '.'}/.antigravitycli/legacy.json',
-          '${windows ? home : '.'}/.agycli/partial.json',
+          '$home/.antigravitycli/legacy.json',
+          '$home/.agycli/partial.json',
         ];
         final conversations = [
           '$root/conversations/encoded.pb',
@@ -2086,13 +2087,7 @@ branch refs/heads/main
                       entry.key.replaceAll("'", windows ? "''" : r"'\''"),
                     ),
                   )
-                  .map(
-                    (entry) => _remoteSnapshotLine(
-                      entry.key,
-                      entry.value,
-                      mtime: 1700000000,
-                    ),
-                  )
+                  .map((entry) => _remoteSnapshotLine(entry.key, entry.value))
                   .join(),
             );
           }
@@ -2122,7 +2117,11 @@ branch refs/heads/main
             );
           }
           if (command.contains('antigravity-cli')) {
-            return _buildExecSession(stdout: conversations.join('\n'));
+            return _buildExecSession(
+              stdout: conversations
+                  .map((path) => _listedFileLine(path, mtime: 1700000000))
+                  .join('\n'),
+            );
           }
           return _buildExecSession();
         });
@@ -2176,7 +2175,10 @@ branch refs/heads/main
         expect(scoped.sessions.single.sessionId, 'encoded');
         expect(scoped.sessions.single.workingDirectory, cwd);
         if (!windows) {
-          expect(commands, anyElement(contains('./.antigravitycli ./.agycli')));
+          // Legacy roots must resolve under the home directory: MonkeyMux runs
+          // client commands from the active window's cwd, where `./` is wrong.
+          expect(commands, anyElement(contains('~/.antigravitycli ~/.agycli')));
+          expect(commands, isNot(anyElement(contains('./.antigravitycli'))));
           expect(commands, anyElement(contains('~/.agy/sessions')));
           expect(commands, isNot(anyElement(contains('python3 -c'))));
         }
@@ -2214,11 +2216,7 @@ branch refs/heads/main
                         _remoteSnapshotLine(
                           jsonPaths[i],
                           '{"id":"json-$i","summary":"Session $i"}',
-                          mtime: i,
                         ),
-                    for (final path in conversationPaths)
-                      if (command.contains(path))
-                        _remoteSnapshotLine(path, '', mtime: 1),
                   ].join(),
                 );
               }
@@ -2231,7 +2229,12 @@ branch refs/heads/main
                         : 'head -n $scanLimit',
                   ),
                 );
-                return _buildExecSession(stdout: jsonPaths.join('\n'));
+                return _buildExecSession(
+                  stdout: [
+                    for (final (i, path) in jsonPaths.indexed)
+                      _listedFileLine(path, mtime: i),
+                  ].join('\n'),
+                );
               }
               if (command.contains('history.jsonl')) {
                 expect(
@@ -2243,7 +2246,11 @@ branch refs/heads/main
                   ),
                 );
               } else if (command.contains('antigravity-cli')) {
-                return _buildExecSession(stdout: conversationPaths.join('\n'));
+                return _buildExecSession(
+                  stdout: conversationPaths
+                      .map((path) => _listedFileLine(path, mtime: 1))
+                      .join('\n'),
+                );
               }
               return _buildExecSession();
             });
@@ -2273,14 +2280,12 @@ branch refs/heads/main
               contains(windows ? 'byte[] 65536' : r'$HEAD_BIN -c 65536'),
             );
             expect(snapshots, contains(windows ? '-TotalCount 20' : "'1,20p'"));
-            expect(
-              snapshots,
-              contains(windows ? 'byte[] 0' : r'$HEAD_BIN -c 0'),
-            );
+            // The listing already carries each `.pb` mtime, so no snapshot
+            // pass reads the conversation files themselves.
+            expect(snapshots, isNot(contains(RegExp(r"conv-\d+\.pb'"))));
             expect(snapshots, contains('json-${readLimit - 1}.json'));
-            expect(snapshots, contains('conv-${readLimit - 1}.pb'));
+            expect(snapshots, contains('conv-${readLimit - 1}.pbtxt'));
             expect(snapshots, isNot(contains('json-$readLimit.json')));
-            expect(snapshots, isNot(contains('conv-$readLimit.pb')));
             expect(snapshots, isNot(contains('conv-$readLimit.pbtxt')));
           },
         );
@@ -2431,7 +2436,7 @@ branch refs/heads/main
             command.contains(sessionPath)) {
           output = _remoteSnapshotLine(sessionPath, '''
 {"type":"session","id":"REAL","timestamp":"2026-08-21T08:12:27.194Z","cwd":"/Users/depoll/Code/MonkeySSH"}
-''', mtime: 1787300289);
+''');
         } else if (command.contains('Buffer.from(process.argv[1]') &&
             command.contains(sessionPath)) {
           output =
@@ -2754,7 +2759,7 @@ branch refs/heads/main
               stdout: _remoteSnapshotLine(rolloutPath, '''
 {"timestamp":"2026-04-26T22:44:20.349Z","type":"session_meta","payload":{"id":"$sessionId","timestamp":"2026-04-26T22:44:01.169Z","cwd":"/Users/depoll/Code/flutty"}}
 {"timestamp":"2026-04-26T22:44:48.390Z","type":"event_msg","payload":{"type":"user_message","message":"fix codex resume","images":[]}}
-''', mtime: 1777243460),
+'''),
             );
           }
           return _buildExecSession();
@@ -2775,6 +2780,76 @@ branch refs/heads/main
       },
     );
 
+    test(
+      'Claude discovery bounds the transcript search and reads head and tail '
+      'in one round trip',
+      () async {
+        final client = _MockSshClient();
+        const sessionId = '0d8d2b7c-6f1e-4d0f-9c1a-2b3c4d5e6f70';
+        const transcriptPath =
+            '/Users/demo/.claude/projects/-Users-depoll-Code-flutty/'
+            '$sessionId.jsonl';
+        final commands = <String>[];
+        _stubDiscoveryExec(client, (command) async {
+          commands.add(command);
+          if (command.contains('.claude/history.jsonl')) {
+            return _buildExecSession(
+              stdout: jsonEncode({
+                'sessionId': sessionId,
+                'project': '/Users/depoll/Code/flutty',
+              }),
+            );
+          }
+          if (command.contains('find ~/.claude/projects')) {
+            return _buildExecSession(
+              stdout: _listedFileLine(transcriptPath, mtime: 1780000000),
+            );
+          }
+          if (command.contains(transcriptPath)) {
+            final head = base64Encode(
+              utf8.encode(
+                '{"type":"user","isMeta":false,"message":{"role":"user","content":"Original prompt"}}\n',
+              ),
+            );
+            final tail = base64Encode(
+              utf8.encode('{"customTitle":"Renamed title"}\n'),
+            );
+            return _buildExecSession(
+              stdout: '$transcriptPath\x1f$head\x1f$tail\n',
+            );
+          }
+          return _buildExecSession();
+        });
+
+        final result = await AgentSessionDiscoveryService()
+            .discoverSessionsStream(
+              _buildDiscoverySession(client),
+              toolName: 'Claude Code',
+            )
+            .last;
+
+        final info = result.sessions.single;
+        expect(info.sessionId, sessionId);
+        expect(info.summary, 'Renamed title');
+        expect(
+          info.lastActive,
+          DateTime.fromMillisecondsSinceEpoch(1780000000000),
+        );
+        final find = commands.singleWhere(
+          (command) => command.contains('find ~/.claude/projects'),
+        );
+        expect(find, contains('-maxdepth 2'));
+        expect(find, contains("-name '$sessionId.jsonl'"));
+        final snapshots = commands
+            .where((command) => command.contains('SEP='))
+            .toList(growable: false);
+        expect(snapshots, hasLength(1));
+        expect(snapshots.single, contains("'1,120p'"));
+        expect(snapshots.single, contains(r'$TAIL_BIN -n 120'));
+        expect(snapshots.single, isNot(contains('STAT_BIN')));
+      },
+    );
+
     test('Cursor discovery resolves chat id, title, and cwd', () async {
       final client = _MockSshClient();
       const metaPath =
@@ -2789,7 +2864,7 @@ branch refs/heads/main
           return _buildExecSession(
             stdout: _remoteSnapshotLine(metaPath, '''
 {"schemaVersion":1,"createdAtMs":1783404550969,"hasConversation":true,"title":"Copilot Theming Fix","updatedAtMs":1783405351095,"cwd":"/Users/depoll/Code/flutty"}
-''', mtime: 1777243460),
+'''),
           );
         }
         return _buildExecSession();
@@ -3139,7 +3214,7 @@ HEAD b
   "current_model_id": "grok-code-fast-1",
   "num_messages": 12
 }
-''', mtime: 1786740000),
+'''),
           );
         }
         return _buildExecSession();
@@ -3177,6 +3252,48 @@ HEAD b
       );
     });
 
+    test('Grok Build falls back to an unscoped listing', () async {
+      final client = _MockSshClient();
+      const summaryPath =
+          '/Users/demo/.grok/sessions/%2FUsers%2Fdepoll%2FCode%2Fother/'
+          '019f6cb5-f7e4-7bc1-bb25-9985af59619e/summary.json';
+      final commands = <String>[];
+      _stubDiscoveryExec(client, (command) async {
+        commands.add(command);
+        if (command.contains('GROK_SESSIONS_ROOT')) {
+          return _buildExecSession(
+            stdout: command.contains('%2FUsers%2Fdepoll%2FCode%2Fflutty')
+                ? ''
+                : summaryPath,
+          );
+        }
+        if (command.contains(summaryPath)) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(summaryPath, '''
+{"info": {"id": "019f6cb5-f7e4-7bc1-bb25-9985af59619e"}, "generated_title": "Other project work"}
+'''),
+          );
+        }
+        return _buildExecSession();
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Grok Build',
+          )
+          .last;
+
+      expect(result.sessions.single.summary, 'Other project work');
+      final listings = commands
+          .where((command) => command.contains('GROK_SESSIONS_ROOT'))
+          .toList(growable: false);
+      expect(listings, hasLength(2));
+      expect(listings.first, contains('%2FUsers%2Fdepoll%2FCode%2Fflutty'));
+      expect(listings.last, contains(r'find "$GROK_SESSIONS_ROOT" -name'));
+    });
+
     test(
       'Grok Build Windows discovery lets GROK_HOME override default',
       () async {
@@ -3198,7 +3315,7 @@ HEAD b
   "generated_title": "Resume from custom Grok home",
   "last_active_at": "2026-08-14T20:04:00Z"
 }
-''', mtime: 1786740000),
+'''),
             );
           }
           if (script.contains('Get-ChildItem') &&
@@ -3254,7 +3371,7 @@ HEAD b
             stdout: _remoteSnapshotLine(sessionPath, '''
 {"type":"session","version":3,"id":"01JYX7ABCD","timestamp":"2026-04-12T21:07:44.781Z","cwd":"/Users/depoll/Code/flutty"}
 {"type":"message","message":{"role":"user","content":"Fix the tmux navigator crash"}}
-''', mtime: 1777243460),
+'''),
           );
         }
         if (command.contains('--Users-depoll-Code-flutty--')) {
@@ -3351,7 +3468,8 @@ HEAD b
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
       _stubDiscoveryExec(client, (command) async {
-        if (command.contains(projectPath)) {
+        if (command.contains(r"$SED_BIN -n '1,1p'") &&
+            command.contains(projectPath)) {
           return _buildExecSession(
             stdout: _remoteSnapshotLine(projectPath, '''
 {"type":"session","version":3,"id":"01JYX7ABCD","timestamp":"2026-04-12T21:07:44.781Z","cwd":"/Users/depoll/Code/flutty"}
@@ -3443,6 +3561,43 @@ HEAD b
       expect(listCommand, contains('--Users-depoll-worktrees-feature--'));
       expect(listCommand, isNot(contains('find ~/.pi/agent/sessions')));
     });
+
+    test(
+      'OpenCode re-queries SQLite unscoped before spawning the CLI',
+      () async {
+        final client = _MockSshClient();
+        final commands = <String>[];
+        _stubDiscoveryExec(client, (command) async {
+          commands.add(command);
+          if (command.contains('opencode.db')) {
+            return _buildExecSession(
+              stdout: command.contains('/Users/depoll/Code/flutty')
+                  ? ''
+                  : 'session-1\x1fElsewhere\x1f\x1f1770000000\n',
+            );
+          }
+          return _buildExecSession();
+        });
+
+        final result = await AgentSessionDiscoveryService()
+            .discoverSessionsStream(
+              _buildDiscoverySession(client),
+              workingDirectory: '/Users/depoll/Code/flutty',
+              toolName: 'OpenCode',
+            )
+            .last;
+
+        expect(result.sessions.single.sessionId, 'session-1');
+        expect(
+          commands.where((command) => command.contains('opencode.db')),
+          hasLength(2),
+        );
+        expect(
+          commands.where((command) => command.contains('session list')),
+          isEmpty,
+        );
+      },
+    );
 
     test('Hermes discovery reads the state database', () async {
       final client = _MockSshClient();
