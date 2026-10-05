@@ -383,7 +383,9 @@ AcpLaunchCommand applyAcpAgentLaunchSettings({
 }
 
 bool _isResolvedTerminalExecutable(AgentLaunchTool tool, String executable) {
-  final name = normalizeCommandBasename(executable);
+  final name = normalizeCommandBasename(
+    executable.replaceAll(r'\', '/').split('/').last,
+  );
   return tool.candidateCommandNames.any(
     (candidate) => candidate.toLowerCase() == name,
   );
