@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE_DIR="$ROOT_DIR/remote/monkeymux"
 ASSET_DIR="$ROOT_DIR/assets/monkeymux"
-VERSION="$(sh "$REMOTE_DIR/monkeymux-version.sh" 2>/dev/null || echo "0.1.0")"
+VERSION="$(sh "$REMOTE_DIR/monkeymux-version.sh")"
 STAMP_FILE="$ASSET_DIR/.build-inputs.sha256"
 TMP_DIR="$(mktemp -d)"
 GZIP_TOOL="$TMP_DIR/deterministic-gzip"
