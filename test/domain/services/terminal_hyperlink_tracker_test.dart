@@ -162,55 +162,6 @@ void main() {
       expect(tracker.trackedHyperlinkCount, 0);
     });
 
-    test('drops link membership from cells an unlinked write replaces', () {
-      const url = 'https://example.com/hidden';
-      terminal.write('\x1b]8;;$url\x07label\x1b]8;;\x07\rplain');
-
-      for (var x = 0; x < 5; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 0)), isNull);
-      }
-      expect(tracker.resolveLinkOnRow(0), isNull);
-      expect(tracker.hasLinkInRowRange(0, 0, 4), isFalse);
-    });
-
-    test('a partial overwrite leaves only the surviving linked cells', () {
-      const url = 'https://example.com/partial';
-      terminal.write('\x1b]8;;$url\x07label\x1b]8;;\x07\rXY');
-
-      expect(tracker.resolveLinkAt(const CellOffset(1, 0)), isNull);
-      expect(tracker.resolveLinkAt(const CellOffset(2, 0)), url);
-      expect(tracker.resolveLinkAt(const CellOffset(4, 0)), url);
-      expect(tracker.hasLinkInRowRange(0, 0, 1), isFalse);
-      expect(tracker.hasLinkInRowRange(0, 0, 2), isTrue);
-      expect(tracker.resolveLinkOnRow(0), url);
-    });
-
-    test('excludes an unlinked cell a deletion pulls into the link', () {
-      const url = 'https://example.com/deleted';
-      terminal.write('\x1b]8;;$url\x07aaaa\x1b]8;;\x07a\x1b[1;2H\x1b[P');
-
-      for (var x = 0; x < 3; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
-      }
-      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), isNull);
-      expect(tracker.hasLinkInRowRange(0, 3, 4), isFalse);
-    });
-
-    test('keeps cells a non-reflowing resize hides on their row', () {
-      const url = 'https://example.com/alt';
-      terminal
-        ..write('\x1b[?1049h')
-        ..resize(10, terminal.viewHeight)
-        ..write('\x1b]8;;$url\x07abcdefgh\r\nijkl\x1b]8;;\x07\x1b[2;1HfghX')
-        ..resize(5, terminal.viewHeight);
-
-      for (var x = 0; x < 5; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
-        expect(tracker.resolveLinkAt(CellOffset(x, 1)), isNull, reason: '$x');
-      }
-      expect(tracker.resolveLinkOnRow(1), isNull);
-    });
-
     test('tracks an OSC 8 link delivered across separate writes', () {
       terminal
         ..write('\u001b]8;;https://example.com/chunked\u0007')
@@ -256,72 +207,6 @@ void main() {
         'https://example.com/reflow',
       );
       expect(tracker.resolveLinkAt(const CellOffset(0, 2)), isNull);
-    });
-
-    test('keeps every link cell when reflow moves wide-character padding', () {
-      const url = 'https://example.com/wide';
-      terminal
-        ..resize(4, terminal.viewHeight)
-        ..write('\x1b]8;;$url\x07abc漢d\x1b]8;;\x07')
-        ..resize(5, terminal.viewHeight);
-
-      // abc漢 now fills row 0 with no padding before 漢; d moved to row 1.
-      for (var x = 0; x < 5; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
-      }
-      expect(tracker.resolveLinkAt(const CellOffset(0, 1)), url);
-      expect(tracker.resolveLinkAt(const CellOffset(1, 1)), isNull);
-
-      terminal
-        ..write('\x1b[2J\x1b[H')
-        ..resize(20, terminal.viewHeight)
-        ..write('\x1b]8;;$url/2\x07abcd界ef\x1b]8;;\x07')
-        ..resize(5, terminal.viewHeight);
-
-      // abcd plus padding on row 0, then 界ef on row 1.
-      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), '$url/2');
-      for (var x = 0; x < 4; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/2', reason: '$x');
-      }
-      expect(tracker.hasLinkInRowRange(1, 3, 3), isTrue);
-      expect(tracker.resolveLinkAt(const CellOffset(4, 1)), isNull);
-    });
-
-    test('keeps untouched wrapped link cells after an erase in the link', () {
-      const url = 'https://example.com/erase';
-      // CSI K after the label clears the continuation row's wrap flag.
-      terminal
-        ..resize(10, terminal.viewHeight)
-        ..write('\x1b]8;;$url\x07abcdefghijklmno\x1b]8;;\x07\x1b[K');
-
-      for (var x = 0; x < 5; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 1)), url, reason: '$x');
-      }
-      expect(tracker.resolveLinkAt(const CellOffset(5, 1)), isNull);
-
-      // Erasing the end of the first row leaves the second row's cells alone.
-      terminal
-        ..write('\x1b[2J\x1b[H')
-        ..resize(5, terminal.viewHeight)
-        ..write('\x1b]8;;$url/2\x07abcdefghij\x1b]8;;\x07\x1b[1;4H\x1b[K');
-
-      expect(tracker.resolveLinkAt(const CellOffset(2, 0)), '$url/2');
-      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), isNull);
-      // The close reads a clamped cursor, so a label ending in the last
-      // column never included `j`.
-      for (var x = 0; x < 4; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/2', reason: '$x');
-      }
-
-      // Erasing a row's first linked cell leaves the rest of the row linked.
-      terminal
-        ..write('\x1b[2J\x1b[H')
-        ..write('\x1b]8;;$url/3\x07abcdefghijklmn\x1b]8;;\x07\x1b[2;1H\x1b[X');
-
-      expect(tracker.resolveLinkAt(const CellOffset(0, 1)), isNull);
-      for (var x = 1; x < 5; x++) {
-        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/3', reason: '$x');
-      }
     });
 
     test('prunes detached hyperlinks while processing later OSC 8 output', () {

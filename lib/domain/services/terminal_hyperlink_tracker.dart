@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:xterm/xterm.dart';
 
@@ -122,11 +120,15 @@ class TerminalHyperlinkTracker {
     _pruneDetachedHyperlinks();
 
     final queryStart = CellOffset(startColumn, row);
+    final queryEndInclusive = CellOffset(endColumn, row);
     final queryEndExclusive = CellOffset(endColumn + 1, row);
     bool intersectsExclusive(CellOffset start, CellOffset end) =>
         _compareOffsets(start, end) < 0 &&
         _compareOffsets(start, queryEndExclusive) < 0 &&
         _compareOffsets(queryStart, end) < 0;
+    bool intersectsInclusive(CellOffset start, CellOffset end) =>
+        _compareOffsets(start, queryEndInclusive) <= 0 &&
+        _compareOffsets(queryStart, end) <= 0;
 
     final activeHyperlink = _pendingHyperlink;
     if (activeHyperlink != null &&
@@ -140,7 +142,10 @@ class TerminalHyperlinkTracker {
 
     for (final hyperlink in _trackedHyperlinks) {
       if (identical(hyperlink.buffer, terminal.buffer) &&
-          hyperlink.coversRowRange(row, startColumn, endColumn)) {
+          intersectsInclusive(
+            hyperlink.startAnchor.offset,
+            hyperlink.lastCellAnchor.offset,
+          )) {
         return true;
       }
     }
@@ -179,7 +184,8 @@ class TerminalHyperlinkTracker {
     }
     for (final hyperlink in _trackedHyperlinks) {
       if (!identical(hyperlink.buffer, terminal.buffer) ||
-          !hyperlink.coversRowRange(row, 0, terminal.buffer.viewWidth - 1)) {
+          row < hyperlink.startAnchor.y ||
+          row > hyperlink.lastCellAnchor.y) {
         continue;
       }
       final nextDestination = hyperlink.uri.toString();
@@ -302,50 +308,18 @@ class _PendingTerminalHyperlink {
   }
 }
 
-/// A closed OSC 8 link. Its anchors follow scrolling and reflow, and a
-/// snapshot of the cells written while it was open decides membership: a cell
-/// a later unlinked write replaced is no longer part of the link.
 class _TrackedTerminalHyperlink {
   _TrackedTerminalHyperlink({
     required this.uri,
     required this.buffer,
     required this.startAnchor,
     required this.lastCellAnchor,
-  }) {
-    final start = startAnchor.offset;
-    final end = lastCellAnchor.offset;
-    for (var y = start.y; y <= end.y; y++) {
-      final line = buffer.lines[y];
-      final from = y == start.y ? start.x : 0;
-      // Reflow drops the blank cells past the content of a row, such as the
-      // one left before a wide character that did not fit.
-      final to = y == end.y
-          ? min(end.x + 1, line.length)
-          : line.getTrimmedLength(buffer.viewWidth);
-      if (from >= to) {
-        continue;
-      }
-      final cells = <int>[];
-      for (var x = from; x < to; x++) {
-        line.getCellData(x, _cell);
-        cells
-          ..add(_cell.content)
-          ..add(_styleHash());
-      }
-      _rows.add(_LinkedRow(line.createAnchor(from), cells));
-    }
-  }
+  });
 
   final Uri uri;
   final Buffer buffer;
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
-
-  /// The rows the link covered when it closed. Per-row anchors keep a row's
-  /// cells found after an erase elsewhere in the link or a change to wrap
-  /// flags; reflow moves each anchor with its cell.
-  final _rows = <_LinkedRow>[];
-  static final _cell = CellData.empty();
 
   bool get attached => startAnchor.attached && lastCellAnchor.attached;
 
@@ -357,121 +331,21 @@ class _TrackedTerminalHyperlink {
     return _compareOffsets(startAnchor.offset, lastCellAnchor.offset) > 0;
   }
 
-  bool contains(CellOffset offset) =>
-      coversRowRange(offset.y, offset.x, offset.x);
+  bool contains(CellOffset offset) {
+    if (!attached) {
+      return false;
+    }
 
-  /// Whether a surviving linked cell lies on [row] within the inclusive
-  /// column range.
-  bool coversRowRange(int row, int startColumn, int endColumn) {
-    if (!attached || row < startAnchor.y || row > lastCellAnchor.y) {
-      return false;
-    }
-    // Deleted characters pull later, unlinked cells into the row, so only
-    // cells up to the end anchor count.
-    final first = row == startAnchor.y ? startAnchor.x : 0;
-    final last = row == lastCellAnchor.y ? lastCellAnchor.x : buffer.viewWidth;
-    final from = max(startColumn, first);
-    final to = min(endColumn, last);
-    if (from > to) {
-      return false;
-    }
-    final width = buffer.viewWidth;
-    // Only a reflowing resize moves cells to another row. Without one, cells
-    // past the edge stay hidden on their row.
-    final reflows = buffer.terminal.reflowEnabled && !buffer.isAltBuffer;
-    for (final _LinkedRow(:anchor, :cells) in _rows) {
-      if (!anchor.attached) {
-        continue;
-      }
-      var y = anchor.y;
-      var x = anchor.x;
-      for (var i = 0; i < cells.length && y <= row; i += 2) {
-        // A reflow narrower than the snapshot continues a row's cells on the
-        // next row, and wraps a wide character that would reach the last
-        // column.
-        if (x >= width ||
-            (x == width - 1 &&
-                width > 1 &&
-                cells[i] >> CellContent.widthShift == 2)) {
-          if (!reflows) {
-            break;
-          }
-          y++;
-          x = 0;
-          if (y > row) {
-            break;
-          }
-        }
-        if (y == row &&
-            x >= from &&
-            x <= to &&
-            _readCell(CellOffset(x, y)) &&
-            _cell.content == cells[i] &&
-            _styleHash() == cells[i + 1]) {
-          return true;
-        }
-        x++;
-      }
-    }
-    return false;
+    return _containsInclusiveOffset(
+      start: startAnchor.offset,
+      end: lastCellAnchor.offset,
+      target: offset,
+    );
   }
-
-  /// Loads the cell at [offset] into [_cell]. Returns false when the cell
-  /// does not exist.
-  bool _readCell(CellOffset offset) {
-    if (offset.y < 0 || offset.y >= buffer.lines.length) {
-      return false;
-    }
-    final line = buffer.lines[offset.y];
-    if (offset.x < 0 || offset.x >= line.length) {
-      return false;
-    }
-    line.getCellData(offset.x, _cell);
-    return true;
-  }
-
-  static int _styleHash() => Object.hash(
-    _cell.foreground,
-    _cell.background,
-    _cell.flags,
-    _cell.underlineColor,
-  );
 
   void dispose() {
     startAnchor.dispose();
     lastCellAnchor.dispose();
-    for (final row in _rows) {
-      row.dispose();
-    }
-  }
-}
-
-/// One row of a closed link: an anchor on its first linked cell and the
-/// content and style hash of its cells in order.
-class _LinkedRow {
-  _LinkedRow(this.anchor, this.cells) {
-    _follow();
-  }
-
-  CellAnchor anchor;
-  final List<int> cells;
-
-  /// Erasing a cell disposes the anchors on it but moves no cell, so an anchor
-  /// on the same cell keeps the row's surviving cells aligned with [cells].
-  void _follow() {
-    anchor.onDispose = (disposed) {
-      final line = disposed.line;
-      if (line != null && disposed.x < line.length) {
-        anchor = line.createAnchor(disposed.x);
-        _follow();
-      }
-    };
-  }
-
-  void dispose() {
-    anchor
-      ..onDispose = null
-      ..dispose();
   }
 }
 
@@ -480,6 +354,12 @@ bool _containsExclusiveOffset({
   required CellOffset end,
   required CellOffset target,
 }) => _compareOffsets(start, target) <= 0 && _compareOffsets(target, end) < 0;
+
+bool _containsInclusiveOffset({
+  required CellOffset start,
+  required CellOffset end,
+  required CellOffset target,
+}) => _compareOffsets(start, target) <= 0 && _compareOffsets(target, end) <= 0;
 
 CellOffset? _previousCellOffset(CellOffset offset, int lineWidth) {
   if (offset.x > 0) {
