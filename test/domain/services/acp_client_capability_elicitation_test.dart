@@ -94,9 +94,6 @@ final class _Process implements AcpTerminalProcess {
   Stream<List<int>> get stderr => const Stream.empty();
 
   @override
-  Future<void> get done => exit.future;
-
-  @override
   Future<AcpTerminalExitStatus> waitForExit() => exit.future;
 
   @override
