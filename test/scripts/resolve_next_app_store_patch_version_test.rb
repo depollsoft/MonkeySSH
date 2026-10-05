@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
-require_relative 'resolve_next_app_store_patch_version'
+require_relative '../../scripts/resolve_next_app_store_patch_version'
 
 class FakeAppStoreVersion
   attr_accessor :app_version_state, :version_string

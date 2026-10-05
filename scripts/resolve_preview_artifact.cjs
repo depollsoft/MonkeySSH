@@ -24,11 +24,8 @@ async function resolve({github, owner, repo, sha, buildName, buildNumber,
       const {data: run} = await github.rest.actions.getWorkflowRun({
         owner, repo, run_id: artifact.workflow_run.id, request,
       });
-      // The old workflow_run producer used the default branch as head_sha;
-      // its source-qualified artifact name remains valid during migration.
-      const sourceMatches = run.event === 'workflow_run' ||
-        (run.event === 'pull_request' && run.head_sha === sha &&
-         run.head_repository?.full_name === `${owner}/${repo}`);
+      const sourceMatches = run.event === 'pull_request' && run.head_sha === sha &&
+        run.head_repository?.full_name === `${owner}/${repo}`;
       if (run.workflow_id === workflow.id && run.conclusion === 'success' && sourceMatches) {
         return {name, runId: String(run.id)};
       }

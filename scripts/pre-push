@@ -56,18 +56,15 @@ collect_pushed_dart_files() {
         else
             base="$remote_sha"
         fi
-        git diff --name-only --diff-filter=ACM "$base" "$local_sha" -- '*.dart'
+        # analysis_options.yaml excludes third_party/**, where vendored upstream
+        # code keeps its own lint rules; honour that here too.
+        git diff --name-only --diff-filter=ACM "$base" "$local_sha" -- '*.dart' ':(exclude)third_party/'
     done
 }
 
 dart_files=()
 while IFS= read -r file; do
     [ -z "$file" ] && continue
-    # analysis_options.yaml excludes third_party/**, where vendored upstream
-    # code keeps its own lint rules; honour that here too.
-    case "$file" in
-        third_party/*) continue ;;
-    esac
     dart_files+=("$file")
 done < <(collect_pushed_dart_files | sort -u)
 

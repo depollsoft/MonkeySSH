@@ -68,22 +68,6 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: python3 scripts/ci_changes.py
 
-  # ---------------------------------------------------------------------------
-  # Lightweight success path for docs-only or other non-Flutter changes.
-  noop:
-    name: No-op
-    needs: changes
-    if: >-
-      needs.changes.outputs.run_check != 'true' &&
-      needs.changes.outputs.go != 'true' &&
-      needs.changes.outputs.tooling != 'true' &&
-      github.event_name != 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Skip heavy CI
-        run: echo "No Flutter-relevant changes detected; CI is a no-op."
-
   # Generate the ignored helper payload once, then fan the exact same bytes out
   # to every Flutter test and package job in this workflow run.
   #
@@ -120,7 +104,7 @@ jobs:
           key: monkeymux-assets-v1-${{ runner.os }}-${{ steps.monkeymux-fingerprint.outputs.value }}
 
       - name: Build assets
-        run: scripts/ensure_monkeymux_assets.sh
+        run: scripts/build_monkeymux_assets.sh
 
       - name: Save MonkeyMux assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.monkeymux-cache.outputs.cache-hit != 'true'
@@ -209,17 +193,9 @@ jobs:
       - name: Test deployment orchestration
         run: |
           node --test test/scripts/resolve_preview_artifact_test.cjs test/scripts/preview_deploy_comments_test.cjs test/scripts/agent_usage_probe_test.cjs
-          ruby test/scripts/store_delivery_test.rb
-          ruby test/scripts/match_git_persistence_test.rb
 
-      - name: Test release-note metadata
-        run: ruby test/scripts/preview_release_notes_test.rb
-
-      - name: Test App Store version selection
-        run: ruby scripts/resolve_next_app_store_patch_version_test.rb
-
-      - name: Test workflow job graph
-        run: ruby test/scripts/workflow_job_graph_test.rb
+      - name: Test Ruby scripts
+        run: for test in test/scripts/*_test.rb; do ruby "$test"; done
 
   test:
     name: Test (Shard ${{ matrix.shard-index }}/6)
@@ -451,16 +427,10 @@ jobs:
           sqlite-targets: android-arm64 android-x64 android-arm android-ia32
 
       - name: Configure Firebase for Android
-        env:
-          FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON }}
-        run: |
-          if [ -z "$FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON" ]; then
-            echo "FLUTTY_FIREBASE_ENABLED=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          mkdir -p android/app/src/production
-          printf '%s' "$FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON" > android/app/src/production/google-services.json
-          echo "FLUTTY_FIREBASE_ENABLED=true" >> "$GITHUB_ENV"
+        uses: ./.github/actions/firebase-config
+        with:
+          platform: android
+          config: ${{ secrets.FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON }}
 
       - name: Generate CI release signing config
         run: |
@@ -542,16 +512,10 @@ jobs:
           dependency-fingerprint: ${{ hashFiles('pubspec.lock', 'ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
 
       - name: Configure Firebase for iOS
-        env:
-          FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST }}
-        run: |
-          if [ -z "$FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST" ]; then
-            echo "FLUTTY_FIREBASE_ENABLED=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          mkdir -p ios/Runner/Firebase/production
-          printf '%s' "$FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST" > ios/Runner/Firebase/production/GoogleService-Info.plist
-          echo "FLUTTY_FIREBASE_ENABLED=true" >> "$GITHUB_ENV"
+        uses: ./.github/actions/firebase-config
+        with:
+          platform: ios
+          config: ${{ secrets.FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST }}
 
       - name: Disable iOS code signing for CI
         run: |

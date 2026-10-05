@@ -1,7 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {statusMarker, noPreviewCommentUrl, readMeta, findStatusComment,
-  findPreviewComment, resolveRequestContext, upsertStatusComment} = require('../../scripts/preview_deploy_comments.cjs');
+const {statusMarker, noPreviewCommentUrl, readMeta, findStatusComment, findPreviewComment,
+  resolveRequestContext, upsertStatusComment, renderStatusComment, deployRunMeta,
+  syncManagedReactions} = require('../../scripts/preview_deploy_comments.cjs');
 const meta = (key, value) => `<!-- ${key}:${value} -->`;
 const bot = {login: 'github-actions[bot]', type: 'Bot'};
 const status = (id, key, user = bot) => ({id, user,
@@ -84,4 +85,50 @@ test('finishing a second deployment leaves the first request status unchanged', 
     issueNumber: 4, comments, body, requestKey: request.requestKey}), 2);
   assert.equal(comments[0].body, original);
   assert.equal(comments[1].body, body);
+});
+
+test('rendered status comments round-trip every trailer value through readMeta', () => {
+  const request = {requestKey: 'comment-7', requestedBy: 'octo', requestedAt: 'at',
+    requestCommentId: '7', requestCommentUrl: 'request-url', deploySha: 'sha',
+    previewCommentUrl: 'preview-url'};
+  const version = {'build-name': '1.2.3', 'build-codename': 'Name', 'build-number': '42',
+    'requested-build-number': '41', 'rebuild-required': 'true'};
+  const meta = deployRunMeta({request, state: 'in_progress', runUrl: 'run-url', version});
+  const body = renderStatusComment({status: 'Deploying', workflow: '[View](run-url)', meta,
+    buildDisplay: '1.2.3 "Name"', buildNumber: '42', rows: ['| **Extra** | row |'],
+    notes: ['', '> note']});
+  assert.equal(Object.keys(meta).length, 14);
+  for (const [key, value] of Object.entries(meta)) {
+    assert.equal(readMeta(body, `preview-deploy-${key}`), value, key);
+  }
+  assert.equal(findStatusComment([{id: 1, user: bot, body}], 'comment-7').id, 1);
+  assert.deepEqual(body.split('\n').slice(0, 12), ['## 🚀 Preview Deploy', '| | Details |', '|---|---|',
+    '| **Status** | Deploying |', '| **Requested by** | @octo via `/deploy` comment |',
+    '| **Preview SHA** | `sha` |', '| **Version** | `1.2.3 "Name"` |', '| **Build** | `42` |',
+    '| **Extra** | row |', '| **Request** | [View /deploy comment](request-url) |',
+    '| **Preview Comment** | [View preview artifacts](preview-url) |', '| **Requested at** | at |']);
+  const dispatched = renderStatusComment({status: 's', workflow: 'w', meta: deployRunMeta({
+    request: {...request, requestCommentId: '', requestCommentUrl: '', previewCommentUrl: ''},
+    state: 'failed', runUrl: '', version: {}})});
+  assert.match(dispatched, /@octo via workflow dispatch/);
+  assert.doesNotMatch(dispatched, /Version|Build|Request\b|Preview Comment/);
+  assert.equal(readMeta(dispatched, 'preview-deploy-build-number'), '');
+});
+
+test('reaction sync leaves only the target managed bot reaction', async () => {
+  const calls = [];
+  const reactions = [{id: 1, content: 'eyes', user: {login: 'github-actions[bot]'}},
+    {id: 2, content: 'rocket', user: {login: 'github-actions[bot]'}},
+    {id: 3, content: 'rocket', user: {login: 'human'}},
+    {id: 4, content: 'heart', user: {login: 'github-actions[bot]'}}];
+  const github = {paginate: async (route, args) => { calls.push(['list', args.comment_id]); return reactions; },
+    request: async (route, args) => calls.push([route.split(' ')[0], args.reaction_id ?? args.content])};
+  const args = {github, owner: 'o', repo: 'r', commentId: '9'};
+  await syncManagedReactions({...args, target: 'eyes'});
+  await syncManagedReactions({...args, target: '-1'});
+  await syncManagedReactions(args);
+  await syncManagedReactions({...args, commentId: ''});
+  assert.deepEqual(calls, [['list', 9], ['DELETE', 2],
+    ['list', 9], ['DELETE', 1], ['DELETE', 2], ['POST', '-1'],
+    ['list', 9], ['DELETE', 1], ['DELETE', 2]]);
 });

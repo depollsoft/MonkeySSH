@@ -58,12 +58,19 @@ Future<void> waitForTerminalText(
   required String description,
   Duration timeout = const Duration(seconds: 20),
 }) async {
-  await pumpUntil(
-    tester,
-    () => terminalBufferText(terminal()).contains(expected),
-    description: '$description\n${terminalBufferText(terminal())}',
-    timeout: timeout,
-  );
+  try {
+    await pumpUntil(
+      tester,
+      () => terminalBufferText(terminal()).contains(expected),
+      description: description,
+      timeout: timeout,
+    );
+  } on TestFailure {
+    // Report the buffer as it was at the timeout, not when the wait began.
+    fail(
+      'Timed out waiting for $description\n${terminalBufferText(terminal())}',
+    );
+  }
 }
 
 String terminalBufferText(Terminal terminal) {
