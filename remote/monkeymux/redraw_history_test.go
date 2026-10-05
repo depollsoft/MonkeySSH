@@ -64,11 +64,12 @@ func TestRedrawDoesNotReplayPreviousBufferAcrossAlternateScreenSwitch(t *testing
 			t.Run(mode+action, func(t *testing.T) {
 				server := newMuxServerWithSize("test", 80, 24)
 				window := &muxWindow{
-					id:                              "@1",
-					redrawForwardingPaused:          true,
-					redrawForwardingGeneration:      1,
-					redrawForwardingFallbackHistory: []byte("previous buffer content"),
+					id:                         "@1",
+					redrawForwardingPaused:     true,
+					redrawForwardingGeneration: 1,
 				}
+				window.redrawForwardingFallbackScreen = newTerminalScreen(80, 24)
+				window.redrawForwardingFallbackScreen.Write([]byte("previous buffer content"))
 				if action == "l" {
 					window.privateModes = map[string]bool{"1049": true}
 				}

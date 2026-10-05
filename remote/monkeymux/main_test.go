@@ -1416,12 +1416,11 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
 	server.mu.Lock()
-	window.redrawForwardingFallbackHistory =
-		server.foregroundHistoryFallbackHistoryLocked(window)
+	window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
 	fallback := string(
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
-			window.redrawForwardingFallbackHistory,
+			redrawFallbackHistory(window),
 		),
 	)
 	server.mu.Unlock()
@@ -4954,12 +4953,12 @@ func TestRestartedRedrawPauseKeepsOriginalFallback(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	first := string(window.redrawForwardingFallbackHistory)
+	first := string(redrawFallbackHistory(window))
 	// The first redraw produced only a clear, so the screen no longer holds a
 	// usable frame.
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2J"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(first, "oldest complete frame") {
@@ -4996,7 +4995,7 @@ func TestRestartedRedrawPauseRefreshesUsableFallback(t *testing.T) {
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2Jnewer complete frame"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(second, "newer complete frame") {
@@ -5062,7 +5061,7 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.redrawForwardingBuffer = []byte("buffered")
-	captured := len(window.redrawForwardingFallbackHistory)
+	captured := len(redrawFallbackHistory(window))
 	server.mu.Unlock()
 	if captured == 0 {
 		t.Fatal("pause captured no fallback history to release")
@@ -5072,12 +5071,12 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if window.redrawForwardingFallbackHistory != nil ||
+	if window.redrawForwardingFallbackScreen != nil ||
 		window.redrawForwardingBuffer != nil ||
 		window.redrawForwardingPaused {
 		t.Fatalf(
 			"closed window retained redraw state: history=%d buffer=%d paused=%v",
-			len(window.redrawForwardingFallbackHistory),
+			len(redrawFallbackHistory(window)),
 			len(window.redrawForwardingBuffer),
 			window.redrawForwardingPaused,
 		)
@@ -5169,13 +5168,13 @@ func TestRedrawFallbackSnapshotSurvivesHistoryRewrite(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	snapshot := string(window.redrawForwardingFallbackHistory)
+	snapshot := string(redrawFallbackHistory(window))
 	// Output landing while the pause is in flight rewrites the history buffer
 	// starting at index 0, over the bytes an aliased snapshot would point at.
 	window.appendHistoryLocked(
 		bytes.Repeat([]byte("x"), windowFullReplayHistoryLimitBytes),
 	)
-	after := string(window.redrawForwardingFallbackHistory)
+	after := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(snapshot, "last known tui screen") {

@@ -763,3 +763,60 @@ func TestDropColorSchemeQueries(t *testing.T) {
 		})
 	}
 }
+
+func TestControlStringAt(t *testing.T) {
+	tests := []struct {
+		name       string
+		data       string
+		index      int
+		utf8Prefix int
+		kind       byte
+		payload    string
+		end        int
+		incomplete bool
+		recognized bool
+	}{
+		{name: "csi", data: "\x1b[>qrest", kind: '[', payload: "\x1b[>q", end: 4, recognized: true},
+		{name: "c1 csi", data: "\x9b>q", kind: '[', payload: "\x9b>q", end: 3, recognized: true},
+		{name: "osc bel", data: "\x1b]11;?\x07x", kind: ']', payload: "11;?", end: 7, recognized: true},
+		{name: "osc st", data: "\x1b]11;?\x1b\\", kind: ']', payload: "11;?", end: 8, recognized: true},
+		{name: "c1 osc", data: "\x9d11;?\x07", kind: ']', payload: "11;?", end: 6, recognized: true},
+		{name: "dcs", data: "\x1bP+q544e\x1b\\", kind: 'P', payload: "+q544e", end: 10, recognized: true},
+		{name: "c1 dcs", data: "\x90+q544e\x1b\\", kind: 'P', payload: "+q544e", end: 9, recognized: true},
+		{name: "apc", data: "\x1b_Ga=q,i=1;\x1b\\", kind: '_', payload: "Ga=q,i=1;", end: 13, recognized: true},
+		{name: "c1 apc", data: "\x9fGa=q\x1b\\", kind: '_', payload: "Ga=q", end: 7, recognized: true},
+		{name: "offset", data: "ab\x1b[c", index: 2, kind: '[', payload: "\x1b[c", end: 5, recognized: true},
+		{name: "bare esc", data: "\x1b", incomplete: true, recognized: true},
+		{name: "incomplete csi", data: "\x1b[>", kind: '[', incomplete: true, recognized: true},
+		{name: "incomplete osc", data: "\x1b]11;", kind: ']', incomplete: true, recognized: true},
+		{name: "incomplete dcs", data: "\x1bP+q", kind: 'P', incomplete: true, recognized: true},
+		{name: "incomplete apc", data: "\x1b_Ga", kind: '_', incomplete: true, recognized: true},
+		{name: "text", data: "a\x1b[c"},
+		{name: "other escape", data: "\x1bM"},
+		{name: "unescaped 7-bit introducer", data: "[c"},
+		{name: "utf8 continuation", data: "\xc3\x9bc", index: 1},
+		{name: "leading utf8 prefix", data: "\x9b>q", utf8Prefix: 1},
+		{name: "out of range", data: "x", index: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, recognized := controlStringAt([]byte(test.data), test.index, test.utf8Prefix)
+			if recognized != test.recognized {
+				t.Fatalf("recognized = %v, want %v", recognized, test.recognized)
+			}
+			if !recognized {
+				return
+			}
+			if got.incomplete != test.incomplete || got.kind != test.kind {
+				t.Fatalf("got kind %q incomplete %v, want kind %q incomplete %v", got.kind, got.incomplete, test.kind, test.incomplete)
+			}
+			if test.incomplete {
+				return
+			}
+			payload := string([]byte(test.data)[got.payloadStart:got.payloadEnd])
+			if payload != test.payload || got.end != test.end {
+				t.Fatalf("got payload %q end %d, want payload %q end %d", payload, got.end, test.payload, test.end)
+			}
+		})
+	}
+}

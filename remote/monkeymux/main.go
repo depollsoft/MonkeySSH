@@ -858,7 +858,6 @@ type muxWindow struct {
 	redrawForwardingPaused               bool
 	redrawForwardingGeneration           int
 	redrawForwardingReplay               []byte
-	redrawForwardingFallbackHistory      []byte
 	redrawForwardingFallbackScreen       *terminalScreen
 	redrawForwardingBuffer               []byte
 	redrawForwardingFailoverBuffer       []byte
@@ -10383,34 +10382,23 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	window.redrawForwardingPrimaryNeedsFailover =
 		len(preservedQueries) > 0 &&
 			!s.isAttachConnectionLocked(preservedPrimary)
-	if !window.redrawForwardingPaused ||
-		len(window.redrawForwardingFallbackHistory) == 0 {
-		// Snapshot the pre-resize frame for every redraw pause, not just
-		// deferred window-switch replays: restore and theme redraws start the
-		// same transaction directly and hit the same coalesced-SIGWINCH
-		// failure. Only a frame with visible content is worth retaining: a
-		// snapshot taken in the instant after the child cleared but before it
-		// repainted would hand the user exactly the emptiness this fallback
-		// exists to avoid.
-		if snapshot := s.foregroundHistoryFallbackHistoryLocked(
-			window,
-		); terminalOutputHasVisibleContent(snapshot) {
-			window.redrawForwardingFallbackHistory = snapshot
-			window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
-		} else {
-			window.redrawForwardingFallbackHistory = nil
-			window.redrawForwardingFallbackScreen = nil
-		}
-	} else if refreshed := s.foregroundHistoryFallbackHistoryLocked(
-		window,
-	); terminalOutputHasVisibleContent(refreshed) {
-		// A pause restarted while another is in flight only re-snapshots when
-		// the history still holds a complete frame. If the first (empty) redraw
-		// already cleared the screen, re-reading it would capture that blank
-		// frame and hand the user exactly the emptiness this fallback exists to
-		// avoid, so the original snapshot is kept instead.
-		window.redrawForwardingFallbackHistory = refreshed
-		window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
+	// Snapshot the pre-resize screen for every redraw pause, not just
+	// deferred window-switch replays: restore and theme redraws start the
+	// same transaction directly and hit the same coalesced-SIGWINCH failure.
+	// The clone is the whole snapshot; the frame bytes are rendered from it
+	// only if the resume actually needs the fallback, which the common
+	// (child repainted) case never does. Only a screen with visible content
+	// is worth retaining: a snapshot taken in the instant after the child
+	// cleared but before it repainted would hand the user exactly the
+	// emptiness this fallback exists to avoid. A frame that paints only a
+	// background color counts as visible: it is the picture the user saw.
+	// A pause restarted while another is in flight likewise keeps the
+	// original snapshot when the first (empty) redraw already cleared the
+	// screen.
+	if screen := window.screenLocked(); screen.HasVisibleContent() {
+		window.redrawForwardingFallbackScreen = screen.Clone()
+	} else if !window.redrawForwardingPaused {
+		window.redrawForwardingFallbackScreen = nil
 	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
@@ -10542,17 +10530,17 @@ func (s *muxServer) resumePausedAttachForwarding(
 		// foreground replay clears the client, so the update needs its base
 		// frame restored first. Paint the retained history and any delta inside
 		// one synchronized transaction so the user sees a complete frame.
-		fallbackReplay := s.foregroundHistoryFallbackReplayLocked(
-			window,
-			window.redrawForwardingFallbackHistory,
-		)
-		// Substitute only a frame that actually paints something. An
-		// escape-only snapshot (a clear the child had just emitted) is long
-		// enough to look like a frame while rendering exactly the blank screen
-		// this fallback exists to prevent.
-		if terminalOutputHasVisibleContent(
-			window.redrawForwardingFallbackHistory,
-		) && len(fallbackReplay) > 0 {
+		// The pause retained the screen only when it had something to paint,
+		// so an escape-only snapshot (a clear the child had just emitted) never
+		// substitutes for the redraw.
+		var fallbackReplay []byte
+		if window.redrawForwardingFallbackScreen != nil {
+			fallbackReplay = s.foregroundHistoryFallbackReplayLocked(
+				window,
+				window.redrawForwardingFallbackScreen.RenderFrame(),
+			)
+		}
+		if len(fallbackReplay) > 0 {
 			if visibleRedraw {
 				// A normal TUI update (for example a spinner tick) can arrive
 				// while the child coalesces both resize notifications. It relies
@@ -10572,12 +10560,9 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// to finish the frame with; the queries are re-attached to the
 					// primary and failover deliveries exactly as the other branches
 					// do, so the response wait still has something to wait for.
-					frame := fallbackReplay
-					if window.redrawForwardingFallbackScreen != nil {
-						screen := window.redrawForwardingFallbackScreen.Clone()
-						screen.Write(secondaryBuffered)
-						frame = s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
-					}
+					screen := window.redrawForwardingFallbackScreen.Clone()
+					screen.Write(secondaryBuffered)
+					frame := s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
 					buffered = append(append([]byte(nil), frame...), queryData...)
 					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 					secondaryBuffered = append([]byte(nil), frame...)
@@ -10906,7 +10891,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	}
 	w.redrawForwardingPaused = false
 	w.redrawForwardingReplay = nil
-	w.redrawForwardingFallbackHistory = nil
 	w.redrawForwardingFallbackScreen = nil
 	w.redrawForwardingBuffer = nil
 	w.redrawForwardingFailoverBuffer = nil
@@ -10915,32 +10899,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
-}
-
-// foregroundHistoryFallbackHistoryLocked snapshots the frame bytes to fall back
-// to if the redraw about to be triggered produces nothing. The result must be a
-// copy: these helpers can return slices aliasing window.history, which
-// appendHistoryLocked rewrites in place as output arrives during the pause,
-// which would mutate the snapshot into the very redraw it exists to recover
-// from.
-func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
-	window *muxWindow,
-) []byte {
-	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
-		return nil
-	}
-	// This is a TUI frame recovery. A tail of the raw byte history is not a
-	// frame: an application that streams incremental updates evicts its last
-	// full repaint from that tail, and replaying the remainder onto a cleared
-	// client paints only the rows the updates touched. Render the complete
-	// picture from the screen model instead, which reproduces every visible
-	// cell, the cursor and the main-screen scrollback regardless of how the
-	// application drew them.
-	screen := window.screenLocked()
-	if !screen.HasVisibleContent() {
-		return nil
-	}
-	return screen.RenderFrame()
 }
 
 // foregroundHistoryFallbackReplayLocked renders the snapshot taken when the
@@ -13687,6 +13645,18 @@ func terminalQueryResponseCount(data []byte) int {
 	return count
 }
 
+// dcsCapabilityCount counts the ";"-separated capability names in an XTGETTCAP
+// query or reply payload after its prefix.
+func dcsCapabilityCount(fields []byte) int {
+	count := 0
+	for _, capability := range bytes.Split(fields, []byte{';'}) {
+		if len(capability) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func terminalQuerySequenceResponseCount(sequence []byte) int {
 	payloadStart := 0
 	osc := false
@@ -13724,16 +13694,7 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 		if !bytes.HasPrefix(payload, []byte("+q")) {
 			return 1
 		}
-		count := 0
-		for _, capability := range bytes.Split(payload[2:], []byte{';'}) {
-			if len(capability) > 0 {
-				count++
-			}
-		}
-		if count > 0 {
-			return count
-		}
-		return 0
+		return dcsCapabilityCount(payload[2:])
 	}
 	code, value, ok := strings.Cut(
 		string(payload),
@@ -13781,13 +13742,7 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 		!bytes.HasPrefix(payload, []byte("1+r")) {
 		return 1
 	}
-	count := 0
-	for _, capability := range bytes.Split(payload[3:], []byte{';'}) {
-		if len(capability) > 0 {
-			count++
-		}
-	}
-	if count > 0 {
+	if count := dcsCapabilityCount(payload[3:]); count > 0 {
 		return count
 	}
 	return 1
@@ -15010,120 +14965,114 @@ func terminalQuerySequenceAt(
 	return terminalQuerySequenceAtWithUtf8Prefix(data, index, 0)
 }
 
+// controlString locates one ESC- or C1-introduced control string: kind is the
+// 7-bit introducer ('[' CSI, ']' OSC, 'P' DCS, '_' APC; 0 for a bare trailing
+// ESC), data[payloadStart:payloadEnd] is the payload (the whole sequence for a
+// CSI) and end is the index just past the terminator. incomplete reports a
+// string whose terminator has not arrived yet.
+type controlString struct {
+	kind         byte
+	payloadStart int
+	payloadEnd   int
+	end          int
+	incomplete   bool
+}
+
+// controlStringAt recognises the control string starting at index. It reports
+// false for any other byte, including a continuation byte that belongs to the
+// leading UTF-8 prefix carried over from the previous chunk and a C1 byte that
+// continues a multi-byte character.
+func controlStringAt(
+	data []byte,
+	index int,
+	leadingUtf8Prefix int,
+) (controlString, bool) {
+	if index < 0 || index >= len(data) {
+		return controlString{}, false
+	}
+	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
+		return controlString{}, false
+	}
+	introducer := data[index]
+	payloadStart := index + 1
+	if introducer == '\x1b' {
+		if index+1 >= len(data) {
+			return controlString{incomplete: true}, true
+		}
+		switch data[index+1] {
+		case '[', ']', 'P', '_':
+			introducer = data[index+1]
+			payloadStart = index + 2
+		default:
+			return controlString{}, false
+		}
+	} else if isUtf8ContinuationAt(data, index) {
+		return controlString{}, false
+	} else {
+		switch introducer {
+		case 0x9b:
+			introducer = '['
+		case 0x9d:
+			introducer = ']'
+		case 0x90:
+			introducer = 'P'
+		case 0x9f:
+			introducer = '_'
+		default:
+			return controlString{}, false
+		}
+	}
+	result := controlString{kind: introducer, payloadStart: payloadStart}
+	if introducer == '[' {
+		end := csiSequenceEnd(data, payloadStart)
+		if end < 0 {
+			result.incomplete = true
+			return result, true
+		}
+		result.payloadStart = index
+		result.payloadEnd = end + 1
+		result.end = end + 1
+		return result, true
+	}
+	findTerminator := findStringTerminator
+	if introducer == ']' {
+		findTerminator = findOscTerminator
+	}
+	end, terminatorLength, ok := findTerminator(data[payloadStart:])
+	if !ok {
+		result.incomplete = true
+		return result, true
+	}
+	result.payloadEnd = payloadStart + end
+	result.end = payloadStart + end + terminatorLength
+	return result, true
+}
+
 func terminalQuerySequenceAtWithUtf8Prefix(
 	data []byte,
 	index int,
 	leadingUtf8Prefix int,
 ) (int, bool, bool, bool) {
-	if index < 0 || index >= len(data) {
+	sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+	if !ok {
 		return -1, false, false, false
 	}
-	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
-		return -1, false, false, false
+	if sequence.incomplete {
+		return -1, false, true, true
 	}
-	introducer := data[index]
-	payloadStart := index + 1
-	escaped := false
-	if introducer == '\x1b' {
-		if index+1 >= len(data) {
-			return -1, false, true, true
-		}
-		escaped = true
-		introducer = data[index+1]
-		payloadStart = index + 2
-	} else if isUtf8ContinuationAt(data, index) {
-		return -1, false, false, false
-	}
-	switch introducer {
+	payload := data[sequence.payloadStart:sequence.payloadEnd]
+	query := false
+	switch sequence.kind {
 	case '[':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
-	case 0x9b:
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
+		query = isReplayUnsafeCsiQuery(payload)
 	case ']':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9d:
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeOscQuery(payload)
 	case 'P':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x90:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeDcsQuery(payload)
 	case '_':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9f:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	default:
-		return -1, false, false, false
+		query = isReplayUnsafeKittyQuery(payload)
 	}
+	return sequence.end, query, false, true
 }
 
 func leadingUtf8ContinuationPrefix(data []byte, remaining int) int {
@@ -15458,120 +15407,34 @@ func scanTerminalResponseInput(
 	}
 	var responseEnds []int
 	for index := 0; index < len(data); {
-		if index < leadingUtf8Prefix &&
-			data[index]&0xc0 == 0x80 {
+		sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+		if !ok {
 			return responseEnds, -1, 0, index
 		}
-		sequenceEnd := -1
+		if sequence.incomplete {
+			kind := sequence.kind
+			if kind == '[' {
+				kind = 0
+			}
+			return responseEnds, index, kind, len(data)
+		}
+		payload := data[sequence.payloadStart:sequence.payloadEnd]
 		isResponse := false
-		introducer := data[index]
-		payloadStart := index + 1
-		escaped := false
-		if introducer == '\x1b' {
-			if index+1 >= len(data) {
-				return responseEnds, index, 0, len(data)
-			}
-			escaped = true
-			introducer = data[index+1]
-			payloadStart = index + 2
-		}
-		switch introducer {
+		switch sequence.kind {
 		case '[':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
-		case 0x9b:
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
+			isResponse = isTerminalResponseCsi(payload)
 		case ']':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9d:
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseOsc(payload)
 		case 'P':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x90:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseDcs(payload)
 		case '_':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9f:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		default:
-			return responseEnds, -1, 0, index
+			isResponse = isTerminalResponseKitty(payload)
 		}
 		if !isResponse {
 			return responseEnds, -1, 0, index
 		}
-		responseEnds = append(responseEnds, sequenceEnd)
-		index = sequenceEnd
+		responseEnds = append(responseEnds, sequence.end)
+		index = sequence.end
 	}
 	return responseEnds, -1, 0, len(data)
 }
@@ -15732,6 +15595,17 @@ func terminalResponseNumericParams(value string) bool {
 	return true
 }
 
+// isTerminalColorOscCode reports the OSC codes whose "?" form queries the
+// terminal's palette, colors, or clipboard and whose reply carries the value.
+func isTerminalColorOscCode(code string) bool {
+	switch code {
+	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalResponseOsc(payload []byte) bool {
 	if len(payload) > 0 && (payload[0] == 'L' || payload[0] == 'l') {
 		return true
@@ -15740,12 +15614,7 @@ func isTerminalResponseOsc(payload []byte) bool {
 	if !ok || value == "?" {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isTerminalResponseDcs(payload []byte) bool {
@@ -15776,12 +15645,7 @@ func isReplayUnsafeOscQuery(payload []byte) bool {
 	if !ok || !strings.Contains(value, "?") {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isReplayUnsafeDcsQuery(payload []byte) bool {
