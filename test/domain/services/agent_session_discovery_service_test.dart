@@ -2347,8 +2347,6 @@ branch refs/heads/main
         when(() => backendService.resolve(session)).thenReturn(backend);
         when(() => backend.capabilities).thenReturn(
           const TerminalBackendCapabilities(
-            supportsWindows: true,
-            supportsClientCommands: true,
             clientCommandsUseControlChannel: true,
           ),
         );
@@ -2411,8 +2409,6 @@ branch refs/heads/main
       when(() => backendService.resolve(session)).thenReturn(backend);
       when(() => backend.capabilities).thenReturn(
         const TerminalBackendCapabilities(
-          supportsWindows: true,
-          supportsClientCommands: true,
           clientCommandsUseControlChannel: true,
         ),
       );

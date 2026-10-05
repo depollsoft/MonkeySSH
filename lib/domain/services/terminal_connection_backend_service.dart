@@ -109,7 +109,8 @@ class TerminalConnectionBackendService {
   }) {
     final backend = activeMuxBackend ?? session.remoteMuxBackend;
     final muxSessionName =
-        _nonEmpty(sessionName) ?? _nonEmpty(session.remoteMuxSessionName);
+        trimmedOrNull(sessionName) ??
+        trimmedOrNull(session.remoteMuxSessionName);
 
     if (backend == null || muxSessionName == null) {
       return _DirectTerminalConnectionBackend(session);
@@ -141,8 +142,6 @@ class _DirectTerminalConnectionBackend implements TerminalConnectionBackend {
   const _DirectTerminalConnectionBackend(this._session);
 
   static const _capabilities = TerminalBackendCapabilities(
-    supportsWindows: false,
-    supportsClientCommands: true,
     clientCommandsUseControlChannel: false,
   );
 
@@ -248,14 +247,10 @@ class _MultiplexedTerminalConnectionBackend
        _extraFlags = extraFlags;
 
   static const _tmuxCapabilities = TerminalBackendCapabilities(
-    supportsWindows: true,
-    supportsClientCommands: true,
     clientCommandsUseControlChannel: false,
   );
 
   static const _monkeyMuxCapabilities = TerminalBackendCapabilities(
-    supportsWindows: true,
-    supportsClientCommands: true,
     clientCommandsUseControlChannel: true,
   );
 
@@ -384,6 +379,14 @@ class _MultiplexedTerminalConnectionBackend
       _remoteMultiplexer.isExecChannelCoolingDown(_session);
 }
 
+/// Deadline for opening the exec channel of a client command.
+const _clientCommandOpenTimeout = Duration(seconds: 10);
+
+/// Deadline for a client command to finish once its channel is open, matching
+/// the MonkeyMux `run_command` budget so a hung command cannot hold a queued
+/// exec slot forever.
+const _clientCommandResponseTimeout = Duration(seconds: 25);
+
 /// Runs [command] on a short-lived exec channel and collects its output.
 ///
 /// [command] must already carry any working-directory wrapping.
@@ -394,7 +397,7 @@ Future<TerminalClientCommandResult> _runSshClientCommand(
 }) => session.runQueuedExec(() async {
   final exec = await openSshExec(
     session.execute(command),
-    const Duration(seconds: 10),
+    _clientCommandOpenTimeout,
   );
   try {
     final stdout = StringBuffer();
@@ -407,23 +410,25 @@ Future<TerminalClientCommandResult> _runSshClientCommand(
         .cast<List<int>>()
         .transform(utf8.decoder)
         .forEach(stderr.write);
-    await Future.wait<void>([stdoutFuture, stderrFuture, exec.done]);
+    await Future.wait<void>([stdoutFuture, stderrFuture, exec.done])
+        .timeout(_clientCommandResponseTimeout);
     final stdoutText = stdout.toString();
     return TerminalClientCommandResult(
       output: stdoutText.isNotEmpty ? stdoutText : stderr.toString(),
+      exitCode: exec.exitCode,
     );
+  } on TimeoutException {
+    // close() only sends EOF; a command that ignores it would keep the exec
+    // slot occupied, so tear the channel down.
+    exec.channel.destroy();
+    rethrow;
   } finally {
     exec.close();
   }
 }, priority: priority);
 
-String? _nonEmpty(String? value) {
-  final trimmed = value?.trim();
-  return trimmed == null || trimmed.isEmpty ? null : trimmed;
-}
-
 String _wrapClientCommandWorkingDirectory(String command, String? directory) {
-  final cwd = _nonEmpty(directory);
+  final cwd = trimmedOrNull(directory);
   if (cwd == null) {
     return command;
   }
