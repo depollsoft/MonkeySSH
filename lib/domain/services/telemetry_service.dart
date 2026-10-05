@@ -1116,9 +1116,9 @@ class TelemetryCollectionNotifier extends Notifier<bool> {
   int _revision = 0;
   Future<void> _preferenceUpdates = Future<void>.value();
 
-    ref.watch(settingsGenerationProvider);
   @override
   bool build() {
+    ref.watch(settingsGenerationProvider);
     _settingsService = ref.watch(settingsServiceProvider);
     _telemetryService = ref.watch(telemetryServiceProvider);
     _disposed = false;
@@ -1173,8 +1173,12 @@ class TelemetryCollectionNotifier extends Notifier<bool> {
       SettingKeys.telemetryCollection,
     );
     if (_disposed || revision != _revision) return;
-    await telemetry.setCollectionEnabled(enabled: enabled);
-    if (_disposed || revision != _revision) return;
+    // createTelemetryService already applied the persisted preference to the
+    // SDKs at startup; repeating it costs several native round-trips.
+    if (enabled != telemetry.collectionEnabled) {
+      await telemetry.setCollectionEnabled(enabled: enabled);
+      if (_disposed || revision != _revision) return;
+    }
     state = enabled;
   }
 }
@@ -1237,13 +1241,14 @@ class TelemetryOptInPromptNotifier extends Notifier<TelemetryOptInPromptState> {
 
   late SettingsService _settingsService;
   bool _disposed = false;
+  bool _markShownInFlight = false;
 
   @override
   TelemetryOptInPromptState build() {
+    ref.watch(settingsGenerationProvider);
     _settingsService = ref.watch(settingsServiceProvider);
     _disposed = false;
     ref.onDispose(() => _disposed = true);
-    ref.watch(settingsGenerationProvider);
     Future.microtask(_init);
     return const TelemetryOptInPromptState(
       choice: TelemetryOptInPromptChoice.notShown,
@@ -1291,20 +1296,28 @@ class TelemetryOptInPromptNotifier extends Notifier<TelemetryOptInPromptState> {
 
   /// Records that the prompt has become visible.
   Future<void> markShown({required String trigger}) async {
-    if (state.choice != TelemetryOptInPromptChoice.notShown) {
+    // The prompt card calls this after every frame until the state flips, so
+    // overlapping calls must not log or persist "shown" more than once.
+    if (state.choice != TelemetryOptInPromptChoice.notShown ||
+        _markShownInFlight) {
       return;
     }
-    await ref
-        .read(telemetryServiceProvider)
-        .logTelemetryPromptShown(trigger: trigger);
-    await _settingsService.setString(
-      SettingKeys.telemetryOptInPromptState,
-      TelemetryOptInPromptChoice.shown.name,
-    );
-    if (_disposed) {
-      return;
+    _markShownInFlight = true;
+    try {
+      await ref
+          .read(telemetryServiceProvider)
+          .logTelemetryPromptShown(trigger: trigger);
+      await _settingsService.setString(
+        SettingKeys.telemetryOptInPromptState,
+        TelemetryOptInPromptChoice.shown.name,
+      );
+      if (_disposed) {
+        return;
+      }
+      state = state.copyWith(choice: TelemetryOptInPromptChoice.shown);
+    } finally {
+      _markShownInFlight = false;
     }
-    state = state.copyWith(choice: TelemetryOptInPromptChoice.shown);
   }
 
   /// Dismisses the prompt without enabling telemetry collection.
