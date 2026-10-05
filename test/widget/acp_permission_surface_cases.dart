@@ -88,6 +88,78 @@ void registerAcpPermissionSurfaceTests() {
       await tester.pumpAndSettle();
     });
 
+    testWidgets('other action failures keep their error path', (tester) async {
+      final prompt = AcpToolPermissionPrompt(
+        stableKey: 'broken',
+        title: 'Allow this action?',
+        options: const [
+          AcpPermissionOption(
+            id: 'opt-allow',
+            name: 'Allow',
+            kind: AcpPermissionOptionKind.allowOnce,
+          ),
+        ],
+        onSelect: (_) async => throw Exception('remote write failed'),
+        onCancel: () async {},
+      );
+      await _pump(tester, [prompt]);
+
+      // The failure is not absorbed by the surface: it reaches the test
+      // harness as an uncaught error, the same route production reports it.
+      final reported = <FlutterErrorDetails>[];
+      final previousReporter = reportTestException;
+      reportTestException = (details, _) => reported.add(details);
+      try {
+        await tester.tap(find.text('Allow'));
+        await tester.pump();
+      } finally {
+        reportTestException = previousReporter;
+      }
+
+      expect(
+        reported.map((details) => details.exception.toString()),
+        contains(contains('remote write failed')),
+      );
+      expect(
+        find.text('The agent is no longer waiting for this request.'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a vanished session is reported instead of thrown', (
+      tester,
+    ) async {
+      final prompt = AcpToolPermissionPrompt(
+        stableKey: 'gone',
+        title: 'Allow this action?',
+        options: const [
+          AcpPermissionOption(
+            id: 'opt-allow',
+            name: 'Allow',
+            kind: AcpPermissionOptionKind.allowOnce,
+          ),
+        ],
+        onSelect: (_) async =>
+            throw StateError('No ACP session for the requested key.'),
+        onCancel: () async {},
+      );
+      await _pump(tester, [prompt]);
+
+      await tester.tap(find.text('Allow'));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('The agent is no longer waiting for this request.'),
+        findsOneWidget,
+      );
+      // The card is usable again once the failure is reported.
+      expect(
+        tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+        isNotNull,
+      );
+    });
+
     testWidgets('write prompt shows metadata but hides content by default', (
       tester,
     ) async {

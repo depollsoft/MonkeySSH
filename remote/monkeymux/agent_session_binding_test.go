@@ -1124,7 +1124,7 @@ func TestAgentSessionOwnershipExclusion(t *testing.T) {
 			now := time.Now()
 			home, _ := os.UserHomeDir()
 			// A tool root can hold its session file directly.
-			executable := agentCommands[tool].executable
+			executable := agentRegistry[tool].launch.executable
 			processes := map[int]processInfo{101: {pid: 101, comm: tool}, 201: {pid: 201, comm: executable}}
 			files := map[int][]string{}
 			bindingTestProcesses(t, cwd, now.Add(-time.Minute), processes, files)
@@ -1178,7 +1178,7 @@ func TestAgentSessionOwnershipForeignWorkers(t *testing.T) {
 				home, _ := os.UserHomeDir()
 				path = filepath.Join(home, ".gemini", "antigravity-cli", "presence", id+".lock")
 			}
-			executable := agentCommands[tool].executable
+			executable := agentRegistry[tool].launch.executable
 			processes := map[int]processInfo{
 				100: {pid: 100, comm: "zsh"},
 				101: {pid: 101, ppid: 100, comm: executable, args: executable},

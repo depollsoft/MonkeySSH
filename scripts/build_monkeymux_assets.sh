@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE_DIR="$ROOT_DIR/remote/monkeymux"
 ASSET_DIR="$ROOT_DIR/assets/monkeymux"
-VERSION="$(sh "$REMOTE_DIR/monkeymux-version.sh" 2>/dev/null || echo "0.1.0")"
+VERSION="$(sh "$REMOTE_DIR/monkeymux-version.sh")"
 STAMP_FILE="$ASSET_DIR/.build-inputs.sha256"
 TMP_DIR="$(mktemp -d)"
 GZIP_TOOL="$TMP_DIR/deterministic-gzip"
@@ -31,26 +31,14 @@ targets=(
   "windows arm64 windows-arm64"
 )
 
-sha256_file() {
+# Hashes the named file, or stdin when called without an argument.
+sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    sha256sum "$@" | awk '{print $1}'
     return
   fi
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-    return
-  fi
-  echo "sha256sum or shasum is required" >&2
-  return 1
-}
-
-sha256_stdin() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-    return
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
+    shasum -a 256 "$@" | awk '{print $1}'
     return
   fi
   echo "sha256sum or shasum is required" >&2
@@ -71,17 +59,15 @@ build_fingerprint() {
       -o -name 'monkeymux-version.sh' -o -path '*/conpty/*' \) \
       -print | LC_ALL=C sort | while IFS= read -r input; do
       printf '%s  %s\n' \
-        "$(sha256_file "$input")" "${input#"$ROOT_DIR/"}"
+        "$(sha256 "$input")" "${input#"$ROOT_DIR/"}"
     done
     printf '%s  scripts/build_monkeymux_assets.sh\n' \
-      "$(sha256_file "$ROOT_DIR/scripts/build_monkeymux_assets.sh")"
+      "$(sha256 "$ROOT_DIR/scripts/build_monkeymux_assets.sh")"
     printf '%s  scripts/deterministic_gzip.go\n' \
-      "$(sha256_file "$ROOT_DIR/scripts/deterministic_gzip.go")"
-    for script in ensure_monkeymux_assets.sh verify_monkeymux_assets.py; do
-      printf '%s  scripts/%s\n' \
-        "$(sha256_file "$ROOT_DIR/scripts/$script")" "$script"
-    done
-  } | sha256_stdin
+      "$(sha256 "$ROOT_DIR/scripts/deterministic_gzip.go")"
+    printf '%s  scripts/verify_monkeymux_assets.py\n' \
+      "$(sha256 "$ROOT_DIR/scripts/verify_monkeymux_assets.py")"
+  } | sha256
 }
 
 fingerprint="$(build_fingerprint)"
@@ -137,7 +123,7 @@ for target in "${targets[@]}"; do
   )
   "$GZIP_TOOL" "$raw_output" "$output"
   size="$(wc -c <"$raw_output" | tr -d ' ')"
-  sha="$(sha256_file "$raw_output")"
+  sha="$(sha256 "$raw_output")"
   manifest_entries+=("$(printf '    {\"platform\":\"%s\",\"asset\":\"assets/monkeymux/bin/%s/monkeymux.gz\",\"encoding\":\"gzip\",\"sha256\":\"%s\",\"size\":%s}' "$platform" "$platform" "$sha" "$size")")
 done
 

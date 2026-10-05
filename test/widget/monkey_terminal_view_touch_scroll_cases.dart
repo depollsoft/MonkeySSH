@@ -142,7 +142,7 @@ void registerMonkeyTerminalViewTouchScrollTests() {
         calibrator.cancelPending();
 
         expect(calibrator.needsMeasurement, isFalse);
-        calibrator.invalidate();
+        calibrator.reset();
         expect(calibrator.needsMeasurement, isTrue);
       });
 

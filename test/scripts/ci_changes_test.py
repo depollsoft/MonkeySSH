@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,14 @@ class ClassificationTest(unittest.TestCase):
                 # gate that requires a native change.
                 self.assertTrue(result['windows_native'])
 
+    def test_windows_gating_inputs_reach_the_merge_queue_build_only(self):
+        for path in sorted(changes.WINDOWS_GATING_INPUTS):
+            with self.subTest(path=path):
+                result = self.assert_platforms([path], ['windows'])
+                # build-windows needs monkeymux-assets, which run_check enables.
+                self.assertTrue(result['run_check'])
+                self.assertFalse(result['windows_native'])
+
     def test_release_and_workflow_tooling_do_not_require_flutter(self):
         for path in [
             '.github/workflows/security.yml', '.github/actions/deployment-status/action.yml',
@@ -78,6 +87,13 @@ class ClassificationTest(unittest.TestCase):
             with self.subTest(path=path):
                 result = self.assert_platforms([path], changes.PLATFORMS)
                 self.assertTrue(result['run_check'])
+
+    def test_firebase_config_action_builds_only_the_mobile_platforms(self):
+        result = self.assert_platforms(['.github/actions/firebase-config/action.yml'],
+                                       ['android', 'ios'])
+        # The build jobs need monkeymux-assets, which run_check enables.
+        self.assertTrue(result['run_check'])
+        self.assertFalse(result['ios_native'])
 
     def test_shared_inputs_are_not_native_changes(self):
         # `<platform>` fires on shared inputs; `<platform>_native` must not, or
@@ -404,6 +420,34 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertIn('--require-screenshots', commands)
         self.assertIn('scripts/validate_store_demo_videos.py', commands)
 
+    def test_windows_only_tests_are_gated_by_their_own_inputs(self):
+        # build-windows is the only job that runs these tests, so each test file,
+        # its lib/ subject and, for whole-file runs, everything it imports must
+        # enable that job (and run_check, for the monkeymux-assets it needs).
+        steps = self.workflows['ci.yml']['jobs']['build-windows']['steps']
+        expected = set()
+        for line in (line for step in steps for line in step.get('run', '').splitlines()):
+            for test in re.findall(r'test/\S+_test\.(?:dart|cjs)', line):
+                expected.add(test)
+                subject = 'lib/' + test.removeprefix('test/').replace('_test.dart', '.dart')
+                if (ROOT / subject).exists():
+                    expected.add(subject)
+                if '--plain-name' in line:
+                    continue
+                source = (ROOT / test).read_text()
+                for target in re.findall(r"""(?:import|require\()\s*['"]([^'"]+)['"]""", source):
+                    if target.startswith('package:monkeyssh/'):
+                        expected.add('lib/' + target.removeprefix('package:monkeyssh/'))
+                    elif target.startswith('.'):
+                        expected.add(os.path.normpath(os.path.join(os.path.dirname(test), target)))
+        self.assertGreaterEqual(len(expected), 14)
+        for path in sorted(expected):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file(), path)
+                result = changes.classify([path])
+                self.assertTrue(result['windows'])
+                self.assertTrue(result['run_check'])
+
     def test_security_shallow_comparison_passes_the_resolved_baseline(self):
         jobs = self.workflows['security.yml']['jobs']
         steps = jobs['dependency-review']['steps']
@@ -491,17 +535,21 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertEqual(steps[2]['if'], "inputs.sqlite-targets != ''")
         self.assertEqual(action['inputs']['cache']['default'], 'true')
         self.assertEqual(action['inputs']['pub-cache']['default'], 'true')
+        for workflow, expected in [
+                ('ci.yml', {'check', 'test', 'build-android', 'build-ios',
+                            'build-macos', 'build-windows', 'build-linux'}),
+                ('build-deploy.yml', {'build-android', 'build-ios'})]:
+            jobs = self.workflows[workflow]['jobs']
+            users = {name for name, job in jobs.items() for step in job.get('steps', [])
+                     if step.get('uses') == './.github/actions/flutter-setup'}
+            self.assertEqual(users, expected)
+            for name, job in jobs.items():
+                for step in job.get('steps', []):
+                    if step.get('uses', '').startswith('subosito/flutter-action@'):
+                        # terminal-test runs pub get inside third_party/xterm, so it
+                        # is the one job that is not the setup trio.
+                        self.assertEqual((workflow, name), ('ci.yml', 'terminal-test'))
         jobs = self.workflows['ci.yml']['jobs']
-        users = {name for name, job in jobs.items() for step in job.get('steps', [])
-                 if step.get('uses') == './.github/actions/flutter-setup'}
-        self.assertEqual(users, {'check', 'test', 'build-android', 'build-ios',
-                                 'build-macos', 'build-windows', 'build-linux'})
-        for name, job in jobs.items():
-            for step in job.get('steps', []):
-                if step.get('uses', '').startswith('subosito/flutter-action@'):
-                    # terminal-test runs pub get inside third_party/xterm, so it
-                    # is the one job that is not the setup trio.
-                    self.assertEqual(name, 'terminal-test')
         windows = next(s for s in jobs['build-windows']['steps']
                        if s.get('uses') == './.github/actions/flutter-setup')
         # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is safe.

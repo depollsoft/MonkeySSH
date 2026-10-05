@@ -1,0 +1,62 @@
+name: Configure Firebase
+description: >-
+  Write a flavor's native Firebase config file and export
+  FLUTTY_FIREBASE_ENABLED. An empty config disables Firebase unless the build
+  is deployed, where Firebase Analytics is mandatory.
+
+inputs:
+  platform:
+    description: android or ios.
+    required: true
+  flavor:
+    description: Flutter flavor whose config directory receives the file.
+    required: false
+    default: production
+  config:
+    description: google-services.json or GoogleService-Info.plist contents (a secret).
+    required: false
+    default: ''
+  required:
+    description: Fail instead of disabling Firebase when the config is empty.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Write Firebase config
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        FLAVOR: ${{ inputs.flavor }}
+        CONFIG: ${{ inputs.config }}
+        REQUIRED: ${{ inputs.required }}
+      run: |
+        FLAVOR_SECRET="$(printf '%s' "$FLAVOR" | tr '[:lower:]' '[:upper:]')"
+        case "$PLATFORM" in
+          android)
+            LABEL=Android
+            DESTINATION="android/app/src/$FLAVOR/google-services.json"
+            SECRET="FIREBASE_ANDROID_${FLAVOR_SECRET}_GOOGLE_SERVICES_JSON"
+            ;;
+          ios)
+            LABEL=iOS
+            DESTINATION="ios/Runner/Firebase/$FLAVOR/GoogleService-Info.plist"
+            SECRET="FIREBASE_IOS_${FLAVOR_SECRET}_GOOGLE_SERVICE_INFO_PLIST"
+            ;;
+          *)
+            echo "::error title=Invalid Firebase platform::Expected android or ios."
+            exit 1
+            ;;
+        esac
+        if [ -z "$CONFIG" ]; then
+          if [ "$REQUIRED" = 'true' ]; then
+            echo "::error title=Missing Firebase $LABEL config::Firebase Analytics must be enabled for deployed $LABEL release builds. Configure the $SECRET secret."
+            exit 1
+          fi
+          echo "FLUTTY_FIREBASE_ENABLED=false" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        mkdir -p "$(dirname "$DESTINATION")"
+        printf '%s' "$CONFIG" > "$DESTINATION"
+        echo "FLUTTY_FIREBASE_ENABLED=true" >> "$GITHUB_ENV"

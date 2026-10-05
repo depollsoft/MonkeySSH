@@ -324,8 +324,7 @@ String? _sanitizeSessionSummary(
 
   final lowered = unquoted.toLowerCase();
   if (_genericSessionSummaries.contains(lowered) ||
-      lowered == sessionId.toLowerCase() ||
-      lowered == _truncateSessionIdValue(sessionId).toLowerCase()) {
+      lowered == sessionId.toLowerCase()) {
     return null;
   }
 
@@ -515,6 +514,30 @@ Iterable<String> _nonEmptyLines(String output) => output
     .split('\n')
     .map((line) => line.trim())
     .where((line) => line.isNotEmpty);
+
+/// A file from [posixListNewestFilesCommand] or [windowsListNewestFilesScript]
+/// with the mtime that listing already computed.
+typedef _ListedFile = ({String path, DateTime? modifiedAt});
+
+/// Parses `<epoch>\t<path>` listing lines; a line without a leading epoch is
+/// taken as a bare path. Duplicate paths keep their first position.
+List<_ListedFile> _parseListedFiles(String output) {
+  final seen = <String>{};
+  final files = <_ListedFile>[];
+  for (final line in _nonEmptyLines(output)) {
+    final tab = line.indexOf('\t');
+    final epoch = tab < 0 ? null : int.tryParse(line.substring(0, tab));
+    final path = epoch == null ? line : line.substring(tab + 1).trim();
+    if (path.isEmpty || !seen.add(path)) continue;
+    files.add((
+      path: path,
+      modifiedAt: epoch == null || epoch <= 0
+          ? null
+          : _dateTimeFromEpochValue(epoch),
+    ));
+  }
+  return files;
+}
 
 int _sessionScanLimit(
   int max, {
@@ -915,12 +938,15 @@ String? piEncodedSessionDirectoryName(String? workingDirectory) {
   return '--$encoded--';
 }
 
-/// Parses `sqlite3`-separated Hermes session rows into session metadata.
+/// Parses `sqlite3`-separated session rows (Hermes, OpenCode) into metadata.
 ///
-/// Columns are id, title, cwd, and the epoch-seconds last-activity time,
-/// delimited by ASCII Unit Separator so titles may contain any printable text.
+/// Columns are id, title, cwd, and the epoch last-activity time, delimited by
+/// ASCII Unit Separator so titles may contain any printable text.
 @visibleForTesting
-List<ToolSessionInfo> parseHermesDbOutput(String output) {
+List<ToolSessionInfo> parseSeparatedSessionRows(
+  String output, {
+  required String toolName,
+}) {
   final sessions = <ToolSessionInfo>[];
   for (final line in output.trim().split('\n')) {
     if (line.trim().isEmpty) continue;
@@ -931,21 +957,17 @@ List<ToolSessionInfo> parseHermesDbOutput(String output) {
     if (id.isEmpty) continue;
     final title = parts[1].trim();
     final directory = parts[2].trim();
-    DateTime? lastActive;
-    if (parts.length >= 4) {
-      final epoch = int.tryParse(parts[3].trim());
-      if (epoch != null && epoch > 0) {
-        lastActive = _dateTimeFromEpochValue(epoch);
-      }
-    }
+    final epoch = parts.length < 4 ? null : int.tryParse(parts[3].trim());
 
     sessions.add(
       ToolSessionInfo(
-        toolName: 'Hermes',
+        toolName: toolName,
         sessionId: id,
         workingDirectory: directory.isNotEmpty ? directory : null,
-        lastActive: lastActive,
-        summary: title.isNotEmpty ? title : _truncateSessionIdValue(id),
+        lastActive: epoch == null || epoch <= 0
+            ? null
+            : _dateTimeFromEpochValue(epoch),
+        summary: title.isNotEmpty ? title : null,
       ),
     );
   }
@@ -1037,7 +1059,7 @@ List<ToolSessionInfo> parseMuseSessionIndex(String output) {
         workingDirectory: cwd,
         summary: title is String && title.trim().isNotEmpty
             ? title.trim()
-            : _truncateSessionIdValue(id),
+            : null,
         lastActive: updated,
       ),
     );
@@ -1096,125 +1118,80 @@ parseCursorSessionMetadata(String raw) {
 })
 parseAntigravitySessionMetadata(String raw) {
   final decoded = _tryDecodeJsonObject(raw);
-  if (decoded == null) {
-    return _parsePartialAntigravitySessionMetadata(raw);
-  }
+  final field = _jsonFieldReader(decoded, raw);
+  String? text(String key) => _stringValue(field(key));
 
-  final sessionId =
-      _readStringField(decoded, 'id') ?? _readStringField(decoded, 'sessionId');
-  final summary =
-      _readStringField(decoded, 'display') ??
-      _readStringField(decoded, 'summary') ??
-      _readStringField(decoded, 'name');
-
+  final sessionId = text('id') ?? text('sessionId');
+  final summary = text('display') ?? text('summary') ?? text('name');
   var workingDirectory =
-      _readStringField(decoded, 'workingDirectory') ??
-      _readStringField(decoded, 'cwd');
-
-  if (workingDirectory == null) {
-    final projectResources = _readMapField(decoded, 'projectResources');
-    final resources = _readListField(projectResources, 'resources');
-    if (resources != null) {
-      for (final resource in resources) {
-        if (resource is Map) {
-          final resourceMap = resource.map((k, v) => MapEntry('$k', v));
-          final gitFolder = _readMapField(resourceMap, 'gitFolder');
-          final folderUriStr = _readStringField(gitFolder, 'folderUri');
-          if (folderUriStr != null) {
-            try {
-              final uri = Uri.tryParse(folderUriStr);
-              if (uri != null && uri.isScheme('file')) {
-                workingDirectory = _uriToFilePath(uri);
-                break;
-              }
-            } on Object {
-              // Ignore uri parsing errors
-            }
-          }
-        }
-      }
-    }
-  }
-
+      text('workingDirectory') ??
+      text('cwd') ??
+      _antigravityGitFolderDirectory(decoded, raw);
   if (workingDirectory == null && summary != null && summary.startsWith('/')) {
     workingDirectory = summary;
   }
-
   final updatedAt =
-      _parseDateTimeValue(decoded['updatedAt']) ??
-      _parseDateTimeValue(decoded['lastActive']);
-
-  final parsedAny =
-      sessionId != null ||
-      summary != null ||
-      workingDirectory != null ||
-      updatedAt != null;
+      _parseDateTimeValue(field('updatedAt')) ??
+      _parseDateTimeValue(field('lastActive'));
 
   return (
     sessionId: sessionId,
     summary: summary,
     workingDirectory: workingDirectory,
     updatedAt: updatedAt,
-    parsedAny: parsedAny,
+    parsedAny:
+        sessionId != null ||
+        summary != null ||
+        workingDirectory != null ||
+        updatedAt != null,
   );
 }
 
-({
-  String? sessionId,
-  String? summary,
-  String? workingDirectory,
-  DateTime? updatedAt,
-  bool parsedAny,
-})
-_parsePartialAntigravitySessionMetadata(String raw) {
-  final sessionId =
-      _readJsonStringFromRaw(raw, 'id') ??
-      _readJsonStringFromRaw(raw, 'sessionId');
-  final summary =
-      _readJsonStringFromRaw(raw, 'display') ??
-      _readJsonStringFromRaw(raw, 'summary') ??
-      _readJsonStringFromRaw(raw, 'name');
-
-  var workingDirectory =
-      _readJsonStringFromRaw(raw, 'workingDirectory') ??
-      _readJsonStringFromRaw(raw, 'cwd');
-
-  if (workingDirectory == null) {
-    final folderUriStr = _readJsonStringFromRaw(raw, 'folderUri');
-    if (folderUriStr != null) {
-      try {
-        final uri = Uri.tryParse(folderUriStr);
-        if (uri != null && uri.isScheme('file')) {
-          workingDirectory = _uriToFilePath(uri);
-        }
-      } on Object {
-        // Ignore uri parsing errors
-      }
+/// The first `file:` git folder of an Antigravity session as a path: the
+/// `projectResources.resources[].gitFolder.folderUri` walk for decoded JSON,
+/// or a flat `folderUri` lookup when [raw] is a truncated prefix.
+String? _antigravityGitFolderDirectory(
+  Map<String, dynamic>? decoded,
+  String raw,
+) {
+  final folderUris = decoded == null
+      ? [?_readJsonStringFromRaw(raw, 'folderUri')]
+      : (_readListField(
+                  _readMapField(decoded, 'projectResources'),
+                  'resources',
+                ) ??
+                const [])
+            .whereType<Map>()
+            .map(
+              (resource) => _readStringField(
+                _readMapField(
+                  resource.map((k, v) => MapEntry('$k', v)),
+                  'gitFolder',
+                ),
+                'folderUri',
+              ),
+            )
+            .whereType<String>();
+  for (final folderUri in folderUris) {
+    try {
+      final uri = Uri.tryParse(folderUri);
+      if (uri != null && uri.isScheme('file')) return _uriToFilePath(uri);
+    } on Object {
+      // Ignore uri parsing errors
     }
   }
-
-  if (workingDirectory == null && summary != null && summary.startsWith('/')) {
-    workingDirectory = summary;
-  }
-
-  final updatedAt =
-      _parseDateTimeValue(_readJsonStringFromRaw(raw, 'updatedAt')) ??
-      _parseDateTimeValue(_readJsonStringFromRaw(raw, 'lastActive'));
-
-  final parsedAny =
-      sessionId != null ||
-      summary != null ||
-      workingDirectory != null ||
-      updatedAt != null;
-
-  return (
-    sessionId: sessionId,
-    summary: summary,
-    workingDirectory: workingDirectory,
-    updatedAt: updatedAt,
-    parsedAny: parsedAny,
-  );
+  return null;
 }
+
+/// Reads top-level JSON fields from [decoded], or straight from the [raw] text
+/// when the file is a truncated prefix that no longer parses.
+Object? Function(String key) _jsonFieldReader(
+  Map<String, dynamic>? decoded,
+  String raw,
+) => decoded != null
+    ? (key) => decoded[key]
+    : (key) =>
+          _readJsonStringFromRaw(raw, key) ?? _readJsonNumberFromRaw(raw, key);
 
 String? _readJsonStringFromRaw(String raw, String key) {
   final pattern = RegExp(
@@ -1255,67 +1232,24 @@ int? _readJsonNumberFromRaw(String raw, String key) {
 })
 parseOpenCodeStorageSessionMetadata(String raw) {
   final decoded = _tryDecodeJsonObject(raw);
-  if (decoded == null) {
-    final sessionId =
-        _readJsonStringFromRaw(raw, 'id') ??
-        _readJsonStringFromRaw(raw, 'sessionId') ??
-        _readJsonStringFromRaw(raw, 'sessionID');
-    final summary =
-        _readJsonStringFromRaw(raw, 'title') ??
-        _readJsonStringFromRaw(raw, 'summary') ??
-        _readJsonStringFromRaw(raw, 'name');
-    final workingDirectory =
-        _readJsonStringFromRaw(raw, 'directory') ??
-        _readJsonStringFromRaw(raw, 'cwd');
-    final parentId =
-        _readJsonStringFromRaw(raw, 'parentID') ??
-        _readJsonStringFromRaw(raw, 'parent_id');
-    final updatedAt =
-        _parseDateTimeValue(_readJsonNumberFromRaw(raw, 'updated')) ??
-        _parseDateTimeValue(_readJsonStringFromRaw(raw, 'updatedAt'));
-    final isArchived =
-        _readJsonNumberFromRaw(raw, 'archived') != null ||
-        _readJsonNumberFromRaw(raw, 'time_archived') != null;
-
-    return (
-      sessionId: sessionId,
-      summary: summary,
-      workingDirectory: workingDirectory,
-      updatedAt: updatedAt,
-      parentId: parentId,
-      isArchived: isArchived,
-      parsedAny:
-          sessionId != null ||
-          summary != null ||
-          workingDirectory != null ||
-          parentId != null ||
-          updatedAt != null ||
-          isArchived,
-    );
-  }
-
+  final field = _jsonFieldReader(decoded, raw);
+  String? text(String key) => _stringValue(field(key));
+  // `time.updated` / `time.archived` nest under `time`; the raw lookup for a
+  // truncated prefix finds the key wherever it sits.
   final time = _readMapField(decoded, 'time');
-  final sessionId =
-      _readStringField(decoded, 'id') ??
-      _readStringField(decoded, 'sessionId') ??
-      _readStringField(decoded, 'sessionID');
-  final summary =
-      _readStringField(decoded, 'title') ??
-      _readStringField(decoded, 'summary') ??
-      _readStringField(decoded, 'name');
-  final workingDirectory =
-      _readStringField(decoded, 'directory') ??
-      _readStringField(decoded, 'cwd');
-  final parentId =
-      _readStringField(decoded, 'parentID') ??
-      _readStringField(decoded, 'parent_id');
+  final timeField = decoded == null ? field : (String key) => time?[key];
+
+  final sessionId = text('id') ?? text('sessionId') ?? text('sessionID');
+  final summary = text('title') ?? text('summary') ?? text('name');
+  final workingDirectory = text('directory') ?? text('cwd');
+  final parentId = text('parentID') ?? text('parent_id');
   final updatedAt =
-      _parseDateTimeValue(time?['updated']) ??
-      _parseDateTimeValue(decoded['updatedAt']) ??
-      _parseDateTimeValue(decoded['updated']) ??
-      _parseDateTimeValue(decoded['time_updated']);
+      _parseDateTimeValue(timeField('updated')) ??
+      _parseDateTimeValue(field('updatedAt')) ??
+      _parseDateTimeValue(field('updated')) ??
+      _parseDateTimeValue(field('time_updated'));
   final isArchived =
-      time?['archived'] != null || decoded['time_archived'] != null;
+      timeField('archived') != null || field('time_archived') != null;
 
   return (
     sessionId: sessionId,
@@ -1947,7 +1881,7 @@ class AgentSessionDiscoveryService {
   }) {
     final handlers =
         <
-          String,
+          AgentLaunchTool,
           Future<_ToolDiscoveryResult> Function(
             SshSession,
             String?,
@@ -1956,7 +1890,7 @@ class AgentSessionDiscoveryService {
             bool previewOnly,
           })
         >{
-          'OpenCode':
+          AgentLaunchTool.openCode:
               (session, cwd, related, max, {bool previewOnly = false}) =>
                   _discoverOpenCodeSessions(
                     session,
@@ -1966,8 +1900,8 @@ class AgentSessionDiscoveryService {
                     previewOnly: previewOnly,
                     useAcp: toolName != null,
                   ),
-          'Codex': _discoverCodexSessions,
-          'Copilot CLI':
+          AgentLaunchTool.codex: _discoverCodexSessions,
+          AgentLaunchTool.copilotCli:
               (session, cwd, related, max, {bool previewOnly = false}) =>
                   _discoverCopilotSessions(
                     session,
@@ -1977,24 +1911,28 @@ class AgentSessionDiscoveryService {
                     previewOnly: previewOnly,
                     useAcp: toolName != null,
                   ),
-          'Claude Code': _discoverClaudeSessions,
-          'Antigravity': _discoverAntigravitySessions,
-          'Cursor Agent': _discoverCursorSessions,
-          'Pi': _discoverPiSessions,
-          'Hermes': _discoverHermesSessions,
-          'Grok Build': _discoverGrokSessions,
-          'Muse Code': _discoverMuseSessions,
+          AgentLaunchTool.claudeCode: _discoverClaudeSessions,
+          AgentLaunchTool.antigravity: _discoverAntigravitySessions,
+          AgentLaunchTool.cursorAgent: _discoverCursorSessions,
+          AgentLaunchTool.pi: _discoverPiSessions,
+          AgentLaunchTool.hermes: _discoverHermesSessions,
+          AgentLaunchTool.grokBuild: _discoverGrokSessions,
+          AgentLaunchTool.museCode: _discoverMuseSessions,
         };
+    final tools = toolName == null
+        ? handlers.keys.toList()
+        : [_agentLaunchToolForSessionToolName(toolName)];
     return [
-      for (final name in toolName == null ? handlers.keys : [toolName])
-        handlers[name]?.call(
+      for (final tool in tools)
+        handlers[tool]?.call(
               session,
               workingDirectory,
               relatedWorkingDirectories,
               previewOnly ? 1 : maxPerTool,
               previewOnly: toolName == null && previewOnly,
             ) ??
-            Future.value(_ToolDiscoveryResult.success(name, const [])),
+            // A provider this service never probes still counts as attempted.
+            Future.value(_ToolDiscoveryResult.empty(toolName!)),
     ];
   }
 
@@ -2192,7 +2130,7 @@ class AgentSessionDiscoveryService {
               'tail -n $tailCount ~/.claude/history.jsonl 2>/dev/null',
             );
       if (output.trim().isEmpty) {
-        return const _ToolDiscoveryResult.success('Claude Code', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.claudeCode, []);
       }
 
       final historyEntries = <Map<String, dynamic>>[];
@@ -2244,16 +2182,12 @@ class AgentSessionDiscoveryService {
           (entry) => _readStringField(entry, 'sessionId') ?? '',
         ),
       );
-      final sessionFileHeadSnapshots = await _readRemoteFileSnapshots(
+      final snapshotLines = previewOnly ? 40 : 120;
+      final sessionFileSnapshots = await _readRemoteFileSnapshots(
         session,
-        sessionFilesById.values,
-        maxLines: previewOnly ? 40 : 120,
-      );
-      final sessionFileTailSnapshots = await _readRemoteFileSnapshots(
-        session,
-        sessionFilesById.values,
-        maxLines: previewOnly ? 40 : 120,
-        tail: true,
+        sessionFilesById.values.map((file) => file.path),
+        maxLines: snapshotLines,
+        tailLines: snapshotLines,
       );
       final sessions = <ToolSessionInfo>[];
       var hadError = false;
@@ -2272,21 +2206,15 @@ class AgentSessionDiscoveryService {
           }
 
           String? summary;
-          final sessionFilePath = sessionFilesById[sessionId] ?? '';
-          if (sessionFilePath.isNotEmpty) {
-            final headSnapshot = sessionFileHeadSnapshots[sessionFilePath];
-            final tailSnapshot = sessionFileTailSnapshots[sessionFilePath];
-            final snapshot = tailSnapshot ?? headSnapshot;
-            lastActive ??= snapshot?.modifiedAt;
-            final combinedContent = switch ((headSnapshot, tailSnapshot)) {
-              (null, null) => '',
-              (final head?, null) => head.content,
-              (null, final tail?) => tail.content,
-              (final head?, final tail?) =>
-                head.content == tail.content
-                    ? head.content
-                    : '${head.content}\n${tail.content}',
-            };
+          final sessionFile = sessionFilesById[sessionId];
+          if (sessionFile != null) {
+            lastActive ??= sessionFile.modifiedAt;
+            final snapshot = sessionFileSnapshots[sessionFile.path];
+            final head = snapshot?.content ?? '';
+            final tail = snapshot?.tailContent;
+            final combinedContent = tail == null || tail == head
+                ? head
+                : '$head\n$tail';
             final metadata = parseClaudeSessionMetadata(combinedContent);
             if (combinedContent.trim().isNotEmpty && !metadata.parsedAny) {
               hadError = true;
@@ -2321,12 +2249,12 @@ class AgentSessionDiscoveryService {
         }
       }
       return _ToolDiscoveryResult.success(
-        'Claude Code',
+        AgentLaunchTool.claudeCode,
         sortAndLimitDiscoveredSessions(sessions, max),
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Claude Code');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.claudeCode);
     }
   }
 
@@ -2363,11 +2291,10 @@ class AgentSessionDiscoveryService {
               ),
             );
       if (output.trim().isEmpty) {
-        return const _ToolDiscoveryResult.success('Codex', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.codex, []);
       }
 
-      final rolloutPaths = _nonEmptyLines(output).toList(growable: false);
-      final recentRolloutPaths = rolloutPaths
+      final rollouts = _parseListedFiles(output)
           .take(metadataReadLimit)
           .toList(growable: false);
       final sessionIndex = await _readCodexSessionIndex(
@@ -2376,14 +2303,14 @@ class AgentSessionDiscoveryService {
       );
       final rolloutSnapshots = await _readRemoteFileSnapshots(
         session,
-        recentRolloutPaths,
+        rollouts.map((file) => file.path),
         maxLines: previewOnly ? 40 : 80,
       );
       final sessions = <ToolSessionInfo>[];
       var hadError = sessionIndex.hadError;
 
-      for (final filePath in recentRolloutPaths) {
-        final fileName = filePath.split('/').last.replaceAll('.jsonl', '');
+      for (final file in rollouts) {
+        final fileName = file.path.split('/').last.replaceAll('.jsonl', '');
         final threadId = _extractCodexThreadId(fileName);
         final threadInfo = threadId != null
             ? sessionIndex.entries[threadId]
@@ -2394,7 +2321,7 @@ class AgentSessionDiscoveryService {
         String? sessionWorkingDirectory;
         var lastActive = threadInfo?.updatedAt;
 
-        final snapshot = rolloutSnapshots[filePath];
+        final snapshot = rolloutSnapshots[file.path];
         if (snapshot == null) {
           hadError = true;
         } else {
@@ -2410,8 +2337,8 @@ class AgentSessionDiscoveryService {
           } on Object {
             hadError = true;
           }
-          lastActive ??= snapshot.modifiedAt;
         }
+        lastActive ??= file.modifiedAt;
 
         sessions.add(
           ToolSessionInfo(
@@ -2419,12 +2346,12 @@ class AgentSessionDiscoveryService {
             sessionId: sessionId ?? fileName,
             workingDirectory: sessionWorkingDirectory,
             lastActive: lastActive,
-            summary: summary ?? _truncateId(fileName),
+            summary: summary,
           ),
         );
       }
       return _ToolDiscoveryResult.success(
-        'Codex',
+        AgentLaunchTool.codex,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -2434,7 +2361,7 @@ class AgentSessionDiscoveryService {
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Codex');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.codex);
     }
   }
 
@@ -2512,7 +2439,7 @@ class AgentSessionDiscoveryService {
         );
         if (acpSessions != null && acpSessions.sessions.isNotEmpty) {
           return _ToolDiscoveryResult.success(
-            'Copilot CLI',
+            AgentLaunchTool.copilotCli,
             sortAndLimitDiscoveredSessions(acpSessions.sessions, max),
             hadError: acpSessions.hadError,
           );
@@ -2523,21 +2450,21 @@ class AgentSessionDiscoveryService {
         max,
         previewOnly: previewOnly,
       );
-      final workspacePaths = await _listCopilotWorkspacePaths(
+      final workspaceFiles = await _listCopilotWorkspaceFiles(
         session,
         scanLimit,
         relatedWorkingDirectories,
       );
-      if (workspacePaths.isEmpty) {
-        return const _ToolDiscoveryResult.success('Copilot CLI', []);
+      if (workspaceFiles.isEmpty) {
+        return _ToolDiscoveryResult.success(AgentLaunchTool.copilotCli, []);
       }
-      final recentWorkspacePaths = workspacePaths
+      final recentWorkspaceFiles = workspaceFiles
           .take(metadataReadLimit)
           .toList(growable: false);
 
       final workspaceSnapshots = await _readRemoteFileSnapshots(
         session,
-        recentWorkspacePaths,
+        recentWorkspaceFiles.map((file) => file.path),
       );
       final planPathsNeedingFallback = <String>[];
       final metadataByWorkspacePath =
@@ -2547,7 +2474,8 @@ class AgentSessionDiscoveryService {
           >{};
       var hadError = false;
 
-      for (final workspacePath in recentWorkspacePaths) {
+      for (final file in recentWorkspaceFiles) {
+        final workspacePath = file.path;
         final dirPath = workspacePath.replaceFirst(
           RegExp(r'/workspace\.yaml$'),
           '/',
@@ -2575,7 +2503,7 @@ class AgentSessionDiscoveryService {
           metadataByWorkspacePath[workspacePath] = (
             summary: null,
             workingDirectory: null,
-            updatedAt: snapshot.modifiedAt,
+            updatedAt: null,
           );
           planPathsNeedingFallback.add('${dirPath}plan.md');
         }
@@ -2588,9 +2516,9 @@ class AgentSessionDiscoveryService {
       );
       final sessions = <ToolSessionInfo>[];
 
-      for (final workspacePath in recentWorkspacePaths) {
+      for (final file in recentWorkspaceFiles) {
+        final workspacePath = file.path;
         final metadata = metadataByWorkspacePath[workspacePath];
-        final snapshot = workspaceSnapshots[workspacePath];
         if (metadata == null) {
           hadError = true;
           continue;
@@ -2611,20 +2539,19 @@ class AgentSessionDiscoveryService {
             toolName: 'Copilot CLI',
             sessionId: dirName,
             workingDirectory: metadata.workingDirectory,
-            lastActive: metadata.updatedAt ?? snapshot?.modifiedAt,
-            summary:
-                metadata.summary ?? fallbackSummary ?? _truncateId(dirName),
+            lastActive: metadata.updatedAt ?? file.modifiedAt,
+            summary: metadata.summary ?? fallbackSummary,
           ),
         );
       }
 
       return _ToolDiscoveryResult.success(
-        'Copilot CLI',
+        AgentLaunchTool.copilotCli,
         sessions..sort(compareDiscoveredSessionsByRecency),
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Copilot CLI');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.copilotCli);
     }
   }
 
@@ -2668,21 +2595,21 @@ class AgentSessionDiscoveryService {
               session,
               posixListNewestFilesCommand(
                 'find ~/.antigravity/sessions ~/.agy/sessions '
-                "./.antigravitycli ./.agycli -maxdepth 1 -name '*.json' -type f",
+                "~/.antigravitycli ~/.agycli -maxdepth 1 -name '*.json' -type f",
                 scanLimit,
               ),
             );
-      final jsonPaths = _nonEmptyLines(jsonPathOutput)
+      final jsonFiles = _parseListedFiles(jsonPathOutput)
           .take(metadataReadLimit)
           .toList(growable: false);
       final jsonSnapshots = await _readRemoteFileSnapshots(
         session,
-        jsonPaths,
+        jsonFiles.map((file) => file.path),
         maxBytes: _openCodeStorageSessionMetadataMaxBytes,
       );
 
-      for (final path in jsonPaths) {
-        final snapshot = jsonSnapshots[path];
+      for (final file in jsonFiles) {
+        final snapshot = jsonSnapshots[file.path];
         if (snapshot == null) {
           hadError = true;
           continue;
@@ -2694,15 +2621,15 @@ class AgentSessionDiscoveryService {
             continue;
           }
           final sessionId =
-              metadata.sessionId ?? _fileNameWithoutExtension(path);
+              metadata.sessionId ?? _fileNameWithoutExtension(file.path);
           if (sessionId.isEmpty || !seenSessionIds.add(sessionId)) continue;
           sessions.add(
             ToolSessionInfo(
               toolName: 'Antigravity',
               sessionId: sessionId,
               workingDirectory: metadata.workingDirectory,
-              lastActive: metadata.updatedAt ?? snapshot.modifiedAt,
-              summary: metadata.summary ?? _truncateId(sessionId),
+              lastActive: metadata.updatedAt ?? file.modifiedAt,
+              summary: metadata.summary,
             ),
           );
         } on Object {
@@ -2728,10 +2655,10 @@ class AgentSessionDiscoveryService {
                 scanLimit,
               ),
             );
-      final conversationPaths = _nonEmptyLines(conversationPathOutput)
+      final conversationFiles = _parseListedFiles(conversationPathOutput)
           .take(metadataReadLimit)
           .toList(growable: false);
-      if (conversationPaths.isNotEmpty) {
+      if (conversationFiles.isNotEmpty) {
         final historyOutput = session.remoteIsWindows
             ? await _execWindowsPowerShell(
                 session,
@@ -2746,8 +2673,11 @@ class AgentSessionDiscoveryService {
                 '~/.gemini/antigravity-cli/history.jsonl 2>/dev/null',
               );
         final historyById = _parseAntigravityHistoryJsonl(historyOutput);
-        final annotationPaths = conversationPaths
-            .map(_antigravityAnnotationPathForConversationFile)
+        final annotationPaths = conversationFiles
+            .map(
+              (file) =>
+                  _antigravityAnnotationPathForConversationFile(file.path),
+            )
             .whereType<String>()
             .toList(growable: false);
         final annotationSnapshots = await _readRemoteFileSnapshots(
@@ -2755,18 +2685,13 @@ class AgentSessionDiscoveryService {
           annotationPaths,
           maxLines: 20,
         );
-        final conversationSnapshots = await _readRemoteFileSnapshots(
-          session,
-          conversationPaths,
-          maxBytes: 0,
-        );
 
-        for (final path in conversationPaths) {
-          final sessionId = _fileNameWithoutExtension(path);
+        for (final file in conversationFiles) {
+          final sessionId = _fileNameWithoutExtension(file.path);
           if (sessionId.isEmpty || !seenSessionIds.add(sessionId)) continue;
           final history = historyById[sessionId];
           final annotationPath = _antigravityAnnotationPathForConversationFile(
-            path,
+            file.path,
           );
           final annotationTitle = annotationPath == null
               ? null
@@ -2778,17 +2703,15 @@ class AgentSessionDiscoveryService {
               toolName: 'Antigravity',
               sessionId: sessionId,
               workingDirectory: history?.workingDirectory,
-              lastActive:
-                  history?.updatedAt ?? conversationSnapshots[path]?.modifiedAt,
-              summary:
-                  history?.summary ?? annotationTitle ?? _truncateId(sessionId),
+              lastActive: history?.updatedAt ?? file.modifiedAt,
+              summary: history?.summary ?? annotationTitle,
             ),
           );
         }
       }
 
       return _ToolDiscoveryResult.success(
-        'Antigravity',
+        AgentLaunchTool.antigravity,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -2798,7 +2721,7 @@ class AgentSessionDiscoveryService {
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Antigravity');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.antigravity);
     }
   }
 
@@ -2838,30 +2761,29 @@ class AgentSessionDiscoveryService {
               ),
             );
       if (output.trim().isEmpty) {
-        return const _ToolDiscoveryResult.success('Cursor Agent', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.cursorAgent, []);
       }
 
-      final metaPaths = _nonEmptyLines(output).toList(growable: false);
-      final recentMetaPaths = metaPaths
+      final metaFiles = _parseListedFiles(output)
           .take(metadataReadLimit)
           .toList(growable: false);
       final metaSnapshots = await _readRemoteFileSnapshots(
         session,
-        recentMetaPaths,
+        metaFiles.map((file) => file.path),
         maxLines: 20,
       );
       final sessions = <ToolSessionInfo>[];
       var hadError = false;
 
-      for (final filePath in recentMetaPaths) {
-        final chatId = _cursorChatIdFromMetaPath(filePath);
+      for (final file in metaFiles) {
+        final chatId = _cursorChatIdFromMetaPath(file.path);
         if (chatId == null) continue;
 
         String? summary;
         String? sessionWorkingDirectory;
         DateTime? lastActive;
 
-        final snapshot = metaSnapshots[filePath];
+        final snapshot = metaSnapshots[file.path];
         if (snapshot == null) {
           hadError = true;
         } else {
@@ -2881,8 +2803,8 @@ class AgentSessionDiscoveryService {
           } on Object {
             hadError = true;
           }
-          lastActive ??= snapshot.modifiedAt;
         }
+        lastActive ??= file.modifiedAt;
 
         sessions.add(
           ToolSessionInfo(
@@ -2890,12 +2812,13 @@ class AgentSessionDiscoveryService {
             sessionId: chatId,
             workingDirectory: sessionWorkingDirectory,
             lastActive: lastActive,
-            summary: summary ?? 'Cursor session ${_truncateId(chatId)}',
+            summary:
+                summary ?? 'Cursor session ${_truncateSessionIdValue(chatId)}',
           ),
         );
       }
       return _ToolDiscoveryResult.success(
-        'Cursor Agent',
+        AgentLaunchTool.cursorAgent,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -2905,7 +2828,7 @@ class AgentSessionDiscoveryService {
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Cursor Agent');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.cursorAgent);
     }
   }
 
@@ -2945,50 +2868,55 @@ class AgentSessionDiscoveryService {
         for (final directory in relatedWorkingDirectories)
           Uri.encodeComponent(directory),
       }.toList(growable: false);
-      String output;
-      if (session.remoteIsWindows) {
-        output = await _execWindowsPowerShell(
-          session,
-          windowsListNewestFilesScript(
-            relativeRoot: '.grok/sessions',
-            includeGlobs: const ['summary.json'],
-            limit: scanLimit,
-            pathLikeFilters: scopedDirectoryNames
-                .map((name) => '*/$name/*')
-                .toList(growable: false),
-            overrideRootEnvironmentVariable: 'GROK_HOME',
-            overrideRelativeRoot: 'sessions',
-          ),
-        );
-      } else {
-        final roots = scopedDirectoryNames
+      Future<String> list({required bool scoped}) {
+        final names = scoped ? scopedDirectoryNames : const <String>[];
+        if (session.remoteIsWindows) {
+          return _execWindowsPowerShell(
+            session,
+            windowsListNewestFilesScript(
+              relativeRoot: '.grok/sessions',
+              includeGlobs: const ['summary.json'],
+              limit: scanLimit,
+              pathLikeFilters: names
+                  .map((name) => '*/$name/*')
+                  .toList(growable: false),
+              overrideRootEnvironmentVariable: 'GROK_HOME',
+              overrideRelativeRoot: 'sessions',
+            ),
+          );
+        }
+        final roots = names
             .map((name) => r'"$GROK_SESSIONS_ROOT"/' + shellEscapePosix(name))
             .join(' ');
-        output = await _exec(
+        return _exec(
           session,
           r'GROK_SESSIONS_ROOT="${GROK_HOME:-$HOME/.grok}/sessions"; '
           '${posixListNewestFilesCommand('${roots.isEmpty ? r'find "$GROK_SESSIONS_ROOT"' : 'find $roots -maxdepth 2'} '
           '-name summary.json -type f', scanLimit)}',
         );
       }
+
+      final output = await _queryScopedThenUnscoped(
+        list,
+        hasScope: scopedDirectoryNames.isNotEmpty,
+      );
       if (output.trim().isEmpty) {
-        return const _ToolDiscoveryResult.success('Grok Build', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.grokBuild, []);
       }
 
-      final summaryPaths = _nonEmptyLines(output)
-          .toSet()
+      final summaryFiles = _parseListedFiles(output)
           .take(metadataReadLimit)
           .toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
-        summaryPaths,
+        summaryFiles.map((file) => file.path),
         maxBytes: _grokSessionMetadataMaxBytes,
       );
       final sessions = <ToolSessionInfo>[];
       var hadError = false;
 
-      for (final path in summaryPaths) {
-        final snapshot = snapshots[path];
+      for (final file in summaryFiles) {
+        final snapshot = snapshots[file.path];
         if (snapshot == null) {
           hadError = true;
           continue;
@@ -3000,7 +2928,7 @@ class AgentSessionDiscoveryService {
         }
         if (metadata.isHidden) continue;
 
-        final segments = path
+        final segments = file.path
             .split('/')
             .where((segment) => segment.isNotEmpty)
             .toList(growable: false);
@@ -3020,14 +2948,14 @@ class AgentSessionDiscoveryService {
             toolName: 'Grok Build',
             sessionId: sessionId,
             workingDirectory: metadata.workingDirectory,
-            lastActive: metadata.updatedAt ?? snapshot.modifiedAt,
-            summary: metadata.summary ?? _truncateId(sessionId),
+            lastActive: metadata.updatedAt ?? file.modifiedAt,
+            summary: metadata.summary,
           ),
         );
       }
 
       return _ToolDiscoveryResult.success(
-        'Grok Build',
+        AgentLaunchTool.grokBuild,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -3037,7 +2965,7 @@ class AgentSessionDiscoveryService {
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Grok Build');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.grokBuild);
     }
   }
 
@@ -3059,13 +2987,13 @@ class AgentSessionDiscoveryService {
         max,
         previewOnly: previewOnly,
       );
-      final sessionPaths = await _listPiSessionPaths(
+      final sessionFiles = await _listPiSessionFiles(
         session,
         workingDirectory,
         relatedWorkingDirectories,
         scanLimit: scanLimit,
       );
-      if (sessionPaths.isEmpty) {
+      if (sessionFiles.isEmpty) {
         DiagnosticsLogService.instance.debug(
           'agent.discovery',
           'pi_complete',
@@ -3078,10 +3006,13 @@ class AgentSessionDiscoveryService {
             'hadError': false,
           },
         );
-        return const _ToolDiscoveryResult.success('Pi', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.pi, []);
       }
-      final recentSessionPaths = sessionPaths
+      final recentSessionFiles = sessionFiles
           .take(metadataReadLimit)
+          .toList(growable: false);
+      final recentSessionPaths = recentSessionFiles
+          .map((file) => file.path)
           .toList(growable: false);
       // Pi's first JSONL record is the complete session header. Reading exactly
       // that line avoids every image, tool result, and transcript-size concern.
@@ -3094,8 +3025,8 @@ class AgentSessionDiscoveryService {
       final sessions = <ToolSessionInfo>[];
       var hadError = false;
 
-      for (final filePath in recentSessionPaths) {
-        final snapshot = snapshots[filePath];
+      for (final file in recentSessionFiles) {
+        final snapshot = snapshots[file.path];
         if (snapshot == null) {
           hadError = true;
           continue;
@@ -3118,9 +3049,10 @@ class AgentSessionDiscoveryService {
               workingDirectory: sessionWorkingDirectory,
               // The header timestamp is creation time. File mtime tracks the
               // latest turn and is therefore the picker ordering authority.
-              lastActive: snapshot.modifiedAt ?? header.createdAt,
+              lastActive: file.modifiedAt ?? header.createdAt,
               summary:
-                  labels[filePath] ?? 'Pi session ${_truncateId(sessionId)}',
+                  labels[file.path] ??
+                  'Pi session ${_truncateSessionIdValue(sessionId)}',
             ),
           );
         } on Object {
@@ -3133,7 +3065,7 @@ class AgentSessionDiscoveryService {
         'pi_complete',
         fields: {
           'connectionId': session.connectionId,
-          'candidateCount': sessionPaths.length,
+          'candidateCount': sessionFiles.length,
           'snapshotCount': snapshots.length,
           'parsedCount': sessions.length,
           'labelCount': labels.length,
@@ -3143,7 +3075,7 @@ class AgentSessionDiscoveryService {
         },
       );
       return _ToolDiscoveryResult.success(
-        'Pi',
+        AgentLaunchTool.pi,
         returnedSessions,
         hadError: hadError,
       );
@@ -3157,7 +3089,7 @@ class AgentSessionDiscoveryService {
           'errorType': error.runtimeType,
         },
       );
-      return const _ToolDiscoveryResult.failure('Pi');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.pi);
     }
   }
 
@@ -3193,7 +3125,7 @@ class AgentSessionDiscoveryService {
   ///
   /// Every bucket comes from an explicit directory returned by the repository's
   /// `git worktree list`; there is no global session-store scan.
-  Future<List<String>> _listPiSessionPaths(
+  Future<List<_ListedFile>> _listPiSessionFiles(
     SshSession session,
     String? workingDirectory,
     List<String> relatedWorkingDirectories, {
@@ -3205,7 +3137,7 @@ class AgentSessionDiscoveryService {
           .map(piEncodedSessionDirectoryName)
           .whereType<String>(),
     }.toList(growable: false);
-    if (buckets.isEmpty) return const <String>[];
+    if (buckets.isEmpty) return const <_ListedFile>[];
     final output = session.remoteIsWindows
         ? await _execWindowsPowerShell(
             session,
@@ -3227,7 +3159,7 @@ class AgentSessionDiscoveryService {
               scanLimit,
             ),
           );
-    return _nonEmptyLines(output).take(scanLimit).toList(growable: false);
+    return _parseListedFiles(output).take(scanLimit).toList(growable: false);
   }
 
   // Muse owns the index. Read it without creating or modifying the database.
@@ -3244,7 +3176,7 @@ class AgentSessionDiscoveryService {
         ?workingDirectory,
         ...relatedWorkingDirectories,
       ], columnName: 'workspace_root');
-      Future<String> query({bool scoped = true}) => _exec(
+      Future<String> query({required bool scoped}) => _exec(
         session,
         r'sqlite3 -readonly -json "${XDG_DATA_HOME:-$HOME/.local/share}/muse/session-index.db" '
         '${shellEscapePosix("SELECT session_id, workspace_root, title, updated_at_us FROM sessions "
@@ -3254,16 +3186,13 @@ class AgentSessionDiscoveryService {
         "ORDER BY updated_at_us DESC LIMIT $limit;")} 2>/dev/null',
       );
       var sessions = <ToolSessionInfo>[];
-      try {
-        if (!session.remoteIsWindows) {
-          sessions = [...parseMuseSessionIndex(await query())];
-        }
-      } on Object {
-        /* Fall back to durable logs. */
-      }
-      if (!session.remoteIsWindows && sessions.isEmpty && scope != null) {
+      if (!session.remoteIsWindows) {
         try {
-          sessions = [...parseMuseSessionIndex(await query(scoped: false))];
+          sessions = [
+            ...parseMuseSessionIndex(
+              await _queryScopedThenUnscoped(query, hasScope: scope != null),
+            ),
+          ];
         } on Object {
           /* Fall back to durable logs. */
         }
@@ -3292,23 +3221,22 @@ class AgentSessionDiscoveryService {
                   limit,
                 ),
               );
-        final paths = _nonEmptyLines(output)
-            .toSet()
+        final files = _parseListedFiles(output)
             .take(_sessionMetadataReadLimit(max, previewOnly: previewOnly))
             .toList();
         final snapshots = await _readRemoteFileSnapshots(
           session,
-          paths,
+          files.map((file) => file.path),
           maxBytes: 64 * 1024,
         );
-        for (final path in paths) {
-          final snapshot = snapshots[path];
+        for (final file in files) {
+          final snapshot = snapshots[file.path];
           if (snapshot == null) continue;
           final metadata = parseMuseSessionMetadata(
             snapshot.content,
-            modifiedAt: snapshot.modifiedAt,
+            modifiedAt: file.modifiedAt,
           );
-          final pathParts = path.replaceAll(r'\', '/').split('/');
+          final pathParts = file.path.replaceAll(r'\', '/').split('/');
           final directoryId = pathParts.length >= 2
               ? pathParts[pathParts.length - 2]
               : null;
@@ -3325,10 +3253,7 @@ class AgentSessionDiscoveryService {
               toolName: 'Muse Code',
               sessionId: indexed.sessionId,
               workingDirectory: metadata.workingDirectory,
-              summary:
-                  indexed.summary == _truncateSessionIdValue(indexed.sessionId)
-                  ? metadata.summary
-                  : indexed.summary,
+              summary: indexed.summary ?? metadata.summary,
               lastActive:
                   metadata.lastActive != null &&
                       (indexed.lastActive == null ||
@@ -3342,7 +3267,7 @@ class AgentSessionDiscoveryService {
         if (sessions.isEmpty) rethrow;
       }
       return _ToolDiscoveryResult.success(
-        'Muse Code',
+        AgentLaunchTool.museCode,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -3351,7 +3276,7 @@ class AgentSessionDiscoveryService {
         ),
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Muse Code');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.museCode);
     }
   }
 
@@ -3368,7 +3293,7 @@ class AgentSessionDiscoveryService {
     bool previewOnly = false,
   }) async {
     if (session.remoteIsWindows) {
-      return const _ToolDiscoveryResult.success('Hermes', []);
+      return _ToolDiscoveryResult.success(AgentLaunchTool.hermes, []);
     }
     try {
       final scanLimit = _sessionScanLimit(
@@ -3383,26 +3308,27 @@ class AgentSessionDiscoveryService {
           workingDirectory,
         ...relatedWorkingDirectories,
       ];
-      var output = await _queryHermesDb(
-        session,
-        scanLimit,
-        scopedDirectories: scopedDirectories,
+      final output = await _queryScopedThenUnscoped(
+        ({required scoped}) => _queryHermesDb(
+          session,
+          scanLimit,
+          scopedDirectories: scoped ? scopedDirectories : const [],
+        ),
+        hasScope: scopedDirectories.isNotEmpty,
       );
-      // Fall back to an unscoped query so a preset pointed at an unused
-      // directory still surfaces recent work instead of an empty picker.
-      if (output.trim().isEmpty && scopedDirectories.isNotEmpty) {
-        output = await _queryHermesDb(session, scanLimit);
-      }
       if (output.trim().isEmpty) {
-        return const _ToolDiscoveryResult.success('Hermes', []);
+        return _ToolDiscoveryResult.success(AgentLaunchTool.hermes, []);
       }
 
       return _ToolDiscoveryResult.success(
-        'Hermes',
-        sortAndLimitDiscoveredSessions(parseHermesDbOutput(output), max),
+        AgentLaunchTool.hermes,
+        sortAndLimitDiscoveredSessions(
+          parseSeparatedSessionRows(output, toolName: 'Hermes'),
+          max,
+        ),
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('Hermes');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.hermes);
     }
   }
 
@@ -3480,7 +3406,7 @@ class AgentSessionDiscoveryService {
         );
         if (acpSessions != null && acpSessions.sessions.isNotEmpty) {
           return _ToolDiscoveryResult.success(
-            'OpenCode',
+            AgentLaunchTool.openCode,
             sortAndLimitDiscoveredSessions(acpSessions.sessions, max),
             hadError: acpSessions.hadError,
           );
@@ -3489,15 +3415,21 @@ class AgentSessionDiscoveryService {
 
       // V2's CLI list is project-scoped. The database also covers the global
       // recent-session picker when there is no selected working directory.
-      final dbOutput = await _queryOpenCodeDb(
-        session,
-        scanLimit,
-        scopedDirectories: relatedWorkingDirectories,
+      final dbOutput = await _queryScopedThenUnscoped(
+        ({required scoped}) => _queryOpenCodeDb(
+          session,
+          scanLimit,
+          scopedDirectories: scoped ? relatedWorkingDirectories : const [],
+        ),
+        hasScope: relatedWorkingDirectories.isNotEmpty,
       );
       if (dbOutput.trim().isNotEmpty) {
         return _ToolDiscoveryResult.success(
-          'OpenCode',
-          sortAndLimitDiscoveredSessions(_parseOpenCodeDbOutput(dbOutput), max),
+          AgentLaunchTool.openCode,
+          sortAndLimitDiscoveredSessions(
+            parseSeparatedSessionRows(dbOutput, toolName: 'OpenCode'),
+            max,
+          ),
         );
       }
 
@@ -3513,7 +3445,7 @@ class AgentSessionDiscoveryService {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
           return _ToolDiscoveryResult.success(
-            'OpenCode',
+            AgentLaunchTool.openCode,
             _scopeSessions(
               sessions,
               workingDirectory,
@@ -3527,9 +3459,13 @@ class AgentSessionDiscoveryService {
         }
       }
 
-      return _ToolDiscoveryResult.success('OpenCode', [], hadError: hadError);
+      return _ToolDiscoveryResult.success(
+        AgentLaunchTool.openCode,
+        [],
+        hadError: hadError,
+      );
     } on Object {
-      return const _ToolDiscoveryResult.failure('OpenCode');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.openCode);
     }
   }
 
@@ -3564,7 +3500,7 @@ class AgentSessionDiscoveryService {
         try {
           final sessions = _parseOpenCodeCliJson(cliOutput);
           return _ToolDiscoveryResult.success(
-            'OpenCode',
+            AgentLaunchTool.openCode,
             _scopeSessions(
               sessions,
               workingDirectory,
@@ -3589,23 +3525,23 @@ class AgentSessionDiscoveryService {
       );
       if (storagePathOutput.trim().isEmpty) {
         return _ToolDiscoveryResult.success(
-          'OpenCode',
+          AgentLaunchTool.openCode,
           const <ToolSessionInfo>[],
           hadError: hadError,
         );
       }
 
-      final storagePaths = _nonEmptyLines(storagePathOutput)
+      final storageFiles = _parseListedFiles(storagePathOutput)
           .take(metadataReadLimit)
           .toList(growable: false);
       final snapshots = await _readRemoteFileSnapshots(
         session,
-        storagePaths,
+        storageFiles.map((file) => file.path),
         maxBytes: _openCodeStorageSessionMetadataMaxBytes,
       );
       final sessions = <ToolSessionInfo>[];
-      for (final path in storagePaths) {
-        final snapshot = snapshots[path];
+      for (final file in storageFiles) {
+        final snapshot = snapshots[file.path];
         if (snapshot == null) {
           hadError = true;
           continue;
@@ -3629,8 +3565,8 @@ class AgentSessionDiscoveryService {
               toolName: 'OpenCode',
               sessionId: sessionId,
               workingDirectory: metadata.workingDirectory,
-              lastActive: metadata.updatedAt ?? snapshot.modifiedAt,
-              summary: metadata.summary ?? _truncateId(sessionId),
+              lastActive: metadata.updatedAt ?? file.modifiedAt,
+              summary: metadata.summary,
             ),
           );
         } on Object {
@@ -3639,7 +3575,7 @@ class AgentSessionDiscoveryService {
       }
 
       return _ToolDiscoveryResult.success(
-        'OpenCode',
+        AgentLaunchTool.openCode,
         _scopeSessions(
           sessions,
           workingDirectory,
@@ -3649,8 +3585,20 @@ class AgentSessionDiscoveryService {
         hadError: hadError,
       );
     } on Object {
-      return const _ToolDiscoveryResult.failure('OpenCode');
+      return _ToolDiscoveryResult.failure(AgentLaunchTool.openCode);
     }
+  }
+
+  /// Runs [query] scoped to the active directories and, when that yields
+  /// nothing, unscoped, so a preset pointed at an unused directory still
+  /// surfaces recent work instead of an empty picker.
+  static Future<String> _queryScopedThenUnscoped(
+    Future<String> Function({required bool scoped}) query, {
+    required bool hasScope,
+  }) async {
+    final scoped = await query(scoped: true);
+    if (scoped.trim().isNotEmpty || !hasScope) return scoped;
+    return query(scoped: false);
   }
 
   List<ToolSessionInfo> _scopeSessions(
@@ -3704,7 +3652,7 @@ class AgentSessionDiscoveryService {
           final updated =
               entry['updated'] ?? (time is Map ? time['updated'] : null);
           if (updated is int) {
-            lastActive = _dateTimeFromEpoch(updated);
+            lastActive = _dateTimeFromEpochValue(updated);
           } else if (updated is String) {
             lastActive = DateTime.tryParse(updated);
           }
@@ -3714,41 +3662,10 @@ class AgentSessionDiscoveryService {
             sessionId: id,
             workingDirectory: directory,
             lastActive: lastActive,
-            summary: title.isNotEmpty ? title : _truncateId(id),
+            summary: title.isNotEmpty ? title : null,
           );
         })
         .toList();
-  }
-
-  List<ToolSessionInfo> _parseOpenCodeDbOutput(String output) {
-    final sessions = <ToolSessionInfo>[];
-    for (final line in output.trim().split('\n')) {
-      if (line.trim().isEmpty) continue;
-      final parts = line.split('\x1f');
-      if (parts.length < 3) continue;
-
-      final id = parts[0].trim();
-      final title = parts[1].trim();
-      final directory = parts[2].trim();
-      DateTime? lastActive;
-      if (parts.length >= 4) {
-        final ts = int.tryParse(parts[3].trim());
-        if (ts != null) {
-          lastActive = _dateTimeFromEpoch(ts);
-        }
-      }
-
-      sessions.add(
-        ToolSessionInfo(
-          toolName: 'OpenCode',
-          sessionId: id,
-          workingDirectory: directory.isNotEmpty ? directory : null,
-          lastActive: lastActive,
-          summary: title.isNotEmpty ? title : _truncateId(id),
-        ),
-      );
-    }
-    return sessions;
   }
 
   Future<String> _queryOpenCodeDb(
@@ -4020,9 +3937,7 @@ class AgentSessionDiscoveryService {
                   ? null
                   : sessionInfo.cwd,
               lastActive: _parseDateTimeValue(sessionInfo.updatedAt),
-              summary:
-                  sessionInfo.title ??
-                  _truncateSessionIdValue(sessionInfo.sessionId),
+              summary: sessionInfo.title,
               additionalDirectories: sessionInfo.additionalDirectories,
             );
             sessionsById.putIfAbsent(info.sessionId, () => info);
@@ -4044,7 +3959,7 @@ class AgentSessionDiscoveryService {
     }
   }, priority: SshExecPriority.low);
 
-  Future<List<String>> _listCopilotWorkspacePaths(
+  Future<List<_ListedFile>> _listCopilotWorkspaceFiles(
     SshSession session,
     int scanLimit,
     Iterable<String> relatedWorkingDirectories,
@@ -4062,7 +3977,7 @@ class AgentSessionDiscoveryService {
           limit: scanLimit,
         ),
       );
-      return _nonEmptyLines(output).toList(growable: false);
+      return _parseListedFiles(output);
     }
 
     final scopedDirectories = relatedWorkingDirectories
@@ -4077,8 +3992,7 @@ class AgentSessionDiscoveryService {
       scanLimit,
     );
     if (scopedDirectories.isEmpty) {
-      final output = await _exec(session, globalCommand);
-      return _nonEmptyLines(output).toList(growable: false);
+      return _parseListedFiles(await _exec(session, globalCommand));
     }
 
     final scopedCommand = StringBuffer()
@@ -4106,18 +4020,22 @@ class AgentSessionDiscoveryService {
       session,
       _newestFilePathsCommand('{ $scopedCommand; }', scanLimit),
     );
-    final output = scopedOutput.trim().isNotEmpty
-        ? scopedOutput
-        : await _exec(session, globalCommand);
-    return _nonEmptyLines(output).toList(growable: false);
+    return _parseListedFiles(
+      scopedOutput.trim().isNotEmpty
+          ? scopedOutput
+          : await _exec(session, globalCommand),
+    );
   }
 
+  /// Reads bounded file contents in batches: the first [maxBytes] bytes, the
+  /// first [maxLines] lines, or the whole file, plus the last [tailLines]
+  /// lines in the same round trip when requested.
   Future<Map<String, _RemoteFileSnapshot>> _readRemoteFileSnapshots(
     SshSession session,
     Iterable<String> paths, {
     int? maxLines,
     int? maxBytes,
-    bool tail = false,
+    int? tailLines,
   }) async {
     final uniquePaths = paths
         .where((path) => path.isNotEmpty)
@@ -4135,7 +4053,7 @@ class AgentSessionDiscoveryService {
             batchPaths,
             maxLines: maxLines,
             maxBytes: maxBytes,
-            tail: tail,
+            tailLines: tailLines,
           ),
         );
         snapshots.addAll(await _parseRemoteFileSnapshotOutput(output));
@@ -4154,9 +4072,6 @@ class AgentSessionDiscoveryService {
       final command = StringBuffer()
         ..write(r'SEP=$(printf "\037"); ')
         ..write(
-          r'STAT_BIN=/usr/bin/stat; [ -x "$STAT_BIN" ] || STAT_BIN=stat; ',
-        )
-        ..write(
           r'HEAD_BIN=/usr/bin/head; [ -x "$HEAD_BIN" ] || HEAD_BIN=head; ',
         )
         ..write(
@@ -4171,11 +4086,7 @@ class AgentSessionDiscoveryService {
         ..write('for path in ')
         ..write(batchPaths.map(shellEscapePosix).join(' '))
         ..write(r'; do [ -f "$path" ] || continue; ')
-        ..write(
-          r'mtime=$( ($STAT_BIN -c %Y "$path" 2>/dev/null || '
-          r'$STAT_BIN -f %m "$path" 2>/dev/null) | $HEAD_BIN -n 1); ',
-        )
-        ..write(r'printf "%s%s%s%s" "$path" "$SEP" "${mtime:-}" "$SEP"; ');
+        ..write(r'printf "%s%s" "$path" "$SEP"; ');
 
       if (maxBytes != null) {
         command.write(
@@ -4189,13 +4100,16 @@ class AgentSessionDiscoveryService {
         );
       } else {
         command.write(
-          tail
-              ? r'$TAIL_BIN -n '
-                    '$maxLines'
-                    r' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; '
-              : r'''$SED_BIN -n '1,'''
-                    '$maxLines'
-                    r'''p' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ''',
+          r'''$SED_BIN -n '1,'''
+          '$maxLines'
+          r'''p' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ''',
+        );
+      }
+      if (tailLines != null) {
+        command.write(
+          r'printf "%s" "$SEP"; $TAIL_BIN -n '
+          '$tailLines'
+          r' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ',
         );
       }
 
@@ -4207,7 +4121,10 @@ class AgentSessionDiscoveryService {
     return snapshots;
   }
 
-  Future<Map<String, String>> _findClaudeSessionFiles(
+  /// Locates `projects/<encoded-cwd>/<sessionId>.jsonl` transcripts. The depth
+  /// bound skips the much larger `<sessionId>/subagents/` and tool-result
+  /// trees underneath them.
+  Future<Map<String, _ListedFile>> _findClaudeSessionFiles(
     SshSession session,
     Iterable<String> sessionIds,
   ) async {
@@ -4216,44 +4133,44 @@ class AgentSessionDiscoveryService {
         .toSet()
         .toList(growable: false);
     if (uniqueSessionIds.isEmpty) {
-      return const <String, String>{};
+      return const <String, _ListedFile>{};
     }
 
-    final nameFilters = uniqueSessionIds
-        .map((id) => '-name ${shellEscapePosix('$id.jsonl')}')
-        .join(' -o ');
+    final names = uniqueSessionIds
+        .map((id) => '$id.jsonl')
+        .toList(growable: false);
     final output = session.remoteIsWindows
         ? await _execWindowsPowerShell(
             session,
-            windowsFindFilesByNameScript(
+            windowsListNewestFilesScript(
               relativeRoot: '.claude/projects',
-              names: uniqueSessionIds
-                  .map((id) => '$id.jsonl')
-                  .toList(growable: false),
+              includeGlobs: names,
+              maxDepth: 1,
+              limit: names.length,
             ),
           )
         : await _exec(
             session,
-            'find ~/.claude/projects -type f \\( $nameFilters \\) '
-            '-print 2>/dev/null',
+            posixListNewestFilesCommand(
+              r'find ~/.claude/projects -maxdepth 2 -type f \( '
+              '${names.map((name) => '-name ${shellEscapePosix(name)}').join(' -o ')}'
+              r' \)',
+              names.length,
+            ),
           );
 
-    final filesById = <String, String>{};
-    for (final rawLine in output.split('\n')) {
-      final path = rawLine.trim();
-      if (path.isEmpty) continue;
-      final fileName = path.split('/').last;
+    final filesById = <String, _ListedFile>{};
+    for (final file in _parseListedFiles(output)) {
+      final fileName = file.path.split('/').last;
       if (!fileName.endsWith('.jsonl')) continue;
       final sessionId = fileName.substring(
         0,
         fileName.length - '.jsonl'.length,
       );
-      filesById.putIfAbsent(sessionId, () => path);
+      filesById.putIfAbsent(sessionId, () => file);
     }
     return filesById;
   }
-
-  DateTime _dateTimeFromEpoch(int epoch) => _dateTimeFromEpochValue(epoch);
 
   /// Expands shell-home shorthand before exact session-store lookup.
   ///
@@ -4418,8 +4335,6 @@ class AgentSessionDiscoveryService {
         _pathLastSegment(sessionDirectory) ==
             _pathLastSegment(expectedDirectory);
   }
-
-  static String _truncateId(String id) => _truncateSessionIdValue(id);
 }
 
 @immutable
@@ -4522,15 +4437,20 @@ class _CachedRelatedWorkingDirectories {
 }
 
 class _ToolDiscoveryResult {
-  const _ToolDiscoveryResult.success(
-    this.toolName,
+  _ToolDiscoveryResult.success(
+    AgentLaunchTool tool,
     this.sessions, {
     this.hadError = false,
-  });
+  }) : toolName = tool.discoveredSessionToolName!;
 
-  const _ToolDiscoveryResult.failure(this.toolName)
-    : sessions = const <ToolSessionInfo>[],
+  _ToolDiscoveryResult.failure(AgentLaunchTool tool)
+    : toolName = tool.discoveredSessionToolName!,
+      sessions = const <ToolSessionInfo>[],
       hadError = true;
+
+  const _ToolDiscoveryResult.empty(this.toolName)
+    : sessions = const <ToolSessionInfo>[],
+      hadError = false;
 
   final String toolName;
   final List<ToolSessionInfo> sessions;
@@ -4583,10 +4503,12 @@ class _AntigravityHistoryEntry {
 }
 
 class _RemoteFileSnapshot {
-  const _RemoteFileSnapshot({required this.content, this.modifiedAt});
+  const _RemoteFileSnapshot({required this.content, this.tailContent});
 
   final String content;
-  final DateTime? modifiedAt;
+
+  /// The last `tailLines` lines when the reader asked for them.
+  final String? tailContent;
 }
 
 Future<Map<String, _RemoteFileSnapshot>> _parseRemoteFileSnapshotOutput(
@@ -4607,22 +4529,17 @@ Map<String, _RemoteFileSnapshot> _parseRemoteFileSnapshotOutputSync(
   for (final line in output.split('\n')) {
     if (line.trim().isEmpty) continue;
     final parts = line.split('\x1f');
-    if (parts.length < 3) continue;
+    if (parts.length < 2) continue;
 
     final path = parts[0].trim();
     if (path.isEmpty) continue;
 
-    DateTime? modifiedAt;
-    final epoch = int.tryParse(parts[1].trim());
-    if (epoch != null && epoch > 0) {
-      modifiedAt = _dateTimeFromEpochValue(epoch);
-    }
-
     try {
-      final content = utf8.decode(base64Decode(parts[2].trim()));
       snapshots[path] = _RemoteFileSnapshot(
-        content: content,
-        modifiedAt: modifiedAt,
+        content: utf8.decode(base64Decode(parts[1].trim())),
+        tailContent: parts.length < 3
+            ? null
+            : utf8.decode(base64Decode(parts[2].trim())),
       );
     } on FormatException {
       continue;
@@ -4724,10 +4641,12 @@ const _posixFileTimestampsScript =
     "else stat -f '%m\t%N' \"\$@\"; fi";
 
 String _newestFilePathsCommand(String timestampsCommand, int limit) =>
-    '$timestampsCommand | LC_ALL=C sort -t "\t" -k1,1nr | '
-    'head -n $limit | cut -f2-';
+    '$timestampsCommand | LC_ALL=C sort -t "\t" -k1,1nr | head -n $limit';
 
 /// Globally sorts timestamp/path records from every batch of [findCommand].
+///
+/// Emits `<epoch seconds>\t<path>` lines, newest first, so readers can use
+/// the mtime the listing already computed instead of running `stat` again.
 @visibleForTesting
 String posixListNewestFilesCommand(
   String findCommand,
@@ -4742,7 +4661,7 @@ String posixListNewestFilesCommand(
 /// more Windows user roots that match any of [includeGlobs], newest first,
 /// limited to [limit].
 ///
-/// Emits one forward-slash path per line, mirroring
+/// Emits one `<epoch seconds>\t<forward-slash path>` line per file, mirroring
 /// [posixListNewestFilesCommand]. When
 /// [pathLikeFilters] is non-empty only files whose forward-slash path matches at
 /// least one `-like` pattern are emitted (mirroring `find ... -path <pattern>`).
@@ -4836,35 +4755,16 @@ String windowsListNewestFilesScript({
     ..write('$limit')
     ..write(');')
     ..write(r'$__flSeen=@{};')
+    ..write(r'$__flEpoch=New-Object DateTime(1970,1,1,0,0,0,')
+    ..write('([DateTimeKind]::Utc));')
     ..write(r'foreach($__flF in $__flItems){')
     ..write(r"$__flPath=($__flF.FullName -replace '\\','/');")
     ..write(r'if($__flSeen.ContainsKey($__flPath)){continue}')
     ..write(r'$__flSeen[$__flPath]=$true;')
+    ..write(r'[void]$__flOut.Append([string][int64](')
+    ..write(r'($__flF.LastWriteTimeUtc-$__flEpoch).TotalSeconds));')
+    ..write(r'[void]$__flOut.Append([char]9);')
     ..write(r'[void]$__flOut.Append($__flPath);')
-    ..write(r'[void]$__flOut.Append([char]10)}');
-  return powerShellUtf8OutputScript(body.toString());
-}
-
-/// Builds a PowerShell script listing files under `%USERPROFILE%\<relativeRoot>`
-/// whose leaf name exactly matches any of [names]. Emits one forward-slash path
-/// per line, mirroring `find <root> -type f \( -name a -o -name b \) -print`.
-@visibleForTesting
-String windowsFindFilesByNameScript({
-  required String relativeRoot,
-  required List<String> names,
-}) {
-  final body = StringBuffer()
-    ..write(r'$__flRoot=Join-Path $env:USERPROFILE ')
-    ..write(powerShellSingleQuote(relativeRoot))
-    ..write(';')
-    ..write(
-      r'$__flItems=@(Get-ChildItem -LiteralPath $__flRoot -Recurse -File '
-      r'2>$null|Where-Object {$__flN=$_.Name;(',
-    )
-    ..write(_windowsNameLikeCondition(names))
-    ..write(')});')
-    ..write(r'foreach($__flF in $__flItems){')
-    ..write(r"[void]$__flOut.Append(($__flF.FullName -replace '\\','/'));")
     ..write(r'[void]$__flOut.Append([char]10)}');
   return powerShellUtf8OutputScript(body.toString());
 }
@@ -4977,32 +4877,27 @@ List<List<String>> windowsSnapshotPathBatches(List<String> paths) {
   return batches;
 }
 
-/// Builds a PowerShell script that emits `path\x1f mtime \x1f base64` snapshot
-/// lines for [paths], matching [_parseRemoteFileSnapshotOutputSync].
+/// Builds a PowerShell script that emits `path\x1f base64[\x1f base64]`
+/// snapshot lines for [paths], matching [_parseRemoteFileSnapshotOutputSync].
 ///
 /// The content selection mirrors the POSIX reader: [maxBytes] reads the first N
 /// bytes, a null [maxLines]/[maxBytes] reads the whole file, otherwise the first
-/// (or, when [tail] is set, last) [maxLines] lines are read. `mtime` is Unix
-/// epoch seconds; paths are echoed verbatim so they match the map keys the
-/// callers pass in.
+/// [maxLines] lines are read; [tailLines] appends the last N lines as a second
+/// field. Paths are echoed verbatim so they match the map keys the callers pass
+/// in.
 @visibleForTesting
 String windowsFileSnapshotScript(
   List<String> paths, {
   int? maxLines,
   int? maxBytes,
-  bool tail = false,
+  int? tailLines,
 }) {
   final pathsLiteral = paths.map(powerShellSingleQuote).join(',');
   final body = StringBuffer()
     ..write(r'$SEP=[char]0x1f;')
-    ..write(r'$__flEpoch=New-Object DateTime(1970,1,1,0,0,0,')
-    ..write('([DateTimeKind]::Utc));')
     ..write('\$__flPaths=@($pathsLiteral);')
     ..write(r'foreach($p in $__flPaths){try{')
-    ..write(r'if(-not (Test-Path -LiteralPath $p -PathType Leaf)){continue}')
-    ..write(r'$fi=Get-Item -LiteralPath $p 2>$null;if($null -eq $fi){continue}')
-    ..write(r'$__flMtime=[int64]((($fi.LastWriteTimeUtc)-$__flEpoch)')
-    ..write('.TotalSeconds);');
+    ..write(r'if(-not (Test-Path -LiteralPath $p -PathType Leaf)){continue}');
   if (maxBytes != null) {
     body
       ..write(r'$fs=[System.IO.File]::OpenRead($p);')
@@ -5017,9 +4912,7 @@ String windowsFileSnapshotScript(
   } else {
     body
       ..write(
-        tail
-            ? '\$__flLines=@(Get-Content -LiteralPath \$p -Tail $maxLines -Encoding UTF8 2>\$null);'
-            : '\$__flLines=@(Get-Content -LiteralPath \$p -TotalCount $maxLines -Encoding UTF8 2>\$null);',
+        '\$__flLines=@(Get-Content -LiteralPath \$p -TotalCount $maxLines -Encoding UTF8 2>\$null);',
       )
       ..write(r'$__flText=[string]::Join([char]10,$__flLines);')
       ..write(r'$__flB64=[Convert]::ToBase64String(')
@@ -5027,9 +4920,19 @@ String windowsFileSnapshotScript(
   }
   body
     ..write(r'[void]$__flOut.Append($p);[void]$__flOut.Append($SEP);')
-    ..write(r'[void]$__flOut.Append([string]$__flMtime);')
-    ..write(r'[void]$__flOut.Append($SEP);')
-    ..write(r'[void]$__flOut.Append($__flB64);[void]$__flOut.Append([char]10);')
+    ..write(r'[void]$__flOut.Append($__flB64);');
+  if (tailLines != null) {
+    body
+      ..write(
+        '\$__flLines=@(Get-Content -LiteralPath \$p -Tail $tailLines -Encoding UTF8 2>\$null);',
+      )
+      ..write(r'$__flText=[string]::Join([char]10,$__flLines);')
+      ..write(r'[void]$__flOut.Append($SEP);')
+      ..write(r'[void]$__flOut.Append([Convert]::ToBase64String(')
+      ..write(r'[System.Text.Encoding]::UTF8.GetBytes($__flText)));');
+  }
+  body
+    ..write(r'[void]$__flOut.Append([char]10);')
     ..write('}catch{}}');
   return powerShellUtf8OutputScript(body.toString());
 }
@@ -5080,10 +4983,10 @@ List<dynamic>? _readListField(Map<String, dynamic>? map, String key) {
   return value is List ? value : null;
 }
 
-String? _readStringField(Map<String, dynamic>? map, String key) {
-  final value = map?[key];
-  return value is String ? value : null;
-}
+String? _readStringField(Map<String, dynamic>? map, String key) =>
+    _stringValue(map?[key]);
+
+String? _stringValue(Object? value) => value is String ? value : null;
 
 /// Converts a `file:` [uri] to a filesystem path without letting the local
 /// platform rewrite separators for remote hosts.

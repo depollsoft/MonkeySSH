@@ -242,7 +242,7 @@ comparison: it is compiled into the binary, reported in the server `hello`
 frame, and checked by `attach` before it restarts anything.
 `monkeymux-version.sh` derives the packaging version from that same constant so
 `assets/monkeymux/manifest.json` always describes the binary it ships. Bump the
-constant and run `scripts/ensure_monkeymux_assets.sh`; never edit the version in
+constant and run `scripts/build_monkeymux_assets.sh`; never edit the version in
 the generated manifest by hand. The manifest and compressed binaries are
 ignored build outputs. CI builds them once from the checked-out source and
 fans the resulting artifact out to every Flutter package job. If the manifest

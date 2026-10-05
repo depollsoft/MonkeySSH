@@ -47,10 +47,6 @@ class BufferLine with IndexedItem {
     return _data[index * _cellSize + _cellBackground];
   }
 
-  int getAttributes(int index) {
-    return _data[index * _cellSize + _cellAttributes];
-  }
-
   int getContent(int index) {
     return _data[index * _cellSize + _cellContent];
   }
@@ -72,29 +68,6 @@ class BufferLine with IndexedItem {
     cellData.underlineColor = _data[offset + _cellUnderlineColor];
   }
 
-  CellData createCellData(int index) {
-    final cellData = CellData.empty();
-    final offset = index * _cellSize;
-    _data[offset + _cellForeground] = cellData.foreground;
-    _data[offset + _cellBackground] = cellData.background;
-    _data[offset + _cellAttributes] = cellData.flags;
-    _data[offset + _cellContent] = cellData.content;
-    _data[offset + _cellUnderlineColor] = cellData.underlineColor;
-    return cellData;
-  }
-
-  void setForeground(int index, int value) {
-    _data[index * _cellSize + _cellForeground] = value;
-  }
-
-  void setBackground(int index, int value) {
-    _data[index * _cellSize + _cellBackground] = value;
-  }
-
-  void setAttributes(int index, int value) {
-    _data[index * _cellSize + _cellAttributes] = value;
-  }
-
   void setContent(int index, int value) {
     _data[index * _cellSize + _cellContent] = value;
   }
@@ -111,15 +84,6 @@ class BufferLine with IndexedItem {
     _data[offset + _cellAttributes] = style.attrs;
     _data[offset + _cellContent] = char | (witdh << CellContent.widthShift);
     _data[offset + _cellUnderlineColor] = style.underlineColor;
-  }
-
-  void setCellData(int index, CellData cellData) {
-    final offset = index * _cellSize;
-    _data[offset + _cellForeground] = cellData.foreground;
-    _data[offset + _cellBackground] = cellData.background;
-    _data[offset + _cellAttributes] = cellData.flags;
-    _data[offset + _cellContent] = cellData.content;
-    _data[offset + _cellUnderlineColor] = cellData.underlineColor;
   }
 
   void eraseCell(int index, CursorStyle style) {
@@ -177,16 +141,14 @@ class BufferLine with IndexedItem {
   void removeCells(int start, int count, [CursorStyle? style]) {
     assert(start >= 0 && start < _length);
     assert(count >= 0 && start + count <= _length);
+    if (count <= 0) return;
 
     style ??= CursorStyle.empty;
 
     if (start + count < _length) {
       final moveStart = start * _cellSize;
       final moveEnd = (_length - count) * _cellSize;
-      final moveOffset = count * _cellSize;
-      for (var i = moveStart; i < moveEnd; i++) {
-        _data[i] = _data[i + moveOffset];
-      }
+      _data.setRange(moveStart, moveEnd, _data, moveStart + count * _cellSize);
     }
 
     for (var i = _length - count; i < _length; i++) {
@@ -211,6 +173,7 @@ class BufferLine with IndexedItem {
 
   /// Inserts [count] cells at [start]. New cells are initialized with [style].
   void insertCells(int start, int count, [CursorStyle? style]) {
+    if (count <= 0) return;
     style ??= CursorStyle.empty;
 
     if (start > 0 && getWidth(start - 1) == 2) {
@@ -221,9 +184,8 @@ class BufferLine with IndexedItem {
       final moveStart = start * _cellSize;
       final moveEnd = (_length - count) * _cellSize;
       final moveOffset = count * _cellSize;
-      for (var i = moveEnd - 1; i >= moveStart; i--) {
-        _data[i + moveOffset] = _data[i];
-      }
+      _data.setRange(
+          moveStart + moveOffset, moveEnd + moveOffset, _data, moveStart);
     }
 
     final end = min(start + count, _length);
@@ -316,19 +278,9 @@ class BufferLine with IndexedItem {
   /// line.
   void copyFrom(BufferLine src, int srcCol, int dstCol, int len) {
     resize(dstCol + len);
-
-    // data.setRange(
-    //   dstCol * _cellSize,
-    //   (dstCol + len) * _cellSize,
-    //   Uint32List.sublistView(src.data, srcCol * _cellSize, len * _cellSize),
-    // );
-
-    var srcOffset = srcCol * _cellSize;
-    var dstOffset = dstCol * _cellSize;
-
-    for (var i = 0; i < len * _cellSize; i++) {
-      _data[dstOffset++] = src._data[srcOffset++];
-    }
+    final dstOffset = dstCol * _cellSize;
+    _data.setRange(
+        dstOffset, dstOffset + len * _cellSize, src._data, srcCol * _cellSize);
   }
 
   static int _calcCapacity(int length) {
@@ -389,12 +341,6 @@ class BufferLine with IndexedItem {
     final anchor = CellAnchor(offset, owner: this);
     _anchors.add(anchor);
     return anchor;
-  }
-
-  void dispose() {
-    for (final anchor in _anchors) {
-      anchor.dispose();
-    }
   }
 
   @override

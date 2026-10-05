@@ -77,9 +77,6 @@ enum AcpSessionErrorKind {
   /// A requested ACP capability is not advertised by the agent.
   unsupportedCapability,
 
-  /// The custom provider's command has not been approved for launch.
-  commandNotApproved,
-
   /// The SSH transport failed or could not reconnect.
   transport,
 
@@ -291,7 +288,6 @@ final class AcpSessionState {
     required this.status,
     required this.createdAt,
     required this.lastActivityAt,
-    this.isCustomProvider = false,
     this.title,
     this.attached = true,
     this.initialization,
@@ -340,9 +336,6 @@ final class AcpSessionState {
 
   /// Provider display label.
   final String providerLabel;
-
-  /// Whether the backing provider is a user-defined custom provider.
-  final bool isCustomProvider;
 
   /// Working directory the session launched into.
   final String cwd;
@@ -515,7 +508,6 @@ final class AcpSessionState {
   }) => AcpSessionState(
     key: key ?? this.key,
     providerLabel: providerLabel,
-    isCustomProvider: isCustomProvider,
     cwd: cwd ?? this.cwd,
     title: clearTitle ? null : (title ?? this.title),
     status: status ?? this.status,
@@ -553,7 +545,6 @@ final class AcpSessionState {
       other is AcpSessionState &&
           key == other.key &&
           providerLabel == other.providerLabel &&
-          isCustomProvider == other.isCustomProvider &&
           cwd == other.cwd &&
           title == other.title &&
           status == other.status &&

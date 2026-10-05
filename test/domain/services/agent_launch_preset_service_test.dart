@@ -40,6 +40,29 @@ void main() {
     expect(loaded.additionalArguments, preset.additionalArguments);
   });
 
+  test('getAllPresets decodes every supported host preset once', () async {
+    await service.setPresetForHost(
+      1,
+      const AgentLaunchPreset(tool: AgentLaunchTool.codex),
+    );
+    await service.setPresetForHost(
+      2,
+      const AgentLaunchPreset(tool: AgentLaunchTool.pi),
+    );
+    await SettingsService(database).updateJson(
+      SettingKeys.agentLaunchPresets,
+      (current) => (current ?? {})
+        ..['3'] = {'tool': 'unknown-tool'}
+        ..['not-a-host'] = {'tool': 'codex'},
+    );
+
+    final all = await service.getAllPresets();
+
+    expect(all.keys, unorderedEquals([1, 2]));
+    expect(all[1]!.tool, AgentLaunchTool.codex);
+    expect(all[2]!.tool, AgentLaunchTool.pi);
+  });
+
   test('deletes a stored host preset', () async {
     const preset = AgentLaunchPreset(tool: AgentLaunchTool.codex);
 

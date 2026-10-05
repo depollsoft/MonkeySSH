@@ -310,11 +310,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
               final wide =
                   constraints.maxWidth >= 760 &&
                   MediaQuery.textScalerOf(context).scale(14) <= 19;
-              final padding = constraints.maxWidth > 1200
-                  ? (constraints.maxWidth - 1152) / 2
-                  : constraints.maxWidth >= 700
-                  ? 24.0
-                  : 16.0;
+              final padding = _contentInset(constraints.maxWidth);
               return ListView(
                 key: const ValueKey('agent-management-list'),
                 physics: const AlwaysScrollableScrollPhysics(),
@@ -409,6 +405,13 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
   }
 }
 
+/// Horizontal inset that centres content at 1152dp on wide layouts.
+double _contentInset(double width) => width > 1200
+    ? (width - 1152) / 2
+    : width >= 700
+    ? 24
+    : 16;
+
 class _UpdateBar extends StatelessWidget {
   const _UpdateBar({
     required this.label,
@@ -434,19 +437,9 @@ class _UpdateBar extends StatelessWidget {
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            MediaQuery.sizeOf(context).width > 1200
-                ? (MediaQuery.sizeOf(context).width - 1152) / 2
-                : MediaQuery.sizeOf(context).width >= 700
-                ? 24
-                : 16,
-            12,
-            MediaQuery.sizeOf(context).width > 1200
-                ? (MediaQuery.sizeOf(context).width - 1152) / 2
-                : MediaQuery.sizeOf(context).width >= 700
-                ? 24
-                : 16,
-            12,
+          padding: EdgeInsets.symmetric(
+            horizontal: _contentInset(MediaQuery.sizeOf(context).width),
+            vertical: 12,
           ),
           child: LayoutBuilder(
             builder: (context, constraints) {

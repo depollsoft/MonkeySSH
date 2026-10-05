@@ -183,9 +183,8 @@ Future<_ValidationResult> _runCase(
         body: TerminalTextInputHandler(
           terminal: terminal,
           focusNode: focusNode,
-          deleteDetection: true,
           resolveTextBeforeCursor: testCase.resolveTextBeforeCursor,
-          child: const SizedBox.expand(),
+          child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
         ),
       ),
     ),

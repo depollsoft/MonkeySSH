@@ -84,7 +84,7 @@ void main() {
       reason:
           'assets/monkeymux/manifest.json is out of step with monkeyMuxVersion '
           'in remote/monkeymux/main.go. Bump monkeyMuxVersion and rebuild with '
-          'scripts/ensure_monkeymux_assets.sh.',
+          'scripts/build_monkeymux_assets.sh.',
     );
   });
 
@@ -105,7 +105,7 @@ void main() {
         reason:
             '${entry.asset} does not embed manifest version '
             '${manifest.version}. Rebuild the assets with '
-            'scripts/ensure_monkeymux_assets.sh after bumping monkeyMuxVersion.',
+            'scripts/build_monkeymux_assets.sh after bumping monkeyMuxVersion.',
       );
     }
   });

@@ -20,9 +20,10 @@ on:
       - '!ios/fastlane/metadata-*/**'
       - 'scripts/build_monkeymux_assets.sh'
       - 'scripts/deterministic_gzip.go'
-      - 'scripts/ensure_monkeymux_assets.sh'
       - 'scripts/verify_monkeymux_assets.py'
+      - 'scripts/android_signing.sh'
       - 'scripts/cache_sqlite3_native_assets.sh'
+      - 'scripts/fetch_pr_commits.py'
       - 'scripts/version_codename.py'
       - 'scripts/preview_release_notes.rb'
       - 'scripts/preview_build_number.py'
@@ -38,6 +39,10 @@ on:
       - '.github/workflows/preview-ios.yml'
       - '.github/actions/apple-cache-restore/**'
       - '.github/actions/apple-cache-save/**'
+      - '.github/actions/compute-version/**'
+      - '.github/actions/deployment-status/**'
+      - '.github/actions/firebase-config/**'
+      - '.github/actions/flutter-setup/**'
 
 concurrency:
   group: preview-${{ github.event.pull_request.number }}
@@ -61,34 +66,30 @@ jobs:
       build-display: ${{ steps.version.outputs.build-display }}
       commits-list: ${{ steps.commits.outputs.list }}
     steps:
+      # The workflow commit supplies the version action and its helpers; the PR
+      # head supplies the version being built.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - name: Preserve preview version helper
-        run: cp scripts/preview_build_number.py "$RUNNER_TEMP/preview_build_number.py"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
+          path: source
+          sparse-checkout: |
+            pubspec.yaml
+            scripts/version_codename.py
+            assets/version_codenames.json
+          sparse-checkout-cone-mode: false
 
       - name: Compute version
         id: version
-        run: |
-          BASE_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
-          BUILD_NUMBER=$(python3 "$RUNNER_TEMP/preview_build_number.py")
-          BUILD_CODENAME=$(python3 scripts/version_codename.py "$BASE_VERSION")
-          BUILD_DISPLAY="$BASE_VERSION"
-          if [ -n "$BUILD_CODENAME" ]; then
-            BUILD_DISPLAY="$BASE_VERSION \"$BUILD_CODENAME\""
-          fi
-
-          echo "build-name=${BASE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "build-number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "build-codename=${BUILD_CODENAME}" >> "$GITHUB_OUTPUT"
-          echo "build-display=${BUILD_DISPLAY}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/compute-version
+        with:
+          source: source
+          build-number: pull-request
 
       - name: Write version metadata
         run: |

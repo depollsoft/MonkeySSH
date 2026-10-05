@@ -21,6 +21,7 @@ import 'key_service.dart';
 import 'port_forward_browser_service.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
+import 'ssh_wire.dart';
 
 /// Supported transfer payload types.
 enum TransferPayloadType {
@@ -1408,43 +1409,13 @@ class SecureTransferService {
 
     try {
       final decoded = Uint8List.fromList(base64.decode(encodedHostKey));
-      if (!_looksLikeKnownHostKeyBlob(decoded)) {
+      if (!looksLikeSshHostKeyBlob(decoded)) {
         return null;
       }
       return decoded;
     } on FormatException {
       return null;
     }
-  }
-
-  bool _looksLikeKnownHostKeyBlob(Uint8List hostKeyBytes) {
-    final keyTypeBytes = _readSshBlobString(hostKeyBytes, 0);
-    if (keyTypeBytes == null) {
-      return false;
-    }
-
-    final keyType = utf8.decode(keyTypeBytes, allowMalformed: true);
-    return keyType == 'ssh-rsa' ||
-        keyType == 'ssh-ed25519' ||
-        keyType.startsWith('ecdsa-sha2-');
-  }
-
-  Uint8List? _readSshBlobString(Uint8List bytes, int offset) {
-    if (bytes.length - offset < 4) {
-      return null;
-    }
-
-    final length =
-        (bytes[offset] << 24) |
-        (bytes[offset + 1] << 16) |
-        (bytes[offset + 2] << 8) |
-        bytes[offset + 3];
-    final start = offset + 4;
-    final end = start + length;
-    if (length < 0 || end > bytes.length) {
-      return null;
-    }
-    return Uint8List.sublistView(bytes, start, end);
   }
 
   String _preferKnownHostFingerprint(
@@ -1511,9 +1482,10 @@ const _saltBytes = 16;
 const _nonceBytes = 12;
 const _pbkdf2Iterations = 120000;
 const _maxPbkdf2Iterations = 1000000;
-const _argon2idIterations = 3;
-const _argon2idMemoryKiB = 32768;
-const _argon2idLanes = 1;
+
+/// Import fallbacks for envelopes that omit a work factor; the same values the
+/// exporter writes by default.
+const _defaultArgon2id = TransferArgon2idProfile();
 
 Future<String> _encryptTransferPayload(
   (TransferPayload, String, TransferArgon2idProfile) request,
@@ -1663,9 +1635,10 @@ Future<SecretKey> _deriveEnvelopeKey({
     return _derivePbkdf2Key(transferPassphrase, salt, iterations: iterations);
   }
 
-  final iterations = _optionalInt(envelope['iter']) ?? _argon2idIterations;
-  final memoryKiB = _optionalInt(envelope['mem']) ?? _argon2idMemoryKiB;
-  final lanes = _optionalInt(envelope['lanes']) ?? _argon2idLanes;
+  final iterations =
+      _optionalInt(envelope['iter']) ?? _defaultArgon2id.iterations;
+  final memoryKiB = _optionalInt(envelope['mem']) ?? _defaultArgon2id.memoryKiB;
+  final lanes = _optionalInt(envelope['lanes']) ?? _defaultArgon2id.parallelism;
   if (iterations <= 0 ||
       iterations > TransferArgon2idProfile.maxIterations ||
       memoryKiB < TransferArgon2idProfile.minMemoryKiB ||

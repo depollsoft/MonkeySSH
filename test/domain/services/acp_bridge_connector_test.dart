@@ -10,13 +10,8 @@ import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_acp_bridge_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
-import 'package:monkeyssh/domain/services/ssh_service.dart';
 
-class _MockSftpClient extends Mock implements SftpClient {}
-
-class _MockSshSession extends Mock implements SshSession {}
-
-class _MockTerminalSession extends Mock implements SSHSession {}
+import '../../helpers/mocks.dart';
 
 MonkeyMuxAcpBridgeService _unusedBridgeService() => MonkeyMuxAcpBridgeService(
   installer: MonkeyMuxInstallerService(
@@ -31,7 +26,7 @@ void main() {
   testWidgets('capability binding applies the configured terminal open limit', (
     tester,
   ) async {
-    final session = _MockSshSession();
+    final session = MockSshSession();
     final opening = Completer<SSHSession>();
     when(() => session.remoteIsWindows).thenReturn(false);
     when(() => session.execute('task')).thenAnswer((_) => opening.future);
@@ -67,11 +62,11 @@ void main() {
   test(
     'capability operations resolve the replacement same-host SSH session',
     () async {
-      final first = _MockSshSession();
-      final second = _MockSshSession();
-      final sftp = _MockSftpClient();
-      final firstTerminal = _MockTerminalSession();
-      final secondTerminal = _MockTerminalSession();
+      final first = MockSshSession();
+      final second = MockSshSession();
+      final sftp = MockSftpClient();
+      final firstTerminal = MockSSHSession();
+      final secondTerminal = MockSSHSession();
       when(() => first.remoteIsWindows).thenReturn(true);
       when(() => first.execute('first')).thenAnswer((_) async => firstTerminal);
       when(second.sftp).thenAnswer((_) async => sftp);
@@ -111,8 +106,8 @@ void main() {
     ('/C:/Users/demo', r'C:\Users\demo\Code\project'),
   ]) {
     test('canonicalizes tilde cwd under $home to native syntax', () async {
-      final sftp = _MockSftpClient();
-      final session = _MockSshSession();
+      final sftp = MockSftpClient();
+      final session = MockSshSession();
       when(session.sftp).thenAnswer((_) async => sftp);
       when(() => session.remoteIsWindows).thenReturn(false);
       when(() => sftp.absolute('.')).thenAnswer((_) async => home);

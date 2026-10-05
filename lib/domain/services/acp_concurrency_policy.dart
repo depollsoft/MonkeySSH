@@ -63,7 +63,7 @@ final class AcpConcurrencyRequiresChoice extends AcpConcurrencyDecision {
 ///
 /// This policy only decides whether starting or resuming one additional
 /// distinct live session is allowed. It intentionally never gates any other
-/// ACP capability: custom providers, attachments, rendering, slash commands,
+/// ACP capability: every provider, attachments, rendering, slash commands,
 /// and every other part of the ACP experience stay fully available to free
 /// users with a single live session.
 class AcpConcurrencyPolicy {

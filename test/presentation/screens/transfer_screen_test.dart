@@ -14,6 +14,8 @@ import 'package:monkeyssh/presentation/widgets/file_picker_helpers.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../helpers/mocks.dart';
+
 class _MockXFile extends Mock implements XFile {}
 
 class _TransferFilePicker extends FilePickerPlatform {
@@ -53,20 +55,18 @@ class _TransferFilePicker extends FilePickerPlatform {
   }) => save!(bytes);
 }
 
-class _MockAuthService extends Mock implements AuthService {}
-
 class _UnlockedAuthStateNotifier extends AuthStateNotifier {
   @override
   AuthState build() => AuthState.unlocked;
 }
 
 void main() {
-  late _MockAuthService authService;
+  late MockAuthService authService;
   late ProviderContainer container;
   late BuildContext context;
 
   setUp(() {
-    authService = _MockAuthService();
+    authService = MockAuthService();
     container = ProviderContainer(
       overrides: [
         authStateProvider.overrideWith(_UnlockedAuthStateNotifier.new),

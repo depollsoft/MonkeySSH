@@ -28,6 +28,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
+import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _FakeActiveSessions extends ActiveSessionsNotifier {
@@ -54,10 +55,6 @@ class _FakeActiveSessions extends ActiveSessionsNotifier {
 }
 
 class _MockSshService extends Mock implements SshService {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockExecSession extends Mock implements SSHSession {}
 
 class _MockAgentLaunchPresetService extends Mock
     implements AgentLaunchPresetService {}
@@ -136,11 +133,11 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
   when(() => ssh.getSessionsForHost(any()))
       .thenReturn(<SshSession>[?activeSession]);
   when(() => ssh.getSession(any())).thenReturn(activeSession);
-  when(() => presetService.getPresetForHost(any())).thenAnswer((_) async {
+  when(presetService.getAllPresets).thenAnswer((_) async {
     if (presetError != null) {
       throw presetError;
     }
-    return preset;
+    return {1: ?preset};
   });
   when(() => launchPreferencesService.getPreferencesForHost(any())).thenAnswer(
     (_) async => HostCliLaunchPreferences(startInYoloMode: startInYoloMode),
@@ -205,33 +202,11 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
 void main() {
   final key = fakeAcpKey();
 
-  testWidgets('provider picker excludes custom ACP definitions', (
-    tester,
-  ) async {
-    final custom = AcpCustomProviderDefinition.create(
-      id: 'custom-provider',
-      label: 'Custom provider',
-      launchCommand: AcpLaunchCommand(executable: '/opt/custom-acp'),
-      now: DateTime.utc(2026),
-    );
-
-    await _pumpAndLaunch(
-      tester,
-      FakeAcpSessionManager(),
-      startSession: false,
-      providers: <AcpProvider>[acpCopilotCliProvider, custom],
-    );
-
-    expect(find.text('Copilot CLI'), findsOneWidget);
-    expect(find.text('Custom provider'), findsNothing);
-    expect(find.text('Add custom provider'), findsNothing);
-  });
-
   testWidgets('generic sheet launches Cursor through its resolved binary', (
     tester,
   ) async {
-    final client = _MockSshClient();
-    final exec = _MockExecSession();
+    final client = MockSshClient();
+    final exec = MockSSHSession();
     when(() => exec.stdout).thenAnswer(
       (_) => Stream.value(
         Uint8List.fromList(
@@ -399,13 +374,15 @@ void main() {
       when(() => ssh.allSessions).thenReturn(const <SshSession>[]);
       when(() => ssh.getSessionsForHost(any()))
           .thenReturn(const <SshSession>[]);
-      when(() => presetService.getPresetForHost(host.id)).thenAnswer(
-        (_) async => const AgentLaunchPreset(
-          tool: AgentLaunchTool.openCode,
-          workingDirectory: '/saved-agent-worktree',
-          tmuxSessionName: 'agents',
-          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
-        ),
+      when(presetService.getAllPresets).thenAnswer(
+        (_) async => {
+          host.id: const AgentLaunchPreset(
+            tool: AgentLaunchTool.openCode,
+            workingDirectory: '/saved-agent-worktree',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          ),
+        },
       );
 
       await tester.pumpWidget(
@@ -642,13 +619,13 @@ void main() {
       List<SSHPtyConfig?>? ptys,
     }) {
       registerFallbackValue(const SSHPtyConfig());
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         invocation,
       ) async {
         commands?.add(invocation.positionalArguments.single as String);
         ptys?.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
-        final exec = _MockExecSession();
+        final exec = MockSSHSession();
         when(() => exec.stdout).thenAnswer(
           (_) => Stream.value(
             Uint8List.fromList(utf8.encode('copilot\u001f/usr/bin/copilot\n')),

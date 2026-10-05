@@ -29,33 +29,42 @@ bool handleIterm2InlineImageOsc(
   const maxMetadataLength = 8 * 1024;
   var aggregateLength = 0;
   var metadataLength = 0;
-  var foundPayloadSeparator = false;
-  for (final arg in args) {
+  var payloadArg = -1;
+  var payloadSeparator = -1;
+  for (var index = 0; index < args.length; index += 1) {
+    final arg = args[index];
     aggregateLength += arg.length + 1;
-    if (!foundPayloadSeparator) {
+    if (payloadArg < 0) {
       final separator = arg.indexOf(':');
       metadataLength += separator < 0 ? arg.length + 1 : separator;
-      foundPayloadSeparator = separator >= 0;
+      if (separator >= 0) {
+        payloadArg = index;
+        payloadSeparator = separator;
+      }
     }
     if (metadataLength > maxMetadataLength ||
         aggregateLength > _maxEncodedImageLength + maxMetadataLength) {
       return true;
     }
   }
-
-  final rawCommand = args.join(';');
-  final separator = rawCommand.indexOf(':');
-  if (separator < 0) {
+  // Base64 never contains `;`, so a valid payload is confined to the argument
+  // holding the `:` separator; trailing arguments mean a malformed payload.
+  if (payloadArg < 0 || payloadArg != args.length - 1) {
     return true;
   }
-  final metadata = _parseIterm2FileMetadata(
-    rawCommand.substring('File='.length, separator),
-  );
+
+  final metadata = _parseIterm2FileMetadata([
+    for (var index = 0; index <= payloadArg; index += 1)
+      args[index].substring(
+        index == 0 ? 'File='.length : 0,
+        index == payloadArg ? payloadSeparator : null,
+      ),
+  ]);
   if (metadata['inline'] != '1') {
     return true;
   }
 
-  final encoded = rawCommand.substring(separator + 1);
+  final encoded = args[payloadArg].substring(payloadSeparator + 1);
   if (encoded.isEmpty || encoded.length > _maxEncodedImageLength) {
     return true;
   }
@@ -102,8 +111,7 @@ bool handleIterm2InlineImageOsc(
   if (displayColumns != null) {
     graphicsArgs['c'] = '$displayColumns';
   }
-  if (displayRows != null &&
-      (displayColumns == null || rows != null || !preservesAspectRatio)) {
+  if (displayRows != null) {
     graphicsArgs['r'] = '$displayRows';
   }
   if (metadata['doNotMoveCursor'] == '1') {
@@ -116,9 +124,9 @@ bool handleIterm2InlineImageOsc(
 
 const int _maxEncodedImageLength = ((maxIterm2InlineImageBytes + 2) ~/ 3) * 4;
 
-Map<String, String> _parseIterm2FileMetadata(String raw) {
+Map<String, String> _parseIterm2FileMetadata(List<String> fields) {
   final metadata = <String, String>{};
-  for (final field in raw.split(';')) {
+  for (final field in fields) {
     final separator = field.indexOf('=');
     if (separator <= 0) {
       continue;

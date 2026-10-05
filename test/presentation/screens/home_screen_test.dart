@@ -136,6 +136,44 @@ void main() {
       );
       expect(calls, 2);
     });
+    test(
+      'negative answers back off, settle, and pause in background',
+      () async {
+        var probes = 0;
+        var foreground = true;
+        controller.dispose();
+        controller = MuxBadgeController(
+          getSession: () => session,
+          resolveBackend: (_) => backend,
+          resolveSessionName: (_, _) async {
+            probes++;
+            return null;
+          },
+          serviceForBackend: (_) => mux,
+          extraFlags: () => null,
+          onWindowsChanged: published.add,
+          disconnect: (_) async => disconnected++,
+          isAppForeground: () => foreground,
+          retryInitialDelay: const Duration(milliseconds: 2),
+          retryMaxDelay: const Duration(milliseconds: 8),
+        );
+        foreground = false;
+        await controller.queryTmux();
+        expect(controller.queried, isTrue);
+        expect(controller.windows, isNull);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(probes, 1, reason: 'no remote probes while backgrounded');
+
+        foreground = true;
+        // Retries at 2 ms and 4 ms; the 8 ms delay reaches the cap and settles.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(probes, 3);
+
+        when(() => session.remoteMuxSessionName).thenReturn('work');
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(probes, 4, reason: 'a changed mux identity re-probes once');
+      },
+    );
     test('empty MonkeyMux results disconnect and omit tmux flags', () async {
       backend = RemoteMuxBackend.monkeyMux;
       when(() => mux.listWindows(session, 'work')).thenAnswer((_) async => []);

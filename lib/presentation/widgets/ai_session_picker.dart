@@ -147,13 +147,8 @@ class AiSessionProviderTile extends StatelessWidget {
   }
 }
 
-/// Loader callback used by [AiSessionPickerDialog].
+/// Loader callback used by [AiSessionPickerDialog] and [AiSessionProviderList].
 typedef AiSessionLoader = Stream<DiscoveredSessionsResult> Function(
-  int maxSessions,
-);
-
-/// Loader callback used by [AiSessionProviderList].
-typedef AiSessionProviderLoader = Stream<DiscoveredSessionsResult> Function(
   int maxSessions,
 );
 
@@ -178,7 +173,7 @@ class AiSessionProviderList extends StatefulWidget {
   final Iterable<String> orderedTools;
 
   /// Loads recent sessions for all rendered providers.
-  final AiSessionProviderLoader loadSessions;
+  final AiSessionLoader loadSessions;
 
   /// Builds each provider row.
   final AiSessionProviderEntryBuilder itemBuilder;
@@ -463,13 +458,12 @@ Future<ToolSessionInfo?> showAiSessionPickerDialog({
 
 /// Builds a compact, identifiable subtitle for one recent session.
 ///
-/// Pi titles commonly come from the first prompt and can repeat across
-/// worktrees/subtrees, so include the final cwd segment before recency. Other
-/// providers retain the existing time/tool fallback.
+/// Titles commonly come from the first prompt and can repeat across
+/// worktrees/subtrees, so the final cwd segment precedes recency whenever the
+/// provider reports a working directory; otherwise the time/tool fallback.
 String aiSessionSubtitle(ToolSessionInfo session) {
   final updated = session.lastUpdatedLabel;
-  if (session.toolName == 'Pi' &&
-      (session.workingDirectory?.trim().isNotEmpty ?? false)) {
+  if (session.workingDirectory?.trim().isNotEmpty ?? false) {
     final directory = acpCwdSummary(session.workingDirectory);
     return updated.isEmpty ? directory : '$directory · $updated';
   }

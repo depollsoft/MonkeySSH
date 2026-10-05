@@ -41,11 +41,6 @@ test('uses a completed exact artifact without waiting', async () => {
   assert.equal(calls.waits, 0);
 });
 
-test('legacy workflow_run artifact remains usable during migration', async () => {
-  const {options} = fixture({artifacts: [artifact], run: {...producer, event: 'workflow_run', head_sha: 'old-main'}});
-  assert.deepEqual(await resolve(options), {name, runId: '20'});
-});
-
 test('rejects expired, wrong-name, and provenance-free artifacts', async () => {
   for (const difference of [{expired: true}, {name: name + '-old'}, {workflow_run: undefined}]) {
     const {options, calls} = fixture({artifacts: [{...artifact, ...difference}]});
@@ -56,6 +51,7 @@ test('rejects expired, wrong-name, and provenance-free artifacts', async () => {
 
 test('rejects wrong workflow, failed runs, forks, and a different commit', async () => {
   for (const difference of [{workflow_id: 8}, {conclusion: 'failure'}, {event: 'push'},
+    {event: 'workflow_run', head_sha: 'old-main'},
     {head_sha: 'b'.repeat(40)}, {head_repository: {full_name: 'fork/repo'}}]) {
     const {options, calls} = fixture({artifacts: [artifact], run: {...producer, ...difference}});
     assert.equal(await resolve(options), null);

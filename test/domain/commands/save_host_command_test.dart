@@ -33,16 +33,6 @@ SaveHostInput _minimalInput({
   isFavorite: false,
 );
 
-/// A [AgentLaunchPresetService] subclass whose [setPresetForHost] always
-/// throws, used to trigger transaction rollback in tests.
-class _ThrowingPresetService extends AgentLaunchPresetService {
-  _ThrowingPresetService(super.settings);
-
-  @override
-  Future<void> setPresetForHost(int hostId, AgentLaunchPreset preset) async =>
-      throw Exception('simulated preset-write failure');
-}
-
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -246,7 +236,7 @@ void main() {
           final throwingCommand = SaveHostCommand(
             db: db,
             hostRepository: hostRepo,
-            presetService: _ThrowingPresetService(settingsService),
+            presetService: ThrowingPresetService(settingsService),
             cliPreferencesService: cliPrefsService,
           );
 
@@ -268,7 +258,7 @@ void main() {
         final throwingCommand = SaveHostCommand(
           db: db,
           hostRepository: hostRepo,
-          presetService: _ThrowingPresetService(settingsService),
+          presetService: ThrowingPresetService(settingsService),
           cliPreferencesService: cliPrefsService,
         );
 

@@ -462,6 +462,54 @@ void main() {
       },
     );
 
+    testWidgets(
+      'styled preview reuses its font fit on unchanged rebuilds at scale '
+      '$textScale',
+      (tester) async {
+        var fittingSearches = 0;
+        debugOnStyledPreviewFontFit = () => fittingSearches++;
+        addTearDown(() => debugOnStyledPreviewFontFit = null);
+        final terminal = Terminal(maxLines: 100)
+          ..resize(80, 24)
+          ..write('git status --short\r\n M lib/foo.dart\r\n\$');
+        final preview = SshSession.buildTerminalPreviewSnapshot(terminal)!;
+        Widget buildStack(String title) => MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(textScale)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: SizedBox(
+              width: 360,
+              child: ConnectionPreviewStack(
+                entries: [
+                  ConnectionPreviewStackEntry(
+                    title: title,
+                    body: preview.plainText,
+                    previewSnapshot: preview,
+                    terminalTheme: TerminalThemes.defaultDarkTheme,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(buildStack('Connection #1'));
+        expect(fittingSearches, 1);
+
+        // Same entry values: no measurement at all.
+        await tester.pumpWidget(buildStack('Connection #1'));
+        expect(fittingSearches, 1);
+
+        // Changed chrome but identical snapshot geometry: the card is
+        // re-measured, yet the font fit comes from the cache.
+        await tester.pumpWidget(buildStack('Connection #2'));
+        expect(fittingSearches, 1);
+      },
+    );
+
     testWidgets('styled preview content fills card width at scale $textScale', (
       tester,
     ) async {

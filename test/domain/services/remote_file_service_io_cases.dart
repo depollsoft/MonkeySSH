@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 
-class _MockSftpClient extends Mock implements SftpClient {}
+import '../../helpers/mocks.dart';
 
 class _MockSftpFile extends Mock implements SftpFile {}
 
@@ -18,13 +18,13 @@ class _MockRandomAccessFile extends Mock implements RandomAccessFile {}
 void registerRemoteFileServiceIoTests() {
   group('remote_file_service_io', () {
     late Directory directory;
-    late _MockSftpClient sftp;
+    late MockSftpClient sftp;
     late _MockSftpFile remoteFile;
     const service = RemoteFileService();
 
     setUp(() async {
       directory = await Directory.systemTemp.createTemp('remote-file-test-');
-      sftp = _MockSftpClient();
+      sftp = MockSftpClient();
       remoteFile = _MockSftpFile();
       when(() => sftp.open('/remote/file')).thenAnswer((_) async => remoteFile);
       when(() => remoteFile.close()).thenAnswer((_) async {});

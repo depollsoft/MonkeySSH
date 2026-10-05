@@ -83,26 +83,22 @@ void main() {
       );
     });
 
-    test(
-      'collapses every custom provider id to "custom", never the raw id',
-      () {
-        adapter.sessionOpened(
+    test('collapses any id that is not a built-in provider to "unknown" '
+        'rather than forwarding it raw', () {
+      adapter
+        ..sessionOpened(
           providerCategory: 'a-user-typed-uuid-like-id',
           isReconnect: true,
+        )
+        ..sessionOpened(
+          providerCategory: 'builtin:future-provider',
+          isReconnect: false,
         );
 
-        expect(analytics.events.single.value['provider_category'], 'custom');
-      },
-    );
-
-    test('collapses a reserved builtin-prefixed id that is not a known '
-        'provider to "unknown" rather than forwarding it raw', () {
-      adapter.sessionOpened(
-        providerCategory: 'builtin:future-provider',
-        isReconnect: false,
+      expect(
+        analytics.events.map((event) => event.value['provider_category']),
+        ['unknown', 'unknown'],
       );
-
-      expect(analytics.events.single.value['provider_category'], 'unknown');
     });
 
     test('forwards session-ended, reconnect, attachment, and permission '

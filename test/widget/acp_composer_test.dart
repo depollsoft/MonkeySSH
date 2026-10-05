@@ -12,7 +12,6 @@ import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_controller.dart';
@@ -21,15 +20,12 @@ import 'package:xterm/xterm.dart';
 
 class _FakeConnector extends Fake implements AcpBridgeConnector {}
 
-class _FakeProviderService extends Fake implements AcpProviderService {}
-
 class _FakeRecent extends Fake implements AcpRecentSessionsService {}
 
 class _RecordingManager extends AcpSessionManager {
   _RecordingManager()
     : super(
         connector: _FakeConnector(),
-        providerService: _FakeProviderService(),
         recentSessions: _FakeRecent(),
         isProUnlocked: () => true,
       );
@@ -89,7 +85,6 @@ Future<void> _pump(
   AcpComposerAttachmentActions actions = const AcpComposerAttachmentActions(),
   ThemeData? theme,
   Size size = const Size(400, 800),
-  VoidCallback? onOpenConfig,
   Widget? controls,
   AcpComposerFocusController? focusController,
 }) async {
@@ -108,7 +103,6 @@ Future<void> _pump(
               controller: controller,
               attachmentActions: actions,
               focusController: focusController,
-              onOpenConfig: onOpenConfig,
               controls: controls,
             ),
           ],
@@ -332,6 +326,70 @@ void main() {
     await tester.pump();
     expect(controller.text, '/deploy ');
     expect(find.text('Deploy the build'), findsNothing);
+  });
+
+  testWidgets('a session update with unchanged text does not reopen the '
+      'keyboard over an active slash query', (tester) async {
+    const commands = [
+      AcpAvailableCommand(name: 'deploy', description: 'Deploy the build'),
+    ];
+    final controller = _makeController(
+      _RecordingManager(),
+      session: _session(commands: commands),
+    );
+    addTearDown(controller.dispose);
+    await _pump(tester, controller);
+
+    final fieldFinder = find.byType(TextField);
+    await tester.tap(fieldFinder);
+    await tester.enterText(fieldFinder, '/dep');
+    await tester.pump();
+    expect(find.text('Deploy the build'), findsOneWidget);
+
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    controller.updateSession(
+      _session(commands: commands, promptStatus: AcpPromptStatus.streaming),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      tester.widget<EditableText>(find.byType(EditableText)).focusNode.hasFocus,
+      isFalse,
+    );
+    expect(find.text('Deploy the build'), findsOneWidget);
+  });
+
+  testWidgets('a large paste that cannot become a chip stays in the field', (
+    tester,
+  ) async {
+    final controller =
+        _makeController(
+          _RecordingManager(),
+          preparationService: const AcpAttachmentPreparationService(
+            limits: AcpAttachmentLimits(maxCount: 1),
+          ),
+        )..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'a.txt',
+            bytes: Uint8List.fromList('x'.codeUnits),
+          ),
+        );
+    addTearDown(controller.dispose);
+    await _pump(tester, controller);
+    final pasted = List.generate(24, (index) => 'line $index').join('\n');
+
+    await tester.enterText(find.byType(TextField), pasted);
+    await tester.pump();
+
+    expect(controller.attachments, hasLength(1));
+    expect(controller.text, pasted);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      pasted,
+    );
+    expect(controller.error?.kind, AcpComposerErrorKind.attachment);
   });
 
   testWidgets('uses the proportional body style for prompt input', (
@@ -650,19 +708,6 @@ void main() {
       tester.getSize(find.byKey(const ValueKey('acp-composer-toolbar'))).height,
       48,
     );
-  });
-
-  testWidgets('config affordance is shown when a handler is provided', (
-    tester,
-  ) async {
-    var opened = false;
-    final controller = _makeController(_RecordingManager());
-    addTearDown(controller.dispose);
-    await _pump(tester, controller, onOpenConfig: () => opened = true);
-
-    await tester.tap(find.byTooltip('Session settings'));
-    await tester.pump();
-    expect(opened, isTrue);
   });
 
   testWidgets('rebinds to a replacement controller in didUpdateWidget', (

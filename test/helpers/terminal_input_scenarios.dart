@@ -250,3 +250,58 @@ Future<void> replacementAfterDeletingLaterWord(WidgetTester tester) async {
 
   await disposeTerminalInputHarness(tester, harness);
 }
+
+Future<void> touchCaretMoveAfterReplacementSelectionCollapse(
+  WidgetTester tester,
+) async {
+  final harness = await pumpTerminalInputHarness(
+    tester,
+    attachController: false,
+    initialEditingValue: const TextEditingValue(
+      text: '${_deleteDetectionMarker}echo teh world',
+      selection: TextSelection.collapsed(offset: 16),
+    ),
+  );
+  final terminalOutput = harness.terminalOutput;
+
+  tester.testTextInput.updateEditingValue(
+    const TextEditingValue(
+      text: '${_deleteDetectionMarker}echo the world',
+      selection: TextSelection(baseOffset: 7, extentOffset: 10),
+    ),
+  );
+  await tester.pump();
+
+  terminalOutput.clear();
+
+  await tester.tap(find.byType(TerminalTextInputHandler));
+  await tester.pump();
+
+  tester.testTextInput.updateEditingValue(
+    const TextEditingValue(
+      text: '${_deleteDetectionMarker}echo the world',
+      selection: TextSelection.collapsed(offset: 7),
+    ),
+  );
+  await tester.pump();
+
+  expect(
+    terminalStateFromEvents(
+      terminalOutput,
+      initialText: 'echo the world',
+      initialCursorOffset: 'echo the'.length,
+    ),
+    (text: 'echo the world', cursorOffset: 'echo '.length),
+  );
+  expect(
+    (tester.state(
+      find.byType(TerminalTextInputHandler),
+    ) as TextInputClient).currentTextEditingValue,
+    const TextEditingValue(
+      text: _deleteDetectionMarker,
+      selection: TextSelection.collapsed(offset: 2),
+    ),
+  );
+
+  await disposeTerminalInputHarness(tester, harness);
+}

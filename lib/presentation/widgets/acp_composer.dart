@@ -45,13 +45,6 @@ class AcpComposerAttachmentActions {
   /// Picks files from the remote host over SFTP.
   final AcpAttachmentPick? pickRemoteFiles;
 
-  /// Whether at least one source is available.
-  bool get hasAny =>
-      pickPhotos != null ||
-      pickFiles != null ||
-      pickAudio != null ||
-      pickRemoteFiles != null;
-
   /// Whether at least one source is offered given the agent's audio support.
   bool hasAnyFor({required bool audioSupported}) =>
       pickPhotos != null ||
@@ -129,9 +122,7 @@ class AcpComposer extends StatefulWidget {
     super.key,
     this.attachmentActions = const AcpComposerAttachmentActions(),
     this.focusController,
-    this.onOpenConfig,
     this.controls,
-    this.hintText = 'Message the agent',
     this.useBottomSafeArea = true,
   });
 
@@ -144,14 +135,8 @@ class AcpComposer extends StatefulWidget {
   /// Optional owner used by the terminal shell's persistent keyboard button.
   final AcpComposerFocusController? focusController;
 
-  /// Opens the session configuration surface; hidden when null.
-  final VoidCallback? onOpenConfig;
-
   /// Compact model, effort, mode, and permission controls shown in the toolbar.
   final Widget? controls;
-
-  /// Placeholder text for the empty field.
-  final String hintText;
 
   /// Whether the composer should reserve the device bottom safe area.
   final bool useBottomSafeArea;
@@ -165,6 +150,8 @@ class _AcpComposerState extends State<AcpComposer> {
   late final FocusNode _focusNode;
   var _syncing = false;
   var _highlightedSlash = 0;
+  var _lastSlashActive = false;
+  late String _lastText;
 
   AcpComposerController get _controller => widget.controller;
 
@@ -172,6 +159,7 @@ class _AcpComposerState extends State<AcpComposer> {
   void initState() {
     super.initState();
     _text = TextEditingController(text: _controller.text);
+    _lastText = _controller.text;
     _focusNode = FocusNode(onKeyEvent: _handleKey)
       ..addListener(_onFocusChanged);
     _text.addListener(_onFieldChanged);
@@ -190,6 +178,8 @@ class _AcpComposerState extends State<AcpComposer> {
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
       _highlightedSlash = 0;
+      _lastSlashActive = widget.controller.isSlashActive;
+      _lastText = widget.controller.text;
       // Re-sync the field to the newly bound controller's text/caret.
       _syncFieldFromController();
       _clampHighlight();
@@ -218,16 +208,19 @@ class _AcpComposerState extends State<AcpComposer> {
     }
     final previous = _controller.text;
     final next = _text.text;
+    final selection = _text.selection;
     final insertion = _largePastedInsertion(previous, next);
-    if (insertion != null) {
-      final remaining = next.replaceRange(
-        insertion.start,
-        insertion.start + insertion.text.length,
-        '',
+    // A paste that cannot become a chip (count or size limit) stays in the
+    // field as ordinary text next to the error banner.
+    if (insertion != null && _controller.addPastedText(insertion.text)) {
+      _controller.setText(
+        next.replaceRange(
+          insertion.start,
+          insertion.start + insertion.text.length,
+          '',
+        ),
+        caret: insertion.start,
       );
-      _controller
-        ..setText(remaining, caret: insertion.start)
-        ..addPastedText(insertion.text);
       return;
     }
     final newline = _singleNewlineInsertion(previous, next);
@@ -245,7 +238,6 @@ class _AcpComposerState extends State<AcpComposer> {
       if (_controller.canSend) unawaited(_controller.send());
       return;
     }
-    final selection = _text.selection;
     final caret = selection.isValid ? selection.baseOffset : next.length;
     _controller.setText(next, caret: caret);
   }
@@ -290,7 +282,15 @@ class _AcpComposerState extends State<AcpComposer> {
   void _onControllerChanged() {
     _syncFieldFromController();
     _clampHighlight();
-    if (_controller.isSlashActive) {
+    // Reopen the keyboard only for a user edit that shows the picker, so a
+    // session update while a slash query sits in the field does not undo a
+    // deliberate keyboard dismissal.
+    final slashActive = _controller.isSlashActive;
+    final userEdit =
+        (slashActive && !_lastSlashActive) || _controller.text != _lastText;
+    _lastSlashActive = slashActive;
+    _lastText = _controller.text;
+    if (slashActive && userEdit) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _controller.isSlashActive && !_focusNode.hasFocus) {
           _focusNode.requestFocus();
@@ -379,8 +379,9 @@ class _AcpComposerState extends State<AcpComposer> {
     if (!_controller.isEditable || text.isEmpty) {
       return;
     }
-    if (collapseLargePaste && shouldCollapseAcpComposerPaste(text)) {
-      _controller.addPastedText(text);
+    if (collapseLargePaste &&
+        shouldCollapseAcpComposerPaste(text) &&
+        _controller.addPastedText(text)) {
       _focusNode.requestFocus();
       return;
     }
@@ -659,7 +660,7 @@ class _AcpComposerState extends State<AcpComposer> {
                                 14,
                                 10,
                               ),
-                              hintText: widget.hintText,
+                              hintText: 'Message the agent',
                               hintStyle: theme.textTheme.bodyMedium?.copyWith(
                                 color: scheme.onSurfaceVariant,
                                 fontSize: 15.5,
@@ -693,14 +694,6 @@ class _AcpComposerState extends State<AcpComposer> {
                               const SizedBox(width: 2),
                             ] else
                               const Spacer(),
-                            if (widget.onOpenConfig != null) ...[
-                              _ComposerToolbarButton(
-                                tooltip: 'Session settings',
-                                icon: Icons.tune,
-                                onPressed: widget.onOpenConfig,
-                              ),
-                              const SizedBox(width: 2),
-                            ],
                             if (queueing) ...[
                               _StopTurnButton(onPressed: _stopActiveTurn),
                               const SizedBox(width: 2),

@@ -925,6 +925,27 @@ void main() {
       });
     }
 
+    testWidgets('a directory holding only . and .. shows the empty state', (
+      tester,
+    ) async {
+      await _pumpCrashlyticsBrowser(
+        tester,
+        entries: [
+          for (final name in ['.', '..'])
+            SftpName(
+              filename: name,
+              longname: name,
+              attr: SftpFileAttrs(mode: const SftpFileMode.value(1 << 14)),
+            ),
+        ],
+      );
+
+      expect(find.text('empty directory'), findsOneWidget);
+      expect(find.text('.'), findsNothing);
+      expect(find.text('..'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     for (final code in [
       SftpStatusCode.failure,
       SftpStatusCode.permissionDenied,
@@ -948,7 +969,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('Delete'));
         await tester.pumpAndSettle();
-        await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+        await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
         await tester.pumpAndSettle();
         expect(find.text('Deleted "folder"'), findsNothing);
         deletion.completeError(SftpStatusError(code, 'delete rejected'));
@@ -1142,7 +1163,7 @@ void main() {
             await tester.enterText(find.byType(TextField), 'renamed.txt');
             await tester.tap(find.widgetWithText(FilledButton, 'Rename'));
           } else {
-            await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+            await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
           }
         }
         await tester.pumpAndSettle();

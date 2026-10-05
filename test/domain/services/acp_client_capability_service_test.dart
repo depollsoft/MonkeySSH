@@ -11,9 +11,9 @@ import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
-import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 
 void main() {
   group('AcpClientCapabilityService', () {
@@ -54,7 +54,7 @@ void main() {
         maxTerminals: 1,
         maxTerminalLifetime: Duration(seconds: 30),
       );
-      late _MockSshSession session;
+      late MockSshSession session;
       late Completer<SSHSession> opening;
       late _MockTerminalSession channel;
 
@@ -69,7 +69,7 @@ void main() {
         });
         transport = _ServerTransport();
         client = AcpClient(AcpJsonRpcConnection(transport: transport));
-        session = _MockSshSession();
+        session = MockSshSession();
         opening = Completer<SSHSession>();
         channel = _MockTerminalSession();
         final exit = Completer<int?>();
@@ -622,6 +622,36 @@ void main() {
 
       await service.closeSession('session-a');
       expect(await read('closed', 'session-a', '/docs/a.txt'), isNot(allowed));
+    });
+
+    test('resolves allowed roots once per session until they change', () async {
+      files.files['/docs/a.txt'] = Uint8List.fromList(utf8.encode('ok'));
+      service.setSessionAllowedRoots('session-a', const [
+        '/workspace',
+        '/docs',
+      ]);
+      Future<void> read(String id) async {
+        transport.sendRequest(id, 'fs/read_text_file', {
+          'sessionId': 'session-a',
+          'path': '/docs/a.txt',
+        });
+        await _settle();
+        expect(transport.responseFor(id)['result'], {'content': 'ok'});
+      }
+
+      await read('first');
+      await read('second');
+      expect(
+        files.canonicalizedPaths.where((path) => path == '/docs'),
+        hasLength(1),
+      );
+
+      service.setSessionAllowedRoots('session-a', const ['/docs']);
+      await read('third');
+      expect(
+        files.canonicalizedPaths.where((path) => path == '/docs'),
+        hasLength(2),
+      );
     });
 
     test('rejects a read that resolves through an escaping symlink', () async {
@@ -1789,6 +1819,7 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
   final files = <String, Uint8List>{};
   final canonicalPaths = <String, String>{};
   final canonicalWritePaths = <String, String>{};
+  final canonicalizedPaths = <String>[];
   final readPaths = <String>[];
   Exception? writeFailure;
   Future<void>? canonicalizeGate;
@@ -1798,6 +1829,7 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
 
   @override
   Future<String> canonicalizeExistingPath(String path) async {
+    canonicalizedPaths.add(path);
     if (canonicalizeGate case final gate?) await gate;
     return canonicalPaths[path] ?? path;
   }
@@ -1833,8 +1865,6 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
     files[path] = bytes;
   }
 }
-
-class _MockSshSession extends Mock implements SshSession {}
 
 class _MockTerminalSession extends MockSessionWithChannel {}
 
@@ -1879,9 +1909,6 @@ final class _FakeTerminalProcess implements AcpTerminalProcess {
 
   @override
   Stream<List<int>> get stderr => _stderr.stream;
-
-  @override
-  Future<void> get done => _exit.future.then((_) {});
 
   @override
   void kill() {

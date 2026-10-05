@@ -1011,7 +1011,10 @@ void main() {
               id: 't1',
               toolCall: AcpToolCall(id: 't1', title: 'Read file'),
             ),
-            const AcpUsageEntry(id: 'us1', usage: AcpUsage(totalTokens: 1200)),
+            const AcpUsageEntry(
+              id: 'us1',
+              usage: AcpUsage(contextUsedTokens: 1200),
+            ),
             const AcpStatusEntry(id: 's1', message: 'Done'),
           ],
         ),
@@ -1271,12 +1274,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         const AcpUsageView(
-          usage: AcpUsage(
-            inputTokens: 1500,
-            outputTokens: 300,
-            contextWindow: 1000,
-            contextUsedTokens: 400,
-          ),
+          usage: AcpUsage(contextWindow: 1000, contextUsedTokens: 400),
         ),
       ),
     );

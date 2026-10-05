@@ -19,9 +19,10 @@ on:
       - '!ios/fastlane/metadata-*/**'
       - 'scripts/build_monkeymux_assets.sh'
       - 'scripts/deterministic_gzip.go'
-      - 'scripts/ensure_monkeymux_assets.sh'
       - 'scripts/verify_monkeymux_assets.py'
+      - 'scripts/android_signing.sh'
       - 'scripts/cache_sqlite3_native_assets.sh'
+      - 'scripts/fetch_pr_commits.py'
       - 'scripts/version_codename.py'
       - 'scripts/preview_release_notes.rb'
       - 'scripts/preview_build_number.py'
@@ -37,6 +38,10 @@ on:
       - '.github/workflows/preview-ios.yml'
       - '.github/actions/apple-cache-restore/**'
       - '.github/actions/apple-cache-save/**'
+      - '.github/actions/compute-version/**'
+      - '.github/actions/deployment-status/**'
+      - '.github/actions/firebase-config/**'
+      - '.github/actions/flutter-setup/**'
 
 concurrency:
   group: deploy-private
@@ -67,14 +72,7 @@ jobs:
 
       - name: Compute version
         id: version
-        run: |
-          BASE_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
-          BUILD_NUMBER=$(( $(date +%s) / 10 ))
-          BUILD_CODENAME=$(python3 scripts/version_codename.py "$BASE_VERSION")
-
-          echo "build-name=${BASE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "build-number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "build-codename=${BUILD_CODENAME}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/compute-version
 
       - name: Resolve associated PR metadata
         id: pr-metadata

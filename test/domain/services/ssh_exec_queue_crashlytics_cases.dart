@@ -58,13 +58,9 @@ void registerSshExecQueueCrashlyticsTests() {
       );
 
       final queries = <String, Future<Object?> Function(SshSession)>{
-        'isTmuxActive': service.isTmuxActive,
         'foregroundSessionName': service.foregroundSessionName,
-        'hasSession': (session) => service.hasSession(session, 'main'),
         'currentPaneContext': (session) =>
             service.currentPaneContext(session, 'main'),
-        'hasForegroundClient': (session) =>
-            service.hasForegroundClient(session, 'main'),
       };
       for (final query in queries.entries) {
         test(
@@ -237,7 +233,7 @@ void registerSshExecQueueCrashlyticsTests() {
       'refusal backoff grows across expiry and resets only after success',
       () => _expectNoUnhandledErrors(() async {
         var now = DateTime.utc(2026, 9, 10);
-        final service = TmuxService(execChannelNow: () => now);
+        final service = TmuxService(now: () => now);
         var refused = true;
         final session = _FakeSession(connectionId, () async {
           if (refused) {

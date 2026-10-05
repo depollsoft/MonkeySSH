@@ -11,9 +11,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 RELEASE_TAG="${STORE_ASSETS_RELEASE_TAG:-store-assets}"
-RELEASE_TITLE="${STORE_ASSETS_RELEASE_TITLE:-Store assets}"
+RELEASE_TITLE="Store assets"
 ASSET_NAME="${STORE_ASSETS_ARCHIVE_NAME:-store-assets.tar.gz}"
-DEFAULT_OUTPUT="${STORE_ASSETS_ARCHIVE:-$ROOT_DIR/build/store-assets/$ASSET_NAME}"
+DEFAULT_OUTPUT="$ROOT_DIR/build/store-assets/$ASSET_NAME"
 
 usage() {
   cat <<'EOF'
@@ -68,30 +68,12 @@ require_command() {
 }
 
 repo_slug() {
-  if [ -n "${STORE_ASSETS_REPO:-}" ]; then
-    printf '%s\n' "$STORE_ASSETS_REPO"
-    return
-  fi
   if [ -n "${GITHUB_REPOSITORY:-}" ]; then
     printf '%s\n' "$GITHUB_REPOSITORY"
     return
   fi
   require_command gh
   gh repo view --json nameWithOwner --jq .nameWithOwner
-}
-
-managed_media_roots() {
-  cat <<'EOF'
-ios/fastlane/screenshots
-ios/fastlane/app-previews
-store/demo-videos
-android/fastlane/metadata-private/android/en-US/images/phoneScreenshots
-android/fastlane/metadata-private/android/en-US/images/sevenInchScreenshots
-android/fastlane/metadata-private/android/en-US/images/tenInchScreenshots
-android/fastlane/metadata-production/android/en-US/images/phoneScreenshots
-android/fastlane/metadata-production/android/en-US/images/sevenInchScreenshots
-android/fastlane/metadata-production/android/en-US/images/tenInchScreenshots
-EOF
 }
 
 screenshot_globs() {
@@ -193,38 +175,36 @@ cmd_present() {
   list_media_files
 }
 
+# Describe exactly the files staged for the archive. Hashing the staging tree
+# (instead of re-running `paths` from Python) cannot silently produce an empty
+# manifest when a nested command fails.
 write_manifest() {
   local archive_path="$1"
-  local manifest_path="$2"
+  local staging="$2"
   require_command python3
-  python3 - "$archive_path" "$manifest_path" "$RELEASE_TAG" <<'PY'
+  python3 - "$archive_path" "$staging" "$RELEASE_TAG" <<'PY'
 import hashlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
 archive_path = Path(sys.argv[1])
-manifest_path = Path(sys.argv[2])
+staging = Path(sys.argv[2])
 release_tag = sys.argv[3]
-root = Path.cwd()
+manifest_path = staging / 'store-assets-manifest.json'
 
 files = []
-for line in os.popen('scripts/store_assets.sh paths'):
-    pattern = line.strip()
-    if not pattern:
+for path in sorted(staging.rglob('*')):
+    if not path.is_file() or path.is_symlink() or path == manifest_path:
         continue
-    for path in sorted(root.glob(pattern)):
-        if not path.is_file() or path.is_symlink():
-            continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        rel = path.relative_to(root).as_posix()
-        files.append({
-            'path': rel,
-            'sha256': digest,
-            'size': path.stat().st_size,
-        })
+    files.append({
+        'path': path.relative_to(staging).as_posix(),
+        'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+        'size': path.stat().st_size,
+    })
+if not files:
+    raise SystemExit('Refusing to write a store-assets manifest with no files')
 
 payload = {
     'version': 1,
@@ -234,7 +214,6 @@ payload = {
     'file_count': len(files),
     'files': files,
 }
-manifest_path.parent.mkdir(parents=True, exist_ok=True)
 manifest_path.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
 print(f'Wrote manifest with {len(files)} file(s) to {manifest_path}')
 PY
@@ -301,7 +280,7 @@ cmd_package() {
     cp "$path" "$staging/$path"
   done < <(list_media_files)
 
-  write_manifest "$output" "$staging/store-assets-manifest.json"
+  write_manifest "$output" "$staging" || return
 
   # Avoid macOS AppleDouble "._*" entries in the archive.
   COPYFILE_DISABLE=1 tar -C "$staging" --exclude '._*' --exclude '.DS_Store' -czf "$output" .

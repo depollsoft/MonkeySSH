@@ -69,20 +69,11 @@ class _AgentUsageRingIconState extends ConsumerState<AgentUsageRingIcon>
 
   @override
   Widget build(BuildContext context) {
+    // Support, the preference and the connection state are gated by the
+    // provider, which yields null while any of them is missing.
     if (!_foreground ||
         !TickerMode.valuesOf(context).enabled ||
-        ModalRoute.isCurrentOf(context) == false ||
-        !supportsAgentUsageRings(
-          widget.tool,
-          modelProvider: widget.modelProvider,
-        ) ||
-        !ref.watch(agentUsageRingsEnabledProvider) ||
-        ref.watch(
-              activeSessionsProvider.select(
-                (states) => states[widget.session.connectionId],
-              ),
-            ) !=
-            SshConnectionState.connected) {
+        ModalRoute.isCurrentOf(context) == false) {
       return widget.child;
     }
     final rings = ref
@@ -137,7 +128,7 @@ class SplitUsageRing extends StatelessWidget {
       for (final segment in rings.segments)
         '${segment.label}: ${value(segment.remaining)}',
     ];
-    final scheme = Theme.of(context).colorScheme;
+    final palette = _ringPalette(Theme.of(context).colorScheme);
     return Semantics(
       label: '$agentLabel account allowance',
       value: values.join('; '),
@@ -147,14 +138,10 @@ class SplitUsageRing extends StatelessWidget {
           key: const ValueKey('split-usage-ring'),
           painter: _SplitUsageRingPainter(
             rings: rings,
-            primary: _readableColor(scheme.primary, scheme),
-            secondary: _readableColor(scheme.onSurfaceVariant, scheme),
-            warning: _readableColor(scheme.tertiary, scheme),
-            track: _readableColor(
-              scheme.surfaceContainerHighest,
-              scheme,
-              minContrast: 3,
-            ),
+            primary: palette.primary,
+            secondary: palette.secondary,
+            warning: palette.warning,
+            track: palette.track,
           ),
           child: Center(child: child),
         ),
@@ -162,6 +149,24 @@ class SplitUsageRing extends StatelessWidget {
     );
   }
 }
+
+typedef _RingPalette = ({
+  Color primary,
+  Color secondary,
+  Color warning,
+  Color track,
+});
+
+// The contrast search costs hundreds of luminance computations; the bar that
+// hosts the ring rebuilds on every terminal event with the same scheme.
+final _ringPalettes = Expando<_RingPalette>('usage ring palette');
+
+_RingPalette _ringPalette(ColorScheme scheme) => _ringPalettes[scheme] ??= (
+  primary: _readableColor(scheme.primary, scheme),
+  secondary: _readableColor(scheme.onSurfaceVariant, scheme),
+  warning: _readableColor(scheme.tertiary, scheme),
+  track: _readableColor(scheme.surfaceContainerHighest, scheme, minContrast: 3),
+);
 
 Color _readableColor(
   Color color,

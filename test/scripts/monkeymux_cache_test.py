@@ -22,8 +22,8 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         (self.root / 'scripts').mkdir()
-        for name in ['build_monkeymux_assets.sh', 'ensure_monkeymux_assets.sh',
-                     'verify_monkeymux_assets.py', 'deterministic_gzip.go']:
+        for name in ['build_monkeymux_assets.sh', 'verify_monkeymux_assets.py',
+                     'deterministic_gzip.go']:
             shutil.copyfile(ROOT / 'scripts' / name, self.root / 'scripts' / name)
         self.remote = self.root / 'remote/monkeymux'
         (self.remote / 'conpty').mkdir(parents=True)
@@ -79,8 +79,8 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         paths = ['remote/monkeymux/main.go', 'remote/monkeymux/go.sum',
                  'remote/monkeymux/go.mod', 'remote/monkeymux/conpty/payload.dll',
                  'remote/monkeymux/monkeymux-version.sh',
-                 'scripts/build_monkeymux_assets.sh', 'scripts/ensure_monkeymux_assets.sh',
-                 'scripts/deterministic_gzip.go', 'scripts/verify_monkeymux_assets.py']
+                 'scripts/build_monkeymux_assets.sh', 'scripts/deterministic_gzip.go',
+                 'scripts/verify_monkeymux_assets.py']
         for path in paths:
             with self.subTest(path=path):
                 before = self.fingerprint()
@@ -89,6 +89,15 @@ class MonkeyMuxCacheTest(unittest.TestCase):
                 target.write_bytes(original + b'\n# modified input\n')
                 self.assertNotEqual(before, self.fingerprint())
                 target.write_bytes(original)
+
+    def test_unreadable_version_fails_instead_of_building_a_placeholder(self):
+        (self.remote / 'monkeymux-version.sh').write_text('echo broken >&2\nexit 3\n')
+        manifest = (self.assets / 'manifest.json').read_text()
+        result = self.builder('--force')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('broken', result.stderr)
+        self.assertNotIn('compile requested', result.stderr)
+        self.assertEqual((self.assets / 'manifest.json').read_text(), manifest)
 
     def test_go_test_edits_do_not_invalidate_the_fingerprint(self):
         before = self.fingerprint()

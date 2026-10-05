@@ -208,50 +208,64 @@ Uri normalizePortForwardBrowserUri(Uri uri) =>
 
 /// Returns whether [host] is a browser-safe local bind address.
 bool isPortForwardBrowserHost(String host) {
-  final normalized = _withoutAddressZone(host);
-  return normalized.isEmpty ||
-      normalized == 'localhost' ||
-      normalized == '0.0.0.0' ||
-      normalized == '::' ||
-      normalized == '::1' ||
-      normalized == '[::]' ||
-      normalized == '[::1]' ||
-      normalized.endsWith('.localhost') ||
-      _isLoopbackIpv4Address(normalized);
+  final kind = classifyLoopbackHost(host);
+  return kind.isLoopback || kind.isWildcard;
 }
 
 /// Returns whether [host] is an explicit loopback bind address.
-bool isPortForwardLoopbackHost(String host) {
-  final normalized = _withoutAddressZone(host);
-  return normalized == 'localhost' ||
-      normalized == '::1' ||
-      normalized == '[::1]' ||
-      normalized.endsWith('.localhost') ||
-      _isLoopbackIpv4Address(normalized);
+bool isPortForwardLoopbackHost(String host) =>
+    classifyLoopbackHost(host).isLoopback;
+
+/// Lowercases a host literal and strips any `%zone` suffix and IPv6 brackets.
+///
+/// Accepts both `[fe80::1%en0]` and the `ss` form `[::1]%lo`.
+String normalizeHostLiteral(String host) {
+  var normalized = host.trim().toLowerCase();
+  final zoneIndex = normalized.indexOf('%');
+  if (zoneIndex >= 0) {
+    normalized = normalized.substring(0, zoneIndex);
+  }
+  if (normalized.startsWith('[')) {
+    normalized = normalized.substring(1);
+  }
+  if (normalized.endsWith(']')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  return normalized;
+}
+
+/// Classifies a host literal after [normalizeHostLiteral].
+///
+/// Loopback hosts are `localhost`, `*.localhost`, `127.0.0.0/8` and `::1`.
+/// Wildcard bind addresses (empty, `0.0.0.0`, `::`) are not loopback, but a
+/// listener bound to one is reachable through the loopback address of the
+/// same family.
+({bool isLoopback, bool isWildcard, bool isIpv6}) classifyLoopbackHost(
+  String host,
+) {
+  final normalized = normalizeHostLiteral(host);
+  return (
+    isLoopback:
+        normalized == 'localhost' ||
+        normalized == '::1' ||
+        normalized.endsWith('.localhost') ||
+        _isLoopbackIpv4Address(normalized),
+    isWildcard:
+        normalized.isEmpty || normalized == '0.0.0.0' || normalized == '::',
+    isIpv6: normalized.contains(':'),
+  );
 }
 
 String _browserHostForBindAddress(String localHost) {
-  final host = _withoutAddressZone(localHost);
-  if (host.isEmpty || host == '0.0.0.0') {
+  final host = normalizeHostLiteral(localHost);
+  final kind = classifyLoopbackHost(host);
+  if (kind.isWildcard && !kind.isIpv6) {
     return '127.0.0.1';
   }
-  if (_isLoopbackIpv4Address(host)) {
-    return host;
-  }
-  if (host == '::' || host == '[::]' || host == '::1' || host == '[::1]') {
+  if (kind.isIpv6 && (kind.isWildcard || kind.isLoopback)) {
     return 'localhost';
   }
   return host;
-}
-
-String _withoutAddressZone(String host) {
-  final normalized = host
-      .trim()
-      .toLowerCase()
-      .replaceFirst(RegExp(r'^\['), '')
-      .replaceFirst(RegExp(r'\]$'), '');
-  final zoneIndex = normalized.indexOf('%');
-  return zoneIndex < 0 ? normalized : normalized.substring(0, zoneIndex);
 }
 
 bool _samePortForwardBrowserSourceHost(String left, String right) {

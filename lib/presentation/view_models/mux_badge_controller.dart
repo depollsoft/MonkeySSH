@@ -9,6 +9,7 @@ import '../../domain/models/tmux_state.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
 import '../../domain/services/ssh_service.dart';
+import '../../domain/services/tmux_service.dart' show isAppInForeground;
 
 class MuxBadgeController extends ChangeNotifier {
   MuxBadgeController({
@@ -19,6 +20,9 @@ class MuxBadgeController extends ChangeNotifier {
     required this.extraFlags,
     required this.onWindowsChanged,
     required this.disconnect,
+    this.isAppForeground = isAppInForeground,
+    this.retryInitialDelay = const Duration(seconds: 2),
+    this.retryMaxDelay = const Duration(seconds: 60),
   });
   final SshSession? Function() getSession;
   final RemoteMuxBackend Function(SshSession) resolveBackend;
@@ -28,7 +32,14 @@ class MuxBadgeController extends ChangeNotifier {
   final String? Function() extraFlags;
   final void Function(List<TmuxWindow>?) onWindowsChanged;
   final Future<void> Function(SshSession) disconnect;
-  static const _tmuxQueryRetryDelay = Duration(seconds: 2);
+
+  /// Probes pause while this returns false; the retry timer keeps waiting.
+  final bool Function() isAppForeground;
+
+  /// First retry delay after a negative or failed query; later retries double
+  /// up to [retryMaxDelay].
+  final Duration retryInitialDelay;
+  final Duration retryMaxDelay;
   bool _disposed = false;
   bool get mounted => !_disposed;
   void _change(VoidCallback change) {
@@ -47,6 +58,8 @@ class MuxBadgeController extends ChangeNotifier {
     _windowChangeSubscription = null;
     unawaited(subscription?.cancel());
     _muxSessionEnding = false;
+    _retryAttempt = 0;
+    _negativeMuxIdentity = null;
     windows = null;
     sessionName = null;
     queried = false;
@@ -74,43 +87,60 @@ class MuxBadgeController extends ChangeNotifier {
   int _windowReloadGeneration = 0;
   int _windowEventGeneration = 0;
   int _tmuxQueryGeneration = 0;
+  int _retryAttempt = 0;
 
-  Future<void> _retryTmuxQuery(
-    int retries, {
-    required int expectedGeneration,
-  }) async {
-    if (!_isCurrentTmuxQuery(expectedGeneration)) {
-      return;
-    }
-    if (retries <= 0) {
-      _change(() => queried = true);
-      _scheduleTmuxRetry();
-      return;
-    }
-    await Future<void>.delayed(_tmuxQueryRetryDelay);
-    if (_isCurrentTmuxQuery(expectedGeneration)) {
-      await queryTmux(retries: retries - 1);
-    }
+  /// The session's mux identity when the last negative answer was recorded.
+  /// Once the retry delay has reached [retryMaxDelay] the answer is settled:
+  /// no further remote probe runs until this identity changes.
+  (RemoteMuxBackend?, String?)? _negativeMuxIdentity;
+
+  Duration get _retryDelay => resolveTmuxWindowReloadRetryDelay(
+    _retryAttempt,
+    initialDelay: retryInitialDelay,
+    maxDelay: retryMaxDelay,
+  );
+
+  bool get _isNegativeAnswerSettled {
+    final identity = _negativeMuxIdentity;
+    if (identity == null || _retryDelay < retryMaxDelay) return false;
+    final session = getSession();
+    return session != null && _muxIdentity(session) == identity;
+  }
+
+  static (RemoteMuxBackend?, String?) _muxIdentity(SshSession session) =>
+      (session.remoteMuxBackend, session.remoteMuxSessionName);
+
+  void _recordNegativeAnswer(int queryGeneration, SshSession? session) {
+    if (!_isCurrentTmuxQuery(queryGeneration)) return;
+    onWindowsChanged(null);
+    _negativeMuxIdentity = session == null ? null : _muxIdentity(session);
+    _change(() => queried = true);
+    _scheduleTmuxRetry();
   }
 
   void _scheduleTmuxRetry() {
     if (_tmuxRetryTimer?.isActive ?? false) return;
-    _tmuxRetryTimer = Timer(const Duration(seconds: 10), () {
+    _tmuxRetryTimer = Timer(_retryDelay, () {
       _tmuxRetryTimer = null;
-      if (mounted) {
-        unawaited(queryTmux());
+      if (!mounted) return;
+      if (!isAppForeground() || _isNegativeAnswerSettled) {
+        // Keep waiting without touching the host; a resumed app or a changed
+        // mux identity is picked up on a later tick.
+        _scheduleTmuxRetry();
+        return;
       }
+      _retryAttempt += 1;
+      unawaited(queryTmux());
     });
   }
 
-  Future<void> queryTmux({int retries = 3}) async {
+  Future<void> queryTmux() async {
     final queryGeneration = ++_tmuxQueryGeneration;
     final session = getSession();
     if (session == null) {
-      onWindowsChanged(null);
-      // Session not available yet — retry after a delay so the badge
-      // still appears for connections that finish establishing shortly.
-      await _retryTmuxQuery(retries, expectedGeneration: queryGeneration);
+      // Session not available yet; retry so the badge still appears for
+      // connections that finish establishing shortly.
+      _recordNegativeAnswer(queryGeneration, null);
       return;
     }
 
@@ -121,10 +151,10 @@ class MuxBadgeController extends ChangeNotifier {
       return;
     }
     if (sessionName == null) {
-      onWindowsChanged(null);
-      await _retryTmuxQuery(retries, expectedGeneration: queryGeneration);
+      _recordNegativeAnswer(queryGeneration, session);
       return;
     }
+    _negativeMuxIdentity = null;
     this.muxBackend = muxBackend;
 
     await _windowChangeSubscription?.cancel();
@@ -195,6 +225,11 @@ class MuxBadgeController extends ChangeNotifier {
       final nextWindows = currentWindows == null
           ? event.windows
           : applyTmuxWindowChangeEvent(currentWindows, event);
+      if (identical(nextWindows, currentWindows) &&
+          this.sessionName == sessionName &&
+          this.muxBackend == muxBackend) {
+        return;
+      }
       _change(() {
         windows = nextWindows;
         this.sessionName = sessionName;
@@ -218,6 +253,11 @@ class MuxBadgeController extends ChangeNotifier {
     _tmuxRetryTimer?.cancel();
     _tmuxRetryTimer = null;
     final nextWindows = applyTmuxWindowChangeEvent(currentWindows, event);
+    if (identical(nextWindows, currentWindows) &&
+        this.sessionName == sessionName &&
+        this.muxBackend == muxBackend) {
+      return;
+    }
     _change(() {
       windows = nextWindows;
       this.sessionName = sessionName;
@@ -269,8 +309,14 @@ class MuxBadgeController extends ChangeNotifier {
       if (windows.isEmpty) {
         _scheduleTmuxRetry();
       } else {
+        _retryAttempt = 0;
         _tmuxRetryTimer?.cancel();
         _tmuxRetryTimer = null;
+      }
+      if (identical(windows, this.windows) &&
+          this.sessionName == sessionName &&
+          this.muxBackend == muxBackend) {
+        return;
       }
       _change(() {
         this.windows = windows;

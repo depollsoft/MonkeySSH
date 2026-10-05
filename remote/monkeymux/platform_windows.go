@@ -875,19 +875,13 @@ func shellExecutableCommand(value string) (string, bool) {
 	return "& " + argument, true
 }
 
-func piResumeCommandWithFreshFallback(resume string, launch string) string {
-	resume = strings.TrimSpace(resume)
-	launch = strings.TrimSpace(launch)
-	if resume == "" {
-		return launch
-	}
-	if launch == "" || launch == resume {
-		return resume
-	}
+// shellOrElseJoin chains [fallback] after [first] so it only runs when [first]
+// fails to start, in the syntax of the configured shell.
+func shellOrElseJoin(first string, fallback string) string {
 	if isCmdShell(defaultShellPath()) {
-		return resume + " || " + launch
+		return first + " || " + fallback
 	}
-	return resume + "; if (-not $?) { " + launch + " }"
+	return first + "; if (-not $?) { " + fallback + " }"
 }
 
 func defaultShellPath() string {
@@ -1049,10 +1043,6 @@ func forwardResizeSignals(
 		}
 	}()
 	return func() { close(done) }
-}
-
-func (id socketIdentity) valid() bool {
-	return id.device != 0 || id.inode != 0
 }
 
 func socketInfoIdentity(info os.FileInfo) (socketIdentity, error) {

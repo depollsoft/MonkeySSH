@@ -3,7 +3,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -12,9 +11,10 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/acp_connection_support.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 
-class _MockExecChannel extends Mock implements SSHSession {}
+class _MockExecChannel extends MockSessionWithChannel {}
 
 void registerAcpConnectionSupportTests() {
   group('acp_connection_support', () {
@@ -24,7 +24,7 @@ void registerAcpConnectionSupportTests() {
         test(
           'OpenCode sign-in uses cached launch probe: windows=$windows executable=$executable',
           () async {
-            final client = _MockSshClient();
+            final client = MockSshClient();
             when(() => client.remoteVersion).thenReturn(
               windows
                   ? 'SSH-2.0-OpenSSH_for_Windows_9.5'
@@ -36,7 +36,7 @@ void registerAcpConnectionSupportTests() {
               () => client.execute(any(), pty: any(named: 'pty')),
             ).thenAnswer((_) async {
               probes++;
-              final channel = _MockExecChannel();
+              final channel = MockSSHSession();
               final output =
                   '$executable\u001f$prefix/$executable\n'
                   '${executable == 'opencode2' ? 'opencode\u001f$prefix/opencode\n' : ''}';
@@ -73,13 +73,67 @@ void registerAcpConnectionSupportTests() {
         );
       }
     }
+    for (final (providerId, installed, expectedArgv) in [
+      (
+        AcpBuiltinProviderIds.copilotCli,
+        'github-copilot',
+        ['github-copilot', 'login'],
+      ),
+      (AcpBuiltinProviderIds.copilotCli, 'copilot', ['copilot', 'login']),
+      (AcpBuiltinProviderIds.hermes, 'hermes-agent', ['hermes-agent']),
+      // A provider whose sign-in executable is not a probe candidate keeps
+      // its declared command even when the probe finds nothing.
+      (
+        AcpBuiltinProviderIds.claudeAgent,
+        'claude-agent-acp',
+        ['claude', '/login'],
+      ),
+    ]) {
+      test('terminal sign-in substitutes the installed probe candidate: '
+          '$providerId installed=$installed', () async {
+        final client = MockSshClient();
+        when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async {
+              final channel = _MockExecChannel();
+              when(() => channel.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.value(
+                  Uint8List.fromList(
+                    utf8.encode('$installed\u001f/opt/tools/$installed\n'),
+                  ),
+                ),
+              );
+              when(() => channel.stderr)
+                  .thenAnswer((_) => const Stream<Uint8List>.empty());
+              when(() => channel.done).thenAnswer((_) async {});
+              when(() => channel.exitCode).thenReturn(0);
+              when(channel.close).thenReturn(null);
+              return channel;
+            });
+        final session = SshSession(
+          connectionId: 93,
+          hostId: 3,
+          client: client,
+          config: const SshConnectionConfig(
+            hostname: 'example.test',
+            port: 22,
+            username: 'dev',
+          ),
+        );
+        final command = await resolveAcpTerminalAuthCommand(
+          providerId: providerId,
+          session: session,
+        );
+        expect(command?.argv, expectedArgv);
+      });
+    }
     for (final windows in [false, true]) {
       for (final installedAdapter in [false, true]) {
         for (final installedMuse in [false, true]) {
           testWidgets(
             'Muse launch requires CLI: windows=$windows adapter=$installedAdapter muse=$installedMuse',
             (tester) async {
-              final client = _MockSshClient();
+              final client = MockSshClient();
               when(() => client.remoteVersion).thenReturn(
                 windows
                     ? 'SSH-2.0-OpenSSH_for_Windows_9.5'
@@ -88,7 +142,7 @@ void registerAcpConnectionSupportTests() {
               final prefix = windows ? 'C:/tools' : '/opt/tools';
               when(() => client.execute(any(), pty: any(named: 'pty')))
                   .thenAnswer((_) async {
-                    final channel = _MockExecChannel();
+                    final channel = MockSSHSession();
                     final output = [
                       'npx\u001f$prefix/npx',
                       if (installedAdapter)
@@ -172,14 +226,14 @@ void registerAcpConnectionSupportTests() {
     }
 
     test('ACP executable prewarm is reused during the launch window', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final executedCommands = <String>[];
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         invocation,
       ) async {
         executedCommands.add(invocation.positionalArguments.single as String);
-        final channel = _MockExecChannel();
+        final channel = MockSSHSession();
         final output = [
           'cursor-agent\u001f/Users/demo/.local/bin/cursor-agent',
           'npx\u001f/opt/homebrew/bin/npx',

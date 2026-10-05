@@ -511,8 +511,8 @@ void registerMonkeyTerminalViewLayoutTests() {
         );
       });
 
-      test('style-run batching falls back to per-cell for combining marks, '
-          'complex scripts, and emoji', () async {
+      test('style-run batching falls back to per-cell for complex scripts '
+          'and emoji', () async {
         final theme = TerminalThemes.defaultDarkTheme.toXtermTheme();
         final painter = MonkeyTerminalPainter(
           theme: theme,
@@ -520,14 +520,14 @@ void registerMonkeyTerminalViewLayoutTests() {
           textScaler: TextScaler.noScaling,
         );
         const columns = 32;
-        // Cells that must NOT be coalesced into a run: a combining mark (width
-        // 0, which would shape with its neighbour and desync the grid), a
-        // cursive-joining script (Arabic, which would connect when concatenated
-        // but is drawn isolated per cell), and an emoji (wide, non-monospace
-        // fallback). All must fall back to the per-cell path unchanged.
+        // Cells that must NOT be coalesced into a run: a cursive-joining script
+        // (Arabic, which would connect when concatenated but is drawn isolated
+        // per cell) and an emoji (wide, non-monospace fallback). Both must fall
+        // back to the per-cell path unchanged. (The buffer drops combining
+        // marks, so they never reach the painter.)
         final terminal = Terminal()
           ..resize(columns, 2)
-          ..write('\x1b[37mabc e\u0301f \u0627\u0644\u0645 \u{1F600} xyz');
+          ..write('\x1b[37mabc \u0627\u0644\u0645 \u{1F600} xyz');
         final line = terminal.buffer.lines[0];
 
         final width = (painter.cellSize.width * columns).ceil();
@@ -1184,6 +1184,44 @@ void registerMonkeyTerminalViewLayoutTests() {
           theme.brightCyan,
         );
       });
+    });
+
+    testWidgets('editable rect is only reported when the caret moves', (
+      tester,
+    ) async {
+      final terminal = Terminal()..write('abc');
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 300,
+            height: 200,
+            child: MonkeyTerminalView(terminal, hardwareKeyboardOnly: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      final state = tester.state<MonkeyTerminalViewState>(
+        find.byType(MonkeyTerminalView),
+      );
+      final reports = <Rect>[];
+      state.renderTerminal.onEditableRect = (_, caretRect) =>
+          reports.add(caretRect);
+      await tester.pump();
+
+      // The first change after a new listener reports the current caret once.
+      terminal.write('\x1b[0m');
+      expect(reports, hasLength(1));
+      final firstCaret = reports.single;
+
+      terminal.write('\x1b[0m');
+      expect(reports, hasLength(1), reason: 'the caret did not move');
+
+      terminal.write('d');
+      expect(reports, hasLength(2));
+      expect(reports.last.left, greaterThan(firstCaret.left));
+
+      terminal.write('\x1b[1m');
+      expect(reports, hasLength(2), reason: 'the caret did not move');
     });
   });
 }

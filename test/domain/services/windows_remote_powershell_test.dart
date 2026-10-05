@@ -217,8 +217,13 @@ exit 7;
       expect(script, contains('Sort-Object LastWriteTimeUtc -Descending'));
       expect(script, contains('Select-Object -First 120'));
       expect(script, contains("'.codex/sessions'"));
-      // Emits forward-slash paths.
+      // Emits `<epoch seconds>\t<forward-slash path>` lines.
       expect(script, contains(r"-replace '\\','/'"));
+      expect(
+        script,
+        contains(r'($__flF.LastWriteTimeUtc-$__flEpoch).TotalSeconds'),
+      );
+      expect(script, contains(r'[void]$__flOut.Append([char]9);'));
     });
 
     test('includes path-like filters when provided', () {
@@ -276,18 +281,6 @@ exit 7;
     });
   });
 
-  group('windowsFindFilesByNameScript', () {
-    test('matches each exact name via Where-Object', () {
-      final script = windowsFindFilesByNameScript(
-        relativeRoot: '.claude/projects',
-        names: const ['abc-123.jsonl', 'def-456.jsonl'],
-      );
-      expect(script, isNot(contains('-Include ')));
-      expect(script, contains(r"$__flN -like 'abc-123.jsonl'"));
-      expect(script, contains(r"$__flN -like 'def-456.jsonl'"));
-    });
-  });
-
   group('windowsTailFileScript', () {
     test('reads the last N lines of a USERPROFILE-relative file', () {
       final script = windowsTailFileScript(
@@ -332,17 +325,19 @@ exit 7;
       expect(script, contains(r'$fs.Read($buf,0,$buf.Length)'));
     });
 
-    test('reads head or tail lines for maxLines', () {
+    test('reads head lines for maxLines and tail lines in the same pass', () {
       final head = windowsFileSnapshotScript(const [
         'C:/x/y.jsonl',
       ], maxLines: 80);
       expect(head, contains('-TotalCount 80 -Encoding UTF8'));
-      final tail = windowsFileSnapshotScript(
+      expect(head, isNot(contains('-Tail ')));
+      final both = windowsFileSnapshotScript(
         const ['C:/x/y.jsonl'],
         maxLines: 80,
-        tail: true,
+        tailLines: 40,
       );
-      expect(tail, contains('-Tail 80 -Encoding UTF8'));
+      expect(both, contains('-TotalCount 80 -Encoding UTF8'));
+      expect(both, contains('-Tail 40 -Encoding UTF8'));
     });
   });
 

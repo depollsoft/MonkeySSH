@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -1416,12 +1417,11 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
 	server.mu.Lock()
-	window.redrawForwardingFallbackHistory =
-		server.foregroundHistoryFallbackHistoryLocked(window)
+	window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
 	fallback := string(
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
-			window.redrawForwardingFallbackHistory,
+			redrawFallbackHistory(window),
 		),
 	)
 	server.mu.Unlock()
@@ -2901,20 +2901,22 @@ func TestCoalescedTerminalResponsesRouteToEachOriginWindow(t *testing.T) {
 			paletteResponseCount,
 		)
 	}
-	firstCompletion, queued := client.enqueueTerminalQuery(
+	firstCompletion, queued := client.enqueueWrite(
 		paletteQuery,
 		true,
 		"@1",
 		paletteResponseCount,
+		nil,
 	)
 	if !queued || !client.waitForWrite(firstCompletion) {
 		t.Fatal("first window queries were not written")
 	}
-	secondCompletion, queued := client.enqueueTerminalQuery(
+	secondCompletion, queued := client.enqueueWrite(
 		[]byte("\x1b[>q"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(secondCompletion) {
 		t.Fatal("second window query was not written")
@@ -2968,11 +2970,12 @@ func TestSeparateTermcapResponsesStayWithOriginWindow(t *testing.T) {
 	if responseCount != 2 {
 		t.Fatalf("termcap response count = %d, want 2", responseCount)
 	}
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		termcapQuery,
 		true,
 		"@1",
 		responseCount,
+		nil,
 	)
 	if emptyCount := terminalQueryResponseCount(
 		[]byte("\x1bP+q;;\x1b\\"),
@@ -2982,11 +2985,12 @@ func TestSeparateTermcapResponsesStayWithOriginWindow(t *testing.T) {
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("termcap query was not written")
 	}
-	completion, queued = client.enqueueTerminalQuery(
+	completion, queued = client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("second window query was not written")
@@ -3036,20 +3040,22 @@ func TestCombinedTermcapResponseConsumesOriginExpectations(t *testing.T) {
 	)
 	t.Cleanup(client.close)
 	termcapQuery := []byte("\x1bP+q544e;436f\x1b\\")
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		termcapQuery,
 		true,
 		"@1",
 		terminalQueryResponseCount(termcapQuery),
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("termcap query was not written")
 	}
-	completion, queued = client.enqueueTerminalQuery(
+	completion, queued = client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("second window query was not written")
@@ -4228,11 +4234,12 @@ func TestQueryWriteArmsResponseGraceBeforeSocketWrite(t *testing.T) {
 	conn.client = client
 	t.Cleanup(client.close)
 
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("terminal query was not written")
@@ -4250,11 +4257,12 @@ func TestSuccessfulQueryWriteWinsConcurrentClientClose(t *testing.T) {
 	)
 	conn.client = client
 
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("successful query write was reported as failed after close")
@@ -4267,7 +4275,7 @@ func TestAttachCloseCompletesQueuedWriteWaiters(t *testing.T) {
 		controlMessage{ClientID: "queued-close"},
 	)
 	gate := &attachWriteGate{done: make(chan struct{})}
-	completion, queued := client.enqueueConditionalTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
@@ -4677,7 +4685,7 @@ func TestSelectWindowSimulatedResizeUsesLatestServerSize(t *testing.T) {
 		)
 	}
 
-	server.resize(100, 30)
+	server.resizeWithRedraw(100, 30, false, false, "")
 	if err := server.selectWindow("@2"); err != nil {
 		t.Fatal(err)
 	}
@@ -4897,7 +4905,7 @@ func TestEmptyThemeRedrawFallsBackToHistory(t *testing.T) {
 	signalForegroundResize = func(int) {}
 	simulateForegroundResize = func(*muxWindow, int, int) {}
 
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	server.mu.Lock()
 	paused := window.redrawForwardingPaused
 	generation := window.redrawForwardingGeneration
@@ -4954,12 +4962,12 @@ func TestRestartedRedrawPauseKeepsOriginalFallback(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	first := string(window.redrawForwardingFallbackHistory)
+	first := string(redrawFallbackHistory(window))
 	// The first redraw produced only a clear, so the screen no longer holds a
 	// usable frame.
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2J"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(first, "oldest complete frame") {
@@ -4996,7 +5004,7 @@ func TestRestartedRedrawPauseRefreshesUsableFallback(t *testing.T) {
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.appendHistoryLocked([]byte("\x1b[H\x1b[2Jnewer complete frame"))
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	second := string(window.redrawForwardingFallbackHistory)
+	second := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(second, "newer complete frame") {
@@ -5062,7 +5070,7 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	window.redrawForwardingBuffer = []byte("buffered")
-	captured := len(window.redrawForwardingFallbackHistory)
+	captured := len(redrawFallbackHistory(window))
 	server.mu.Unlock()
 	if captured == 0 {
 		t.Fatal("pause captured no fallback history to release")
@@ -5072,12 +5080,12 @@ func TestClosedWindowReleasesRedrawFallback(t *testing.T) {
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if window.redrawForwardingFallbackHistory != nil ||
+	if window.redrawForwardingFallbackScreen != nil ||
 		window.redrawForwardingBuffer != nil ||
 		window.redrawForwardingPaused {
 		t.Fatalf(
 			"closed window retained redraw state: history=%d buffer=%d paused=%v",
-			len(window.redrawForwardingFallbackHistory),
+			len(redrawFallbackHistory(window)),
 			len(window.redrawForwardingBuffer),
 			window.redrawForwardingPaused,
 		)
@@ -5169,13 +5177,13 @@ func TestRedrawFallbackSnapshotSurvivesHistoryRewrite(t *testing.T) {
 
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	snapshot := string(window.redrawForwardingFallbackHistory)
+	snapshot := string(redrawFallbackHistory(window))
 	// Output landing while the pause is in flight rewrites the history buffer
 	// starting at index 0, over the bytes an aliased snapshot would point at.
 	window.appendHistoryLocked(
 		bytes.Repeat([]byte("x"), windowFullReplayHistoryLimitBytes),
 	)
-	after := string(window.redrawForwardingFallbackHistory)
+	after := string(redrawFallbackHistory(window))
 	server.mu.Unlock()
 
 	if !strings.Contains(snapshot, "last known tui screen") {
@@ -5258,7 +5266,7 @@ func TestResizeOnlyUpdatesActiveWindowPty(t *testing.T) {
 	}
 	server.activeID = "@1"
 
-	server.resize(132, 43)
+	server.resizeWithRedraw(132, 43, false, false, "")
 
 	assertPtySize(t, activePty, 132, 43)
 	assertPtySize(t, inactivePty, 80, 24)
@@ -5286,7 +5294,7 @@ func TestSelectWindowResizesSelectedWindowToLatestTerminalSize(t *testing.T) {
 	}
 	signalForegroundResize = func(_ int) {}
 
-	server.resize(132, 43)
+	server.resizeWithRedraw(132, 43, false, false, "")
 	if err := server.selectWindow("@2"); err != nil {
 		t.Fatal(err)
 	}
@@ -5546,7 +5554,7 @@ func TestSameSizeResizeDoesNotSignalFocusAwareTui(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 40)
+	server.resizeWithRedraw(120, 40, false, false, "")
 
 	if len(signaled) != 0 {
 		t.Fatalf("signaled process groups = %#v, want none", signaled)
@@ -5596,7 +5604,7 @@ func TestChangedSizeResizeDoesNotBounceForegroundTui(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 55)
+	server.resizeWithRedraw(120, 55, false, false, "")
 
 	// A genuine size change relies on the real PTY resize (SIGWINCH at the new
 	// size) to repaint the TUI. It must NOT drive the synthetic width-1 redraw
@@ -5645,7 +5653,7 @@ func TestChangedSizeResizeForwardsReflowImmediately(t *testing.T) {
 		t.Fatal("changed-size resize must not perform the synthetic redraw dance")
 	}
 
-	server.resize(120, 55)
+	server.resizeWithRedraw(120, 55, false, false, "")
 
 	// After a genuine resize the TUI's reflow must forward to attach clients
 	// immediately, not be buffered behind the synchronized-redraw tail that hides
@@ -6017,7 +6025,7 @@ func TestForceForegroundThemeRedrawPinsToHintWindow(t *testing.T) {
 	server.mu.Lock()
 	server.activeID = "@2"
 	server.mu.Unlock()
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	if len(simulated) != 0 {
 		t.Fatalf("redraw danced after active window changed = %#v, want none", simulated)
 	}
@@ -6026,7 +6034,7 @@ func TestForceForegroundThemeRedrawPinsToHintWindow(t *testing.T) {
 	server.mu.Lock()
 	server.activeID = "@1"
 	server.mu.Unlock()
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	if !reflect.DeepEqual(simulated, []string{"@1"}) {
 		t.Fatalf("pinned redraw dance = %#v, want [@1]", simulated)
 	}
@@ -6576,7 +6584,7 @@ func TestSameSizeResizeDoesNotSignalShell(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 40)
+	server.resizeWithRedraw(120, 40, false, false, "")
 
 	if len(signaled) != 0 {
 		t.Fatalf("signaled process groups = %#v, want none", signaled)
@@ -6952,7 +6960,7 @@ func TestActiveReplayIncludesWindowHistory(t *testing.T) {
 	server.mu.Lock()
 	replay := server.activeReplayLocked()
 	server.mu.Unlock()
-	server.writeAttach(attach, replay)
+	server.writeAttach(replay)
 
 	window := server.windows[0]
 	want := replayPrefixForTest(window) + "previous screen" +
@@ -8123,6 +8131,32 @@ func TestKittyTransmissionPayloadSignatureMatchesClientHash(t *testing.T) {
 	}
 }
 
+func TestKittyTransmissionPayloadSignatureSamplesWithoutDecoding(t *testing.T) {
+	// The direct read of the base64 bit stream must agree with the lenient
+	// decode for every chunk split and padding shape Kitty produces.
+	random := rand.New(rand.NewSource(7))
+	for _, size := range []int{1, 2, 3, 4, 5, 3071, 3072, 3073, 4096, 5000, 12289, 70000} {
+		raw := make([]byte, size)
+		random.Read(raw)
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		var buf []byte
+		for start := 0; start < len(encoded); start += 4096 {
+			end := start + 4096
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			more := "1"
+			if end == len(encoded) {
+				more = "0"
+			}
+			buf = append(buf, "\x1b_Ga=t,i=1,f=100,m="+more+";"+encoded[start:end]+"\x1b\\"...)
+		}
+		if got, want := kittyTransmissionPayloadSignature(buf), fnv32ImageSignature(raw); got != want {
+			t.Fatalf("size %d: signature = %d, want %d", size, got, want)
+		}
+	}
+}
+
 func TestGlobalKittyImageBudgetEvictsAcrossWindows(t *testing.T) {
 	saved := kittyImageGlobalBudgetBytes
 	defer func() { kittyImageGlobalBudgetBytes = saved }()
@@ -8419,7 +8453,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 	chunk := []byte("plain text without queries\x1b]2;Title\x07")
 	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8428,7 +8462,7 @@ func TestStripLocallyAnsweredThemeQueriesLeavesNormalOutput(t *testing.T) {
 func TestStripLocallyAnsweredThemeQueriesIsNoopWithoutHint(t *testing.T) {
 	chunk := []byte("\x1b]11;?\x1b\\")
 
-	got := stripLocallyAnsweredThemeQueries(chunk, nil)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, nil)
 	if string(got) != string(chunk) {
 		t.Fatalf("got = %q, want unchanged %q", got, chunk)
 	}
@@ -8441,7 +8475,7 @@ func TestStripLocallyAnsweredThemeQueriesStripsAnsweredQuery(t *testing.T) {
 			"\x1b]4;5;rgb:aaaa/bbbb/cccc\x1b\\",
 	)
 
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != "beforemiddleafter" {
 		t.Fatalf("got = %q, want %q", got, "beforemiddleafter")
 	}
@@ -8502,7 +8536,7 @@ func TestStripLocallyAnsweredThemeQueriesPreservesOsc8Hyperlinks(t *testing.T) {
 
 	want := "\x1b]8;;https://example.com/a\x07A\x1b]8;;\x07 " +
 		"\x1b]8;id=1;file:///tmp/x\x1b\\B\x1b]8;;\x1b\\"
-	got := stripLocallyAnsweredThemeQueries(chunk, hint)
+	got := (&muxWindow{}).stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
 	if string(got) != want {
 		t.Fatalf("got = %q, want %q", got, want)
 	}
@@ -10185,7 +10219,7 @@ func TestDiscoverCodexSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "codex", args: "codex"},
 	}
 
-	got := discoverAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}})
+	got := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 	if got[100] != sessionID || got[101] != "" {
 		t.Fatalf("Codex sibling assignments = %#v, want only argv-owned pane", got)
 	}
@@ -10220,7 +10254,7 @@ func TestDiscoverClaudeSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "claude", args: "claude"},
 	}
 
-	got := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}, 101: {}})
+	got := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 	if got[100] != sessionID || got[101] != "" {
 		t.Fatalf("Claude sibling assignments = %#v, want only argv-owned pane", got)
 	}
@@ -10259,7 +10293,7 @@ func TestDiscoverCodexSessionIDsUsesOpenRolloutFile(t *testing.T) {
 		},
 	}
 
-	sessions := discoverAgentSessionIDs("codex", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("codex session id = %q, want %q", got, sessionID)
@@ -10320,11 +10354,7 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 	processTableForMetadata = func() map[int]processInfo { return processes }
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 
-	sessions := discoverAgentSessionIDs("codex",
-		processes,
-		map[int]struct{}{100: {}},
-		map[int]string{100: "/work/project"},
-	)
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("codex session id = %q, want %q", got, sessionID)
@@ -10380,10 +10410,7 @@ func TestDiscoverCodexSessionIDsSkipsUnknownProcessStart(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "codex", args: "codex"},
 	}
 
-	sessions := discoverAgentSessionIDs("codex",
-		processes,
-		map[int]struct{}{100: {}, 101: {}},
-	)
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("codex sessions = %#v, want none without process start times", sessions)
@@ -10424,7 +10451,7 @@ func TestDiscoverOpenCodeSessionIDsUsesProcessArgs(t *testing.T) {
 		200: {pid: 200, ppid: 100, comm: "opencode", args: "opencode --session ses_arg"},
 	}
 
-	sessions := discoverAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != "ses_arg" {
 		t.Fatalf("opencode session id = %q, want ses_arg", got)
@@ -10468,11 +10495,7 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
-	sessions := discoverAgentSessionIDs("opencode",
-		processes,
-		map[int]struct{}{100: {}},
-		map[int]string{100: "/work/project"},
-	)
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
 	if got := sessions[100]; got != "ses_new" {
 		t.Fatalf("opencode session id = %q, want ses_new", got)
@@ -10504,10 +10527,7 @@ func TestDiscoverOpenCodeSessionIDsSkipsAmbiguousWorkingDirectory(t *testing.T) 
 		201: {pid: 201, ppid: 101, comm: "opencode", args: "opencode"},
 	}
 
-	sessions := discoverAgentSessionIDs("opencode",
-		processes,
-		map[int]struct{}{100: {}, 101: {}},
-	)
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("opencode sessions = %#v, want none for ambiguous cwd fallback", sessions)
@@ -10542,7 +10562,7 @@ func TestDiscoverClaudeSessionIDsUsesOpenProjectFile(t *testing.T) {
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10594,7 +10614,7 @@ func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10675,7 +10695,7 @@ func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10720,7 +10740,7 @@ func TestDiscoverClaudeSessionIDsIgnoresSessionThatLeftTheWorkingDirectory(t *te
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("relocated Claude session leaked to the original directory: %#v", sessions)
@@ -10810,7 +10830,7 @@ func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T)
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10919,56 +10939,10 @@ func TestDiscoverClaudeSessionIDsDoesNotResumeSessionFromBeforeFreshProcess(t *t
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("fresh Claude process inherited stale sessions %#v, want none", sessions)
-	}
-}
-
-func TestAgentStoreFallbacksRejectSessionsFromBeforeProcess(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	project := filepath.Join(home, "project")
-	processStarted := time.Now().UTC().Truncate(time.Second)
-	stale := processStarted.Add(-time.Hour)
-
-	if got := openCodeSessionIDForWorkingDirectory(
-		[]openCodeSessionEntry{{sessionID: "stale-opencode", directory: project, updatedAt: stale}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh OpenCode process inherited stale session %q", got)
-	}
-	if got := antigravitySessionIDForWorkspace(
-		[]antigravityHistoryEntry{{conversationID: "stale-antigravity", workspace: project, updatedAt: stale}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh Antigravity process inherited stale session %q", got)
-	}
-	if got := cursorSessionIDForWorkspace(
-		[]cursorChatEntry{{chatID: "stale-cursor", cwd: project, updatedAt: stale.UnixMilli()}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh Cursor process inherited stale session %q", got)
-	}
-
-	codexID := "123e4567-e89b-12d3-a456-426614174099"
-	codexDir := filepath.Join(home, ".codex", "sessions", "2026", "08")
-	if err := os.MkdirAll(codexDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	codexPath := filepath.Join(codexDir, "rollout-2026-08-18T00-00-00-"+codexID+".jsonl")
-	if err := os.WriteFile(codexPath, []byte(`{"cwd":`+fmt.Sprintf("%q", project)+`,"id":"`+codexID+`"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(codexPath, stale, stale); err != nil {
-		t.Fatal(err)
-	}
-	if got := codexRecentSessionIDForWorkingDirectory(project, processStarted); got != "" {
-		t.Fatalf("fresh Codex process inherited stale session %q", got)
 	}
 }
 
@@ -11023,6 +10997,67 @@ func TestCloseNativeWindowWaitsForRetryableBridgeStop(t *testing.T) {
 	}
 	if !window.closed || len(server.windows) != 0 {
 		t.Fatal("window remained open after bridge stop succeeded")
+	}
+}
+
+func TestMarkWindowClosedStopsBridgeThroughSeam(t *testing.T) {
+	originalStop := stopNativeAcpBridgeForWindow
+	defer func() { stopNativeAcpBridgeForWindow = originalStop }()
+	var stopped []string
+	stopNativeAcpBridgeForWindow = func(id string) error {
+		stopped = append(stopped, id)
+		return nil
+	}
+
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, nativeAcpBridgeID: "bridge-1", lastActivity: time.Now()},
+	}
+	server.activeID = "@1"
+
+	server.markWindowClosed("@1")
+	if len(stopped) != 1 || stopped[0] != "bridge-1" {
+		t.Fatalf("bridge stops = %v, want [bridge-1]", stopped)
+	}
+}
+
+func TestQuerySessionAtSocketReturnsZeroWindowServer(t *testing.T) {
+	socketPath := filepath.Join(shortUnixSocketDir(t), "s.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello controlMessage
+		if err := json.NewDecoder(conn).Decode(&hello); err != nil {
+			return
+		}
+		encoder := json.NewEncoder(conn)
+		_ = encoder.Encode(controlResponse{Type: "hello", Session: "empty"})
+		// A server between its last window closing and shutdown reports an
+		// empty list, which the wire format omits entirely.
+		_ = encoder.Encode(controlResponse{Type: "window_list"})
+		// Hold the connection open so a stalled client only returns on its
+		// socket deadline.
+		time.Sleep(socketTimeout)
+	}()
+
+	started := time.Now()
+	info, err := querySessionAtSocket(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.name != "empty" || len(info.windows) != 0 {
+		t.Fatalf("info = %+v, want session empty with no windows", info)
+	}
+	if elapsed := time.Since(started); elapsed >= socketTimeout/2 {
+		t.Fatalf("query took %v, want well under the socket deadline", elapsed)
 	}
 }
 
@@ -12121,7 +12156,7 @@ func TestRunShellCommandUsesServerEnvironment(t *testing.T) {
 	t.Setenv("MONKEYMUX_TEST_ENV", "ok")
 	server := newMuxServer("test")
 
-	output, exitCode, err := server.runShellCommand("printf %s \"$MONKEYMUX_TEST_ENV\"")
+	output, exitCode, err := server.runShellCommandContext(context.Background(), "printf %s \"$MONKEYMUX_TEST_ENV\"")
 	if err != nil {
 		t.Fatalf("runShellCommand returned error: %v", err)
 	}
@@ -12182,7 +12217,7 @@ func TestRunShellCommandReportsExitCode(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	server := newMuxServer("test")
 
-	_, exitCode, err := server.runShellCommand("exit 7")
+	_, exitCode, err := server.runShellCommandContext(context.Background(), "exit 7")
 	if err != nil {
 		t.Fatalf("runShellCommand returned error: %v", err)
 	}
@@ -12195,7 +12230,7 @@ func TestRunShellCommandBoundsOutput(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	server := newMuxServer("test")
 
-	output, _, err := server.runShellCommand("yes x")
+	output, _, err := server.runShellCommandContext(context.Background(), "yes x")
 	if !errors.Is(err, errRunCommandOutputLimit) {
 		t.Fatalf("runShellCommand error = %v, want output limit", err)
 	}
@@ -12972,7 +13007,7 @@ func TestUnansweredTerminalQueriesCloseDesynchronizedAttach(t *testing.T) {
 			t.Cleanup(client.close)
 			query := []byte("\x1b[c")
 			for i := 0; i < terminalResponseMaxOutstanding; i++ {
-				completion, queued := client.enqueueTerminalQuery(query, true, "@1", 1)
+				completion, queued := client.enqueueWrite(query, true, "@1", 1, nil)
 				if !queued || !client.waitForWrite(completion) {
 					t.Fatalf("query %d was rejected before the limit", i)
 				}
@@ -12980,7 +13015,7 @@ func TestUnansweredTerminalQueriesCloseDesynchronizedAttach(t *testing.T) {
 					enterStreamingTerminalResponseContinuation(t, client)
 				}
 			}
-			completion, _ := client.enqueueTerminalQuery(query, true, "@2", 1)
+			completion, _ := client.enqueueWrite(query, true, "@2", 1, nil)
 			client.waitForWrite(completion)
 			select {
 			case <-client.done:

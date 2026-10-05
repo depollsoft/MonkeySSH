@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_json.dart';
 import '../models/acp_recent_session.dart';
 import '../models/acp_session_keys.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 
 /// Persists non-content references to recently used ACP sessions and the last
@@ -28,9 +29,7 @@ class AcpRecentSessionsService {
   final SettingsService _settings;
   final int _maxEntries;
 
-  // Serializes every read-modify-write cycle so two overlapping mutations can
-  // never both read the same starting list and silently discard a change.
-  Future<void> _mutationQueue = Future<void>.value();
+  final _mutations = SerializedMutations();
 
   /// Loads all persisted recent-session references, most recent first.
   ///
@@ -44,7 +43,7 @@ class AcpRecentSessionsService {
   ///
   /// A reference with the same [AcpSessionKey] replaces the previous entry so
   /// updated titles and timestamps are retained without duplication.
-  Future<void> record(AcpRecentSessionRef ref) => _withMutationLock(() async {
+  Future<void> record(AcpRecentSessionRef ref) => _mutations.run(() async {
     final mcpServerIds = ref.mcpServerIds;
     final safeRef = ref.copyWith(
       title: _bounded(ref.title, kAcpRecentTitleMaxCharacters),
@@ -68,7 +67,7 @@ class AcpRecentSessionsService {
   });
 
   /// Removes the reference identified by [key], if present.
-  Future<void> remove(AcpSessionKey key) => _withMutationLock(() async {
+  Future<void> remove(AcpSessionKey key) => _mutations.run(() async {
     final existing = await list();
     final updated = existing
         .where((entry) => entry.key != key)
@@ -84,22 +83,21 @@ class AcpRecentSessionsService {
   }
 
   /// Persists [key] as the last selected session, or clears it when `null`.
-  Future<void> setLastSelected(AcpSessionKey? key) =>
-      _withMutationLock(() async {
-        if (key == null) {
-          await _settings.delete(SettingKeys.acpLastSelectedSession);
-          return;
-        }
-        await _settings.setString(
-          SettingKeys.acpLastSelectedSession,
-          jsonEncode(<String, Object?>{
-            'hostId': key.hostId,
-            'providerId': key.providerId,
-            'bridgeId': key.bridgeId,
-            'acpSessionId': key.acpSessionId,
-          }),
-        );
-      });
+  Future<void> setLastSelected(AcpSessionKey? key) => _mutations.run(() async {
+    if (key == null) {
+      await _settings.delete(SettingKeys.acpLastSelectedSession);
+      return;
+    }
+    await _settings.setString(
+      SettingKeys.acpLastSelectedSession,
+      jsonEncode(<String, Object?>{
+        'hostId': key.hostId,
+        'providerId': key.providerId,
+        'bridgeId': key.bridgeId,
+        'acpSessionId': key.acpSessionId,
+      }),
+    );
+  });
 
   static String? _bounded(String? value, int maxCharacters) {
     if (value == null || value.length <= maxCharacters) return value;
@@ -117,23 +115,9 @@ class AcpRecentSessionsService {
     );
   }
 
-  Future<void> _withMutationLock(Future<void> Function() action) {
-    final operation = _mutationQueue.then((_) => action());
-    _mutationQueue = operation.catchError((_) {});
-    return operation;
-  }
-
   List<AcpRecentSessionRef> _decode(String? raw) {
-    if (raw == null || raw.isEmpty) return const [];
-    Object? decoded;
-    try {
-      decoded = jsonDecode(raw);
-    } on FormatException {
-      return const [];
-    }
-    if (decoded is! List) return const [];
     final refs = <AcpRecentSessionRef>[];
-    for (final item in decoded) {
+    for (final item in decodeJsonList(raw)) {
       final ref = AcpRecentSessionRef.tryFromJson(item);
       if (ref != null) refs.add(ref);
       if (refs.length >= _maxEntries) break;

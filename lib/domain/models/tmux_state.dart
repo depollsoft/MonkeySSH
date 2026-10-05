@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
+import 'terminal_backend.dart';
 import 'terminal_progress.dart';
 
 /// Field separator used for tmux format strings.
@@ -67,6 +68,14 @@ class MuxWindowNotification {
   int get hashCode => Object.hash(seq, payload);
 }
 
+/// Returns the active window of [windows], if any.
+TmuxWindow? activeTmuxWindow(Iterable<TmuxWindow> windows) {
+  for (final window in windows) {
+    if (window.isActive) return window;
+  }
+  return null;
+}
+
 /// Represents a single window within a tmux session.
 @immutable
 class TmuxWindow {
@@ -114,7 +123,7 @@ class TmuxWindow {
     }
 
     final activityEpoch = fields.length > 7 ? int.tryParse(fields[7]) : null;
-    final storedTool = fields.length > 9 ? _nonEmpty(fields[9]) : null;
+    final storedTool = fields.length > 9 ? trimmedOrNull(fields[9]) : null;
     final agentTool = _agentToolFromMetadata(storedTool);
     final unsupportedTool = storedTool != null && agentTool == null;
 
@@ -126,21 +135,21 @@ class TmuxWindow {
           ? fields[10]
           : null,
       panePid: fields.length > 11 ? int.tryParse(fields[11]) : null,
-      currentCommand: fields.length > 3 ? _nonEmpty(fields[3]) : null,
-      currentPath: fields.length > 4 ? _nonEmpty(fields[4]) : null,
-      flags: fields.length > 5 ? _nonEmpty(fields[5]) : null,
-      paneTitle: fields.length > 6 ? _nonEmpty(fields[6]) : null,
+      currentCommand: fields.length > 3 ? trimmedOrNull(fields[3]) : null,
+      currentPath: fields.length > 4 ? trimmedOrNull(fields[4]) : null,
+      flags: fields.length > 5 ? trimmedOrNull(fields[5]) : null,
+      paneTitle: fields.length > 6 ? trimmedOrNull(fields[6]) : null,
       lastActivityEpochSeconds: activityEpoch != null && activityEpoch > 0
           ? activityEpoch
           : null,
-      paneStartCommand: fields.length > 8 ? _nonEmpty(fields[8]) : null,
+      paneStartCommand: fields.length > 8 ? trimmedOrNull(fields[8]) : null,
       agentTool: agentTool,
       hasUnsupportedAgentTool: unsupportedTool,
       activeAgentSessionId: !unsupportedTool && fields.length > 12
-          ? _nonEmpty(fields[12])
+          ? trimmedOrNull(fields[12])
           : null,
       agentSessionTitle: !unsupportedTool && fields.length > 13
-          ? _nonEmpty(fields[13])
+          ? trimmedOrNull(fields[13])
           : null,
       activeAgentSessionConfidence: unsupportedTool
           ? null
@@ -159,6 +168,10 @@ class TmuxWindow {
 
   /// The window name (often set by the running program or user).
   final String name;
+
+  /// A key that stays stable across reloads: the tmux window ID when
+  /// reported, otherwise the index.
+  String get stableKey => id ?? '#$index';
 
   /// Whether this is the currently active window in the session.
   final bool isActive;
@@ -264,13 +277,9 @@ class TmuxWindow {
 
   /// Returns a copy of this window with selectively overridden fields.
   TmuxWindow copyWith({
-    String? id,
     int? panePid,
     bool? isActive,
     String? currentCommand,
-    String? flags,
-    AgentLaunchTool? agentTool,
-    bool? hasUnsupportedAgentTool,
     String? activeAgentSessionId,
     String? agentSessionTitle,
     AgentSessionConfidence? activeAgentSessionConfidence,
@@ -279,19 +288,17 @@ class TmuxWindow {
     bool clearLastActivityEpochSeconds = false,
   }) => TmuxWindow(
     index: index,
-    id: id ?? this.id,
+    id: id,
     panePid: panePid ?? this.panePid,
     name: name,
     isActive: isActive ?? this.isActive,
     currentCommand: currentCommand ?? this.currentCommand,
     currentPath: currentPath,
-    flags: flags ?? this.flags,
+    flags: flags,
     paneTitle: paneTitle,
     paneStartCommand: paneStartCommand,
-    agentTool: agentTool ?? this.agentTool,
-    hasUnsupportedAgentTool:
-        hasUnsupportedAgentTool ??
-        (agentTool == null && this.hasUnsupportedAgentTool),
+    agentTool: agentTool,
+    hasUnsupportedAgentTool: hasUnsupportedAgentTool,
     activeAgentSessionId: clearActiveAgentSessionMetadata
         ? null
         : activeAgentSessionId ?? this.activeAgentSessionId,
@@ -322,11 +329,11 @@ class TmuxWindow {
     if (hasUnsupportedAgentTool) return null;
     final tool = foregroundAgentTool;
     if (tool == null) return null;
-    return _agentSessionIdFromCommand(paneStartCommand, tool: tool);
+    return agentSessionIdFromLaunchCommand(paneStartCommand, tool: tool);
   }
 
   /// Short coding-agent session label suitable for secondary UI text.
-  String? get agentSessionLabel {
+  String? get _agentSessionLabel {
     final title = _normalizedTmuxTitle(agentSessionTitle);
     if (title != null && title.isNotEmpty) {
       final tool = foregroundAgentTool;
@@ -345,7 +352,7 @@ class TmuxWindow {
   }
 
   /// Agent-aware title, preferring live session metadata when available.
-  String? get agentContextTitle {
+  String? get _agentContextTitle {
     final sessionTitle = agentSessionDisplayTitle;
     if (sessionTitle != null) return sessionTitle;
     return _agentFallbackContextTitle;
@@ -495,8 +502,8 @@ class TmuxWindow {
       name,
       stripPlaceholderPrefix: true,
     );
-    final sessionLabel = agentSessionLabel;
-    final agentTitle = agentContextTitle;
+    final sessionLabel = _agentSessionLabel;
+    final agentTitle = _agentContextTitle;
     if (agentTitle != null && display == agentTitle) {
       return sessionLabel == display ? null : sessionLabel;
     }
@@ -566,7 +573,7 @@ class TmuxWindow {
         return tool;
       }
     }
-    return _agentToolFromCommandText(paneStartCommand);
+    return agentLaunchToolForCommandText(paneStartCommand);
   }
 
   @override
@@ -679,16 +686,22 @@ List<TmuxWindow> applyTmuxWindowChangeEvent(
         if (window.id != null) byId.putIfAbsent(window.id!, () => window);
         byIndex.putIfAbsent(window.index, () => window);
       }
-      return List<TmuxWindow>.unmodifiable(
-        nextWindows.map((nextWindow) {
-          final existingWindow = nextWindow.id == null
-              ? byIndex[nextWindow.index]
-              : byId[nextWindow.id];
-          return existingWindow == null
-              ? nextWindow
-              : _preserveActiveAgentSessionMetadata(existingWindow, nextWindow);
-        }),
-      );
+      final merged = nextWindows
+          .map((nextWindow) {
+            final existingWindow = nextWindow.id == null
+                ? byIndex[nextWindow.index]
+                : byId[nextWindow.id];
+            return existingWindow == null
+                ? nextWindow
+                : _preserveActiveAgentSessionMetadata(
+                    existingWindow,
+                    nextWindow,
+                  );
+          })
+          .toList(growable: false);
+      return _sameWindows(windows, merged)
+          ? windows
+          : List<TmuxWindow>.unmodifiable(merged);
     case TmuxWindowSnapshotEvent(window: final window):
       final updated = <TmuxWindow>[];
       var existingIndex = -1;
@@ -718,8 +731,20 @@ List<TmuxWindow> applyTmuxWindowChangeEvent(
         );
       }
       if (needsSort) updated.sort((a, b) => a.index.compareTo(b.index));
-      return List<TmuxWindow>.unmodifiable(updated);
+      return _sameWindows(windows, updated)
+          ? windows
+          : List<TmuxWindow>.unmodifiable(updated);
   }
+}
+
+/// Whether [next] carries exactly the windows of [current], so callers can
+/// keep the existing list instance and skip rebuilding.
+bool _sameWindows(List<TmuxWindow> current, List<TmuxWindow> next) {
+  if (current.length != next.length) return false;
+  for (var i = 0; i < current.length; i++) {
+    if (current[i] != next[i]) return false;
+  }
+  return true;
 }
 
 TmuxWindow _preserveActiveAgentSessionMetadata(
@@ -908,12 +933,19 @@ const _monthAbbreviations = <String>[
 ];
 
 /// Returns whether [value] is a stable tmux window ID such as `@7`.
-bool isValidTmuxWindowId(String value) => RegExp(r'^@\d+$').hasMatch(value);
+bool isValidTmuxWindowId(String value) => _tmuxWindowIdPattern.hasMatch(value);
 
-String? _nonEmpty(String value) {
-  final trimmed = value.trim();
-  return trimmed.isEmpty ? null : trimmed;
-}
+final _tmuxWindowIdPattern = RegExp(r'^@\d+$');
+final _placeholderPrefixPattern = RegExp(r'^_+\s*');
+final _placeholderInfixPattern = RegExp(r'\s_+\s');
+final _whitespacePattern = RegExp(r'\s+');
+final _hostTitlePattern = RegExp(
+  r'^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$',
+  caseSensitive: false,
+);
+final _agentStatusTitlePattern = RegExp(
+  r'^(?:idle|ready|running|thinking|waiting|working)(?:\s+\(([^)]+)\))?$',
+);
 
 String? _normalizedTmuxTitle(
   String? value, {
@@ -924,8 +956,10 @@ String? _normalizedTmuxTitle(
 
   var normalized = trimmed;
   if (stripPlaceholderPrefix) {
-    normalized = normalized.replaceFirst(RegExp(r'^_+\s*'), '').trimLeft();
-    normalized = normalized.replaceAll(RegExp(r'\s_+\s'), ' ').trim();
+    normalized = normalized
+        .replaceFirst(_placeholderPrefixPattern, '')
+        .trimLeft();
+    normalized = normalized.replaceAll(_placeholderInfixPattern, ' ').trim();
   }
 
   return normalized.isEmpty ? null : normalized;
@@ -964,13 +998,10 @@ bool _isUnhelpfulTmuxTitle(
 
 bool _isLikelyDefaultHostTitle(String value) {
   final trimmed = value.trim();
-  if (trimmed.isEmpty || trimmed.contains(RegExp(r'\s'))) return false;
+  if (trimmed.isEmpty || trimmed.contains(_whitespacePattern)) return false;
   final lowered = trimmed.toLowerCase();
   if (lowered == 'localhost') return true;
-  return RegExp(
-    r'^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$',
-    caseSensitive: false,
-  ).hasMatch(trimmed);
+  return _hostTitlePattern.hasMatch(trimmed);
 }
 
 bool _isUnhelpfulAgentTitle(
@@ -992,9 +1023,7 @@ bool _isUnhelpfulAgentTitle(
     return true;
   }
 
-  final statusMatch = RegExp(
-    r'^(?:idle|ready|running|thinking|waiting|working)(?:\s+\(([^)]+)\))?$',
-  ).firstMatch(lowered);
+  final statusMatch = _agentStatusTitlePattern.firstMatch(lowered);
   if (statusMatch == null) return false;
   final statusContext = statusMatch.group(1)?.trim();
   return statusContext == null ||
@@ -1014,7 +1043,7 @@ bool _isDecorativeShellTitle(String value) {
 
 String _normalizeAgentTitleForComparison(String value) =>
     _stripLeadingDecorativePrefix(value)
-        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(_whitespacePattern, ' ')
         .trim()
         .toLowerCase();
 
@@ -1076,7 +1105,7 @@ String? _normalizeTitleForComparison(String? value) {
   final normalized = _normalizedTmuxTitle(value, stripPlaceholderPrefix: true);
   if (normalized == null) return null;
   final comparable = _stripLeadingDecorativePrefix(normalized)
-      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_whitespacePattern, ' ')
       .trim()
       .toLowerCase();
   return comparable.isEmpty ? null : comparable;
@@ -1098,9 +1127,6 @@ bool _isAsciiLetterOrDigit(int rune) =>
     (rune >= 0x41 && rune <= 0x5A) ||
     (rune >= 0x61 && rune <= 0x7A);
 
-AgentLaunchTool? _agentToolFromCommandText(String? value) =>
-    agentLaunchToolForCommandText(value);
-
 AgentLaunchTool? _agentToolFromMetadata(String? value) =>
     agentLaunchToolForCommandName(value) ??
     agentLaunchToolForCommandText(value);
@@ -1112,8 +1138,8 @@ AgentSessionConfidence? _agentSessionConfidenceFromWindowFields(
       ? _agentSessionConfidenceFromMetadata(fields[14])
       : null;
   if (confidence != null) return confidence;
-  final sessionId = fields.length > 12 ? _nonEmpty(fields[12]) : null;
-  final title = fields.length > 13 ? _nonEmpty(fields[13]) : null;
+  final sessionId = fields.length > 12 ? trimmedOrNull(fields[12]) : null;
+  final title = fields.length > 13 ? trimmedOrNull(fields[13]) : null;
   if (sessionId != null || title != null) return AgentSessionConfidence.high;
   return null;
 }
@@ -1194,11 +1220,6 @@ String? agentSessionIdFromLaunchCommand(
   return null;
 }
 
-String? _agentSessionIdFromCommand(
-  String? value, {
-  required AgentLaunchTool tool,
-}) => agentSessionIdFromLaunchCommand(value, tool: tool);
-
 String? _windowContextLabelFromPath(String? value) {
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) return null;
@@ -1262,28 +1283,27 @@ String? parseTmuxSessionName(String? command) {
   if (tmuxIdx < 0) return null;
   final tmuxPart = command.substring(tmuxIdx);
 
-  // Match a shell argument: 'quoted', "quoted", or unquoted-word.
-  const argPattern = r"""(?:'([^']*)'|"([^"]*)"|(\S+))""";
-
-  // Try -s <name> (new-session / new).
-  // Use a whitespace lookbehind so we match standalone flags like `-s`
-  // or combined flags like `-As`, but not subcommand suffixes like
-  // `list-sessions`.
-  final sFlag = RegExp('(?<=\\s)-[A-Za-z]*s\\s+$argPattern')
-      .firstMatch(tmuxPart);
-  if (sFlag != null) {
-    return sFlag.group(1) ?? sFlag.group(2) ?? sFlag.group(3);
+  // Try -s <name> (new-session / new), then -t <name> (attach).
+  for (final pattern in [_tmuxSessionFlagPattern, _tmuxTargetFlagPattern]) {
+    final match = pattern.firstMatch(tmuxPart);
+    if (match != null) {
+      return match.group(1) ?? match.group(2) ?? match.group(3);
+    }
   }
-
-  // Try -t <name> (attach / attach-session)
-  final tFlag = RegExp('(?<=\\s)-[A-Za-z]*t\\s+$argPattern')
-      .firstMatch(tmuxPart);
-  if (tFlag != null) {
-    return tFlag.group(1) ?? tFlag.group(2) ?? tFlag.group(3);
-  }
-
   return null;
 }
+
+// Match a shell argument: 'quoted', "quoted", or unquoted-word.
+const _tmuxShellArgPattern = r"""(?:'([^']*)'|"([^"]*)"|(\S+))""";
+
+// Use a whitespace lookbehind so we match standalone flags like `-s` or
+// combined flags like `-As`, but not subcommand suffixes like `list-sessions`.
+final _tmuxSessionFlagPattern = RegExp(
+  '(?<=\\s)-[A-Za-z]*s\\s+$_tmuxShellArgPattern',
+);
+final _tmuxTargetFlagPattern = RegExp(
+  '(?<=\\s)-[A-Za-z]*t\\s+$_tmuxShellArgPattern',
+);
 
 /// Resolves the preferred tmux session name before running remote queries.
 ///

@@ -241,6 +241,16 @@ concurrency:
 
 env:
   FLUTTER_VERSION: '3.47.4'
+  # Source builds check out an older or PR commit over the workflow commit.
+  # These files always come from the workflow commit: archived before the
+  # source checkout and restored after it (word splitting is intentional).
+  WORKFLOW_TOOLING: >-
+    .github/actions Gemfile Gemfile.lock
+    ios/fastlane/Fastfile ios/fastlane/Appfile ios/fastlane/Matchfile
+    android/fastlane/Fastfile android/fastlane/Appfile
+    scripts/preview_release_notes.rb scripts/store_metadata.rb scripts/testflight_delivery.rb
+    scripts/match_git_persistence.rb scripts/resolve_next_app_store_patch_version.rb
+    scripts/store_assets.sh scripts/android_signing.sh scripts/fetch_pr_commits.py
 
 jobs:
   validate-build-inputs:
@@ -277,8 +287,11 @@ jobs:
     needs: validate-build-inputs
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      BUILD_FROM_SOURCE: ${{ (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '') }}
     outputs:
-      source-sha: ${{ steps.source-sha.outputs.value }}
+      android-source-sha: ${{ inputs.android-reuse-source-sha || steps.source-sha.outputs.value }}
+      ios-source-sha: ${{ inputs.ios-reuse-source-sha || steps.source-sha.outputs.value }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -302,7 +315,7 @@ jobs:
           echo "value=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout resolved source SHA
-        if: (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '')
+        if: env.BUILD_FROM_SOURCE == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -310,14 +323,14 @@ jobs:
           fetch-depth: 1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '')
+        if: env.BUILD_FROM_SOURCE == 'true'
         with:
           go-version-file: remote/monkeymux/go.mod
           cache-dependency-path: remote/monkeymux/go.sum
 
       - name: Fingerprint MonkeyMux inputs
         id: monkeymux-fingerprint
-        if: (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '')
+        if: env.BUILD_FROM_SOURCE == 'true'
         run: |
           if [ -f scripts/verify_monkeymux_assets.py ]; then
             fingerprint="$(bash scripts/build_monkeymux_assets.sh --print-fingerprint)"
@@ -334,18 +347,11 @@ jobs:
           key: monkeymux-assets-v1-${{ runner.os }}-${{ steps.monkeymux-fingerprint.outputs.value }}
 
       - name: Build assets
-        if: (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '')
-        run: |
-          if [ -x scripts/ensure_monkeymux_assets.sh ]; then
-            scripts/ensure_monkeymux_assets.sh
-          else
-            # Existing PR heads created before asset generation moved out of
-            # Git have the original builder but not the new ensure wrapper.
-            scripts/build_monkeymux_assets.sh
-          fi
+        if: env.BUILD_FROM_SOURCE == 'true'
+        run: scripts/build_monkeymux_assets.sh
 
       - name: Upload assets
-        if: (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '')
+        if: env.BUILD_FROM_SOURCE == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.monkeymux-assets-artifact-name }}
@@ -373,10 +379,11 @@ jobs:
       FLUTTY_DIAGNOSTICS_ENABLED: ${{ inputs.enable-diagnostics || inputs.pr-number != '' }}
       FLUTTY_FIREBASE_ENABLED: 'false'
       FLUTTY_SOURCE_BRANCH: ${{ inputs.source-branch }}
+      SOURCE_SHA: ${{ needs.monkeymux-assets.outputs.android-source-sha }}
     outputs:
       store-uploaded: ${{ inputs.run-android-deploy && (inputs.deploy-android-to == 'internal' || inputs.deploy-android-to == 'production') && steps.android-deploy.outcome == 'success' }}
       apk-artifact-id: ${{ steps.upload-apk.outputs.artifact-id }}
-      source-sha: ${{ steps.source-sha.outputs.value }}
+      source-sha: ${{ needs.monkeymux-assets.outputs.android-source-sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -384,42 +391,19 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
 
-      - name: Preserve deployment tooling from the workflow commit
-        if: inputs.deploy-android-to != 'none'
-        run: |
-          git archive HEAD \
-            Gemfile Gemfile.lock ios/fastlane/Fastfile ios/fastlane/Appfile ios/fastlane/Matchfile \
-            android/fastlane/Fastfile android/fastlane/Appfile \
-            scripts/preview_release_notes.rb scripts/store_metadata.rb scripts/testflight_delivery.rb scripts/match_git_persistence.rb \
-            scripts/resolve_next_app_store_patch_version.rb scripts/store_assets.sh \
-            .github/actions/deployment-status > "$RUNNER_TEMP/deployment-tooling.tar"
-
-      - name: Capture source SHA
-        id: source-sha
-        env:
-          REUSED_SOURCE_SHA: ${{ inputs.android-reuse-source-sha }}
-          BUILT_SOURCE_SHA: ${{ needs.monkeymux-assets.outputs.source-sha }}
-        run: |
-          if [ -n "$REUSED_SOURCE_SHA" ]; then
-            echo "value=$REUSED_SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          elif [ -n "$BUILT_SOURCE_SHA" ]; then
-            echo "value=$BUILT_SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error title=Missing source SHA::MonkeyMux asset generation did not resolve a source commit."
-            exit 1
-          fi
+      - name: Preserve workflow tooling
+        run: git archive HEAD $WORKFLOW_TOOLING > "$RUNNER_TEMP/workflow-tooling.tar"
 
       - name: Checkout resolved source SHA for Android build
         if: inputs.android-reuse-aab-artifact-name == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ steps.source-sha.outputs.value }}
+          ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 1
 
-      - name: Restore deployment tooling from the workflow commit
-        if: inputs.deploy-android-to != 'none'
-        run: tar -xf "$RUNNER_TEMP/deployment-tooling.tar"
+      - name: Restore workflow tooling
+        run: tar -xf "$RUNNER_TEMP/workflow-tooling.tar"
 
       - name: Download MonkeyMux assets
         if: inputs.android-reuse-aab-artifact-name == ''
@@ -450,45 +434,20 @@ jobs:
             echo 'org.gradle.vfs.watch=false'
           } >> ~/.gradle/gradle.properties
 
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      - uses: ./.github/actions/flutter-setup
         if: inputs.android-reuse-aab-artifact-name == ''
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: 'stable'
-          cache: true
-
-      - name: Install dependencies
-        if: inputs.android-reuse-aab-artifact-name == ''
-        run: flutter pub get
-
-      - name: Cache SQLite native asset
-        if: inputs.android-reuse-aab-artifact-name == ''
-        run: |
-          scripts/cache_sqlite3_native_assets.sh \
-            android-arm64 android-x64 android-arm android-ia32
+          sqlite-targets: android-arm64 android-x64 android-arm android-ia32
 
       - name: Configure Firebase for Android
         if: inputs.android-reuse-aab-artifact-name == '' || inputs.deploy-android-to == 'firebase'
-        env:
-          FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON }}
-          FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON }}
-        run: |
-          if [ "${{ inputs.flavor }}" = "private" ]; then
-            GOOGLE_SERVICES_JSON="$FIREBASE_ANDROID_PRIVATE_GOOGLE_SERVICES_JSON"
-          else
-            GOOGLE_SERVICES_JSON="$FIREBASE_ANDROID_PRODUCTION_GOOGLE_SERVICES_JSON"
-          fi
-          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
-            if [ "${{ inputs.deploy-android-to }}" != "none" ]; then
-              echo "::error title=Missing Firebase Android config::Firebase Analytics must be enabled for deployed Android release builds. Configure the FIREBASE_ANDROID_${{ inputs.flavor == 'private' && 'PRIVATE' || 'PRODUCTION' }}_GOOGLE_SERVICES_JSON secret."
-              exit 1
-            fi
-            echo "FLUTTY_FIREBASE_ENABLED=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          mkdir -p "android/app/src/${{ inputs.flavor }}"
-          printf '%s' "$GOOGLE_SERVICES_JSON" > "android/app/src/${{ inputs.flavor }}/google-services.json"
-          echo "FLUTTY_FIREBASE_ENABLED=true" >> "$GITHUB_ENV"
+        uses: ./.github/actions/firebase-config
+        with:
+          platform: android
+          flavor: ${{ inputs.flavor }}
+          config: ${{ secrets[format('FIREBASE_ANDROID_{0}_GOOGLE_SERVICES_JSON', inputs.flavor == 'private' && 'PRIVATE' || 'PRODUCTION')] }}
+          required: ${{ inputs.deploy-android-to != 'none' }}
 
       - name: Resolve Android SDK path
         id: android-sdk
@@ -585,42 +544,37 @@ jobs:
           storeFile=upload-keystore.jks
           EOF_KEY_PROPERTIES
 
-      - name: Build signed AAB
-        if: inputs.deploy-android-to != 'none' && inputs.deploy-android-to != 'firebase' && inputs.android-reuse-aab-artifact-name == ''
+      # Exactly one package build applies. Play deploys sign an AAB through
+      # key.properties; Firebase App Distribution serves APKs to testers
+      # without a linked Play account, so it gets a release-signed universal
+      # APK; non-deploy builds produce an unsigned release or a debug AAB.
+      - name: Build Android package
+        if: >-
+          (inputs.android-reuse-aab-artifact-name == '' &&
+           (inputs.deploy-android-to != 'none' || inputs.build-android-unsigned-aab)) ||
+          (inputs.build-android-apk && inputs.deploy-android-to == 'none' && !inputs.build-android-unsigned-aab)
         env:
           ANDROID_TARGET_PLATFORM: ${{ inputs.android-target-platform }}
+          DEPLOY_ANDROID_TO: ${{ inputs.deploy-android-to }}
+          UNSIGNED_AAB: ${{ inputs.build-android-unsigned-aab }}
         run: |
-          EXTRA_ANDROID_FLAGS=()
+          case "$DEPLOY_ANDROID_TO" in
+            firebase) ANDROID_FLAGS=(apk --release) ;;
+            none)
+              if [ "$UNSIGNED_AAB" = 'true' ]; then
+                export FLUTTY_ALLOW_UNSIGNED_RELEASE=true
+                ANDROID_FLAGS=(appbundle --release --no-tree-shake-icons)
+              else
+                ANDROID_FLAGS=(appbundle --debug --no-tree-shake-icons)
+              fi
+              ;;
+            *) ANDROID_FLAGS=(appbundle --release) ;;
+          esac
           if [ -n "$ANDROID_TARGET_PLATFORM" ]; then
-            EXTRA_ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
+            ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
           fi
-          flutter build appbundle \
+          flutter build "${ANDROID_FLAGS[@]}" \
             --flavor "$BUILD_FLAVOR" \
-            --release \
-            "${EXTRA_ANDROID_FLAGS[@]}" \
-            --build-name="$BUILD_NAME" \
-            --build-number="$BUILD_NUMBER" \
-            --dart-define=FLUTTY_PR_NUMBER="$FLUTTY_PR_NUMBER" \
-            --dart-define=FLUTTY_PR_TITLE="$FLUTTY_PR_TITLE" \
-            --dart-define=FLUTTY_DIAGNOSTICS_ENABLED="$FLUTTY_DIAGNOSTICS_ENABLED" \
-            --dart-define=FLUTTY_FIREBASE_ENABLED="$FLUTTY_FIREBASE_ENABLED"
-
-      # Firebase App Distribution serves APKs directly to testers without
-      # requiring the Firebase app to be linked to a Play account, so firebase
-      # deploys build a release-signed universal APK instead of an AAB.
-      - name: Build signed APK for Firebase App Distribution
-        if: inputs.deploy-android-to == 'firebase' && inputs.android-reuse-aab-artifact-name == ''
-        env:
-          ANDROID_TARGET_PLATFORM: ${{ inputs.android-target-platform }}
-        run: |
-          EXTRA_ANDROID_FLAGS=()
-          if [ -n "$ANDROID_TARGET_PLATFORM" ]; then
-            EXTRA_ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
-          fi
-          flutter build apk \
-            --flavor "$BUILD_FLAVOR" \
-            --release \
-            "${EXTRA_ANDROID_FLAGS[@]}" \
             --build-name="$BUILD_NAME" \
             --build-number="$BUILD_NUMBER" \
             --dart-define=FLUTTY_PR_NUMBER="$FLUTTY_PR_NUMBER" \
@@ -642,123 +596,20 @@ jobs:
             exit 1
           fi
 
-      - name: Build unsigned AAB
-        if: inputs.build-android-unsigned-aab && inputs.android-reuse-aab-artifact-name == '' && inputs.deploy-android-to == 'none'
-        env:
-          ANDROID_TARGET_PLATFORM: ${{ inputs.android-target-platform }}
-          FLUTTY_ALLOW_UNSIGNED_RELEASE: 'true'
-        run: |
-          EXTRA_ANDROID_FLAGS=()
-          if [ -n "$ANDROID_TARGET_PLATFORM" ]; then
-            EXTRA_ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
-          fi
-          flutter build appbundle \
-            --flavor "$BUILD_FLAVOR" \
-            --release \
-            --no-tree-shake-icons \
-            "${EXTRA_ANDROID_FLAGS[@]}" \
-            --build-name="$BUILD_NAME" \
-            --build-number="$BUILD_NUMBER" \
-            --dart-define=FLUTTY_PR_NUMBER="$FLUTTY_PR_NUMBER" \
-            --dart-define=FLUTTY_PR_TITLE="$FLUTTY_PR_TITLE" \
-            --dart-define=FLUTTY_DIAGNOSTICS_ENABLED="$FLUTTY_DIAGNOSTICS_ENABLED" \
-            --dart-define=FLUTTY_FIREBASE_ENABLED="$FLUTTY_FIREBASE_ENABLED"
-
-      - name: Build debug AAB for preview artifacts
-        if: inputs.build-android-apk && inputs.deploy-android-to == 'none' && !inputs.build-android-unsigned-aab
-        env:
-          ANDROID_TARGET_PLATFORM: ${{ inputs.android-target-platform }}
-        run: |
-          EXTRA_ANDROID_FLAGS=()
-          if [ -n "$ANDROID_TARGET_PLATFORM" ]; then
-            EXTRA_ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
-          fi
-          flutter build appbundle \
-            --flavor "$BUILD_FLAVOR" \
-            --debug \
-            --no-tree-shake-icons \
-            "${EXTRA_ANDROID_FLAGS[@]}" \
-            --build-name="$BUILD_NAME" \
-            --build-number="$BUILD_NUMBER" \
-            --dart-define=FLUTTY_PR_NUMBER="$FLUTTY_PR_NUMBER" \
-            --dart-define=FLUTTY_PR_TITLE="$FLUTTY_PR_TITLE" \
-            --dart-define=FLUTTY_DIAGNOSTICS_ENABLED="$FLUTTY_DIAGNOSTICS_ENABLED" \
-            --dart-define=FLUTTY_FIREBASE_ENABLED="$FLUTTY_FIREBASE_ENABLED"
-
-      - name: Prepare AAB for preview install artifacts
-        id: preview-aab
-        if: inputs.build-android-apk && inputs.deploy-android-to == 'none'
-        run: |
-          set -euo pipefail
-
-          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-          if [ ! -f "$DEBUG_KEYSTORE" ]; then
-            mkdir -p "$HOME/.android"
-            keytool -genkeypair \
-              -keystore "$DEBUG_KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-          if [ "${{ inputs.build-android-unsigned-aab }}" = "true" ]; then
-            UNSIGNED_AAB_PATH="build/app/outputs/bundle/${{ inputs.flavor }}Release/app-${{ inputs.flavor }}-release.aab"
-            PREVIEW_AAB_PATH="$RUNNER_TEMP/app-${{ inputs.flavor }}-release-preview-signed.aab"
-            jarsigner \
-              -sigalg SHA256withRSA \
-              -digestalg SHA-256 \
-              -keystore "$DEBUG_KEYSTORE" \
-              -storepass android \
-              -keypass android \
-              -signedjar "$PREVIEW_AAB_PATH" \
-              "$UNSIGNED_AAB_PATH" \
-              androiddebugkey
-            jarsigner -verify "$PREVIEW_AAB_PATH"
-          else
-            PREVIEW_AAB_PATH="$GITHUB_WORKSPACE/build/app/outputs/bundle/${{ inputs.flavor }}Debug/app-${{ inputs.flavor }}-debug.aab"
-          fi
-
-          echo "path=$PREVIEW_AAB_PATH" >> "$GITHUB_OUTPUT"
-
       - name: Generate APK artifact from preview AAB
         if: inputs.build-android-apk && inputs.deploy-android-to == 'none'
-        env:
-          BUNDLETOOL_VERSION: '1.18.3'
         run: |
           set -euo pipefail
-
-          BUNDLETOOL_JAR="$RUNNER_TEMP/bundletool.jar"
-          AAB_PATH="${{ steps.preview-aab.outputs.path }}"
-          APKS_PATH="$RUNNER_TEMP/app-${{ inputs.flavor }}-preview.apks"
-          APK_DIR="$RUNNER_TEMP/app-${{ inputs.flavor }}-preview-apks"
-          APK_PATH="build/app/outputs/flutter-apk/android-apk-${BUILD_FLAVOR}-${BUILD_NAME}-${BUILD_NUMBER}.apk"
-          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-
-          curl \
-            --fail \
-            --location \
-            --retry 3 \
-            --output "$BUNDLETOOL_JAR" \
-            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
-
-          java -jar "$BUNDLETOOL_JAR" build-apks \
-            --bundle="$AAB_PATH" \
-            --output="$APKS_PATH" \
-            --mode=universal \
-            --ks="$DEBUG_KEYSTORE" \
-            --ks-pass=pass:android \
-            --ks-key-alias=androiddebugkey \
-            --key-pass=pass:android \
-            --overwrite
-
-          rm -rf "$APK_DIR"
-          mkdir -p "$APK_DIR" "$(dirname "$APK_PATH")"
-          unzip -q "$APKS_PATH" universal.apk -d "$APK_DIR"
-          mv "$APK_DIR/universal.apk" "$APK_PATH"
+          if [ "${{ inputs.build-android-unsigned-aab }}" = "true" ]; then
+            PREVIEW_AAB_PATH="$RUNNER_TEMP/app-${{ inputs.flavor }}-release-preview-signed.aab"
+            bash scripts/android_signing.sh jarsign \
+              "build/app/outputs/bundle/${{ inputs.flavor }}Release/app-${{ inputs.flavor }}-release.aab" \
+              "$PREVIEW_AAB_PATH" debug
+          else
+            PREVIEW_AAB_PATH="build/app/outputs/bundle/${{ inputs.flavor }}Debug/app-${{ inputs.flavor }}-debug.aab"
+          fi
+          bash scripts/android_signing.sh universal-apk "$PREVIEW_AAB_PATH" \
+            "build/app/outputs/flutter-apk/android-apk-${BUILD_FLAVOR}-${BUILD_NAME}-${BUILD_NUMBER}.apk" debug
 
       - name: Download reusable AAB artifact
         if: inputs.android-reuse-aab-artifact-name != ''
@@ -784,64 +635,23 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-        run: |
-          AAB_PATH=$(find build/app/outputs/bundle/${{ inputs.flavor }}Release -maxdepth 1 -name '*.aab' -print -quit)
-          if [ -z "$AAB_PATH" ]; then
-            echo "Expected a reusable unsigned AAB artifact, but none was downloaded."
-            exit 1
-          fi
-
-          SIGNED_AAB_PATH="$(dirname "$AAB_PATH")/signed-$(basename "$AAB_PATH")"
-          jarsigner \
-            -sigalg SHA256withRSA \
-            -digestalg SHA-256 \
-            -keystore android/app/upload-keystore.jks \
-            -storepass "$ANDROID_STORE_PASSWORD" \
-            -keypass "$ANDROID_KEY_PASSWORD" \
-            -signedjar "$SIGNED_AAB_PATH" \
-            "$AAB_PATH" \
-            "$ANDROID_KEY_ALIAS"
-          jarsigner -verify "$SIGNED_AAB_PATH"
-          mv "$SIGNED_AAB_PATH" "$AAB_PATH"
-
-      - name: Generate release-signed Firebase APK from reusable AAB
-        if: inputs.deploy-android-to == 'firebase' && inputs.android-reuse-aab-artifact-name != '' && inputs.android-reuse-aab-is-unsigned
-        env:
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-          BUNDLETOOL_VERSION: '1.18.3'
+          DEPLOY_ANDROID_TO: ${{ inputs.deploy-android-to }}
         run: |
           set -euo pipefail
           AAB_PATH=$(find build/app/outputs/bundle/${{ inputs.flavor }}Release -maxdepth 1 -name '*.aab' -print -quit)
           if [ -z "$AAB_PATH" ]; then
-            echo "::error title=Missing reusable AAB::The preview artifact did not contain an AAB."
+            echo "::error title=Missing reusable AAB::Expected a reusable unsigned AAB artifact, but none was downloaded."
             exit 1
           fi
-
-          BUNDLETOOL_JAR="$RUNNER_TEMP/bundletool.jar"
-          APKS_PATH="$RUNNER_TEMP/app-${{ inputs.flavor }}-firebase.apks"
-          APK_DIR="$RUNNER_TEMP/app-${{ inputs.flavor }}-firebase-apks"
-          APK_PATH="build/app/outputs/flutter-apk/app-${{ inputs.flavor }}-release.apk"
-          curl \
-            --fail \
-            --location \
-            --retry 3 \
-            --output "$BUNDLETOOL_JAR" \
-            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
-          java -jar "$BUNDLETOOL_JAR" build-apks \
-            --bundle="$AAB_PATH" \
-            --output="$APKS_PATH" \
-            --mode=universal \
-            --ks=android/app/upload-keystore.jks \
-            --ks-pass="pass:$ANDROID_STORE_PASSWORD" \
-            --ks-key-alias="$ANDROID_KEY_ALIAS" \
-            --key-pass="pass:$ANDROID_KEY_PASSWORD" \
-            --overwrite
-          rm -rf "$APK_DIR"
-          mkdir -p "$APK_DIR" "$(dirname "$APK_PATH")"
-          unzip -q "$APKS_PATH" universal.apk -d "$APK_DIR"
-          mv "$APK_DIR/universal.apk" "$APK_PATH"
+          SIGNING=(android/app/upload-keystore.jks "$ANDROID_KEY_ALIAS" "$ANDROID_STORE_PASSWORD" "$ANDROID_KEY_PASSWORD")
+          SIGNED_AAB_PATH="$(dirname "$AAB_PATH")/signed-$(basename "$AAB_PATH")"
+          bash scripts/android_signing.sh jarsign "$AAB_PATH" "$SIGNED_AAB_PATH" "${SIGNING[@]}"
+          mv "$SIGNED_AAB_PATH" "$AAB_PATH"
+          # Firebase App Distribution serves the release-signed universal APK.
+          if [ "$DEPLOY_ANDROID_TO" = 'firebase' ]; then
+            bash scripts/android_signing.sh universal-apk "$AAB_PATH" \
+              "build/app/outputs/flutter-apk/app-${{ inputs.flavor }}-release.apk" "${SIGNING[@]}"
+          fi
 
       - name: Upload signed AAB artifact
         if: inputs.deploy-android-to != 'none' && inputs.deploy-android-to != 'firebase' && inputs.android-reuse-aab-artifact-name == ''
@@ -876,46 +686,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr-number }}
-        run: |
-          python3 << 'SCRIPT'
-          import json, os, sys, uuid, urllib.request
-
-          try:
-              token = os.environ['GH_TOKEN']
-              repo = os.environ['GITHUB_REPOSITORY']
-              pr = os.environ['PR_NUMBER']
-              base_url = f'https://api.github.com/repos/{repo}/pulls/{pr}/commits'
-              headers = {
-                  'Authorization': f'Bearer {token}',
-                  'Accept': 'application/vnd.github+json',
-              }
-              commits = []
-              page = 1
-              max_commits = 100
-              while True:
-                  url = f'{base_url}?per_page=100&page={page}'
-                  req = urllib.request.Request(url, headers=headers)
-                  data = json.loads(urllib.request.urlopen(req).read())
-                  if not data:
-                      break
-                  commits.extend(data)
-                  if len(data) < 100 or len(commits) >= max_commits:
-                      break
-                  page += 1
-              commits = commits[:max_commits]
-              lines = []
-              for c in reversed(commits):
-                  sha = c['sha'][:7]
-                  msg = c['commit']['message'].split('\n')[0]
-                  lines.append(f'{sha} {msg}')
-              delim = f'FLUTTY_EOF_{uuid.uuid4().hex}'
-              with open(os.environ['GITHUB_ENV'], 'a') as f:
-                  f.write(f'FLUTTY_PR_COMMITS<<{delim}\n')
-                  f.write('\n'.join(lines))
-                  f.write(f'\n{delim}\n')
-          except Exception as e:
-              print(f'Warning: failed to fetch PR commits: {e}', file=sys.stderr)
-          SCRIPT
+        run: python3 scripts/fetch_pr_commits.py
 
       - name: Start Android GitHub deployment
         id: start-android-deployment
@@ -925,7 +696,7 @@ jobs:
         with:
           action: start
           environment: Android ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-android-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-android-to == 'production' && 'Play Production' || 'Play Internal' }}
-          ref: ${{ steps.source-sha.outputs.value }}
+          ref: ${{ env.SOURCE_SHA }}
           state: in_progress
           description: ${{ inputs.deploy-android-to == 'firebase' && 'Android Firebase App Distribution upload started.' || 'Android Play upload started.' }}
           production-environment: ${{ inputs.deploy-android-to == 'production' }}
@@ -989,7 +760,7 @@ jobs:
           ANDROID_VERSION_CODE: ${{ inputs.build-number }}
           FLUTTY_BUILD_NAME: ${{ inputs.build-name }}
           FLUTTY_VERSION_CODENAME: ${{ inputs.build-codename }}
-          FLUTTY_SOURCE_SHA: ${{ steps.source-sha.outputs.value }}
+          FLUTTY_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
         run: |
           if [ "${{ inputs.deploy-android-to }}" = "firebase" ]; then
@@ -1053,10 +824,11 @@ jobs:
       FLUTTY_DIAGNOSTICS_ENABLED: ${{ inputs.enable-diagnostics || inputs.pr-number != '' }}
       FLUTTY_FIREBASE_ENABLED: 'false'
       FLUTTY_SOURCE_BRANCH: ${{ inputs.source-branch }}
+      SOURCE_SHA: ${{ needs.monkeymux-assets.outputs.ios-source-sha }}
     outputs:
       deployment-id: ${{ steps.start-ios-deployment.outputs.deployment-id }}
       store-uploaded: ${{ inputs.run-ios-deploy && (inputs.deploy-ios-to == 'testflight' || inputs.deploy-ios-to == 'appstore') && steps.ios-deploy.outcome == 'success' }}
-      source-sha: ${{ steps.source-sha.outputs.value }}
+      source-sha: ${{ needs.monkeymux-assets.outputs.ios-source-sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1064,48 +836,19 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
 
-      - name: Preserve Apple cache actions from the workflow commit
-        run: git archive HEAD .github/actions/apple-cache-restore .github/actions/apple-cache-save > "$RUNNER_TEMP/apple-cache-actions.tar"
-
-      - name: Preserve deployment tooling from the workflow commit
-        if: inputs.deploy-ios-to != 'none'
-        run: |
-          git archive HEAD \
-            Gemfile Gemfile.lock ios/fastlane/Fastfile ios/fastlane/Appfile ios/fastlane/Matchfile \
-            android/fastlane/Fastfile android/fastlane/Appfile \
-            scripts/preview_release_notes.rb scripts/store_metadata.rb scripts/testflight_delivery.rb scripts/match_git_persistence.rb \
-            scripts/resolve_next_app_store_patch_version.rb scripts/store_assets.sh \
-            .github/actions/deployment-status > "$RUNNER_TEMP/deployment-tooling.tar"
-
-      - name: Capture source SHA
-        id: source-sha
-        env:
-          REUSED_SOURCE_SHA: ${{ inputs.ios-reuse-source-sha }}
-          BUILT_SOURCE_SHA: ${{ needs.monkeymux-assets.outputs.source-sha }}
-        run: |
-          if [ -n "$REUSED_SOURCE_SHA" ]; then
-            echo "value=$REUSED_SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          elif [ -n "$BUILT_SOURCE_SHA" ]; then
-            echo "value=$BUILT_SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error title=Missing source SHA::MonkeyMux asset generation did not resolve a source commit."
-            exit 1
-          fi
+      - name: Preserve workflow tooling
+        run: git archive HEAD $WORKFLOW_TOOLING > "$RUNNER_TEMP/workflow-tooling.tar"
 
       - name: Checkout resolved source SHA for iOS build
         if: inputs.ios-reuse-ipa-artifact-name == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ steps.source-sha.outputs.value }}
+          ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 1
 
-      - name: Restore Apple cache actions from the workflow commit
-        run: tar -xf "$RUNNER_TEMP/apple-cache-actions.tar"
-
-      - name: Restore deployment tooling from the workflow commit
-        if: inputs.deploy-ios-to != 'none'
-        run: tar -xf "$RUNNER_TEMP/deployment-tooling.tar"
+      - name: Restore workflow tooling
+        run: tar -xf "$RUNNER_TEMP/workflow-tooling.tar"
 
       - name: Download MonkeyMux assets
         if: inputs.ios-reuse-ipa-artifact-name == ''
@@ -1121,48 +864,25 @@ jobs:
           phase: swiftpm
           restore-swiftpm: ${{ inputs.ios-reuse-ipa-artifact-name == '' }}
 
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      - uses: ./.github/actions/flutter-setup
         if: inputs.ios-reuse-ipa-artifact-name == ''
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: 'stable'
-          cache: true
+          sqlite-targets: ios-arm64
 
       - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
         with:
           ruby-version: '3.3'
           bundler-cache: true
 
-      - name: Install dependencies
-        if: inputs.ios-reuse-ipa-artifact-name == ''
-        run: flutter pub get
-
-      - name: Cache SQLite native asset
-        if: inputs.ios-reuse-ipa-artifact-name == ''
-        run: scripts/cache_sqlite3_native_assets.sh ios-arm64
-
       - name: Configure Firebase for iOS
         if: inputs.ios-reuse-ipa-artifact-name == '' || inputs.deploy-ios-to == 'firebase'
-        env:
-          FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST }}
-          FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST }}
-        run: |
-          if [ "${{ inputs.flavor }}" = "private" ]; then
-            GOOGLE_SERVICE_INFO_PLIST="$FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST"
-          else
-            GOOGLE_SERVICE_INFO_PLIST="$FIREBASE_IOS_PRODUCTION_GOOGLE_SERVICE_INFO_PLIST"
-          fi
-          if [ -z "$GOOGLE_SERVICE_INFO_PLIST" ]; then
-            if [ "${{ inputs.deploy-ios-to }}" != "none" ]; then
-              echo "::error title=Missing Firebase iOS config::Firebase Analytics must be enabled for deployed iOS release builds. Configure the FIREBASE_IOS_${{ inputs.flavor == 'private' && 'PRIVATE' || 'PRODUCTION' }}_GOOGLE_SERVICE_INFO_PLIST secret."
-              exit 1
-            fi
-            echo "FLUTTY_FIREBASE_ENABLED=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          mkdir -p "ios/Runner/Firebase/${{ inputs.flavor }}"
-          printf '%s' "$GOOGLE_SERVICE_INFO_PLIST" > "ios/Runner/Firebase/${{ inputs.flavor }}/GoogleService-Info.plist"
-          echo "FLUTTY_FIREBASE_ENABLED=true" >> "$GITHUB_ENV"
+        uses: ./.github/actions/firebase-config
+        with:
+          platform: ios
+          flavor: ${{ inputs.flavor }}
+          config: ${{ secrets[format('FIREBASE_IOS_{0}_GOOGLE_SERVICE_INFO_PLIST', inputs.flavor == 'private' && 'PRIVATE' || 'PRODUCTION')] }}
+          required: ${{ inputs.deploy-ios-to != 'none' }}
 
       - name: Restore Apple build caches
         id: apple-cache
@@ -1231,8 +951,6 @@ jobs:
 
       - name: Package unsigned IPA
         if: inputs.build-ios-unsigned-ipa && inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'
-        env:
-          SOURCE_SHA: ${{ steps.source-sha.outputs.value }}
         run: |
           APP_PATH=$(find build/ios/iphoneos -maxdepth 1 -name '*.app' -type d -print -quit)
           if [ -z "$APP_PATH" ]; then
@@ -1306,46 +1024,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr-number }}
-        run: |
-          python3 << 'SCRIPT'
-          import json, os, sys, uuid, urllib.request
-
-          try:
-              token = os.environ['GH_TOKEN']
-              repo = os.environ['GITHUB_REPOSITORY']
-              pr = os.environ['PR_NUMBER']
-              base_url = f'https://api.github.com/repos/{repo}/pulls/{pr}/commits'
-              headers = {
-                  'Authorization': f'Bearer {token}',
-                  'Accept': 'application/vnd.github+json',
-              }
-              commits = []
-              page = 1
-              max_commits = 100
-              while True:
-                  url = f'{base_url}?per_page=100&page={page}'
-                  req = urllib.request.Request(url, headers=headers)
-                  data = json.loads(urllib.request.urlopen(req).read())
-                  if not data:
-                      break
-                  commits.extend(data)
-                  if len(data) < 100 or len(commits) >= max_commits:
-                      break
-                  page += 1
-              commits = commits[:max_commits]
-              lines = []
-              for c in reversed(commits):
-                  sha = c['sha'][:7]
-                  msg = c['commit']['message'].split('\n')[0]
-                  lines.append(f'{sha} {msg}')
-              delim = f'FLUTTY_EOF_{uuid.uuid4().hex}'
-              with open(os.environ['GITHUB_ENV'], 'a') as f:
-                  f.write(f'FLUTTY_PR_COMMITS<<{delim}\n')
-                  f.write('\n'.join(lines))
-                  f.write(f'\n{delim}\n')
-          except Exception as e:
-              print(f'Warning: failed to fetch PR commits: {e}', file=sys.stderr)
-          SCRIPT
+        run: python3 scripts/fetch_pr_commits.py
 
       - name: Validate Firebase App Distribution credentials
         if: inputs.deploy-ios-to == 'firebase' && inputs.run-ios-deploy
@@ -1365,7 +1044,7 @@ jobs:
         with:
           action: start
           environment: iOS ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-ios-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-ios-to == 'appstore' && 'App Store' || 'TestFlight' }}
-          ref: ${{ steps.source-sha.outputs.value }}
+          ref: ${{ env.SOURCE_SHA }}
           state: in_progress
           description: ${{ inputs.deploy-ios-to == 'firebase' && 'iOS Firebase App Distribution upload started.' || 'iOS App Store Connect upload started.' }}
           production-environment: ${{ inputs.deploy-ios-to == 'appstore' }}
@@ -1400,7 +1079,7 @@ jobs:
           FLUTTY_BUILD_NAME: ${{ inputs.build-name }}
           FLUTTY_TESTFLIGHT_METADATA_PATH: ${{ inputs.deploy-ios-to == 'testflight' && format('{0}/testflight-followup.json', runner.temp) || '' }}
           FLUTTY_VERSION_CODENAME: ${{ inputs.build-codename }}
-          FLUTTY_SOURCE_SHA: ${{ steps.source-sha.outputs.value }}
+          FLUTTY_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           BUNDLE_GEMFILE: ${{ github.workspace }}/Gemfile
         run: |
           if [ "${{ inputs.deploy-ios-to }}" = "firebase" ]; then
@@ -1531,7 +1210,7 @@ jobs:
         if: inputs.build-ios-unsigned-ipa && inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: build/ios/ipa/ios-unsigned-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}-${{ steps.source-sha.outputs.value }}.ipa
+          path: build/ios/ipa/ios-unsigned-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}-${{ env.SOURCE_SHA }}.ipa
           archive: false
 
           retention-days: 7

@@ -32,6 +32,13 @@ void registerTmuxAlertTrackerTests() {
             Object.hash(1, 7, tmuxSessionName, window) & 0x7fffffff;
         final stableNotificationId = notificationId(windowId);
         final indexOnlyNotificationId = notificationId(indexOnlyWindowIndex);
+        TmuxWindow withAlert(TmuxWindow window, {bool? isActive}) => TmuxWindow(
+          index: window.index,
+          id: window.id,
+          name: window.name,
+          isActive: isActive ?? window.isActive,
+          flags: '!',
+        );
         var windows = initialWindows;
         void apply(TmuxWindow? changed) {
           if (changed != null) {
@@ -55,14 +62,14 @@ void registerTmuxAlertTrackerTests() {
         expect(clearedNotificationIds, isEmpty);
         final shownIds = <int>[];
         for (final window in initialWindows.skip(1)) {
-          apply(window.copyWith(flags: '!'));
+          apply(withAlert(window));
           shownIds.add(
             window.id == null ? indexOnlyNotificationId : stableNotificationId,
           );
           expect(shownNotificationIds, shownIds);
           expect(clearedNotificationIds, isEmpty);
         }
-        apply(initialWindows[1].copyWith(isActive: true, flags: '!'));
+        apply(withAlert(initialWindows[1], isActive: true));
         expect(clearedNotificationIds, [stableNotificationId]);
       },
     );

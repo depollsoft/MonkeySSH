@@ -20,12 +20,6 @@ class EscapeParser {
 
   final _queue = ByteConsumer();
 
-  /// Start of sequence or character being processed. Useful for debugging.
-  var tokenBegin = 0;
-
-  /// End of sequence or character being processed. Useful for debugging.
-  int get tokenEnd => _queue.totalConsumed;
-
   void write(String chunk) {
     _queue.unrefConsumedBlocks();
     _queue.add(chunk);
@@ -34,13 +28,13 @@ class EscapeParser {
 
   void _process() {
     while (_queue.isNotEmpty) {
-      tokenBegin = _queue.totalConsumed;
+      final tokenBegin = _queue.totalConsumed;
       final char = _queue.consume();
 
       if (char == Ascii.ESC) {
         final processed = _processEscape();
         if (!processed) {
-          _queue.rollback(tokenEnd - tokenBegin);
+          _queue.rollback(_queue.totalConsumed - tokenBegin);
           return;
         }
       } else {
@@ -247,6 +241,9 @@ class EscapeParser {
   bool _escHandleCSI() {
     final result = _consumeCsi();
     if (result == _SeqParse.incomplete) return false;
+    for (final control in _csiControls) {
+      _processChar(control);
+    }
     if (result == _SeqParse.aborted) return true;
 
     if (_csi.finalByte == Ascii.u && _handleKittyKeyboardProtocol()) {
@@ -289,6 +286,12 @@ class EscapeParser {
   /// object allocations.
   final _csi = _Csi(finalByte: 0, params: []);
 
+  /// C0 controls met inside the last parsed CSI. Like xterm and the MonkeyMux
+  /// screen model they execute as if they preceded it, once the sequence is
+  /// known to be complete: a sequence split across writes is parsed again
+  /// from its start, which would otherwise run them twice.
+  final _csiControls = <int>[];
+
   /// Parse a CSI from the head of the queue. Returns [_SeqParse.incomplete] if
   /// the CSI isn't complete and [_SeqParse.aborted] if ESC, CAN or SUB cut it short.
   /// After a CSI is successfully parsed, [_csi] is updated.
@@ -299,6 +302,7 @@ class EscapeParser {
 
     _csi.params.clear();
     _csi.subParams.clear();
+    _csiControls.clear();
 
     // test whether the csi is a `CSI ? Ps ...` or `CSI Ps ...`
     final prefix = _queue.peek();
@@ -356,6 +360,11 @@ class EscapeParser {
         return _SeqParse.aborted;
       }
 
+      if (char < 0x20) {
+        _csiControls.add(char);
+        continue;
+      }
+
       if (char == Ascii.semicolon) {
         commitParam(emptyAsZero: true);
         pendingEmptyParam = true;
@@ -389,7 +398,7 @@ class EscapeParser {
         continue;
       }
 
-      if (char > Ascii.NULL && char < Ascii.num0) {
+      if (char < Ascii.num0) {
         // Intermediate byte (0x20-0x2F). Only the last one is retained; it
         // disambiguates finals such as `p` (DECRQM `$p` vs DECSTR `!p`).
         _csi.intermediate = char;
@@ -456,14 +465,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sb/
   void _csiHandleRepeatPreviousCharacter() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.repeatPreviousCharacter(amount);
+    handler.repeatPreviousCharacter(_countParam());
   }
 
   /// `ESC [ Ps c` Device Attributes (DA)
@@ -545,13 +547,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sd/
   void _csiHandleLinePositionAbsolute() {
-    var y = 1;
-
-    if (_csi.params.isNotEmpty) {
-      y = _csi.params[0];
-    }
-
-    handler.setCursorY(y - 1);
+    handler.setCursorY(_countParam() - 1);
   }
 
   /// `ESC [ Ps ; Ps f` Alias: Set Cursor Position
@@ -928,20 +924,11 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sr/
   void _csiHandleSetMargins() {
-    var top = 1;
-    int? bottom;
-
     if (_csi.params.length > 2) return;
-
-    if (_csi.params.isNotEmpty) {
-      top = _csi.params[0];
-
-      if (_csi.params.length == 2) {
-        bottom = _csi.params[1] - 1;
-      }
-    }
-
-    handler.setMargins(top - 1, bottom);
+    final top = _csi.params.isNotEmpty ? _csi.params[0] : 0;
+    final bottom = _csi.params.length == 2 ? _csi.params[1] : 0;
+    // A zero or absent bottom means the last row.
+    handler.setMargins(top > 0 ? top - 1 : 0, bottom > 0 ? bottom - 1 : null);
   }
 
   /// `ESC [ Ps t` Window operations [DISPATCH]
@@ -1008,95 +995,46 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_ca/
   void _csiHandleCursorUp() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorY(-amount);
+    handler.moveCursorY(-_countParam());
   }
 
   /// `ESC [ Ps B` Cursor Down (CUD)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cb/
   void _csiHandleCursorDown() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorY(amount);
+    handler.moveCursorY(_countParam());
   }
 
   /// `ESC [ Ps C` Cursor Right (CUF)
   ///
   /// Cursor Right (CUF)
   void _csiHandleCursorForward() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorX(amount);
+    handler.moveCursorX(_countParam());
   }
 
   /// `ESC [ Ps D` Cursor Left (CUB)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cd/
   void _csiHandleCursorBackward() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorX(-amount);
+    handler.moveCursorX(-_countParam());
   }
 
   /// `ESC [ Ps E` Cursor Next Line (CNL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_ce/
   void _csiHandleCursorNextLine() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.cursorNextLine(amount);
+    handler.cursorNextLine(_countParam());
   }
 
   /// `ESC [ Ps F` Cursor Previous Line (CPL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cf/
   void _csiHandleCursorPrecedingLine() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.cursorPrecedingLine(amount);
+    handler.cursorPrecedingLine(_countParam());
   }
 
   void _csiHandleCursorHorizontalAbsolute() {
-    var x = 1;
-
-    if (_csi.params.isNotEmpty) {
-      x = _csi.params[0];
-      if (x == 0) x = 1;
-    }
-
-    handler.setCursorX(x - 1);
+    handler.setCursorX(_countParam() - 1);
   }
 
   /// ESC [ Ps J Erase Display [Dispatch] (ED)
@@ -1145,65 +1083,35 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cl/
   void _csiHandleInsertLines() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.insertLines(amount);
+    handler.insertLines(_countParam());
   }
 
   /// ESC [ Ps M Delete Line (DL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cm/
   void _csiHandleDeleteLines() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.deleteLines(amount);
+    handler.deleteLines(_countParam());
   }
 
   /// ESC [ Ps P Delete Character (DCH)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cp/
   void _csiHandleDelete() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.deleteChars(amount);
+    handler.deleteChars(_countParam());
   }
 
   /// `ESC [ Ps S` Scroll Up (SU)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cs/
   void _csiHandleScrollUp() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.scrollUp(amount);
+    handler.scrollUp(_countParam());
   }
 
   /// `ESC [ Ps T `Scroll Down (SD)
   ///
   /// https://terminalguide.namepad.de/seq/csi_ct_1param/
   void _csiHandleScrollDown() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.scrollDown(amount);
+    handler.scrollDown(_countParam());
   }
 
   /// `ESC [ Ps I` Cursor Horizontal Forward Tabulation (CHT)
@@ -1212,7 +1120,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_ci/
   void _csiHandleCursorForwardTab() {
-    handler.cursorForwardTab(_tabAmount());
+    handler.cursorForwardTab(_countParam());
   }
 
   /// `ESC [ Ps Z` Cursor Backward Tabulation (CBT)
@@ -1223,12 +1131,13 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cz/
   void _csiHandleCursorBackwardTab() {
-    handler.cursorBackwardTab(_tabAmount());
+    handler.cursorBackwardTab(_countParam());
   }
 
-  /// The repeat count of a CHT/CBT sequence. Absent, zero and negative
-  /// parameters all mean one tab stop.
-  int _tabAmount() {
+  /// The count of a sequence whose absent or zero parameter means one, as in
+  /// xterm (`params[0] || 1`). ED, EL, SGR and the like, where zero selects an
+  /// operation, read their parameter themselves.
+  int _countParam() {
     if (_csi.params.isEmpty) return 1;
     final amount = _csi.params[0];
     return amount > 0 ? amount : 1;
@@ -1238,13 +1147,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cx/
   void _csiHandleEraseCharacters() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.eraseChars(amount);
+    handler.eraseChars(_countParam());
   }
 
   /// `ESC [ Ps @` Insert Blanks (ICH)
@@ -1255,13 +1158,7 @@ class EscapeParser {
   /// contents to the right. The contents of the amount right-most columns in
   /// the scroll region are lost. The cursor position is not changed.
   void _csiHandleInsertBlankCharacters() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.insertBlankChars(amount);
+    handler.insertBlankChars(_countParam());
   }
 
   void _setMode(int mode, bool enabled) {
@@ -1359,6 +1256,7 @@ class EscapeParser {
           handler.useAltBuffer();
         } else {
           handler.useMainBuffer();
+          handler.restoreCursor();
         }
         return;
       case 2004:
@@ -1459,6 +1357,21 @@ class EscapeParser {
   ///
   /// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
   bool _escHandleDCS() {
+    // Only XTGETTCAP (`+ q <hexcap> [ ; <hexcap> ]...`) and DECRQSS
+    // (`$ q <Pt>`, where <Pt> is the intermediate/final of the control
+    // function being queried, for example `r` for DECSTBM or ` q` for
+    // DECSCUSR) are answered. Any other DCS, Sixel included, is skipped
+    // without buffering its payload.
+    if (_queue.isEmpty) return false;
+    final kind = _queue.peek();
+    if (kind != '+'.charCode && kind != r'$'.charCode) {
+      return _skipToStringTerminator();
+    }
+    _queue.consume();
+    if (_queue.isEmpty) return false;
+    if (_queue.peek() != 'q'.charCode) return _skipToStringTerminator();
+    _queue.consume();
+
     final body = StringBuffer();
 
     while (true) {
@@ -1480,17 +1393,10 @@ class EscapeParser {
     }
 
     final payload = body.toString();
-    // XTGETTCAP request: `+ q <hexcap> [ ; <hexcap> ]...`.
-    if (payload.length >= 2 && payload[0] == '+' && payload[1] == 'q') {
-      final caps = payload.substring(2).split(';');
-      handler.sendTermcapReport(caps);
-      return true;
-    }
-    // DECRQSS (Request Status String): `$ q <Pt>`, where <Pt> is the
-    // intermediate/final of the control function being queried (for example
-    // `r` for DECSTBM, `m` for SGR, ` q` for DECSCUSR).
-    if (payload.length >= 2 && payload[0] == '\$' && payload[1] == 'q') {
-      handler.sendStatusStringReport(payload.substring(2));
+    if (kind == '+'.charCode) {
+      handler.sendTermcapReport(payload.split(';'));
+    } else {
+      handler.sendStatusStringReport(payload);
     }
     return true;
   }

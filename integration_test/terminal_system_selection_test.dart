@@ -157,15 +157,18 @@ void main() {
                   focusNode: focusNode,
                   controller: inputController,
                   showKeyboardOnFocus: false,
-                  child: RepaintBoundary(
-                    key: repaintBoundaryKey,
-                    child: MonkeyTerminalView(
-                      terminal,
-                      key: terminalViewKey,
-                      controller: controller,
-                      hardwareKeyboardOnly: true,
-                      theme: _testTerminalTheme,
-                      useSystemSelection: true,
+                  child: Focus(
+                    focusNode: focusNode,
+                    child: RepaintBoundary(
+                      key: repaintBoundaryKey,
+                      child: MonkeyTerminalView(
+                        terminal,
+                        key: terminalViewKey,
+                        controller: controller,
+                        hardwareKeyboardOnly: true,
+                        theme: _testTerminalTheme,
+                        useSystemSelection: true,
+                      ),
                     ),
                   ),
                 ),
@@ -176,6 +179,7 @@ void main() {
         ),
       ),
     );
+    focusNode.requestFocus();
     await tester.pumpAndSettle();
 
     for (var row = 0; row < 80; row += 1) {

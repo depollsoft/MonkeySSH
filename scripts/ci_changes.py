@@ -25,7 +25,6 @@ DEPENDENCY_LOCKS = {
 }
 PAYLOAD_SCRIPTS = {
     'scripts/build_monkeymux_assets.sh',
-    'scripts/ensure_monkeymux_assets.sh',
     'scripts/deterministic_gzip.go',
     'scripts/verify_monkeymux_assets.py',
 }
@@ -38,6 +37,19 @@ WINDOWS_TEST_INPUTS = {
     'lib/domain/services/windows_remote_powershell.dart',
     'test/domain/services/monkeymux_installer_service_test.dart',
     'test/domain/services/monkeymux_windows_cleanup_test.dart',
+}
+# Inputs of the other Windows-only tests in build-windows. They gate only the
+# merge-queue build (not `windows_native`), so a PR keeps the cheap path.
+# ci_changes_test derives the required set from ci.yml so the two cannot drift.
+WINDOWS_GATING_INPUTS = {
+    'lib/domain/models/agent_runtime_info.dart',
+    'lib/domain/services/agent_management_service.dart',
+    'lib/domain/services/agent_usage_windows_command.dart',
+    'test/domain/services/agent_management_service_test.dart',
+    'test/domain/services/agent_probe_parallel_test.dart',
+    'test/domain/services/agent_usage_windows_command_test.dart',
+    'test/helpers/powershell_test_helpers.dart',
+    'test/scripts/agent_usage_windows_test.cjs',
 }
 
 # Keep the non-required preview/deployment workflow triggers aligned with these
@@ -57,7 +69,9 @@ MOBILE_PATHS = [
     'ios/**',
     '!ios/fastlane/metadata-*/**',
     *sorted(PAYLOAD_SCRIPTS),
+    'scripts/android_signing.sh',
     'scripts/cache_sqlite3_native_assets.sh',
+    'scripts/fetch_pr_commits.py',
     'scripts/version_codename.py',
     'scripts/preview_release_notes.rb',
     'scripts/preview_build_number.py',
@@ -73,6 +87,10 @@ MOBILE_PATHS = [
     '.github/workflows/preview-ios.yml',
     '.github/actions/apple-cache-restore/**',
     '.github/actions/apple-cache-save/**',
+    '.github/actions/compute-version/**',
+    '.github/actions/deployment-status/**',
+    '.github/actions/firebase-config/**',
+    '.github/actions/flutter-setup/**',
 ]
 
 
@@ -86,10 +104,8 @@ def classify(paths):
             daemon and (not path.endswith('_test.go')
                         or path.startswith('remote/monkeymux/conpty/'))
         ) or path in PAYLOAD_SCRIPTS
-        workflow = path.startswith(('.github/workflows/', '.github/actions/'))
         tooling = (
-            workflow
-            or path.startswith(('scripts/', 'test/scripts/', '.github/'))
+            path.startswith(('scripts/', 'test/scripts/', '.github/'))
             or path in {'Gemfile', 'Gemfile.lock'}
             or '/fastlane/' in path
         )
@@ -100,7 +116,8 @@ def classify(paths):
             path.startswith('third_party/') or path == '.github/workflows/ci.yml'
         )
         result['deps'] |= path in DEPENDENCY_LOCKS
-        result['windows'] |= path in WINDOWS_TEST_INPUTS
+        windows_test_input = path in WINDOWS_TEST_INPUTS or path in WINDOWS_GATING_INPUTS
+        result['windows'] |= windows_test_input
         result['windows_native'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
 
@@ -125,16 +142,21 @@ def classify(paths):
                 'scripts/cache_sqlite3_native_assets.sh',
             }
         )
+        # Only the mobile builds configure Firebase.
+        firebase = path.startswith('.github/actions/firebase-config/')
         native = False
         for platform in PLATFORMS:
             platform_source = (
                 path.startswith(f'{platform}/') and '/fastlane/' not in path
             )
             result[f'{platform}_native'] |= platform_source
-            result[platform] |= global_build or platform_source
+            result[platform] |= global_build or platform_source or (
+                firebase and platform in {'android', 'ios'})
             native |= platform_source
+        # Every build job needs monkeymux-assets, which run_check enables.
         result['run_check'] |= (
-            global_build or native or payload or path.endswith('.dart')
+            global_build or native or payload or windows_test_input or firebase
+            or path.endswith('.dart')
             or path == 'analysis_options.yaml' or path.startswith('web/')
         )
     return result

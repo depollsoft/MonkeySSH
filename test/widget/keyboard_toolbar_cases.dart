@@ -237,6 +237,16 @@ void registerKeyboardToolbarTests() {
         },
       );
 
+      test('locking an already locked modifier keeps it locked', () {
+        final controller = KeyboardToolbarController()..lockCtrl();
+        addTearDown(controller.dispose);
+        expect(controller.ctrlState, isTrue);
+
+        controller.lockCtrl();
+
+        expect(controller.ctrlState, isTrue);
+      });
+
       test('system keyboard combines and consumes one-shot Ctrl+Alt', () {
         final controller = KeyboardToolbarController()
           ..toggleCtrl()
@@ -1855,6 +1865,36 @@ void registerKeyboardToolbarTests() {
         expect(controller.isCtrlActive, isFalse);
       });
 
+      testWidgets('swapping the input sink for the terminal restores the Ctrl '
+          'menu', (tester) async {
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(
+            KeyboardToolbar(
+              terminal: terminal,
+              onTextInput: (_) {},
+              onSpecialKey: (_) {},
+            ),
+          ),
+        );
+        expect(_menuIndicator('Ctrl'), findsNothing);
+
+        await tester.pumpWidget(
+          bottomAnchoredToolbar(KeyboardToolbar(terminal: terminal)),
+        );
+        expect(_menuIndicator('Ctrl'), findsOneWidget);
+
+        final gesture = await longPressCtrl(tester);
+        await gesture.moveTo(tester.getCenter(find.text('\u2303C')));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(output, ['\u0003']);
+      });
+
       testWidgets('custom input sinks keep symbol menus only', (tester) async {
         final textInput = <String>[];
         final specialKeys = <TerminalKey>[];
@@ -2352,25 +2392,6 @@ void registerKeyboardToolbarTests() {
         });
       });
 
-      test('keeps bottom safe-area padding when keyboard is closed', () {
-        const mediaQuery = MediaQueryData(
-          padding: EdgeInsets.only(bottom: 34),
-          viewPadding: EdgeInsets.only(bottom: 34),
-        );
-
-        expect(resolveKeyboardToolbarBottomInset(mediaQuery), 34);
-      });
-
-      test('drops bottom safe-area padding when keyboard is open', () {
-        // The scaffold lifts the body above the keyboard and strips the bottom
-        // view inset from it, so only the (already zeroed) padding remains.
-        const mediaQuery = MediaQueryData(
-          viewPadding: EdgeInsets.only(bottom: 34),
-        );
-
-        expect(resolveKeyboardToolbarBottomInset(mediaQuery), 0);
-      });
-
       test('keeps bottom safe-area padding for an unlifted bottom inset', () {
         // A bottom view inset that survives into the body means the layout was
         // never lifted for it (stale platform inset, or
@@ -2381,7 +2402,6 @@ void registerKeyboardToolbarTests() {
           viewInsets: EdgeInsets.only(bottom: 320),
         );
 
-        expect(resolveKeyboardToolbarBottomInset(mediaQuery), 34);
         expect(resolveKeyboardToolbarHeight(mediaQuery), 118);
       });
 

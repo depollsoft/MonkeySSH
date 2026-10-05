@@ -6,6 +6,13 @@ const monkeyMuxAcpBridgeProtocolVersion = 1;
 /// Maximum encoded size of one bridge or ACP NDJSON frame.
 const monkeyMuxAcpBridgeMaxFrameBytes = 20 * 1024 * 1024;
 
+/// Helper failure message for a locked Cursor Agent login keychain.
+///
+/// Mirrors `errCursorAgentKeychainLocked` in `remote/monkeymux/acp_bridge.go`;
+/// the two must stay identical until the helper reports a structured code.
+const monkeyMuxCursorKeychainLockedMessage =
+    'Cursor Agent login keychain is locked';
+
 /// State of the ACP provider process retained by MonkeyMux.
 enum MonkeyMuxAcpProviderState {
   /// The provider is starting.

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/terminal_backend.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
 import 'ssh_exec_queue.dart';
@@ -86,6 +87,20 @@ abstract interface class RemoteMultiplexerService {
 
   /// Returns whether short-lived exec control is cooling down.
   bool isExecChannelCoolingDown(SshSession session);
+
+  /// Whether [runClientCommand] goes through the backend control channel
+  /// rather than a separate SSH exec channel.
+  bool get clientCommandsUseControlChannel;
+
+  /// Runs a short-lived client command on the backend's best channel.
+  ///
+  /// [command] must already carry any working-directory wrapping.
+  Future<TerminalClientCommandResult> runClientCommand(
+    SshSession session,
+    String sessionName,
+    String command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  });
 
   /// Verifies whether the visible terminal is attached to [sessionName].
   Future<bool> hasForegroundClientOrThrow(

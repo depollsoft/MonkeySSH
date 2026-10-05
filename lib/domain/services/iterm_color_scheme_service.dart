@@ -58,11 +58,13 @@ class ItermColorSchemeService {
   Future<List<ItermColorSchemeMetadata>> _fetchSchemes() async {
     final http.Response response;
     try {
+      // Only the `schemes/` subtree is listed: the recursive repository tree
+      // mirrors every scheme into ~38 other formats, runs to ~7 MB, and sits
+      // at GitHub's truncation cap.
       response = await _client.get(
         Uri.https(
           'api.github.com',
-          '/repos/mbadolato/iTerm2-Color-Schemes/git/trees/master',
-          {'recursive': '1'},
+          '/repos/mbadolato/iTerm2-Color-Schemes/git/trees/master:schemes',
         ),
         headers: const {
           'Accept': 'application/vnd.github+json',
@@ -104,12 +106,12 @@ class ItermColorSchemeService {
         continue;
       }
       final path = item['path'];
-      if (path is! String ||
-          !path.startsWith(_schemesPathPrefix) ||
-          !path.endsWith(_schemesPathSuffix)) {
+      if (path is! String || !path.endsWith(_schemesPathSuffix)) {
         continue;
       }
-      schemes.add(ItermColorSchemeMetadata.fromPath(path));
+      schemes.add(
+        ItermColorSchemeMetadata.fromPath('$_schemesPathPrefix$path'),
+      );
     }
 
     schemes.sort(
@@ -216,6 +218,10 @@ TerminalThemeData parseItermColorScheme({
   );
   final colors = _readDict(rootDict);
   final background = _readColor(colors, 'Background Color');
+  final ansi = [
+    for (var index = 0; index < 16; index += 1)
+      _readColor(colors, 'Ansi $index Color'),
+  ];
 
   return TerminalThemeData(
     id: scheme.id,
@@ -226,22 +232,22 @@ TerminalThemeData parseItermColorScheme({
     background: background,
     cursor: _readColor(colors, 'Cursor Color'),
     selection: _readColor(colors, 'Selection Color'),
-    black: _readColor(colors, 'Ansi 0 Color'),
-    red: _readColor(colors, 'Ansi 1 Color'),
-    green: _readColor(colors, 'Ansi 2 Color'),
-    yellow: _readColor(colors, 'Ansi 3 Color'),
-    blue: _readColor(colors, 'Ansi 4 Color'),
-    magenta: _readColor(colors, 'Ansi 5 Color'),
-    cyan: _readColor(colors, 'Ansi 6 Color'),
-    white: _readColor(colors, 'Ansi 7 Color'),
-    brightBlack: _readColor(colors, 'Ansi 8 Color'),
-    brightRed: _readColor(colors, 'Ansi 9 Color'),
-    brightGreen: _readColor(colors, 'Ansi 10 Color'),
-    brightYellow: _readColor(colors, 'Ansi 11 Color'),
-    brightBlue: _readColor(colors, 'Ansi 12 Color'),
-    brightMagenta: _readColor(colors, 'Ansi 13 Color'),
-    brightCyan: _readColor(colors, 'Ansi 14 Color'),
-    brightWhite: _readColor(colors, 'Ansi 15 Color'),
+    black: ansi[0],
+    red: ansi[1],
+    green: ansi[2],
+    yellow: ansi[3],
+    blue: ansi[4],
+    magenta: ansi[5],
+    cyan: ansi[6],
+    white: ansi[7],
+    brightBlack: ansi[8],
+    brightRed: ansi[9],
+    brightGreen: ansi[10],
+    brightYellow: ansi[11],
+    brightBlue: ansi[12],
+    brightMagenta: ansi[13],
+    brightCyan: ansi[14],
+    brightWhite: ansi[15],
   );
 }
 

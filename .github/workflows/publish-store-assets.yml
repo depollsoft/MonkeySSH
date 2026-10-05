@@ -63,37 +63,24 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            SYNC="$(
-              python3 - <<'PY'
+            python3 - >> "$GITHUB_OUTPUT" <<'PY'
           import json, os
-          payload = json.loads(os.environ.get('CLIENT_PAYLOAD', '{}') or '{}')
-          print('true' if str(payload.get('sync', False)).lower() in {'1', 'true', 'yes'} else 'false')
+          payload = json.loads(os.environ.get('CLIENT_PAYLOAD') or '{}') or {}
+          def choice(key, allowed):
+              value = str(payload.get(key, 'both')).lower()
+              return value if value in allowed else 'both'
+          sync = str(payload.get('sync', False)).lower() in {'1', 'true', 'yes'}
+          print(f"sync={'true' if sync else 'false'}")
+          print(f"platform={choice('platform', {'both', 'ios', 'android'})}")
+          print(f"app={choice('app', {'both', 'private', 'production'})}")
           PY
-            )"
-            PLATFORM="$(
-              python3 - <<'PY'
-          import json, os
-          payload = json.loads(os.environ.get('CLIENT_PAYLOAD', '{}') or '{}')
-          value = str(payload.get('platform', 'both')).lower()
-          print(value if value in {'both', 'ios', 'android'} else 'both')
-          PY
-            )"
-            APP="$(
-              python3 - <<'PY'
-          import json, os
-          payload = json.loads(os.environ.get('CLIENT_PAYLOAD', '{}') or '{}')
-          value = str(payload.get('app', 'both')).lower()
-          print(value if value in {'both', 'private', 'production'} else 'both')
-          PY
-            )"
           else
-            SYNC='${{ inputs.sync }}'
-            PLATFORM='${{ inputs.platform }}'
-            APP='${{ inputs.app }}'
+            {
+              echo "sync=${{ inputs.sync }}"
+              echo "platform=${{ inputs.platform }}"
+              echo "app=${{ inputs.app }}"
+            } >> "$GITHUB_OUTPUT"
           fi
-          echo "sync=$SYNC" >> "$GITHUB_OUTPUT"
-          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
-          echo "app=$APP" >> "$GITHUB_OUTPUT"
         env:
           CLIENT_PAYLOAD: ${{ github.event_name == 'repository_dispatch' && toJson(github.event.client_payload) || '{}' }}
 
@@ -105,7 +92,6 @@ jobs:
           scripts/store_assets.sh download
 
       - name: Install media validation dependencies
-        if: steps.inputs.outputs.platform == 'both' || steps.inputs.outputs.platform == 'ios' || steps.inputs.outputs.platform == 'android'
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet --upgrade pip
@@ -113,7 +99,6 @@ jobs:
           brew install ffmpeg
 
       - name: Validate demo videos / App Previews
-        if: steps.inputs.outputs.platform == 'both' || steps.inputs.outputs.platform == 'ios' || steps.inputs.outputs.platform == 'android'
         run: |
           has_videos=false
           if find ios/fastlane/app-previews store/demo-videos -type f \( -name '*.mov' -o -name '*.mp4' -o -name '*.m4v' \) 2>/dev/null | grep -q .; then

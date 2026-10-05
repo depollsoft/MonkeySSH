@@ -252,10 +252,10 @@ AcpStatusDisplay acpActivitySnapshotDisplay(AcpActivitySnapshot snapshot) {
 /// Maps a native session onto the same compact waiting/running vocabulary used
 /// by terminal mux windows.
 AcpStatusDisplay acpSessionMuxStatusDisplay(AcpSessionState session) =>
-    acpMuxStatusSnapshotDisplay(AcpActivitySnapshot.fromSession(session));
+    _muxStatusSnapshotDisplay(AcpActivitySnapshot.fromSession(session));
 
 /// Resolves mux waiting/running status from a coarse activity snapshot.
-AcpStatusDisplay acpMuxStatusSnapshotDisplay(AcpActivitySnapshot snapshot) {
+AcpStatusDisplay _muxStatusSnapshotDisplay(AcpActivitySnapshot snapshot) {
   if (snapshot.status != AcpConnectionStatus.ready) {
     return acpStatusDisplay(snapshot.status);
   }

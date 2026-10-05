@@ -994,10 +994,12 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
     if (event is TmuxWindowListEvent) {
       _windowLoader.invalidate();
       final currentWindows = _windows;
+      final windows = currentWindows == null
+          ? event.windows
+          : applyTmuxWindowChangeEvent(currentWindows, event);
+      if (identical(windows, currentWindows) && !_isLoadingWindows) return;
       setState(() {
-        _windows = currentWindows == null
-            ? event.windows
-            : applyTmuxWindowChangeEvent(currentWindows, event);
+        _windows = windows;
         _error = null;
         _isLoadingWindows = false;
       });
@@ -1014,8 +1016,10 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
       return;
     }
     _windowLoader.invalidate();
+    final windows = applyTmuxWindowChangeEvent(currentWindows, event);
+    if (identical(windows, currentWindows) && !_isLoadingWindows) return;
     setState(() {
-      _windows = applyTmuxWindowChangeEvent(currentWindows, event);
+      _windows = windows;
       _error = null;
       _isLoadingWindows = false;
     });
@@ -1420,9 +1424,7 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
         scopeWorkingDirectory:
             widget.scopeWorkingDirectory ??
             resolveAgentSessionScopeWorkingDirectory(
-              activeWorkingDirectory: _windows
-                  ?.where((window) => window.isActive)
-                  .firstOrNull
+              activeWorkingDirectory: activeTmuxWindow(_windows ?? const [])
                   ?.currentPath,
               sessionWorkingDirectory: widget.session.workingDirectory,
             ),
@@ -1989,7 +1991,9 @@ class MuxWindowRow extends StatelessWidget {
             child: p.isNative
                 ? AcpMuxWindowStatusBadge(
                     session: p.session,
-                    fallbackLabel: orphan ? 'recent' : 'native',
+                    fallback: orphan
+                        ? AcpMuxWindowFallback.recent
+                        : AcpMuxWindowFallback.native,
                   )
                 : TmuxWindowStatusBadge(window: p.window!),
           ),

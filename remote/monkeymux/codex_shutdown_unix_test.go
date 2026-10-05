@@ -76,7 +76,7 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 				if err := os.WriteFile(agentPath, []byte(script), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				command := agentResumeCommandWithFreshFallback("/bin/sh "+shellQuote(agentPath),
+				command := resumeCommandWithFreshFallback("/bin/sh "+shellQuote(agentPath),
 					"echo relaunched > "+shellQuote(relaunched))
 				cmd := exec.Command(shell, "-i", "-c", holdAgentWindowCommand(shell, command))
 				windowPty, proc, err := startWindow(cmd, 80, 24)

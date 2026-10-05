@@ -2,7 +2,6 @@
 
 import 'dart:async';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -39,6 +38,7 @@ import 'package:monkeyssh/presentation/widgets/premium_badge.dart';
 import 'package:monkeyssh/presentation/widgets/tmux_window_navigator.dart';
 import 'package:monkeyssh/presentation/widgets/tmux_window_status_badge.dart';
 
+import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _TestConfirmMuxWindowCloseNotifier extends ConfirmMuxWindowCloseNotifier {
@@ -275,7 +275,9 @@ void registerTmuxWindowNavigatorTests() {
                     promptStatus: AcpPromptStatus.streaming,
                   ),
                 ),
-                const AcpMuxWindowStatusBadge(fallbackLabel: 'native'),
+                const AcpMuxWindowStatusBadge(
+                  fallback: AcpMuxWindowFallback.native,
+                ),
               ],
             ),
           ),
@@ -904,7 +906,16 @@ void registerTmuxWindowNavigatorTests() {
                   await tester.pumpWidget(const SizedBox.shrink());
                 case 'stable identity':
                   events.add(
-                    TmuxWindowListEvent([shell, alert.copyWith(id: '@9')]),
+                    const TmuxWindowListEvent([
+                      shell,
+                      TmuxWindow(
+                        index: 1,
+                        id: '@9',
+                        name: 'agent',
+                        isActive: false,
+                        flags: '!',
+                      ),
+                    ]),
                   );
               }
               await tester.pump();
@@ -2124,8 +2135,6 @@ class _MockAgentLaunchPresetService extends Mock
 class _MockAgentSessionDiscoveryService extends Mock
     implements AgentSessionDiscoveryService {}
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 Widget _pickerHost(Future<void> Function(BuildContext) open) => MaterialApp(
   home: Scaffold(
     body: Builder(
@@ -2140,7 +2149,7 @@ Widget _pickerHost(Future<void> Function(BuildContext) open) => MaterialApp(
 SshSession _navigatorSession() => SshSession(
   connectionId: 1,
   hostId: 1,
-  client: _MockSshClient(),
+  client: MockSshClient(),
   config: const SshConnectionConfig(
     hostname: 'example.com',
     port: 22,

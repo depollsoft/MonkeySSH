@@ -1,17 +1,7 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart';
-
-double _contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
-}
 
 Color _compositeOver(Color foreground, Color background) =>
     Color.alphaBlend(foreground, background);
@@ -122,6 +112,38 @@ void main() {
       expect(restored.isDark, original.isDark);
       expect(restored.foreground, original.foreground);
       expect(restored.background, original.background);
+    });
+
+    test('equality compares colors, not just the id', () {
+      expect(testTheme.copyWith(), testTheme);
+      expect(testTheme.copyWith().hashCode, testTheme.hashCode);
+      expect(
+        testTheme.copyWith(background: const Color(0xFFFF0000)),
+        isNot(equals(testTheme)),
+      );
+      expect(
+        testTheme.copyWith(brightMagenta: const Color(0xFF123456)),
+        isNot(equals(testTheme)),
+      );
+      expect(
+        testTheme.copyWith(paletteOverrides: const {200: Color(0xFF123456)}),
+        isNot(equals(testTheme)),
+      );
+      expect(testTheme.copyWith(name: 'Renamed'), isNot(equals(testTheme)));
+    });
+
+    test('ansiColors round-trips through copyWithAnsiColors', () {
+      final colors = testTheme.ansiColors;
+      expect(colors, hasLength(16));
+      expect(colors[0], testTheme.black);
+      expect(colors[15], testTheme.brightWhite);
+      colors[9] = const Color(0xFF00AA00);
+
+      final updated = testTheme.copyWithAnsiColors(colors);
+      expect(updated.brightRed, const Color(0xFF00AA00));
+      expect(updated.ansiColors, colors);
+      expect(terminalThemePaletteColor(updated, 9), const Color(0xFF00AA00));
+      expect(updated.copyWithAnsiColors(testTheme.ansiColors), testTheme);
     });
 
     test('copyWith creates new theme with modified fields', () {
@@ -285,7 +307,7 @@ void main() {
         final xtermTheme = theme.toXtermTheme();
 
         expect(
-          _contrastRatio(
+          contrastRatio(
             theme.foreground,
             _compositeOver(xtermTheme.selection, theme.background),
           ),
@@ -297,12 +319,12 @@ void main() {
 
   group('TerminalThemes', () {
     test('all returns non-empty list', () {
-      final themes = TerminalThemes.all;
+      const themes = TerminalThemes.all;
       expect(themes, isNotEmpty);
     });
 
     test('darkThemes returns only dark themes', () {
-      final themes = TerminalThemes.darkThemes;
+      const themes = TerminalThemes.darkThemes;
       expect(themes, isNotEmpty);
       for (final theme in themes) {
         expect(theme.isDark, true);
@@ -310,7 +332,7 @@ void main() {
     });
 
     test('lightThemes returns only light themes', () {
-      final themes = TerminalThemes.lightThemes;
+      const themes = TerminalThemes.lightThemes;
       expect(themes, isNotEmpty);
       for (final theme in themes) {
         expect(theme.isDark, false);
@@ -367,7 +389,7 @@ void main() {
     });
 
     test('all themes have unique IDs', () {
-      final themes = TerminalThemes.all;
+      const themes = TerminalThemes.all;
       final ids = themes.map((t) => t.id).toSet();
       expect(ids.length, themes.length);
     });
@@ -432,7 +454,7 @@ void main() {
     test('built-in themes keep default text usable', () {
       for (final theme in TerminalThemes.all) {
         expect(
-          _contrastRatio(theme.foreground, theme.background),
+          contrastRatio(theme.foreground, theme.background),
           greaterThanOrEqualTo(3),
           reason:
               'Theme ${theme.name} should keep default terminal text usable '
@@ -443,14 +465,14 @@ void main() {
 
     test('default built-in themes keep default text highly readable', () {
       expect(
-        _contrastRatio(
+        contrastRatio(
           TerminalThemes.defaultDarkTheme.foreground,
           TerminalThemes.defaultDarkTheme.background,
         ),
         greaterThanOrEqualTo(4.5),
       );
       expect(
-        _contrastRatio(
+        contrastRatio(
           TerminalThemes.defaultLightTheme.foreground,
           TerminalThemes.defaultLightTheme.background,
         ),
@@ -461,7 +483,7 @@ void main() {
     test('all built-in themes keep cursors visible', () {
       for (final theme in TerminalThemes.all) {
         expect(
-          _contrastRatio(theme.cursor, theme.background),
+          contrastRatio(theme.cursor, theme.background),
           greaterThanOrEqualTo(1.4),
           reason:
               'Theme ${theme.name} should keep the cursor visible on the '
@@ -473,7 +495,7 @@ void main() {
     test('all built-in themes keep selections visible', () {
       for (final theme in TerminalThemes.all) {
         expect(
-          _contrastRatio(
+          contrastRatio(
             _compositeOver(theme.readableSelection, theme.background),
             theme.background,
           ),
@@ -488,7 +510,7 @@ void main() {
     test('all built-in themes keep selected text readable', () {
       for (final theme in TerminalThemes.all) {
         expect(
-          _contrastRatio(
+          contrastRatio(
             theme.foreground,
             _compositeOver(theme.readableSelection, theme.background),
           ),
@@ -504,7 +526,7 @@ void main() {
       for (final theme in TerminalThemes.all) {
         final xtermTheme = theme.toXtermTheme();
         expect(
-          _contrastRatio(
+          contrastRatio(
             xtermTheme.searchHitForeground,
             xtermTheme.searchHitBackground,
           ),
@@ -513,7 +535,7 @@ void main() {
               'Theme ${theme.name} should keep default search hits readable.',
         );
         expect(
-          _contrastRatio(
+          contrastRatio(
             xtermTheme.searchHitForeground,
             xtermTheme.searchHitBackgroundCurrent,
           ),

@@ -8,11 +8,13 @@
 /// session manager, not just the UI.
 library;
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
@@ -82,6 +84,26 @@ List<AcpSwitcherEntry> buildAcpMuxWindowEntries(
       return created != 0 ? created : a.keyValue.compareTo(b.keyValue);
     });
 
+/// Provider, working directory and recency for a switcher row.
+///
+/// A recent entry has no live session, so its provider label comes from the
+/// built-in provider catalogue by id.
+String acpSwitcherEntrySubtitle(AcpSwitcherEntry entry, {DateTime? now}) {
+  final session = entry.session;
+  final recent = entry.recent;
+  final provider =
+      session?.providerLabel ??
+      acpBuiltinProviders
+          .firstWhereOrNull((p) => p.id == recent!.providerId)
+          ?.label;
+  final activity = session?.lastActivityAt ?? recent!.lastActivityAt;
+  return [
+    ?provider,
+    acpCwdSummary(session?.cwd ?? recent?.cwd),
+    acpRelativeTime(activity, now: now),
+  ].join(' · ');
+}
+
 /// Navigates to the chat for [key], replacing the current chat route.
 void _openChat(BuildContext context, AcpSessionKey key) {
   final location = buildAgentChatLocation(
@@ -105,104 +127,126 @@ Future<void> showAcpSessionSwitcher(
   builder: (context) => _SessionSwitcherSheet(currentKey: currentKey),
 );
 
-class _SessionSwitcherSheet extends ConsumerStatefulWidget {
+class _SessionSwitcherSheet extends StatelessWidget {
   const _SessionSwitcherSheet({this.currentKey});
 
   final AcpSessionKey? currentKey;
 
   @override
-  ConsumerState<_SessionSwitcherSheet> createState() =>
-      _SessionSwitcherSheetState();
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      FluttyTheme.spacingMd,
+      0,
+      FluttyTheme.spacingMd,
+      FluttyTheme.spacingLg,
+    ),
+    child: _SessionEntriesList(
+      currentKey: currentKey,
+      header: 'agent sessions',
+      headerFontSize: 18,
+      shrinkWrap: true,
+      onOpen: (key) {
+        Navigator.of(context).pop();
+        _openChat(context, key);
+      },
+    ),
+  );
 }
 
-class _SessionSwitcherSheetState extends ConsumerState<_SessionSwitcherSheet> {
+/// The recents-backed session list shared by the sheet and the wide rail.
+class _SessionEntriesList extends ConsumerStatefulWidget {
+  const _SessionEntriesList({
+    required this.currentKey,
+    required this.header,
+    required this.headerFontSize,
+    required this.shrinkWrap,
+    required this.onOpen,
+  });
+
+  final AcpSessionKey? currentKey;
+  final String header;
+  final double headerFontSize;
+  final bool shrinkWrap;
+  final void Function(AcpSessionKey key) onOpen;
+
+  @override
+  ConsumerState<_SessionEntriesList> createState() =>
+      _SessionEntriesListState();
+}
+
+class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
   late Future<List<AcpRecentSessionRef>> _recents;
+  int _trackedCount = 0;
 
   @override
   void initState() {
     super.initState();
-    _recents = ref.read(acpSessionManagerProvider).loadRecentSessions();
+    _recents = _loadRecents();
   }
 
+  Future<List<AcpRecentSessionRef>> _loadRecents() =>
+      ref.read(acpSessionManagerProvider).loadRecentSessions();
+
   Future<void> _newSession() async {
-    final navigator = Navigator.of(context);
     final key = await showAcpNewSessionSheet(context);
-    if (!mounted) {
-      return;
-    }
-    navigator.pop();
-    if (key != null) {
-      _openChat(context, key);
-    }
+    if (key != null && mounted) widget.onOpen(key);
   }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final managerState = ref
-        .watch(acpSessionManagerStateProvider)
-        .asData
-        ?.value;
-    final sessions = managerState?.sessions ?? const <AcpSessionState>[];
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        FluttyTheme.spacingMd,
-        0,
-        FluttyTheme.spacingMd,
-        FluttyTheme.spacingLg,
-      ),
-      child: FutureBuilder<List<AcpRecentSessionRef>>(
-        future: _recents,
-        builder: (context, snapshot) {
-          final entries = buildAcpSwitcherEntries(
-            sessions: sessions,
-            recents: snapshot.data ?? const <AcpRecentSessionRef>[],
-          );
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: FluttyTheme.spacingXs,
-                ),
-                child: Text(
-                  'agent sessions',
-                  style: FluttyTheme.displayMono(
-                    fontSize: 18,
-                    color: colorScheme.onSurface,
-                  ),
-                ),
+    final sessions =
+        ref.watch(acpSessionManagerStateProvider).asData?.value.sessions ??
+        const <AcpSessionState>[];
+    // A session that ends while the list is open becomes a recent entry.
+    if (sessions.length < _trackedCount) _recents = _loadRecents();
+    _trackedCount = sessions.length;
+    final list = FutureBuilder<List<AcpRecentSessionRef>>(
+      future: _recents,
+      builder: (context, snapshot) {
+        final entries = buildAcpSwitcherEntries(
+          sessions: sessions,
+          recents: snapshot.data ?? const <AcpRecentSessionRef>[],
+        );
+        return ListView(
+          shrinkWrap: widget.shrinkWrap,
+          children: [
+            for (final entry in entries)
+              AcpSessionTile(
+                entry: entry,
+                selected: entry.keyValue == widget.currentKey?.value,
+                onTap: () =>
+                    widget.onOpen(entry.session?.key ?? entry.recent!.key),
               ),
-              const SizedBox(height: FluttyTheme.spacingSm),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final entry in entries)
-                      AcpSessionTile(
-                        entry: entry,
-                        selected: entry.keyValue == widget.currentKey?.value,
-                        onTap: () {
-                          final navigator = Navigator.of(context);
-                          final key = entry.session?.key ?? entry.recent!.key;
-                          navigator.pop();
-                          _openChat(context, key);
-                        },
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: FluttyTheme.spacingSm),
-              FilledButton.icon(
-                onPressed: _newSession,
-                icon: const Icon(Icons.add),
-                label: const Text('New session'),
-              ),
-            ],
-          );
-        },
-      ),
+          ],
+        );
+      },
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: FluttyTheme.spacingXs,
+          ),
+          child: Text(
+            widget.header,
+            style: FluttyTheme.displayMono(
+              fontSize: widget.headerFontSize,
+              color: colorScheme.onSurface,
+            ),
+          ),
+        ),
+        const SizedBox(height: FluttyTheme.spacingSm),
+        if (widget.shrinkWrap) Flexible(child: list) else Expanded(child: list),
+        const SizedBox(height: FluttyTheme.spacingSm),
+        FilledButton.icon(
+          onPressed: _newSession,
+          icon: const Icon(Icons.add),
+          label: const Text('New session'),
+        ),
+      ],
     );
   }
 }
@@ -237,8 +281,6 @@ class AcpSessionTile extends StatelessWidget {
             icon: Icons.history,
             tone: AcpStatusTone.neutral,
           );
-    final cwd = session?.cwd ?? entry.recent?.cwd;
-    final activity = session?.lastActivityAt ?? entry.recent?.lastActivityAt;
     return Semantics(
       selected: selected,
       button: true,
@@ -252,8 +294,7 @@ class AcpSessionTile extends StatelessWidget {
         ),
         title: Text(entry.title, overflow: TextOverflow.ellipsis),
         subtitle: Text(
-          '${entry.session?.providerLabel ?? ''} · ${acpCwdSummary(cwd)}'
-          '${activity != null ? ' · ${acpRelativeTime(activity)}' : ''}',
+          acpSwitcherEntrySubtitle(entry),
           style: FluttyTheme.monoStyle.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
@@ -284,29 +325,9 @@ class AcpSessionRail extends ConsumerStatefulWidget {
 }
 
 class _AcpSessionRailState extends ConsumerState<AcpSessionRail> {
-  late Future<List<AcpRecentSessionRef>> _recents;
-
-  @override
-  void initState() {
-    super.initState();
-    _recents = ref.read(acpSessionManagerProvider).loadRecentSessions();
-  }
-
-  Future<void> _newSession() async {
-    final key = await showAcpNewSessionSheet(context);
-    if (key != null && mounted) {
-      _openChat(context, key);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final managerState = ref
-        .watch(acpSessionManagerStateProvider)
-        .asData
-        ?.value;
-    final sessions = managerState?.sessions ?? const <AcpSessionState>[];
     return Container(
       width: 300,
       decoration: BoxDecoration(
@@ -318,57 +339,20 @@ class _AcpSessionRailState extends ConsumerState<AcpSessionRail> {
         color: colorScheme.surface,
         child: SafeArea(
           right: false,
-          child: FutureBuilder<List<AcpRecentSessionRef>>(
-            future: _recents,
-            builder: (context, snapshot) {
-              final entries = buildAcpSwitcherEntries(
-                sessions: sessions,
-                recents: snapshot.data ?? const <AcpRecentSessionRef>[],
-              );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingSm,
-                    ),
-                    child: Text(
-                      'sessions',
-                      style: FluttyTheme.displayMono(
-                        fontSize: 16,
-                        color: colorScheme.onSurface,
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      children: [
-                        for (final entry in entries)
-                          AcpSessionTile(
-                            entry: entry,
-                            selected: entry.keyValue == widget.currentKey.value,
-                            onTap: () => _openChat(
-                              context,
-                              entry.session?.key ?? entry.recent!.key,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(FluttyTheme.spacingMd),
-                    child: FilledButton.icon(
-                      onPressed: _newSession,
-                      icon: const Icon(Icons.add),
-                      label: const Text('New session'),
-                    ),
-                  ),
-                ],
-              );
-            },
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              FluttyTheme.spacingMd,
+              FluttyTheme.spacingMd,
+              FluttyTheme.spacingMd,
+              FluttyTheme.spacingMd,
+            ),
+            child: _SessionEntriesList(
+              currentKey: widget.currentKey,
+              header: 'sessions',
+              headerFontSize: 16,
+              shrinkWrap: false,
+              onOpen: (key) => _openChat(context, key),
+            ),
           ),
         ),
       ),

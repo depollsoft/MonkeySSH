@@ -15,9 +15,7 @@ import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/connection_attempt_dialog.dart';
 
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockMonetizationService extends Mock implements MonetizationService {}
+import '../helpers/mocks.dart';
 
 const _freeMonetizationState = MonetizationState(
   billingAvailability: MonetizationBillingAvailability.unavailable,
@@ -180,9 +178,9 @@ void main() {
 
     testWidgets('cancels a stalled connection from the dialog', (tester) async {
       final sshService = _StalledSshService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
-      final monetizationService = _MockMonetizationService();
+      final monetizationService = MockMonetizationService();
       when(() => monetizationService.currentState)
           .thenReturn(_freeMonetizationState);
 
@@ -237,9 +235,9 @@ void main() {
       'cancelled authentication closes without reporting a Flutter error',
       (tester) async {
         final sshService = _StalledSshService(abortAuthentication: true);
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
-        final monetizationService = _MockMonetizationService();
+        final monetizationService = MockMonetizationService();
         when(() => monetizationService.currentState)
             .thenReturn(_freeMonetizationState);
 
@@ -304,9 +302,9 @@ void main() {
       tester,
     ) async {
       final sshService = _StalledSshService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
-      final monetizationService = _MockMonetizationService();
+      final monetizationService = MockMonetizationService();
       when(() => monetizationService.currentState)
           .thenReturn(_freeMonetizationState);
 

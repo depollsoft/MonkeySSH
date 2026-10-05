@@ -33,14 +33,12 @@ void main() {
     });
 
     test('ignores frames within budget', () {
-      service.handleTimingsForTesting([
-        _frame(buildMicros: 6000, rasterMicros: 5000),
-      ]);
+      service.handleTimings([_frame(buildMicros: 6000, rasterMicros: 5000)]);
       expect(logger.events, isEmpty);
     });
 
     test('flags a UI-thread bound janky frame', () {
-      service.handleTimingsForTesting([
+      service.handleTimings([
         _frame(buildMicros: 1200 * 1000, rasterMicros: 4000),
       ]);
       expect(logger.events, hasLength(1));
@@ -52,7 +50,7 @@ void main() {
     });
 
     test('flags a raster-thread bound janky frame', () {
-      service.handleTimingsForTesting([
+      service.handleTimings([
         _frame(buildMicros: 3000, rasterMicros: 900 * 1000),
       ]);
       expect(logger.events, hasLength(1));

@@ -659,42 +659,15 @@ class _PortForwardBrowserScreenState
     if (!mounted) {
       return '';
     }
-    final controller = TextEditingController(text: request.defaultText);
-    try {
-      return await showDialog<String>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: Text(_displayRequestOrigin(request.url)),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(request.message),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: controller,
-                    autofocus: true,
-                    decoration: const InputDecoration(labelText: 'Response'),
-                    onSubmitted: (value) => Navigator.of(context).pop(value),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(''),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(context).pop(controller.text),
-                  child: const Text('OK'),
-                ),
-              ],
-            ),
-          ) ??
-          '';
-    } finally {
-      controller.dispose();
-    }
+    return await showDialog<String>(
+          context: context,
+          builder: (_) => _JavaScriptPromptDialog(
+            title: _displayRequestOrigin(request.url),
+            message: request.message,
+            defaultText: request.defaultText,
+          ),
+        ) ??
+        '';
   }
 
   Future<void> _handleHttpAuthRequest(
@@ -705,73 +678,19 @@ class _PortForwardBrowserScreenState
       request.onCancel();
       return;
     }
-    final usernameController = TextEditingController();
-    final passwordController = TextEditingController();
-    try {
-      final credential = await showDialog<WebViewCredential>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text('Sign in'),
-          content: AutofillGroup(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  request.realm?.isNotEmpty ?? false
-                      ? '${request.host} - ${request.realm}'
-                      : request.host,
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: usernameController,
-                  autofocus: true,
-                  autofillHints: const [AutofillHints.username],
-                  decoration: const InputDecoration(labelText: 'Username'),
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: passwordController,
-                  autofillHints: const [AutofillHints.password],
-                  decoration: const InputDecoration(labelText: 'Password'),
-                  obscureText: true,
-                  onSubmitted: (_) => Navigator.of(context).pop(
-                    WebViewCredential(
-                      user: usernameController.text,
-                      password: passwordController.text,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(
-                WebViewCredential(
-                  user: usernameController.text,
-                  password: passwordController.text,
-                ),
-              ),
-              child: const Text('Sign in'),
-            ),
-          ],
-        ),
-      );
-      if (!mounted || !_tabs.contains(tab) || credential == null) {
-        request.onCancel();
-      } else {
-        request.onProceed(credential);
-      }
-    } finally {
-      usernameController.dispose();
-      passwordController.dispose();
+    final credential = await showDialog<WebViewCredential>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _HttpAuthDialog(
+        origin: request.realm?.isNotEmpty ?? false
+            ? '${request.host} - ${request.realm}'
+            : request.host,
+      ),
+    );
+    if (!mounted || !_tabs.contains(tab) || credential == null) {
+      request.onCancel();
+    } else {
+      request.onProceed(credential);
     }
   }
 
@@ -1023,11 +942,13 @@ class _PortForwardBrowserScreenState
 
   void _handleProgress(_PortForwardBrowserTabState tab, int progress) {
     if (!mounted) return;
-    setState(() {
-      tab
-        ..progress = progress
-        ..isLoading = progress < 100;
-    });
+    tab
+      ..progress = progress
+      ..isLoading = progress < 100;
+    // Only the selected tab renders its progress bar; switching tabs rebuilds.
+    if (identical(tab, _selectedTab)) {
+      setState(() {});
+    }
   }
 
   Future<void> _handleWebResourceError(
@@ -1363,4 +1284,126 @@ class _PortForwardBrowserTabState {
   bool hasTriedLoopbackFallback = false;
   Uri currentUri;
   String? pageTitle;
+}
+
+/// Owns its controller so the field survives the dialog's exit transition.
+class _JavaScriptPromptDialog extends StatefulWidget {
+  const _JavaScriptPromptDialog({
+    required this.title,
+    required this.message,
+    required this.defaultText,
+  });
+
+  final String title;
+  final String message;
+  final String? defaultText;
+
+  @override
+  State<_JavaScriptPromptDialog> createState() =>
+      _JavaScriptPromptDialogState();
+}
+
+class _JavaScriptPromptDialogState extends State<_JavaScriptPromptDialog> {
+  late final _controller = TextEditingController(text: widget.defaultText);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(widget.message),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Response'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+      ],
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(''),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.of(context).pop(_controller.text),
+        child: const Text('OK'),
+      ),
+    ],
+  );
+}
+
+/// Owns its controllers so the fields survive the dialog's exit transition.
+class _HttpAuthDialog extends StatefulWidget {
+  const _HttpAuthDialog({required this.origin});
+
+  final String origin;
+
+  @override
+  State<_HttpAuthDialog> createState() => _HttpAuthDialogState();
+}
+
+class _HttpAuthDialogState extends State<_HttpAuthDialog> {
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(
+    WebViewCredential(
+      user: _usernameController.text,
+      password: _passwordController.text,
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Sign in'),
+    content: AutofillGroup(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(widget.origin),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _usernameController,
+            autofocus: true,
+            autofillHints: const [AutofillHints.username],
+            decoration: const InputDecoration(labelText: 'Username'),
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _passwordController,
+            autofillHints: const [AutofillHints.password],
+            decoration: const InputDecoration(labelText: 'Password'),
+            obscureText: true,
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('Sign in')),
+    ],
+  );
 }

@@ -29,7 +29,6 @@ void registerTerminalScreenScrollPolicyTests() {
           expect(
             shouldUseSyntheticAltBufferScrollFallback(
               isUsingAltBuffer: true,
-              preferExplicitMouseReporting: true,
               terminalReportsMouseWheel: false,
             ),
             isTrue,
@@ -41,7 +40,6 @@ void registerTerminalScreenScrollPolicyTests() {
         expect(
           shouldUseSyntheticAltBufferScrollFallback(
             isUsingAltBuffer: false,
-            preferExplicitMouseReporting: false,
             terminalReportsMouseWheel: false,
           ),
           isFalse,
@@ -52,7 +50,6 @@ void registerTerminalScreenScrollPolicyTests() {
         expect(
           shouldUseSyntheticAltBufferScrollFallback(
             isUsingAltBuffer: true,
-            preferExplicitMouseReporting: true,
             terminalReportsMouseWheel: true,
           ),
           isFalse,
@@ -65,7 +62,6 @@ void registerTerminalScreenScrollPolicyTests() {
           expect(
             shouldUseSyntheticAltBufferScrollFallback(
               isUsingAltBuffer: true,
-              preferExplicitMouseReporting: true,
               terminalReportsMouseWheel: false,
               isAgentToolActive: true,
             ),
@@ -73,17 +69,6 @@ void registerTerminalScreenScrollPolicyTests() {
           );
         },
       );
-
-      test('can still opt into the synthetic fallback when desired', () {
-        expect(
-          shouldUseSyntheticAltBufferScrollFallback(
-            isUsingAltBuffer: true,
-            preferExplicitMouseReporting: false,
-            terminalReportsMouseWheel: true,
-          ),
-          isTrue,
-        );
-      });
     });
 
     group('terminal touch scroll routing helper', () {
@@ -181,6 +166,80 @@ void registerTerminalScreenScrollPolicyTests() {
           ),
           isTrue,
         );
+      });
+
+      bool unlistedProgram({
+        required bool isUsingAltBuffer,
+        required bool terminalReportsMouseWheel,
+        required bool bracketedPasteMode,
+        String currentCommand = 'aider',
+      }) => isAgentToolActiveForTerminalScroll(
+        activeWindowTool: null,
+        startupTool: null,
+        hasWindowSnapshot: true,
+        currentCommand: currentCommand,
+        isUsingAltBuffer: isUsingAltBuffer,
+        terminalReportsMouseWheel: terminalReportsMouseWheel,
+        bracketedPasteMode: bracketedPasteMode,
+      );
+
+      test('treats an unlisted alt-screen REPL with bracketed paste as a '
+          'line editor', () {
+        expect(
+          unlistedProgram(
+            isUsingAltBuffer: true,
+            terminalReportsMouseWheel: false,
+            bracketedPasteMode: true,
+          ),
+          isTrue,
+        );
+      });
+
+      test('keeps pagers, mouse TUIs and bare shells on the normal path', () {
+        // A pager or htop in the alt screen never asks for bracketed paste.
+        expect(
+          unlistedProgram(
+            isUsingAltBuffer: true,
+            terminalReportsMouseWheel: false,
+            bracketedPasteMode: false,
+            currentCommand: 'less',
+          ),
+          isFalse,
+        );
+        // A mouse-aware TUI gets real wheel reports instead.
+        expect(
+          unlistedProgram(
+            isUsingAltBuffer: true,
+            terminalReportsMouseWheel: true,
+            bracketedPasteMode: true,
+          ),
+          isFalse,
+        );
+        // zsh enables bracketed paste at its prompt, but in the main buffer.
+        expect(
+          unlistedProgram(
+            isUsingAltBuffer: false,
+            terminalReportsMouseWheel: false,
+            bracketedPasteMode: true,
+            currentCommand: 'zsh',
+          ),
+          isFalse,
+        );
+      });
+
+      test('listed main-buffer agents keep the name fallback', () {
+        for (final command in ['claude', 'copilot', 'codex', 'opencode']) {
+          expect(
+            unlistedProgram(
+              isUsingAltBuffer: false,
+              terminalReportsMouseWheel: false,
+              bracketedPasteMode: false,
+              currentCommand: command,
+            ),
+            isTrue,
+            reason: command,
+          );
+        }
       });
     });
 
@@ -447,6 +506,12 @@ void registerTerminalScreenScrollPolicyTests() {
 
       test('does not suppress when the command is unknown (non-shell)', () {
         expect(suppress(currentCommand: 'htop'), isFalse);
+      });
+
+      test('suppresses reports for every login shell, not just six', () {
+        for (final shell in ['tcsh', '-ksh93', 'mksh', 'nu', 'pwsh.exe']) {
+          expect(suppress(currentCommand: shell), isTrue, reason: shell);
+        }
       });
     });
   });

@@ -35,6 +35,7 @@ import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/tmux_service.dart';
 import '../../domain/services/transfer_intent_service.dart';
+import '../providers/connection_actions.dart';
 import '../providers/entity_list_providers.dart';
 import '../providers/host_row_providers.dart';
 import '../view_models/mux_badge_controller.dart';
@@ -50,6 +51,7 @@ import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/connection_preview_snippet.dart';
 import '../widgets/connection_status_dot.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
@@ -143,16 +145,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     }
   }
 
-  void _releaseTerminalRouteGuard() {
-    if (!_isOpeningTerminalRoute) {
-      return;
-    }
-    if (mounted) {
-      setState(() => _isOpeningTerminalRoute = false);
-    } else {
-      _isOpeningTerminalRoute = false;
-    }
-  }
+  // Nothing in build reads this flag, so no rebuild is needed to clear it.
+  void _releaseTerminalRouteGuard() => _isOpeningTerminalRoute = false;
 
   StreamSubscription<String>? _incomingTransferSubscription;
   final Queue<String> _incomingTransferQueue = Queue<String>();
@@ -1022,18 +1016,115 @@ enum _HostContextAction {
   delete,
 }
 
-Future<void> _disconnectConnection(WidgetRef ref, int connectionId) async {
-  await ref.read(tmuxServiceProvider).clearCache(connectionId);
-  await ref.read(monkeyMuxServiceProvider).clearCache(connectionId);
-  await ref.read(activeSessionsProvider.notifier).disconnect(connectionId);
-}
-
 Future<void> _disconnectHostConnections(
   WidgetRef ref,
   Iterable<int> connectionIds,
 ) async {
   for (final connectionId in connectionIds.toList(growable: false)) {
-    await _disconnectConnection(ref, connectionId);
+    await disconnectConnectionAndClearMuxCaches(ref, connectionId);
+  }
+}
+
+/// Opens a row's context menu anchored at the centre of [context]'s render box.
+Future<void> _showContextMenuAtCenter(
+  BuildContext context,
+  Future<void> Function(Offset globalPosition) showMenu,
+) async {
+  final renderBox = context.findRenderObject() as RenderBox?;
+  if (renderBox == null) {
+    return;
+  }
+  await showMenu(renderBox.localToGlobal(renderBox.size.center(Offset.zero)));
+}
+
+/// Shared Pro-gated, auth-gated, passphrase-protected export flow used by the
+/// host and key rows; only the copy and payload builder differ.
+Future<void> _exportEncryptedFile(
+  BuildContext context,
+  WidgetRef ref, {
+  required String blockedAction,
+  required String blockedOutcome,
+  required bool requiresAuthorization,
+  required String authorizationReason,
+  required String authorizationRequiredMessage,
+  required String passphraseTitle,
+  required String defaultFileName,
+  required String errorContext,
+  required Future<String> Function(
+    SecureTransferService service,
+    String transferPassphrase,
+  )
+  buildPayload,
+}) async {
+  final hasAccess = await requireMonetizationFeatureAccess(
+    context: context,
+    ref: ref,
+    feature: MonetizationFeature.encryptedTransfers,
+    blockedAction: blockedAction,
+    blockedOutcome: blockedOutcome,
+  );
+  if (!hasAccess || !context.mounted) {
+    return;
+  }
+  if (requiresAuthorization) {
+    final isAuthorized = await authorizeSensitiveTransferExport(
+      context: context,
+      authService: ref.read(authServiceProvider),
+      readAuthState: () => ref.read(authStateProvider),
+      reason: authorizationReason,
+    );
+    if (!context.mounted) {
+      return;
+    }
+    if (!isAuthorized) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(authorizationRequiredMessage)));
+      return;
+    }
+  }
+
+  final transferPassphrase = await showTransferPassphraseDialog(
+    context: context,
+    title: passphraseTitle,
+  );
+  if (!context.mounted || transferPassphrase == null) {
+    return;
+  }
+
+  try {
+    final payload = await buildPayload(
+      ref.read(secureTransferServiceProvider),
+      transferPassphrase,
+    );
+    if (!context.mounted) {
+      return;
+    }
+    await saveTransferPayloadToFile(
+      context: context,
+      payload: payload,
+      defaultFileName: sanitizeTransferFileBaseName(defaultFileName),
+      sharePositionOrigin: shareOriginFromContext(context),
+    );
+  } on FormatException catch (error) {
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(error.message)));
+  } on Exception catch (error) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        library: 'home',
+        context: ErrorDescription(errorContext),
+      ),
+    );
+    if (!context.mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Export failed. Try again.')));
   }
 }
 
@@ -1070,7 +1161,12 @@ class _HostRow extends ConsumerWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: openHostConnection,
-        onLongPress: () => unawaited(_showContextMenuAtCenter(context, ref)),
+        onLongPress: () => unawaited(
+          _showContextMenuAtCenter(
+            context,
+            (position) => _showContextMenu(context, ref, position),
+          ),
+        ),
         onSecondaryTapDown: (details) =>
             unawaited(_showContextMenu(context, ref, details.globalPosition)),
         child: Container(
@@ -1201,7 +1297,14 @@ class _HostRow extends ConsumerWidget {
                           icon: Icons.more_vert,
                           tooltip: 'Host actions',
                           onTap: () => unawaited(
-                            _showContextMenuAtCenter(buttonContext, ref),
+                            _showContextMenuAtCenter(
+                              buttonContext,
+                              (position) => _showContextMenu(
+                                buttonContext,
+                                ref,
+                                position,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -1375,21 +1478,6 @@ class _HostRow extends ConsumerWidget {
     }
   }
 
-  Future<void> _showContextMenuAtCenter(
-    BuildContext context,
-    WidgetRef ref,
-  ) async {
-    final renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox == null) {
-      return;
-    }
-
-    final globalPosition = renderBox.localToGlobal(
-      renderBox.size.center(Offset.zero),
-    );
-    await _showContextMenu(context, ref, globalPosition);
-  }
-
   Future<void> _openNewConnection(BuildContext context, WidgetRef ref) async {
     final result = await connectToHostWithProgressDialog(context, ref, host);
 
@@ -1551,7 +1639,7 @@ class _HostRow extends ConsumerWidget {
         await _duplicateHost(context, ref);
         return;
       case _HostContextAction.export:
-        await _exportEncryptedFile(context, ref);
+        await _exportHostFile(context, ref);
         return;
       case _HostContextAction.delete:
         await _confirmDelete(context, ref);
@@ -1582,115 +1670,37 @@ class _HostRow extends ConsumerWidget {
     );
   }
 
-  Future<void> _exportEncryptedFile(BuildContext context, WidgetRef ref) async {
-    final hasAccess = await requireMonetizationFeatureAccess(
-      context: context,
-      ref: ref,
-      feature: MonetizationFeature.encryptedTransfers,
-      blockedAction: 'Export encrypted host file',
-      blockedOutcome:
-          'Unlock Pro to share this host securely with another device.',
-    );
-    if (!hasAccess || !context.mounted) {
-      return;
-    }
-    if ((host.password?.isNotEmpty ?? false) || host.keyId != null) {
-      final isAuthorized = await authorizeSensitiveTransferExport(
-        context: context,
-        authService: ref.read(authServiceProvider),
-        readAuthState: () => ref.read(authStateProvider),
-        reason: 'Authenticate to export host credentials',
+  Future<void> _exportHostFile(BuildContext context, WidgetRef ref) =>
+      _exportEncryptedFile(
+        context,
+        ref,
+        blockedAction: 'Export encrypted host file',
+        blockedOutcome:
+            'Unlock Pro to share this host securely with another device.',
+        requiresAuthorization:
+            (host.password?.isNotEmpty ?? false) || host.keyId != null,
+        authorizationReason: 'Authenticate to export host credentials',
+        authorizationRequiredMessage: 'Authentication required for host export',
+        passphraseTitle: 'Host transfer passphrase',
+        defaultFileName:
+            'host-${host.label.toLowerCase().replaceAll(' ', '-')}',
+        errorContext: 'while exporting host data',
+        buildPayload: (service, transferPassphrase) =>
+            service.createHostPayload(
+              host: host,
+              transferPassphrase: transferPassphrase,
+              includeReferencedKey: host.keyId != null,
+            ),
       );
-      if (!context.mounted) {
-        return;
-      }
-      if (!isAuthorized) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Authentication required for host export'),
-          ),
-        );
-        return;
-      }
-    }
-
-    final transferPassphrase = await showTransferPassphraseDialog(
-      context: context,
-      title: 'Host transfer passphrase',
-    );
-    if (!context.mounted || transferPassphrase == null) {
-      return;
-    }
-
-    try {
-      final payload = await ref
-          .read(secureTransferServiceProvider)
-          .createHostPayload(
-            host: host,
-            transferPassphrase: transferPassphrase,
-            includeReferencedKey: host.keyId != null,
-          );
-
-      if (!context.mounted) {
-        return;
-      }
-
-      final defaultFileName = sanitizeTransferFileBaseName(
-        'host-${host.label.toLowerCase().replaceAll(' ', '-')}',
-      );
-
-      await saveTransferPayloadToFile(
-        context: context,
-        payload: payload,
-        defaultFileName: defaultFileName,
-        sharePositionOrigin: shareOriginFromContext(context),
-      );
-    } on FormatException catch (error) {
-      if (!context.mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.message)));
-    } on Exception catch (error) {
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          library: 'home',
-          context: ErrorDescription('while exporting host data'),
-        ),
-      );
-      if (!context.mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Export failed. Try again.')),
-      );
-    }
-  }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Host'),
-        content: Text('Delete "${host.label}"? This removes the saved host.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Host',
+      message: 'Delete "${host.label}"? This removes the saved host.',
     );
 
-    if ((confirmed ?? false) && context.mounted) {
+    if (confirmed && context.mounted) {
       final deletedCount = await ref
           .read(hostRepositoryProvider)
           .delete(host.id);
@@ -1825,8 +1835,9 @@ class _ConnectionRow extends ConsumerWidget {
           trailing: IconButton(
             icon: const Icon(Icons.close),
             tooltip: 'Disconnect',
-            onPressed: () =>
-                unawaited(_disconnectConnection(ref, connectionId)),
+            onPressed: () => unawaited(
+              disconnectConnectionAndClearMuxCaches(ref, connectionId),
+            ),
           ),
           onTap: openConnection,
         ),
@@ -2100,7 +2111,7 @@ class _KeyRow extends ConsumerWidget {
               _SmallIconButton(
                 icon: useShareSheet ? Icons.share : Icons.save_alt,
                 tooltip: useShareSheet ? 'Share encrypted' : 'Export encrypted',
-                onTap: () => unawaited(_exportEncryptedFile(context, ref)),
+                onTap: () => unawaited(_exportKeyFile(context, ref)),
               ),
               _SmallIconButton(
                 icon: Icons.copy,
@@ -2134,86 +2145,25 @@ class _KeyRow extends ConsumerWidget {
         .showSnackBar(const SnackBar(content: Text('Public key copied')));
   }
 
-  Future<void> _exportEncryptedFile(BuildContext context, WidgetRef ref) async {
-    final hasAccess = await requireMonetizationFeatureAccess(
-      context: context,
-      ref: ref,
-      feature: MonetizationFeature.encryptedTransfers,
-      blockedAction: 'Export encrypted key file',
-      blockedOutcome:
-          'Unlock Pro to move this SSH key securely to another device.',
-    );
-    if (!hasAccess || !context.mounted) {
-      return;
-    }
-    final isAuthorized = await authorizeSensitiveTransferExport(
-      context: context,
-      authService: ref.read(authServiceProvider),
-      readAuthState: () => ref.read(authStateProvider),
-      reason: 'Authenticate to export private key',
-    );
-    if (!context.mounted) {
-      return;
-    }
-    if (!isAuthorized) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Authentication required for key export')),
-      );
-      return;
-    }
-
-    final transferPassphrase = await showTransferPassphraseDialog(
-      context: context,
-      title: 'Key transfer passphrase',
-    );
-    if (!context.mounted || transferPassphrase == null) {
-      return;
-    }
-
-    try {
-      final payload = await ref
-          .read(secureTransferServiceProvider)
-          .createKeyPayload(
-            key: sshKey,
-            transferPassphrase: transferPassphrase,
-          );
-
-      if (!context.mounted) {
-        return;
-      }
-
-      final defaultFileName = sanitizeTransferFileBaseName(
-        'key-${sshKey.name.toLowerCase().replaceAll(' ', '-')}',
-      );
-
-      await saveTransferPayloadToFile(
-        context: context,
-        payload: payload,
-        defaultFileName: defaultFileName,
-        sharePositionOrigin: shareOriginFromContext(context),
-      );
-    } on FormatException catch (error) {
-      if (!context.mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.message)));
-    } on Exception catch (error) {
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          library: 'home',
-          context: ErrorDescription('while exporting key data'),
+  Future<void> _exportKeyFile(BuildContext context, WidgetRef ref) =>
+      _exportEncryptedFile(
+        context,
+        ref,
+        blockedAction: 'Export encrypted key file',
+        blockedOutcome:
+            'Unlock Pro to move this SSH key securely to another device.',
+        requiresAuthorization: true,
+        authorizationReason: 'Authenticate to export private key',
+        authorizationRequiredMessage: 'Authentication required for key export',
+        passphraseTitle: 'Key transfer passphrase',
+        defaultFileName:
+            'key-${sshKey.name.toLowerCase().replaceAll(' ', '-')}',
+        errorContext: 'while exporting key data',
+        buildPayload: (service, transferPassphrase) => service.createKeyPayload(
+          key: sshKey,
+          transferPassphrase: transferPassphrase,
         ),
       );
-      if (!context.mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Export failed. Try again.')),
-      );
-    }
-  }
 
   void _showKeyDetails(BuildContext context) {
     final theme = Theme.of(context);
@@ -2282,30 +2232,14 @@ class _KeyRow extends ConsumerWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Key'),
-        content: Text(
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Key',
+      message:
           'Delete "${sshKey.name}"? You’ll need the private key to reconnect.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
 
-    if ((confirmed ?? false) && context.mounted) {
+    if (confirmed && context.mounted) {
       await ref.read(keyRepositoryProvider).delete(sshKey.id);
     }
   }
@@ -2465,28 +2399,14 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     final snippetLabel = snippetCount == 1
         ? '1 snippet'
         : '$snippetCount snippets';
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Delete "${folder.name}"?'),
-        content: Text(
-          snippetCount == 0
-              ? 'This folder will be removed.'
-              : '$snippetLabel will move to No folder.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete "${folder.name}"?',
+      message: snippetCount == 0
+          ? 'This folder will be removed.'
+          : '$snippetLabel will move to No folder.',
     );
-    if ((confirmed ?? false) == false || !context.mounted) {
+    if (!confirmed || !context.mounted) {
       return;
     }
 
@@ -2758,7 +2678,12 @@ class _SnippetRow extends ConsumerWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _copySnippet(context, ref),
-        onLongPress: () => unawaited(_showContextMenuAtCenter(context, ref)),
+        onLongPress: () => unawaited(
+          _showContextMenuAtCenter(
+            context,
+            (position) => _showContextMenu(context, ref, position),
+          ),
+        ),
         onSecondaryTapDown: (details) =>
             unawaited(_showContextMenu(context, ref, details.globalPosition)),
         child: Container(
@@ -2833,8 +2758,13 @@ class _SnippetRow extends ConsumerWidget {
                 builder: (buttonContext) => _SmallIconButton(
                   icon: Icons.more_vert,
                   tooltip: 'Snippet actions',
-                  onTap: () =>
-                      unawaited(_showContextMenuAtCenter(buttonContext, ref)),
+                  onTap: () => unawaited(
+                    _showContextMenuAtCenter(
+                      buttonContext,
+                      (position) =>
+                          _showContextMenu(buttonContext, ref, position),
+                    ),
+                  ),
                 ),
               ),
               reorderHandle,
@@ -2843,21 +2773,6 @@ class _SnippetRow extends ConsumerWidget {
         ),
       ),
     );
-  }
-
-  Future<void> _showContextMenuAtCenter(
-    BuildContext context,
-    WidgetRef ref,
-  ) async {
-    final renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox == null) {
-      return;
-    }
-
-    final globalPosition = renderBox.localToGlobal(
-      renderBox.size.center(Offset.zero),
-    );
-    await _showContextMenu(context, ref, globalPosition);
   }
 
   Future<void> _showContextMenu(
@@ -2933,28 +2848,13 @@ class _SnippetRow extends ConsumerWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Snippet'),
-        content: Text('Delete "${snippet.name}"? This can’t be undone.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Snippet',
+      message: 'Delete "${snippet.name}"? This can’t be undone.',
     );
 
-    if ((confirmed ?? false) && context.mounted) {
+    if (confirmed && context.mounted) {
       await ref.read(snippetRepositoryProvider).delete(snippet.id);
       if (context.mounted) {
         ScaffoldMessenger.of(context)
@@ -3042,13 +2942,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     serviceForBackend: _serviceForBackend,
     extraFlags: () => widget.tmuxExtraFlags,
     onWindowsChanged: _syncConnectionSessionTitle,
-    disconnect: (session) async {
-      await ref.read(tmuxServiceProvider).clearCache(session.connectionId);
-      await ref.read(monkeyMuxServiceProvider).clearCache(session.connectionId);
-      await ref
-          .read(activeSessionsProvider.notifier)
-          .disconnect(session.connectionId);
-    },
+    disconnect: (session) =>
+        disconnectConnectionAndClearMuxCaches(ref, session.connectionId),
   )..addListener(_badgeChanged);
 
   void _badgeChanged() {
@@ -3096,14 +2991,15 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     }, identifier: _pageStorageIdentifier);
   }
 
-  bool get _hasAgentSessionAccess {
-    final monetizationState =
-        ref.read(monetizationStateProvider).asData?.value ??
-        ref.read(monetizationServiceProvider).currentState;
-    return monetizationState.allowsFeature(
-      MonetizationFeature.agentLaunchPresets,
-    );
-  }
+  /// Pro gate for the AI Sessions row. [build] passes a watched value so a
+  /// purchase that completes while the badge is on screen unlocks it at once.
+  bool _allowsAgentSessions(AsyncValue<MonetizationState> monetization) =>
+      (monetization.asData?.value ??
+              ref.read(monetizationServiceProvider).currentState)
+          .allowsFeature(MonetizationFeature.agentLaunchPresets);
+
+  bool get _hasAgentSessionAccess =>
+      _allowsAgentSessions(ref.read(monetizationStateProvider));
 
   RemoteMuxBackend _resolveMuxBackend(SshSession session) {
     final activeBackend = session.remoteMuxBackend;
@@ -3277,7 +3173,9 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     }
 
     final theme = Theme.of(context);
-    final hasAgentSessionAccess = _hasAgentSessionAccess;
+    final hasAgentSessionAccess = _allowsAgentSessions(
+      ref.watch(monetizationStateProvider),
+    );
     final totalWindowCount = windows.length + nativeAcpEntries.length;
     final firstNativeWindowIndex =
         windows.fold<int>(

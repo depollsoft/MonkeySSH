@@ -1,7 +1,5 @@
 // ignore_for_file: implementation_imports, public_member_api_docs
 
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
@@ -108,12 +106,4 @@ Color _resolveBackgroundColor(
       colorValue & 0xFF,
     ),
   };
-}
-
-double contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
 }

@@ -27,14 +27,6 @@ class CellOffset {
     return y > other.y || (y == other.y && x >= other.x);
   }
 
-  bool isAtSameRow(CellOffset other) {
-    return y == other.y;
-  }
-
-  bool isAtSameColumn(CellOffset other) {
-    return x == other.x;
-  }
-
   bool isWithin(BufferRange range) {
     return range.contains(this);
   }

@@ -20,9 +20,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import generate_store_screenshots as store_screenshots
-from store_media import _video_duration
+from store_media import ROOT, _video_duration, display_path
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_HOLD_MS = 1600
 ANDROID_RECORDING_BIT_RATE = 8_000_000
 # Store-slot output locations (all relative to the repo root).
@@ -158,13 +157,7 @@ def _run_target(
     demo._require_live_agent_windows()
     demo.reset_monkeymux()
     screenshot_target = target.screenshot_target
-    if screenshot_target.platform == 'ios':
-        device_id = store_screenshots._boot_ios_simulator(
-            store_screenshots._ios_simulator_name(screenshot_target),
-        )
-        store_screenshots._reset_ios_app_state(device_id)
-    else:
-        device_id = store_screenshots._android_device_id()
+    device_id = store_screenshots._prepare_device(screenshot_target)
 
     with store_screenshots._android_display_override(screenshot_target, device_id):
         with tempfile.TemporaryDirectory(prefix='monkeyssh-demo-video-') as tmpdir:
@@ -275,12 +268,14 @@ def _run_flutter_recording(
                 if recorder is None:
                     if target.platform == 'android':
                         _dismiss_android_system_dialogs(device_id, force=True)
-                    pending_recorder = _recorder_for_target(
+                    recorder = _recorder_for_target(
                         target, device_id, output_path,
                     )
-                    cleanup.callback(pending_recorder.stop)
-                    pending_recorder.start()
-                    recorder = pending_recorder
+                    # A failed start() cleans up after itself; registering
+                    # stop() only afterwards keeps its error from being
+                    # replaced by a "no recording produced" one.
+                    recorder.start()
+                    cleanup.callback(recorder.stop)
                 beat = _parse_beat(line)
                 if beat is not None and beat not in beat_times:
                     beat_times[beat] = time.monotonic()
@@ -304,7 +299,7 @@ def _run_flutter_recording(
     if output_path.stat().st_size < 500_000:
         raise RuntimeError(f'{output_path} is too small to be a real screen recording')
 
-    print(f'Wrote {_display_path(output_path)}')
+    print(f'Wrote {display_path(output_path)}')
     return _compute_beat_offsets(beat_times, len(_promo_segments()))
 
 
@@ -330,18 +325,17 @@ def _compute_beat_offsets(
 ) -> list[float]:
     """Returns per-beat offsets (seconds) relative to beat 1.
 
-    Returns an empty list when the beats are incomplete so callers fall back to
-    even time-slicing.
+    The app must emit exactly one beat per caption segment; anything else would
+    put every caption over the wrong scene while generation still succeeded.
     """
-    if 1 not in beat_times:
-        return []
+    expected = list(range(1, seg_count + 1))
+    if sorted(beat_times) != expected:
+        raise RuntimeError(
+            f'App emitted beats {sorted(beat_times)}, expected {expected} '
+            '(one per caption segment).'
+        )
     origin = beat_times[1]
-    offsets: list[float] = []
-    for beat in range(1, seg_count + 1):
-        if beat not in beat_times:
-            return []
-        offsets.append(max(0.0, beat_times[beat] - origin))
-    return offsets
+    return [max(0.0, beat_times[beat] - origin) for beat in expected]
 
 
 def _compose_promotional_video(
@@ -349,7 +343,7 @@ def _compose_promotional_video(
     target: store_screenshots.ScreenshotTarget,
     raw_path: Path,
     output_path: Path,
-    beat_offsets: list[float] | None = None,
+    beat_offsets: list[float],
 ) -> None:
     ffmpeg = shutil.which('ffmpeg')
     if ffmpeg is None:
@@ -357,7 +351,7 @@ def _compose_promotional_video(
 
     duration = _video_duration(raw_path)
     duration = min(duration, MAX_COMPOSE_DURATION)
-    seg_starts = _segment_starts(beat_offsets or [], len(_promo_segments()), duration)
+    seg_starts = _segment_starts(beat_offsets, duration)
     with tempfile.TemporaryDirectory(prefix='monkeyssh-demo-compose-') as tmpdir:
         tmpdir_path = Path(tmpdir)
         layout = _promo_layout(target)
@@ -427,7 +421,7 @@ def _compose_promotional_video(
                 '[out]',
                 '-an',
                 '-r',
-                '30',
+                str(OVERLAY_FPS),
                 '-t',
                 f'{duration:.3f}',
                 '-c:v',
@@ -445,7 +439,7 @@ def _compose_promotional_video(
 
     if output_path.stat().st_size < 500_000:
         raise RuntimeError(f'{output_path} is too small to be a composed demo video')
-    print(f'Wrote {_display_path(output_path)}')
+    print(f'Wrote {display_path(output_path)}')
 
 
 def _compose_app_preview(
@@ -454,7 +448,7 @@ def _compose_app_preview(
     output_path: Path,
     width: int,
     height: int,
-    beat_offsets: list[float] | None = None,
+    beat_offsets: list[float],
 ) -> None:
     """Composes an App Store-compliant preview: the full-screen native app at the
     exact device slot resolution, with fading lower-third caption overlays and a
@@ -465,7 +459,7 @@ def _compose_app_preview(
     if ffmpeg is None:
         raise RuntimeError('ffmpeg is required to compose app previews.')
     duration = min(_video_duration(raw_path), MAX_COMPOSE_DURATION)
-    seg_starts = _segment_starts(beat_offsets or [], len(_promo_segments()), duration)
+    seg_starts = _segment_starts(beat_offsets, duration)
     with tempfile.TemporaryDirectory(prefix='monkeyssh-app-preview-') as tmpdir:
         frames_dir = Path(tmpdir) / 'overlay-frames'
         frames_dir.mkdir(parents=True, exist_ok=True)
@@ -508,7 +502,7 @@ def _compose_app_preview(
             '-map',
             '2:a',
             '-r',
-            '30',
+            str(OVERLAY_FPS),
             '-t',
             f'{duration:.3f}',
             '-c:v',
@@ -532,7 +526,7 @@ def _compose_app_preview(
 
     if output_path.stat().st_size < 300_000:
         raise RuntimeError(f'{output_path} is too small to be an app preview')
-    print(f'Wrote {_display_path(output_path)}')
+    print(f'Wrote {display_path(output_path)}')
 
 
 def _render_app_preview_overlays(
@@ -668,7 +662,7 @@ def _compose_landscape_promo(
     *,
     raw_path: Path,
     output_path: Path,
-    beat_offsets: list[float] | None = None,
+    beat_offsets: list[float],
 ) -> None:
     """Composes a 16:9 landscape branded promo for the Google Play preview slot
     (uploaded to YouTube): the portrait app capture sits in a device frame on the
@@ -678,7 +672,7 @@ def _compose_landscape_promo(
     if ffmpeg is None:
         raise RuntimeError('ffmpeg is required to compose the landscape promo.')
     duration = min(_video_duration(raw_path), MAX_COMPOSE_DURATION)
-    seg_starts = _segment_starts(beat_offsets or [], len(_promo_segments()), duration)
+    seg_starts = _segment_starts(beat_offsets, duration)
     layout = _landscape_layout()
     with tempfile.TemporaryDirectory(prefix='monkeyssh-landscape-') as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -740,7 +734,7 @@ def _compose_landscape_promo(
             '-map',
             '3:a',
             '-r',
-            '30',
+            str(OVERLAY_FPS),
             '-t',
             f'{duration:.3f}',
             '-c:v',
@@ -764,7 +758,7 @@ def _compose_landscape_promo(
 
     if output_path.stat().st_size < 300_000:
         raise RuntimeError(f'{output_path} is too small to be a landscape promo')
-    print(f'Wrote {_display_path(output_path)}')
+    print(f'Wrote {display_path(output_path)}')
 
 
 def _landscape_layout() -> dict[str, int]:
@@ -874,12 +868,19 @@ def _render_landscape_overlays(
         'label': _load_font(int(height * 0.030), bold=True, mono=True),
     }
     text_top = int(height * 0.30)
+    glow_sprites = [
+        _glow_sprite(segment.accent, int(width * 0.42), alpha=44) for segment in segments
+    ]
+    layers = [
+        _render_segment_text(segment, index + 1, len(segments), panel_w, fonts)
+        for index, segment in enumerate(segments)
+    ]
     frame_count = int(math.ceil(duration * fps)) + 1
     for index in range(frame_count):
         t = min(index / fps, duration)
         frame = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        _draw_landscape_drift_glow(frame, t, segments, seg_starts, layout)
-        for seg_index, segment in enumerate(segments):
+        _draw_landscape_drift_glow(frame, t, seg_starts, glow_sprites, layout)
+        for seg_index in range(len(segments)):
             start, seg_len = _segment_span(seg_index, seg_starts, duration)
             local = t - start
             fade = 0.5
@@ -894,9 +895,7 @@ def _render_landscape_overlays(
             env = min(alpha_in, alpha_out)
             if env <= 0.01:
                 continue
-            layer = _render_segment_text(
-                segment, seg_index + 1, len(segments), panel_w, fonts,
-            )
+            layer = layers[seg_index].copy()
             _scale_alpha(layer, env)
             slide = int((1 - _ease_in_out(alpha_in)) * 40)
             frame.alpha_composite(layer, (panel_x, text_top + slide))
@@ -909,15 +908,14 @@ def _render_landscape_overlays(
 def _draw_landscape_drift_glow(
     frame: Image.Image,
     t: float,
-    segments: list[PromoSegment],
     seg_starts: list[float],
+    glow_sprites: list[Image.Image],
     layout: dict[str, int],
 ) -> None:
     width = layout['canvas_width']
     height = layout['canvas_height']
-    accent = segments[_segment_at(t, seg_starts)].accent
-    size = int(width * 0.42)
-    sprite = _glow_sprite(accent, size, alpha=44)
+    sprite = glow_sprites[_segment_at(t, seg_starts)]
+    size = sprite.width
     phase = 2 * math.pi * t
     top_x = int(width * 0.72 + math.sin(phase / 9) * width * 0.07) - size // 2
     top_y = int(height * 0.26 + math.cos(phase / 11) * height * 0.06) - size // 2
@@ -1049,9 +1047,6 @@ def _render_overlay_frames(
     height = layout['canvas_height']
     big = height > 2600
     segments = _promo_segments()
-    seg_count = len(segments)
-    if len(seg_starts) != seg_count:
-        seg_starts = [i * duration / seg_count for i in range(seg_count)]
     margin = int(width * 0.072)
     fonts = {
         'eyebrow': _load_font(28 if big else 23, bold=True, mono=True),
@@ -1066,30 +1061,28 @@ def _render_overlay_frames(
     ]
 
     text_top = int(height * 0.103)
+    layers = [
+        _render_segment_text(segment, index + 1, len(segments), width - 2 * margin, fonts)
+        for index, segment in enumerate(segments)
+    ]
 
     frame_count = int(math.ceil(duration * fps)) + 1
     for index in range(frame_count):
         t = min(index / fps, duration)
         frame = Image.new('RGBA', (width, height), (0, 0, 0, 0))
         _draw_drift_glow(frame, t, seg_starts, glow_sprites, layout)
-        _draw_top_text(frame, t, segments, seg_starts, duration, margin, text_top, width, fonts)
+        _draw_top_text(frame, t, layers, seg_starts, duration, margin, text_top)
         _draw_timeline(frame, t, segments, seg_starts, duration, margin, width, height, fonts)
         frame.save(directory / f'frame-{index:05d}.png')
     return frame_count
 
 
-def _segment_starts(
-    beat_offsets: list[float],
-    seg_count: int,
-    duration: float,
-) -> list[float]:
+def _segment_starts(beat_offsets: list[float], duration: float) -> list[float]:
     """Builds caption start times from measured beat offsets.
 
-    Falls back to even slicing when beats are missing. Applies a small lead so
-    captions land with their scene, and keeps the starts strictly increasing.
+    Applies a small lead so captions land with their scene, and keeps the
+    starts strictly increasing.
     """
-    if len(beat_offsets) != seg_count:
-        return [i * duration / seg_count for i in range(seg_count)]
     starts: list[float] = []
     prev = -1.0
     for index, offset in enumerate(beat_offsets):
@@ -1146,17 +1139,14 @@ def _draw_drift_glow(
 def _draw_top_text(
     frame: Image.Image,
     t: float,
-    segments: list[PromoSegment],
+    layers: list[Image.Image],
     seg_starts: list[float],
     duration: float,
     margin: int,
     text_top: int,
-    width: int,
-    fonts: dict[str, ImageFont.ImageFont],
 ) -> None:
-    region_w = width - 2 * margin
     fade = 0.5
-    for index, segment in enumerate(segments):
+    for index in range(len(layers)):
         start, seg_len = _segment_span(index, seg_starts, duration)
         local = t - start
         if local < -fade or local > seg_len + fade:
@@ -1164,7 +1154,7 @@ def _draw_top_text(
         alpha_in = _clamp01(local / fade)
         alpha_out = (
             1.0
-            if index == len(segments) - 1
+            if index == len(layers) - 1
             else _clamp01((seg_len - local) / fade)
         )
         env = min(alpha_in, alpha_out)
@@ -1173,9 +1163,7 @@ def _draw_top_text(
         slide = int((1 - _ease_in_out(alpha_in)) * 48) - int(
             (1 - _ease_in_out(alpha_out)) * 48,
         )
-        layer = _render_segment_text(
-            segment, index + 1, len(segments), region_w, fonts,
-        )
+        layer = layers[index].copy()
         _scale_alpha(layer, env)
         frame.alpha_composite(layer, (margin, text_top + slide))
 
@@ -1535,13 +1523,6 @@ def _load_font(
     return ImageFont.load_default()
 
 
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
-
-
 
 def _recorder_for_target(
     target: store_screenshots.ScreenshotTarget,
@@ -1594,7 +1575,8 @@ class _IosSimulatorRecorder(_NativeScreenRecorder):
         )
         time.sleep(0.5)
         if self._process.poll() is not None:
-            stderr = self._process.stderr.read() if self._process.stderr else ''
+            process, self._process = self._process, None
+            stderr = process.stderr.read() if process.stderr else ''
             raise RuntimeError(f'iOS screen recording failed to start: {stderr}')
 
     def stop(self) -> None:
@@ -1604,15 +1586,7 @@ class _IosSimulatorRecorder(_NativeScreenRecorder):
             return
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            _wait_for_recorder_exit(process)
         if process.stderr is not None:
             self._stderr = process.stderr.read()
             process.stderr.close()
@@ -1666,12 +1640,19 @@ class _AndroidScreenRecorder(_NativeScreenRecorder):
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        self._remote_pid = self._wait_for_remote_pid()
+        try:
+            self._remote_pid = self._wait_for_remote_pid()
+        except BaseException:
+            process, self._process = self._process, None
+            store_screenshots._terminate_process(process, timeout=5)
+            raise
 
     def stop(self) -> None:
         process = self._process
         self._process = None
-        if process is not None and process.poll() is None:
+        if process is None:
+            return
+        if process.poll() is None:
             if self._remote_pid is not None:
                 subprocess.run(
                     [
@@ -1688,15 +1669,7 @@ class _AndroidScreenRecorder(_NativeScreenRecorder):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            _wait_for_recorder_exit(process)
 
         subprocess.run(
             [
@@ -1755,6 +1728,19 @@ class _AndroidScreenRecorder(_NativeScreenRecorder):
                     return int(value)
             time.sleep(0.2)
         raise RuntimeError('Timed out waiting for Android screenrecord to start')
+
+
+def _wait_for_recorder_exit(process: subprocess.Popen) -> None:
+    """Waits for an interrupted recorder to finalize, escalating if it hangs."""
+    try:
+        process.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 class _AndroidSystemDialogWatchdog:

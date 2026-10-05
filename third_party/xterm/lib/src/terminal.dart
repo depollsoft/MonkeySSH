@@ -22,7 +22,6 @@ import 'package:xterm/src/core/mouse/mode.dart';
 import 'package:xterm/src/core/platform.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/core/tabs.dart';
-import 'package:xterm/src/utils/ascii.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
 typedef _GraphicsPreinflation = ({Uint8List? payload, int micros});
@@ -344,9 +343,6 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// Whether Kitty keyboard progressive-enhancement flags are active.
   bool get kittyKeyboardMode => kittyKeyboardFlags != 0;
 
-  /// Alias matching kterm's public API.
-  bool get kittyMode => kittyKeyboardMode;
-
   /// Active Kitty keyboard progressive-enhancement flags for the current buffer.
   int get kittyKeyboardFlags => _kittyKeyboardState.flags;
 
@@ -420,7 +416,6 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// Sends a key event to the underlying program.
   ///
   /// See also:
-  /// - [charInput]
   /// - [textInput]
   /// - [paste]
   bool keyInput(
@@ -468,50 +463,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     return false;
   }
 
-  /// Similary to [keyInput], but takes a character as input instead of a
-  /// [TerminalKey].
-  ///
-  /// See also:
-  /// - [keyInput]
-  /// - [textInput]
-  /// - [paste]
-  bool charInput(int charCode, {bool alt = false, bool ctrl = false}) {
-    if (ctrl) {
-      // a(97) ~ z(122)
-      if (charCode >= Ascii.a && charCode <= Ascii.z) {
-        final output = charCode - Ascii.a + 1;
-        onOutput?.call(String.fromCharCode(output));
-        notifyListeners();
-        return true;
-      }
-
-      // [(91) ~ _(95)
-      if (charCode >= Ascii.openBracket && charCode <= Ascii.underscore) {
-        final output = charCode - Ascii.openBracket + 27;
-        onOutput?.call(String.fromCharCode(output));
-        notifyListeners();
-        return true;
-      }
-    }
-
-    if (alt && platform != TerminalTargetPlatform.macos) {
-      if (charCode >= Ascii.a && charCode <= Ascii.z) {
-        final code = charCode - Ascii.a + 65;
-        final input = [0x1b, code];
-        onOutput?.call(String.fromCharCodes(input));
-        notifyListeners();
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   /// Sends regular text input to the underlying program.
   ///
   /// See also:
   /// - [keyInput]
-  /// - [charInput]
   /// - [paste]
   void textInput(String text) {
     final kittyOutput = encodeKittyTextInput(text, _kittyKeyboardState.flags);
@@ -531,17 +486,20 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   ///
   /// See also:
   /// - [textInput]
+  /// Terminal control sequences and unsafe controls stripped from pastes, in
+  /// the order they are applied.
+  static final _pasteControlPatterns = [
+    RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), // CSI
+    RegExp(r'\x1b\][\s\S]*?(?:\x07|\x1b\\)'), // OSC
+    RegExp(r'\x1b[P\^_X][\s\S]*?\x1b\\'), // DCS, PM, APC, SOS
+    RegExp(r'\x1b[ -/]*[@-~]'), // other escape sequences
+    RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'), // C0 but tab, LF and CR
+  ];
+
   void paste(String text) {
-    // Strip terminal control sequences and unsafe controls before sending paste
-    // payloads.
-    text = text.replaceAll(RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), '');
-    text = text.replaceAll(RegExp(r'\x1b\][\s\S]*?(?:\x07|\x1b\\)'), '');
-    text = text.replaceAll(RegExp(r'\x1b[P\^_X][\s\S]*?\x1b\\'), '');
-    text = text.replaceAll(RegExp(r'\x1b[ -/]*[@-~]'), '');
-    text = text.replaceAll(
-      RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'),
-      '',
-    );
+    for (final pattern in _pasteControlPatterns) {
+      text = text.replaceAll(pattern, '');
+    }
 
     text = text.replaceAll('\r\n', '\n');
     text = text.replaceAll('\r', '\n');
@@ -672,8 +630,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       _pendingKittyPlaceholder = pending;
       _lastKittyPlaceholder = pending;
     }
-    _precedingCodepoint = char;
-    _buffer.writeChar(char);
+    if (_buffer.writeChar(char)) {
+      _precedingCodepoint = char;
+    }
     if (placeholderToBind != null) {
       placeholderToBind.bind(
         _buffer.graphics.addPlaceholder(
@@ -700,24 +659,30 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   @override
-  void tab() {
+  void tab() => _advanceTab();
+
+  /// Moves to the next tab stop, or into the pending-wrap state past the last
+  /// column when none is left. Returns whether a stop was found.
+  bool _advanceTab() {
     final nextStop = _tabStops.find(_buffer.cursorX + 1, _viewWidth);
 
     if (nextStop != null) {
       _buffer.setCursorX(nextStop);
-    } else {
-      _buffer.setCursorX(_viewWidth);
-      _buffer.cursorGoForward(); // Enter pending-wrap state
+      return true;
     }
+    _buffer.setCursorX(_viewWidth);
+    _buffer.cursorGoForward(); // Enter pending-wrap state
+    return false;
   }
 
   @override
   void cursorForwardTab(int amount) {
     // CHT is defined as [amount] repetitions of a horizontal tab, so it reuses
     // [tab] verbatim -- including this terminal's pending-wrap handling at the
-    // right margin.
+    // right margin. Past the last stop a repetition changes nothing, and the
+    // count can be 2^31, so stop there.
     for (var i = 0; i < amount; i++) {
-      tab();
+      if (!_advanceTab()) break;
     }
   }
 
@@ -757,11 +722,6 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   void shiftIn() {
     _buffer.charset.use(0);
-  }
-
-  @override
-  void unknownSBC(int char) {
-    // no-op
   }
 
   /* ANSI sequence */
@@ -905,7 +865,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       return;
     }
 
-    for (var i = 0; i < count; i++) {
+    // Capped at one row, like the MonkeyMux screen model: the count can be
+    // 2^31.
+    for (var i = 0; i < count && i < _viewWidth; i++) {
       _buffer.writeChar(_precedingCodepoint);
     }
   }
@@ -922,7 +884,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setCursorY(int y) {
-    _buffer.setCursorY(y);
+    _buffer.setCursor(_buffer.cursorX, y);
   }
 
   @override
@@ -1142,7 +1104,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setMargins(int top, [int? bottom]) {
-    _buffer.setVerticalMargins(top, bottom ?? viewHeight - 1);
+    final lastRow = viewHeight - 1;
+    top = top.clamp(0, lastRow);
+    bottom = (bottom ?? lastRow).clamp(0, lastRow);
+    // Like xterm and the MonkeyMux screen model, a region of fewer than two
+    // rows is ignored and a valid one homes the cursor.
+    if (top >= bottom) return;
+    _buffer.setVerticalMargins(top, bottom);
+    _buffer.setCursor(0, 0);
   }
 
   @override

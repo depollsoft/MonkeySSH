@@ -36,7 +36,7 @@ Be respectful and constructive in all interactions.
    ```
 4. Install dependencies:
    ```bash
-   ./scripts/ensure_monkeymux_assets.sh
+   ./scripts/build_monkeymux_assets.sh
    flutter pub get
    ```
 5. Run the app:

@@ -35,11 +35,9 @@ import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
-import '../../domain/services/acp_concurrency_policy.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
-import '../../domain/services/monetization_service.dart';
 import '../../domain/services/pi_model_scope_metadata_service.dart';
 import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
@@ -452,43 +450,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       replace: replace,
     );
     if (result is AcpSessionLaunchBlocked && mounted) {
-      final choice = await showAcpConcurrencyChoice(
+      return resolveAcpConcurrencyBlock(
         context,
-        decision: result.decision,
-        managerState: manager.state,
+        ref,
+        result.decision,
+        relaunch: (replace) => _reconnect(cwd: cwd, replace: replace),
       );
-      if (choice == null) {
-        return null;
-      }
-      return _resolveConcurrency(choice, result.decision, cwd);
     }
     return result;
-  }
-
-  Future<AcpSessionLaunchResult?> _resolveConcurrency(
-    AcpConcurrencyChoice choice,
-    AcpConcurrencyRequiresChoice decision,
-    String cwd,
-  ) async {
-    final manager = ref.read(acpSessionManagerProvider);
-    switch (choice) {
-      case AcpConcurrencyChoice.stopAndContinue:
-        final blocking = [
-          for (final value in decision.blockingSessionKeys)
-            manager.state.byKeyValue(value)?.key,
-        ].whereType<AcpSessionKey>().toList(growable: false);
-        return _reconnect(cwd: cwd, replace: blocking);
-      case AcpConcurrencyChoice.upgrade:
-        await context.push<void>('/upgrade?feature=concurrentAcpSessions');
-        if (!mounted) {
-          return null;
-        }
-        final unlocked = ref
-            .read(monetizationServiceProvider)
-            .currentState
-            .isProUnlocked;
-        return unlocked ? _reconnect(cwd: cwd) : null;
-    }
   }
 
   /// Returns a live SFTP client owned by the host's current SSH connection,
@@ -770,17 +739,27 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   Future<void> _openConfig() => showAcpConfigOptions(context, sessionKey: _key);
 
-  List<AcpPermissionPrompt> _prompts(AcpSessionState session) {
+  /// Tool-call titles by id, used to label permission and elicitation
+  /// prompts; empty when nothing is pending so the timeline is not walked.
+  Map<String, String> _toolTitles(AcpSessionState session) {
+    if (session.pendingPermissions.isEmpty &&
+        session.pendingElicitations.isEmpty &&
+        session.awaitingElicitations.isEmpty) {
+      return const <String, String>{};
+    }
+    return <String, String>{
+      for (final entry
+          in session.timeline.entries.whereType<domain.AcpToolCallEntry>())
+        if (entry.title?.trim().isNotEmpty ?? false)
+          entry.toolCallId: entry.title!.trim(),
+    };
+  }
+
+  List<AcpPermissionPrompt> _prompts(
+    AcpSessionState session,
+    Map<String, String> toolTitles,
+  ) {
     final manager = ref.read(acpSessionManagerProvider);
-    final toolTitles = session.pendingPermissions.isEmpty
-        ? const <String, String>{}
-        : <String, String>{
-            for (final entry
-                in session.timeline.entries
-                    .whereType<domain.AcpToolCallEntry>())
-              if (entry.title?.trim().isNotEmpty ?? false)
-                entry.toolCallId: entry.title!.trim(),
-          };
     return [
       for (final pending in session.pendingPermissions)
         acpToolPromptFromSession(
@@ -803,18 +782,16 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     ];
   }
 
-  Widget _elicitationSurface(AcpSessionState session) {
+  Widget _elicitationSurface(
+    AcpSessionState session,
+    Map<String, String> toolTitles,
+  ) {
     final manager = ref.read(acpSessionManagerProvider);
     return AcpElicitationSurface(
       agentLabel: session.providerLabel,
       elicitations: session.pendingElicitations,
       awaiting: session.awaitingElicitations,
-      toolTitles: {
-        for (final entry
-            in session.timeline.entries.whereType<domain.AcpToolCallEntry>())
-          if (entry.title?.trim().isNotEmpty ?? false)
-            entry.toolCallId: entry.title!.trim(),
-      },
+      toolTitles: toolTitles,
       onAccept: (requestKey, content) =>
           manager.acceptElicitation(_key, requestKey, content: content),
       onDecline: (requestKey) => manager.declineElicitation(_key, requestKey),
@@ -1177,7 +1154,6 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     required bool showBack,
     required Widget Function(Widget child) contentWrapper,
   }) {
-    final colorScheme = Theme.of(context).colorScheme;
     if (session == null) {
       final content = _connectError != null
           ? _buildConnectError(_connectError!)
@@ -1206,70 +1182,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     final entries = _timelineMapperCache.map(session);
     final activity = acpSessionActivityDisplay(session);
     _queuePreviewPublish(session, entries, activity);
-    final prompts = _prompts(session);
-    final quickConfigControls = _buildQuickConfigControls(session);
+    final toolTitles = _toolTitles(session);
+    final prompts = _prompts(session, toolTitles);
 
     return Scaffold(
       resizeToAvoidBottomInset: !widget.embedded,
       appBar: widget.embedded
           ? null
-          : AppBar(
-              automaticallyImplyLeading: showBack,
-              titleSpacing: 0,
-              title: Tooltip(
-                message: 'Switch agent session',
-                child: InkWell(
-                  onTap: widget.embedded
-                      ? null
-                      : () => showAcpSessionSwitcher(context, currentKey: _key),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: FluttyTheme.spacingSm,
-                      vertical: FluttyTheme.spacingXs,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                acpSessionDisplayTitle(session),
-                                style: FluttyTheme.displayMono(fontSize: 16),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              Text(
-                                '${session.providerLabel} · '
-                                '${acpCwdSummary(session.cwd)} · '
-                                '${activity.label}',
-                                style: FluttyTheme.monoStyle.copyWith(
-                                  color: colorScheme.onSurfaceVariant,
-                                  fontSize: 12,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (!widget.embedded)
-                          const Icon(Icons.expand_more, size: 20),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              actions: [
-                if (!widget.embedded)
-                  IconButton(
-                    tooltip: 'MonkeyMux windows',
-                    icon: const Icon(Icons.window_outlined),
-                    onPressed: _openMonkeyMuxWindows,
-                  ),
-                _buildOverflowMenu(session),
-              ],
-            ),
+          : _buildAppBar(session, activity, showBack: showBack),
       body: Column(
         children: [
           Expanded(
@@ -1279,122 +1199,17 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 bottom: !widget.embedded,
                 child: Column(
                   children: [
-                    if (session.status != AcpConnectionStatus.ready)
-                      _buildSessionStatusBanner(session)
-                    else if (!activity.isReady && activity.label != 'working')
-                      _SessionStatusBanner(
-                        message: switch (activity.label) {
-                          'working' => 'agent is working',
-                          'sending' => 'sending prompt',
-                          'cancelling' => 'cancelling current turn',
-                          _ => activity.label,
-                        },
-                        icon: activity.icon,
-                        tone: activity.tone,
-                        transitioning:
-                            session.promptStatus != AcpPromptStatus.idle &&
-                            !activity.needsInput,
-                        progressFraction: widget.embedded
-                            ? null
-                            : activity.progressFraction,
-                        indeterminateProgress:
-                            !widget.embedded && activity.indeterminate,
-                      ),
-                    Expanded(
-                      child: Stack(
-                        children: [
-                          if (entries.isEmpty)
-                            _AcpEmptyConversation(
-                              providerLabel: session.providerLabel,
-                              cwd: acpCwdSummary(session.cwd),
-                            )
-                          else
-                            NotificationListener<ScrollMetricsNotification>(
-                              onNotification: (_) {
-                                _scheduleAutoScroll();
-                                return false;
-                              },
-                              child: NotificationListener<ScrollNotification>(
-                                onNotification: _handleTranscriptScroll,
-                                child: AcpMessageThread(
-                                  entries: entries,
-                                  controller: _scroll,
-                                  followTail: _autoScroll,
-                                  onStickyPromptTap: _handleStickyPromptTap,
-                                  footer:
-                                      session.promptStatus ==
-                                          AcpPromptStatus.idle
-                                      ? null
-                                      : IgnorePointer(
-                                          key: const ValueKey(
-                                            'acp-running-cursor',
-                                          ),
-                                          child: CursorBlock(
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .primary,
-                                            size: 12,
-                                          ),
-                                        ),
-                                  imageResolver: _resolveChatImage,
-                                  onTapImage: _openImageViewer,
-                                  onOpenResource: _openResource,
-                                  onCopyResource: (resource) =>
-                                      _copyToClipboard(
-                                        resource.uri,
-                                        'Resource',
-                                      ),
-                                  onTapLink: _openMarkdownLink,
-                                  onCopyCode: (code) =>
-                                      _copyToClipboard(code, 'Code'),
-                                  onOpenLocation: (location) =>
-                                      unawaited(_openRemotePath(location.path)),
-                                ),
-                              ),
-                            ),
-                          if (_showJumpToLatest)
-                            Positioned(
-                              right: FluttyTheme.spacingMd,
-                              bottom: FluttyTheme.spacingMd,
-                              child: SizedBox.square(
-                                dimension: 44,
-                                child: FloatingActionButton.small(
-                                  heroTag: 'acp-jump-latest',
-                                  tooltip: 'Jump to latest',
-                                  onPressed: _jumpToLatest,
-                                  child: const Icon(Icons.arrow_downward),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
+                    ?_buildBanner(session, activity),
+                    Expanded(child: _buildTranscript(session, entries)),
                     if (prompts.isNotEmpty ||
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
-                      ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: MediaQuery.sizeOf(context).height * 0.34,
-                        ),
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: FluttyTheme.spacingMd,
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _elicitationSurface(session),
-                              AcpPermissionSurface(prompts: prompts),
-                            ],
-                          ),
-                        ),
-                      ),
+                      _buildPendingPanel(session, prompts, toolTitles),
                     AcpComposer(
                       controller: _composer,
                       attachmentActions: _attachmentActions(session),
                       focusController: widget.composerFocusController,
-                      controls: quickConfigControls,
+                      controls: _buildQuickConfigControls(session),
                       useBottomSafeArea: !widget.embedded,
                     ),
                   ],
@@ -1406,6 +1221,175 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       ),
     );
   }
+
+  AppBar _buildAppBar(
+    AcpSessionState session,
+    AcpStatusDisplay activity, {
+    required bool showBack,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return AppBar(
+      automaticallyImplyLeading: showBack,
+      titleSpacing: 0,
+      title: Tooltip(
+        message: 'Switch agent session',
+        child: InkWell(
+          onTap: widget.embedded
+              ? null
+              : () => showAcpSessionSwitcher(context, currentKey: _key),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: FluttyTheme.spacingSm,
+              vertical: FluttyTheme.spacingXs,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        acpSessionDisplayTitle(session),
+                        style: FluttyTheme.displayMono(fontSize: 16),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        '${session.providerLabel} · '
+                        '${acpCwdSummary(session.cwd)} · '
+                        '${activity.label}',
+                        style: FluttyTheme.monoStyle.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                if (!widget.embedded) const Icon(Icons.expand_more, size: 20),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        if (!widget.embedded)
+          IconButton(
+            tooltip: 'MonkeyMux windows',
+            icon: const Icon(Icons.window_outlined),
+            onPressed: _openMonkeyMuxWindows,
+          ),
+        _buildOverflowMenu(session),
+      ],
+    );
+  }
+
+  Widget? _buildBanner(AcpSessionState session, AcpStatusDisplay activity) {
+    if (session.status != AcpConnectionStatus.ready) {
+      return _buildSessionStatusBanner(session);
+    }
+    if (!activity.isReady && activity.label != 'working') {
+      return _SessionStatusBanner(
+        message: switch (activity.label) {
+          'sending' => 'sending prompt',
+          'cancelling' => 'cancelling current turn',
+          _ => activity.label,
+        },
+        icon: activity.icon,
+        tone: activity.tone,
+        transitioning:
+            session.promptStatus != AcpPromptStatus.idle &&
+            !activity.needsInput,
+        progressFraction: widget.embedded ? null : activity.progressFraction,
+        indeterminateProgress: !widget.embedded && activity.indeterminate,
+      );
+    }
+    return null;
+  }
+
+  Widget _buildTranscript(
+    AcpSessionState session,
+    List<ui.AcpTimelineEntry> entries,
+  ) => Stack(
+    children: [
+      if (entries.isEmpty)
+        _AcpEmptyConversation(
+          providerLabel: session.providerLabel,
+          cwd: acpCwdSummary(session.cwd),
+        )
+      else
+        NotificationListener<ScrollMetricsNotification>(
+          onNotification: (_) {
+            _scheduleAutoScroll();
+            return false;
+          },
+          child: NotificationListener<ScrollNotification>(
+            onNotification: _handleTranscriptScroll,
+            child: AcpMessageThread(
+              entries: entries,
+              controller: _scroll,
+              followTail: _autoScroll,
+              onStickyPromptTap: _handleStickyPromptTap,
+              footer: session.promptStatus == AcpPromptStatus.idle
+                  ? null
+                  : IgnorePointer(
+                      key: const ValueKey('acp-running-cursor'),
+                      child: CursorBlock(
+                        color: Theme.of(context).colorScheme.primary,
+                        size: 12,
+                      ),
+                    ),
+              imageResolver: _resolveChatImage,
+              onTapImage: _openImageViewer,
+              onOpenResource: _openResource,
+              onCopyResource: (resource) =>
+                  _copyToClipboard(resource.uri, 'Resource'),
+              onTapLink: _openMarkdownLink,
+              onCopyCode: (code) => _copyToClipboard(code, 'Code'),
+              onOpenLocation: (location) =>
+                  unawaited(_openRemotePath(location.path)),
+            ),
+          ),
+        ),
+      if (_showJumpToLatest)
+        Positioned(
+          right: FluttyTheme.spacingMd,
+          bottom: FluttyTheme.spacingMd,
+          child: SizedBox.square(
+            dimension: 44,
+            child: FloatingActionButton.small(
+              heroTag: 'acp-jump-latest',
+              tooltip: 'Jump to latest',
+              onPressed: _jumpToLatest,
+              child: const Icon(Icons.arrow_downward),
+            ),
+          ),
+        ),
+    ],
+  );
+
+  Widget _buildPendingPanel(
+    AcpSessionState session,
+    List<AcpPermissionPrompt> prompts,
+    Map<String, String> toolTitles,
+  ) => ConstrainedBox(
+    constraints: BoxConstraints(
+      maxHeight: MediaQuery.sizeOf(context).height * 0.34,
+    ),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: FluttyTheme.spacingMd),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _elicitationSurface(session, toolTitles),
+          AcpPermissionSurface(prompts: prompts),
+        ],
+      ),
+    ),
+  );
 
   Widget _buildSessionStatusBanner(AcpSessionState session) {
     final status = session.status;
@@ -1521,11 +1505,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     context.go(buildAcpSessionFallbackLocation());
   }
 
-  bool get _hasProviderSignInCommand => acpBuiltinProviders.any(
-    (provider) =>
-        provider.id == widget.providerId &&
-        provider.terminalAuthCommand != null,
-  );
+  bool get _hasProviderSignInCommand =>
+      acpTerminalAuthCommandFor(widget.providerId) != null;
 
   /// Offers the agent's advertised sign-in methods for this session.
   ///
@@ -1641,27 +1622,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   Future<void> _openTerminalForAuth() async {
-    final session = widget.providerId == AcpBuiltinProviderIds.openCode
-        ? ref
-              .read(sshServiceProvider)
-              .getSessionsForHost(widget.hostId)
-              .firstOrNull
-        : null;
-    final authCommand = await resolveAcpTerminalAuthCommand(
+    await copyAcpTerminalAuthCommand(
+      context,
+      ref,
       providerId: widget.providerId,
-      session: session,
+      hostId: widget.hostId,
     );
     if (!mounted) return;
-    if (authCommand != null) {
-      unawaited(
-        Clipboard.setData(ClipboardData(text: authCommand.argv.join(' '))),
-      );
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Sign-in command copied — run it in the terminal.'),
-        ),
-      );
-    }
     if (widget.embedded) {
       widget.onExitEmbedded?.call();
     } else {
@@ -1816,55 +1783,25 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   /// opening the new session or surfacing a safe error.
   Future<void> _fork() async {
     final manager = ref.read(acpSessionManagerProvider);
-    var result = await manager.forkSession(_key);
+    AcpSessionLaunchResult? result = await manager.forkSession(_key);
 
     if (result is AcpSessionLaunchBlocked) {
       if (!mounted) {
         return;
       }
       final decision = result.decision;
-      final choice = await showAcpConcurrencyChoice(
+      result = await resolveAcpConcurrencyBlock(
         context,
-        decision: decision,
-        managerState: manager.state,
+        ref,
+        decision,
+        relaunch: (replace) => manager.forkSession(_key, replace: replace),
         allowStopAndContinue: !decision.blockingSessionKeys.contains(
           _key.value,
         ),
       );
-      if (choice == null || !mounted) {
-        return;
-      }
-      switch (choice) {
-        case AcpConcurrencyChoice.stopAndContinue:
-          // forkSession has no replace parameter, so free capacity first by
-          // stopping the blocking live session(s), then retry the fork.
-          for (final value in decision.blockingSessionKeys) {
-            final blockingKey = manager.state.byKeyValue(value)?.key;
-            if (blockingKey != null) {
-              await manager.stopSession(blockingKey);
-            }
-          }
-          if (!mounted) {
-            return;
-          }
-          result = await manager.forkSession(_key);
-        case AcpConcurrencyChoice.upgrade:
-          await context.push<void>('/upgrade?feature=concurrentAcpSessions');
-          if (!mounted) {
-            return;
-          }
-          final unlocked = ref
-              .read(monetizationServiceProvider)
-              .currentState
-              .isProUnlocked;
-          if (!unlocked) {
-            return;
-          }
-          result = await manager.forkSession(_key);
-      }
     }
 
-    if (!mounted) {
+    if (!mounted || result == null) {
       return;
     }
     switch (result) {

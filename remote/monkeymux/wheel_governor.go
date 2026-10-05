@@ -10,20 +10,6 @@ type wheelAccelerationProfile struct {
 	speed  func(count int) int
 }
 
-var wheelAccelerationProfiles = map[string]*wheelAccelerationProfile{
-	"antigravity": {
-		window: 150 * time.Millisecond,
-		speed: func(count int) int {
-			// Integer square root, bounded by the TUI's maximum speed.
-			speed := 1
-			for speed < 12 && speed*speed <= count {
-				speed++
-			}
-			return speed
-		},
-	},
-}
-
 var wheelGovernorNow = time.Now
 
 // Like scheduleRestoreRedraw, this is replaceable so tests can fire timers
@@ -267,7 +253,7 @@ func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
 		return nil
 	}
-	return wheelAccelerationProfiles[w.agentToolLocked()]
+	return agentRegistry[w.agentToolLocked()].wheelProfile
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

@@ -91,6 +91,83 @@ void registerTerminalPathVerifierTests() {
     });
 
     test(
+      'stats a shared directory prefix once and caches the shrunken link',
+      () {
+        fakeAsync((async) {
+          final sshClient = _MockSshClient();
+          final session = SshSession(
+            connectionId: 7,
+            hostId: 1,
+            client: sshClient,
+            config: const SshConnectionConfig(
+              hostname: 'terminal.example.com',
+              port: 22,
+              username: 'root',
+            ),
+          );
+          var mounted = true;
+          final verifier = TerminalPathVerifier(
+            currentScope: () => '1:${session.connectionId}:/project',
+            workingDirectory: () => '/project',
+            activeSession: () => session,
+            isMounted: () => mounted,
+            onCacheChanged: () {},
+            showMessage: (_) {},
+            now: () => DateTime(2026).add(async.elapsed),
+          );
+
+          try {
+            final sftp = _MockSftpClient();
+            final statPaths = <String>[];
+            when(sshClient.sftp).thenAnswer((_) async => sftp);
+            when(() => sftp.stat(any())).thenAnswer((invocation) async {
+              final path = invocation.positionalArguments.single as String;
+              statPaths.add(path);
+              if (path == '/project/src/foo') {
+                return SftpFileAttrs();
+              }
+              // ignore: only_throw_errors
+              throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+            });
+            verifier
+              ..primeTerminalFilePathVerification('src/foo/a.cpp')
+              ..primeTerminalFilePathVerification('src/foo/b.cpp');
+            async
+              ..flushMicrotasks()
+              ..elapse(const Duration(milliseconds: 100))
+              ..flushMicrotasks();
+            // Both files probe their own candidates, but the shared directory
+            // prefix is only stat'ed once.
+            expect(statPaths, contains('/project/src/foo/a.cpp'));
+            expect(statPaths, contains('/project/src/foo/b.cpp'));
+            expect(statPaths.where((path) => path == '/project/src/foo'), [
+              '/project/src/foo',
+            ]);
+            expect(
+              verifier.interactiveTerminalFilePathCandidate('src/foo/b.cpp'),
+              'src/foo',
+            );
+
+            // Tapping the shrunken link is a cache hit, not another stat.
+            final statCount = statPaths.length;
+            String? resolved;
+            verifier
+                .resolveVerifiedTerminalFilePath('src/foo')
+                .then((value) => resolved = value);
+            async.flushMicrotasks();
+            expect(resolved, '/project/src/foo');
+            expect(statPaths, hasLength(statCount));
+          } finally {
+            mounted = false;
+            verifier
+              ..cancelPendingBatch()
+              ..disposeTerminalPathVerificationSftp();
+          }
+        });
+      },
+    );
+
+    test(
       'path batch stops using its SFTP client after session replacement',
       () {
         fakeAsync((async) {

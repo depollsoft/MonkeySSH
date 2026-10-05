@@ -1,251 +1,71 @@
-import 'dart:convert';
-
 import 'package:collection/collection.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
 
-/// Reserved ID prefix for built-in ACP providers.
-///
-/// Custom provider IDs must never use this prefix so user-defined and
-/// built-in providers can never collide.
-const acpCustomProviderReservedIdPrefix = 'builtin:';
+/// ID prefix shared by every built-in ACP provider.
+const acpBuiltinProviderIdPrefix = 'builtin:';
 
-/// Maximum length allowed for a custom ACP provider ID.
-const acpProviderIdMaxLength = 128;
-
-/// Maximum length allowed for a custom ACP provider label.
-const acpProviderLabelMaxLength = 120;
-
-/// Maximum length allowed for an ACP launch command executable.
-const acpLaunchCommandExecutableMaxLength = 1024;
-
-/// Maximum length allowed for a single ACP launch command argument.
-const acpLaunchCommandArgumentMaxLength = 4096;
-
-/// Maximum number of arguments allowed in an ACP launch command.
-const acpLaunchCommandMaxArgumentCount = 64;
-
-final _controlCharacterPattern = RegExp(r'[\x00-\x1F\x7F]');
 const _listEquality = ListEquality<String>();
+const _mapEquality = MapEquality<String, String>();
 
 /// Stable identifiers for built-in ACP providers.
 abstract final class AcpBuiltinProviderIds {
   /// GitHub Copilot CLI.
-  static const copilotCli = '${acpCustomProviderReservedIdPrefix}copilot-cli';
+  static const copilotCli = '${acpBuiltinProviderIdPrefix}copilot-cli';
 
   /// Claude Agent SDK ACP adapter.
-  static const claudeAgent =
-      '${acpCustomProviderReservedIdPrefix}claude-agent-acp';
+  static const claudeAgent = '${acpBuiltinProviderIdPrefix}claude-agent-acp';
 
   /// Codex ACP adapter.
-  static const codex = '${acpCustomProviderReservedIdPrefix}codex-acp';
+  static const codex = '${acpBuiltinProviderIdPrefix}codex-acp';
 
   /// OpenCode CLI.
-  static const openCode = '${acpCustomProviderReservedIdPrefix}opencode';
+  static const openCode = '${acpBuiltinProviderIdPrefix}opencode';
 
   /// Cursor Agent's native ACP server.
-  static const cursorAgent =
-      '${acpCustomProviderReservedIdPrefix}cursor-agent-acp';
+  static const cursorAgent = '${acpBuiltinProviderIdPrefix}cursor-agent-acp';
 
   /// Antigravity ACP adapter.
-  static const antigravity =
-      '${acpCustomProviderReservedIdPrefix}antigravity-acp';
+  static const antigravity = '${acpBuiltinProviderIdPrefix}antigravity-acp';
 
   /// Pi's standalone ACP adapter.
-  static const pi = '${acpCustomProviderReservedIdPrefix}pi-acp';
+  static const pi = '${acpBuiltinProviderIdPrefix}pi-acp';
 
   /// Community ACP adapter for Meta Muse Code.
-  static const museCode = '${acpCustomProviderReservedIdPrefix}muse-code';
+  static const museCode = '${acpBuiltinProviderIdPrefix}muse-code';
 
   /// xAI Grok Build's official ACP stdio server.
-  static const grokBuild = '${acpCustomProviderReservedIdPrefix}grok-build';
+  static const grokBuild = '${acpBuiltinProviderIdPrefix}grok-build';
 
   /// Nous Research Hermes ACP server.
-  static const hermes = '${acpCustomProviderReservedIdPrefix}hermes-acp';
+  static const hermes = '${acpBuiltinProviderIdPrefix}hermes-acp';
 
   /// OpenClaw ACP server.
-  static const openClaw = '${acpCustomProviderReservedIdPrefix}openclaw-acp';
+  static const openClaw = '${acpBuiltinProviderIdPrefix}openclaw-acp';
 }
 
 /// Resolves the terminal-agent identity sharing a built-in ACP provider.
 AgentLaunchTool? agentLaunchToolForBuiltinAcpProviderId(String providerId) =>
-    switch (providerId) {
-      AcpBuiltinProviderIds.claudeAgent => AgentLaunchTool.claudeCode,
-      AcpBuiltinProviderIds.copilotCli => AgentLaunchTool.copilotCli,
-      AcpBuiltinProviderIds.codex => AgentLaunchTool.codex,
-      AcpBuiltinProviderIds.openCode => AgentLaunchTool.openCode,
-      AcpBuiltinProviderIds.cursorAgent => AgentLaunchTool.cursorAgent,
-      AcpBuiltinProviderIds.antigravity => AgentLaunchTool.antigravity,
-      AcpBuiltinProviderIds.pi => AgentLaunchTool.pi,
-      AcpBuiltinProviderIds.hermes => AgentLaunchTool.hermes,
-      AcpBuiltinProviderIds.openClaw => AgentLaunchTool.openclaw,
-      AcpBuiltinProviderIds.grokBuild => AgentLaunchTool.grokBuild,
-      AcpBuiltinProviderIds.museCode => AgentLaunchTool.museCode,
-      _ => null,
-    };
-
-/// Validates and normalizes a custom ACP provider ID.
-///
-/// Throws a [FormatException] when [id] is blank, exceeds
-/// [acpProviderIdMaxLength], contains control characters (including NUL), or
-/// uses the reserved built-in prefix.
-String validateAcpCustomProviderId(String id) {
-  final trimmed = id.trim();
-  if (trimmed.isEmpty) {
-    throw const FormatException('ACP provider ID must not be blank');
-  }
-  if (trimmed.length > acpProviderIdMaxLength) {
-    throw const FormatException(
-      'ACP provider ID must not exceed $acpProviderIdMaxLength characters',
-    );
-  }
-  if (_controlCharacterPattern.hasMatch(trimmed)) {
-    throw const FormatException(
-      'ACP provider ID must not contain control characters',
-    );
-  }
-  if (trimmed.startsWith(acpCustomProviderReservedIdPrefix)) {
-    throw const FormatException(
-      'ACP provider ID must not use the reserved built-in prefix',
-    );
-  }
-  return trimmed;
-}
-
-/// Validates and normalizes an ACP provider label.
-///
-/// Throws a [FormatException] when [label] is blank, exceeds
-/// [acpProviderLabelMaxLength], or contains control characters.
-String validateAcpProviderLabel(String label) {
-  final trimmed = label.trim();
-  if (trimmed.isEmpty) {
-    throw const FormatException('ACP provider label must not be blank');
-  }
-  if (trimmed.length > acpProviderLabelMaxLength) {
-    throw const FormatException(
-      'ACP provider label must not exceed $acpProviderLabelMaxLength characters',
-    );
-  }
-  if (_controlCharacterPattern.hasMatch(trimmed)) {
-    throw const FormatException(
-      'ACP provider label must not contain control characters',
-    );
-  }
-  return trimmed;
-}
-
-/// Validates an ACP launch command.
-///
-/// Throws a [FormatException] when the executable is blank, either the
-/// executable or an argument contains control characters (including NUL), or
-/// the command exceeds reasonable length/count limits.
-void validateAcpLaunchCommand(AcpLaunchCommand command) {
-  final executable = command.executable.trim();
-  if (executable.isEmpty) {
-    throw const FormatException(
-      'ACP launch command executable must not be blank',
-    );
-  }
-  if (executable.length > acpLaunchCommandExecutableMaxLength) {
-    throw const FormatException(
-      'ACP launch command executable must not exceed '
-      '$acpLaunchCommandExecutableMaxLength characters',
-    );
-  }
-  if (_controlCharacterPattern.hasMatch(command.executable)) {
-    throw const FormatException(
-      'ACP launch command executable must not contain control characters',
-    );
-  }
-  if (command.arguments.length > acpLaunchCommandMaxArgumentCount) {
-    throw const FormatException(
-      'ACP launch command must not exceed $acpLaunchCommandMaxArgumentCount '
-      'arguments',
-    );
-  }
-  for (final argument in command.arguments) {
-    if (argument.length > acpLaunchCommandArgumentMaxLength) {
-      throw const FormatException(
-        'ACP launch command argument must not exceed '
-        '$acpLaunchCommandArgumentMaxLength characters',
-      );
-    }
-    if (_controlCharacterPattern.hasMatch(argument)) {
-      throw const FormatException(
-        'ACP launch command argument must not contain control characters',
-      );
-    }
-  }
-}
-
-/// Computes a deterministic fingerprint for [command].
-///
-/// The fingerprint changes whenever the executable or any argument changes,
-/// so it can be compared against a previously approved fingerprint to detect
-/// when a user must re-approve a custom provider's command.
-String computeAcpLaunchCommandFingerprint(AcpLaunchCommand command) {
-  final canonical = jsonEncode({
-    'executable': command.executable,
-    'arguments': command.arguments,
-  });
-  return sha256.convert(utf8.encode(canonical)).toString();
-}
+    acpBuiltinProviders
+        .firstWhereOrNull((provider) => provider.id == providerId)
+        ?.tool;
 
 /// A single non-interactive process invocation: an executable plus its
 /// arguments.
 ///
 /// The working directory is deliberately not part of this model. The remote
-/// bridge always controls the working directory a provider launches into, so
-/// it must never be smuggled inside an approved command.
+/// bridge always controls the working directory a provider launches into.
 @immutable
 class AcpLaunchCommand {
   /// Creates a new [AcpLaunchCommand].
   ///
   /// [arguments] is defensively copied so later mutations to a caller-owned
-  /// list can never change this command after construction (which would
-  /// otherwise let an already-approved command's fingerprint go stale
-  /// without detection).
+  /// list can never change this command after construction.
   AcpLaunchCommand({
     required this.executable,
     List<String> arguments = const [],
   }) : arguments = List.unmodifiable(arguments);
-
-  /// Decodes an [AcpLaunchCommand] from untrusted JSON, returning `null`
-  /// instead of throwing when [json] is malformed or fails validation.
-  static AcpLaunchCommand? tryFromJson(Object? json) {
-    if (json is! Map || json.keys.any((key) => key is! String)) {
-      return null;
-    }
-    final executable = json['executable'];
-    if (executable is! String) {
-      return null;
-    }
-    final rawArguments = json['arguments'];
-    if (rawArguments != null && rawArguments is! List) {
-      return null;
-    }
-    final arguments = <String>[];
-    if (rawArguments is List) {
-      for (final value in rawArguments) {
-        if (value is! String) {
-          return null;
-        }
-        arguments.add(value);
-      }
-    }
-    final command = AcpLaunchCommand(
-      executable: executable,
-      arguments: List.unmodifiable(arguments),
-    );
-    try {
-      validateAcpLaunchCommand(command);
-    } on FormatException {
-      return null;
-    }
-    return command;
-  }
 
   /// The executable name or path to launch.
   final String executable;
@@ -255,12 +75,6 @@ class AcpLaunchCommand {
 
   /// The full argument vector, with [executable] first.
   List<String> get argv => [executable, ...arguments];
-
-  /// Encodes this command as JSON.
-  Map<String, dynamic> toJson() => {
-    'executable': executable,
-    'arguments': arguments,
-  };
 
   @override
   bool operator ==(Object other) =>
@@ -281,17 +95,21 @@ class AcpLaunchCommand {
 class AcpExecutableProbe {
   /// Creates a new [AcpExecutableProbe].
   ///
-  /// [candidateExecutableNames], [versionArguments], and
-  /// [requiredExecutableNames] are defensively
-  /// copied so later mutations to a caller-owned list can never change this
-  /// probe after construction.
+  /// [candidateExecutableNames], [versionArguments],
+  /// [requiredExecutableNames], and [executableOverrideEnvironmentVariables]
+  /// are defensively copied so later mutations to a caller-owned collection
+  /// can never change this probe after construction.
   AcpExecutableProbe({
     required List<String> candidateExecutableNames,
     List<String> versionArguments = const ['--version'],
     List<String> requiredExecutableNames = const [],
+    Map<String, String> executableOverrideEnvironmentVariables = const {},
   }) : candidateExecutableNames = List.unmodifiable(candidateExecutableNames),
        versionArguments = List.unmodifiable(versionArguments),
-       requiredExecutableNames = List.unmodifiable(requiredExecutableNames);
+       requiredExecutableNames = List.unmodifiable(requiredExecutableNames),
+       executableOverrideEnvironmentVariables = Map.unmodifiable(
+         executableOverrideEnvironmentVariables,
+       );
 
   /// Executable names or aliases that may resolve to this provider on PATH.
   final List<String> candidateExecutableNames;
@@ -301,6 +119,11 @@ class AcpExecutableProbe {
 
   /// Arguments used to probe the resolved executable's version.
   final List<String> versionArguments;
+
+  /// Environment variables that, when set on the host, name the absolute path
+  /// to use for an executable instead of the PATH lookup, keyed by executable
+  /// name.
+  final Map<String, String> executableOverrideEnvironmentVariables;
 
   @override
   bool operator ==(Object other) =>
@@ -314,6 +137,10 @@ class AcpExecutableProbe {
           _listEquality.equals(
             requiredExecutableNames,
             other.requiredExecutableNames,
+          ) &&
+          _mapEquality.equals(
+            executableOverrideEnvironmentVariables,
+            other.executableOverrideEnvironmentVariables,
           );
 
   @override
@@ -321,6 +148,7 @@ class AcpExecutableProbe {
     _listEquality.hash(candidateExecutableNames),
     _listEquality.hash(versionArguments),
     _listEquality.hash(requiredExecutableNames),
+    _mapEquality.hash(executableOverrideEnvironmentVariables),
   );
 
   @override
@@ -434,20 +262,20 @@ bool isValidAcpLaunchProfileName(String name) =>
 
 /// Immutable, app-bundled definition of an ACP-compatible coding-agent
 /// provider.
-///
-/// Built-in providers ship with the app and never require user approval;
-/// only [AcpCustomProviderDefinition] tracks command approval state.
 @immutable
 class AcpBuiltinProvider implements AcpProvider {
   /// Creates a new [AcpBuiltinProvider].
   const AcpBuiltinProvider({
     required this.id,
     required this.label,
+    required this.tool,
+    required this.telemetryCategory,
     required this.launchCommand,
     required this.executableProbe,
     this.terminalAuthCommand,
     this.adapterFallbackCommand,
     this.launchProfileSupport,
+    this.windowsLaunchPreamble,
   });
 
   /// Stable identifier for this provider.
@@ -457,6 +285,13 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Human-readable label shown in provider pickers.
   @override
   final String label;
+
+  /// Terminal-agent identity sharing this provider's icon, sessions and
+  /// launch arguments.
+  final AgentLaunchTool tool;
+
+  /// Coarse snake_case category reported to telemetry instead of the id.
+  final String telemetryCategory;
 
   /// Default stdio ACP launch command for this provider.
   @override
@@ -480,8 +315,9 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Optional capability for discovering and selecting isolated CLI profiles.
   final AcpLaunchProfileSupport? launchProfileSupport;
 
-  @override
-  bool get isCustom => false;
+  /// Optional PowerShell statements run before this provider's argv on a
+  /// Windows host.
+  final String? windowsLaunchPreamble;
 
   @override
   bool operator ==(Object other) =>
@@ -489,21 +325,27 @@ class AcpBuiltinProvider implements AcpProvider {
       other is AcpBuiltinProvider &&
           id == other.id &&
           label == other.label &&
+          tool == other.tool &&
+          telemetryCategory == other.telemetryCategory &&
           launchCommand == other.launchCommand &&
           executableProbe == other.executableProbe &&
           terminalAuthCommand == other.terminalAuthCommand &&
           adapterFallbackCommand == other.adapterFallbackCommand &&
-          launchProfileSupport == other.launchProfileSupport;
+          launchProfileSupport == other.launchProfileSupport &&
+          windowsLaunchPreamble == other.windowsLaunchPreamble;
 
   @override
   int get hashCode => Object.hash(
     id,
     label,
+    tool,
+    telemetryCategory,
     launchCommand,
     executableProbe,
     terminalAuthCommand,
     adapterFallbackCommand,
     launchProfileSupport,
+    windowsLaunchPreamble,
   );
 
   @override
@@ -531,12 +373,10 @@ bool isApprovedAcpBuiltinLaunchOverride(
         baseArguments,
       ) ??
       _listEquality.equals(command.arguments, baseArguments);
-  final tool = agentLaunchToolForBuiltinAcpProviderId(provider.id);
-  final usesTerminalExecutable =
-      tool != null &&
-      tool.candidateCommandNames.any(
-        (candidate) => candidate.toLowerCase() == executableName,
-      );
+  final tool = provider.tool;
+  final usesTerminalExecutable = tool.candidateCommandNames.any(
+    (candidate) => candidate.toLowerCase() == executableName,
+  );
   if (!launchArgumentsApproved && usesTerminalExecutable) {
     String? profile;
     final profileSupport = provider.launchProfileSupport;
@@ -586,6 +426,8 @@ String? _resolvedAcpExecutableName(String executable) {
 /// Built-in Copilot CLI ACP provider.
 final acpCopilotCliProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.copilotCli,
+  tool: AgentLaunchTool.copilotCli,
+  telemetryCategory: 'copilot_cli',
   label: 'Copilot CLI',
   launchCommand: AcpLaunchCommand(
     executable: 'copilot',
@@ -611,6 +453,8 @@ final acpCopilotCliProvider = AcpBuiltinProvider(
 /// Built-in Claude Agent SDK ACP provider.
 final acpClaudeAgentProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.claudeAgent,
+  tool: AgentLaunchTool.claudeCode,
+  telemetryCategory: 'claude_agent',
   label: 'Claude Agent',
   launchCommand: AcpLaunchCommand(executable: 'claude-agent-acp'),
   executableProbe: AcpExecutableProbe(
@@ -629,6 +473,8 @@ final acpClaudeAgentProvider = AcpBuiltinProvider(
 /// Built-in Codex ACP provider.
 final acpCodexProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.codex,
+  tool: AgentLaunchTool.codex,
+  telemetryCategory: 'codex',
   label: 'Codex',
   launchCommand: AcpLaunchCommand(executable: 'codex-acp'),
   executableProbe: AcpExecutableProbe(
@@ -643,6 +489,8 @@ final acpCodexProvider = AcpBuiltinProvider(
 /// Built-in OpenCode ACP provider.
 final acpOpenCodeProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.openCode,
+  tool: AgentLaunchTool.openCode,
+  telemetryCategory: 'opencode',
   label: 'OpenCode',
   launchCommand: AcpLaunchCommand(
     executable: 'opencode',
@@ -660,6 +508,8 @@ final acpOpenCodeProvider = AcpBuiltinProvider(
 /// Built-in Cursor Agent native ACP provider.
 final acpCursorAgentProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.cursorAgent,
+  tool: AgentLaunchTool.cursorAgent,
+  telemetryCategory: 'cursor_agent',
   label: 'Cursor Agent',
   launchCommand: AcpLaunchCommand(
     executable: 'cursor-agent',
@@ -677,6 +527,8 @@ final acpCursorAgentProvider = AcpBuiltinProvider(
 /// Built-in Antigravity ACP provider.
 final acpAntigravityProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.antigravity,
+  tool: AgentLaunchTool.antigravity,
+  telemetryCategory: 'antigravity',
   label: 'Antigravity',
   launchCommand: AcpLaunchCommand(
     executable: 'npx',
@@ -695,6 +547,8 @@ final acpAntigravityProvider = AcpBuiltinProvider(
 /// Built-in Hermes ACP provider.
 final acpHermesProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.hermes,
+  tool: AgentLaunchTool.hermes,
+  telemetryCategory: 'hermes',
   label: 'Hermes',
   launchCommand: AcpLaunchCommand(
     executable: 'hermes',
@@ -717,6 +571,8 @@ final acpHermesProvider = AcpBuiltinProvider(
 /// Built-in OpenClaw ACP provider.
 final acpOpenClawProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.openClaw,
+  tool: AgentLaunchTool.openclaw,
+  telemetryCategory: 'openclaw',
   label: 'OpenClaw',
   launchCommand: AcpLaunchCommand(
     executable: 'openclaw',
@@ -738,6 +594,8 @@ final acpOpenClawProvider = AcpBuiltinProvider(
 /// Built-in Grok Build ACP provider.
 final acpGrokBuildProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.grokBuild,
+  tool: AgentLaunchTool.grokBuild,
+  telemetryCategory: 'grok_build',
   label: 'Grok Build',
   launchCommand: AcpLaunchCommand(
     executable: 'grok',
@@ -753,11 +611,16 @@ final acpGrokBuildProvider = AcpBuiltinProvider(
 /// Muse Code uses a separate community adapter; `muse serve` speaks MSP.
 final acpMuseCodeProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.museCode,
+  tool: AgentLaunchTool.museCode,
+  telemetryCategory: 'muse_code',
   label: 'Muse Code',
   launchCommand: AcpLaunchCommand(executable: 'muse-code-acp'),
   executableProbe: AcpExecutableProbe(
     candidateExecutableNames: const ['muse-code-acp'],
     requiredExecutableNames: const ['muse'],
+    executableOverrideEnvironmentVariables: const {
+      'muse': _museExecutableVariable,
+    },
   ),
   terminalAuthCommand: AcpLaunchCommand(
     executable: 'muse',
@@ -767,11 +630,40 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
     executable: 'npx',
     arguments: const ['--yes', '@bex-co/muse-code-acp@0.6.0'],
   ),
+  windowsLaunchPreamble: _museWindowsExecutablePreamble,
 );
+
+const _museExecutableVariable = 'MUSE_CODE_EXECUTABLE';
+
+// Node's spawn cannot execute the official muse.cmd shim without a shell.
+// Resolve the launcher's selected native binary for the adapter's subprocess.
+// Preserve explicit overrides and never run the updater while opening chat.
+const _museWindowsExecutablePreamble =
+    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
+    r'$__flMuse=Get-Command muse -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1; '
+    r'if($null -ne $__flMuse){ '
+    r'$__flMusePath=$__flMuse.Source; '
+    r"if([IO.Path]::GetExtension($__flMusePath) -eq '.exe'){ "
+    r'$env:MUSE_CODE_EXECUTABLE=$__flMusePath '
+    '}else{ '
+    r'$__flMuseDir=Split-Path -Parent $__flMusePath; '
+    r"$__flMuseVersionFile=Join-Path $__flMuseDir '.muse-version'; "
+    r'if(Test-Path -LiteralPath $__flMuseVersionFile -PathType Leaf){ '
+    r'$__flMuseVersion=[IO.File]::ReadAllText($__flMuseVersionFile).Trim(); '
+    r"if($__flMuseVersion -match '^\d+\.\d+\.\d+-R\d+(\.\d+)?$'){ "
+    r'$__flMuseBinary=Join-Path $__flMuseDir ("muse-bin-"+$__flMuseVersion+".exe"); '
+    r'if(Test-Path -LiteralPath $__flMuseBinary -PathType Leaf){ '
+    r'$env:MUSE_CODE_EXECUTABLE=$__flMuseBinary '
+    '}}}}}; '
+    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
+    "throw 'Muse native executable was not found. Install or update Muse Code in Agent Management.' "
+    '}};';
 
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(
   id: AcpBuiltinProviderIds.pi,
+  tool: AgentLaunchTool.pi,
+  telemetryCategory: 'pi',
   label: 'Pi',
   launchCommand: AcpLaunchCommand(executable: 'pi-acp'),
   executableProbe: AcpExecutableProbe(
@@ -798,235 +690,7 @@ final acpBuiltinProviders = List<AcpBuiltinProvider>.unmodifiable([
   acpMuseCodeProvider,
 ]);
 
-/// Approval record for a custom ACP provider's exact launch command.
-///
-/// The UI must require re-approval whenever the provider's launch command no
-/// longer matches [commandFingerprint].
-@immutable
-class AcpCommandApproval {
-  /// Creates a new [AcpCommandApproval].
-  const AcpCommandApproval({
-    required this.commandFingerprint,
-    required this.approvedAt,
-  });
-
-  /// Approves [command] as of [now] (defaulting to the current UTC time).
-  factory AcpCommandApproval.approve(
-    AcpLaunchCommand command, {
-    DateTime? now,
-  }) => AcpCommandApproval(
-    commandFingerprint: computeAcpLaunchCommandFingerprint(command),
-    approvedAt: (now ?? DateTime.now()).toUtc(),
-  );
-
-  /// Decodes an [AcpCommandApproval] from untrusted JSON, returning `null`
-  /// instead of throwing when [json] is malformed.
-  static AcpCommandApproval? tryFromJson(Object? json) {
-    if (json is! Map || json.keys.any((key) => key is! String)) {
-      return null;
-    }
-    final fingerprint = json['commandFingerprint'];
-    if (fingerprint is! String || fingerprint.isEmpty) {
-      return null;
-    }
-    final rawApprovedAt = json['approvedAt'];
-    if (rawApprovedAt is! String) {
-      return null;
-    }
-    final approvedAt = DateTime.tryParse(rawApprovedAt);
-    if (approvedAt == null) {
-      return null;
-    }
-    return AcpCommandApproval(
-      commandFingerprint: fingerprint,
-      approvedAt: approvedAt,
-    );
-  }
-
-  /// SHA-256 fingerprint of the exact command that was approved.
-  final String commandFingerprint;
-
-  /// When this command was approved.
-  final DateTime approvedAt;
-
-  /// Encodes this approval as JSON.
-  Map<String, dynamic> toJson() => {
-    'commandFingerprint': commandFingerprint,
-    'approvedAt': approvedAt.toIso8601String(),
-  };
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AcpCommandApproval &&
-          commandFingerprint == other.commandFingerprint &&
-          approvedAt.isAtSameMomentAs(other.approvedAt);
-
-  @override
-  int get hashCode => Object.hash(commandFingerprint, approvedAt);
-
-  @override
-  String toString() => 'AcpCommandApproval(fingerprint: $commandFingerprint)';
-}
-
-/// User-defined ACP provider with an explicitly approved launch command.
-///
-/// Only the exact approved command may ever be launched automatically; if
-/// [launchCommand] changes without a matching new approval,
-/// [isCommandApproved] becomes `false` and the UI must require the user to
-/// review and re-approve the command again before it can launch.
-@immutable
-class AcpCustomProviderDefinition implements AcpProvider {
-  const AcpCustomProviderDefinition._({
-    required this.id,
-    required this.label,
-    required this.launchCommand,
-    required this.approval,
-    required this.createdAt,
-    required this.updatedAt,
-  });
-
-  /// Creates a new, validated custom provider definition, approving
-  /// [launchCommand] as of [now] (defaulting to the current UTC time).
-  ///
-  /// Throws a [FormatException] if [id], [label], or [launchCommand] fail
-  /// validation.
-  factory AcpCustomProviderDefinition.create({
-    required String id,
-    required String label,
-    required AcpLaunchCommand launchCommand,
-    DateTime? now,
-  }) {
-    final normalizedId = validateAcpCustomProviderId(id);
-    final normalizedLabel = validateAcpProviderLabel(label);
-    validateAcpLaunchCommand(launchCommand);
-    final timestamp = (now ?? DateTime.now()).toUtc();
-    return AcpCustomProviderDefinition._(
-      id: normalizedId,
-      label: normalizedLabel,
-      launchCommand: launchCommand,
-      approval: AcpCommandApproval.approve(launchCommand, now: timestamp),
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    );
-  }
-
-  /// Decodes an [AcpCustomProviderDefinition] from untrusted JSON, returning
-  /// `null` instead of throwing when [json] is malformed or fails
-  /// validation.
-  ///
-  /// Unknown fields are ignored so future schema additions stay
-  /// forward-compatible with older persisted data.
-  static AcpCustomProviderDefinition? tryFromJson(Object? json) {
-    if (json is! Map || json.keys.any((key) => key is! String)) {
-      return null;
-    }
-    final rawId = json['id'];
-    final rawLabel = json['label'];
-    if (rawId is! String || rawLabel is! String) {
-      return null;
-    }
-    final launchCommand = AcpLaunchCommand.tryFromJson(json['launchCommand']);
-    if (launchCommand == null) {
-      return null;
-    }
-    final approval = AcpCommandApproval.tryFromJson(json['approval']);
-    if (approval == null) {
-      return null;
-    }
-    final rawCreatedAt = json['createdAt'];
-    final rawUpdatedAt = json['updatedAt'];
-    if (rawCreatedAt is! String || rawUpdatedAt is! String) {
-      return null;
-    }
-    final createdAt = DateTime.tryParse(rawCreatedAt);
-    final updatedAt = DateTime.tryParse(rawUpdatedAt);
-    if (createdAt == null || updatedAt == null) {
-      return null;
-    }
-
-    try {
-      final id = validateAcpCustomProviderId(rawId);
-      final label = validateAcpProviderLabel(rawLabel);
-      validateAcpLaunchCommand(launchCommand);
-      return AcpCustomProviderDefinition._(
-        id: id,
-        label: label,
-        launchCommand: launchCommand,
-        approval: approval,
-        createdAt: createdAt,
-        updatedAt: updatedAt,
-      );
-    } on FormatException {
-      return null;
-    }
-  }
-
-  /// Stable identifier for this custom provider.
-  @override
-  final String id;
-
-  /// User-provided display label.
-  @override
-  final String label;
-
-  /// The exact launch command the user reviewed and approved.
-  @override
-  final AcpLaunchCommand launchCommand;
-
-  /// Approval record for [launchCommand].
-  final AcpCommandApproval approval;
-
-  /// When this custom provider was first created.
-  final DateTime createdAt;
-
-  /// When this custom provider was last saved.
-  final DateTime updatedAt;
-
-  /// Whether [approval] still matches the exact current [launchCommand].
-  ///
-  /// The UI must require re-approval whenever this is `false`.
-  bool get isCommandApproved =>
-      approval.commandFingerprint ==
-      computeAcpLaunchCommandFingerprint(launchCommand);
-
-  /// Encodes this definition as JSON.
-  Map<String, dynamic> toJson() => {
-    'schemaVersion': 1,
-    'id': id,
-    'label': label,
-    'launchCommand': launchCommand.toJson(),
-    'approval': approval.toJson(),
-    'createdAt': createdAt.toIso8601String(),
-    'updatedAt': updatedAt.toIso8601String(),
-  };
-
-  @override
-  bool get isCustom => true;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AcpCustomProviderDefinition &&
-          id == other.id &&
-          label == other.label &&
-          launchCommand == other.launchCommand &&
-          approval == other.approval &&
-          createdAt.isAtSameMomentAs(other.createdAt) &&
-          updatedAt.isAtSameMomentAs(other.updatedAt);
-
-  @override
-  int get hashCode =>
-      Object.hash(id, label, launchCommand, approval, createdAt, updatedAt);
-
-  @override
-  String toString() =>
-      'AcpCustomProviderDefinition(id: $id, label: $label, '
-      'approved: $isCommandApproved)';
-}
-
-/// An ACP provider available to launch, whether it is
-/// built into the app or defined by the user.
+/// An ACP provider available to launch.
 sealed class AcpProvider {
   /// Stable identifier for this provider.
   String get id;
@@ -1036,8 +700,4 @@ sealed class AcpProvider {
 
   /// The launch command that would be used to start this provider.
   AcpLaunchCommand get launchCommand;
-
-  /// Whether this provider was defined by the user rather than bundled with
-  /// the app.
-  bool get isCustom;
 }

@@ -9,7 +9,6 @@ import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
-import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
@@ -63,7 +62,6 @@ HostEditDraft _draft({
   disableTmuxStatusBar: false,
   disableAgentTmuxStatusBar: false,
   startClisInYoloMode: false,
-  agentWindowModePreference: AgentWindowModePreference.askEveryTime,
   autoForwardPorts: autoForwardPorts,
 );
 
@@ -372,7 +370,6 @@ void main() {
 
         expect(viewModel.updateDraft(initialDraft), isFalse);
         expect(viewModel.updateDraft(_draft(label: 'Changed')), isTrue);
-        expect(container.read(hostEditViewModelProvider(null)).isDirty, isTrue);
       });
 
       test('maps remote window startup modes to mux backends', () {

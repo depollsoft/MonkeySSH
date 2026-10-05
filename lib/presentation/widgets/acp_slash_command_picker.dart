@@ -18,7 +18,6 @@ class AcpSlashCommandPicker extends StatelessWidget {
     required this.onSelected,
     super.key,
     this.onHighlightChanged,
-    this.maxHeight = 240,
   });
 
   /// The ranked commands to display.
@@ -32,9 +31,6 @@ class AcpSlashCommandPicker extends StatelessWidget {
 
   /// Called when a row is hovered, to sync the keyboard highlight.
   final ValueChanged<int>? onHighlightChanged;
-
-  /// Maximum height before the list scrolls.
-  final double maxHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -52,7 +48,7 @@ class AcpSlashCommandPicker extends StatelessWidget {
         borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
         clipBehavior: Clip.antiAlias,
         child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxHeight),
+          constraints: const BoxConstraints(maxHeight: 240),
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),

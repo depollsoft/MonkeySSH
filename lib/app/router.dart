@@ -65,7 +65,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/lock',
-        name: 'lock',
+        name: Routes.lock,
         builder: (context, state) => const LockScreen(),
       ),
       GoRoute(
@@ -160,13 +160,13 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/hosts/add',
-        name: 'host-add',
+        name: Routes.hostAdd,
         builder: (context, state) =>
             HostEditScreen(initialSshUrl: state.uri.queryParameters['sshUrl']),
       ),
       GoRoute(
         path: '/hosts/edit/:hostId',
-        name: 'host-edit',
+        name: Routes.hostEdit,
         builder: (context, state) {
           final hostId = int.tryParse(state.pathParameters['hostId'] ?? '');
           return HostEditScreen(hostId: hostId);
@@ -179,7 +179,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/keys/add',
-        name: 'key-add',
+        name: Routes.keyAdd,
         builder: (context, state) => KeyAddScreen(
           initialTabIndex: state.uri.queryParameters['tab'] == 'import' ? 1 : 0,
         ),
@@ -199,14 +199,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           final tmuxPaneDirectory = state.uri.queryParameters['tmuxCwd'];
           if (hostId == null) {
             return _buildSlideUpPage<String>(
-              key: state.pageKey,
+              state: state,
               child: const Scaffold(
                 body: Center(child: Text('Invalid host ID')),
               ),
             );
           }
           return _buildSlideUpPage<String>(
-            key: state.pageKey,
+            state: state,
             child: SftpScreen(
               hostId: hostId,
               connectionId: connectionId,
@@ -245,14 +245,14 @@ final routerProvider = Provider<GoRouter>((ref) {
               acpSessionId == null ||
               acpSessionId.isEmpty) {
             return _buildSlideUpPage<void>(
-              key: state.pageKey,
+              state: state,
               child: const Scaffold(
                 body: Center(child: Text('Invalid agent session')),
               ),
             );
           }
           return _buildSlideUpPage<void>(
-            key: state.pageKey,
+            state: state,
             child: AgentChatScreen(
               key: ValueKey<String>(
                 'agent-chat:$hostId:$providerId:$bridgeId:$acpSessionId',
@@ -293,12 +293,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/port-forwards/add',
-        name: 'port-forward-add',
+        name: Routes.portForwardAdd,
         builder: (context, state) => const PortForwardEditScreen(),
       ),
       GoRoute(
         path: '/port-forwards/edit/:id',
-        name: 'port-forward-edit',
+        name: Routes.portForwardEdit,
         builder: (context, state) {
           final portForwardId = int.tryParse(state.pathParameters['id'] ?? '');
           return PortForwardEditScreen(portForwardId: portForwardId);
@@ -310,7 +310,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         pageBuilder: (context, state) {
           if (!isPortForwardBrowserSupported()) {
             return _buildSlideUpPage<String>(
-              key: state.pageKey,
+              state: state,
               child: const Scaffold(
                 body: Center(
                   child: Text('In-app browser is not supported here.'),
@@ -321,14 +321,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           final launch = _portForwardBrowserLaunchFromRouteState(state);
           if (launch == null) {
             return _buildSlideUpPage<String>(
-              key: state.pageKey,
+              state: state,
               child: const Scaffold(
                 body: Center(child: Text('Invalid port-forward browser URL')),
               ),
             );
           }
           return _buildSlideUpPage<String>(
-            key: state.pageKey,
+            state: state,
             child: PortForwardBrowserScreen(
               initialTabs: launch.tabs,
               initialTabIndex: launch.selectedIndex,
@@ -460,10 +460,16 @@ class _LiveMaterialPageRoute<T> extends PageRoute<T>
 }
 
 CustomTransitionPage<T> _buildSlideUpPage<T>({
-  required LocalKey key,
+  required GoRouterState state,
   required Widget child,
 }) => CustomTransitionPage<T>(
-  key: key,
+  key: state.pageKey,
+  // go_router only names builder-based pages; the route observer needs this.
+  name: state.name ?? state.path,
+  arguments: <String, String>{
+    ...state.pathParameters,
+    ...state.uri.queryParameters,
+  },
   fullscreenDialog: true,
   transitionDuration: const Duration(milliseconds: 280),
   reverseTransitionDuration: const Duration(milliseconds: 220),

@@ -213,25 +213,6 @@ void main() {
       });
     });
 
-    group('GetAll settings', () {
-      test('getAll returns empty map initially', () async {
-        final all = await service.getAll();
-        expect(all, isEmpty);
-      });
-
-      test('getAll returns all settings', () async {
-        await service.setString('key1', 'value1');
-        await service.setString('key2', 'value2');
-        await service.setInt('key3', 123);
-
-        final all = await service.getAll();
-        expect(all, hasLength(3));
-        expect(all['key1'], 'value1');
-        expect(all['key2'], 'value2');
-        expect(all['key3'], '123');
-      });
-    });
-
     group('Watch settings', () {
       test('watchString emits updates on change', () async {
         await service.setString('watched_key', 'value1');

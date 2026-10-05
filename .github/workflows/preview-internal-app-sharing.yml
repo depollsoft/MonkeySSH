@@ -66,7 +66,7 @@ jobs:
             const isAndroidAabArtifact = (artifact) =>
               !artifact.expired && artifact.name.startsWith('android-unsigned-private-');
             const isAbiLimitedAndroidAab = (artifact) =>
-              /-android-(arm|arm64|x64)$/.test(artifact.name);
+              /-android-(?:arm|arm64|x64|ia32)$/.test(artifact.name);
             const androidAabArtifacts = artifacts.filter(isAndroidAabArtifact);
             // Prefer a full (all-ABI) AAB when one is present, but fall back to
             // an ABI-limited preview AAB. Fast PR previews build arm64-only, so
@@ -132,31 +132,8 @@ jobs:
             exit 1
           fi
 
-          DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-          if [ ! -f "$DEBUG_KEYSTORE" ]; then
-            mkdir -p "$HOME/.android"
-            keytool -genkeypair \
-              -keystore "$DEBUG_KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
           SIGNED_AAB_PATH="$RUNNER_TEMP/$(basename "$AAB_PATH" .aab)-ias-signed.aab"
-          jarsigner \
-            -sigalg SHA256withRSA \
-            -digestalg SHA-256 \
-            -keystore "$DEBUG_KEYSTORE" \
-            -storepass android \
-            -keypass android \
-            -signedjar "$SIGNED_AAB_PATH" \
-            "$AAB_PATH" \
-            androiddebugkey
-          jarsigner -verify "$SIGNED_AAB_PATH"
+          bash scripts/android_signing.sh jarsign "$AAB_PATH" "$SIGNED_AAB_PATH" debug
 
           echo "path=$SIGNED_AAB_PATH" >> "$GITHUB_OUTPUT"
 

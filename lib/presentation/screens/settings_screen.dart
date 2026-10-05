@@ -305,7 +305,7 @@ class _SecuritySection extends ConsumerWidget {
             leading: const Icon(Icons.pin_outlined),
             title: const Text('Change PIN'),
             subtitle: const Text('Update your PIN code'),
-            onTap: () => _showChangePinDialog(context, ref),
+            onTap: () => _showChangePinDialog(context),
           )
         else
           ListTile(
@@ -391,180 +391,12 @@ class _SecuritySection extends ConsumerWidget {
     );
   }
 
-  void _showChangePinDialog(BuildContext context, WidgetRef ref) {
-    final currentPinController = TextEditingController();
-    final newPinController = TextEditingController();
-    final confirmPinController = TextEditingController();
-    final formKey = GlobalKey<FormState>();
-    var currentPinErrorText = '';
-    var isChanging = false;
-
-    String? validateCurrentPin(String? value) {
-      if (value?.isEmpty ?? true) return 'Required';
-      return null;
-    }
-
-    String? validateNewPin(String? value) {
-      if (value?.isEmpty ?? true) return 'Required';
-      if (value!.length < 6) return 'PIN must be 6-8 digits';
-      return null;
-    }
-
+  void _showChangePinDialog(BuildContext context) {
     unawaited(
       showDialog<void>(
         context: context,
-        builder: (context) => StatefulBuilder(
-          builder: (context, setState) => AlertDialog(
-            title: const Text('Change PIN'),
-            content: Form(
-              key: formKey,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: currentPinController,
-                    decoration: const InputDecoration(
-                      labelText: 'Current PIN',
-                      counterText: '',
-                    ),
-                    forceErrorText: currentPinErrorText.isEmpty
-                        ? null
-                        : currentPinErrorText,
-                    obscureText: true,
-                    keyboardType: TextInputType.number,
-                    maxLength: 8,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    validator: validateCurrentPin,
-                    onChanged: (_) {
-                      if (currentPinErrorText.isEmpty) return;
-                      setState(() => currentPinErrorText = '');
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: newPinController,
-                    decoration: const InputDecoration(
-                      labelText: 'New PIN',
-                      counterText: '',
-                    ),
-                    obscureText: true,
-                    keyboardType: TextInputType.number,
-                    maxLength: 8,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    validator: validateNewPin,
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: confirmPinController,
-                    decoration: const InputDecoration(
-                      labelText: 'Confirm new PIN',
-                      counterText: '',
-                    ),
-                    obscureText: true,
-                    keyboardType: TextInputType.number,
-                    maxLength: 8,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    validator: (v) {
-                      final pinValidationError = validateNewPin(v);
-                      if (pinValidationError != null) return pinValidationError;
-                      if (v != newPinController.text) {
-                        return 'PINs do not match';
-                      }
-                      return null;
-                    },
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: isChanging ? null : () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: isChanging
-                    ? null
-                    : () async {
-                        if (!(formKey.currentState?.validate() ?? false)) {
-                          return;
-                        }
-
-                        setState(() {
-                          currentPinErrorText = '';
-                          isChanging = true;
-                        });
-
-                        bool success;
-                        try {
-                          success = await ref
-                              .read(authServiceProvider)
-                              .changePin(
-                                currentPinController.text,
-                                newPinController.text,
-                              );
-                        } on Object catch (error, stackTrace) {
-                          FlutterError.reportError(
-                            FlutterErrorDetails(
-                              exception: error,
-                              stack: stackTrace,
-                              library: 'auth',
-                              context: ErrorDescription(
-                                'while changing the app PIN from settings',
-                              ),
-                            ),
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Could not change PIN. Try again.',
-                                ),
-                              ),
-                            );
-                          }
-                          return;
-                        } finally {
-                          if (context.mounted) {
-                            setState(() => isChanging = false);
-                          }
-                        }
-
-                        if (!context.mounted) return;
-
-                        if (success) {
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('PIN changed successfully'),
-                            ),
-                          );
-                          return;
-                        }
-
-                        setState(
-                          () =>
-                              currentPinErrorText = 'Current PIN is incorrect',
-                        );
-                      },
-                child: isChanging
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Change'),
-              ),
-            ],
-          ),
-        ),
-      ).whenComplete(() {
-        currentPinController.clear();
-        newPinController.clear();
-        confirmPinController.clear();
-        currentPinController.dispose();
-        newPinController.dispose();
-        confirmPinController.dispose();
-      }),
+        builder: (context) => const _ChangePinDialog(),
+      ),
     );
   }
 
@@ -585,6 +417,179 @@ class _SecuritySection extends ConsumerWidget {
     label: (minutes) =>
         minutes == 0 ? 'Disabled' : '$minutes minute${minutes == 1 ? '' : 's'}',
     onSelected: ref.read(autoLockTimeoutNotifierProvider.notifier).setTimeout,
+  );
+}
+
+class _ChangePinDialog extends ConsumerStatefulWidget {
+  const _ChangePinDialog();
+
+  @override
+  ConsumerState<_ChangePinDialog> createState() => _ChangePinDialogState();
+}
+
+class _ChangePinDialogState extends ConsumerState<_ChangePinDialog> {
+  final _currentPinController = TextEditingController();
+  final _newPinController = TextEditingController();
+  final _confirmPinController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  var _currentPinErrorText = '';
+  var _isChanging = false;
+
+  @override
+  void dispose() {
+    // The fields still need their controllers during the route's exit
+    // animation, so they are owned here instead of by the caller.
+    _currentPinController
+      ..clear()
+      ..dispose();
+    _newPinController
+      ..clear()
+      ..dispose();
+    _confirmPinController
+      ..clear()
+      ..dispose();
+    super.dispose();
+  }
+
+  static String? _validateCurrentPin(String? value) {
+    if (value?.isEmpty ?? true) return 'Required';
+    return null;
+  }
+
+  static String? _validateNewPin(String? value) {
+    if (value?.isEmpty ?? true) return 'Required';
+    if (value!.length < 6) return 'PIN must be 6-8 digits';
+    return null;
+  }
+
+  Future<void> _submit() async {
+    if (!(_formKey.currentState?.validate() ?? false)) {
+      return;
+    }
+
+    setState(() {
+      _currentPinErrorText = '';
+      _isChanging = true;
+    });
+
+    bool success;
+    try {
+      success = await ref
+          .read(authServiceProvider)
+          .changePin(_currentPinController.text, _newPinController.text);
+    } on Object catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'auth',
+          context: ErrorDescription('while changing the app PIN from settings'),
+        ),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not change PIN. Try again.')),
+        );
+      }
+      return;
+    } finally {
+      if (mounted) {
+        setState(() => _isChanging = false);
+      }
+    }
+
+    if (!mounted) return;
+
+    if (success) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('PIN changed successfully')));
+      return;
+    }
+
+    setState(() => _currentPinErrorText = 'Current PIN is incorrect');
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Change PIN'),
+    content: Form(
+      key: _formKey,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextFormField(
+            controller: _currentPinController,
+            decoration: const InputDecoration(
+              labelText: 'Current PIN',
+              counterText: '',
+            ),
+            forceErrorText: _currentPinErrorText.isEmpty
+                ? null
+                : _currentPinErrorText,
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            maxLength: 8,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            validator: _validateCurrentPin,
+            onChanged: (_) {
+              if (_currentPinErrorText.isEmpty) return;
+              setState(() => _currentPinErrorText = '');
+            },
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: _newPinController,
+            decoration: const InputDecoration(
+              labelText: 'New PIN',
+              counterText: '',
+            ),
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            maxLength: 8,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            validator: _validateNewPin,
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: _confirmPinController,
+            decoration: const InputDecoration(
+              labelText: 'Confirm new PIN',
+              counterText: '',
+            ),
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            maxLength: 8,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            validator: (v) {
+              final pinValidationError = _validateNewPin(v);
+              if (pinValidationError != null) return pinValidationError;
+              if (v != _newPinController.text) {
+                return 'PINs do not match';
+              }
+              return null;
+            },
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: _isChanging ? null : () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _isChanging ? null : _submit,
+        child: _isChanging
+            ? const SizedBox(
+                height: 20,
+                width: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Text('Change'),
+      ),
+    ],
   );
 }
 
