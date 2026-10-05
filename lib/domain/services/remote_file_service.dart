@@ -10,6 +10,7 @@ import 'package:path/path.dart' as path;
 import '../models/auto_connect_command.dart'
     show terminalControlCharacterPattern;
 import 'diagnostics_log_service.dart';
+import 'ssh_error_policy.dart';
 
 final _sftpWindowsDriveRootPattern = RegExp(r'^/?[A-Za-z]:(?:/|$)');
 final _windowsDriveSftpPathPattern = RegExp(r'^/?[A-Za-z]:(?:[/\\]|$)');
@@ -658,6 +659,113 @@ class RemoteFileService {
       Error.throwWithStackTrace(error, stackTrace);
     }
     await remoteFile.close();
+  }
+
+  /// Replaces the contents of [remotePath] without truncating it first.
+  ///
+  /// The bytes go to a unique sibling file that is closed, given the original
+  /// owner and mode, and renamed over the destination. A failure before the
+  /// rename leaves the original untouched. A final symlink is resolved so the
+  /// link keeps pointing at the edited file. Without `posix-rename`, servers
+  /// refuse to rename over a file, so the original is first moved aside and
+  /// restored if the second rename fails. When the directory denies new files
+  /// or the original owner cannot be reproduced, this falls back to writing
+  /// in place, as editors do.
+  Future<void> replaceFileBytes({
+    required SftpClient sftp,
+    required String remotePath,
+    required Uint8List bytes,
+  }) async {
+    var target = remotePath;
+    SftpFileAttrs? original;
+    try {
+      if ((await sftp.stat(remotePath, followLink: false)).isSymbolicLink) {
+        target = await sftp.absolute(remotePath);
+        if ((await sftp.stat(target, followLink: false)).isSymbolicLink) {
+          throw FileSystemException('Cannot resolve symbolic link', remotePath);
+        }
+      }
+      original = await sftp.stat(target);
+    } on SftpStatusError catch (error) {
+      if (error.code != SftpStatusCode.noSuchFile) rethrow;
+    }
+    Future<void> writeInPlace() => uploadBytes(
+      sftp: sftp,
+      remotePath: target,
+      bytes: bytes,
+      applyPrivateMode: false,
+    );
+
+    final suffix = Random.secure().nextInt(1 << 32).toRadixString(16);
+    final nameStart = target.lastIndexOf('/') + 1;
+    final temporaryPath =
+        '${target.substring(0, nameStart)}.'
+        '${target.substring(nameStart)}.$suffix.monkeyssh-save';
+    final SftpFile temporaryFile;
+    try {
+      temporaryFile = await sftp.open(
+        temporaryPath,
+        mode:
+            SftpFileOpenMode.write |
+            SftpFileOpenMode.create |
+            SftpFileOpenMode.exclusive,
+      );
+    } on SftpStatusError catch (error) {
+      if (error.code != SftpStatusCode.permissionDenied) rethrow;
+      return writeInPlace();
+    }
+    var renamed = false;
+    try {
+      await _writeAndClose(temporaryFile, Stream.value(bytes), null);
+      if (original != null) {
+        try {
+          if (original.userID != null && original.groupID != null) {
+            await sftp.setStat(
+              temporaryPath,
+              SftpFileAttrs(userID: original.userID, groupID: original.groupID),
+            );
+          }
+          if (original.mode != null) {
+            await sftp.setStat(
+              temporaryPath,
+              SftpFileAttrs(mode: original.mode),
+            );
+          }
+        } on SftpStatusError {
+          return await writeInPlace();
+        }
+      }
+      try {
+        await sftp.rename(temporaryPath, target);
+      } on SftpStatusError catch (error) {
+        if (original == null || error.code != SftpStatusCode.failure) rethrow;
+        final asidePath = '$temporaryPath.orig';
+        await sftp.rename(target, asidePath);
+        try {
+          await sftp.rename(temporaryPath, target);
+        } on Object {
+          await sftp.rename(asidePath, target);
+          rethrow;
+        }
+        await _removeQuietly(sftp, asidePath);
+      }
+      renamed = true;
+    } finally {
+      if (!renamed) await _removeQuietly(sftp, temporaryPath);
+    }
+  }
+
+  Future<void> _removeQuietly(SftpClient sftp, String remotePath) async {
+    try {
+      await sftp.remove(remotePath);
+    } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
+      DiagnosticsLogService.instance.warning(
+        'sftp.upload',
+        'cleanup_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
   }
 
   /// Uploads raw bytes into a remote file path.
