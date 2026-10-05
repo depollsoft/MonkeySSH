@@ -251,10 +251,15 @@ class MonkeyMuxInstallerService {
       _uploadProgress;
 
   /// Installs the helper if needed and returns its executable path.
+  ///
+  /// When confirmation is declined, [reuseInstallation] may supply a helper
+  /// already verified by the caller. It is cached for subsequent control and
+  /// watcher calls without loading or uploading the bundled helper.
   Future<MonkeyMuxInstallation> ensureInstalled(
     SshSession session, {
     SshExecPriority priority = SshExecPriority.low,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    MonkeyMuxInstallation? Function()? reuseInstallation,
   }) async {
     final connectionId = session.connectionId;
     final cachedInstallation = _installCache[connectionId];
@@ -311,6 +316,7 @@ class MonkeyMuxInstallerService {
         session,
         priority: priority,
         confirmInstall: confirmInstall,
+        reuseInstallation: reuseInstallation,
       ),
     );
     request.future
@@ -374,6 +380,7 @@ class MonkeyMuxInstallerService {
     SshSession session, {
     required SshExecPriority priority,
     required MonkeyMuxInstallConfirmation? confirmInstall,
+    required MonkeyMuxInstallation? Function()? reuseInstallation,
   }) async {
     final platform = await probePlatform(session, priority: priority);
     final manifest = await _manifestFuture;
@@ -451,6 +458,18 @@ class MonkeyMuxInstallerService {
         );
         final confirmed = await confirmInstall(installRequest);
         if (!confirmed) {
+          final existingInstallation = reuseInstallation?.call();
+          if (existingInstallation != null) {
+            DiagnosticsLogService.instance.info(
+              'monkeymux.install',
+              'reuse_deferred',
+              fields: {
+                'connectionId': session.connectionId,
+                'platform': existingInstallation.platform,
+              },
+            );
+            return existingInstallation;
+          }
           DiagnosticsLogService.instance.info(
             'monkeymux.install',
             'confirmation_declined',
