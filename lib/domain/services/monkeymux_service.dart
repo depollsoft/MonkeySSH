@@ -1221,6 +1221,15 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         'type': 'run_command',
         'command': buildAgentActiveSessionMetadataCommand(panePids),
       }, priority: SshExecPriority.low);
+      final exitCode = response.exitCode ?? 0;
+      if (exitCode != 0) {
+        DiagnosticsLogService.instance.debug(
+          'monkeymux.agent',
+          'active_session_metadata_failed',
+          fields: {'connectionId': session.connectionId, 'exitCode': exitCode},
+        );
+        return null;
+      }
       final metadataByPanePid = parseAgentActiveSessionMetadataOutput(
         response.data ?? '',
         panePids,
@@ -1256,13 +1265,15 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     List<TmuxWindow> windows, {
     bool force = false,
   }) {
+    final observer = _states[key]?.observer;
     final panePids = _monkeyMuxAgentPanePids(windows);
-    if (panePids.isEmpty) {
+    // The probe is a POSIX shell script; a Windows helper runs `run_command`
+    // through cmd or PowerShell, where it can only fail.
+    if (panePids.isEmpty || (observer?.runsOnWindows ?? false)) {
       _states[key]?.cancelAgentMetadataPeriodicRefresh();
       return;
     }
     final state = _stateFor(key);
-    final observer = state.observer;
     if (observer != null) {
       if (!observer.isControlChannelReady) {
         return;
@@ -1813,6 +1824,9 @@ class _MonkeyMuxWindowChangeObserver {
     final override = controlResponseTimeoutOverride;
     return override == null ? _controlChannelOpenTimeout : override * 2;
   }
+
+  /// Whether the helper this observer attached to is the Windows build.
+  bool get runsOnWindows => _installation?.isWindows ?? false;
 
   bool get isControlChannelReady =>
       !_disposed && !_controller.isClosed && _controlSession != null;

@@ -136,6 +136,34 @@ void registerTmuxWindowLoaderTests() {
       );
     }
 
+    test('a window snapshot does not discard a structural reload', () async {
+      // @2 closed; the reload is in flight when a snapshot for @1 arrives.
+      final pending = Completer<List<TmuxWindow>>();
+      var calls = 0;
+      final state =
+          _LoaderState(() {
+              calls++;
+              return pending.future;
+            })
+            ..windows = const [
+              TmuxWindow(index: 1, name: 'one', isActive: true, id: '@1'),
+              TmuxWindow(index: 2, name: 'two', isActive: false, id: '@2'),
+            ];
+      final load = state.loader.load();
+      const snapshot = TmuxWindowSnapshotEvent(
+        TmuxWindow(index: 1, name: 'renamed', isActive: true, id: '@1'),
+      );
+      state.loader.recordSnapshot(snapshot);
+      state.windows = applyTmuxWindowChangeEvent(state.windows!, snapshot);
+      pending.complete(const [
+        TmuxWindow(index: 1, name: 'one', isActive: true, id: '@1'),
+      ]);
+      await load;
+      expect(state.windows!.map((w) => w.name), ['renamed']);
+      expect(calls, 1);
+      state.loader.dispose();
+    });
+
     test('recovers from a transient empty window reload', () {
       fakeAsync((async) {
         var calls = 0;

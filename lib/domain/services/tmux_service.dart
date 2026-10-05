@@ -1542,13 +1542,31 @@ class TmuxService implements RemoteMultiplexerService {
         if (agentSessionId != null)
           'set-option -w -t ${shellEscapePosix(target)} @flutty_agent_session_updated_at ${_now().millisecondsSinceEpoch ~/ 1000}',
       ];
-      await _execTmuxCommand(
-        session,
-        sessionName,
-        optionCommands.join(r' \; '),
-        extraFlags: extraFlags,
-      );
-      _requireState(session.connectionId, state);
+      // The control channel hands each string to tmux unchanged, where an
+      // escaped `\;` is an argument rather than a separator (and a bare `;`
+      // would answer with several reply blocks), so send one command per
+      // request there. A shell-built exec command can still chain them.
+      var sent = 0;
+      for (; sent < optionCommands.length; sent += 1) {
+        final output = await _tryControlCommand(
+          session,
+          sessionName,
+          optionCommands[sent],
+          extraFlags: extraFlags,
+        );
+        _requireState(session.connectionId, state);
+        if (output == null) break;
+      }
+      if (sent < optionCommands.length) {
+        await _exec(
+          session,
+          _tmuxCommand(
+            optionCommands.sublist(sent).join(r' \; '),
+            extraFlags: extraFlags,
+          ),
+        );
+        _requireState(session.connectionId, state);
+      }
     }
     DiagnosticsLogService.instance.info(
       'tmux.action',
