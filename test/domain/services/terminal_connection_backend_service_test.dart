@@ -111,7 +111,7 @@ void main() {
     testWidgets('stalled client command output releases the queue', (
       tester,
     ) async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final exec = _MockSshExecSession();
       final stdout = StreamController<Uint8List>();
       when(() => exec.stdout).thenAnswer((_) => stdout.stream);

@@ -14,6 +14,9 @@ rL1lsxis7nYbDZxVkav3AAAAFm1vbmtleXNzaC10ZXN0LWZpeHR1cmUBAgMEBQYH
 -----END OPENSSH PRIVATE KEY-----
 ''';
 
+/// Passphrase protecting the encrypted fixture keys.
+const sshKeyFixturePassphrase = 'correct';
+
 const sshEd25519EncryptedPrivateKey = '''
 -----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBFEx5/gz

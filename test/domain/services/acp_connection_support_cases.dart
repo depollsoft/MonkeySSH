@@ -11,7 +11,10 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/acp_connection_support.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
+
+class _MockExecChannel extends MockSessionWithChannel {}
 
 void registerAcpConnectionSupportTests() {
   group('acp_connection_support', () {
@@ -88,7 +91,7 @@ void registerAcpConnectionSupportTests() {
     ]) {
       test('terminal sign-in substitutes the installed probe candidate: '
           '$providerId installed=$installed', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((_) async {

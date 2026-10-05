@@ -38,7 +38,7 @@ Future<List<ShellCompletionSuggestion>> _completeFromHistory(
   ShellCompletionInvocation invocation,
   List<String> commands,
 ) {
-  final client = _MockSshClient();
+  final client = MockSshClient();
   _stubHistoryExec(client, commands);
   return ShellCompletionService().complete(
     _buildShellCompletionSession(client, connectionId: 1, hostId: 1),

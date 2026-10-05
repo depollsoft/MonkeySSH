@@ -261,7 +261,7 @@ void main() {
   test(
     'parks a rejected prompt restore while a newer send is still preparing',
     () async {
-      final manager = _RecordingManager();
+      final manager = RecordingAcpSessionManager();
       final promptGate = Completer<void>();
       final uploadGate = Completer<void>();
       manager
@@ -305,7 +305,7 @@ void main() {
   );
 
   test('session snapshots notify only when composer-visible state changes', () {
-    final manager = _RecordingManager();
+    final manager = RecordingAcpSessionManager();
     final controller = _controller(manager);
     addTearDown(controller.dispose);
     var notifications = 0;
