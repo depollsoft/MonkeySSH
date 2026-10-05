@@ -156,17 +156,24 @@ class _AcpPermissionSurfaceState extends State<AcpPermissionSurface> {
     }
     setState(() => _resolving.add(key));
     try {
-      await action();
-      await HapticFeedback.selectionClick();
-    } on Object {
-      // The session was replaced or ended between the frame and the tap.
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('The agent is no longer waiting for this request.'),
-          ),
-        );
+      try {
+        await action();
+        // AcpSessionManager reports a request whose session was replaced or
+        // ended between the frame and the tap as a StateError; that is the
+        // one failure this surface absorbs. Anything else keeps its normal
+        // error path.
+        // ignore: avoid_catching_errors
+      } on StateError {
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(
+              content: Text('The agent is no longer waiting for this request.'),
+            ),
+          );
+        }
+        return;
       }
+      await HapticFeedback.selectionClick();
     } finally {
       if (mounted) {
         setState(() => _resolving.remove(key));
