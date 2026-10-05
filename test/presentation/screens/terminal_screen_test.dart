@@ -4113,6 +4113,44 @@ void main() {
     );
 
     testWidgets(
+      'drops delayed theme reports once a plain TUI exits during the delay',
+      (tester) async {
+        await pumpScreen(tester);
+        shellStdoutController.add(
+          Uint8List.fromList(utf8.encode('\x1b[?2031h\x1b[?1004h')),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(session.terminalColorSchemeUpdatesMode, isTrue);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(TerminalScreen)),
+        );
+        await container
+            .read(themeModeNotifierProvider.notifier)
+            .setThemeMode(ThemeMode.dark);
+        await tester.pump();
+        // Let the immediate focus transition finish (its focus-in is 50 ms
+        // later); the delayed reports start at 250 ms.
+        await tester.pump(const Duration(milliseconds: 60));
+
+        // The TUI exits before the delayed reports fire, leaving a shell.
+        shellStdoutController.add(
+          Uint8List.fromList(utf8.encode('\x1b[?2031l\x1b[?1004l')),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(session.terminalColorSchemeUpdatesMode, isFalse);
+        shellWrites.clear();
+        await tester.pump(const Duration(seconds: 1));
+
+        final writtenShellText = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(writtenShellText, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'refreshes an active TUI when assigning the first session theme',
       (tester) async {
         await pumpScreen(tester);

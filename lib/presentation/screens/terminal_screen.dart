@@ -3234,16 +3234,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
         return;
       }
-      if (_isTmuxActive &&
-          _tmuxStateConnectionId == session.connectionId &&
-          !_shouldRefreshPlainTerminalTui(session)) {
+      // The TUI that justified these reports may have exited during the
+      // delay; a bare shell would read them as typed input.
+      if (!_shouldRefreshPlainTerminalTui(session)) {
         DiagnosticsLogService.instance.info(
           'terminal.theme',
-          'tmux_outer_late_skipped',
+          'late_refresh_skipped',
           fields: {
             'reason': reason,
             'connectionId': session.connectionId,
-            'colorSchemeUpdatesMode': session.terminalColorSchemeUpdatesMode,
+            'isTmuxActive': _isTmuxActive,
             'focusMode': _terminal.reportFocusMode,
             'altBuffer': _terminal.isUsingAltBuffer,
             'mouseMode': _terminal.mouseMode != MouseMode.none,
@@ -3251,10 +3251,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
         return;
       }
+      // DEC 2031 reports are only solicited while the mode is still on. The
+      // Windows default-color path is gated by the palette query above.
+      final colorSchemeUpdates = session.terminalColorSchemeUpdatesMode;
+      final sendThemeMode = includeThemeModeReport && colorSchemeUpdates;
+      final sendDefaults =
+          includeDefaultColorReports &&
+          (colorSchemeUpdates || requirePaletteQuerySince != null);
+      if (!sendThemeMode && !sendDefaults && !includeFocusReport) {
+        return;
+      }
       _refreshTerminalThemeReportsForTui(
         theme,
-        includeThemeModeReport: includeThemeModeReport,
-        includeDefaultColorReports: includeDefaultColorReports,
+        includeThemeModeReport: sendThemeMode,
+        includeDefaultColorReports: sendDefaults,
         includeFocusReport: includeFocusReport,
         reason: reason,
       );
