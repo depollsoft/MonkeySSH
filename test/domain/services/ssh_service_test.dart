@@ -6,6 +6,9 @@ import 'dart:typed_data';
 // ignore_for_file: public_member_api_docs
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:dartssh2/src/message/msg_channel.dart';
+import 'package:dartssh2/src/ssh_channel.dart';
+import 'package:dartssh2/src/ssh_message.dart';
 // SSHUserInfoRequest/SSHUserInfoPrompt are not exported from the public API,
 // but are needed to exercise the keyboard-interactive auth handler.
 // ignore: implementation_imports
@@ -596,9 +599,10 @@ Future<void> _waitForCondition(
 }
 
 class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
-  _ThrowOnRepeatedCloseSink(this._delegate);
+  _ThrowOnRepeatedCloseSink(this._controller);
 
-  final StreamSink<List<int>> _delegate;
+  final StreamController<List<int>> _controller;
+  StreamSink<List<int>> get _delegate => _controller.sink;
   int addAttempts = 0;
   int addStreamAttempts = 0;
   int closeAttempts = 0;
@@ -613,10 +617,28 @@ class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
   void addError(Object error, [StackTrace? stackTrace]) =>
       _delegate.addError(error, stackTrace);
 
+  /// Forwards each chunk through [add]. Like SSHForwardChannel, a sink the
+  /// channel closes ends the transfer instead of throwing at the producer.
   @override
   Future<void> addStream(Stream<List<int>> stream) {
     addStreamAttempts++;
-    return _delegate.addStream(stream);
+    final transfer = Completer<void>();
+    late final StreamSubscription<List<int>> subscription;
+    subscription = stream.listen(
+      (data) {
+        if (!_controller.isClosed) {
+          add(data);
+          return;
+        }
+        unawaited(subscription.cancel());
+        if (!transfer.isCompleted) transfer.complete();
+      },
+      onError: transfer.completeError,
+      onDone: () {
+        if (!transfer.isCompleted) transfer.complete();
+      },
+    );
+    return transfer.future;
   }
 
   @override
@@ -634,7 +656,7 @@ class _ThrowOnRepeatedCloseSink implements StreamSink<List<int>> {
 
 class _SingleCloseForwardChannel implements SSHForwardChannel {
   _SingleCloseForwardChannel() {
-    sink = _ThrowOnRepeatedCloseSink(_sinkController.sink);
+    sink = _ThrowOnRepeatedCloseSink(_sinkController);
   }
 
   final _streamController = StreamController<Uint8List>();
@@ -676,6 +698,64 @@ class _SingleCloseForwardChannel implements SSHForwardChannel {
       unawaited(_streamController.close());
     }
   }
+}
+
+/// Socket fake for relay tests. [incoming] feeds the relay, [pulledBytes]
+/// counts what it has read, and a pending [flushGate] models a client that
+/// stopped reading.
+class _PipeSocket extends Stream<Uint8List> implements Socket {
+  // ignore: close_sinks, each test closes it when the client should hit EOF.
+  final incoming = StreamController<Uint8List>();
+  final _done = Completer<void>();
+  Completer<void>? flushGate;
+  int pulledBytes = 0;
+  int flushes = 0;
+  bool destroyed = false;
+
+  @override
+  StreamSubscription<Uint8List> listen(
+    void Function(Uint8List event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => incoming.stream
+      .map((chunk) {
+        pulledBytes += chunk.length;
+        return chunk;
+      })
+      .listen(
+        onData,
+        onError: onError,
+        onDone: onDone,
+        cancelOnError: cancelOnError,
+      );
+
+  @override
+  void add(List<int> data) {}
+
+  @override
+  Future<void> flush() {
+    flushes++;
+    return flushGate?.future ?? Future<void>.value();
+  }
+
+  @override
+  Future<void> close() async {
+    await flush();
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  Future<void> get done => _done.future;
+
+  @override
+  void destroy() {
+    destroyed = true;
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _CancellableConnectSshService extends SshService {
@@ -6056,6 +6136,146 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       }
     }
 
+    test('stopping a reverse tunnel ends its accepted connections', () async {
+      final client = _MockSshClient();
+      final forward = _SingleCloseForwardChannel();
+      final session = _testSession(client);
+      final remoteForward = _MockRemoteForward();
+      final connections = StreamController<SSHForwardChannel>();
+      final targetServer = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final accepted = Completer<Socket>();
+      final subscription = targetServer.listen(accepted.complete);
+      addTearDown(() async {
+        await connections.close();
+        await subscription.cancel();
+        await targetServer.close();
+        await forward.close();
+      });
+      when(() => remoteForward.host).thenReturn('127.0.0.1');
+      when(() => remoteForward.port).thenReturn(8022);
+      when(() => remoteForward.connections)
+          .thenAnswer((_) => connections.stream);
+      when(remoteForward.close).thenReturn(null);
+      when(() => client.forwardRemote(host: '127.0.0.1', port: 8022))
+          .thenAnswer((_) async => remoteForward);
+      expect(
+        await session.startRemoteForward(
+          portForwardId: 1,
+          remoteHost: '127.0.0.1',
+          remotePort: 8022,
+          localHost: '127.0.0.1',
+          localPort: targetServer.port,
+        ),
+        isTrue,
+      );
+      connections.add(forward);
+      // ignore: close_sinks, the relay owns closing this connection.
+      final target = await accepted.future;
+      final targetClosed = Completer<void>();
+      target.listen(
+        (_) {},
+        onDone: targetClosed.complete,
+        onError: (Object _) => targetClosed.complete(),
+      );
+
+      await session.stopForward(1);
+
+      expect(forward.destroyCalls, 1);
+      await targetClosed.future.timeout(const Duration(seconds: 5));
+    });
+
+    for (final ending in ['stop', 'remote close']) {
+      test(
+        'relay $ending does not wait on a client that stopped reading',
+        () async {
+          final socket = _PipeSocket()..flushGate = Completer<void>();
+          final forward = _SingleCloseForwardChannel();
+          final stopped = Completer<void>();
+          final relay = relayPortForward(
+            socket,
+            () => forward,
+            stopped: stopped.future,
+            closeGrace: const Duration(milliseconds: 1),
+          );
+          forward._streamController.add(Uint8List(16));
+          await pumpEventQueue();
+          expect(socket.flushes, 1);
+
+          if (ending == 'stop') {
+            stopped.complete();
+          } else {
+            await forward._sinkController.close();
+          }
+          await relay.timeout(const Duration(seconds: 1));
+
+          expect(socket.destroyed, isTrue);
+          expect(forward.destroyCalls, 1);
+        },
+      );
+    }
+
+    test(
+      'relay stops reading the socket while the SSH window is full',
+      () async {
+        // A real dartssh2 channel: its upload loop sends one window and then
+        // stops reading, and that pause must reach the local socket.
+        const window = 4096;
+        final sent = <SSHMessage>[];
+        final controller = SSHChannelController(
+          localId: 1,
+          localMaximumPacketSize: window,
+          localInitialWindowSize: 1 << 20,
+          remoteId: 2,
+          remoteInitialWindowSize: window,
+          remoteMaximumPacketSize: window,
+          sendMessage: sent.add,
+        );
+        final socket = _PipeSocket();
+        final stopped = Completer<void>();
+        final relay = relayPortForward(
+          socket,
+          () => SSHForwardChannel(controller.channel),
+          stopped: stopped.future,
+        );
+        int sentBytes() => sent.whereType<SSH_Message_Channel_Data>().fold(
+          0,
+          (total, message) => total + message.data.length,
+        );
+        final upload = [
+          for (var chunk = 0; chunk < 16; chunk++)
+            Uint8List(window)..fillRange(0, window, chunk),
+        ]..forEach(socket.incoming.add);
+        await pumpEventQueue();
+
+        expect(sentBytes(), window);
+        expect(socket.pulledBytes, lessThanOrEqualTo(3 * window));
+
+        controller.handleMessage(
+          SSH_Message_Channel_Window_Adjust(
+            recipientChannel: 1,
+            bytesToAdd: 1 << 20,
+          ),
+        );
+        await socket.incoming.close();
+        await pumpEventQueue();
+
+        expect(sentBytes(), 16 * window);
+        expect(
+          [
+            for (final message in sent.whereType<SSH_Message_Channel_Data>())
+              ...message.data,
+          ],
+          [for (final chunk in upload) ...chunk],
+        );
+        expect(sent.last, isA<SSH_Message_Channel_EOF>());
+        stopped.complete();
+        await relay;
+      },
+    );
+
     for (final scenario in [
       'closed sink',
       'sink closes during upload',
@@ -6196,7 +6416,10 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           expect(forward.sink.addAttempts, 1);
         }
         expect(forward.flushCalls, 0);
-        expect(forward.sink.addStreamAttempts, 0);
+        expect(
+          forward.sink.addStreamAttempts,
+          scenario == 'sink closes during upload' ? 1 : 0,
+        );
         if (scenario == 'stop' ||
             scenario == 'closed sink' ||
             scenario == 'sink closes during upload') {

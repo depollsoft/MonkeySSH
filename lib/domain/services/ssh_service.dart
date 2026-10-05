@@ -2665,18 +2665,34 @@ class _PreparedHostKeySocket {
   final HostKeySource hostKeySource;
 }
 
-Future<void> _relayForward(
+/// How long a relay that ended without cancellation may keep flushing data it
+/// already accepted before it destroys the local socket.
+const _forwardRelayCloseGrace = Duration(seconds: 5);
+
+/// Relays one forwarded connection between [socket] and an SSH channel.
+///
+/// Uploads go through `addStream`, so a full SSH window pauses reads from
+/// [socket] instead of buffering the whole upload in memory. Normal EOF closes
+/// one direction and keeps the other open. Cancellation through [stopped] or a
+/// failure destroys both endpoints at once, so a client that stopped reading
+/// cannot hold the relay open; any other ending flushes what was accepted for
+/// at most [closeGrace].
+@visibleForTesting
+Future<void> relayPortForward(
   Socket socket,
   FutureOr<SSHForwardChannel?> Function() openChannel, {
   Future<void>? stopped,
   Duration? openTimeout,
   void Function(SSHForwardChannel)? destroyChannel,
+  Duration closeGrace = _forwardRelayCloseGrace,
 }) async {
   SSHForwardChannel? forward;
   StreamIterator<Uint8List>? incoming;
   StreamIterator<Uint8List>? outgoing;
   Future<void>? socketFlush;
   var finished = false;
+  var graceful = false;
+  var stopRequested = false;
   var forwardSinkClosed = false;
   var closingForwardSink = false;
   var socketClosed = false;
@@ -2700,6 +2716,9 @@ Future<void> _relayForward(
     }
   }
 
+  // Registered before any race on [stopped], so it is set by the time a race
+  // resumes.
+  unawaited(stopped?.then((_) => stopRequested = true));
   // Observe write-side errors before awaiting channel creation.
   unawaited(
     socket.done.then<void>((_) {
@@ -2731,19 +2750,36 @@ Future<void> _relayForward(
         });
     outgoing = StreamIterator(socket);
     final source = outgoing;
+    Object? readError;
+    StackTrace? readStackTrace;
+    // Continues [source] from its current chunk. A read error ends this stream
+    // rather than flowing into the channel sink, and is rethrown afterwards.
+    Stream<Uint8List> remainingUpload() async* {
+      try {
+        do {
+          yield source.current;
+        } while (await source.moveNext());
+      } on Object catch (error, stackTrace) {
+        readError = error;
+        readStackTrace = stackTrace;
+      }
+    }
+
     final socketToForward = () async {
-      while (await source.moveNext()) {
+      if (await source.moveNext()) {
         final channel = await opening;
         // A delivered channel may already have a completed sink.done future.
         // Let its observer run before writing queued socket bytes.
         await Future<void>.value();
         if (channel == null || finished || forwardSinkClosed) return;
-        // SSHForwardChannel.flush() flushes the shared SSH transport, not
-        // this channel. Dart's Socket.flush() temporarily binds its sink;
-        // concurrent shell/forward/control packets then throw while writing
-        // to it and can corrupt the encrypted packet stream. The channel's
-        // upload loop sends queued data without an explicit transport flush.
-        channel.sink.add(source.current);
+        // addStream owns the sink until the socket ends: nothing else adds to
+        // or closes it meanwhile. SSHForwardChannel pauses it while the SSH
+        // window is full, which stops the reads above. Never flush instead:
+        // SSHForwardChannel.flush() flushes the shared SSH transport.
+        await channel.sink.addStream(remainingUpload());
+        if (readError case final error?) {
+          Error.throwWithStackTrace(error, readStackTrace!);
+        }
       }
       final channel = forward;
       if (channel != null && !finished && !forwardSinkClosed) {
@@ -2761,7 +2797,10 @@ Future<void> _relayForward(
     final channel = await (openTimeout == null
         ? pending
         : pending.timeout(openTimeout));
-    if (channel == null) return;
+    if (channel == null) {
+      graceful = !stopRequested;
+      return;
+    }
     incoming = StreamIterator(channel.stream);
     final response = incoming;
     final forwardToSocket = () async {
@@ -2780,14 +2819,32 @@ Future<void> _relayForward(
       unexpectedClose.future,
       ?stopped,
     ]);
+    graceful = !stopRequested;
   } finally {
     finished = true;
+    if (!graceful) {
+      // Destroy first: a pending flush or close waits on a client that may
+      // never read again. The pumps' pending futures are already observed.
+      socket.destroy();
+      if (forward != null) destroy(forward!);
+    }
+    // Waits for [future] unless the grace expires or the tunnel stops.
+    Future<bool> settled(Future<void> future) => Future.any<bool>([
+      future.then((_) => true),
+      if (stopped != null) stopped.then((_) => false),
+    ]).timeout(closeGrace, onTimeout: () => false);
     try {
       try {
-        if (socketFlush != null) await socketFlush;
-        if (!closingSocket) {
-          closingSocket = true;
-          await socket.close();
+        if (graceful) {
+          // A remote close can win while the response is still flushing.
+          // Wait for that flush before closing the write side.
+          final flush = socketFlush;
+          if (flush != null && !await settled(flush)) {
+            socket.destroy();
+          } else if (!closingSocket) {
+            closingSocket = true;
+            if (!await settled(socket.close())) socket.destroy();
+          }
         }
       } finally {
         await Future.wait([
@@ -2799,7 +2856,7 @@ Future<void> _relayForward(
       socket.destroy();
       rethrow;
     } finally {
-      if (forward != null) destroy(forward!);
+      if (graceful && forward != null) destroy(forward!);
     }
   }
 }
@@ -5929,10 +5986,10 @@ while($true){
         remoteHost: remoteHost,
         remotePort: remotePort,
       );
-      tunnel.localConnections.add(connection);
+      tunnel.connections.add(connection);
       unawaited(
         connection.whenComplete(() {
-          tunnel.localConnections.remove(connection);
+          tunnel.connections.remove(connection);
         }),
       );
     },
@@ -5969,7 +6026,7 @@ while($true){
     required int remotePort,
   }) async {
     try {
-      await _relayForward(
+      await relayPortForward(
         socket,
         () => _isClosing || tunnel.stopped.isCompleted
             ? null
@@ -6068,39 +6125,17 @@ while($true){
       );
 
       _activeTunnels[portForwardId] = tunnel;
-      tunnel.subscription = remoteForward.connections.listen((channel) async {
-        Socket? socket;
-        try {
-          socket = await Socket.connect(localHost, localPort);
-          await _relayForward(socket, () => channel);
-        } on Object catch (e) {
-          if (e is! Exception &&
-              e is! SSHError &&
-              !_isClosedForwardSinkError(e)) {
-            rethrow;
-          }
-          DiagnosticsLogService.instance.warning(
-            'ssh.forward',
-            'remote_connection_failed',
-            fields: {'errorType': e.runtimeType},
-          );
-          if (kDebugMode) {
-            debugPrint('Remote forward connection error: $e');
-          }
-        } finally {
-          if (socket == null) {
-            try {
-              channel.destroy();
-            } on SSHError catch (_) {
-              // The transport may already be closed during channel teardown.
-            }
-          }
-          try {
-            socket?.destroy();
-          } on Exception catch (_) {
-            // Ignore cleanup errors.
-          }
-        }
+      tunnel.subscription = remoteForward.connections.listen((channel) {
+        final connection = _handleRemoteForwardConnection(
+          channel,
+          tunnel: tunnel,
+          localHost: localHost,
+          localPort: localPort,
+        );
+        tunnel.connections.add(connection);
+        unawaited(
+          connection.whenComplete(() => tunnel.connections.remove(connection)),
+        );
       });
 
       _notifyPortForwardsChanged();
@@ -6143,6 +6178,62 @@ while($true){
     }
   }
 
+  Future<void> _handleRemoteForwardConnection(
+    SSHForwardChannel channel, {
+    required _ActiveTunnel tunnel,
+    required String localHost,
+    required int localPort,
+  }) async {
+    Socket? socket;
+    try {
+      final connecting = Socket.connect(localHost, localPort);
+      socket = await Future.any<Socket?>([
+        connecting,
+        tunnel.stopped.future.then((_) => null),
+      ]);
+      if (socket == null) {
+        // Stopped while connecting: a socket that arrives later has no relay.
+        unawaited(
+          connecting.then<void>(
+            (late) => late.destroy(),
+            onError: (Object _, StackTrace _) {},
+          ),
+        );
+        return;
+      }
+      await relayPortForward(
+        socket,
+        () => channel,
+        stopped: tunnel.stopped.future,
+      );
+    } on Object catch (e) {
+      if (e is! Exception && e is! SSHError && !_isClosedForwardSinkError(e)) {
+        rethrow;
+      }
+      DiagnosticsLogService.instance.warning(
+        'ssh.forward',
+        'remote_connection_failed',
+        fields: {'errorType': e.runtimeType},
+      );
+      if (kDebugMode) {
+        debugPrint('Remote forward connection error: $e');
+      }
+    } finally {
+      if (socket == null) {
+        try {
+          channel.destroy();
+        } on SSHError catch (_) {
+          // The transport may already be closed during channel teardown.
+        }
+      }
+      try {
+        socket?.destroy();
+      } on Exception catch (_) {
+        // Ignore cleanup errors.
+      }
+    }
+  }
+
   void _closeLateRemoteForward(Future<SSHRemoteForward?> request) {
     unawaited(
       request.then<void>(
@@ -6180,7 +6271,7 @@ while($true){
         await browserServerSocket.close();
       }
       tunnel.remoteForward?.close();
-      await Future.wait(tunnel.localConnections);
+      await Future.wait(tunnel.connections);
       _notifyPortForwardsChanged();
     }
   }
@@ -6489,7 +6580,9 @@ class _ActiveTunnel {
        isLocal = false;
 
   final stopped = Completer<void>();
-  final localConnections = <Future<void>>{};
+
+  /// Relays for accepted local or reverse connections, awaited on stop.
+  final connections = <Future<void>>{};
   final ServerSocket? serverSocket;
   final List<ServerSocket> browserServerSockets;
   final SSHRemoteForward? remoteForward;
