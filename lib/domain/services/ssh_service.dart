@@ -35,9 +35,11 @@ import 'interactive_auth_prompt.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
+import 'serial_task_queue.dart';
 import 'settings_service.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
+import 'ssh_wire.dart';
 import 'telemetry_service.dart';
 import 'terminal_command_mark_tracker.dart';
 import 'terminal_hyperlink_tracker.dart';
@@ -3388,7 +3390,7 @@ class _SshHostKeyParser {
     final data = _buffer.takeBytes();
     var offset = 0;
     while (!_hostKeyBytes.isCompleted && data.length - offset >= 5) {
-      final packetLength = _readUint32(data, offset);
+      final packetLength = readSshUint32(data, offset);
       if (packetLength + 4 > _maxBufferedBytes) {
         _fail(
           'SSH handshake packet length $packetLength exceeds the '
@@ -3440,45 +3442,12 @@ class _SshHostKeyParser {
       return;
     }
 
-    final hostKey = _readSshString(payload, 1);
-    if (hostKey == null || !_looksLikeHostKeyBlob(hostKey)) {
+    final hostKey = readSshString(payload, 1);
+    if (hostKey == null || !looksLikeSshHostKeyBlob(hostKey)) {
       return;
     }
 
     _hostKeyBytes.complete(Uint8List.fromList(hostKey));
-  }
-
-  bool _looksLikeHostKeyBlob(Uint8List hostKey) {
-    final typeBytes = _readSshString(hostKey, 0);
-    if (typeBytes == null) {
-      return false;
-    }
-
-    final type = utf8.decode(typeBytes, allowMalformed: true);
-    return type == 'ssh-rsa' ||
-        type == 'ssh-ed25519' ||
-        type.startsWith('ecdsa-sha2-');
-  }
-
-  static int _readUint32(Uint8List bytes, int offset) =>
-      (bytes[offset] << 24) |
-      (bytes[offset + 1] << 16) |
-      (bytes[offset + 2] << 8) |
-      bytes[offset + 3];
-
-  static Uint8List? _readSshString(Uint8List bytes, int offset) {
-    if (bytes.length - offset < 4) {
-      return null;
-    }
-
-    final length = _readUint32(bytes, offset);
-    final start = offset + 4;
-    final end = start + length;
-    if (length < 0 || end > bytes.length) {
-      return null;
-    }
-
-    return Uint8List.sublistView(bytes, start, end);
   }
 }
 
@@ -4117,8 +4086,8 @@ class SshSession {
   /// Active port forward tunnels.
   final Map<int, _ActiveTunnel> _activeTunnels = {};
 
-  final Map<int, ({Future<void> done, _PortForwardOperationKind kind})>
-  _portForwardOperations = {};
+  final _portForwardOperations = KeyedTaskGate<int>();
+  final Set<int> _stoppingPortForwardIds = {};
   final _portForwardChanges = StreamController<void>.broadcast(sync: true);
   final _closeStarted = Completer<void>();
   bool _isClosing = false;
@@ -4134,8 +4103,8 @@ class SshSession {
   String? _automaticPortProxyHost;
   int _automaticPortForwardGeneration = 0;
   Future<void>? _automaticPortForwardRefresh;
-  Future<void>? _automaticPortForwardSnapshotQueue;
-  Future<void> _automaticPortForwardConfiguration = Future<void>.value();
+  final _automaticPortForwardSnapshotQueue = SerialTaskQueue();
+  final _automaticPortForwardConfiguration = SerialTaskQueue();
   final Map<RemoteTcpListenerKey, int>
   _automaticPortForwardIdsByRemoteListener = {};
   final Map<RemoteTcpListenerKey, int> _automaticPortForwardMisses = {};
@@ -4217,12 +4186,10 @@ class SshSession {
       activeTunnels.any((tunnel) => tunnel.portForwardId == portForwardId);
 
   /// Whether this session is currently starting or replacing [portForwardId].
-  bool isPortForwardStarting(int portForwardId) {
-    final operation = _portForwardOperations[portForwardId];
-    return operation != null &&
-        operation.kind != _PortForwardOperationKind.stop &&
-        !isPortForwardActive(portForwardId);
-  }
+  bool isPortForwardStarting(int portForwardId) =>
+      _portForwardOperations.isRunning(portForwardId) &&
+      !_stoppingPortForwardIds.contains(portForwardId) &&
+      !isPortForwardActive(portForwardId);
 
   /// Starts a saved [portForward] on this SSH session.
   ///
@@ -4991,23 +4958,16 @@ class SshSession {
     Set<RemoteTcpListenerKey> excludedRemoteListeners = const {},
     Set<String> shellLineageTokens = const {},
     bool includeHostLevelListeners = true,
-  }) {
-    final operation = _automaticPortForwardConfiguration.then(
-      (_) => enabled
-          ? _startAutomaticPortForwarding(
-              proxyHost,
-              excludedRemoteListeners,
-              shellLineageTokens,
-              includeHostLevelListeners,
-            )
-          : _stopAutomaticPortForwarding(),
-    );
-    _automaticPortForwardConfiguration = operation.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
-    );
-    return operation;
-  }
+  }) => _automaticPortForwardConfiguration.run(
+    () => enabled
+        ? _startAutomaticPortForwarding(
+            proxyHost,
+            excludedRemoteListeners,
+            shellLineageTokens,
+            includeHostLevelListeners,
+          )
+        : _stopAutomaticPortForwarding(),
+  );
 
   /// Updates persistent mux pane/process roots used for shell-owned detection.
   Future<void> updateAutomaticPortForwardProcessRoots(Set<int> processRoots) {
@@ -5024,7 +4984,7 @@ class SshSession {
       return Future<void>.value();
     }
 
-    final operation = _automaticPortForwardConfiguration.then((_) async {
+    return _automaticPortForwardConfiguration.run(() async {
       if (_isClosing || _automaticPortProxyHost == null) {
         return;
       }
@@ -5034,11 +4994,6 @@ class SshSession {
       await _stopAutomaticPortForwardWatcher(waitForClose: true);
       await _startAutomaticPortDiscovery(generation);
     });
-    _automaticPortForwardConfiguration = operation.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
-    );
-    return operation;
   }
 
   Future<void> _startAutomaticPortForwarding(
@@ -5131,7 +5086,7 @@ class SshSession {
     if (runningRefresh != null) {
       await runningRefresh;
     }
-    final pendingSnapshot = _automaticPortForwardSnapshotQueue;
+    final pendingSnapshot = _automaticPortForwardSnapshotQueue.pending;
     if (pendingSnapshot != null) {
       await pendingSnapshot;
     }
@@ -5508,39 +5463,24 @@ class SshSession {
     Map<RemoteTcpListenerKey, RemoteTcpListener> listeners, {
     required int generation,
     required bool removeMissingImmediately,
-  }) {
-    final previous = _automaticPortForwardSnapshotQueue ?? Future<void>.value();
-    final operation = previous.then(
-      (_) => _reconcileAutomaticPortForwards(
-        listeners,
-        generation: generation,
-        removeMissingImmediately: removeMissingImmediately,
-      ),
-    );
-    late final Future<void> trackedOperation;
-    trackedOperation = operation
-        .then<void>(
-          (_) {},
-          onError: (Object error, StackTrace _) {
-            DiagnosticsLogService.instance.warning(
-              'ssh.forward',
-              'automatic_snapshot_reconcile_failed',
-              fields: {
-                'connectionId': connectionId,
-                'hostId': hostId,
-                'errorType': error.runtimeType,
-              },
-            );
-          },
-        )
-        .whenComplete(() {
-          if (identical(_automaticPortForwardSnapshotQueue, trackedOperation)) {
-            _automaticPortForwardSnapshotQueue = null;
-          }
-        });
-    _automaticPortForwardSnapshotQueue = trackedOperation;
-    return operation;
-  }
+  }) => _automaticPortForwardSnapshotQueue.run(
+    () => _reconcileAutomaticPortForwards(
+      listeners,
+      generation: generation,
+      removeMissingImmediately: removeMissingImmediately,
+    ),
+    onError: (Object error, StackTrace _) {
+      DiagnosticsLogService.instance.warning(
+        'ssh.forward',
+        'automatic_snapshot_reconcile_failed',
+        fields: {
+          'connectionId': connectionId,
+          'hostId': hostId,
+          'errorType': error.runtimeType,
+        },
+      );
+    },
+  );
 
   void _handleAutomaticPortWatcherEnded(
     SSHSession watcher, {
@@ -6607,28 +6547,17 @@ while($true){
     int portForwardId,
     Future<T> Function() operation, {
     required _PortForwardOperationKind kind,
-  }) async {
-    while (true) {
-      final pendingOperation = _portForwardOperations[portForwardId];
-      if (pendingOperation == null) {
-        break;
-      }
-      await pendingOperation.done;
+  }) => _portForwardOperations.run(portForwardId, () async {
+    if (kind != _PortForwardOperationKind.stop) {
+      return operation();
     }
-
-    final gate = Completer<void>();
-    final gateFuture = gate.future;
-    _portForwardOperations[portForwardId] = (done: gateFuture, kind: kind);
+    _stoppingPortForwardIds.add(portForwardId);
     try {
       return await operation();
     } finally {
-      if (identical(_portForwardOperations[portForwardId]?.done, gateFuture)) {
-        final removedOperation = _portForwardOperations.remove(portForwardId);
-        unawaited(removedOperation?.done);
-      }
-      gate.complete();
+      _stoppingPortForwardIds.remove(portForwardId);
     }
-  }
+  });
 
   void _notifyPortForwardsChanged() {
     if (!_portForwardChanges.isClosed) {
@@ -6651,7 +6580,7 @@ while($true){
     _automaticPortForwardProcessRoots = const {};
     _automaticPortForwardIncludeHostLevelListeners = true;
     await _stopAutomaticPortForwardWatcher();
-    final pendingSnapshot = _automaticPortForwardSnapshotQueue;
+    final pendingSnapshot = _automaticPortForwardSnapshotQueue.pending;
     if (pendingSnapshot != null) {
       await pendingSnapshot;
     }
@@ -7978,10 +7907,12 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   _automaticForwardDesiredExclusionsByHost = {};
   final Map<String, Set<RemoteTcpListenerKey>>
   _automaticForwardShellOwnedByEndpoint = {};
-  final Map<int, Future<void>> _automaticForwardHostReconfigurationQueues = {};
-  final Map<String, Future<void>> _automaticForwardReconfigurationQueues = {};
+  final Map<int, SerialTaskQueue> _automaticForwardHostReconfigurationQueues =
+      {};
+  final Map<String, SerialTaskQueue> _automaticForwardReconfigurationQueues =
+      {};
   Timer? _previewStateRefreshTimer;
-  Future<void> _backgroundStatusSyncQueue = Future<void>.value();
+  final _backgroundStatusSyncQueue = SerialTaskQueue();
 
   @override
   Map<int, SshConnectionState> build() {
@@ -8585,11 +8516,11 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   /// Reloads and serially reapplies automatic forwarding for [hostId].
   Future<void> reconfigureAutomaticPortForwardingForHost(int hostId) {
-    final previous =
-        _automaticForwardHostReconfigurationQueues[hostId] ??
-        Future<void>.value();
-    late final Future<void> trackedOperation;
-    final operation = previous.then((_) async {
+    final queue = _automaticForwardHostReconfigurationQueues.putIfAbsent(
+      hostId,
+      SerialTaskQueue.new,
+    );
+    return queue.run(() async {
       if (!ref.mounted) {
         return;
       }
@@ -8608,16 +8539,6 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
         }
       }
     });
-    trackedOperation = operation.whenComplete(() {
-      if (identical(
-        _automaticForwardHostReconfigurationQueues[hostId],
-        trackedOperation,
-      )) {
-        _automaticForwardHostReconfigurationQueues.remove(hostId);
-      }
-    });
-    _automaticForwardHostReconfigurationQueues[hostId] = trackedOperation;
-    return trackedOperation;
   }
 
   /// Reapplies automatic forwarding for every currently connected saved host.
@@ -8639,11 +8560,11 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     Host triggerHost, {
     required String endpointKey,
   }) {
-    final previous =
-        _automaticForwardReconfigurationQueues[endpointKey] ??
-        Future<void>.value();
-    late final Future<void> trackedOperation;
-    final operation = previous.then((_) async {
+    final queue = _automaticForwardReconfigurationQueues.putIfAbsent(
+      endpointKey,
+      SerialTaskQueue.new,
+    );
+    return queue.run(() async {
       if (!ref.mounted) {
         return;
       }
@@ -8721,16 +8642,6 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
         );
       }
     });
-    trackedOperation = operation.whenComplete(() {
-      if (identical(
-        _automaticForwardReconfigurationQueues[endpointKey],
-        trackedOperation,
-      )) {
-        _automaticForwardReconfigurationQueues.remove(endpointKey);
-      }
-    });
-    _automaticForwardReconfigurationQueues[endpointKey] = trackedOperation;
-    return trackedOperation;
   }
 
   Future<void> _reconfigureAutomaticPortForwardingAfterSessionRemoval(
@@ -9519,13 +9430,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   /// Publish the current active-connection status to native keepalive surfaces.
   Future<void> syncBackgroundStatus() => _queueBackgroundStatusSync();
 
-  Future<void> _queueBackgroundStatusSync() {
-    final nextSync = _backgroundStatusSyncQueue
-        .catchError((Object _) {})
-        .then((_) => _syncBackgroundStatus());
-    _backgroundStatusSyncQueue = nextSync;
-    return nextSync;
-  }
+  Future<void> _queueBackgroundStatusSync() =>
+      _backgroundStatusSyncQueue.run(_syncBackgroundStatus);
 }
 
 class _TerminalNotificationExpiry {

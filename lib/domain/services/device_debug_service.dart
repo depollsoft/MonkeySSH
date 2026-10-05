@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'diagnostics_log_service.dart';
+import 'serial_task_queue.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -151,7 +152,7 @@ class MethodChannelAndroidDeviceDebugPlatform
   }
 
   final MethodChannel _channel;
-  Future<void> _discoveryTail = Future<void>.value();
+  final _discoveryQueue = SerialTaskQueue();
   final _pairingCodes = StreamController<String>.broadcast();
 
   @override
@@ -278,23 +279,12 @@ class MethodChannelAndroidDeviceDebugPlatform
   Future<AndroidAdbEndpoint?> discoverEndpoint(
     AndroidAdbServiceKind kind, {
     Duration timeout = const Duration(seconds: 6),
-  }) {
-    final previous = _discoveryTail;
-    final release = Completer<void>();
-    _discoveryTail = release.future;
-    return _discoverEndpointAfter(
-      previous,
-      kind,
-      timeout: timeout,
-    ).whenComplete(release.complete);
-  }
+  }) => _discoveryQueue.run(() => _discoverEndpoint(kind, timeout: timeout));
 
-  Future<AndroidAdbEndpoint?> _discoverEndpointAfter(
-    Future<void> previous,
+  Future<AndroidAdbEndpoint?> _discoverEndpoint(
     AndroidAdbServiceKind kind, {
     required Duration timeout,
   }) async {
-    await previous;
     if (!supported) {
       throw const DeviceDebugException(
         kind: DeviceDebugErrorKind.unsupported,

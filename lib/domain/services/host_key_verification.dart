@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 
 import '../../data/database/database.dart';
 import '../../data/repositories/known_hosts_repository.dart';
+import 'ssh_wire.dart';
 
 /// The user decision for a presented SSH host key.
 enum HostKeyTrustDecision {
@@ -295,8 +296,8 @@ String canonicalizeSshHostKeyType(
   String? encodedHostKey,
 }) {
   final decodedKeyType =
-      _tryReadSshHostKeyType(hostKeyBytes) ??
-      _tryReadSshHostKeyTypeFromEncodedKey(encodedHostKey);
+      readSshHostKeyType(hostKeyBytes) ??
+      readSshHostKeyType(_decodeHostKey(encodedHostKey));
   if (decodedKeyType != null && decodedKeyType.isNotEmpty) {
     return decodedKeyType;
   }
@@ -385,33 +386,6 @@ String formatLegacySshHostKeyFingerprint(List<int> hostKeyBytes) {
   return buffer.toString();
 }
 
-String? _tryReadSshHostKeyType(Uint8List? hostKeyBytes) {
-  if (hostKeyBytes == null || hostKeyBytes.length < 4) {
-    return null;
-  }
-
-  final typeLength = _readUint32(hostKeyBytes);
-  const typeStart = 4;
-  final typeEnd = typeStart + typeLength;
-  if (typeLength <= 0 || typeEnd > hostKeyBytes.length) {
-    return null;
-  }
-
-  try {
-    return utf8.decode(hostKeyBytes.sublist(typeStart, typeEnd));
-  } on FormatException {
-    return null;
-  }
-}
-
-String? _tryReadSshHostKeyTypeFromEncodedKey(String? encodedHostKey) {
-  final hostKeyBytes = _decodeHostKey(encodedHostKey);
-  if (hostKeyBytes == null) {
-    return null;
-  }
-  return _tryReadSshHostKeyType(hostKeyBytes);
-}
-
 Uint8List? _decodeHostKey(String? encodedHostKey) {
   if (encodedHostKey == null || encodedHostKey.isEmpty) {
     return null;
@@ -423,9 +397,3 @@ Uint8List? _decodeHostKey(String? encodedHostKey) {
     return null;
   }
 }
-
-int _readUint32(Uint8List bytes, [int offset = 0]) =>
-    (bytes[offset] << 24) |
-    (bytes[offset + 1] << 16) |
-    (bytes[offset + 2] << 8) |
-    bytes[offset + 3];
