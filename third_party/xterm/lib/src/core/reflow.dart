@@ -2,50 +2,56 @@ import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
 class _LineBuilder {
-  _LineBuilder([this._capacity = 80]) {
-    _result = BufferLine(_capacity);
-  }
+  _LineBuilder(this._capacity);
 
   final int _capacity;
 
-  late BufferLine _result;
+  /// Allocated on first use: most logical lines never need a builder line, and
+  /// a reflow visits every line of the scrollback.
+  BufferLine? _result;
+
+  BufferLine get _line => _result ??= BufferLine(_capacity);
+
+  /// Whether [_result] came from [setBuffer] and may still hold cells past
+  /// [_length].
+  var _reused = false;
 
   int _length = 0;
 
   int get length => _length;
-
-  bool get isEmpty => _length == 0;
 
   bool get isNotEmpty => _length != 0;
 
   /// Adds a range of cells from [src] to the builder. Anchors within the range
   /// will be reparented to the new line returned by [take].
   void add(BufferLine src, int start, int length) {
-    _result.copyFrom(src, start, _length, length);
+    final line = _line..copyFrom(src, start, _length, length);
     _length += length;
-    // A line reused by [setBuffer] ends at the added cells; the cells it had
-    // past them must not reappear when it is resized to the new width.
-    _result.truncate(_length);
+    if (_reused) {
+      // A line reused by [setBuffer] ends at the added cells; the cells it
+      // had past them must not reappear when it is resized to the new width.
+      // A fresh line has nothing there, and later adds only append.
+      line.truncate(_length);
+      _reused = false;
+    }
   }
 
   /// Reuses the given [line] as the initial buffer for this builder.
   void setBuffer(BufferLine line, int length) {
     _result = line;
     _length = length;
+    _reused = true;
   }
 
   void addAnchor(CellAnchor anchor, int offset) {
-    anchor.reparent(_result, _length + offset);
+    anchor.reparent(_line, _length + offset);
   }
 
   BufferLine take({required bool wrapped}) {
-    final result = _result;
-    result.isWrapped = wrapped;
-    // result.resize(_length);
-
-    _result = BufferLine(_capacity);
+    final result = _line..isWrapped = wrapped;
+    _result = null;
+    _reused = false;
     _length = 0;
-
     return result;
   }
 }
