@@ -1267,11 +1267,11 @@ func attachCommand(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	themeHint, err := decodeThemeHintBase64(*themeHintBase64)
+	themeHint, err := decodeHintBase64(*themeHintBase64, themeHintLimitBytes, "theme")
 	if err != nil {
 		fatal(err)
 	}
-	capabilityHint, err := decodeCapabilityHintBase64(*capabilityHintBase64)
+	capabilityHint, err := decodeHintBase64(*capabilityHintBase64, capabilityHintLimitBytes, "capability")
 	if err != nil {
 		fatal(err)
 	}
@@ -1646,7 +1646,11 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 
 	decoder := json.NewDecoder(conn)
 	info := runningSessionInfo{}
-	for info.name == "" || info.windows == nil {
+	// Track receipt rather than content: a server with no windows omits the
+	// "windows" field, so waiting for a non-nil slice would stall until the
+	// socket deadline.
+	sawWindows := false
+	for info.name == "" || !sawWindows {
 		var response controlResponse
 		if err := decoder.Decode(&response); err != nil {
 			return runningSessionInfo{}, err
@@ -1657,6 +1661,7 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 			info.version = response.Version
 			info.attachCount = response.AttachCount
 		case "window_list":
+			sawWindows = true
 			info.windows = response.Windows
 			for _, window := range response.Windows {
 				if window.LastActivityEpochSeconds > info.lastActive {
@@ -1748,11 +1753,11 @@ func serveCommand(args []string) {
 	if strings.TrimSpace(*session) == "" {
 		usageAndExit()
 	}
-	themeHint, err := decodeThemeHintBase64(*themeHintBase64)
+	themeHint, err := decodeHintBase64(*themeHintBase64, themeHintLimitBytes, "theme")
 	if err != nil {
 		fatal(err)
 	}
-	capabilityHint, err := decodeCapabilityHintBase64(*capabilityHintBase64)
+	capabilityHint, err := decodeHintBase64(*capabilityHintBase64, capabilityHintLimitBytes, "capability")
 	if err != nil {
 		fatal(err)
 	}
@@ -1776,34 +1781,31 @@ func serveCommand(args []string) {
 	}
 }
 
-func decodeThemeHintBase64(encoded string) ([]byte, error) {
+// decodeHintBase64 decodes a base64 attach hint (theme or capability) bounded
+// by [limit]; [label] names the hint in errors.
+func decodeHintBase64(encoded string, limit int, label string) ([]byte, error) {
 	encoded = strings.TrimSpace(encoded)
 	if encoded == "" {
 		return nil, nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("invalid theme hint: %w", err)
+		return nil, fmt.Errorf("invalid %s hint: %w", label, err)
 	}
-	if len(decoded) > themeHintLimitBytes {
-		return nil, fmt.Errorf("theme hint is too large")
+	if len(decoded) > limit {
+		return nil, fmt.Errorf("%s hint is too large", label)
 	}
 	return decoded, nil
 }
 
-func decodeCapabilityHintBase64(encoded string) ([]byte, error) {
-	encoded = strings.TrimSpace(encoded)
-	if encoded == "" {
-		return nil, nil
+// hintDataFromString keeps a raw attach hint when it is non-empty and within
+// [limit] bytes.
+func hintDataFromString(data string, limit int) []byte {
+	data = strings.TrimSpace(data)
+	if data == "" || len(data) > limit {
+		return nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("invalid capability hint: %w", err)
-	}
-	if len(decoded) > capabilityHintLimitBytes {
-		return nil, errors.New("capability hint is too large")
-	}
-	return decoded, nil
+	return []byte(data)
 }
 
 func decodeArgsBase64(encoded string) ([]string, error) {
@@ -1854,11 +1856,16 @@ func gcCommand() {
 			clearStalePIDFile(path, "")
 			continue
 		case ".json":
-			removeAbandonedRestoreFile(path)
+			// Upgrade snapshots left behind by a helper that died mid-restart.
+			// Snapshots still being handed to a starting server are kept,
+			// otherwise gc would make that server come up empty.
+			if strings.HasPrefix(entry.Name(), "monkeymux-restore-") {
+				removeAbandonedFile(path, abandonedRestoreFileAge)
+			}
 			continue
 		case ".staging":
 			// Residue of a helper that died while installing a lock file.
-			removeAbandonedStagingFile(path)
+			removeAbandonedFile(path, abandonedPIDFileAge)
 			continue
 		case ".takeover":
 			// Residue of a helper that died while reclaiming a session file.
@@ -1881,23 +1888,10 @@ func gcCommand() {
 	gcAcpArtifacts(runDir)
 }
 
-// removeAbandonedRestoreFile deletes an upgrade snapshot left behind by a
-// helper that died mid-restart. Snapshots still being handed to a starting
-// server are kept, otherwise gc would make that server come up empty.
-func removeAbandonedRestoreFile(path string) {
-	if !strings.HasPrefix(filepath.Base(path), "monkeymux-restore-") {
-		return
-	}
+// removeAbandonedFile deletes [path] once it has not been modified for [age].
+func removeAbandonedFile(path string, age time.Duration) {
 	info, err := os.Stat(path)
-	if err != nil || time.Since(info.ModTime()) < abandonedRestoreFileAge {
-		return
-	}
-	_ = os.Remove(path)
-}
-
-func removeAbandonedStagingFile(path string) {
-	info, err := os.Stat(path)
-	if err != nil || time.Since(info.ModTime()) < abandonedPIDFileAge {
+	if err != nil || time.Since(info.ModTime()) < age {
 		return
 	}
 	_ = os.Remove(path)
@@ -3361,9 +3355,6 @@ func readAttachReplayHistory(conn net.Conn) []byte {
 			_ = conn.SetReadDeadline(deadline)
 		}
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				break
-			}
 			break
 		}
 	}
@@ -3399,9 +3390,6 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 		tool := agentToolCandidateForRestore(window)
 		if tool == "pi" {
 			hasPiWindows = true
-			if window.PanePid > 0 {
-				panePids[window.PanePid] = struct{}{}
-			}
 		}
 		switch tool {
 		case "antigravity":
@@ -6285,40 +6273,21 @@ func (s *muxServer) scheduleRestoreRedrawFollowUps(windowID string) {
 	}
 	for _, delay := range restoreRedrawFollowUpDelays {
 		scheduleRestoreRedraw(delay, func() {
-			s.redrawRestoredWindow(windowID)
+			s.forceForegroundRedraw(windowID)
 		})
 	}
 }
 
-func (s *muxServer) redrawRestoredWindow(windowID string) {
-	s.resizeMu.Lock()
-	defer s.resizeMu.Unlock()
-	s.mu.Lock()
-	if s.attachCountLocked() == 0 || s.activeID != windowID {
-		s.mu.Unlock()
-		return
-	}
-	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
-		s.mu.Unlock()
-		return
-	}
-	width, height := s.primaryAttachSizeLocked()
-	s.mu.Unlock()
-	s.resizeWithRedraw(width, height, true, true, windowID)
-}
-
-// forceForegroundThemeRedraw makes [windowID] fully repaint after a theme
-// change. A theme switch changes colors without changing the PTY size, so a real
-// same-size SIGWINCH will not make the TUI re-emit explicitly-colored cells (e.g.
-// Copilot CLI's header/footer bars). It therefore uses the synthetic width-1
-// redraw dance — the same mechanism used to repaint a restored window — whose
-// intermediate one-cell frame is hidden from attach clients by the
-// synchronized-redraw transaction. It is pinned to [windowID] (the window that
-// received the theme hint) and is a no-op if that window is no longer active
-// (a concurrent switch will refresh the new window separately), is not a
+// forceForegroundRedraw makes [windowID] fully repaint through the synthetic
+// width-1 redraw dance, whose intermediate one-cell frame is hidden from attach
+// clients by the synchronized-redraw transaction. It repaints a restored window
+// and a window that received a theme hint: a theme switch changes colors
+// without changing the PTY size, so a real same-size SIGWINCH would not make
+// the TUI re-emit explicitly-colored cells (e.g. Copilot CLI's header/footer
+// bars). It is pinned to [windowID] and is a no-op if that window is no longer
+// active (a concurrent switch will refresh the new window separately), is not a
 // foreground-redraw window (plain shell), or when no client is attached.
-func (s *muxServer) forceForegroundThemeRedraw(windowID string) {
+func (s *muxServer) forceForegroundRedraw(windowID string) {
 	if windowID == "" {
 		return
 	}
@@ -6372,12 +6341,16 @@ func createWindowOptionsForRestore(
 	}
 	command := ""
 	if agentTool != "" {
+		// Relaunch the executable that was actually running when it is an
+		// alias of the tool (e.g. opencode2) rather than the canonical
+		// launcher. CurrentCommand is canonicalized to the tool name for
+		// tools that do not keep aliases, so those fall back to the default.
 		executable := ""
-		if agentTool == "opencode" {
-			name := cleanProcessCommandName(state.CurrentCommand)
-			if name == "opencode2" || name == "open-code" {
-				executable = name
-			}
+		if name := cleanProcessCommandName(state.CurrentCommand); name != "" &&
+			name != agentTool &&
+			name != agentCommands[agentTool].executable &&
+			agentToolFromCommandName(name) == agentTool {
+			executable = name
 		}
 		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
 		if agentTool == "pi" {
@@ -6392,7 +6365,7 @@ func createWindowOptionsForRestore(
 					state.AgentSessionDir,
 					state.AgentSessionPath,
 				)
-				command = piResumeCommandWithFreshFallback(resume, launch)
+				command = resumeCommandWithFreshFallback(resume, launch)
 			} else {
 				resume = monkeyMuxAgentLaunchCommand(resume)
 				if agentTool == "codex" {
@@ -6400,7 +6373,7 @@ func createWindowOptionsForRestore(
 					// hook remains active when the lock wait completes.
 					resume = codexResumeGateCommand(sessionID, resume)
 				}
-				command = agentResumeCommandWithFreshFallback(
+				command = resumeCommandWithFreshFallback(
 					resume,
 					monkeyMuxAgentLaunchCommand(launch),
 				)
@@ -7127,7 +7100,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 		_ = window.closePty(windowPty)
 	}
 	if nativeAcpBridgeID != "" {
-		_ = requestAcpBridgeStopAndWait(nativeAcpBridgeID)
+		_ = stopNativeAcpBridgeForWindow(nativeAcpBridgeID)
 	}
 
 	s.broadcast(controlResponse{
@@ -7191,7 +7164,7 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		height:          hello.Height,
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
-		capabilityHint:  capabilityHintDataFromString(hello.CapabilityHint),
+		capabilityHint:  hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes),
 		queueReady:      make(chan struct{}, 1),
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
@@ -7401,25 +7374,6 @@ func (c *attachClient) enqueueOptional(data []byte) bool {
 	return queued
 }
 
-func (c *attachClient) enqueueTerminalQuery(
-	data []byte,
-	wait bool,
-	windowID string,
-	responseCount int,
-) (<-chan error, bool) {
-	return c.enqueueWrite(data, wait, windowID, responseCount, nil)
-}
-
-func (c *attachClient) enqueueConditionalTerminalQuery(
-	data []byte,
-	wait bool,
-	windowID string,
-	responseCount int,
-	gate *attachWriteGate,
-) (<-chan error, bool) {
-	return c.enqueueWrite(data, wait, windowID, responseCount, gate)
-}
-
 func (c *attachClient) enqueueWrite(
 	data []byte,
 	wait bool,
@@ -7555,25 +7509,14 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	c.activityMu.Lock()
 	if !c.terminalResponseUntil.IsZero() &&
 		now.After(c.terminalResponseUntil) {
-		if len(c.terminalResponseCarry) > 0 {
+		if len(c.terminalResponseCarry) > 0 ||
+			len(c.terminalResponsePasteStartCarry) > 0 {
 			c.inputMu.Lock()
 			inputLocked = true
 			expiredInput = append(
 				expiredInput,
 				c.terminalResponseCarry...,
 			)
-			expiredInput = append(
-				expiredInput,
-				c.terminalResponsePasteStartCarry...,
-			)
-			if c.focusSequenceSnapshot != nil {
-				expiredFocusSequence = c.focusSequenceSnapshot()
-			}
-			claim = c.focusClaim
-			passthrough = c.inputPassthrough
-		} else if len(c.terminalResponsePasteStartCarry) > 0 {
-			c.inputMu.Lock()
-			inputLocked = true
 			expiredInput = append(
 				expiredInput,
 				c.terminalResponsePasteStartCarry...,
@@ -8078,10 +8021,6 @@ func (c *attachClient) routePostPasteInputLocked(
 			return
 		}
 	}
-	if c.terminalResponseContinuation != 0 {
-		c.routeInputLocked(data, 0, result)
-		return
-	}
 	c.routeInputLocked(data, 0, result)
 }
 
@@ -8478,45 +8417,21 @@ func (s *muxServer) focusSequenceSnapshot() uint64 {
 	return s.nextFocusSequence
 }
 
+// focusAttachClientIfUnchanged focuses [client] only when no other focus
+// change happened since [expectedFocusSequence] was snapshotted.
 func (s *muxServer) focusAttachClientIfUnchanged(
 	client *attachClient,
 	expectedFocusSequence uint64,
 ) bool {
 	s.resizeMu.Lock()
 	defer s.resizeMu.Unlock()
-	if client == nil {
-		return false
-	}
-	s.mu.Lock()
-	if s.nextFocusSequence != expectedFocusSequence {
-		s.mu.Unlock()
-		return false
-	}
-	registered := s.attachClients[client.conn]
-	if registered == nil {
-		s.mu.Unlock()
-		return false
-	}
-	primaryChanged := s.attachConn != registered.conn
-	if primaryChanged {
-		s.pendingFocusRefreshConn = nil
-	}
-	s.nextFocusSequence++
-	registered.focusSequence.Store(s.nextFocusSequence)
-	s.attachConn = registered.conn
-	targetWidth, targetHeight := s.primaryAttachSizeLocked()
-	sizeChanged :=
-		targetWidth != s.publishedWidth ||
-			targetHeight != s.publishedHeight
-	s.mu.Unlock()
-	s.applyFocusedClientViewport(
-		registered,
-		targetWidth,
-		targetHeight,
-		sizeChanged,
-		primaryChanged,
-	)
-	return true
+	return s.focusAttachClientLocked(
+		client,
+		0,
+		0,
+		true,
+		&expectedFocusSequence,
+	).focused
 }
 
 func (s *muxServer) focusAttachClientByID(
@@ -8544,7 +8459,7 @@ func (s *muxServer) focusAttachClientByIDWithResult(
 	s.mu.Lock()
 	client := s.attachClientByIDLocked(clientID)
 	s.mu.Unlock()
-	return s.focusAttachClientLocked(client, width, height, forceRedraw)
+	return s.focusAttachClientLocked(client, width, height, forceRedraw, nil)
 }
 
 func (s *muxServer) focusAttachClient(
@@ -8560,19 +8475,29 @@ func (s *muxServer) focusAttachClient(
 		width,
 		height,
 		forceRedraw,
+		nil,
 	).focused
 }
 
+// focusAttachClientLocked makes [client] the primary attach client. A non-nil
+// [expectedFocusSequence] turns the focus into a no-op when another focus
+// change happened since that sequence was snapshotted.
 func (s *muxServer) focusAttachClientLocked(
 	client *attachClient,
 	width int,
 	height int,
 	forceRedraw bool,
+	expectedFocusSequence *uint64,
 ) attachFocusResult {
 	if client == nil {
 		return attachFocusResult{}
 	}
 	s.mu.Lock()
+	if expectedFocusSequence != nil &&
+		s.nextFocusSequence != *expectedFocusSequence {
+		s.mu.Unlock()
+		return attachFocusResult{}
+	}
 	registered := s.attachClients[client.conn]
 	if registered == nil {
 		s.mu.Unlock()
@@ -8683,11 +8608,7 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		var replacement *attachClient
 		for _, candidate := range s.attachClients {
 			if replacement == nil ||
-				candidate.focusSequence.Load() >
-					replacement.focusSequence.Load() ||
-				(candidate.focusSequence.Load() ==
-					replacement.focusSequence.Load() &&
-					candidate.sequence > replacement.sequence) {
+				moreRecentlyFocusedAttachClient(candidate, replacement) {
 				replacement = candidate
 			}
 		}
@@ -8788,10 +8709,10 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	client.focusSequence.Store(s.nextFocusSequence)
 	s.attachClients[conn] = client
 	s.attachConn = conn
-	if themeHint := themeHintDataFromString(hello.Data); len(themeHint) > 0 {
+	if themeHint := hintDataFromString(hello.Data, themeHintLimitBytes); len(themeHint) > 0 {
 		s.themeHint = append(s.themeHint[:0], themeHint...)
 	}
-	if hint := capabilityHintDataFromString(hello.CapabilityHint); len(hint) > 0 {
+	if hint := hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes); len(hint) > 0 {
 		s.capabilityHint = append(s.capabilityHint[:0], hint...)
 	}
 	width, height := s.primaryAttachSizeLocked()
@@ -9158,7 +9079,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			// explicitly-colored regions (e.g. Copilot CLI's header/footer
 			// bars), so force a full repaint of the window that received the
 			// hint after it has been delivered.
-			s.forceForegroundThemeRedraw(themeWindowID)
+			s.forceForegroundRedraw(themeWindowID)
 		}
 		client.send(controlResponse{ID: request.ID, Type: "theme_hint_ack", Status: "ok"})
 	case "shutdown":
@@ -9348,7 +9269,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 		}
 		windowArgs, err := nativeAcpWindowArguments(bridgeID)
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -9360,7 +9281,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 			nativeAcpProviderID: request.ProviderID,
 		})
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -9550,12 +9471,6 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		PrivateModes:              copyPrivateModes(window.privateModes),
 		TerminalProgress:          copyTerminalProgressSnapshot(window.terminalProgress),
 	}
-}
-
-func (s *muxServer) runShellCommand(command string) (string, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), runCommandTimeout)
-	defer cancel()
-	return s.runShellCommandContext(ctx, command)
 }
 
 func (s *muxServer) runShellCommandContext(
@@ -10002,10 +9917,6 @@ func (s *muxServer) replacementWindowForClosedLocked(closing *muxWindow) *muxWin
 		}
 	}
 	return nil
-}
-
-func (s *muxServer) resize(width int, height int) {
-	s.resizeWithRedraw(width, height, false, false, "")
 }
 
 func (s *muxServer) resizeForClient(
@@ -10622,11 +10533,12 @@ func (s *muxServer) resumePausedAttachForwarding(
 		primaryQueued := false
 		if primaryClient != nil {
 			primaryCompletion, primaryQueued =
-				primaryClient.enqueueTerminalQuery(
+				primaryClient.enqueueWrite(
 					initialOutput,
 					true,
 					windowID,
 					responseCount,
+					nil,
 				)
 		}
 		sortedClients := append([]*attachClient(nil), clients...)
@@ -10643,7 +10555,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			}
 			queryGate := &attachWriteGate{done: make(chan struct{})}
 			queryCompletion, queued :=
-				client.enqueueConditionalTerminalQuery(
+				client.enqueueWrite(
 					failoverOutput,
 					true,
 					windowID,
@@ -11436,11 +11348,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 				data = queryData
 			}
 			primaryCompletion, primaryQueued =
-				primaryClient.enqueueTerminalQuery(
+				primaryClient.enqueueWrite(
 					data,
 					true,
 					windowID,
 					responseCount,
+					nil,
 				)
 		}
 		sort.Slice(allClients, func(i int, j int) bool {
@@ -11469,7 +11382,7 @@ func (s *muxServer) writeAttachOutputIfActive(
 			}
 			queryGate := &attachWriteGate{done: make(chan struct{})}
 			queryCompletion, queued :=
-				client.enqueueConditionalTerminalQuery(
+				client.enqueueWrite(
 					data,
 					true,
 					windowID,
@@ -11603,11 +11516,12 @@ func (s *muxServer) enqueuePrimaryAttachLocked(
 	})
 	responseCount := terminalQueryResponseCount(data)
 	for _, client := range clients {
-		completion, queued := client.enqueueTerminalQuery(
+		completion, queued := client.enqueueWrite(
 			data,
 			tracked,
 			windowID,
 			responseCount,
+			nil,
 		)
 		if !queued {
 			continue
@@ -12326,7 +12240,7 @@ func (s *muxServer) sendThemeHint(data string) bool {
 // the intended window.
 func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
 	s.refreshProcessMetadata("")
-	themeHint := themeHintDataFromString(data)
+	themeHint := hintDataFromString(data, themeHintLimitBytes)
 	var themeHintData []byte
 	s.mu.Lock()
 	if len(themeHint) > 0 {
@@ -12357,22 +12271,6 @@ func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
 		s.sendFocusTransition(windowID)
 	}
 	return windowID, true
-}
-
-func themeHintDataFromString(data string) []byte {
-	data = strings.TrimSpace(data)
-	if data == "" || len(data) > themeHintLimitBytes {
-		return nil
-	}
-	return []byte(data)
-}
-
-func capabilityHintDataFromString(data string) []byte {
-	data = strings.TrimSpace(data)
-	if data == "" || len(data) > capabilityHintLimitBytes {
-		return nil
-	}
-	return []byte(data)
 }
 
 func (s *muxServer) sendFocusTransition(windowID string) {
@@ -16245,7 +16143,7 @@ func canonicalAgentCommandName(command string) string {
 	return firstNonEmptyString(agentToolFromCommandName(command), cleanProcessCommandName(command))
 }
 
-// agentResumeCommandWithFreshFallback wraps a restored agent's --resume command
+// resumeCommandWithFreshFallback wraps a restored agent's --resume command
 // so a resume that exits immediately falls back to launching the agent fresh,
 // keeping the restored window alive instead of letting it vanish.
 //
@@ -16263,8 +16161,16 @@ func canonicalAgentCommandName(command string) string {
 // the shell before it can reach the fallback, so closing a window never
 // relaunches the agent. During Codex server teardown, shutdownCodex freezes the
 // wrapping shell before TERM and leaves it stopped through the final group kill.
-func agentResumeCommandWithFreshFallback(resume string, launch string) string {
-	return piResumeCommandWithFreshFallback(resume, launch)
+func resumeCommandWithFreshFallback(resume string, launch string) string {
+	resume = strings.TrimSpace(resume)
+	launch = strings.TrimSpace(launch)
+	if resume == "" {
+		return launch
+	}
+	if launch == "" || launch == resume {
+		return resume
+	}
+	return shellOrElseJoin(resume, launch)
 }
 
 func isGenericRuntimeCommandName(command string) bool {
@@ -17211,7 +17117,7 @@ func (s *muxServer) close() {
 	killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
 	for _, window := range windows {
 		if window.nativeAcpBridgeID != "" {
-			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
+			_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
 		}
 	}
 	teardowns.Wait()
@@ -17990,6 +17896,10 @@ func socketPath(session string) (string, error) {
 type socketIdentity struct {
 	device uint64
 	inode  uint64
+}
+
+func (id socketIdentity) valid() bool {
+	return id.device != 0 || id.inode != 0
 }
 
 func socketFileIdentity(path string) (socketIdentity, error) {

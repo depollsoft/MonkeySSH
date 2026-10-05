@@ -144,7 +144,7 @@ func TestEnrichRestoreCopilotFallsBackToCwd(t *testing.T) {
 		t.Fatalf("session id = %q, want most-recent session for cwd (recent-session)", got)
 	}
 	options := createWindowOptionsForRestore(restore.Windows[0], false)
-	want := agentResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		monkeyMuxAgentLaunchCommand(agentResumeCommand("copilot", "recent-session", false)),
 		monkeyMuxAgentLaunchCommand(agentLaunchCommand("copilot", false)),
 	)

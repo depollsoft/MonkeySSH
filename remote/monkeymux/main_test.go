@@ -2901,20 +2901,22 @@ func TestCoalescedTerminalResponsesRouteToEachOriginWindow(t *testing.T) {
 			paletteResponseCount,
 		)
 	}
-	firstCompletion, queued := client.enqueueTerminalQuery(
+	firstCompletion, queued := client.enqueueWrite(
 		paletteQuery,
 		true,
 		"@1",
 		paletteResponseCount,
+		nil,
 	)
 	if !queued || !client.waitForWrite(firstCompletion) {
 		t.Fatal("first window queries were not written")
 	}
-	secondCompletion, queued := client.enqueueTerminalQuery(
+	secondCompletion, queued := client.enqueueWrite(
 		[]byte("\x1b[>q"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(secondCompletion) {
 		t.Fatal("second window query was not written")
@@ -2968,11 +2970,12 @@ func TestSeparateTermcapResponsesStayWithOriginWindow(t *testing.T) {
 	if responseCount != 2 {
 		t.Fatalf("termcap response count = %d, want 2", responseCount)
 	}
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		termcapQuery,
 		true,
 		"@1",
 		responseCount,
+		nil,
 	)
 	if emptyCount := terminalQueryResponseCount(
 		[]byte("\x1bP+q;;\x1b\\"),
@@ -2982,11 +2985,12 @@ func TestSeparateTermcapResponsesStayWithOriginWindow(t *testing.T) {
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("termcap query was not written")
 	}
-	completion, queued = client.enqueueTerminalQuery(
+	completion, queued = client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("second window query was not written")
@@ -3036,20 +3040,22 @@ func TestCombinedTermcapResponseConsumesOriginExpectations(t *testing.T) {
 	)
 	t.Cleanup(client.close)
 	termcapQuery := []byte("\x1bP+q544e;436f\x1b\\")
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		termcapQuery,
 		true,
 		"@1",
 		terminalQueryResponseCount(termcapQuery),
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("termcap query was not written")
 	}
-	completion, queued = client.enqueueTerminalQuery(
+	completion, queued = client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@2",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("second window query was not written")
@@ -4228,11 +4234,12 @@ func TestQueryWriteArmsResponseGraceBeforeSocketWrite(t *testing.T) {
 	conn.client = client
 	t.Cleanup(client.close)
 
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("terminal query was not written")
@@ -4250,11 +4257,12 @@ func TestSuccessfulQueryWriteWinsConcurrentClientClose(t *testing.T) {
 	)
 	conn.client = client
 
-	completion, queued := client.enqueueTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
 		1,
+		nil,
 	)
 	if !queued || !client.waitForWrite(completion) {
 		t.Fatal("successful query write was reported as failed after close")
@@ -4267,7 +4275,7 @@ func TestAttachCloseCompletesQueuedWriteWaiters(t *testing.T) {
 		controlMessage{ClientID: "queued-close"},
 	)
 	gate := &attachWriteGate{done: make(chan struct{})}
-	completion, queued := client.enqueueConditionalTerminalQuery(
+	completion, queued := client.enqueueWrite(
 		[]byte("\x1b[c"),
 		true,
 		"@1",
@@ -4677,7 +4685,7 @@ func TestSelectWindowSimulatedResizeUsesLatestServerSize(t *testing.T) {
 		)
 	}
 
-	server.resize(100, 30)
+	server.resizeWithRedraw(100, 30, false, false, "")
 	if err := server.selectWindow("@2"); err != nil {
 		t.Fatal(err)
 	}
@@ -4897,7 +4905,7 @@ func TestEmptyThemeRedrawFallsBackToHistory(t *testing.T) {
 	signalForegroundResize = func(int) {}
 	simulateForegroundResize = func(*muxWindow, int, int) {}
 
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	server.mu.Lock()
 	paused := window.redrawForwardingPaused
 	generation := window.redrawForwardingGeneration
@@ -5258,7 +5266,7 @@ func TestResizeOnlyUpdatesActiveWindowPty(t *testing.T) {
 	}
 	server.activeID = "@1"
 
-	server.resize(132, 43)
+	server.resizeWithRedraw(132, 43, false, false, "")
 
 	assertPtySize(t, activePty, 132, 43)
 	assertPtySize(t, inactivePty, 80, 24)
@@ -5286,7 +5294,7 @@ func TestSelectWindowResizesSelectedWindowToLatestTerminalSize(t *testing.T) {
 	}
 	signalForegroundResize = func(_ int) {}
 
-	server.resize(132, 43)
+	server.resizeWithRedraw(132, 43, false, false, "")
 	if err := server.selectWindow("@2"); err != nil {
 		t.Fatal(err)
 	}
@@ -5546,7 +5554,7 @@ func TestSameSizeResizeDoesNotSignalFocusAwareTui(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 40)
+	server.resizeWithRedraw(120, 40, false, false, "")
 
 	if len(signaled) != 0 {
 		t.Fatalf("signaled process groups = %#v, want none", signaled)
@@ -5596,7 +5604,7 @@ func TestChangedSizeResizeDoesNotBounceForegroundTui(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 55)
+	server.resizeWithRedraw(120, 55, false, false, "")
 
 	// A genuine size change relies on the real PTY resize (SIGWINCH at the new
 	// size) to repaint the TUI. It must NOT drive the synthetic width-1 redraw
@@ -5645,7 +5653,7 @@ func TestChangedSizeResizeForwardsReflowImmediately(t *testing.T) {
 		t.Fatal("changed-size resize must not perform the synthetic redraw dance")
 	}
 
-	server.resize(120, 55)
+	server.resizeWithRedraw(120, 55, false, false, "")
 
 	// After a genuine resize the TUI's reflow must forward to attach clients
 	// immediately, not be buffered behind the synchronized-redraw tail that hides
@@ -6017,7 +6025,7 @@ func TestForceForegroundThemeRedrawPinsToHintWindow(t *testing.T) {
 	server.mu.Lock()
 	server.activeID = "@2"
 	server.mu.Unlock()
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	if len(simulated) != 0 {
 		t.Fatalf("redraw danced after active window changed = %#v, want none", simulated)
 	}
@@ -6026,7 +6034,7 @@ func TestForceForegroundThemeRedrawPinsToHintWindow(t *testing.T) {
 	server.mu.Lock()
 	server.activeID = "@1"
 	server.mu.Unlock()
-	server.forceForegroundThemeRedraw("@1")
+	server.forceForegroundRedraw("@1")
 	if !reflect.DeepEqual(simulated, []string{"@1"}) {
 		t.Fatalf("pinned redraw dance = %#v, want [@1]", simulated)
 	}
@@ -6576,7 +6584,7 @@ func TestSameSizeResizeDoesNotSignalShell(t *testing.T) {
 		signaled = append(signaled, processGroup)
 	}
 
-	server.resize(120, 40)
+	server.resizeWithRedraw(120, 40, false, false, "")
 
 	if len(signaled) != 0 {
 		t.Fatalf("signaled process groups = %#v, want none", signaled)
@@ -11026,6 +11034,67 @@ func TestCloseNativeWindowWaitsForRetryableBridgeStop(t *testing.T) {
 	}
 }
 
+func TestMarkWindowClosedStopsBridgeThroughSeam(t *testing.T) {
+	originalStop := stopNativeAcpBridgeForWindow
+	defer func() { stopNativeAcpBridgeForWindow = originalStop }()
+	var stopped []string
+	stopNativeAcpBridgeForWindow = func(id string) error {
+		stopped = append(stopped, id)
+		return nil
+	}
+
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, nativeAcpBridgeID: "bridge-1", lastActivity: time.Now()},
+	}
+	server.activeID = "@1"
+
+	server.markWindowClosed("@1")
+	if len(stopped) != 1 || stopped[0] != "bridge-1" {
+		t.Fatalf("bridge stops = %v, want [bridge-1]", stopped)
+	}
+}
+
+func TestQuerySessionAtSocketReturnsZeroWindowServer(t *testing.T) {
+	socketPath := filepath.Join(shortUnixSocketDir(t), "s.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello controlMessage
+		if err := json.NewDecoder(conn).Decode(&hello); err != nil {
+			return
+		}
+		encoder := json.NewEncoder(conn)
+		_ = encoder.Encode(controlResponse{Type: "hello", Session: "empty"})
+		// A server between its last window closing and shutdown reports an
+		// empty list, which the wire format omits entirely.
+		_ = encoder.Encode(controlResponse{Type: "window_list"})
+		// Hold the connection open so a stalled client only returns on its
+		// socket deadline.
+		time.Sleep(socketTimeout)
+	}()
+
+	started := time.Now()
+	info, err := querySessionAtSocket(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.name != "empty" || len(info.windows) != 0 {
+		t.Fatalf("info = %+v, want session empty with no windows", info)
+	}
+	if elapsed := time.Since(started); elapsed >= socketTimeout/2 {
+		t.Fatalf("query took %v, want well under the socket deadline", elapsed)
+	}
+}
+
 func TestCloseActiveWindowSelectsNextWindowImmediately(t *testing.T) {
 	server := newMuxServer("test")
 	attach := &recordingConn{}
@@ -12121,7 +12190,7 @@ func TestRunShellCommandUsesServerEnvironment(t *testing.T) {
 	t.Setenv("MONKEYMUX_TEST_ENV", "ok")
 	server := newMuxServer("test")
 
-	output, exitCode, err := server.runShellCommand("printf %s \"$MONKEYMUX_TEST_ENV\"")
+	output, exitCode, err := server.runShellCommandContext(context.Background(), "printf %s \"$MONKEYMUX_TEST_ENV\"")
 	if err != nil {
 		t.Fatalf("runShellCommand returned error: %v", err)
 	}
@@ -12182,7 +12251,7 @@ func TestRunShellCommandReportsExitCode(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	server := newMuxServer("test")
 
-	_, exitCode, err := server.runShellCommand("exit 7")
+	_, exitCode, err := server.runShellCommandContext(context.Background(), "exit 7")
 	if err != nil {
 		t.Fatalf("runShellCommand returned error: %v", err)
 	}
@@ -12195,7 +12264,7 @@ func TestRunShellCommandBoundsOutput(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	server := newMuxServer("test")
 
-	output, _, err := server.runShellCommand("yes x")
+	output, _, err := server.runShellCommandContext(context.Background(), "yes x")
 	if !errors.Is(err, errRunCommandOutputLimit) {
 		t.Fatalf("runShellCommand error = %v, want output limit", err)
 	}
@@ -12972,7 +13041,7 @@ func TestUnansweredTerminalQueriesCloseDesynchronizedAttach(t *testing.T) {
 			t.Cleanup(client.close)
 			query := []byte("\x1b[c")
 			for i := 0; i < terminalResponseMaxOutstanding; i++ {
-				completion, queued := client.enqueueTerminalQuery(query, true, "@1", 1)
+				completion, queued := client.enqueueWrite(query, true, "@1", 1, nil)
 				if !queued || !client.waitForWrite(completion) {
 					t.Fatalf("query %d was rejected before the limit", i)
 				}
@@ -12980,7 +13049,7 @@ func TestUnansweredTerminalQueriesCloseDesynchronizedAttach(t *testing.T) {
 					enterStreamingTerminalResponseContinuation(t, client)
 				}
 			}
-			completion, _ := client.enqueueTerminalQuery(query, true, "@2", 1)
+			completion, _ := client.enqueueWrite(query, true, "@2", 1, nil)
 			client.waitForWrite(completion)
 			select {
 			case <-client.done:
