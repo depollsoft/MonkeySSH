@@ -38,9 +38,9 @@ try:
 except Exception:
     raise SystemExit(0)
 for bridge in message.get("bridges", []):
-    if bridge.get("provider") == "MonkeySSH ACP E2E":
+    if bridge.get("provider") == sys.argv[1]:
         print(bridge.get("id", ""))
-' | while IFS= read -r bridge_id; do
+' "$PROVIDER_LABEL" | while IFS= read -r bridge_id; do
         if [ -n "$bridge_id" ]; then
             "$BIN_DIR/monkeymux" acp stop "$bridge_id" >/dev/null 2>&1 || true
         fi

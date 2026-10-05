@@ -15,11 +15,8 @@ echo 'Running pre-commit checks...'
 # Dart sources becomes uncommittable.
 staged_dart_files=()
 while IFS= read -r file; do
-    case "$file" in
-        third_party/*) continue ;;
-    esac
     staged_dart_files+=("$file")
-done < <(git diff --cached --name-only --diff-filter=ACM -- '*.dart')
+done < <(git diff --cached --name-only --diff-filter=ACM -- '*.dart' ':(exclude)third_party/')
 
 if [ "${#staged_dart_files[@]}" -eq 0 ]; then
     echo 'No staged Dart files; skipping Dart checks.'

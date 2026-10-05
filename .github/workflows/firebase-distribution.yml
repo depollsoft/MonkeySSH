@@ -66,6 +66,21 @@ jobs:
             let androidAabArtifact = '';
             let iosIpaArtifact = '';
             let pullRequest;
+            // Only the PR's current same-repository head may be distributed.
+            const skipUnlessCurrent = (pull) => {
+              let reason = '';
+              if (pull.head.repo?.full_name !== `${owner}/${repo}`) {
+                reason = `Skipping fork PR #${pull.number}.`;
+              } else if (pull.head.sha !== sourceSha) {
+                reason = `Skipping stale ${sourceWorkflow} run ${workflowRun.id}; ` +
+                  `PR #${pull.number} now points at ${pull.head.sha}.`;
+              }
+              if (reason) {
+                core.notice(reason);
+                core.setOutput('should-distribute', 'false');
+              }
+              return reason !== '';
+            };
 
             if (sourceWorkflow === 'PR Preview') {
               platform = 'android';
@@ -81,17 +96,8 @@ jobs:
                 repo,
                 pull_number: pullRequestSummary.number,
               }));
-              if (pullRequest.head.repo?.full_name !== `${owner}/${repo}`) {
-                core.notice(`Skipping fork PR #${pullRequest.number}.`);
-                core.setOutput('should-distribute', 'false');
-                return;
-              }
-              if (pullRequest.head.sha !== sourceSha) {
-                core.notice(
-                  `Skipping stale PR Preview run ${workflowRun.id}; ` +
-                  `PR #${pullRequest.number} now points at ${pullRequest.head.sha}.`,
-                );
-                core.setOutput('should-distribute', 'false');
+              // Checked before the artifact lookup: fork PR runs build nothing.
+              if (skipUnlessCurrent(pullRequest)) {
                 return;
               }
               const aabArtifacts = activeArtifacts.filter((artifact) =>
@@ -162,20 +168,9 @@ jobs:
               return;
             }
 
-            if (pullRequest.head.repo?.full_name !== `${owner}/${repo}`) {
-              core.notice(`Skipping fork PR #${pullRequest.number}.`);
-              core.setOutput('should-distribute', 'false');
+            if (skipUnlessCurrent(pullRequest)) {
               return;
             }
-            if (pullRequest.head.sha !== sourceSha) {
-              core.notice(
-                `Skipping stale ${sourceWorkflow} run ${workflowRun.id}; ` +
-                `PR #${pullRequest.number} now points at ${pullRequest.head.sha}.`,
-              );
-              core.setOutput('should-distribute', 'false');
-              return;
-            }
-
             if (pullRequest.state !== 'open') {
               core.setOutput('should-distribute', 'false');
               return;

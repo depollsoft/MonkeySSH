@@ -25,7 +25,6 @@ DEPENDENCY_LOCKS = {
 }
 PAYLOAD_SCRIPTS = {
     'scripts/build_monkeymux_assets.sh',
-    'scripts/ensure_monkeymux_assets.sh',
     'scripts/deterministic_gzip.go',
     'scripts/verify_monkeymux_assets.py',
 }
@@ -70,7 +69,9 @@ MOBILE_PATHS = [
     'ios/**',
     '!ios/fastlane/metadata-*/**',
     *sorted(PAYLOAD_SCRIPTS),
+    'scripts/android_signing.sh',
     'scripts/cache_sqlite3_native_assets.sh',
+    'scripts/fetch_pr_commits.py',
     'scripts/version_codename.py',
     'scripts/preview_release_notes.rb',
     'scripts/preview_build_number.py',
@@ -86,6 +87,10 @@ MOBILE_PATHS = [
     '.github/workflows/preview-ios.yml',
     '.github/actions/apple-cache-restore/**',
     '.github/actions/apple-cache-save/**',
+    '.github/actions/compute-version/**',
+    '.github/actions/deployment-status/**',
+    '.github/actions/firebase-config/**',
+    '.github/actions/flutter-setup/**',
 ]
 
 
@@ -99,10 +104,8 @@ def classify(paths):
             daemon and (not path.endswith('_test.go')
                         or path.startswith('remote/monkeymux/conpty/'))
         ) or path in PAYLOAD_SCRIPTS
-        workflow = path.startswith(('.github/workflows/', '.github/actions/'))
         tooling = (
-            workflow
-            or path.startswith(('scripts/', 'test/scripts/', '.github/'))
+            path.startswith(('scripts/', 'test/scripts/', '.github/'))
             or path in {'Gemfile', 'Gemfile.lock'}
             or '/fastlane/' in path
         )
@@ -139,17 +142,20 @@ def classify(paths):
                 'scripts/cache_sqlite3_native_assets.sh',
             }
         )
+        # Only the mobile builds configure Firebase.
+        firebase = path.startswith('.github/actions/firebase-config/')
         native = False
         for platform in PLATFORMS:
             platform_source = (
                 path.startswith(f'{platform}/') and '/fastlane/' not in path
             )
             result[f'{platform}_native'] |= platform_source
-            result[platform] |= global_build or platform_source
+            result[platform] |= global_build or platform_source or (
+                firebase and platform in {'android', 'ios'})
             native |= platform_source
-        # build-windows needs the monkeymux-assets job, which run_check enables.
+        # Every build job needs monkeymux-assets, which run_check enables.
         result['run_check'] |= (
-            global_build or native or payload or windows_test_input
+            global_build or native or payload or windows_test_input or firebase
             or path.endswith('.dart')
             or path == 'analysis_options.yaml' or path.startswith('web/')
         )

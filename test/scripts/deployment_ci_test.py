@@ -1,13 +1,18 @@
 """Exercise independent build identity and deployment workflow handoffs."""
 
+import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
+import fetch_pr_commits
 from metadata_changes import classify
 from preview_build_number import build_number
 
@@ -25,6 +30,81 @@ class PreviewVersionTest(unittest.TestCase):
                       '3000-01-01T00:00:00Z']:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 build_number({'pull_request': {'updated_at': value}})
+
+    def compute_version(self, source, **inputs):
+        action = json.loads(subprocess.check_output(
+            ['ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))',
+             str(ROOT / '.github/actions/compute-version/action.yml')], text=True))
+        step = action['runs']['steps'][0]
+        output = Path(source) / 'output'
+        output.write_text('')
+        event = Path(source) / 'event.json'
+        event.write_text(json.dumps({'pull_request': {'updated_at': '2026-09-07T12:34:56Z'}}))
+        result = subprocess.run(['bash', '-e', '-c', step['run']], capture_output=True, text=True, env={
+            **os.environ, 'SOURCE': str(source), 'BUILD_NAME': inputs.get('name', ''),
+            'BUILD_NUMBER': inputs.get('number', ''), 'GITHUB_OUTPUT': str(output),
+            'GITHUB_EVENT_PATH': str(event),
+            'BUILD_NUMBER_SCRIPT': str(ROOT / 'scripts/preview_build_number.py')})
+        return result, dict(line.split('=', 1) for line in output.read_text().splitlines())
+
+    def test_compute_version_action_resolves_and_validates_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp)
+            shutil.copytree(ROOT / 'scripts', source / 'scripts')
+            (source / 'assets').mkdir()
+            (source / 'assets/version_codenames.json').write_text(
+                json.dumps({'codenames': [{'major': 1, 'name': 'Fox'}]}))
+            (source / 'pubspec.yaml').write_text('name: app\nversion: 1.2.3+9\n')
+            result, outputs = self.compute_version(source, number='pull-request')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(outputs, {'build-name': '1.2.3', 'build-number': '178878449',
+                                       'build-codename': 'Fox', 'build-display': '1.2.3 "Fox"'})
+            result, outputs = self.compute_version(source, name='2.0.0-pr.4', number='42')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(outputs['build-display'], '2.0.0-pr.4')
+            self.assertEqual(outputs['build-number'], '42')
+            _, outputs = self.compute_version(source)
+            self.assertRegex(outputs['build-number'], r'^[1-9][0-9]{8,9}$')
+            for inputs in [{'name': '1.2'}, {'name': '1.2.3;x'}, {'number': '0'},
+                           {'number': '2147483648'}, {'number': 'abc'}]:
+                with self.subTest(**inputs):
+                    result, outputs = self.compute_version(source, **inputs)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(outputs, {})
+            (source / 'pubspec.yaml').write_text('name: app\nversion: latest\n')
+            self.assertNotEqual(self.compute_version(source)[0].returncode, 0)
+
+    def test_every_build_workflow_uses_the_shared_version_action(self):
+        for name in ['preview.yml', 'preview-ios.yml', 'preview-deploy.yml', 'deploy-private.yml',
+                     'release.yml']:
+            with self.subTest(workflow=name):
+                text = (ROOT / '.github/workflows' / name).read_text()
+                self.assertIn('uses: ./.github/actions/compute-version', text)
+                self.assertNotIn('version_codename.py "', text)
+
+
+class FetchPrCommitsTest(unittest.TestCase):
+    def test_subjects_are_newest_first_and_capped_at_one_page(self):
+        requests = []
+
+        def urlopen(request):
+            requests.append(request.full_url)
+            page = [{'sha': f'{index:x}' * 40, 'commit': {'message': f'subject {index}\n\nbody'}}
+                    for index in range(100)]
+            return io.BytesIO(json.dumps(page).encode())
+
+        commits = fetch_pr_commits.fetch_commits('owner/repo', '7', 'token', urlopen)
+        self.assertEqual(len(commits), 100)
+        self.assertEqual(requests, ['https://api.github.com/repos/owner/repo/pulls/7/commits?per_page=100&page=1'])
+        self.assertEqual(fetch_pr_commits.env_block(commits[:2], 'EOF'),
+                         'FLUTTY_PR_COMMITS<<EOF\n1111111 subject 1\n0000000 subject 0\nEOF\n')
+
+    def test_failures_warn_without_failing_the_step(self):
+        env = {key: value for key, value in os.environ.items() if key != 'GH_TOKEN'}
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/fetch_pr_commits.py')],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('Warning: failed to fetch PR commits', result.stderr)
 
 
 class MetadataChangesTest(unittest.TestCase):
@@ -86,21 +166,54 @@ class DeploymentContractsTest(unittest.TestCase):
                 self.assertIn('scripts/preview_deploy_comments.cjs', script['with']['script'])
                 self.assertIn('upsertStatusComment({', script['with']['script'])
 
-    def test_deploy_preserves_apple_actions_across_source_checkout(self):
-        steps = self.workflows['build-deploy.yml']['jobs']['build-ios']['steps']
-        preserve = next(i for i, s in enumerate(steps) if s.get('name') ==
-                        'Preserve Apple cache actions from the workflow commit')
-        restore = next(i for i, s in enumerate(steps) if s.get('name') ==
-                       'Restore Apple cache actions from the workflow commit')
-        source = next(i for i, s in enumerate(steps) if s.get('name') == 'Checkout resolved source SHA for iOS build')
-        self.assertLess(preserve, source)
-        self.assertLess(source, restore)
-        for index in [preserve, restore]:
-            self.assertNotIn('if', steps[index])
-            self.assertIn('"$RUNNER_TEMP/apple-cache-actions.tar"', steps[index]['run'])
-        for action in ['apple-cache-restore', 'apple-cache-save']:
-            self.assertIn('.github/actions/' + action, steps[preserve]['run'])
-        self.assertEqual(steps[0]['with']['ref'], '${{ github.sha }}')
+    def test_source_builds_restore_workflow_tooling_after_the_source_checkout(self):
+        workflow = self.workflows['build-deploy.yml']
+        tooling = workflow['env']['WORKFLOW_TOOLING'].split()
+        # Local actions and the scripts deploy steps run must come from the
+        # workflow commit even when the build checks out an older PR head.
+        for path in ['.github/actions', 'scripts/android_signing.sh', 'scripts/fetch_pr_commits.py']:
+            self.assertIn(path, tooling)
+        for platform in ['android', 'ios']:
+            with self.subTest(platform=platform):
+                steps = workflow['jobs'][f'build-{platform}']['steps']
+                index = {s.get('name'): i for i, s in enumerate(steps)}
+                preserve, restore = index['Preserve workflow tooling'], index['Restore workflow tooling']
+                source = index[f'Checkout resolved source SHA for {"iOS" if platform == "ios" else "Android"} build']
+                self.assertLess(preserve, source)
+                self.assertLess(source, restore)
+                for step in [steps[preserve], steps[restore]]:
+                    self.assertNotIn('if', step)
+                    self.assertIn('"$RUNNER_TEMP/workflow-tooling.tar"', step['run'])
+                self.assertIn('$WORKFLOW_TOOLING', steps[preserve]['run'])
+                local = [i for i, s in enumerate(steps) if s.get('uses', '').startswith('./.github/actions/')]
+                self.assertGreater(min(local), restore)
+                self.assertEqual(steps[0]['with']['ref'], '${{ github.sha }}')
+
+    def test_firebase_config_action_writes_flavor_files_or_disables_firebase(self):
+        action = json.loads(subprocess.check_output(
+            ['ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))',
+             str(ROOT / '.github/actions/firebase-config/action.yml')], text=True))
+        script = action['runs']['steps'][0]['run']
+        for platform, flavor, config, required, destination, enabled in [
+            ('android', 'private', '{}', 'true', 'android/app/src/private/google-services.json', 'true'),
+            ('ios', 'production', '<plist/>', 'false', 'ios/Runner/Firebase/production/GoogleService-Info.plist', 'true'),
+            ('android', 'production', '', 'false', None, 'false'),
+        ]:
+            with self.subTest(platform=platform, flavor=flavor), tempfile.TemporaryDirectory() as temp:
+                env_file = Path(temp, 'env')
+                subprocess.run(['bash', '-e', '-c', script], cwd=temp, check=True, env={
+                    **os.environ, 'PLATFORM': platform, 'FLAVOR': flavor, 'CONFIG': config,
+                    'REQUIRED': required, 'GITHUB_ENV': str(env_file)})
+                self.assertEqual(env_file.read_text(), f'FLUTTY_FIREBASE_ENABLED={enabled}\n')
+                if destination:
+                    self.assertEqual(Path(temp, destination).read_text(), config)
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(['bash', '-e', '-c', script], cwd=temp, capture_output=True, text=True,
+                                    env={**os.environ, 'PLATFORM': 'ios', 'FLAVOR': 'private', 'CONFIG': '',
+                                         'REQUIRED': 'true', 'GITHUB_ENV': str(Path(temp, 'env'))})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('FIREBASE_IOS_PRIVATE_GOOGLE_SERVICE_INFO_PLIST', result.stdout)
+            self.assertFalse(Path(temp, 'env').exists())
 
     def test_main_builds_once_per_platform_and_reuses_identical_binary(self):
         jobs = self.workflows['deploy-private.yml']['jobs']
@@ -136,10 +249,12 @@ class DeploymentContractsTest(unittest.TestCase):
             job = workflow['jobs']['compute-version']
             self.assertIn('head.repo.full_name == github.repository', job['if'])
             version_step = next(s for s in job['steps'] if s.get('id') == 'version')
-            self.assertIn('python3 "$RUNNER_TEMP/preview_build_number.py"', version_step['run'])
+            self.assertEqual(version_step['uses'], './.github/actions/compute-version')
+            self.assertEqual(version_step['with'], {'source': 'source', 'build-number': 'pull-request'})
             checkouts = [step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@')]
             self.assertEqual([step['with']['ref'] for step in checkouts],
                              ['${{ github.sha }}', '${{ github.event.pull_request.head.sha }}'])
+            self.assertEqual(checkouts[1]['with']['path'], 'source')
         self.assertIn('github.event.pull_request.updated_at', self.workflows['preview-ios.yml']['run-name'])
 
     def test_distribution_uses_workflow_identity_instead_of_custom_run_title(self):

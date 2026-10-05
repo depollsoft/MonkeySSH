@@ -88,6 +88,13 @@ class ClassificationTest(unittest.TestCase):
                 result = self.assert_platforms([path], changes.PLATFORMS)
                 self.assertTrue(result['run_check'])
 
+    def test_firebase_config_action_builds_only_the_mobile_platforms(self):
+        result = self.assert_platforms(['.github/actions/firebase-config/action.yml'],
+                                       ['android', 'ios'])
+        # The build jobs need monkeymux-assets, which run_check enables.
+        self.assertTrue(result['run_check'])
+        self.assertFalse(result['ios_native'])
+
     def test_shared_inputs_are_not_native_changes(self):
         # `<platform>` fires on shared inputs; `<platform>_native` must not, or
         # the pull_request gate on the Apple/Windows builds means nothing.
@@ -528,17 +535,21 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertEqual(steps[2]['if'], "inputs.sqlite-targets != ''")
         self.assertEqual(action['inputs']['cache']['default'], 'true')
         self.assertEqual(action['inputs']['pub-cache']['default'], 'true')
+        for workflow, expected in [
+                ('ci.yml', {'check', 'test', 'build-android', 'build-ios',
+                            'build-macos', 'build-windows', 'build-linux'}),
+                ('build-deploy.yml', {'build-android', 'build-ios'})]:
+            jobs = self.workflows[workflow]['jobs']
+            users = {name for name, job in jobs.items() for step in job.get('steps', [])
+                     if step.get('uses') == './.github/actions/flutter-setup'}
+            self.assertEqual(users, expected)
+            for name, job in jobs.items():
+                for step in job.get('steps', []):
+                    if step.get('uses', '').startswith('subosito/flutter-action@'):
+                        # terminal-test runs pub get inside third_party/xterm, so it
+                        # is the one job that is not the setup trio.
+                        self.assertEqual((workflow, name), ('ci.yml', 'terminal-test'))
         jobs = self.workflows['ci.yml']['jobs']
-        users = {name for name, job in jobs.items() for step in job.get('steps', [])
-                 if step.get('uses') == './.github/actions/flutter-setup'}
-        self.assertEqual(users, {'check', 'test', 'build-android', 'build-ios',
-                                 'build-macos', 'build-windows', 'build-linux'})
-        for name, job in jobs.items():
-            for step in job.get('steps', []):
-                if step.get('uses', '').startswith('subosito/flutter-action@'):
-                    # terminal-test runs pub get inside third_party/xterm, so it
-                    # is the one job that is not the setup trio.
-                    self.assertEqual(name, 'terminal-test')
         windows = next(s for s in jobs['build-windows']['steps']
                        if s.get('uses') == './.github/actions/flutter-setup')
         # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is safe.
