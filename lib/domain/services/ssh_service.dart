@@ -3576,12 +3576,7 @@ Set<RemoteTcpListenerKey> remoteTcpListenerExclusionKeys(
   String host,
   int port,
 ) {
-  final normalized = host
-      .trim()
-      .replaceFirst(RegExp(r'^\['), '')
-      .replaceFirst(RegExp(r'\]$'), '')
-      .toLowerCase();
-  if (normalized == 'localhost') {
+  if (normalizeHostLiteral(host) == 'localhost') {
     return {
       remoteTcpListenerKey(InternetAddress.loopbackIPv4.address, port),
       remoteTcpListenerKey(InternetAddress.loopbackIPv6.address, port),
@@ -3603,63 +3598,55 @@ Set<RemoteTcpListenerKey> _manualListenerExclusions(
     )
     .toSet();
 
+/// Maps wildcard binds and the default loopback names onto `127.0.0.1` or
+/// `::1`; other addresses (including other `127.x` hosts) stay distinct.
 String _canonicalRemoteTcpListenerHost(String host) {
-  final normalized = host
-      .trim()
-      .replaceFirst(RegExp(r'^\['), '')
-      .replaceFirst(RegExp(r'\]$'), '')
-      .toLowerCase();
-  final zoneIndex = normalized.indexOf('%');
-  final unscoped = zoneIndex < 0
-      ? normalized
-      : normalized.substring(0, zoneIndex);
-  if (unscoped.isEmpty ||
-      unscoped == 'localhost' ||
-      unscoped == '0.0.0.0' ||
-      unscoped == '127.0.0.1') {
-    return InternetAddress.loopbackIPv4.address;
+  final normalized = normalizeHostLiteral(host);
+  final kind = classifyLoopbackHost(normalized);
+  if (kind.isWildcard ||
+      normalized == 'localhost' ||
+      normalized == '127.0.0.1' ||
+      normalized == '::1') {
+    return kind.isIpv6
+        ? InternetAddress.loopbackIPv6.address
+        : InternetAddress.loopbackIPv4.address;
   }
-  if (unscoped == '::' || unscoped == '::1') {
-    return InternetAddress.loopbackIPv6.address;
-  }
-  return unscoped;
+  return normalized;
 }
 
+final _tcp6ListenerLinePattern = RegExp(
+  r'(^|\s)tcp6(?:\s|$)',
+  caseSensitive: false,
+);
+
+/// Returns the loopback target that reaches a discovered listener address.
+///
+/// A loopback address keeps priority 0. A wildcard bind maps to the loopback
+/// address of its family at priority 1, unless it is scoped to a device
+/// (`0.0.0.0%eth0`), which loopback traffic cannot reach.
 ({String host, int priority})? _automaticPortForwardTarget(
   String value, {
   required String listenerLine,
   bool? lsofIsIpv6,
 }) {
-  final address = value
-      .replaceFirst(RegExp(r'^\['), '')
-      .replaceFirst(RegExp(r'\]$'), '')
-      .toLowerCase();
-  if (address == '*') {
-    final isIpv6 =
-        (lsofIsIpv6 ?? false) ||
-        RegExp(
-          r'(^|\s)tcp6(?:\s|$)',
-          caseSensitive: false,
-        ).hasMatch(listenerLine);
-    return (
-      host: isIpv6
-          ? InternetAddress.loopbackIPv6.address
-          : InternetAddress.loopbackIPv4.address,
-      priority: 1,
-    );
-  }
-  if (address == '0.0.0.0') {
-    return (host: InternetAddress.loopbackIPv4.address, priority: 1);
-  }
-  if (address == '::') {
-    return (host: InternetAddress.loopbackIPv6.address, priority: 1);
-  }
-  if (address == '::1' ||
-      address == 'localhost' ||
-      address.startsWith('127.')) {
+  final address = normalizeHostLiteral(value);
+  final kind = classifyLoopbackHost(address);
+  if (kind.isLoopback) {
     return (host: address, priority: 0);
   }
-  return null;
+  final isWildcard = address == '*' || (kind.isWildcard && address.isNotEmpty);
+  if (!isWildcard || value.contains('%')) {
+    return null;
+  }
+  final isIpv6 = address == '*'
+      ? (lsofIsIpv6 ?? false) || _tcp6ListenerLinePattern.hasMatch(listenerLine)
+      : kind.isIpv6;
+  return (
+    host: isIpv6
+        ? InternetAddress.loopbackIPv6.address
+        : InternetAddress.loopbackIPv4.address,
+    priority: 1,
+  );
 }
 
 /// Builds a stable remote shell-lineage marker for one SSH endpoint.

@@ -975,6 +975,36 @@ LISTEN ::1:4201
       });
     });
 
+    test('listener identities ignore zones and map wildcard binds', () {
+      expect(
+        remoteTcpListenerKey('[::1%lo0]', 80),
+        remoteTcpListenerKey('::1', 80),
+      );
+      expect(remoteTcpListenerKey('[::1]%lo', 80).host, '::1');
+      expect(remoteTcpListenerKey('0.0.0.0', 80).host, '127.0.0.1');
+      expect(remoteTcpListenerKey('[::]', 80).host, '::1');
+      expect(remoteTcpListenerExclusionKeys('localhost%lo0', 3000), {
+        remoteTcpListenerKey('127.0.0.1', 3000),
+        remoteTcpListenerKey('::1', 3000),
+      });
+      expect(remoteTcpListenerExclusionKeys('0.0.0.0', 3000), {
+        remoteTcpListenerKey('127.0.0.1', 3000),
+      });
+      // A device-scoped loopback listener is still loopback; a device-scoped
+      // wildcard bind is not reachable through loopback.
+      expect(
+        parseRemoteListeningTcpListeners('''
+LISTEN 0 4096 [::1]%lo:631 [::]:*
+LISTEN 0 4096 0.0.0.0%eth0:8443 0.0.0.0:*
+LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
+''').keys,
+        {
+          remoteTcpListenerKey('::1', 631),
+          remoteTcpListenerKey('127.0.0.1', 8000),
+        },
+      );
+    });
+
     test('builds a valid persistent POSIX watcher command', () async {
       final session = _testSession(
         _MockSshClient(),
