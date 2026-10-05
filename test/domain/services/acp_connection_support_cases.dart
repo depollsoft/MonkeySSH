@@ -73,6 +73,60 @@ void registerAcpConnectionSupportTests() {
         );
       }
     }
+    for (final (providerId, installed, expectedArgv) in [
+      (
+        AcpBuiltinProviderIds.copilotCli,
+        'github-copilot',
+        ['github-copilot', 'login'],
+      ),
+      (AcpBuiltinProviderIds.copilotCli, 'copilot', ['copilot', 'login']),
+      (AcpBuiltinProviderIds.hermes, 'hermes-agent', ['hermes-agent']),
+      // A provider whose sign-in executable is not a probe candidate keeps
+      // its declared command even when the probe finds nothing.
+      (
+        AcpBuiltinProviderIds.claudeAgent,
+        'claude-agent-acp',
+        ['claude', '/login'],
+      ),
+    ]) {
+      test('terminal sign-in substitutes the installed probe candidate: '
+          '$providerId installed=$installed', () async {
+        final client = _MockSshClient();
+        when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async {
+              final channel = _MockExecChannel();
+              when(() => channel.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.value(
+                  Uint8List.fromList(
+                    utf8.encode('$installed\u001f/opt/tools/$installed\n'),
+                  ),
+                ),
+              );
+              when(() => channel.stderr)
+                  .thenAnswer((_) => const Stream<Uint8List>.empty());
+              when(() => channel.done).thenAnswer((_) async {});
+              when(() => channel.exitCode).thenReturn(0);
+              when(channel.close).thenReturn(null);
+              return channel;
+            });
+        final session = SshSession(
+          connectionId: 93,
+          hostId: 3,
+          client: client,
+          config: const SshConnectionConfig(
+            hostname: 'example.test',
+            port: 22,
+            username: 'dev',
+          ),
+        );
+        final command = await resolveAcpTerminalAuthCommand(
+          providerId: providerId,
+          session: session,
+        );
+        expect(command?.argv, expectedArgv);
+      });
+    }
     for (final windows in [false, true]) {
       for (final installedAdapter in [false, true]) {
         for (final installedMuse in [false, true]) {

@@ -852,25 +852,29 @@ class AcpSessionManager {
   /// Forks [key] into a new ACP session on the same bridge, when supported.
   ///
   /// Returns the new session's launch result. The original session is not
-  /// disturbed. Forking counts as a new live session for concurrency.
-  Future<AcpSessionLaunchResult> forkSession(AcpSessionKey key) =>
-      _serialize(() async {
-        final controller = _controllers[key.value];
-        if (controller == null) {
-          return AcpSessionLaunchFailed(
-            key,
-            const AcpSessionError(
-              kind: AcpSessionErrorKind.unknown,
-              message: 'Session is not tracked.',
-            ),
-          );
-        }
-        final decision = _evaluate('\u0000fork');
-        if (decision is AcpConcurrencyRequiresChoice) {
-          return AcpSessionLaunchBlocked(decision);
-        }
-        return controller.fork();
-      });
+  /// disturbed. Forking counts as a new live session for concurrency; the
+  /// sessions in [replace] are stopped first to free a slot.
+  Future<AcpSessionLaunchResult> forkSession(
+    AcpSessionKey key, {
+    List<AcpSessionKey> replace = const <AcpSessionKey>[],
+  }) => _serialize(() async {
+    final controller = _controllers[key.value];
+    if (controller == null) {
+      return AcpSessionLaunchFailed(
+        key,
+        const AcpSessionError(
+          kind: AcpSessionErrorKind.unknown,
+          message: 'Session is not tracked.',
+        ),
+      );
+    }
+    if (replace.isNotEmpty) await _stopAll(replace);
+    final decision = _evaluate('\u0000fork');
+    if (decision is AcpConcurrencyRequiresChoice) {
+      return AcpSessionLaunchBlocked(decision);
+    }
+    return controller.fork();
+  });
 
   /// Loads persisted recent sessions.
   Future<List<AcpRecentSessionRef>> loadRecentSessions() =>

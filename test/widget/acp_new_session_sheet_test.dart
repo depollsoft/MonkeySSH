@@ -136,11 +136,11 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
   when(() => ssh.getSessionsForHost(any()))
       .thenReturn(<SshSession>[?activeSession]);
   when(() => ssh.getSession(any())).thenReturn(activeSession);
-  when(() => presetService.getPresetForHost(any())).thenAnswer((_) async {
+  when(presetService.getAllPresets).thenAnswer((_) async {
     if (presetError != null) {
       throw presetError;
     }
-    return preset;
+    return {1: ?preset};
   });
   when(() => launchPreferencesService.getPreferencesForHost(any())).thenAnswer(
     (_) async => HostCliLaunchPreferences(startInYoloMode: startInYoloMode),
@@ -399,13 +399,15 @@ void main() {
       when(() => ssh.allSessions).thenReturn(const <SshSession>[]);
       when(() => ssh.getSessionsForHost(any()))
           .thenReturn(const <SshSession>[]);
-      when(() => presetService.getPresetForHost(host.id)).thenAnswer(
-        (_) async => const AgentLaunchPreset(
-          tool: AgentLaunchTool.openCode,
-          workingDirectory: '/saved-agent-worktree',
-          tmuxSessionName: 'agents',
-          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
-        ),
+      when(presetService.getAllPresets).thenAnswer(
+        (_) async => {
+          host.id: const AgentLaunchPreset(
+            tool: AgentLaunchTool.openCode,
+            workingDirectory: '/saved-agent-worktree',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          ),
+        },
       );
 
       await tester.pumpWidget(
