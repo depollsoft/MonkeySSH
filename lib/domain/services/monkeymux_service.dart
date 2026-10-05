@@ -653,6 +653,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       'clientId': session.monkeyMuxClientId,
       if (command != null && command.trim().isNotEmpty)
         'command': command.trim(),
+      'restoreCommand': ?buildAgentRestoreCommand(command),
       if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
       if (workingDirectory != null && workingDirectory.trim().isNotEmpty)
         'cwd': workingDirectory.trim(),

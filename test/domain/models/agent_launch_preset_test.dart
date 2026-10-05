@@ -171,6 +171,54 @@ void main() {
     }
   });
 
+  group('buildAgentRestoreCommand', () {
+    for (final (command, expected) in [
+      ("hermes --profile 'alfred'", "hermes --profile 'alfred' --continue"),
+      ('hermes --yolo --continue', 'hermes --yolo --continue'),
+      ("hermes --resume '2025_a1'", "hermes --resume '2025_a1'"),
+      ('openclaw tui', 'openclaw tui'),
+      ("openclaw --profile 'work' tui", "openclaw --profile 'work' tui"),
+      ('grok --yolo', 'grok --yolo --resume'),
+      ("grok --resume '019f'", "grok --resume '019f'"),
+      ('pi', 'pi --continue'),
+      ("cd '/srv/app' && hermes", "cd '/srv/app' && hermes --continue"),
+      (
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto',
+        r'OPENCODE_PERMISSION="{\"*\":\"allow\"}" opencode --auto --continue',
+      ),
+      // Agents the app resumes only by id, other programs, and commands
+      // that chain more after the agent are left to the helper.
+      ('claude --dangerously-skip-permissions', null),
+      ('codex --yolo', null),
+      ('htop', null),
+      ('hermes; echo done', null),
+      ('hermes | tee log', null),
+      ("tmux new-session -A -s 'work' 'hermes'", null),
+      ('', null),
+      (null, null),
+    ]) {
+      test('$command', () {
+        expect(buildAgentRestoreCommand(command), expected);
+      });
+    }
+
+    test('matches the continue form of each resume command', () {
+      for (final tool in AgentLaunchTool.values) {
+        final continueArguments = tool.continueArguments;
+        if (continueArguments == null) continue;
+        expect(
+          buildAgentResumeCommand(tool, '_continue'),
+          [
+            tool.commandName,
+            ...tool.launchArguments,
+            ...continueArguments,
+          ].join(' '),
+          reason: tool.name,
+        );
+      }
+    });
+  });
+
   group('agentLaunchToolForCommandText', () {
     for (final (input, expected) in const [
       (

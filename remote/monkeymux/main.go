@@ -517,6 +517,7 @@ type controlMessage struct {
 	Name           string   `json:"name,omitempty"`
 	Cwd            string   `json:"cwd,omitempty"`
 	Command        string   `json:"command,omitempty"`
+	RestoreCommand string   `json:"restoreCommand,omitempty"`
 	ProviderID     string   `json:"providerId,omitempty"`
 	Provider       string   `json:"provider,omitempty"`
 	Args           []string `json:"args,omitempty"`
@@ -658,7 +659,11 @@ type restoreWindowState struct {
 	AgentSessionAssigned      bool   `json:"agentSessionAssigned,omitempty"`
 	// CommandLine is the agent's foreground command line when the agent has no
 	// launch entry to restart it from; see enrichRestoreWithAgentCommandLines.
-	CommandLine              []string                  `json:"commandLine,omitempty"`
+	CommandLine []string `json:"commandLine,omitempty"`
+	// LaunchCommand and RestoreCommand are the commands the app created the
+	// window with; see launchedCommandForRestore.
+	LaunchCommand            string                    `json:"launchCommand,omitempty"`
+	RestoreCommand           string                    `json:"restoreCommand,omitempty"`
 	NativeAcpBridgeID        string                    `json:"nativeAcpBridgeId,omitempty"`
 	NativeAcpProviderID      string                    `json:"nativeAcpProviderId,omitempty"`
 	LastActivityEpochSeconds int64                     `json:"lastActivityEpochSeconds,omitempty"`
@@ -767,6 +772,8 @@ type muxWindow struct {
 	name                      string
 	cwd                       string
 	command                   string
+	launchCommand             string
+	restoreCommand            string
 	agentTool                 string
 	agentToolConfirmed        bool
 	agentModelProvider        string
@@ -3111,6 +3118,32 @@ func commandLineRelaunchCommand(tool string, argv []string) string {
 	return launch
 }
 
+// launchedCommandForRestore returns the command that starts a window's program
+// again from the commands the app created the window with, or "" when the
+// window has none or its foreground program is no longer the one launched:
+// the user quit it and ran something else, or it exited to the shell. The
+// app's restore command continues the program's latest session; the launch
+// command, which is also the fallback when nothing is left to continue,
+// starts it afresh. Either keeps every flag the app launched it with.
+func launchedCommandForRestore(window restoreWindowState) string {
+	launch := strings.TrimSpace(window.LaunchCommand)
+	if launch == "" {
+		return ""
+	}
+	if tool := agentToolFromCommandText(launch); tool != "" {
+		if tool != agentToolCandidateForRestore(window) {
+			return ""
+		}
+	} else if program := commandNameFromShellCommand(launch); program == "" ||
+		program != cleanProcessCommandName(window.CurrentCommand) {
+		return ""
+	}
+	if restore := strings.TrimSpace(window.RestoreCommand); restore != "" {
+		return agentResumeCommandWithFreshFallback(restore, launch)
+	}
+	return launch
+}
+
 // hermesCommandLineResumes reports whether a Hermes command line already
 // names a session to resume or continue.
 func hermesCommandLineResumes(argv []string) bool {
@@ -5013,7 +5046,9 @@ func agentToolForRestore(window restoreWindowState) string {
 		!window.AgentToolConfirmed {
 		return ""
 	}
-	if !agentToolRelaunchable(tool) && len(window.CommandLine) == 0 {
+	if !agentToolRelaunchable(tool) &&
+		len(window.CommandLine) == 0 &&
+		launchedCommandForRestore(window) == "" {
 		return ""
 	}
 	return tool
@@ -5022,8 +5057,9 @@ func agentToolForRestore(window restoreWindowState) string {
 // agentToolRelaunchable reports whether this agent has a launch entry a
 // restore can start it from. Hermes and OpenClaw have none: the app can start
 // them with --profile and other flags a fixed command would drop. They restart
-// from their recorded command line instead (commandLineRelaunchCommand), and
-// restore as a plain shell when there is none.
+// from their recorded command line (commandLineRelaunchCommand) or the command
+// the app launched them with (launchedCommandForRestore), and restore as a
+// plain shell when there is neither.
 func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
@@ -5037,7 +5073,10 @@ func agentToolRelaunchable(tool string) bool {
 // so a window still named after the agent is not mistaken for it again.
 func agentToolRestoredAsShell(window restoreWindowState) bool {
 	tool := agentToolCandidateForRestore(window)
-	return tool != "" && !agentToolRelaunchable(tool) && len(window.CommandLine) == 0
+	return tool != "" &&
+		!agentToolRelaunchable(tool) &&
+		len(window.CommandLine) == 0 &&
+		launchedCommandForRestore(window) == ""
 }
 
 type processInfo struct {
@@ -6496,7 +6535,11 @@ func createWindowOptionsForRestore(
 		}
 		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
 		if !agentToolRelaunchable(agentTool) {
-			launch = commandLineRelaunchCommand(agentTool, state.CommandLine)
+			if len(state.CommandLine) > 0 {
+				launch = commandLineRelaunchCommand(agentTool, state.CommandLine)
+			} else {
+				launch = launchedCommandForRestore(state)
+			}
 			state.AgentSessionID = ""
 		}
 		if agentTool == "pi" {
@@ -6525,6 +6568,10 @@ func createWindowOptionsForRestore(
 				)
 			}
 		}
+	} else {
+		// A program the helper does not know as an agent, such as Grok Build,
+		// starts again from the command the app launched it with.
+		command = launchedCommandForRestore(state)
 	}
 	history := []byte(nil)
 	if isShellRestoreWindow(state) {
@@ -6548,6 +6595,8 @@ func createWindowOptionsForRestore(
 		name:                      firstNonEmptyString(state.Name, state.PaneTitle, state.CurrentCommand, "shell"),
 		cwd:                       state.Cwd,
 		command:                   command,
+		launchCommand:             state.LaunchCommand,
+		restoreCommand:            state.RestoreCommand,
 		history:                   history,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
@@ -6590,6 +6639,8 @@ type createWindowOptions struct {
 	cwd                       string
 	command                   string
 	args                      []string
+	launchCommand             string
+	restoreCommand            string
 	history                   []byte
 	paneTitle                 string
 	agentTool                 string
@@ -6728,6 +6779,8 @@ func (s *muxServer) createWindowWithStarter(
 		name:                      name,
 		cwd:                       cwd,
 		command:                   filepath.Base(cmd.Path),
+		launchCommand:             options.launchCommand,
+		restoreCommand:            options.restoreCommand,
 		agentTool:                 agentTool,
 		agentToolConfirmed:        agentToolConfirmed,
 		agentSessionID:            options.agentSessionID,
@@ -9101,12 +9154,17 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		})
 	case "create_window":
 		s.focusAttachClientByID(request.ClientID, 0, 0, false)
-		window, err := s.createWindow(createWindowOptions{
+		options := createWindowOptions{
 			name:    request.Name,
 			cwd:     request.Cwd,
 			command: request.Command,
 			args:    request.Args,
-		})
+		}
+		if len(request.Args) == 0 {
+			options.launchCommand = strings.TrimSpace(request.Command)
+			options.restoreCommand = strings.TrimSpace(request.RestoreCommand)
+		}
+		window, err := s.createWindow(options)
 		if err != nil {
 			client.sendError(request, err)
 			return
@@ -9594,6 +9652,8 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 			Name:                      window.name,
 			Cwd:                       window.cwd,
 			CurrentCommand:            window.currentCommandLocked(),
+			LaunchCommand:             window.launchCommand,
+			RestoreCommand:            window.restoreCommand,
 			PanePid:                   window.metadataProcessIDLocked(),
 			PaneTitle:                 window.paneTitle,
 			AgentTool:                 window.agentToolLocked(),

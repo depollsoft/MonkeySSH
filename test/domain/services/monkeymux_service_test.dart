@@ -1203,6 +1203,51 @@ void main() {
       ]);
     });
 
+    test('new agent windows carry a command to restore them with', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client);
+      final output = StreamController<Uint8List>();
+      final control = _buildRespondingControlSession(
+        output,
+        window: _fakeWindowJson,
+      );
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => control);
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+      )..watchWindowChanges(session, 'work');
+      addTearDown(() async {
+        await service.clearCache(session.connectionId);
+        await output.close();
+      });
+
+      await service.createWindow(
+        session,
+        'work',
+        command: "hermes --profile 'alfred'",
+      );
+      await service.createWindow(session, 'work', command: 'htop');
+      await service.createWindow(session, 'work');
+
+      final requests = verify(() => control.write(captureAny())).captured
+          .map(
+            (data) =>
+                jsonDecode(utf8.decode(data as List<int>))
+                    as Map<String, Object?>,
+          )
+          .where((request) => request['type'] == 'create_window')
+          .toList();
+      expect(requests.map((request) => request['restoreCommand']), [
+        "hermes --profile 'alfred' --continue",
+        null,
+        null,
+      ]);
+    });
+
     test('preserves an exact bracketed paste in one control request', () async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();

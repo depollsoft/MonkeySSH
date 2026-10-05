@@ -146,3 +146,123 @@ func TestProcessCommandLineKeepsArgumentBoundaries(t *testing.T) {
 	}
 	t.Fatalf("processCommandLine = %q, want %q", got, want)
 }
+
+// A window the app launched keeps the commands it was launched with, so an
+// upgrade can start its program again: OpenClaw, whose renamed process leaves
+// no arguments to read, a program the helper does not know as an agent, such
+// as Grok Build, and Hermes where its command line cannot be read. The app's
+// restore command continues the latest session, falling back to the launch
+// command.
+func TestLaunchedWindowRestartsFromItsLaunchCommand(t *testing.T) {
+	history := base64.StdEncoding.EncodeToString([]byte("agent screen"))
+	for _, tc := range []struct {
+		name    string
+		state   restoreWindowState
+		command string
+		tool    string
+	}{
+		{
+			name: "openclaw",
+			state: restoreWindowState{
+				Name: "OpenClaw · Work", CurrentCommand: "openclaw", AgentTool: "openclaw", AgentToolConfirmed: true,
+				LaunchCommand: "openclaw --profile 'work' tui",
+			},
+			command: "openclaw --profile 'work' tui",
+			tool:    "openclaw",
+		},
+		{
+			name: "grok",
+			state: restoreWindowState{
+				Name: "grok", CurrentCommand: "grok",
+				LaunchCommand: "grok --yolo", RestoreCommand: "grok --yolo --resume",
+			},
+			command: "grok --yolo --resume || grok --yolo",
+		},
+		{
+			name: "hermes without a command line",
+			state: restoreWindowState{
+				Name: "hermes", CurrentCommand: "hermes", AgentTool: "hermes", AgentToolConfirmed: true,
+				LaunchCommand: "hermes --profile 'alfred'", RestoreCommand: "hermes --profile 'alfred' --continue",
+			},
+			command: "hermes --profile 'alfred' --continue || hermes --profile 'alfred'",
+			tool:    "hermes",
+		},
+		{
+			// What runs now beats how the window was started.
+			name: "hermes command line first",
+			state: restoreWindowState{
+				Name: "hermes", CurrentCommand: "hermes", AgentTool: "hermes", AgentToolConfirmed: true,
+				CommandLine:   []string{"/venv/bin/python3", "/home/demo/.local/bin/hermes", "-p", "other"},
+				LaunchCommand: "hermes --profile 'alfred'", RestoreCommand: "hermes --profile 'alfred' --continue",
+			},
+			command: "'/venv/bin/python3' '/home/demo/.local/bin/hermes' '-p' 'other' --continue || '/venv/bin/python3' '/home/demo/.local/bin/hermes' '-p' 'other'",
+			tool:    "hermes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.state.Cwd = "/home/demo/project"
+			tc.state.HistoryBase64 = history
+			options := createWindowOptionsForRestore(tc.state, true)
+			if options.command != tc.command {
+				t.Fatalf("command = %q\nwant      %q", options.command, tc.command)
+			}
+			if options.agentTool != tc.tool || len(options.history) != 0 {
+				t.Fatalf("restored as tool %q with %d history bytes", options.agentTool, len(options.history))
+			}
+			// The restored window keeps them for the next upgrade.
+			if options.launchCommand != tc.state.LaunchCommand || options.restoreCommand != tc.state.RestoreCommand {
+				t.Fatalf("carried %q / %q", options.launchCommand, options.restoreCommand)
+			}
+		})
+	}
+}
+
+// Once the launched program is no longer in the foreground, the window
+// restores as the shell it now is.
+func TestLaunchedWindowRunningSomethingElseRestoresAsShell(t *testing.T) {
+	history := base64.StdEncoding.EncodeToString([]byte("$ "))
+	for name, state := range map[string]restoreWindowState{
+		"grok exited":         {CurrentCommand: "-zsh", LaunchCommand: "grok --yolo", RestoreCommand: "grok --yolo --resume"},
+		"vim instead of grok": {CurrentCommand: "vim", LaunchCommand: "grok"},
+		"openclaw exited": {
+			CurrentCommand: "zsh", AgentTool: "", AgentToolConfirmed: true,
+			LaunchCommand: "openclaw tui",
+		},
+		"a different agent": {
+			CurrentCommand: "hermes", AgentTool: "hermes", AgentToolConfirmed: true,
+			LaunchCommand: "openclaw tui",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state.HistoryBase64 = history
+			state.HistoryStartsAtGround = true
+			options := createWindowOptionsForRestore(state, true)
+			if options.command != "" || options.agentTool != "" {
+				t.Fatalf("relaunched %q as %q", options.command, options.agentTool)
+			}
+		})
+	}
+}
+
+// create_window records the app's commands, and the restore snapshot the
+// outgoing helper hands over carries them.
+func TestCreateWindowRecordsLaunchCommandsForRestore(t *testing.T) {
+	server := newMuxServer("launch-commands")
+	t.Cleanup(server.close)
+	server.handleControlRequest(newControlClient(nil), controlMessage{
+		Type:           "create_window",
+		Command:        "sleep 30",
+		RestoreCommand: "sleep 31",
+	})
+	server.handleControlRequest(newControlClient(nil), controlMessage{Type: "create_window"})
+	restore := server.restoreSnapshot()
+	if len(restore.Windows) != 2 {
+		t.Fatalf("windows = %d", len(restore.Windows))
+	}
+	if got := restore.Windows[0]; got.LaunchCommand != "sleep 30" || got.RestoreCommand != "sleep 31" {
+		t.Fatalf("launched window carried %q / %q", got.LaunchCommand, got.RestoreCommand)
+	}
+	if got := restore.Windows[1]; got.LaunchCommand != "" || got.RestoreCommand != "" {
+		t.Fatalf("shell window carried %q / %q", got.LaunchCommand, got.RestoreCommand)
+	}
+}
