@@ -747,7 +747,7 @@ void main() {
         priority: any(named: 'priority'),
       ),
     ).thenThrow(
-      const MonkeyMuxInstallException('Cursor Agent login keychain is locked'),
+      const MonkeyMuxInstallException(monkeyMuxCursorKeychainLockedMessage),
     );
     final service = MonkeyMuxAcpBridgeService(
       installer: _FakeInstaller(
@@ -1327,19 +1327,16 @@ void main() {
       // before delivery, so the reconnect would not start from ACK 1.
       await channels.single.remoteClose();
       await _waitUntil(() => !transport.isConnected);
-      await expectLater(
-        transport.write(
-          utf8.encode(
-            '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
-          ),
+      // Input written during the backoff queues instead of failing the
+      // connection, then flushes on the reattached channel.
+      await transport.write(
+        utf8.encode(
+          '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
         ),
-        throwsA(
-          isA<MonkeyMuxAcpBridgeException>().having(
-            (error) => error.kind,
-            'kind',
-            MonkeyMuxAcpBridgeErrorKind.sshChannel,
-          ),
-        ),
+      );
+      expect(
+        channels.single.writes.map(_decodeFrame),
+        isNot(contains(containsPair('type', 'input'))),
       );
       await _waitUntil(() => channels.length == 2);
 
@@ -1348,7 +1345,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(
         channels[1].writes.map(_decodeFrame),
-        isNot(contains(containsPair('type', 'input'))),
+        contains(containsPair('data', containsPair('method', 'initialize'))),
       );
       expect(transport.lastDeliveredSequence, overflow ? 3 : 2);
       expect(errors.map((error) => error.kind), [
@@ -2461,6 +2458,62 @@ void main() {
         .map(_decodeFrame)
         .firstWhere((message) => message['type'] == 'input');
     expect(wrapped['data'], containsPair('method', 'prompt'));
+  });
+
+  test('input written during reconnect flushes after reattach', () async {
+    final client = _MockSshClient();
+    final channels = <_TestChannel>[];
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async {
+          late _TestChannel channel;
+          channel = _TestChannel(
+            onWrite: (value) {
+              if (_decodeFrame(utf8.encode(value))['type'] != 'hello') return;
+              channel.addText(
+                _frame({
+                  'version': 1,
+                  'type': 'hello',
+                  'bridgeId': _bridgeId,
+                  'clientId': _otherBridgeId,
+                  'canSend': true,
+                  'bridge': _metadata(),
+                }),
+              );
+            },
+          );
+          channels.add(channel);
+          return channel.session;
+        });
+    final transport = _bridgeService().connect(
+      sessionProvider: () async => _sshSession(client),
+      bridgeId: _bridgeId,
+      providerId: 'copilot',
+      reconnectBackoff: const [Duration(milliseconds: 20)],
+    );
+    addTearDown(transport.close);
+    await _waitUntil(() => transport.isConnected);
+    await channels.single.remoteClose();
+    await _waitUntil(() => !transport.isConnected);
+
+    await transport.write(
+      utf8.encode(
+        '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
+      ),
+    );
+
+    List<Map<String, Object?>> inputs(_TestChannel channel) => channel.writes
+        .map(_decodeFrame)
+        .where((message) => message['type'] == 'input')
+        .toList();
+    await _waitUntil(
+      () => channels.length == 2 && inputs(channels[1]).isNotEmpty,
+    );
+    expect(transport.isConnected, isTrue);
+    expect(inputs(channels[0]), isEmpty);
+    expect(
+      inputs(channels[1]).single['data'],
+      containsPair('method', 'initialize'),
+    );
   });
 
   test('explicit close only detaches locally and cancels reconnect', () async {

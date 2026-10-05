@@ -27,7 +27,6 @@ const _maxBridgeListEntries = 1024;
 const _helperTimeout = Duration(seconds: 15);
 const _wireInputByteBudget = 32 * 1024;
 const _wireInputTimeBudget = Duration(milliseconds: 4);
-const _cursorKeychainLockedError = 'Cursor Agent login keychain is locked';
 const _profileSourcingPrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
     '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
@@ -409,7 +408,7 @@ final class MonkeyMuxAcpBridgeService {
         maxBytes: _metadataMaxBytes,
       );
     } on MonkeyMuxInstallException catch (error) {
-      if (error.message == _cursorKeychainLockedError) {
+      if (error.message == monkeyMuxCursorKeychainLockedMessage) {
         throw const MonkeyMuxAcpBridgeException(
           MonkeyMuxAcpBridgeErrorKind.keychainLocked,
           'Cursor Agent needs the Mac login keychain unlocked.',
@@ -618,7 +617,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final Duration _handshakeTimeout;
   // Both input views share one single-subscription buffer. Outputs received
   // before subscription must remain available to whichever view is chosen.
-  final _incoming = StreamController<_PreparedAcpOutput>(sync: true);
+  final _incoming = StreamController<AcpDecodedFrame>(sync: true);
   final _states = StreamController<MonkeyMuxAcpTransportState>.broadcast(
     sync: true,
   );
@@ -633,7 +632,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
 
   final _pendingInputFrames = Queue<Uint8List>();
   var _pendingInputBytes = 0;
-  final _pendingReplayFrames = Queue<_PreparedAcpOutput>();
+  final _pendingReplayFrames = Queue<AcpDecodedFrame>();
 
   SSHSession? _channel;
   StreamSubscription<Uint8List>? _stdoutSubscription;
@@ -653,7 +652,6 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   // A replacement transport may queue its setup request before its first
   // handshake. After any completed handshake, rejecting disconnected writes
   // prevents an already-sent request from being duplicated on reconnect.
-  var _hasCompletedHandshake = false;
   var _connected = false;
   var _closed = false;
   var _terminalFailure = false;
@@ -681,18 +679,21 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   int get lastDeliveredSequence => _lastDeliveredSequence;
 
   /// Whether the writer handshake completed.
+  @visibleForTesting
   bool get isConnected => _connected;
 
   /// Whether the first handshake deliberately skipped superseded replay.
   bool didSkipHistoricalReplay() => _skippedHistoricalReplay;
 
+  /// Byte view of [incomingFrames], encoded lazily per listener. Production
+  /// consumes the decoded frames, so no frame is re-encoded unless asked.
   @override
-  Stream<List<int>> get incoming =>
-      _incoming.stream.map((output) => output.bytes);
+  Stream<List<int>> get incoming => _incoming.stream.map(
+    (frame) => utf8.encode('${jsonEncode(frame.message)}\n'),
+  );
 
   @override
-  Stream<AcpDecodedFrame> get incomingFrames =>
-      _incoming.stream.map((output) => output.frame);
+  Stream<AcpDecodedFrame> get incomingFrames => _incoming.stream;
 
   @override
   Future<void> write(List<int> bytes) async {
@@ -702,12 +703,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         'The ACP bridge transport is closed.',
       );
     }
-    if (!_connected && _hasCompletedHandshake) {
-      throw const MonkeyMuxAcpBridgeException(
-        MonkeyMuxAcpBridgeErrorKind.sshChannel,
-        'The ACP bridge is reconnecting; retry the request after reattach.',
-      );
-    }
+    // While reconnecting, frames queue like pre-handshake input and flush
+    // once the new channel completes its handshake. Rejecting them would make
+    // the JSON-RPC connection tear down an attachment that is about to resume.
     for (final byte in bytes) {
       if (byte == 0x0a) {
         final frame = List<int>.of(_outgoingFrame);
@@ -1157,7 +1155,6 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       );
       return;
     }
-    _hasCompletedHandshake = true;
     _emitState(
       MonkeyMuxAcpTransportStatus.connected,
       providerState: metadata.state,
@@ -1224,7 +1221,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _flushPendingInput();
   }
 
-  void _handleOutput(Map<String, Object?> message, _PreparedAcpOutput? output) {
+  void _handleOutput(Map<String, Object?> message, AcpDecodedFrame? output) {
     if (!_matchesCurrentBridge(message)) return;
     if (!_connected) {
       _failTerminal(
@@ -1256,26 +1253,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       );
       return;
     }
-    final encoded = output!.bytes;
-    if (encoded.length > monkeyMuxAcpBridgeMaxFrameBytes) {
-      _failTerminal(
-        const MonkeyMuxAcpBridgeException(
-          MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
-          'The unwrapped ACP frame exceeded the protocol limit.',
-        ),
-      );
-      return;
-    }
     _commitSequence(sequence);
-    _deliverOutput(output);
+    _deliverOutput(output!);
     _sendAck(sequence);
     _finishDirectReplayIfComplete();
   }
 
-  void _handlePending(
-    Map<String, Object?> message,
-    _PreparedAcpOutput? output,
-  ) {
+  void _handlePending(Map<String, Object?> message, AcpDecodedFrame? output) {
     if (!_matchesCurrentBridge(message)) return;
     if (!_connected || !_acceptsPendingFrames) {
       _failTerminal(
@@ -1296,24 +1280,14 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       );
       return;
     }
-    final encoded = output!.bytes;
-    if (encoded.length > monkeyMuxAcpBridgeMaxFrameBytes) {
-      _failTerminal(
-        const MonkeyMuxAcpBridgeException(
-          MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
-          'The unwrapped pending ACP frame exceeded the protocol limit.',
-        ),
-      );
-      return;
-    }
     // Do not expose a request until replay_end has committed the sequence
     // baseline. Otherwise an automatic response could release it remotely,
     // followed by a channel loss that leaves the client at ACK 0 with nothing
     // left for the helper to replay.
-    _pendingReplayFrames.add(output);
+    _pendingReplayFrames.add(output!);
   }
 
-  void _deliverOutput(_PreparedAcpOutput output) => _incoming.add(output);
+  void _deliverOutput(AcpDecodedFrame output) => _incoming.add(output);
 
   void _handleProviderState(Map<String, Object?> message) {
     if (!_matchesCurrentBridge(message)) return;
@@ -1773,10 +1747,9 @@ String _buildHelperCommand(
   return buildWindowsPowerShellCommand(script);
 }
 
-typedef _PreparedAcpOutput = ({AcpDecodedFrame frame, Uint8List bytes});
 typedef _PreparedWireFrame = ({
   Map<String, Object?> message,
-  _PreparedAcpOutput? output,
+  AcpDecodedFrame? output,
 });
 
 // Top-level callback deliberately captures no SSH or UI state. compute uses
@@ -1786,19 +1759,14 @@ _PreparedWireFrame _prepareWireFrame(Uint8List bytes) {
     bytes,
     maxBytes: monkeyMuxAcpBridgeMaxFrameBytes,
   );
-  _PreparedAcpOutput? output;
+  AcpDecodedFrame? output;
   final data = message['data'];
   if ((message['type'] == 'output' || message['type'] == 'pending') &&
       data is Map) {
-    final encoded = utf8.encode('${jsonEncode(data)}\n');
     final immutable = AcpJson.immutableObject(AcpJson.object(data)!);
-    output = (
-      frame: AcpDecodedFrame(
-        message: immutable,
-        byteLength: encoded.length - 1,
-      ),
-      bytes: encoded,
-    );
+    // The wire frame bounds the ACP payload it wraps, so its length is a
+    // safe upper bound without re-encoding the payload.
+    output = AcpDecodedFrame(message: immutable, byteLength: bytes.length);
     // Do not retain both the mutable decode and its immutable copy.
     message['data'] = immutable;
   }
