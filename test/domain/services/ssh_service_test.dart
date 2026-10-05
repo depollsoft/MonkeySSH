@@ -2178,9 +2178,10 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         '\x1b[4h\x1b]0;nano title\x07\x1b[@Z',
       ),
       (
+        // The buffer gives a skin-tone modifier its own two cells.
         'emoji modifier',
         '\x1b[4h\u{1F44D}\u{1F3FD}Z',
-        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\u{1F3FD}\x1b[@Z',
+        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\x1b[@\x1b[@\u{1F3FD}\x1b[@Z',
       ),
     ]) {
       test('insert mode preserves $name', () {
@@ -2260,6 +2261,57 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         );
       },
     );
+
+    test('insert mode shifts by the cell width the buffer uses', () {
+      // U+231A is wide and U+0301 takes no cell in the buffer's width table.
+      final terminal = Terminal(maxLines: 100)..resize(20, 2);
+      final decoder = TerminalXtermOutputDecoder();
+      terminal.write(
+        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}').output,
+      );
+
+      expect(terminal.buffer.cursorX, 5);
+      expect(terminal.lines[0].getText(5, 11), 'abcdef');
+    });
+
+    test('tracks scroll-region cursor moves the way the buffer does', () {
+      // Each prefix ends with the cursor at the top margin or not; a reverse
+      // index after it is adapted only when the buffer agrees.
+      for (final (prefix, atTopMargin) in [
+        ('\x1b[2;1H\x1b[3;2r', false), // a one-row region is ignored
+        ('\x1b[5;1H\x1b[1;0r', true), // a valid region homes the cursor
+        ('\x1b[?6h\x1b[3;6r', true), // to the top margin in origin mode
+        ('\x1b[3;6r\x1b[?6h\x1b[4d\x1b[1d', true), // VPA in origin mode
+        ('\x1b[3;6r\x1b[4;1H\x1b[9A', true), // CUU stops at the margin
+        ('\x1b[3;6r\x1b[4;1H\x1b[9B\x1b[3A', true), // so does CUD
+        ('\x1b[3;6r\x1b[4;1H\x1b[9E\x1b[3F', true), // and CNL/CPL
+        ('\x1b[3;6r\x1b[8;1H\x1b[9F', false), // outside, the whole screen
+      ]) {
+        final terminal = Terminal(maxLines: 100)
+          ..resize(10, 8)
+          ..write(prefix);
+        expect(
+          terminal.buffer.cursorY == terminal.buffer.marginTop,
+          atTopMargin,
+          reason: 'buffer after ${prefix.replaceAll('\x1b', 'ESC')}',
+        );
+
+        final result = TerminalXtermOutputDecoder().add(
+          input: '$prefix\x1bM',
+          terminalColumns: 10,
+          terminalRows: 8,
+          cursorColumn: 0,
+          cursorRow: 0,
+          marginTop: 0,
+          marginBottom: 7,
+        );
+        expect(
+          result.output,
+          atTopMargin ? '$prefix\x1b[L' : '$prefix\x1bM',
+          reason: prefix.replaceAll('\x1b', 'ESC'),
+        );
+      }
+    });
 
     test('preserves reverse index when cursor is below the top margin', () {
       final decoder = TerminalXtermOutputDecoder();

@@ -9,6 +9,8 @@ import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// ignore: implementation_imports
+import 'package:xterm/src/utils/unicode_v11.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../data/database/database.dart';
@@ -580,8 +582,8 @@ class TerminalXtermOutputDecoder {
       }
       final rune = _terminalRuneAt(combinedInput, cursor);
       final runeLength = _terminalRuneLength(rune);
-      if (_insertMode && _isTerminalGraphicRune(rune)) {
-        for (var cell = 0; cell < _terminalCellWidth(rune); cell++) {
+      if (_insertMode) {
+        for (var cell = 0; cell < unicodeV11.wcwidth(rune); cell++) {
           output.write(_terminalInsertBlankCharacterSequence);
         }
       }
@@ -701,7 +703,7 @@ class _TerminalOutputCursorTracker {
       case _terminalCarriageReturnCodeUnit:
         _cursorColumn = 0;
       default:
-        final width = _terminalCellWidth(rune);
+        final width = unicodeV11.wcwidth(rune);
         if (width <= 0) {
           return;
         }
@@ -777,7 +779,10 @@ class _TerminalOutputCursorTracker {
           column: _terminalCsiParam(params, 1, defaultValue: 1) - 1,
         );
       case _terminalLinePositionAbsoluteFinalCodeUnit:
-        _setCursorRow(_terminalCsiParam(params, 0, defaultValue: 1) - 1);
+        _setCursor(
+          row: _terminalCsiParam(params, 0, defaultValue: 1) - 1,
+          column: _cursorColumn!,
+        );
       case _terminalSetMarginsFinalCodeUnit:
         _setMargins(params);
       case _terminalInsertLinesFinalCodeUnit:
@@ -800,8 +805,14 @@ class _TerminalOutputCursorTracker {
     _cursorRow = math.min(row + 1, _rows! - 1);
   }
 
+  /// Moves [offset] rows. Inside the scroll region the cursor stops at the
+  /// margin it moves toward; outside it, at the screen edge.
   void _moveCursorRows(int offset) {
-    _setCursorRow(_cursorRow! + offset);
+    final row = _cursorRow!;
+    final inMargins = row >= _marginTop! && row <= _marginBottom!;
+    final minRow = inMargins && offset < 0 ? _marginTop! : 0;
+    final maxRow = inMargins && offset > 0 ? _marginBottom! : _rows! - 1;
+    _cursorRow = (row + offset).clamp(minRow, maxRow);
   }
 
   void _moveCursorColumns(int offset) {
@@ -810,7 +821,7 @@ class _TerminalOutputCursorTracker {
 
   void _setCursor({required int row, required int column}) {
     if (_originMode) {
-      _cursorRow = (row + _marginTop!).clamp(0, _marginBottom!);
+      _cursorRow = (row + _marginTop!).clamp(_marginTop!, _marginBottom!);
     } else {
       _setCursorRow(row);
     }
@@ -832,16 +843,17 @@ class _TerminalOutputCursorTracker {
 
     final rows = _rows!;
     final top = _terminalCsiParam(params, 0, defaultValue: 1) - 1;
-    final bottom = params.length >= 2 && params[1] != null && params[1] != 0
-        ? params[1]! - 1
-        : rows - 1;
-    _marginTop = top.clamp(0, rows - 1);
-    _marginBottom = bottom.clamp(0, rows - 1);
-    if (_marginTop! > _marginBottom!) {
-      final topMargin = _marginTop!;
-      _marginTop = _marginBottom;
-      _marginBottom = topMargin;
+    final bottom = _terminalCsiParam(params, 1, defaultValue: rows) - 1;
+    final marginTop = top.clamp(0, rows - 1);
+    final marginBottom = bottom.clamp(0, rows - 1);
+    // Like the buffer, ignore a region of fewer than two rows and home the
+    // cursor after a valid one.
+    if (marginTop >= marginBottom) {
+      return;
     }
+    _marginTop = marginTop;
+    _marginBottom = marginBottom;
+    _setCursor(row: 0, column: 0);
   }
 
   void _resetCursorState() {
@@ -967,7 +979,6 @@ const _terminalSosIntroducerCodeUnit = 0x58;
 const _terminalPmIntroducerCodeUnit = 0x5E;
 const _terminalApcIntroducerCodeUnit = 0x5F;
 const _terminalStringTerminatorCodeUnit = 0x5C;
-const _terminalDeleteCodeUnit = 0x7F;
 const _terminalCursorUpFinalCodeUnit = 0x41;
 const _terminalCursorDownFinalCodeUnit = 0x42;
 const _terminalCursorForwardFinalCodeUnit = 0x43;
@@ -1125,47 +1136,6 @@ bool _isTerminalHighSurrogate(int codeUnit) =>
 
 bool _isTerminalLowSurrogate(int codeUnit) =>
     codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
-
-bool _isTerminalGraphicRune(int rune) =>
-    rune >= 0x20 &&
-    rune != _terminalDeleteCodeUnit &&
-    !(rune >= 0x80 && rune <= 0x9F);
-
-int _terminalCellWidth(int rune) {
-  if (!_isTerminalGraphicRune(rune) || _isTerminalZeroWidthRune(rune)) {
-    return 0;
-  }
-  if (_isTerminalWideRune(rune)) {
-    return 2;
-  }
-  return 1;
-}
-
-bool _isTerminalZeroWidthRune(int rune) =>
-    rune == 0x200D ||
-    (rune >= 0x0300 && rune <= 0x036F) ||
-    (rune >= 0x1AB0 && rune <= 0x1AFF) ||
-    (rune >= 0x1DC0 && rune <= 0x1DFF) ||
-    (rune >= 0x20D0 && rune <= 0x20FF) ||
-    (rune >= 0xFE00 && rune <= 0xFE0F) ||
-    (rune >= 0xFE20 && rune <= 0xFE2F) ||
-    (rune >= 0x1F3FB && rune <= 0x1F3FF) ||
-    (rune >= 0xE0100 && rune <= 0xE01EF);
-
-bool _isTerminalWideRune(int rune) =>
-    rune >= 0x1100 &&
-    (rune <= 0x115F ||
-        rune == 0x2329 ||
-        rune == 0x232A ||
-        (rune >= 0x2E80 && rune <= 0xA4CF && rune != 0x303F) ||
-        (rune >= 0xAC00 && rune <= 0xD7A3) ||
-        (rune >= 0xF900 && rune <= 0xFAFF) ||
-        (rune >= 0xFE10 && rune <= 0xFE19) ||
-        (rune >= 0xFE30 && rune <= 0xFE6F) ||
-        (rune >= 0xFF00 && rune <= 0xFF60) ||
-        (rune >= 0xFFE0 && rune <= 0xFFE6) ||
-        (rune >= 0x1F300 && rune <= 0x1FAFF) ||
-        (rune >= 0x20000 && rune <= 0x3FFFD));
 
 bool _hasValidTerminalWindowMetrics(TerminalWindowMetrics? metrics) =>
     metrics != null &&
