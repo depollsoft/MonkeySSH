@@ -17,6 +17,7 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
     required this.getLineHeight,
     this.simulateScroll = true,
     this.forceSgr = false,
+    this.calibrator,
     required this.child,
   });
 
@@ -36,6 +37,10 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
   /// Whether to send SGR wheel reports even if xterm has not observed mouse
   /// reporting mode yet.
   final bool forceSgr;
+
+  /// A wheel calibrator shared with the owner, which then feeds it terminal
+  /// output. When null this handler creates and feeds its own.
+  final TerminalWheelScrollCalibrator? calibrator;
 
   final Widget child;
 
@@ -57,6 +62,7 @@ class _MonkeyTerminalScrollGestureHandlerState
     terminal: () => widget.terminal,
     getLineHeight: () => widget.getLineHeight(),
     sendScrollEvent: ({required up}) => _sendScrollEvent(up),
+    calibrator: widget.calibrator,
   );
   TerminalWheelScrollCalibrator get _wheelCalibrator => _accumulator.calibrator;
 
@@ -113,7 +119,8 @@ class _MonkeyTerminalScrollGestureHandlerState
       setState(() {});
     } else if (mouseTransportChanged) {
       _accumulator.resetRemainder();
-    } else if (_wheelCalibrator.observingTerminalOutput) {
+    } else if (widget.calibrator == null &&
+        _wheelCalibrator.observingTerminalOutput) {
       _wheelCalibrator.terminalChanged(
         captureTerminalViewportLines(widget.terminal),
       );
@@ -182,16 +189,27 @@ class _MonkeyTerminalScrollGestureHandlerState
 }
 
 /// Accumulates scroll distance and calibrates terminal wheel row granularity.
+///
+/// Serves both the trackpad/wheel path (through [onScroll]) and the touch-drag
+/// path (through [scrollBy]); the latter batches its reports, so it enqueues
+/// from [sendScrollEvent] and flushes from [onDrained].
 class TerminalScrollAccumulator {
   TerminalScrollAccumulator({
     required this.terminal,
     required this.getLineHeight,
     required this.sendScrollEvent,
-  });
+    TerminalWheelScrollCalibrator? calibrator,
+    this.onDrained,
+  }) : _wheelCalibrator = calibrator ?? TerminalWheelScrollCalibrator(),
+       _ownsCalibrator = calibrator == null;
   final Terminal Function() terminal;
   final double Function() getLineHeight;
   final bool Function({required bool up}) sendScrollEvent;
-  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+
+  /// Called after each drain that was not blocked by a pending measurement.
+  final VoidCallback? onDrained;
+  final TerminalWheelScrollCalibrator _wheelCalibrator;
+  final bool _ownsCalibrator;
   TerminalWheelScrollCalibrator get calibrator => _wheelCalibrator;
 
   /// Tracks the last offset reported by InfiniteScrollView.
@@ -213,17 +231,25 @@ class TerminalScrollAccumulator {
 
   void dispose() {
     _disposed = true;
-    _wheelCalibrator.dispose();
+    if (_ownsCalibrator) {
+      _wheelCalibrator.dispose();
+    }
   }
 
   void onScroll(double offset) {
+    final delta = offset - lastScrollOffset;
+    lastScrollOffset = offset;
+    scrollBy(delta);
+  }
+
+  /// Adds a signed pixel distance (positive scrolls down) and emits every
+  /// whole calibrated step it completes.
+  void scrollBy(double delta) {
+    scrollRemainder += delta;
     final lineHeight = getLineHeight();
     if (lineHeight <= 0) {
       return;
     }
-
-    scrollRemainder += offset - lastScrollOffset;
-    lastScrollOffset = offset;
     _drain(lineHeight);
   }
 
@@ -258,5 +284,6 @@ class TerminalScrollAccumulator {
       }
       stepHeight = lineHeight * _wheelCalibrator.rowsPerEvent;
     }
+    onDrained?.call();
   }
 }

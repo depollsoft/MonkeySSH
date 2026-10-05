@@ -664,8 +664,16 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   ScrollHoldController? _directTouchScrollHold;
   Drag? _directTouchScrollDrag;
   Offset _lastTouchScrollPosition = Offset.zero;
-  double _touchScrollRemainder = 0;
-  final _touchWheelCalibrator = TerminalWheelScrollCalibrator();
+  // One calibrator learns the application's rows-per-wheel-report for both the
+  // trackpad handler and the touch-drag path below; this state feeds it.
+  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+  late final _touchScrollAccumulator = TerminalScrollAccumulator(
+    terminal: () => widget.terminal,
+    getLineHeight: () => renderTerminal.lineHeight,
+    sendScrollEvent: _sendTouchScrollEvent,
+    calibrator: _wheelCalibrator,
+    onDrained: _drainTouchScrollInput,
+  );
   late bool _touchScrollIsAltBuffer;
   late MouseMode _touchScrollMouseMode;
   late MouseReportMode _touchScrollMouseReportMode;
@@ -808,7 +816,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _touchScrollIsAltBuffer = widget.terminal.isUsingAltBuffer;
       _touchScrollMouseMode = widget.terminal.mouseMode;
       _touchScrollMouseReportMode = widget.terminal.mouseReportMode;
-      _touchWheelCalibrator.reset(forgetEstimate: true);
+      _wheelCalibrator.reset(forgetEstimate: true);
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
       _scheduleGraphicsAnimationSync();
@@ -836,23 +844,23 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _scheduleGraphicsAnimationSync();
     }
     if (oldWidget.simulateScroll != widget.simulateScroll) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.touchScrollToTerminal != widget.touchScrollToTerminal) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _cancelDirectTouchScrollDrag();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.forceSgrTouchScroll != widget.forceSgrTouchScroll) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.scrollResetGeneration != widget.scrollResetGeneration) {
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _cancelDirectTouchScrollDrag();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
@@ -869,7 +877,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     widget.terminal.removeListener(_handleTerminalMetricsChanged);
     _pendingFocusInReportTimer?.cancel();
     _cancelDirectTouchScrollDrag();
-    _touchWheelCalibrator.dispose();
+    _touchScrollAccumulator.dispose();
+    _wheelCalibrator.dispose();
     _stopTouchScrollInertia();
     _resetTouchScrollDispatch();
     _touchScrollInertiaTicker.dispose();
@@ -926,11 +935,11 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _touchScrollMouseReportMode = nextMouseReportMode;
     if (transportChanged) {
       _cancelDirectTouchScrollDrag();
-      _touchWheelCalibrator.reset();
+      _wheelCalibrator.reset();
       _resetTouchScrollDispatch();
       _stopTouchScrollInertia();
-    } else if (_touchWheelCalibrator.observingTerminalOutput) {
-      _touchWheelCalibrator.terminalChanged(
+    } else if (_wheelCalibrator.observingTerminalOutput) {
+      _wheelCalibrator.terminalChanged(
         captureTerminalViewportLines(widget.terminal),
       );
     }
@@ -1199,6 +1208,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         forceSgr: widget.forceSgrTouchScroll,
         getCellOffset: (offset) => renderTerminal.getCellOffset(offset),
         getLineHeight: () => renderTerminal.lineHeight,
+        calibrator: _wheelCalibrator,
         child: child,
       );
     }
@@ -1471,8 +1481,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   void _onTouchScrollStart(DragStartDetails details) {
     _stopTouchScrollInertia();
     _lastTouchScrollPosition = details.localPosition;
-    if (!_touchWheelCalibrator.waitingForResponse) {
-      _touchWheelCalibrator.beginGesture();
+    if (!_wheelCalibrator.waitingForResponse) {
+      _wheelCalibrator.beginGesture();
       _resetTouchScrollDispatch(preserveRemainder: true);
     }
   }
@@ -1498,51 +1508,35 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     );
   }
 
-  double get _touchScrollStepHeight {
-    final lineHeight = renderTerminal.lineHeight;
-    if (lineHeight <= 0) {
-      return 0;
-    }
-    return lineHeight * _touchWheelCalibrator.rowsPerEvent;
-  }
+  /// Feeds a touch-drag distance (positive moves the content down, i.e. wheel
+  /// up) through the shared accumulator.
+  void _applyTouchScrollDelta(double delta) =>
+      _touchScrollAccumulator.scrollBy(-delta);
 
-  void _applyTouchScrollDelta(double delta) {
-    _touchScrollRemainder += delta;
-    final stepHeight = _touchScrollStepHeight;
-    if (stepHeight <= 0 || _touchWheelCalibrator.waitingForResponse) {
-      return;
-    }
+  bool get _canBatchSgrTouchScroll =>
+      widget.forceSgrTouchScroll ||
+      (widget.terminal.mouseMode.reportScroll &&
+          widget.terminal.mouseReportMode == MouseReportMode.sgr);
+
+  /// Accumulator sink. SGR reports are queued and sent in per-frame batches by
+  /// [_drainTouchScrollInput]; anything else goes out immediately, falling
+  /// back to arrow keys when the application does not take mouse input.
+  bool _sendTouchScrollEvent({required bool up}) {
+    final button = up
+        ? TerminalMouseButton.wheelUp
+        : TerminalMouseButton.wheelDown;
     final position = _resolveViewportMousePosition(_lastTouchScrollPosition);
-    final canReportMouse =
-        widget.forceSgrTouchScroll || widget.terminal.mouseMode.reportScroll;
-    while (_touchScrollRemainder.abs() >= stepHeight) {
-      final scrollUp = _touchScrollRemainder > 0;
-      final scrollDirection = scrollUp ? 1 : -1;
-      final lineHeight = renderTerminal.lineHeight;
-      final calibrationStarted =
-          canReportMouse &&
-          _touchWheelCalibrator.needsMeasurement &&
-          _touchWheelCalibrator.begin(
-            before: captureTerminalViewportLines(widget.terminal),
-            onSettled: (previousRows, rows) {
-              if (!mounted) {
-                return;
-              }
-              _touchScrollRemainder -=
-                  scrollDirection * lineHeight * (rows - previousRows);
-              _applyTouchScrollDelta(0);
-            },
-          );
-      _enqueueTouchScrollRun(
-        scrollUp ? TerminalMouseButton.wheelUp : TerminalMouseButton.wheelDown,
-        position,
-      );
-      _touchScrollRemainder += scrollUp ? -stepHeight : stepHeight;
-      if (calibrationStarted) {
-        break;
-      }
+    if (_canBatchSgrTouchScroll) {
+      _enqueueTouchScrollRun(button, position);
+      return true;
     }
-    _drainTouchScrollInput();
+    final handled = _sendTouchScrollMouseInput(button, position);
+    if (!handled && widget.simulateScroll) {
+      widget.terminal.keyInput(
+        up ? TerminalKey.arrowUp : TerminalKey.arrowDown,
+      );
+    }
+    return handled;
   }
 
   void _enqueueTouchScrollRun(TerminalMouseButton button, CellOffset position) {
@@ -1575,50 +1569,25 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     if (_touchScrollDrainScheduled || _pendingTouchScrollRuns.isEmpty) {
       return;
     }
-    final canBatchSgr =
-        widget.forceSgrTouchScroll ||
-        (widget.terminal.mouseMode.reportScroll &&
-            widget.terminal.mouseReportMode == MouseReportMode.sgr);
-    if (canBatchSgr) {
-      // Start with one report so responsive applications can render each
-      // increment. Increase throughput only while requested movement remains
-      // queued across frames, then return to one as soon as caught up.
-      var budget = math.min(1 + _touchScrollBacklogFrames, 6);
-      while (budget > 0 && _pendingTouchScrollRuns.isNotEmpty) {
-        final run = _pendingTouchScrollRuns.first;
-        final count = math.min(run.count, budget);
-        _sendTouchScrollMouseInput(
-          run.button,
-          run.position,
-          repeatCount: count,
-        );
-        _consumeTouchScrollRun(count);
-        budget -= count;
-      }
-      if (_pendingTouchScrollRuns.isEmpty) {
-        _touchScrollBacklogFrames = 0;
-      } else {
-        _touchScrollBacklogFrames = math.min(_touchScrollBacklogFrames + 1, 5);
-      }
-      // Lock the frame-wide budget even when the queue is empty; pointer updates
-      // received before this callback only append runs for the next frame.
-      _scheduleTouchScrollDrain();
-      return;
-    }
-
-    _touchScrollBacklogFrames = 0;
-    while (_pendingTouchScrollRuns.isNotEmpty) {
+    // Start with one report so responsive applications can render each
+    // increment. Increase throughput only while requested movement remains
+    // queued across frames, then return to one as soon as caught up.
+    var budget = math.min(1 + _touchScrollBacklogFrames, 6);
+    while (budget > 0 && _pendingTouchScrollRuns.isNotEmpty) {
       final run = _pendingTouchScrollRuns.first;
-      final handled = _sendTouchScrollMouseInput(run.button, run.position);
-      _consumeTouchScrollRun(1);
-      if (!handled && widget.simulateScroll) {
-        widget.terminal.keyInput(
-          run.button == TerminalMouseButton.wheelUp
-              ? TerminalKey.arrowUp
-              : TerminalKey.arrowDown,
-        );
-      }
+      final count = math.min(run.count, budget);
+      _sendTouchScrollMouseInput(run.button, run.position, repeatCount: count);
+      _consumeTouchScrollRun(count);
+      budget -= count;
     }
+    if (_pendingTouchScrollRuns.isEmpty) {
+      _touchScrollBacklogFrames = 0;
+    } else {
+      _touchScrollBacklogFrames = math.min(_touchScrollBacklogFrames + 1, 5);
+    }
+    // Lock the frame-wide budget even when the queue is empty; pointer updates
+    // received before this callback only append runs for the next frame.
+    _scheduleTouchScrollDrain();
   }
 
   void _scheduleTouchScrollDrain() {
@@ -1645,7 +1614,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _pendingTouchScrollRuns.clear();
     _touchScrollBacklogFrames = 0;
     if (!preserveRemainder) {
-      _touchScrollRemainder = 0;
+      _touchScrollAccumulator.scrollRemainder = 0;
     }
   }
 
