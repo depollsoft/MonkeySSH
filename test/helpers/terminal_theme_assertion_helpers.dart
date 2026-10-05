@@ -109,4 +109,3 @@ Color _resolveBackgroundColor(
     ),
   };
 }
-
