@@ -7577,6 +7577,57 @@ void main() {
     );
 
     testWidgets(
+      'accepting a completion sends one Backspace per replaced character',
+      (tester) async {
+        final completionService = _TestShellCompletionService(
+          cachedSuggestions: const <ShellCompletionSuggestion>[],
+          completionSuggestions:
+              const <String, List<ShellCompletionSuggestion>>{
+                '\u{1F600}r': <ShellCompletionSuggestion>[
+                  ShellCompletionSuggestion(
+                    label: '\u{1F600}report.txt',
+                    replacement: '\u{1F600}report.txt',
+                    replacementStart: 4,
+                    replacementEnd: 7,
+                    kind: ShellCompletionSuggestionKind.file,
+                    commitSuffix: ' ',
+                  ),
+                ],
+              },
+        );
+
+        session.terminal!.write('root@host ~ % cat \u{1F600}');
+        await pumpScreen(tester, shellCompletionService: completionService);
+
+        session.terminal!.textInput('r');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump();
+        expect(
+          completionService.completeInvocations.map(
+            (invocation) => invocation.token,
+          ),
+          ['\u{1F600}r'],
+        );
+
+        // Typing on filters the shown row and lays the popup out.
+        session.terminal!.textInput('e');
+        await tester.pump();
+        shellWrites.clear();
+        await tester.tap(find.text('\u{1F600}report.txt'));
+        await tester.pump();
+
+        // The emoji is two UTF-16 code units but one character to the shell;
+        // a fourth Backspace would erase the space after `cat`.
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          '\x7f\x7f\x7f\u{1F600}report.txt ',
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
       'dismisses shell completion popup when Return/Enter is pressed',
       (tester) async {
         final tmuxService = _MockTmuxService();

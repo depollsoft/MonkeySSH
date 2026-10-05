@@ -4211,6 +4211,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       promptPrefix: _shellCompletionPromptPrefix,
       workingDirectory: workingDirectory,
       shellCommand: shellCommand,
+      windows: _activeSession()?.remoteIsWindows ?? false,
     );
   }
 
@@ -4324,26 +4325,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    var deleteCount = invocation.cursorOffset - suggestion.replacementStart;
-    if (currentInvocation != null &&
-        suggestion.kind == ShellCompletionSuggestionKind.history) {
-      final replacementStart = suggestion.replacementStart == 0
-          ? suggestion.replacementStart
-          : currentInvocation.tokenStart;
-      deleteCount = currentInvocation.cursorOffset - replacementStart;
-    } else if (currentInvocation != null &&
-        currentInvocation.mode == invocation.mode &&
-        currentInvocation.tokenStart == invocation.tokenStart) {
-      deleteCount =
-          currentInvocation.cursorOffset - suggestion.replacementStart;
-    }
-
-    if (deleteCount < 0) {
-      _hideShellCompletionPopup(resetPromptPrefix: false);
+    final deleteCount = shellCompletionBackspaceCount(
+      originalInvocation: invocation,
+      currentInvocation: currentInvocation,
+      suggestion: suggestion,
+    );
+    _hideShellCompletionPopup(resetPromptPrefix: false);
+    if (deleteCount == null) {
       return;
     }
-
-    _hideShellCompletionPopup(resetPromptPrefix: false);
     for (var index = 0; index < deleteCount; index++) {
       _terminal.keyInput(TerminalKey.backspace);
     }
