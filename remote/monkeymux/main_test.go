@@ -11372,6 +11372,11 @@ func TestCreateWindowOptionsForRestoreBuildsAgentResumeCommand(t *testing.T) {
 }
 
 func TestEnrichRestoreWithAgentSessionIDsUsesAntigravityHistory(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
@@ -11434,6 +11439,11 @@ func TestEnrichRestoreWithAgentSessionIDsUsesAntigravityHistory(t *testing.T) {
 }
 
 func TestEnrichRestoreAntigravityRejectsOtherWorkspaceFileMtime(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
@@ -11564,6 +11574,11 @@ func TestLiveCursorWindowPublishesSessionFromFalseConversationMetadata(t *testin
 }
 
 func TestEnrichRestoreWithAgentSessionIDsUsesCursorChatStore(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
