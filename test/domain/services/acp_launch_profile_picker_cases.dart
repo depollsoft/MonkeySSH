@@ -6,6 +6,18 @@ import 'package:monkeyssh/presentation/widgets/acp_connection_support.dart';
 
 void registerAcpLaunchProfilePickerTests() {
   group('acp_launch_profile_picker', () {
+    test('recognises a Windows executable path with backslashes', () {
+      final copilot = applyAcpAgentLaunchSettings(
+        provider: acpCopilotCliProvider,
+        command: AcpLaunchCommand(
+          executable: r'C:\Users\demo\AppData\npm\copilot.cmd',
+          arguments: acpCopilotCliProvider.launchCommand.arguments,
+        ),
+        startInYoloMode: true,
+      );
+      expect(copilot.arguments.first, '--yolo');
+    });
+
     test('native ACP uses the shared profile and YOLO argument plan', () {
       final hermes = applyAcpAgentLaunchSettings(
         provider: acpHermesProvider,

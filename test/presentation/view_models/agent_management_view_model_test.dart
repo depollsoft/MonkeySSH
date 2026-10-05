@@ -212,6 +212,27 @@ void main() {
     },
   );
 
+  test(
+    'recheck replaces the list instead of mutating the service copy',
+    () async {
+      await model.refresh();
+      final before = model.runtimes;
+      final updated = AgentRuntimeInfo(
+        definition: runtimes.first.definition,
+        status: AgentRuntimeStatus.installed,
+        installedVersion: '2.0',
+      );
+      when(() => service.inspect(session, runtimes.first.definition))
+          .thenAnswer((_) async => updated);
+
+      await model.recheck(runtimes.first);
+
+      expect(model.runtimes.first, same(updated));
+      expect(model.runtimes, isNot(same(before)));
+      expect(before.first, isNot(same(updated)));
+    },
+  );
+
   test('revoked access prevents probing and stale actions', () async {
     await model.refresh();
     permitted = false;

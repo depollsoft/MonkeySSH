@@ -158,6 +158,15 @@ class _AcpPermissionSurfaceState extends State<AcpPermissionSurface> {
     try {
       await action();
       await HapticFeedback.selectionClick();
+    } on Object {
+      // The session was replaced or ended between the frame and the tap.
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('The agent is no longer waiting for this request.'),
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _resolving.remove(key));
