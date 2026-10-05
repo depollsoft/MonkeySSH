@@ -109,10 +109,10 @@ func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
 	}
 }
 
-// The restore state does not carry a Hermes or OpenClaw window's --profile, so
-// a restore must not relaunch them. The window comes back as a plain shell and
-// stays one, even when a snapshot from a helper that did not know the agent
-// still names the window after it.
+// Without the command line a Hermes or OpenClaw window was started with, which
+// carries flags such as --profile, a restore must not relaunch them. The window
+// comes back as a plain shell and stays one, even when a snapshot from a helper
+// that did not know the agent still names the window after it.
 func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 	history := base64.StdEncoding.EncodeToString([]byte("agent screen"))
 	for _, tool := range []string{"hermes", "openclaw"} {
@@ -147,5 +147,86 @@ func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An upgrade restarts Hermes and OpenClaw from the command line they were
+// started with, so a profile and every other flag survive. Hermes continues the
+// session it last used in the window's workspace, or starts afresh.
+func TestAgentWindowWithoutLaunchEntryRestartsFromItsCommandLine(t *testing.T) {
+	hermes := []string{"/home/demo/.hermes/venv/bin/python3", "/home/demo/.local/bin/hermes", "-p", "alfred"}
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		argv    []string
+		command string
+	}{
+		{
+			name:    "hermes",
+			tool:    "hermes",
+			argv:    hermes,
+			command: "'/home/demo/.hermes/venv/bin/python3' '/home/demo/.local/bin/hermes' '-p' 'alfred' --continue || '/home/demo/.hermes/venv/bin/python3' '/home/demo/.local/bin/hermes' '-p' 'alfred'",
+		},
+		{
+			name:    "hermes resuming a session",
+			tool:    "hermes",
+			argv:    append(append([]string(nil), hermes...), "--resume", "20250305_091523_a1b2c3"),
+			command: "'/home/demo/.hermes/venv/bin/python3' '/home/demo/.local/bin/hermes' '-p' 'alfred' '--resume' '20250305_091523_a1b2c3'",
+		},
+		{
+			name:    "openclaw",
+			tool:    "openclaw",
+			argv:    []string{"openclaw", "tui", "--session", "main"},
+			command: "'openclaw' 'tui' '--session' 'main'",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := restoreWindowState{
+				Name: tc.tool, Cwd: "/home/demo/project", CurrentCommand: tc.tool,
+				AgentTool: tc.tool, AgentToolConfirmed: true, CommandLine: tc.argv,
+				HistoryBase64: base64.StdEncoding.EncodeToString([]byte("agent screen")),
+			}
+			options := createWindowOptionsForRestore(state, true)
+			if options.command != tc.command {
+				t.Fatalf("command = %q\nwant      %q", options.command, tc.command)
+			}
+			if options.agentTool != tc.tool || options.cwd != "/home/demo/project" {
+				t.Fatalf("restored as tool %q in %q", options.agentTool, options.cwd)
+			}
+			if len(options.history) != 0 {
+				t.Fatal("TUI history replayed under a relaunched agent")
+			}
+		})
+	}
+}
+
+// The command line is read from the agent's process while the outgoing helper
+// still runs it, only for agents without a launch entry, and only when that
+// process is still the agent.
+func TestRestoreRecordsCommandLinesOfAgentsWithoutLaunchEntry(t *testing.T) {
+	original := processCommandLineForRestore
+	t.Cleanup(func() { processCommandLineForRestore = original })
+	processes := map[int][]string{
+		10: {"/venv/bin/python3", "/home/demo/.local/bin/hermes", "-p", "alfred"},
+		11: {"-zsh"},
+		12: {"claude", "--resume", "abc"},
+	}
+	processCommandLineForRestore = func(pid int) []string { return processes[pid] }
+	restore := &serverRestore{Windows: []restoreWindowState{
+		{ID: "@1", AgentTool: "hermes", AgentToolConfirmed: true, CurrentCommand: "hermes", PanePid: 10},
+		// The agent has exited and the shell is back in the foreground.
+		{ID: "@2", AgentTool: "hermes", AgentToolConfirmed: true, CurrentCommand: "hermes", PanePid: 11},
+		// Claude restarts from its launch entry and session id instead.
+		{ID: "@3", AgentTool: "claude", AgentToolConfirmed: true, CurrentCommand: "claude", PanePid: 12},
+	}}
+	enrichRestoreWithAgentCommandLines(restore)
+	if got := restore.Windows[0].CommandLine; len(got) != 4 || got[3] != "alfred" {
+		t.Fatalf("hermes command line = %q", got)
+	}
+	if got := restore.Windows[1].CommandLine; got != nil {
+		t.Fatalf("recorded a shell as the agent: %q", got)
+	}
+	if got := restore.Windows[2].CommandLine; got != nil {
+		t.Fatalf("recorded a command line for an agent with a launch entry: %q", got)
 	}
 }

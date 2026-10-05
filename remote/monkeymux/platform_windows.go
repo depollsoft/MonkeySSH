@@ -841,6 +841,12 @@ var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	return window.proc.Pid()
 }
 
+// processCommandLine is unavailable on Windows; agents without a launch entry
+// restore as a shell there.
+func processCommandLine(pid int) []string {
+	return nil
+}
+
 func shellArgument(value string) (string, bool) {
 	if !isCmdShell(defaultShellPath()) {
 		return "'" + strings.ReplaceAll(value, "'", "''") + "'", true

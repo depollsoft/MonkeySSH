@@ -62,7 +62,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.224"
+	monkeyMuxVersion                  = "0.1.225"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -642,34 +642,37 @@ type serverRestore struct {
 }
 
 type restoreWindowState struct {
-	ID                        string                    `json:"id,omitempty"`
-	Index                     int                       `json:"index,omitempty"`
-	Name                      string                    `json:"name,omitempty"`
-	Cwd                       string                    `json:"cwd,omitempty"`
-	CurrentCommand            string                    `json:"currentCommand,omitempty"`
-	PanePid                   int                       `json:"panePid,omitempty"`
-	PaneTitle                 string                    `json:"paneTitle,omitempty"`
-	AgentTool                 string                    `json:"agentTool,omitempty"`
-	AgentToolConfirmed        bool                      `json:"agentToolConfirmed,omitempty"`
-	AgentSessionID            string                    `json:"agentSessionId,omitempty"`
-	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
-	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
-	AgentSessionIdentityExact bool                      `json:"agentSessionIdentityExact,omitempty"`
-	AgentSessionAssigned      bool                      `json:"agentSessionAssigned,omitempty"`
-	NativeAcpBridgeID         string                    `json:"nativeAcpBridgeId,omitempty"`
-	NativeAcpProviderID       string                    `json:"nativeAcpProviderId,omitempty"`
-	LastActivityEpochSeconds  int64                     `json:"lastActivityEpochSeconds,omitempty"`
-	HistoryBase64             string                    `json:"historyBase64,omitempty"`
-	HistoryStartsAtGround     bool                      `json:"historyStartsAtGround,omitempty"`
-	CursorVisible             bool                      `json:"cursorVisible,omitempty"`
-	CursorVisibilityKnown     bool                      `json:"cursorVisibilityKnown,omitempty"`
-	PrivateModes              map[string]bool           `json:"privateModes,omitempty"`
-	InsertModeEnabled         bool                      `json:"insertModeEnabled,omitempty"`
-	InsertModeKnown           bool                      `json:"insertModeKnown,omitempty"`
-	ApplicationKeypadEnabled  bool                      `json:"applicationKeypadEnabled,omitempty"`
-	ApplicationKeypadKnown    bool                      `json:"applicationKeypadKnown,omitempty"`
-	TerminalProgress          *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
-	Active                    bool                      `json:"active,omitempty"`
+	ID                        string `json:"id,omitempty"`
+	Index                     int    `json:"index,omitempty"`
+	Name                      string `json:"name,omitempty"`
+	Cwd                       string `json:"cwd,omitempty"`
+	CurrentCommand            string `json:"currentCommand,omitempty"`
+	PanePid                   int    `json:"panePid,omitempty"`
+	PaneTitle                 string `json:"paneTitle,omitempty"`
+	AgentTool                 string `json:"agentTool,omitempty"`
+	AgentToolConfirmed        bool   `json:"agentToolConfirmed,omitempty"`
+	AgentSessionID            string `json:"agentSessionId,omitempty"`
+	AgentSessionDir           string `json:"agentSessionDir,omitempty"`
+	AgentSessionPath          string `json:"agentSessionPath,omitempty"`
+	AgentSessionIdentityExact bool   `json:"agentSessionIdentityExact,omitempty"`
+	AgentSessionAssigned      bool   `json:"agentSessionAssigned,omitempty"`
+	// CommandLine is the agent's foreground command line when the agent has no
+	// launch entry to restart it from; see enrichRestoreWithAgentCommandLines.
+	CommandLine              []string                  `json:"commandLine,omitempty"`
+	NativeAcpBridgeID        string                    `json:"nativeAcpBridgeId,omitempty"`
+	NativeAcpProviderID      string                    `json:"nativeAcpProviderId,omitempty"`
+	LastActivityEpochSeconds int64                     `json:"lastActivityEpochSeconds,omitempty"`
+	HistoryBase64            string                    `json:"historyBase64,omitempty"`
+	HistoryStartsAtGround    bool                      `json:"historyStartsAtGround,omitempty"`
+	CursorVisible            bool                      `json:"cursorVisible,omitempty"`
+	CursorVisibilityKnown    bool                      `json:"cursorVisibilityKnown,omitempty"`
+	PrivateModes             map[string]bool           `json:"privateModes,omitempty"`
+	InsertModeEnabled        bool                      `json:"insertModeEnabled,omitempty"`
+	InsertModeKnown          bool                      `json:"insertModeKnown,omitempty"`
+	ApplicationKeypadEnabled bool                      `json:"applicationKeypadEnabled,omitempty"`
+	ApplicationKeypadKnown   bool                      `json:"applicationKeypadKnown,omitempty"`
+	TerminalProgress         *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
+	Active                   bool                      `json:"active,omitempty"`
 }
 
 type muxServer struct {
@@ -3032,7 +3035,73 @@ func collectServerRestore(session string, status runningServerStatus) *serverRes
 		}
 	}
 	enrichRestoreWithAgentSessionIDs(restore)
+	enrichRestoreWithAgentCommandLines(restore)
 	return restore
+}
+
+// processCommandLineForRestore reads a process's command line; tests replace
+// it.
+var processCommandLineForRestore = processCommandLine
+
+// enrichRestoreWithAgentCommandLines records how each agent without a launch
+// entry, such as Hermes or OpenClaw, was started, while its process still
+// runs under the outgoing helper. Restarting one by its name alone could pick
+// the wrong profile or interface; its own command line keeps every flag,
+// --profile included, so the restore can start it again as it was.
+func enrichRestoreWithAgentCommandLines(restore *serverRestore) {
+	if restore == nil {
+		return
+	}
+	for i := range restore.Windows {
+		window := &restore.Windows[i]
+		tool := agentToolCandidateForRestore(*window)
+		if tool == "" || agentToolRelaunchable(tool) || len(window.CommandLine) > 0 || window.PanePid <= 0 {
+			continue
+		}
+		argv := processCommandLineForRestore(window.PanePid)
+		if len(argv) == 0 {
+			continue
+		}
+		// The window's foreground process must still be that agent.
+		name := commandNameFromProcessFields(filepath.Base(argv[0]), strings.Join(argv, " "))
+		if agentToolFromCommandName(name) != tool || commandLineRelaunchCommand(tool, argv) == "" {
+			continue
+		}
+		window.CommandLine = argv
+	}
+}
+
+// commandLineRelaunchCommand starts an agent without a launch entry again from
+// the command line it was started with. Hermes then continues the session it
+// last used in the window's workspace, or starts afresh when there is none;
+// a command line that already names a session to resume is kept as it is.
+func commandLineRelaunchCommand(tool string, argv []string) string {
+	quoted := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		argument, ok := shellArgument(arg)
+		if !ok {
+			return ""
+		}
+		quoted = append(quoted, argument)
+	}
+	launch := strings.Join(quoted, " ")
+	if tool == "hermes" && !hermesCommandLineResumes(argv) {
+		return agentResumeCommandWithFreshFallback(launch+" --continue", launch)
+	}
+	return launch
+}
+
+// hermesCommandLineResumes reports whether a Hermes command line already
+// names a session to resume or continue.
+func hermesCommandLineResumes(argv []string) bool {
+	for _, arg := range argv {
+		switch {
+		case arg == "-c", arg == "--continue", arg == "-r", arg == "--resume",
+			strings.HasPrefix(arg, "--continue="), strings.HasPrefix(arg, "--resume="):
+			return true
+		}
+	}
+	return false
 }
 
 func restoreNeedsWindowActivity(restore *serverRestore) bool {
@@ -4924,18 +4993,17 @@ func agentToolForRestore(window restoreWindowState) string {
 		!window.AgentToolConfirmed {
 		return ""
 	}
-	if !agentToolRelaunchable(tool) {
+	if !agentToolRelaunchable(tool) && len(window.CommandLine) == 0 {
 		return ""
 	}
 	return tool
 }
 
-// agentToolRelaunchable reports whether a restore can start this agent again.
-// Hermes and OpenClaw are recognized while they run, so their windows replay
-// like any other agent, but they have no launch entry: the app can start them
-// with --profile, and the restore state keeps only the command name, so
-// relaunching them could open the wrong profile. Such a window restores as a
-// plain shell instead.
+// agentToolRelaunchable reports whether this agent has a launch entry a
+// restore can start it from. Hermes and OpenClaw have none: the app can start
+// them with --profile and other flags a fixed command would drop. They restart
+// from their recorded command line instead (commandLineRelaunchCommand), and
+// restore as a plain shell when there is none.
 func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
@@ -4949,7 +5017,7 @@ func agentToolRelaunchable(tool string) bool {
 // so a window still named after the agent is not mistaken for it again.
 func agentToolRestoredAsShell(window restoreWindowState) bool {
 	tool := agentToolCandidateForRestore(window)
-	return tool != "" && !agentToolRelaunchable(tool)
+	return tool != "" && !agentToolRelaunchable(tool) && len(window.CommandLine) == 0
 }
 
 type processInfo struct {
@@ -6407,6 +6475,10 @@ func createWindowOptionsForRestore(
 			}
 		}
 		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
+		if !agentToolRelaunchable(agentTool) {
+			launch = commandLineRelaunchCommand(agentTool, state.CommandLine)
+			state.AgentSessionID = ""
+		}
 		if agentTool == "pi" {
 			launch = piLaunchCommand(state.AgentSessionDir)
 		}

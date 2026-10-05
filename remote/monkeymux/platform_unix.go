@@ -581,6 +581,22 @@ var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	return pty.foregroundProcessGroup()
 }
 
+// processCommandLine returns a process's argument vector: exact from
+// /proc/<pid>/cmdline on Linux, otherwise split from the process table, which
+// joins arguments with spaces.
+func processCommandLine(pid int) []string {
+	if pid <= 0 {
+		return nil
+	}
+	if data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline")); err == nil {
+		argv := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+		if len(argv) > 0 && argv[0] != "" {
+			return argv
+		}
+	}
+	return strings.Fields(processTableForMetadata()[pid].args)
+}
+
 func shellArgument(value string) (string, bool) {
 	return shellQuote(value), true
 }
