@@ -3528,6 +3528,123 @@ HEAD b
       );
     });
 
+    test('Pi publishes header rows first and caches labels by mtime and size', () async {
+      final client = _MockSshClient();
+      const sessionPath =
+          '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
+          '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
+      var size = 100;
+      var labelReads = 0;
+      final labelGate = Completer<void>();
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains(r'$HEAD_BIN -n 1 "$path"')) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              sessionPath,
+              '{"type":"session","id":"01JYX7ABCD",'
+              '"timestamp":"2026-04-12T21:07:44.781Z",'
+              '"cwd":"/Users/depoll/Code/flutty"}\n',
+            ),
+          );
+        }
+        if (command.contains('Buffer.from(process.argv[1]')) {
+          labelReads += 1;
+          await labelGate.future;
+          return _buildExecSession(
+            stdout:
+                '$sessionPath\x1f${base64Encode(utf8.encode('Fix the navigator'))}\n',
+          );
+        }
+        if (command.contains('--Users-depoll-Code-flutty--')) {
+          return _buildExecSession(stdout: '1777000000\t$size\t$sessionPath');
+        }
+        return _buildExecSession();
+      });
+      var now = DateTime(2026, 10, 5);
+      final discovery = AgentSessionDiscoveryService(now: () => now);
+      Stream<String?> summaries() => discovery
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Pi',
+          )
+          .map((result) => result.sessions.single.summary);
+
+      final seen = <String?>[];
+      final done = summaries().listen(seen.add).asFuture<void>();
+      await pumpEventQueue();
+      expect(seen, ['Pi session 01JYX7ABCD']);
+      labelGate.complete();
+      await done;
+      expect(seen.last, 'Fix the navigator');
+
+      // Past the discovery cache, an unchanged transcript reuses its label.
+      now = now.add(const Duration(minutes: 5));
+      expect(await summaries().last, 'Fix the navigator');
+      expect(labelReads, 1);
+
+      now = now.add(const Duration(minutes: 5));
+      size = 200;
+      expect(await summaries().last, 'Fix the navigator');
+      expect(labelReads, 2);
+    });
+
+    test('Pi label extraction reads a bounded transcript prefix', () async {
+      try {
+        Process.runSync('node', ['--version']);
+      } on ProcessException {
+        markTestSkipped('Node.js is required to run the Pi label extractor');
+        return;
+      }
+      final root = await Directory.systemTemp.createTemp('pi-labels-');
+      addTearDown(() => root.delete(recursive: true));
+      final bucket = Directory(
+        '${root.path}/.pi/agent/sessions/--Users-depoll-Code-flutty--',
+      )..createSync(recursive: true);
+      String transcript(String id, {String padding = ''}) =>
+          '{"type":"session","id":"$id","timestamp":"2026-04-12T21:07:44.781Z",'
+          '"cwd":"/Users/depoll/Code/flutty"}\n'
+          '${padding.isEmpty ? '' : '${jsonEncode({'type': 'tool_result', 'output': padding})}\n'}'
+          '{"type":"message","message":{"role":"user","content":"Prompt $id"}}\n';
+      final small = File('${bucket.path}/a_SMALL.jsonl')
+        ..writeAsStringSync(transcript('SMALL'));
+      final large = File('${bucket.path}/b_LARGE.jsonl')
+        ..writeAsStringSync(transcript('LARGE', padding: 'x' * (512 << 10)));
+      final client = _MockSshClient();
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('-maxdepth 1 -name "*.jsonl"')) {
+          return _buildExecSession(
+            stdout:
+                '1777000000\t1\t${small.path}\n1777000000\t2\t${large.path}',
+          );
+        }
+        // Run snapshot and label commands for real against the fixtures.
+        final result = await Process.run(
+          'bash',
+          ['-c', command],
+          environment: {
+            'HOME': root.path,
+            'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+          },
+          includeParentEnvironment: false,
+        );
+        return _buildExecSession(stdout: result.stdout as String);
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: '/Users/depoll/Code/flutty',
+            toolName: 'Pi',
+          )
+          .last;
+
+      expect(
+        {for (final info in result.sessions) info.sessionId: info.summary},
+        {'SMALL': 'Prompt SMALL', 'LARGE': 'Pi session LARGE'},
+      );
+    }, skip: Platform.isWindows);
+
     test('Pi discovery does not guess without a pane cwd', () async {
       final client = _MockSshClient();
       final result = await AgentSessionDiscoveryService()

@@ -52,6 +52,7 @@ int snapshotSegmentMaxBytes(int fileCount, {required bool withTail}) =>
     math.min(_snapshotFileMaxBytes, _snapshotBatchMaxBytes ~/ fileCount) ~/
     (withTail ? 2 : 1);
 const _grokSessionMetadataMaxBytes = 64 * 1024;
+const _piLabelCacheMaxEntries = 512;
 const _openCodeStorageSessionMetadataMaxBytes = 64 * 1024;
 const _piSessionLabelExtractorScript = r'''
 const fs = require("fs");
@@ -81,8 +82,10 @@ async function emitLabel(path) {
   let firstUserMessage = "";
   let sessionName;
   try {
+    // Bounded work per transcript: a name or prompt past this stays unread
+    // and the row keeps its fallback label.
     const lines = readline.createInterface({
-      input: fs.createReadStream(path, { encoding: "utf8" }),
+      input: fs.createReadStream(path, { encoding: "utf8", end: 262143 }),
       crlfDelay: Infinity,
     });
     for await (const line of lines) {
@@ -531,23 +534,31 @@ Iterable<String> _nonEmptyLines(String output) => output
 
 /// A file from [posixListNewestFilesCommand] or [windowsListNewestFilesScript]
 /// with the mtime that listing already computed.
-typedef _ListedFile = ({String path, DateTime? modifiedAt});
+typedef _ListedFile = ({String path, DateTime? modifiedAt, int? size});
 
-/// Parses `<epoch>\t<path>` listing lines; a line without a leading epoch is
-/// taken as a bare path. Duplicate paths keep their first position.
+final _listedSizePattern = RegExp(r'^(\d+)\t');
+
+/// Parses `<epoch>\t[<size>\t]<path>` listing lines; a line without a leading
+/// epoch is taken as a bare path. Listed paths are absolute, so a numeric
+/// second field is a size. Duplicate paths keep their first position.
 List<_ListedFile> _parseListedFiles(String output) {
   final seen = <String>{};
   final files = <_ListedFile>[];
   for (final line in _nonEmptyLines(output)) {
     final tab = line.indexOf('\t');
     final epoch = tab < 0 ? null : int.tryParse(line.substring(0, tab));
-    final path = epoch == null ? line : line.substring(tab + 1).trim();
+    var path = epoch == null ? line : line.substring(tab + 1).trim();
+    final sizeMatch = epoch == null
+        ? null
+        : _listedSizePattern.firstMatch(path);
+    if (sizeMatch != null) path = path.substring(sizeMatch.end);
     if (path.isEmpty || !seen.add(path)) continue;
     files.add((
       path: path,
       modifiedAt: epoch == null || epoch <= 0
           ? null
           : _dateTimeFromEpochValue(epoch),
+      size: sizeMatch == null ? null : int.parse(sizeMatch[1]!),
     ));
   }
   return files;
@@ -1601,6 +1612,14 @@ class AgentSessionDiscoveryService {
   _inFlightRelatedWorkingDirectories =
       <_AgentSessionDiscoveryScopeKey, Future<List<String>>>{};
 
+  /// Pi labels by remote identity and path, valid while the transcript keeps
+  /// its mtime and size. A null label records a bounded miss.
+  final Map<
+    (_AgentSessionDiscoveryScopeKey, String),
+    ({DateTime modifiedAt, int size, String? label})
+  >
+  _piLabelCache = {};
+
   /// Invalidates cached and in-flight discovery state for [session].
   ///
   /// The next picker load starts fresh without reconnecting the SSH session.
@@ -1616,6 +1635,7 @@ class AgentSessionDiscoveryService {
     _inFlightDiscoverySnapshots.removeWhere((key, _) => matches(key.scopeKey));
     _relatedWorkingDirectoriesCache.removeWhere((key, _) => matches(key));
     _inFlightRelatedWorkingDirectories.removeWhere((key, _) => matches(key));
+    _piLabelCache.removeWhere((key, _) => matches(key.$1));
   }
 
   /// Warms the discovery cache for the given scope without changing UI state.
@@ -1766,6 +1786,25 @@ class AgentSessionDiscoveryService {
           final completed = await Future.any(pendingResults.values);
           pendingResults.remove(completed.index)?.ignore();
           completedResults[completed.index] = completed.result;
+          if (completed.result.enrichment case final enrichment?) {
+            pendingResults[completed.index] = enrichment.then(
+              (result) => _IndexedToolDiscoveryResult(completed.index, result),
+            );
+            // Publish the rows already known; the enriched ones replace them.
+            if (toolName != null) {
+              final partial = _buildDiscoveredSessionsResult(
+                completedResults.whereType<_ToolDiscoveryResult>(),
+                workingDirectory: resolvedWorkingDirectory,
+                relatedWorkingDirectories: relatedWorkingDirectories,
+                maxPerTool: maxPerTool,
+              );
+              if (identical(_inFlightDiscoveries[key], stream)) {
+                _inFlightDiscoverySnapshots[key] = partial;
+              }
+              controller.add(partial);
+              continue;
+            }
+          }
           if (toolName == null) {
             final previewResult = _buildToolDiscoveryPreviewResult(
               completed.result,
@@ -3036,8 +3075,8 @@ class AgentSessionDiscoveryService {
         recentSessionPaths,
         maxLines: 1,
       );
-      final labels = await _readPiSessionLabels(session, recentSessionPaths);
-      final sessions = <ToolSessionInfo>[];
+      final rows =
+          <({_ListedFile file, String id, String cwd, DateTime? at})>[];
       var hadError = false;
 
       for (final file in recentSessionFiles) {
@@ -3057,24 +3096,55 @@ class AgentSessionDiscoveryService {
             hadError = true;
             continue;
           }
-          sessions.add(
-            ToolSessionInfo(
-              toolName: 'Pi',
-              sessionId: sessionId,
-              workingDirectory: sessionWorkingDirectory,
-              // The header timestamp is creation time. File mtime tracks the
-              // latest turn and is therefore the picker ordering authority.
-              lastActive: file.modifiedAt ?? header.createdAt,
-              summary:
-                  labels[file.path] ??
-                  'Pi session ${_truncateSessionIdValue(sessionId)}',
-            ),
-          );
+          rows.add((
+            file: file,
+            id: sessionId,
+            cwd: sessionWorkingDirectory,
+            // The header timestamp is creation time. File mtime tracks the
+            // latest turn and is therefore the picker ordering authority.
+            at: file.modifiedAt ?? header.createdAt,
+          ));
         } on Object {
           hadError = true;
         }
       }
-      final returnedSessions = sortAndLimitDiscoveredSessions(sessions, max);
+      _ToolDiscoveryResult labelled(
+        Map<String, String> labels, {
+        Future<_ToolDiscoveryResult>? enrichment,
+      }) => _ToolDiscoveryResult.success(
+        AgentLaunchTool.pi,
+        sortAndLimitDiscoveredSessions([
+          for (final row in rows)
+            ToolSessionInfo(
+              toolName: 'Pi',
+              sessionId: row.id,
+              workingDirectory: row.cwd,
+              lastActive: row.at,
+              summary:
+                  labels[row.file.path] ??
+                  'Pi session ${_truncateSessionIdValue(row.id)}',
+            ),
+        ], max),
+        hadError: hadError,
+        enrichment: enrichment,
+      );
+      final identity = _AgentSessionDiscoveryScopeKey.fromSession(
+        session,
+        workingDirectory: null,
+      );
+      final cachedLabels = <String, String>{};
+      final misses = <_ListedFile>[];
+      for (final row in rows) {
+        final file = row.file;
+        final cached = _piLabelCache[(identity, file.path)];
+        if (cached != null &&
+            cached.modifiedAt == file.modifiedAt &&
+            cached.size == file.size) {
+          if (cached.label case final label?) cachedLabels[file.path] = label;
+        } else {
+          misses.add(file);
+        }
+      }
       DiagnosticsLogService.instance.debug(
         'agent.discovery',
         'pi_complete',
@@ -3082,17 +3152,42 @@ class AgentSessionDiscoveryService {
           'connectionId': session.connectionId,
           'candidateCount': sessionFiles.length,
           'snapshotCount': snapshots.length,
-          'parsedCount': sessions.length,
-          'labelCount': labels.length,
-          'returnedCount': returnedSessions.length,
+          'parsedCount': rows.length,
+          'cachedLabelCount': cachedLabels.length,
+          'labelMissCount': misses.length,
           'previewOnly': previewOnly,
           'hadError': hadError,
         },
       );
-      return _ToolDiscoveryResult.success(
-        AgentLaunchTool.pi,
-        returnedSessions,
-        hadError: hadError,
+      // Header rows are already resumable; a preview never waits for labels.
+      if (previewOnly || misses.isEmpty || session.remoteIsWindows) {
+        return labelled(cachedLabels);
+      }
+      return labelled(
+        cachedLabels,
+        enrichment:
+            _readPiSessionLabels(
+              session,
+              misses.map((file) => file.path).toList(growable: false),
+            ).then((extracted) {
+              final labels = extracted ?? const <String, String>{};
+              for (final file in misses) {
+                final (:modifiedAt, :size, path: _) = file;
+                // Retry a failed extraction; cache a completed one, misses too.
+                if (extracted == null || modifiedAt == null || size == null) {
+                  continue;
+                }
+                if (_piLabelCache.length >= _piLabelCacheMaxEntries) {
+                  _piLabelCache.remove(_piLabelCache.keys.first);
+                }
+                _piLabelCache[(identity, file.path)] = (
+                  modifiedAt: modifiedAt,
+                  size: size,
+                  label: labels[file.path],
+                );
+              }
+              return labelled({...cachedLabels, ...labels});
+            }),
       );
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
@@ -3108,13 +3203,11 @@ class AgentSessionDiscoveryService {
     }
   }
 
-  Future<Map<String, String>> _readPiSessionLabels(
+  /// Extracts Pi labels for [sessionPaths], or null when extraction failed.
+  Future<Map<String, String>?> _readPiSessionLabels(
     SshSession session,
     List<String> sessionPaths,
   ) async {
-    if (sessionPaths.isEmpty || session.remoteIsWindows) {
-      return const <String, String>{};
-    }
     try {
       final encodedScript = base64Encode(
         utf8.encode(_piSessionLabelExtractorScript),
@@ -3132,7 +3225,7 @@ class AgentSessionDiscoveryService {
     } on Object {
       // Session rows remain resumable with their id when label extraction is
       // unavailable, so metadata polish never breaks discovery itself.
-      return const <String, String>{};
+      return null;
     }
   }
 
@@ -3172,6 +3265,7 @@ class AgentSessionDiscoveryService {
               'find ${buckets.map((bucket) => '"\$HOME"/.pi/agent/sessions/${shellEscapePosix(bucket)}').join(' ')} '
               '-maxdepth 1 -name "*.jsonl" -type f',
               scanLimit,
+              withSize: true,
             ),
           );
     return _parseListedFiles(output).take(scanLimit).toList(growable: false);
@@ -4465,20 +4559,26 @@ class _ToolDiscoveryResult {
     AgentLaunchTool tool,
     this.sessions, {
     this.hadError = false,
+    this.enrichment,
   }) : toolName = tool.discoveredSessionToolName!;
 
   _ToolDiscoveryResult.failure(AgentLaunchTool tool)
     : toolName = tool.discoveredSessionToolName!,
       sessions = const <ToolSessionInfo>[],
-      hadError = true;
+      hadError = true,
+      enrichment = null;
 
   const _ToolDiscoveryResult.empty(this.toolName)
     : sessions = const <ToolSessionInfo>[],
-      hadError = false;
+      hadError = false,
+      enrichment = null;
 
   final String toolName;
   final List<ToolSessionInfo> sessions;
   final bool hadError;
+
+  /// A more complete result whose rows replace these once it settles.
+  final Future<_ToolDiscoveryResult>? enrichment;
 }
 
 class _IndexedToolDiscoveryResult {
@@ -4689,6 +4789,10 @@ const _posixFileTimestampsScript =
     'if stat -c %Y / >/dev/null 2>&1; then '
     "stat -c '%Y\t%n' \"\$@\"; "
     "else stat -f '%m\t%N' \"\$@\"; fi";
+const _posixFileTimestampsAndSizesScript =
+    'if stat -c %Y / >/dev/null 2>&1; then '
+    "stat -c '%Y\t%s\t%n' \"\$@\"; "
+    "else stat -f '%m\t%z\t%N' \"\$@\"; fi";
 
 String _newestFilePathsCommand(String timestampsCommand, int limit) =>
     '$timestampsCommand | LC_ALL=C sort -t "\t" -k1,1nr | head -n $limit';
@@ -4697,12 +4801,14 @@ String _newestFilePathsCommand(String timestampsCommand, int limit) =>
 ///
 /// Emits `<epoch seconds>\t<path>` lines, newest first, so readers can use
 /// the mtime the listing already computed instead of running `stat` again.
+/// [withSize] adds a `<bytes>\t` field after the mtime.
 @visibleForTesting
 String posixListNewestFilesCommand(
   String findCommand,
-  int limit,
-) => _newestFilePathsCommand(
-  '{ $findCommand -exec sh -c ${shellEscapePosix(_posixFileTimestampsScript)} '
+  int limit, {
+  bool withSize = false,
+}) => _newestFilePathsCommand(
+  '{ $findCommand -exec sh -c ${shellEscapePosix(withSize ? _posixFileTimestampsAndSizesScript : _posixFileTimestampsScript)} '
   'sh {} + 2>/dev/null || true; }',
   limit,
 );
