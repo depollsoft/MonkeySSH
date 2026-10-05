@@ -1079,6 +1079,27 @@ void registerTmuxWindowNavigatorTests() {
           expect(notifications.shown.map((n) => n.body), ['Old', 'Fresh']);
           expect(notifications.shown.last.title, isNot('Half'));
         });
+
+        for (final (label, replacement, expected) in [
+          ('a different entry at it', ['99;i=b;Fresh'], ['Old', 'Fresh']),
+          ('an identical refresh of it', ['99;i=a;Old'], ['Old']),
+          (
+            'a different entry at it and a newer one',
+            ['99;i=b;Fresh', '99;i=c;Next'],
+            ['Old', 'Fresh', 'Next'],
+          ),
+        ]) {
+          testWidgets('the last seen sequence with $label', (tester) async {
+            await pumpBar(tester);
+            await show(tester, [
+              agent('@2', ['99;i=a;Old']),
+            ]);
+            // Either the same server refreshes seq 1, or a replacement server
+            // reuses @2 and restarts its counter at the seq already seen.
+            await show(tester, [agent('@2', replacement)]);
+            expect(notifications.shown.map((n) => n.body), expected);
+          });
+        }
       });
 
       final windows = [

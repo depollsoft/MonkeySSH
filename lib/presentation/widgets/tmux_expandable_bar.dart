@@ -6,34 +6,33 @@ typedef MuxForwardedShow = ({
   MuxWindowNotification notification,
 });
 
-/// Returns background server-forwarded notifications unseen since
-/// [seenSeqsByWindowKey], oldest first.
+/// Returns background server-forwarded notifications newer than the last
+/// one recorded per window in [lastSeenByWindowKey], oldest first.
 ///
 /// Active windows are skipped (their content is visible), but their
-/// sequences still advance [seenSeqsByWindowKey] so each server sequence is
+/// sequences still advance [lastSeenByWindowKey] so each server sequence is
 /// considered once. First sight of a pending notification reports it, like
 /// bell alerts: a pending entry means its window has not been viewed since
 /// the escape arrived. Callers prune keys for closed windows separately.
 @visibleForTesting
 List<MuxForwardedShow> collectUnseenMuxForwardedNotifications(
   List<TmuxWindow> windows,
-  Map<String, int> seenSeqsByWindowKey, {
+  Map<String, MuxWindowNotification> lastSeenByWindowKey, {
   required String Function(TmuxWindow window) windowKeyFor,
 }) {
   final shows = <MuxForwardedShow>[];
   for (final window in windows) {
-    if (window.pendingNotifications.isEmpty) continue;
     final key = windowKeyFor(window);
-    var seen = seenSeqsByWindowKey[key] ?? 0;
+    final seen = lastSeenByWindowKey[key]?.seq ?? 0;
     final fresh =
         window.pendingNotifications.where((n) => n.seq > seen).toList()
           ..sort((a, b) => a.seq.compareTo(b.seq));
+    if (fresh.isEmpty) continue;
+    lastSeenByWindowKey[key] = fresh.last;
+    if (window.isActive) continue;
     for (final notification in fresh) {
-      seen = notification.seq;
-      if (window.isActive) continue;
       shows.add((window: window, notification: notification));
     }
-    seenSeqsByWindowKey[key] = seen;
   }
   return shows;
 }
@@ -234,7 +233,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   // kept per window.
   final _forwardedNotificationParsersByWindowKey =
       <String, TerminalNotificationParser>{};
-  final _seenForwardedNotificationSeqsByWindowKey = <String, int>{};
+  final _lastSeenForwardedNotificationsByWindowKey =
+      <String, MuxWindowNotification>{};
 
   /// Native notification shown per window and the Kitty identifier it shows.
   final _forwardedNotificationsByWindowKey =
@@ -866,7 +866,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     _alertTracker.clear(
       (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
     );
-    _seenForwardedNotificationSeqsByWindowKey.clear();
+    _lastSeenForwardedNotificationsByWindowKey.clear();
     _forwardedNotificationParsersByWindowKey.clear();
     for (final key in _forwardedNotificationsByWindowKey.keys.toList()) {
       _clearForwardedNotification(key);
@@ -887,22 +887,25 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final keys = <String>{
       for (final window in windows) _tmuxAlertWindowKey(window),
     };
-    _seenForwardedNotificationSeqsByWindowKey.removeWhere(
+    _lastSeenForwardedNotificationsByWindowKey.removeWhere(
       (key, _) => !keys.contains(key),
     );
     _forwardedNotificationParsersByWindowKey.removeWhere(
       (key, _) => !keys.contains(key),
     );
     for (final window in windows) {
-      // One server only appends to a window's sequence, so pending entries
-      // all below the last seen one mean this key now names a window on a
-      // replacement server whose counter restarted.
+      // One server only appends to a window's sequence and never rewrites an
+      // entry, so pending entries all below the last seen one, or a
+      // different entry at its sequence, mean this key now names a window on
+      // a replacement server whose counter restarted.
       final key = _tmuxAlertWindowKey(window);
-      final seen = _seenForwardedNotificationSeqsByWindowKey[key];
+      final seen = _lastSeenForwardedNotificationsByWindowKey[key];
+      final pending = window.pendingNotifications;
       if (seen != null &&
-          window.pendingNotifications.isNotEmpty &&
-          window.pendingNotifications.every((n) => n.seq < seen)) {
-        _seenForwardedNotificationSeqsByWindowKey.remove(key);
+          pending.isNotEmpty &&
+          (pending.every((n) => n.seq < seen.seq) ||
+              pending.any((n) => n.seq == seen.seq && n != seen))) {
+        _lastSeenForwardedNotificationsByWindowKey.remove(key);
         _forwardedNotificationParsersByWindowKey.remove(key);
       }
     }
@@ -918,7 +921,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
     final shows = collectUnseenMuxForwardedNotifications(
       windows,
-      _seenForwardedNotificationSeqsByWindowKey,
+      _lastSeenForwardedNotificationsByWindowKey,
       windowKeyFor: _tmuxAlertWindowKey,
     );
     // Recorded above even when notifications are disabled so enabling them
