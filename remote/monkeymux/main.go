@@ -3121,9 +3121,12 @@ func commandLineRelaunchCommand(tool string, argv []string) string {
 // launchedCommandForRestore returns the command that starts a window's program
 // again from the commands the app created the window with, or "" when the
 // window has none or its foreground program is no longer the one launched:
-// the user quit it and ran something else, or it exited to the shell. The
-// foreground command decides, not the window's agent metadata, which an
-// agent that failed at launch leaves on the recovery shell it falls back to. The
+// the user quit it and ran something else, or it exited to the shell. Where
+// a launched window can outlive its program, the foreground command decides,
+// not the window's agent metadata, which an agent that failed at launch
+// leaves on the recovery shell it falls back to. Elsewhere the window closes
+// with its program, so it is still running, while the process table may not
+// name it: Windows shows a Node or Python agent as its runtime. The
 // app's restore command continues the program's latest session; the launch
 // command, which is also the fallback when nothing is left to continue,
 // starts it afresh. Either keeps every flag the app launched it with.
@@ -3132,13 +3135,15 @@ func launchedCommandForRestore(window restoreWindowState) string {
 	if launch == "" {
 		return ""
 	}
-	current := cleanProcessCommandName(window.CurrentCommand)
-	if tool := agentToolFromCommandText(launch); tool != "" {
-		if tool != agentToolFromCommandName(current) {
+	if launchedWindowOutlivesProgram {
+		current := cleanProcessCommandName(window.CurrentCommand)
+		if tool := agentToolFromCommandText(launch); tool != "" {
+			if tool != agentToolFromCommandName(current) {
+				return ""
+			}
+		} else if program := commandNameFromShellCommand(launch); program == "" || program != current {
 			return ""
 		}
-	} else if program := commandNameFromShellCommand(launch); program == "" || program != current {
-		return ""
 	}
 	if restore := strings.TrimSpace(window.RestoreCommand); restore != "" {
 		return agentResumeCommandWithFreshFallback(restore, launch)

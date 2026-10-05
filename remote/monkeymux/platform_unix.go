@@ -640,6 +640,11 @@ const agentWindowHoldThresholdSeconds = 12
 // been running for a while, lets the window close normally. An intentional
 // window close signals SIGHUP to the whole process group, terminating this
 // wrapping shell before the fallback runs, so closing a window never lingers.
+// launchedWindowOutlivesProgram reports whether a window the app launched a
+// program in can stay open once the program ends: an agent that fails right
+// after launch falls back to an interactive shell (holdAgentWindowCommand).
+const launchedWindowOutlivesProgram = true
+
 func holdAgentWindowCommand(shell string, command string) string {
 	command = strings.TrimSpace(command)
 	if command == "" {

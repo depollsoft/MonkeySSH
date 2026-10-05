@@ -927,6 +927,10 @@ func isCmdShell(shell string) bool {
 // fast-exit failure (a locked macOS login keychain that makes cursor-agent print
 // an error and exit immediately) is macOS-specific, and the Windows shell exit
 // semantics differ, so the command is returned unchanged here for now.
+// launchedWindowOutlivesProgram is false here: holdAgentWindowCommand keeps no
+// shell behind, so a window the app launched a program in closes with it.
+const launchedWindowOutlivesProgram = false
+
 func holdAgentWindowCommand(shell string, command string) string {
 	_ = shell
 	return command

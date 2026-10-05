@@ -149,3 +149,18 @@ func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 		}
 	}
 }
+
+// Where a launched window closes with its program, an open one still runs
+// it, even when the process table names only the shell or a runtime; where it
+// can outlive the program, a shell in the foreground means the agent is gone.
+func TestLaunchedWindowWithShellForeground(t *testing.T) {
+	state := restoreWindowState{
+		CurrentCommand: "pwsh", AgentTool: "openclaw", AgentToolConfirmed: true,
+		LaunchCommand: "openclaw tui",
+	}
+	options := createWindowOptionsForRestore(state, true)
+	if relaunched := options.command != ""; relaunched == launchedWindowOutlivesProgram {
+		t.Fatalf("relaunched %v (%q) where a launched window outlives its program: %v",
+			relaunched, options.command, launchedWindowOutlivesProgram)
+	}
+}
