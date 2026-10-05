@@ -1491,16 +1491,7 @@ if(!$__flResolved){$__flResolved='cmd'}
   }
 
   void _applyTerminalParsePiece(Terminal terminal, String slice) {
-    final terminalOutput = _terminalOutputDecoder.add(
-      input: slice,
-      terminalColumns: terminal.viewWidth,
-      terminalRows: terminal.viewHeight,
-      cursorColumn: terminal.buffer.cursorX,
-      cursorRow: terminal.buffer.cursorY,
-      marginTop: terminal.buffer.marginTop,
-      marginBottom: terminal.buffer.marginBottom,
-      originMode: terminal.originMode,
-    );
+    final terminalOutput = _terminalOutputDecoder.add(input: slice);
     // Track control-mode updates before the xterm parser dispatches any OSC
     // queries in this slice, so a query that arrives in the same chunk as a
     // mode change (for example ConPTY's win32-input-mode request) is answered

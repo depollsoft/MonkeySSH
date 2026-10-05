@@ -2256,39 +2256,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(second.output, '\x1bP1+rabc\x1b\\\x1b[@Z');
     });
 
-    test(
-      'adapts reverse index at top margin to keep xterm buffer attached',
-      () {
-        final terminal = Terminal(maxLines: 100)..resize(61, 37);
-        final reverseIndexes = List.filled(9, '\x1bM').join();
-        final insertLines = List.filled(9, '\x1b[L').join();
-        final decoder = TerminalXtermOutputDecoder();
-        final result = decoder.add(
-          input: '\x1b[1;37r\x1b[1;1H$reverseIndexes',
-
-          terminalColumns: terminal.viewWidth,
-          terminalRows: terminal.viewHeight,
-          cursorColumn: terminal.buffer.cursorX,
-          cursorRow: terminal.buffer.cursorY,
-          marginTop: terminal.buffer.marginTop,
-          marginBottom: terminal.buffer.marginBottom,
-        );
-
-        terminal.write(result.output);
-
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isFalse);
-        expect(result.output, '\x1b[1;37r\x1b[1;1H$insertLines');
-        expect(
-          List.generate(
-            terminal.buffer.height,
-            (index) => terminal.buffer.lines[index].attached,
-          ),
-          everyElement(isTrue),
-        );
-      },
-    );
-
     test('insert mode shifts by the cell width the buffer uses', () {
       // U+231A is wide and U+0301 takes no cell in the buffer's width table.
       final terminal = Terminal(maxLines: 100)..resize(20, 2);
@@ -2299,104 +2266,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(terminal.buffer.cursorX, 5);
       expect(terminal.lines[0].getText(5, 11), 'abcdef');
-    });
-
-    test('tracks scroll-region cursor moves the way the buffer does', () {
-      // Each prefix ends with the cursor at the top margin or not; a reverse
-      // index after it is adapted only when the buffer agrees.
-      for (final (prefix, atTopMargin) in [
-        ('\x1b[2;1H\x1b[3;2r', false), // a one-row region is ignored
-        ('\x1b[5;1H\x1b[1;0r', true), // a valid region homes the cursor
-        ('\x1b[?6h\x1b[3;6r', true), // to the top margin in origin mode
-        ('\x1b[3;6r\x1b[?6h\x1b[4d\x1b[1d', true), // VPA in origin mode
-        ('\x1b[3;6r\x1b[4;1H\x1b[9A', true), // CUU stops at the margin
-        ('\x1b[3;6r\x1b[4;1H\x1b[9B\x1b[3A', true), // so does CUD
-        ('\x1b[3;6r\x1b[4;1H\x1b[9E\x1b[3F', true), // and CNL/CPL
-        ('\x1b[3;6r\x1b[8;1H\x1b[9F', false), // outside, the whole screen
-      ]) {
-        final terminal = Terminal(maxLines: 100)
-          ..resize(10, 8)
-          ..write(prefix);
-        expect(
-          terminal.buffer.cursorY == terminal.buffer.marginTop,
-          atTopMargin,
-          reason: 'buffer after ${prefix.replaceAll('\x1b', 'ESC')}',
-        );
-
-        final result = TerminalXtermOutputDecoder().add(
-          input: '$prefix\x1bM',
-          terminalColumns: 10,
-          terminalRows: 8,
-          cursorColumn: 0,
-          cursorRow: 0,
-          marginTop: 0,
-          marginBottom: 7,
-        );
-        expect(
-          result.output,
-          atTopMargin ? '$prefix\x1b[L' : '$prefix\x1bM',
-          reason: prefix.replaceAll('\x1b', 'ESC'),
-        );
-      }
-    });
-
-    test('preserves reverse index when cursor is below the top margin', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[5;4H\x1bM',
-
-        terminalColumns: 61,
-        terminalRows: 37,
-        cursorColumn: 0,
-        cursorRow: 0,
-        marginTop: 0,
-        marginBottom: 36,
-      );
-
-      expect(result.output, '\x1b[5;4H\x1bM');
-    });
-
-    test('restores cursor column after adapted reverse index', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[1;4H\x1bM',
-
-        terminalColumns: 61,
-        terminalRows: 37,
-        cursorColumn: 0,
-        cursorRow: 0,
-        marginTop: 0,
-        marginBottom: 36,
-      );
-
-      expect(result.output, '\x1b[1;4H\x1b[L\x1b[4G');
-    });
-
-    test('adapts origin-mode reverse index at the top margin', () {
-      final terminal = Terminal(maxLines: 100)..resize(61, 37);
-      final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(
-        input: '\x1b[2;10r\x1b[?6h\x1b[1;1H\x1bM',
-
-        terminalColumns: terminal.viewWidth,
-        terminalRows: terminal.viewHeight,
-        cursorColumn: terminal.buffer.cursorX,
-        cursorRow: terminal.buffer.cursorY,
-        marginTop: terminal.buffer.marginTop,
-        marginBottom: terminal.buffer.marginBottom,
-        originMode: terminal.originMode,
-      );
-
-      terminal.write(result.output);
-
-      expect(result.output, '\x1b[2;10r\x1b[?6h\x1b[1;1H\x1b[L');
-      expect(
-        List.generate(
-          terminal.buffer.height,
-          (index) => terminal.buffer.lines[index].attached,
-        ),
-        everyElement(isTrue),
-      );
     });
 
     test('unwraps complete tmux passthrough sequences', () {
@@ -3748,6 +3617,54 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     String firstLineText(Terminal terminal) => terminal.buffer.lines[0]
         .getText(0, terminal.buffer.viewWidth)
         .trimRight();
+
+    test('passes reverse index through to the buffer unchanged', () async {
+      // The vendored buffer keeps lines attached when RI scrolls a region
+      // down. Rewriting RI from a cursor model went wrong whenever that model
+      // missed a move, such as a save/restore (ESC 7, ESC 8) in the chunk.
+      for (final (input, expected) in [
+        (
+          '\x1b[6;1H\x1b7\x1b[H\x1b8\x1bMX',
+          'row0|row1|row2|row3|Xow4|row5|row6|row7',
+        ),
+        ('\x1b[1;8r\x1b[1;1H\x1bM\x1bM', '||row0|row1|row2|row3|row4|row5'),
+        (
+          '\x1b[2;6r\x1b[?6h\x1b[1;1H\x1bM',
+          'row0||row1|row2|row3|row4|row6|row7',
+        ),
+      ]) {
+        final opened = await openShell();
+        final terminal = opened.session.terminal!..resize(20, 8);
+        Future<void> feed(String data) async {
+          opened.stdout.add(Uint8List.fromList(utf8.encode(data)));
+          await pumpEventQueue();
+          opened.session.debugFlushPendingTerminalOutput();
+          await pumpEventQueue();
+        }
+
+        await feed(
+          [for (var row = 0; row < 8; row++) '\x1b[${row + 1};1Hrow$row']
+              .join(),
+        );
+        await feed(input);
+
+        final lines = terminal.buffer.lines.toList();
+        final reason = input.replaceAll('\x1b', 'ESC');
+        expect(
+          [
+            for (final line in lines.sublist(lines.length - 8))
+              line.getText().trim(),
+          ].join('|'),
+          expected,
+          reason: reason,
+        );
+        expect(
+          lines.map((line) => line.attached),
+          everyElement(isTrue),
+          reason: reason,
+        );
+      }
+    });
 
     test('answers Kitty capabilities and iTerm2 cell-size reports', () async {
       final opened = await openShell();
