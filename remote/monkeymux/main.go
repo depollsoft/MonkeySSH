@@ -1672,7 +1672,11 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 
 	decoder := json.NewDecoder(conn)
 	info := runningSessionInfo{}
-	for info.name == "" || info.windows == nil {
+	// Track receipt rather than content: a server with no windows omits the
+	// "windows" field, so waiting for a non-nil slice would stall until the
+	// socket deadline.
+	sawWindows := false
+	for info.name == "" || !sawWindows {
 		var response controlResponse
 		if err := decoder.Decode(&response); err != nil {
 			return runningSessionInfo{}, err
@@ -1683,6 +1687,7 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 			info.version = response.Version
 			info.attachCount = response.AttachCount
 		case "window_list":
+			sawWindows = true
 			info.windows = response.Windows
 			for _, window := range response.Windows {
 				if window.LastActivityEpochSeconds > info.lastActive {
@@ -7154,7 +7159,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 		_ = window.closePty(windowPty)
 	}
 	if nativeAcpBridgeID != "" {
-		_ = requestAcpBridgeStopAndWait(nativeAcpBridgeID)
+		_ = stopNativeAcpBridgeForWindow(nativeAcpBridgeID)
 	}
 
 	s.broadcast(controlResponse{
@@ -9375,7 +9380,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 		}
 		windowArgs, err := nativeAcpWindowArguments(bridgeID)
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -9387,7 +9392,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 			nativeAcpProviderID: request.ProviderID,
 		})
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -17319,7 +17324,7 @@ func (s *muxServer) close() {
 	killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
 	for _, window := range windows {
 		if window.nativeAcpBridgeID != "" {
-			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
+			_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
 		}
 	}
 	teardowns.Wait()

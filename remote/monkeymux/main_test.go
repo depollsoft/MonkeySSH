@@ -11026,6 +11026,67 @@ func TestCloseNativeWindowWaitsForRetryableBridgeStop(t *testing.T) {
 	}
 }
 
+func TestMarkWindowClosedStopsBridgeThroughSeam(t *testing.T) {
+	originalStop := stopNativeAcpBridgeForWindow
+	defer func() { stopNativeAcpBridgeForWindow = originalStop }()
+	var stopped []string
+	stopNativeAcpBridgeForWindow = func(id string) error {
+		stopped = append(stopped, id)
+		return nil
+	}
+
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{
+		{id: "@1", index: 0, nativeAcpBridgeID: "bridge-1", lastActivity: time.Now()},
+	}
+	server.activeID = "@1"
+
+	server.markWindowClosed("@1")
+	if len(stopped) != 1 || stopped[0] != "bridge-1" {
+		t.Fatalf("bridge stops = %v, want [bridge-1]", stopped)
+	}
+}
+
+func TestQuerySessionAtSocketReturnsZeroWindowServer(t *testing.T) {
+	socketPath := filepath.Join(shortUnixSocketDir(t), "s.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello controlMessage
+		if err := json.NewDecoder(conn).Decode(&hello); err != nil {
+			return
+		}
+		encoder := json.NewEncoder(conn)
+		_ = encoder.Encode(controlResponse{Type: "hello", Session: "empty"})
+		// A server between its last window closing and shutdown reports an
+		// empty list, which the wire format omits entirely.
+		_ = encoder.Encode(controlResponse{Type: "window_list"})
+		// Hold the connection open so a stalled client only returns on its
+		// socket deadline.
+		time.Sleep(socketTimeout)
+	}()
+
+	started := time.Now()
+	info, err := querySessionAtSocket(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.name != "empty" || len(info.windows) != 0 {
+		t.Fatalf("info = %+v, want session empty with no windows", info)
+	}
+	if elapsed := time.Since(started); elapsed >= socketTimeout/2 {
+		t.Fatalf("query took %v, want well under the socket deadline", elapsed)
+	}
+}
+
 func TestCloseActiveWindowSelectsNextWindowImmediately(t *testing.T) {
 	server := newMuxServer("test")
 	attach := &recordingConn{}
