@@ -1989,7 +1989,9 @@ class MuxWindowRow extends StatelessWidget {
             child: p.isNative
                 ? AcpMuxWindowStatusBadge(
                     session: p.session,
-                    fallbackLabel: orphan ? 'recent' : 'native',
+                    fallback: orphan
+                        ? AcpMuxWindowFallback.recent
+                        : AcpMuxWindowFallback.native,
                   )
                 : TmuxWindowStatusBadge(window: p.window!),
           ),
