@@ -53,24 +53,8 @@ List<TerminalPreviewImage> _resolveClassicPlacements(
     if (stored == null) {
       continue;
     }
-    final image = stored.image;
-    final imageWidth = image.width.toDouble();
-    final imageHeight = image.height.toDouble();
-
-    // Source rectangle: the optional crop (x=,y=,w=,h=), clamped to the image.
-    final srcLeft = placement.srcX.toDouble().clamp(0.0, imageWidth);
-    final srcTop = placement.srcY.toDouble().clamp(0.0, imageHeight);
-    final srcWidth =
-        (placement.srcWidth > 0
-                ? placement.srcWidth.toDouble()
-                : imageWidth - srcLeft)
-            .clamp(0.0, imageWidth - srcLeft);
-    final srcHeight =
-        (placement.srcHeight > 0
-                ? placement.srcHeight.toDouble()
-                : imageHeight - srcTop)
-            .clamp(0.0, imageHeight - srcTop);
-    if (srcWidth <= 0 || srcHeight <= 0) {
+    final src = resolveKittyPlacementSourceRect(stored, placement);
+    if (src == null) {
       continue;
     }
 
@@ -88,7 +72,7 @@ List<TerminalPreviewImage> _resolveClassicPlacements(
       colSpan = (viewWidth - placement.col).clamp(1, viewWidth);
       // Approximate the covered rows only to cull placements that cannot reach
       // the captured window; the painter derives the real height when drawing.
-      rowSpan = math.max(1, (srcHeight / srcWidth * colSpan).ceil());
+      rowSpan = math.max(1, (src.height / src.width * colSpan).ceil());
     }
 
     // Skip placements entirely outside the captured rows.
@@ -98,8 +82,8 @@ List<TerminalPreviewImage> _resolveClassicPlacements(
 
     resolved.add(
       TerminalPreviewImage(
-        image: image,
-        src: Rect.fromLTWH(srcLeft, srcTop, srcWidth, srcHeight),
+        image: stored.image,
+        src: src,
         col: placement.col,
         row: placement.row - startRow,
         colSpan: colSpan,

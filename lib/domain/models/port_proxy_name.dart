@@ -110,9 +110,13 @@ Map<int, String> resolveGeneratedPortProxyNames(
       candidateCounts.update(name, (count) => count + 1, ifAbsent: () => 1);
     }
 
+    // Fallbacks must avoid every name still in play this pass, not only the
+    // names assigned so far, or one could take another candidate's name.
+    final blockedNames = {...usedNames, ...candidates.values};
     final completedIds = <int>[];
     for (final entry in candidates.entries) {
-      if (candidateCounts[entry.value] == 1) {
+      if (candidateCounts[entry.value] == 1 &&
+          !usedNames.contains(entry.value)) {
         resolved[entry.key] = entry.value;
         usedNames.add(entry.value);
         completedIds.add(entry.key);
@@ -129,10 +133,11 @@ Map<int, String> resolveGeneratedPortProxyNames(
         final name = _uniquePortProxySlugWithHostId(
           entry.value,
           entry.key,
-          usedNames,
+          blockedNames,
         );
         resolved[entry.key] = name;
         usedNames.add(name);
+        blockedNames.add(name);
         completedIds.add(entry.key);
       } else {
         prefixLengths[entry.key] = nextLength;

@@ -137,6 +137,38 @@ class _TrackedPeriodicTimer implements Timer {
   int get tick => _inner.tick;
 }
 
+/// Records every parsing pause/resume request the screen makes.
+class _ParsingPauseRecordingSshSession extends SshSession {
+  _ParsingPauseRecordingSshSession(SshSession source)
+    : super(
+        connectionId: source.connectionId,
+        hostId: source.hostId,
+        client: source.client,
+        config: source.config,
+      );
+
+  final parsingPauseCalls = <bool>[];
+
+  @override
+  void setTerminalParsingPaused({required bool paused}) {
+    parsingPauseCalls.add(paused);
+    super.setTerminalParsingPaused(paused: paused);
+  }
+}
+
+/// Holds every remote bridge lookup until [remoteBridgesGate] completes.
+class _GatedRemoteBridgesAcpSessionManager extends FakeAcpSessionManager {
+  final remoteBridgesGate = Completer<void>();
+  int remoteBridgeLookups = 0;
+
+  @override
+  Future<List<MonkeyMuxAcpBridgeMetadata>> listRemoteBridges(int hostId) async {
+    remoteBridgeLookups++;
+    await remoteBridgesGate.future;
+    return remoteBridges;
+  }
+}
+
 class _ListenerTrackingTerminal extends Terminal {
   final listeners = <VoidCallback>{};
   int listenerRegistrations = 0;
@@ -4082,6 +4114,44 @@ void main() {
     );
 
     testWidgets(
+      'drops delayed theme reports once a plain TUI exits during the delay',
+      (tester) async {
+        await pumpScreen(tester);
+        shellStdoutController.add(
+          Uint8List.fromList(utf8.encode('\x1b[?2031h\x1b[?1004h')),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(session.terminalColorSchemeUpdatesMode, isTrue);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(TerminalScreen)),
+        );
+        await container
+            .read(themeModeNotifierProvider.notifier)
+            .setThemeMode(ThemeMode.dark);
+        await tester.pump();
+        // Let the immediate focus transition finish (its focus-in is 50 ms
+        // later); the delayed reports start at 250 ms.
+        await tester.pump(const Duration(milliseconds: 60));
+
+        // The TUI exits before the delayed reports fire, leaving a shell.
+        shellStdoutController.add(
+          Uint8List.fromList(utf8.encode('\x1b[?2031l\x1b[?1004l')),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(session.terminalColorSchemeUpdatesMode, isFalse);
+        shellWrites.clear();
+        await tester.pump(const Duration(seconds: 1));
+
+        final writtenShellText = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(writtenShellText, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'refreshes an active TUI when assigning the first session theme',
       (tester) async {
         await pumpScreen(tester);
@@ -4857,6 +4927,9 @@ void main() {
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
+      // The abandoned login shell gets a bounded graceful close; let its
+      // grace timer expire so no timer outlives the test.
+      await tester.pump(abandonedSshExecCloseGrace);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets('MonkeyMux attaches on Windows remotes via the ConPTY helper', (
@@ -7599,6 +7672,57 @@ void main() {
     );
 
     testWidgets(
+      'accepting a completion sends one Backspace per replaced character',
+      (tester) async {
+        final completionService = _TestShellCompletionService(
+          cachedSuggestions: const <ShellCompletionSuggestion>[],
+          completionSuggestions:
+              const <String, List<ShellCompletionSuggestion>>{
+                '\u{1F600}r': <ShellCompletionSuggestion>[
+                  ShellCompletionSuggestion(
+                    label: '\u{1F600}report.txt',
+                    replacement: '\u{1F600}report.txt',
+                    replacementStart: 4,
+                    replacementEnd: 7,
+                    kind: ShellCompletionSuggestionKind.file,
+                    commitSuffix: ' ',
+                  ),
+                ],
+              },
+        );
+
+        session.terminal!.write('root@host ~ % cat \u{1F600}');
+        await pumpScreen(tester, shellCompletionService: completionService);
+
+        session.terminal!.textInput('r');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump();
+        expect(
+          completionService.completeInvocations.map(
+            (invocation) => invocation.token,
+          ),
+          ['\u{1F600}r'],
+        );
+
+        // Typing on filters the shown row and lays the popup out.
+        session.terminal!.textInput('e');
+        await tester.pump();
+        shellWrites.clear();
+        await tester.tap(find.text('\u{1F600}report.txt'));
+        await tester.pump();
+
+        // The emoji is two UTF-16 code units but one character to the shell;
+        // a fourth Backspace would erase the space after `cat`.
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          '\x7f\x7f\x7f\u{1F600}report.txt ',
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
       'dismisses shell completion popup when Return/Enter is pressed',
       (tester) async {
         final tmuxService = _MockTmuxService();
@@ -8404,6 +8528,9 @@ void main() {
               trackedSession.openCalls,
               completion.startsWith('close') ? 1 : 2,
             );
+            // A completed close hands the old shell to the bounded graceful
+            // close; let its grace timer expire so no timer outlives the test.
+            await tester.pump(abandonedSshExecCloseGrace);
             return;
           }
           await tester.runAsync(() async {
@@ -8433,6 +8560,9 @@ void main() {
             shellWrites.map(utf8.decode).join(),
             contains(tmuxSessionName),
           );
+          // The abandoned login shell gets a bounded graceful close; let its
+          // grace timer expire so no timer outlives the test.
+          await tester.pump(abandonedSshExecCloseGrace);
         },
         variant: const TargetPlatformVariant({
           TargetPlatform.android,
@@ -9669,6 +9799,94 @@ void main() {
           find.text('The native agent window is no longer running.'),
           findsNothing,
         );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'a queued native window open does not start after the screen is disposed',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1100, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final recordingSession = _ParsingPauseRecordingSshSession(session)
+          ..getOrCreateTerminal();
+        session = recordingSession;
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        addTearDown(windowEvents.close);
+        final acpManager = _GatedRemoteBridgesAcpSessionManager();
+        addTearDown(acpManager.dispose);
+
+        const windows = <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'Claude Agent',
+            isActive: false,
+            nativeAcpBridgeId: '0123456789abcdef0123456789abcdef',
+            nativeAcpProviderId: AcpBuiltinProviderIds.claudeAgent,
+          ),
+          TmuxWindow(
+            index: 3,
+            id: '@4',
+            name: 'Codex',
+            isActive: false,
+            nativeAcpBridgeId: 'abcdef0123456789abcdef0123456789',
+            nativeAcpProviderId: AcpBuiltinProviderIds.codex,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => windows);
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => windowEvents.stream);
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await pumpScreen(
+          tester,
+          activeSessions: _TestActiveSessionsNotifier(session),
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+          acpSessionManager: acpManager,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        windowEvents.add(TmuxWindowListEvent(windows.sublist(1)));
+        await tester.pump();
+
+        // Opening the first window waits on the remote bridge lookup; the
+        // second open queues behind it.
+        await tester.tap(find.byKey(const ValueKey('tmux-sidebar-window-2')));
+        await tester.pump();
+        expect(acpManager.remoteBridgeLookups, 1);
+        await tester.tap(
+          find.byKey(const ValueKey('tmux-sidebar-window-3')),
+          warnIfMissed: false,
+        );
+        await tester.pump();
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        final pauseCallsAtDisposal = List<bool>.of(
+          recordingSession.parsingPauseCalls,
+        );
+
+        acpManager.remoteBridgesGate.complete();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(tester.takeException(), isNull);
+        expect(acpManager.remoteBridgeLookups, 1);
+        expect(recordingSession.parsingPauseCalls, pauseCallsAtDisposal);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );

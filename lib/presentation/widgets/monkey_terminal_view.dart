@@ -4062,7 +4062,9 @@ class MonkeyRenderTerminal extends RenderBox
       _cancelPendingTerminalResize();
     }
     _updateViewportSize(notifyIfUnchanged: true);
-    markNeedsPaint();
+    // A resize outside performLayout changes the buffer height, so the scroll
+    // extent and bottom-following offset need a fresh layout.
+    markNeedsLayout();
   }
 
   void _refreshTerminalDisplay({bool revealLatestOutput = false}) {
@@ -4179,6 +4181,7 @@ class MonkeyRenderTerminal extends RenderBox
             pendingResize.viewportSize,
             pendingResize.pixelSize,
           );
+          markNeedsLayout();
         } else {
           _notifyTerminalResize(
             pendingResize.viewportSize,
@@ -4439,39 +4442,12 @@ class MonkeyRenderTerminal extends RenderBox
         continue;
       }
       final image = stored.image;
-      final imageWidth = image.width.toDouble();
-      final imageHeight = image.height.toDouble();
-
-      // Kitty crop coordinates use the original source dimensions. Encoded
-      // images may have been downscaled while decoding, so map the logical crop
-      // into the decoded image before painting it.
-      final sourceWidth = stored.sourceWidth > 0
-          ? stored.sourceWidth.toDouble()
-          : imageWidth;
-      final sourceHeight = stored.sourceHeight > 0
-          ? stored.sourceHeight.toDouble()
-          : imageHeight;
-      final logicalSrcLeft = placement.srcX.toDouble().clamp(0.0, sourceWidth);
-      final logicalSrcTop = placement.srcY.toDouble().clamp(0.0, sourceHeight);
-      final logicalSrcWidth =
-          (placement.srcWidth > 0
-                  ? placement.srcWidth.toDouble()
-                  : sourceWidth - logicalSrcLeft)
-              .clamp(0.0, sourceWidth - logicalSrcLeft);
-      final logicalSrcHeight =
-          (placement.srcHeight > 0
-                  ? placement.srcHeight.toDouble()
-                  : sourceHeight - logicalSrcTop)
-              .clamp(0.0, sourceHeight - logicalSrcTop);
-      final scaleX = imageWidth / sourceWidth;
-      final scaleY = imageHeight / sourceHeight;
-      final srcLeft = logicalSrcLeft * scaleX;
-      final srcTop = logicalSrcTop * scaleY;
-      final srcWidth = logicalSrcWidth * scaleX;
-      final srcHeight = logicalSrcHeight * scaleY;
-      if (srcWidth <= 0 || srcHeight <= 0) {
+      final src = resolveKittyPlacementSourceRect(stored, placement);
+      if (src == null) {
         continue;
       }
+      final srcWidth = src.width;
+      final srcHeight = src.height;
 
       final double dstWidth;
       final double dstHeight;
@@ -4527,12 +4503,7 @@ class MonkeyRenderTerminal extends RenderBox
       // race) would crash the whole terminal paint and tear down the user's
       // session. Skip the offending image for this frame instead.
       try {
-        canvas.drawImageRect(
-          image,
-          Rect.fromLTWH(srcLeft, srcTop, srcWidth, srcHeight),
-          destination,
-          _imagePaint,
-        );
+        canvas.drawImageRect(image, src, destination, _imagePaint);
       } on Object catch (_) {
         // Intentionally swallowed: a failed image draw must never crash the
         // terminal. The next frame re-attempts with fresh metrics.

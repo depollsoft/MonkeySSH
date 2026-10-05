@@ -986,11 +986,20 @@ _StyledPreviewMeasurement _measureStyledPreview({
   return measurement;
 }
 
+/// Returns the widest occupied terminal column, counting both cells of wide
+/// characters. Trailing blank and empty cells stay padding, as in `text`.
 int _styledContentColumns(TerminalPreviewSnapshot snapshot) {
   var columns = 0;
   for (final line in snapshot.lines) {
-    if (line.text.length > columns) {
-      columns = line.text.length;
+    final cells = line.cells;
+    // A wide character ending at `columns - 1` can still extend the extent.
+    final stop = math.max(0, columns - 1);
+    for (var index = cells.length - 1; index >= stop; index--) {
+      final codePoint = cells.getCodePoint(index);
+      if (codePoint != 0 && codePoint != 0x20) {
+        columns = math.max(columns, index + math.max(1, cells.getWidth(index)));
+        break;
+      }
     }
   }
   return math.max(1, columns);

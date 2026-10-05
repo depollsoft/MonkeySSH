@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:drift/drift.dart' show BooleanExpressionOperators, Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -193,6 +194,17 @@ class SettingsService {
           SettingsCompanion.insert(key: key, value: value),
         );
   }
+
+  /// Replaces a string setting only while it still holds [expected], so a
+  /// value written concurrently by another writer wins.
+  Future<void> replaceString(
+    String key, {
+    required String expected,
+    required String value,
+  }) =>
+      (_db.update(_db.settings)
+            ..where((s) => s.key.equals(key) & s.value.equals(expected)))
+          .write(SettingsCompanion(value: Value(value)));
 
   /// Set an int setting.
   Future<void> setInt(String key, int value) =>
@@ -398,6 +410,18 @@ final terminalThemesApplyToAppNotifierProvider =
       TerminalThemesApplyToAppNotifier.new,
     );
 
+/// Smallest terminal and native-chat font size the app supports.
+const minFontSize = 8.0;
+
+/// Largest terminal and native-chat font size the app supports.
+const maxFontSize = 32.0;
+
+/// Clamps [size] to the supported font-size range shared by pinch zoom,
+/// persistence and the Settings slider.
+double clampFontSize(num size) => size.isFinite
+    ? size.clamp(minFontSize, maxFontSize).toDouble()
+    : minFontSize;
+
 /// Notifier for font size with write capability.
 class FontSizeNotifier extends _AsyncSettingsNotifier<double> {
   Future<void> _writeChain = Future<void>.value();
@@ -409,11 +433,12 @@ class FontSizeNotifier extends _AsyncSettingsNotifier<double> {
   @override
   Future<double> _loadValue(SettingsService settings) async {
     final value = await settings.getInt(SettingKeys.terminalFontSize);
-    return value?.toDouble() ?? 14.0;
+    return value == null ? 14.0 : clampFontSize(value);
   }
 
-  /// Set the font size.
-  Future<void> setFontSize(double size) async {
+  /// Set the font size, clamped to the supported range.
+  Future<void> setFontSize(double requestedSize) async {
+    final size = clampFontSize(requestedSize);
     _setPersistedState(size);
     final writeToken = ++_latestWriteToken;
     final nextWrite = _writeChain.catchError((Object _) {}).then((_) async {
@@ -642,6 +667,7 @@ class TerminalThemeSettingsNotifier
 
   @override
   Future<TerminalThemeSettings> _loadValue(SettingsService settings) async {
+    final revision = _stateRevision;
     final light = await settings.getString(
       SettingKeys.defaultTerminalThemeLight,
     );
@@ -657,7 +683,8 @@ class TerminalThemeSettingsNotifier
       brightness: Brightness.dark,
       customThemeIds: customThemeIds,
     );
-    if (_isDisposed) return state;
+    // A user choice published meanwhile owns storage; skip normalization.
+    if (_isDisposed || revision != _stateRevision) return state;
     await _persistNormalizedThemeId(
       settings,
       key: SettingKeys.defaultTerminalThemeLight,
@@ -731,7 +758,11 @@ class TerminalThemeSettingsNotifier
     required String normalizedThemeId,
   }) async {
     if (storedThemeId != null && storedThemeId != normalizedThemeId) {
-      await settings.setString(key, normalizedThemeId);
+      await settings.replaceString(
+        key,
+        expected: storedThemeId,
+        value: normalizedThemeId,
+      );
     }
   }
 

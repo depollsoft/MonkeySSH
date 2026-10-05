@@ -21,6 +21,9 @@ const _lifetimeAlreadyActiveMessage =
     'store if you need to cancel a monthly or annual renewal.';
 const _noActiveStorePurchaseMessage =
     'No active MonkeySSH Pro purchase could be restored.';
+const _pendingPlayPurchaseMessage =
+    'Your Google Play payment is still pending. MonkeySSH Pro unlocks once '
+    'it completes.';
 
 /// Coordinates local premium state and mobile store purchase flows.
 class MonetizationService {
@@ -69,6 +72,12 @@ class MonetizationService {
   bool _pendingPurchaseObservedUpdate = false;
   bool _restoreInFlight = false;
   bool _restoreObservedPurchaseUpdate = false;
+  // Whether the last catalog query reached the store and returned products.
+  // Apple reconciliation only revokes a cached unlock after such an answer
+  // from a query made for that pass.
+  bool _storeReachable = false;
+  Future<void>? _appleReconciliation;
+  bool _appleReconciliationObservedEntitlement = false;
   Future<void>? _initializationFuture;
   // Serializes entitlement clears and per-purchase handlers so a batch of restore
   // updates (e.g. an old subscription transaction + a redeemed lifetime
@@ -166,9 +175,85 @@ class MonetizationService {
         }
       }
       _initialized = true;
+      if (cachedProUnlocked) {
+        unawaited(_startAppleReconciliation());
+      }
     } finally {
       _initializationFuture = null;
     }
+  }
+
+  /// Re-checks Apple's current entitlements, for example when the app returns
+  /// to the foreground. Joins a check that is already running.
+  ///
+  /// Android reconciles against Google Play's purchase query at startup.
+  Future<void> refreshStoreEntitlement() async {
+    if (!_isApplePlatform) {
+      return;
+    }
+    await initialize();
+    if (!await _settings.getBool(SettingKeys.monetizationProUnlocked)) {
+      return;
+    }
+    await _startAppleReconciliation(queryStore: true);
+  }
+
+  bool get _isApplePlatform =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS;
+
+  /// Starts a reconciliation pass, first querying the catalog when
+  /// [queryStore] is set; startup passes reuse the query initialization just
+  /// made.
+  Future<void> _startAppleReconciliation({bool queryStore = false}) {
+    if (!_isApplePlatform) {
+      return Future.value();
+    }
+    return _appleReconciliation ??= _reconcileAppleStoreEntitlement(
+      queryStore: queryStore,
+    ).whenComplete(() => _appleReconciliation = null);
+  }
+
+  /// Revokes a cached Apple subscription that StoreKit no longer lists.
+  ///
+  /// StoreKit 2 restores by replaying `Transaction.currentEntitlements`
+  /// (verified, unexpired and unrevoked transactions) through the purchase
+  /// stream, so an entitlement that arrives keeps or refreshes the unlock.
+  /// Offline grace: the cached unlock is revoked only after verified absence,
+  /// meaning this pass's catalog query reached the store, the restore call
+  /// succeeded, and no entitlement arrived within the empty-result grace
+  /// period. StoreKit answers the restore from its local cache, so a query
+  /// that succeeded in an earlier pass does not show the store is reachable
+  /// now. An unreachable store, a failed or timed-out restore, or a user
+  /// purchase or restore in progress keeps it unlocked. A lifetime unlock is
+  /// preserved, as in an explicit restore.
+  Future<void> _reconcileAppleStoreEntitlement({
+    required bool queryStore,
+  }) async {
+    if (queryStore) {
+      await _refreshCatalogInternal();
+    }
+    if (!_storeReachable ||
+        _pendingPurchaseResult != null ||
+        _restoreInFlight) {
+      return;
+    }
+    _appleReconciliationObservedEntitlement = false;
+    try {
+      await _inAppPurchase.restorePurchases().timeout(_restoreTimeout);
+    } on Exception {
+      _diagnostics.warning('billing', 'entitlement_check_failed');
+      return;
+    }
+    await Future<void>.delayed(_restoreEmptyResultGracePeriod);
+    await _enqueuePurchaseHandler(() async {
+      if (_appleReconciliationObservedEntitlement ||
+          _pendingPurchaseResult != null ||
+          _restoreInFlight) {
+        return;
+      }
+      await _clearCachedStoreEntitlement(preserveLifetime: true);
+    });
   }
 
   /// Refreshes store product metadata.
@@ -183,6 +268,7 @@ class MonetizationService {
     }
 
     _emit(_state.copyWith(isLoading: true, lastError: null));
+    _storeReachable = false;
     final isAvailable = await _inAppPurchase.isAvailable();
     if (!isAvailable) {
       _purchaseOptionsByOfferId.clear();
@@ -201,6 +287,8 @@ class MonetizationService {
     final response = await _inAppPurchase.queryProductDetails(
       requestedProductIds,
     );
+    _storeReachable =
+        response.error == null && response.productDetails.isNotEmpty;
     final catalog = _buildMonetizationCatalog(response.productDetails);
     _purchaseOptionsByOfferId
       ..clear()
@@ -560,6 +648,9 @@ class MonetizationService {
           if (_restoreInFlight) {
             _restoreObservedPurchaseUpdate = true;
           }
+          if (_appleReconciliation != null) {
+            _appleReconciliationObservedEntitlement = true;
+          }
           unawaited(
             _enqueuePurchaseHandler(() => _handleSuccessfulPurchase(purchase)),
           );
@@ -609,7 +700,9 @@ class MonetizationService {
     required String successMessage,
   }) async {
     try {
-      await _completePurchaseIfNeeded(purchase);
+      if (!await _completePurchaseIfNeeded(purchase)) {
+        throw StateError('Store rejected the purchase acknowledgement');
+      }
       final timestamp =
           _parsePurchaseDate(purchase.transactionDate) ?? DateTime.now();
       await _settings.setBool(SettingKeys.monetizationProUnlocked, value: true);
@@ -674,10 +767,19 @@ class MonetizationService {
     }
   }
 
-  Future<void> _completePurchaseIfNeeded(PurchaseDetails purchase) async {
-    if (purchase.pendingCompletePurchase) {
-      await _inAppPurchase.completePurchase(purchase);
+  /// Completes [purchase] when required and returns whether the store accepted
+  /// it. Google Play reports its acknowledgement outcome through the
+  /// platform-interface future; an unacknowledged purchase is refunded.
+  Future<bool> _completePurchaseIfNeeded(PurchaseDetails purchase) async {
+    if (!purchase.pendingCompletePurchase) {
+      return true;
     }
+    final Future<Object?> completion = _inAppPurchase.completePurchase(
+      purchase,
+    );
+    final result = await completion;
+    return result is! BillingResultWrapper ||
+        result.responseCode == BillingResponse.ok;
   }
 
   Future<void> _clearCachedStoreEntitlement({
@@ -752,20 +854,16 @@ class MonetizationService {
         return const MonetizationActionResult.failure(message);
       }
 
-      final purchases = response.pastPurchases
-          .where(
-            (purchase) =>
-                MonetizationProductIds.allKnown.contains(purchase.productID),
-          )
-          .toList(growable: false);
-      if (purchases.isEmpty) {
+      final (selected: selectedPurchase, :hasPending) =
+          _selectAndroidEntitlement(response);
+      if (selectedPurchase == null) {
         await _clearCachedStoreEntitlement();
-        return const MonetizationActionResult.failure(
-          _noActiveStorePurchaseMessage,
+        return MonetizationActionResult.failure(
+          hasPending
+              ? _pendingPlayPurchaseMessage
+              : _noActiveStorePurchaseMessage,
         );
       }
-
-      final selectedPurchase = _preferredAndroidEntitlementPurchase(purchases);
 
       final isLifetime = MonetizationProductIds.isLifetime(
         selectedPurchase.productID,
@@ -786,18 +884,11 @@ class MonetizationService {
     if (response.error != null) {
       return;
     }
-    final knownPurchases = response.pastPurchases
-        .where(
-          (purchase) =>
-              MonetizationProductIds.allKnown.contains(purchase.productID),
-        )
-        .toList(growable: false);
-    if (knownPurchases.isEmpty) {
+    final selected = _selectAndroidEntitlement(response).selected;
+    if (selected == null) {
       await _clearCachedStoreEntitlement();
       return;
     }
-
-    final selected = _preferredAndroidEntitlementPurchase(knownPurchases);
 
     final isLifetime = MonetizationProductIds.isLifetime(selected.productID);
     if (_state.activeProductId == selected.productID &&
@@ -834,21 +925,21 @@ class MonetizationService {
       return;
     }
 
-    final purchases = response.pastPurchases
-        .where(
-          (purchase) =>
-              MonetizationProductIds.allKnown.contains(purchase.productID),
-        )
-        .toList(growable: false);
-    if (purchases.isEmpty) {
+    final (selected: selectedPurchase, :hasPending) = _selectAndroidEntitlement(
+      response,
+    );
+    if (selectedPurchase == null) {
       _emit(_state.copyWith(isLoading: false, lastError: null));
       _resolvePendingPurchase(
-        const MonetizationActionResult.cancelled('Purchase cancelled.'),
+        hasPending
+            ? const MonetizationActionResult.failure(
+                _pendingPlayPurchaseMessage,
+              )
+            : const MonetizationActionResult.cancelled('Purchase cancelled.'),
       );
       return;
     }
 
-    final selectedPurchase = _preferredAndroidEntitlementPurchase(purchases);
     final isLifetime = MonetizationProductIds.isLifetime(
       selectedPurchase.productID,
     );
@@ -861,23 +952,36 @@ class MonetizationService {
     _resolvePendingPurchase(result);
   }
 
-  GooglePlayPurchaseDetails _preferredAndroidEntitlementPurchase(
-    List<GooglePlayPurchaseDetails> purchases,
-  ) {
-    final lifetimePurchase = purchases.firstWhereOrNull(
-      (purchase) => MonetizationProductIds.isLifetime(purchase.productID),
+  /// Picks the Play purchase that grants Pro: lifetime first, then the newest
+  /// subscription. Only completed purchases are eligible; pending payments
+  /// are reported through [hasPending] and never activate the entitlement.
+  ({GooglePlayPurchaseDetails? selected, bool hasPending})
+  _selectAndroidEntitlement(QueryPurchaseDetailsResponse response) {
+    final known = response.pastPurchases.where(
+      (purchase) =>
+          MonetizationProductIds.allKnown.contains(purchase.productID),
     );
-    if (lifetimePurchase != null) {
-      return lifetimePurchase;
-    }
-
-    return purchases.reduce(
-      (latest, purchase) =>
-          purchase.billingClientPurchase.purchaseTime >
-              latest.billingClientPurchase.purchaseTime
-          ? purchase
-          : latest,
+    final completed = known
+        .where(
+          (purchase) =>
+              purchase.billingClientPurchase.purchaseState ==
+              PurchaseStateWrapper.purchased,
+        )
+        .toList(growable: false);
+    final hasPending = known.any(
+      (purchase) =>
+          purchase.billingClientPurchase.purchaseState ==
+          PurchaseStateWrapper.pending,
     );
+    final selected =
+        completed.firstWhereOrNull(
+          (purchase) => MonetizationProductIds.isLifetime(purchase.productID),
+        ) ??
+        maxBy(
+          completed,
+          (purchase) => purchase.billingClientPurchase.purchaseTime,
+        );
+    return (selected: selected, hasPending: hasPending);
   }
 
   DateTime? _parseCachedDate(String? rawValue) =>

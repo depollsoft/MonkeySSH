@@ -15,6 +15,137 @@ class _MockLocalFile extends Mock implements File {}
 
 class _MockRandomAccessFile extends Mock implements RandomAccessFile {}
 
+/// In-memory SFTP server for [RemoteFileService.replaceFileBytes]. Without
+/// [posixRename], rename refuses an existing destination like SFTP v3. Names
+/// over 255 bytes fail, and with [ignoresMkdirMode] new directories get a
+/// default mode that others can enter.
+class _ReplaceSftp extends Fake implements SftpClient {
+  _ReplaceSftp(this.files);
+
+  final Map<String, List<int>> files;
+  final links = <String, String>{};
+  final setStats = <String>[];
+  final modes = <String, int>{};
+  final directories = <String, int>{};
+
+  /// Each opened path with its directory's mode at that moment, or null when
+  /// the directory is not one this save created.
+  final opened = <String, int?>{};
+
+  /// Paths opened with truncation, which only the in-place fallback does.
+  final truncated = <String>[];
+  bool posixRename = true;
+  bool ignoresMkdirMode = false;
+  int originalMode = 0x81ED;
+  Object? writeFailure;
+  Object? setStatFailure;
+  Object? mkdirFailure;
+
+  @override
+  Future<SftpFileAttrs> stat(String path, {bool followLink = true}) async {
+    if (!followLink && links.containsKey(path)) {
+      return SftpFileAttrs(mode: const SftpFileMode.value(0xA1FF));
+    }
+    if (!files.containsKey(links[path] ?? path)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+    }
+    return SftpFileAttrs(
+      mode: SftpFileMode.value(originalMode),
+      userID: 7,
+      groupID: 8,
+    );
+  }
+
+  @override
+  Future<String> absolute(String path) async => links[path] ?? path;
+
+  @override
+  Future<void> mkdir(String path, [SftpFileAttrs? attrs]) async {
+    _checkNameLength(path);
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (mkdirFailure case final failure?) throw failure;
+    final mode = attrs?.mode?.value;
+    directories[path] = 0x4000 | (ignoresMkdirMode ? 0x1ED : mode ?? 0x1ED);
+  }
+
+  @override
+  Future<void> rmdir(String dirname) async {
+    if (files.keys.any((path) => path.startsWith('$dirname/'))) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'not empty');
+    }
+    directories.remove(dirname);
+  }
+
+  @override
+  Future<SftpFile> open(String path, {SftpFileOpenMode? mode}) async {
+    _checkNameLength(path);
+    if (mode!.flag & SftpFileOpenMode.truncate.flag != 0) truncated.add(path);
+    opened[path] = directories[path.substring(0, path.lastIndexOf('/'))];
+    files[path] = [];
+    return _ReplaceSftpFile(this, path);
+  }
+
+  @override
+  Future<void> setStat(String path, SftpFileAttrs attrs) async {
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (setStatFailure case final failure?) throw failure;
+    setStats.add(path);
+    if (attrs.mode case final mode?) {
+      if (directories.containsKey(path)) {
+        directories[path] = 0x4000 | mode.value;
+      } else {
+        modes[path] = mode.value;
+      }
+    }
+  }
+
+  @override
+  Future<void> rename(String oldPath, String newPath) async {
+    _checkNameLength(newPath);
+    if (!posixRename && files.containsKey(newPath)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'exists');
+    }
+    files[newPath] = files.remove(oldPath)!;
+    if (modes.remove(oldPath) case final mode?) modes[newPath] = mode;
+  }
+
+  void _checkNameLength(String path) {
+    if (path.substring(path.lastIndexOf('/') + 1).length > 255) {
+      // OpenSSH reports ENAMETOOLONG as a bad message.
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.badMessage, 'name too long');
+    }
+  }
+
+  @override
+  Future<void> remove(String filename) async => files.remove(filename);
+}
+
+class _ReplaceSftpFile extends Fake implements SftpFile {
+  _ReplaceSftpFile(this.sftp, this.path);
+
+  final _ReplaceSftp sftp;
+  final String path;
+
+  @override
+  Future<void> writeBytes(
+    Uint8List data, {
+    int chunkSize = 0,
+    int maxPendingRequests = 0,
+    int offset = 0,
+  }) async {
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (sftp.writeFailure case final failure?) throw failure;
+    sftp.files[path]!.addAll(data);
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
 void registerRemoteFileServiceIoTests() {
   group('remote_file_service_io', () {
     late Directory directory;
@@ -337,6 +468,131 @@ void registerRemoteFileServiceIoTests() {
         );
 
         expect(order, ['write 0', 'progress 1', 'write 1', 'progress 2']);
+      });
+    });
+
+    group('replaceFileBytes', () {
+      test('a failed save leaves the original file intact', () async {
+        final server = _ReplaceSftp({
+          '/srv/notes.txt': [1, 2, 3],
+        })..writeFailure = SftpStatusError(SftpStatusCode.failure, 'lost');
+
+        await expectLater(
+          service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/notes.txt',
+            bytes: Uint8List.fromList([9]),
+          ),
+          throwsA(isA<SftpStatusError>()),
+        );
+
+        expect(server.files, {
+          '/srv/notes.txt': [1, 2, 3],
+        });
+        expect(server.directories, isEmpty);
+      });
+
+      test(
+        'replaces a symlink target with its metadata without posix-rename',
+        () async {
+          final server =
+              _ReplaceSftp({
+                  '/srv/real.txt': [1],
+                })
+                ..links['/srv/link'] = '/srv/real.txt'
+                ..posixRename = false;
+
+          await service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/link',
+            bytes: Uint8List.fromList([9]),
+          );
+
+          expect(server.files, {
+            '/srv/real.txt': [9],
+          });
+          expect(server.links, {'/srv/link': '/srv/real.txt'});
+          expect(server.truncated, isEmpty);
+          expect(server.directories, isEmpty);
+          final scratch = server.setStats.first;
+          expect(scratch, startsWith('/srv/.monkeyssh-save-'));
+          expect(server.setStats, [scratch, '$scratch/new', '$scratch/new']);
+        },
+      );
+
+      test('writes the copy only inside a 0700 scratch directory', () async {
+        for (final ignoresMkdirMode in [false, true]) {
+          final server =
+              _ReplaceSftp({
+                  '/srv/secret': [1],
+                })
+                ..originalMode = 0x8180
+                ..ignoresMkdirMode = ignoresMkdirMode;
+
+          await service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/secret',
+            bytes: Uint8List.fromList([9]),
+          );
+
+          expect(server.files, {
+            '/srv/secret': [9],
+          });
+          expect(server.opened.values, [0x41C0]);
+          expect(server.modes['/srv/secret'], 0x8180);
+          expect(server.directories, isEmpty);
+        }
+      });
+
+      test('writes in place without a private scratch directory', () async {
+        for (final server in [
+          _ReplaceSftp({
+              '/srv/secret': [1],
+            })
+            ..mkdirFailure = SftpStatusError(
+              SftpStatusCode.permissionDenied,
+              'read-only directory',
+            ),
+          _ReplaceSftp({
+              '/srv/secret': [1],
+            })
+            ..setStatFailure = SftpStatusError(
+              SftpStatusCode.permissionDenied,
+              'no chmod',
+            ),
+        ]) {
+          await service.replaceFileBytes(
+            sftp: server,
+            remotePath: '/srv/secret',
+            bytes: Uint8List.fromList([9]),
+          );
+
+          expect(server.files, {
+            '/srv/secret': [9],
+          });
+          expect(server.opened.keys, ['/srv/secret']);
+          expect(server.truncated, ['/srv/secret']);
+          expect(server.directories, isEmpty);
+        }
+      });
+
+      test('saves a 250-byte name without posix-rename', () async {
+        final path = '/srv/${'n' * 246}.txt';
+        final server = _ReplaceSftp({
+          path: [1],
+        })..posixRename = false;
+
+        await service.replaceFileBytes(
+          sftp: server,
+          remotePath: path,
+          bytes: Uint8List.fromList([9]),
+        );
+
+        expect(server.files, {
+          path: [9],
+        });
+        expect(server.truncated, isEmpty);
+        expect(server.directories, isEmpty);
       });
     });
   });

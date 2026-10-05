@@ -1824,13 +1824,27 @@ void main() {
         await tester.pump();
         verify(selectWindow).called(1);
 
-        final targetRow = find
-            .ancestor(of: find.text('target'), matching: find.byType(InkWell))
-            .first;
-        await tester.tap(
-          find.descendant(of: targetRow, matching: find.byIcon(Icons.close)),
-        );
-        await tester.pump();
+        Future<void> tapClose() async {
+          final targetRow = find
+              .ancestor(of: find.text('target'), matching: find.byType(InkWell))
+              .first;
+          await tester.tap(
+            find.descendant(of: targetRow, matching: find.byIcon(Icons.close)),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        // The enabled "confirm before closing" preference guards Home too.
+        await tapClose();
+        expect(find.text('Close window?'), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        verifyNever(killWindow);
+        expect(find.text('target'), findsOneWidget);
+
+        await tapClose();
+        await tester.tap(find.text('Close window'));
+        await tester.pumpAndSettle();
         verify(killWindow).called(1);
         expect(find.text('target'), findsNothing);
         expect(find.text('shell'), findsOneWidget);
@@ -2598,6 +2612,74 @@ void main() {
         expect(find.text('2'), findsNothing);
       },
     );
+
+    testWidgets('preview ticks rebuild only rows whose inputs changed', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final first = _buildActiveConnection(
+        connectionId: 1,
+        hostId: 1,
+        preview: 'one',
+      );
+      final second = _buildActiveConnection(
+        connectionId: 2,
+        hostId: 2,
+        preview: 'two',
+      );
+      final sessionsNotifier = _MutableActiveSessionsNotifier(
+        initialConnections: [first, second],
+      );
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessionsNotifier),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+                _buildHost(id: 2, label: 'Beta', sortOrder: 1),
+              ]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(HomeScreen)),
+      );
+      ProviderSubscription<HostRowData> listenHost(int hostId) {
+        final subscription = container.listen(
+          hostRowDataProvider((
+            hostId: hostId,
+            lightThemeId: null,
+            darkThemeId: null,
+            isDark: false,
+          )),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+        return subscription;
+      }
+
+      final alpha = listenHost(1);
+      final beta = listenHost(2);
+      final alphaRow = alpha.read();
+      final betaRow = beta.read();
+
+      // A preview tick republishes the sessions map with nothing changed.
+      sessionsNotifier.setActiveConnections([first, second]);
+      expect(alpha.read(), same(alphaRow));
+      expect(beta.read(), same(betaRow));
+
+      sessionsNotifier.setActiveConnections([
+        _buildActiveConnection(connectionId: 1, hostId: 1, preview: 'one!'),
+        second,
+      ]);
+      expect(alpha.read().previewEntries.single.body, 'one!');
+      expect(beta.read(), same(betaRow));
+    });
 
     testWidgets(
       'adding a connection to host B does not remove host A connection badge',

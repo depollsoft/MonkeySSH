@@ -12,6 +12,13 @@ type wheelAccelerationProfile struct {
 
 var wheelGovernorNow = time.Now
 
+// wheelCarryExpiry bounds how long a trailing run that could still complete
+// into a wheel report is held. A lone Escape is as likely a key press as the
+// first byte of a split report, and without an expiry it waited for the next
+// input chunk, which could then read as an Alt-modified key. Releasing a
+// genuinely split report early only leaves that one event ungoverned.
+const wheelCarryExpiry = 50 * time.Millisecond
+
 // Like scheduleRestoreRedraw, this is replaceable so tests can fire timers
 // synchronously without waiting for wall time.
 var scheduleWheelFlush = func(delay time.Duration, action func()) {
@@ -267,11 +274,14 @@ func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {
 func (s *muxServer) prepareWheelFlushLocked(window *muxWindow) func() {
 	g := &window.wheelGovernor
 	g.flushGen++
-	if g.profile == nil || g.owed == 0 {
+	if g.profile == nil || (g.owed == 0 && len(g.carry) == 0) {
 		return nil
 	}
 	generation := g.flushGen
 	delay := g.profile.window + 50*time.Millisecond
+	if len(g.carry) > 0 {
+		delay = wheelCarryExpiry
+	}
 	return func() {
 		scheduleWheelFlush(delay, func() {
 			s.flushWheelGovernor(window, generation)
@@ -293,13 +303,25 @@ func (s *muxServer) flushWheelGovernor(window *muxWindow, generation int) {
 		s.mu.Unlock()
 		return
 	}
-	window.resetWheelGovernorIfInactiveLocked()
 	g := &window.wheelGovernor
-	if g.profile == nil || g.flushGen != generation {
+	if g.flushGen != generation {
 		s.mu.Unlock()
 		return
 	}
-	data := g.drain(wheelGovernorNow())
+	// A held prefix nothing completed is ordinary input; it goes to the pty
+	// as it is, never back through report detection.
+	held := g.carry
+	g.carry = nil
+	window.resetWheelGovernorIfInactiveLocked()
+	var data []byte
+	if g.profile != nil {
+		data = g.drain(wheelGovernorNow())
+	}
+	if len(held) > 0 {
+		data = append(data, held...)
+		// Rows still owed would land after that input.
+		g.owed = 0
+	}
 	scheduleFlush = s.prepareWheelFlushLocked(window)
 	win32InputMode := window.win32InputMode
 	s.mu.Unlock()

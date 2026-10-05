@@ -352,8 +352,8 @@ func installWheelTestClock(t *testing.T) *wheelTestClock {
 	foregroundProcessGroupForWindow = func(window *muxWindow) int { return window.foregroundPid }
 	wheelGovernorNow = func() time.Time { return clock.now }
 	scheduleWheelFlush = func(delay time.Duration, action func()) {
-		if delay != 200*time.Millisecond {
-			t.Errorf("flush delay=%v, want 200ms", delay)
+		if delay != 200*time.Millisecond && delay != wheelCarryExpiry {
+			t.Errorf("flush delay=%v, want 200ms or %v", delay, wheelCarryExpiry)
 		}
 		clock.timers = append(clock.timers, wheelTestTimer{clock.now.Add(delay), action})
 	}
@@ -584,6 +584,38 @@ func TestWheelGovernorResetsBeforeMouseTrackingResumes(t *testing.T) {
 	clock.timers[0].action()
 	if got := pty.String(); got != want || window.wheelGovernor.count != 0 || window.wheelGovernor.owed != 0 {
 		t.Fatalf("resumed PTY=%q, count=%d owed=%d", got, window.wheelGovernor.count, window.wheelGovernor.owed)
+	}
+}
+
+func TestWheelGovernorCarryExpiresAsOrdinaryInput(t *testing.T) {
+	clock := installWheelTestClock(t)
+	server, window, pty := newWheelTestWindow("agy", true)
+	// A lone Escape could start a split wheel report, so it is held, but
+	// with no debt owed it must still reach the pty on its own.
+	if err := server.writeWindowInput(window.id, []byte("\x1b"), false); err != nil {
+		t.Fatal(err)
+	}
+	if pty.String() != "" || len(clock.timers) != 1 || clock.timers[0].due != clock.now.Add(wheelCarryExpiry) {
+		t.Fatalf("held Escape: pty=%q timers=%d", pty.String(), len(clock.timers))
+	}
+	clock.now = clock.timers[0].due
+	clock.timers[0].action()
+	if got := pty.String(); got != "\x1b" || len(window.wheelGovernor.carry) != 0 || len(clock.timers) != 1 {
+		t.Fatalf("expired Escape: pty=%q carry=%q timers=%d", got, window.wheelGovernor.carry, len(clock.timers))
+	}
+	// A report completed before the expiry is governed as one, and the stale
+	// expiry writes nothing more.
+	pty.Reset()
+	if err := server.writeWindowInput(window.id, []byte(wheelUp+"\x1b[<64;12"), false); err != nil {
+		t.Fatal(err)
+	}
+	stale := clock.timers[len(clock.timers)-1]
+	if err := server.writeWindowInput(window.id, []byte(";34M"), false); err != nil {
+		t.Fatal(err)
+	}
+	stale.action()
+	if got := pty.String(); got != wheelUp {
+		t.Fatalf("split report: pty=%q, want the first report only", got)
 	}
 }
 

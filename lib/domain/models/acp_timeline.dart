@@ -554,9 +554,13 @@ class AcpTimelineBuilder {
   }
 
   /// Marks a queued local prompt as dispatched to the agent.
+  ///
+  /// This is a turn boundary: a late unlabelled chunk from the previous turn
+  /// may have reopened a message, and the new turn must not append to it.
   AcpTimeline markLocalUserPromptDispatched(String messageId) {
     _clearPendingUserEcho();
     _pendingLocalUserMessageId = messageId;
+    _openMessageIndex = null;
     final index = _entries.indexWhere(
       (entry) =>
           entry is AcpMessageEntry &&

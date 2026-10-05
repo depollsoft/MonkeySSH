@@ -26,6 +26,23 @@ class _DelayedBoolSettingsService extends SettingsService {
   }
 }
 
+class _GatedCustomThemesSettingsService extends SettingsService {
+  _GatedCustomThemesSettingsService(super.database);
+
+  final customThemesRead = Completer<void>();
+  final releaseCustomThemes = Completer<void>();
+
+  @override
+  Future<String?> getString(String key) async {
+    if (key == SettingKeys.customTerminalThemes &&
+        !customThemesRead.isCompleted) {
+      customThemesRead.complete();
+      await releaseCustomThemes.future;
+    }
+    return super.getString(key);
+  }
+}
+
 void main() {
   late AppDatabase db;
   late SettingsService service;
@@ -492,6 +509,17 @@ void main() {
             .initializedValue();
         expect(result, 14.0);
       });
+
+      test('keeps loaded and saved sizes in the supported range', () async {
+        final settings = container.read(settingsServiceProvider);
+        await settings.setInt(SettingKeys.terminalFontSize, 40);
+        final notifier = container.read(fontSizeNotifierProvider.notifier);
+        expect(await notifier.initializedValue(), maxFontSize);
+
+        await notifier.setFontSize(2);
+        expect(container.read(fontSizeNotifierProvider), minFontSize);
+        expect(await settings.getInt(SettingKeys.terminalFontSize), 8);
+      });
     });
 
     group('fontFamilyNotifierProvider', () {
@@ -666,6 +694,59 @@ void main() {
           );
         },
       );
+
+      test('normalization never overwrites a newer theme choice', () async {
+        final settings = _GatedCustomThemesSettingsService(testDb);
+        await settings.setString(
+          SettingKeys.defaultTerminalThemeLight,
+          'missing-light-theme',
+        );
+        final themes = ProviderContainer(
+          overrides: [settingsServiceProvider.overrideWithValue(settings)],
+        );
+        addTearDown(themes.dispose);
+        final notifier = themes.read(terminalThemeSettingsProvider.notifier);
+        await settings.customThemesRead.future;
+
+        // The user picks a theme while initialization holds the obsolete id.
+        await notifier.setLightTheme('iterm2-github-light-default');
+        settings.releaseCustomThemes.complete();
+        await notifier.initializedValue();
+
+        expect(
+          themes.read(terminalThemeSettingsProvider).lightThemeId,
+          'iterm2-github-light-default',
+        );
+        expect(
+          await settings.getString(SettingKeys.defaultTerminalThemeLight),
+          'iterm2-github-light-default',
+        );
+      });
+
+      test('normalization skips a value another writer replaced', () async {
+        await service.setString(
+          SettingKeys.defaultTerminalThemeLight,
+          'missing-light-theme',
+        );
+        await service.replaceString(
+          SettingKeys.defaultTerminalThemeLight,
+          expected: 'stale-theme',
+          value: TerminalThemes.defaultLightThemeId,
+        );
+        expect(
+          await service.getString(SettingKeys.defaultTerminalThemeLight),
+          'missing-light-theme',
+        );
+        await service.replaceString(
+          SettingKeys.defaultTerminalThemeLight,
+          expected: 'missing-light-theme',
+          value: TerminalThemes.defaultLightThemeId,
+        );
+        expect(
+          await service.getString(SettingKeys.defaultTerminalThemeLight),
+          TerminalThemes.defaultLightThemeId,
+        );
+      });
 
       test('normalizes unknown saved theme ids', () async {
         final settings = container.read(settingsServiceProvider);

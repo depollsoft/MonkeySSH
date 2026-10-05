@@ -5416,6 +5416,17 @@ func TestHoldAgentWindowCommandWrapsFastFailure(t *testing.T) {
 	if got := holdAgentWindowCommand("/bin/zsh", "   "); got != "" {
 		t.Fatalf("blank command should stay empty, got %q", got)
 	}
+	for _, shell := range []string{"/bin/tcsh", "/usr/local/bin/fish"} {
+		if got := holdAgentWindowCommand(shell, "cursor-agent --resume abc"); got != "cursor-agent --resume abc" {
+			t.Fatalf("%s: non-POSIX shell got the POSIX wrapper: %s", shell, got)
+		}
+	}
+	if _, err := os.Stat("/bin/tcsh"); err == nil {
+		wrapped := holdAgentWindowCommand("/bin/tcsh", "true --resume abc")
+		if output, err := exec.Command("/bin/tcsh", "-f", "-n", "-c", wrapped).CombinedOutput(); err != nil {
+			t.Fatalf("tcsh cannot parse the launch command: %v: %s", err, output)
+		}
+	}
 }
 
 func TestCreateWindowHoldsAgentWindowOpenOnFastFailure(t *testing.T) {
@@ -5491,6 +5502,59 @@ func TestCloseMarksWindowsClosedSoLateWatchersAreInert(t *testing.T) {
 		return 0
 	}
 	server.markWindowClosed("@1")
+}
+
+// Output a child wrote right before exiting can still be buffered in its
+// terminal when Wait returns. The window stays registered until its reader
+// drains that output, and the final window's attach client receives it before
+// the idle shutdown closes the client.
+func TestNaturalExitDeliversBufferedFinalOutput(t *testing.T) {
+	server := newMuxServer("final-output")
+	t.Cleanup(server.close)
+	attach := &recordingConn{}
+	registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
+	windowPty, proc := newLifecyclePty(), newLifecycleProcess()
+	window, err := server.createWindowWithStarter(createWindowOptions{}, func(*exec.Cmd, int, int) (muxPty, muxProcess, error) {
+		return windowPty, proc, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTestAttachWrites(t, server)
+	attach.Reset()
+
+	proc.exit()
+	// Give an early retirement the chance to happen before the reader runs.
+	for deadline := time.Now().Add(50 * time.Millisecond); time.Now().Before(deadline); {
+		server.mu.Lock()
+		retired := server.windowByIDLocked(window.id) == nil
+		server.mu.Unlock()
+		if retired {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case windowPty.output <- []byte("final-output"):
+	case <-time.After(time.Second):
+		t.Fatal("the reader stopped before the final output was read")
+	}
+	close(windowPty.output)
+
+	var closeDone chan struct{}
+	for deadline := time.Now().Add(3 * time.Second); closeDone == nil; {
+		if time.Now().After(deadline) {
+			t.Fatal("last window exit did not shut the server down")
+		}
+		server.mu.Lock()
+		closeDone = server.closeDone
+		server.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	<-closeDone
+	if got := attach.String(); !strings.Contains(got, "final-output") {
+		t.Fatalf("attach output = %q, want the final output", got)
+	}
 }
 
 func TestCreateWindowClosesNonAgentWindowOnExit(t *testing.T) {
@@ -8897,7 +8961,7 @@ console.log(JSON.stringify({
 
 func TestPiProviderChangesBroadcastWithoutTitleChange(t *testing.T) {
 	server := newMuxServer("test")
-	control := &recordingConn{}
+	control := newControlRecorder(server)
 	client := newControlClient(control)
 	window := &muxWindow{
 		id: "@1", name: "Pi", command: "pi", lastActivity: time.Now(),
@@ -8977,7 +9041,7 @@ func TestWindowMetadataRejectsPiIdentityFromOtherProcess(t *testing.T) {
 func TestWindowTitleUpdatesStillBroadcast(t *testing.T) {
 	server := newMuxServer("test")
 	attach := &recordingConn{}
-	control := &recordingConn{}
+	control := newControlRecorder(server)
 	client := newControlClient(control)
 	window := &muxWindow{
 		id:                "@1",
@@ -9153,7 +9217,7 @@ func TestWindowMetadataIgnoresMalformedTerminalProgress(t *testing.T) {
 
 func TestTerminalProgressChangeBroadcastsWindowUpdate(t *testing.T) {
 	server := newMuxServer("test")
-	control := &recordingConn{}
+	control := newControlRecorder(server)
 	client := newControlClient(control)
 	window := &muxWindow{
 		id:           "@1",
@@ -9245,12 +9309,6 @@ func TestRestoreWindowOptionsDropProcessOwnedTerminalModes(t *testing.T) {
 	}
 	if enabled, ok := options.privateModes["7"]; !ok || enabled {
 		t.Fatalf("restored options wrap mode = %v, %v, want present false", enabled, ok)
-	}
-	if options.insertModeKnown || options.insertModeEnabled {
-		t.Fatalf("restored options retained insert mode: known=%v enabled=%v", options.insertModeKnown, options.insertModeEnabled)
-	}
-	if options.applicationKeypadKnown || options.applicationKeypadEnabled {
-		t.Fatalf("restored options retained application keypad: known=%v enabled=%v", options.applicationKeypadKnown, options.applicationKeypadEnabled)
 	}
 	window := &muxWindow{privateModes: options.privateModes}
 	if got := window.themeHintRefreshDataLocked([]byte("\x1b[?997;1n")); len(got) != 0 {
@@ -9576,12 +9634,6 @@ func TestRestoreSnapshotPreservesDisplayModesAndDropsProcessModes(t *testing.T) 
 	}
 	if !options.privateModes["1049"] {
 		t.Fatalf("restored options private modes = %#v", options.privateModes)
-	}
-	if options.insertModeKnown || options.insertModeEnabled {
-		t.Fatal("restored options retained process-owned insert mode")
-	}
-	if options.applicationKeypadKnown || options.applicationKeypadEnabled {
-		t.Fatal("restored options retained process-owned application keypad mode")
 	}
 }
 
@@ -11372,6 +11424,11 @@ func TestCreateWindowOptionsForRestoreBuildsAgentResumeCommand(t *testing.T) {
 }
 
 func TestEnrichRestoreWithAgentSessionIDsUsesAntigravityHistory(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
@@ -11434,6 +11491,11 @@ func TestEnrichRestoreWithAgentSessionIDsUsesAntigravityHistory(t *testing.T) {
 }
 
 func TestEnrichRestoreAntigravityRejectsOtherWorkspaceFileMtime(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
@@ -11564,6 +11626,11 @@ func TestLiveCursorWindowPublishesSessionFromFalseConversationMetadata(t *testin
 }
 
 func TestEnrichRestoreWithAgentSessionIDsUsesCursorChatStore(t *testing.T) {
+	// The pane PIDs below are synthetic; on a Linux runner they can name a real
+	// process whose /proc cwd would then shadow the window's recorded cwd.
+	originalProcessCwd := processWorkingDirectoryForMetadata
+	t.Cleanup(func() { processWorkingDirectoryForMetadata = originalProcessCwd })
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	originalProcessStart := processStartedAtForMetadata
 	originalProcessTable := processTableForMetadata
 	t.Cleanup(func() {
@@ -12475,6 +12542,13 @@ func TestStalledControlClientDoesNotBlockWindowOutput(t *testing.T) {
 		server.handleWindowOutput(window.id, []byte("second"))
 	}()
 	assertTestDeadline(t, conn.writeDeadlines, false)
+	// The window update is now blocked on the stalled subscriber; output
+	// keeps flowing without waiting for that write to time out.
+	select {
+	case <-outputDone:
+	case <-time.After(time.Second):
+		t.Fatal("stalled control writer blocked window output")
+	}
 	if err := conn.Conn.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -12492,6 +12566,74 @@ func TestStalledControlClientDoesNotBlockWindowOutput(t *testing.T) {
 	}
 	if got := string(window.history); got != "firstsecond" {
 		t.Fatalf("history = %q, want firstsecond", got)
+	}
+}
+
+// While a subscriber is stalled, senders do not block, lifecycle events and
+// replies keep their order, and only the newest update per window is kept.
+func TestControlClientQueueCoalescesUpdatesWhileSubscriberStalls(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+	client := newControlClient(conn)
+	update := func(name string) controlResponse {
+		return controlResponse{Type: "window_updated", Window: &windowSnapshot{ID: "@1", Name: name}}
+	}
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		client.send(controlResponse{Type: "hello"}) // the writer blocks on this one
+		client.send(update("first"))
+		client.send(controlResponse{Type: "window_added", Window: &windowSnapshot{ID: "@2"}})
+		client.send(update("second"))
+		client.send(controlResponse{ID: "7", Type: "pong"})
+	}()
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("a stalled subscriber blocked the sender")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	decoder := json.NewDecoder(peer)
+	var got []string
+	for range 4 {
+		var response controlResponse
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		entry := response.Type + response.ID
+		if response.Window != nil {
+			entry += " " + response.Window.ID + " " + response.Window.Name
+		}
+		got = append(got, entry)
+	}
+	want := []string{"hello", "window_added @2 ", "window_updated @1 second", "pong7"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("frames = %q, want %q", got, want)
+	}
+}
+
+func TestControlClientOverBudgetIsDisconnected(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+	client := newControlClient(conn)
+	client.send(controlResponse{Type: "hello"}) // the writer blocks on this one
+	half := controlFrame{data: make([]byte, controlOutgoingLimitBytes/2+1)}
+	client.enqueue(half)
+	client.enqueue(half)
+	select {
+	case <-client.finished:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber over its queue budget was not disconnected")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadAll(peer); err != nil {
+		t.Fatalf("read after disconnect = %v, want EOF", err)
+	}
+	client.send(controlResponse{Type: "pong"})
+	client.outMu.Lock()
+	defer client.outMu.Unlock()
+	if len(client.out) != 0 || client.outBytes != 0 {
+		t.Fatalf("disconnected client still queues %d frames", len(client.out))
 	}
 }
 
@@ -12943,6 +13085,9 @@ func TestFailedProcessTableRefreshIsCached(t *testing.T) {
 	}
 }
 
+// Metadata discovery runs off the output reader: a slow probe neither holds
+// the server mutex nor delays the pane's output, and a result for a process
+// that changed meanwhile is discarded.
 func TestMetadataDiscoveryReleasesServerLockAndRejectsChangedProcess(t *testing.T) {
 	window := &muxWindow{id: "@1", foregroundPid: 42, foregroundCommand: "zsh"}
 	_, server := newThemeQueryTestServer(t, window)
@@ -12955,27 +13100,35 @@ func TestMetadataDiscoveryReleasesServerLockAndRejectsChangedProcess(t *testing.
 	cache.loadedAt = time.Now()
 	cache.mu.Unlock()
 	originalStart := processStartedAtForMetadata
+	entered, release := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() {
+		close(release)
+		server.windowWatchers.Wait()
 		processStartedAtForMetadata = originalStart
 		cache.mu.Lock()
 		cache.processes, cache.loadedAt = previous, loaded
 		cache.mu.Unlock()
 	})
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	processStartedAtForMetadata = func(int) time.Time {
 		close(entered)
 		<-release
 		return time.Now()
 	}
-	go func() {
-		server.handleWindowOutput(window.id, []byte("output"))
-		close(done)
-	}()
-	t.Cleanup(func() { close(release); <-done })
+	server.scheduleProcessMetadataRefresh(window)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("metadata discovery did not start")
+	}
+	outputDone := make(chan struct{})
+	go func() {
+		server.handleWindowOutput(window.id, []byte("output"))
+		close(outputDone)
+	}()
+	select {
+	case <-outputDone:
+	case <-time.After(time.Second):
+		t.Fatal("window output waited for metadata discovery")
 	}
 	changed := make(chan struct{})
 	go func() {
@@ -12990,12 +13143,25 @@ func TestMetadataDiscoveryReleasesServerLockAndRejectsChangedProcess(t *testing.
 		t.Fatal("metadata discovery held server mutex")
 	}
 	release <- struct{}{}
-	<-done
+	for deadline := time.Now().Add(time.Second); ; {
+		server.mu.Lock()
+		inFlight := window.metadataRefreshInFlight
+		server.mu.Unlock()
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("metadata refresh did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
 	if window.foregroundCommand != "zsh" || window.agentSessionID != "" {
 		t.Fatalf("stale metadata committed: command=%q session=%q", window.foregroundCommand, window.agentSessionID)
 	}
 	if string(window.history) != "output" {
-		t.Fatalf("output after discovery = %q", window.history)
+		t.Fatalf("output during discovery = %q", window.history)
 	}
 }
 
@@ -13264,5 +13430,35 @@ func TestInPlaceRedrawIsCreditedToTheLiveForegroundGroup(t *testing.T) {
 	window.noteForegroundCommandLocked(43, "some-inline-tui")
 	if !window.foregroundAppOwnsScreenLocked() {
 		t.Fatalf("redraw credited to %d, foreground %d", window.inPlaceRedrawPid, window.foregroundPid)
+	}
+}
+
+type countingClosePty struct {
+	muxPty
+	closes int
+}
+
+func (p *countingClosePty) Close() error { p.closes++; return nil }
+
+func TestClosePtyClosesEachHandleOnce(t *testing.T) {
+	// The Windows exit drain closes the pseudo console before retirement
+	// closes it again; the second close must not reach the handle.
+	pty := &countingClosePty{}
+	window := &muxWindow{pty: pty}
+	if err := window.closePty(pty); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.closePty(pty); err != nil {
+		t.Fatal(err)
+	}
+	if pty.closes != 1 {
+		t.Fatalf("closes = %d, want 1", pty.closes)
+	}
+	replacement := &countingClosePty{}
+	if err := window.closePty(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if replacement.closes != 1 {
+		t.Fatalf("replacement closes = %d, want 1", replacement.closes)
 	}
 }

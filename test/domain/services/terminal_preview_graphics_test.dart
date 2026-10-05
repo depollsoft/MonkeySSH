@@ -122,6 +122,41 @@ void main() {
       expect(placement.rowSpan, 2);
     });
 
+    test('maps a source-space crop into a downsampled decoded image', () {
+      final terminal = Terminal(maxLines: 100)
+        ..resize(40, 12)
+        ..write('img:');
+      // A 2560px source decoded at half size; Kitty crop coordinates stay in
+      // the 2560px source space.
+      terminal.graphics.storeDecodedImageWithId(
+        2,
+        DecodedTerminalImage(
+          frames: [
+            TerminalImageFrame(
+              _solidImage(const ui.Color(0xFF0000FF), 1280, 20),
+            ),
+          ],
+          sourceWidth: 2560,
+          sourceHeight: 40,
+        ),
+      );
+      terminal.graphics.placeImage(
+        2,
+        terminal.buffer.createAnchorFromCursor(),
+        cols: 6,
+        rows: 3,
+        srcX: 1280,
+        srcWidth: 1280,
+      );
+
+      final snapshot = SshSession.buildTerminalPreviewSnapshot(terminal)!;
+
+      expect(
+        snapshot.images.single.src,
+        const ui.Rect.fromLTWH(640, 0, 640, 20),
+      );
+    });
+
     test(
       'drops the previous placeholder ghost, keeping the newest instance',
       () {

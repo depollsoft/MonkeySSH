@@ -84,6 +84,7 @@ class TmuxWindowLoader {
   int _retryAttempts = 0;
   int _emptyReloads = 0;
   Timer? _retryTimer;
+  List<TmuxWindowSnapshotEvent>? _snapshotsDuringFetch;
 
   void _resetRecovery() {
     _retryTimer?.cancel();
@@ -92,10 +93,21 @@ class TmuxWindowLoader {
     _emptyReloads = 0;
   }
 
-  /// Invalidates in-flight results when a snapshot or session changes.
+  /// Invalidates in-flight results when a full list arrives or the session
+  /// changes.
   void invalidate() {
     _generation++;
     _resetRecovery();
+  }
+
+  /// Records a per-window snapshot the view has applied. Its fields are newer
+  /// than an in-flight query's, but it cannot remove a closed window, so the
+  /// query still decides membership and the snapshot is replayed onto it.
+  void recordSnapshot(TmuxWindowSnapshotEvent event) {
+    // Recovery is left alone: a snapshot cannot repair a failed or empty
+    // structural list, so the scheduled reload that can remove closed
+    // windows must still run.
+    _snapshotsDuringFetch?.add(event);
   }
 
   /// Cancels retries and prevents queued or future queries from starting.
@@ -114,6 +126,7 @@ class TmuxWindowLoader {
     }
     _loading = true;
     final generation = ++_generation;
+    final snapshots = _snapshotsDuringFetch = <TmuxWindowSnapshotEvent>[];
     try {
       List<TmuxWindow>? windows;
       AsyncError? error;
@@ -122,7 +135,17 @@ class TmuxWindowLoader {
       } on Object catch (caught, stackTrace) {
         error = AsyncError(caught, stackTrace);
       }
+      _snapshotsDuringFetch = null;
       if (_disposed || generation != _generation) return;
+      if (snapshots.isNotEmpty && windows != null) {
+        // The query decides membership; the snapshots carry newer fields for
+        // the windows it kept. A failed query still goes through recovery
+        // below, because only a structural reload can drop closed windows.
+        windows = snapshots.fold<List<TmuxWindow>>(
+          windows,
+          applyTmuxWindowChangeEvent,
+        );
+      }
       final isEmpty = windows?.isEmpty ?? false;
       if (error == null) {
         if (isEmpty) {
@@ -1015,7 +1038,7 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
       _windowLoader.load();
       return;
     }
-    _windowLoader.invalidate();
+    _windowLoader.recordSnapshot(event as TmuxWindowSnapshotEvent);
     final windows = applyTmuxWindowChangeEvent(currentWindows, event);
     if (identical(windows, currentWindows) && !_isLoadingWindows) return;
     setState(() {

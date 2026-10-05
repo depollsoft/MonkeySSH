@@ -102,6 +102,7 @@ final class AcpThreadChild {
   const AcpThreadChild({
     required this.entry,
     required this.entryIndex,
+    this.depth = 0,
     this.markdown,
     this.markdownPartIndex,
     this.markdownPartCount,
@@ -110,8 +111,16 @@ final class AcpThreadChild {
     this.userPartCount,
   });
 
+  /// The entry this child renders: a top-level entry, or a descendant of a
+  /// subagent transcript, whose own child is its header row.
   final AcpTimelineEntry entry;
+
+  /// Index of the top-level entry this child belongs to.
   final int entryIndex;
+
+  /// Subagent transcript nesting: 0 at top level, and one more for a
+  /// transcript's header and descendants than for the transcript entry.
+  final int depth;
   final String? markdown;
   final int? markdownPartIndex;
   final int? markdownPartCount;
@@ -143,55 +152,78 @@ List<AcpThreadChild> buildAcpThreadChildren(
   final children = <AcpThreadChild>[];
   final end = endEntryIndex ?? entries.length;
   for (var entryIndex = startEntryIndex; entryIndex < end; entryIndex++) {
-    final entry = entries[entryIndex];
-    if (entry case AcpUserPromptEntry(:final parts)
-        when parts.any(
-          (part) =>
-              part is AcpTextPart &&
-              part.text.length > kAcpTextVirtualChunkChars,
-        )) {
-      final segments = _userPromptSegments[entry] ??= <List<AcpPromptPart>>[
-        for (final part in parts)
-          if (part case AcpTextPart(:final text)
-              when text.length > kAcpTextVirtualChunkChars)
-            for (final chunk in splitAcpTextForVirtualization(text))
-              <AcpPromptPart>[AcpTextPart(chunk)]
-          else
-            <AcpPromptPart>[part],
-      ];
-      for (var partIndex = 0; partIndex < segments.length; partIndex++) {
-        children.add(
-          AcpThreadChild(
-            entry: entry,
-            entryIndex: entryIndex,
-            userParts: segments[partIndex],
-            userPartIndex: partIndex,
-            userPartCount: segments.length,
-          ),
-        );
-      }
-      continue;
-    }
-    if (entry case AcpAssistantMessageEntry(:final markdown)
-        when markdown.length > kAcpMarkdownVirtualChunkChars) {
-      final chunks = _assistantMarkdownChunks[entry] ??=
-          splitAcpMarkdownForVirtualization(markdown);
-      for (var partIndex = 0; partIndex < chunks.length; partIndex++) {
-        children.add(
-          AcpThreadChild(
-            entry: entry,
-            entryIndex: entryIndex,
-            markdown: chunks[partIndex],
-            markdownPartIndex: partIndex,
-            markdownPartCount: chunks.length,
-          ),
-        );
-      }
-      continue;
-    }
-    children.add(AcpThreadChild(entry: entry, entryIndex: entryIndex));
+    _addEntryChildren(children, entries[entryIndex], entryIndex, 0);
   }
   return children;
+}
+
+/// Adds [entry]'s children. A subagent transcript flattens into a header row
+/// plus its descendants one level deeper, so they split and virtualize like
+/// top-level rows instead of mounting as one column.
+void _addEntryChildren(
+  List<AcpThreadChild> children,
+  AcpTimelineEntry entry,
+  int entryIndex,
+  int depth,
+) {
+  if (entry case AcpSubagentTranscriptEntry(entries: final descendants)) {
+    children.add(
+      AcpThreadChild(entry: entry, entryIndex: entryIndex, depth: depth + 1),
+    );
+    for (final descendant in descendants) {
+      _addEntryChildren(children, descendant, entryIndex, depth + 1);
+    }
+    return;
+  }
+  if (entry case AcpUserPromptEntry(:final parts)
+      when parts.any(
+        (part) =>
+            part is AcpTextPart && part.text.length > kAcpTextVirtualChunkChars,
+      )) {
+    final segments = _userPromptSegments[entry] ??= <List<AcpPromptPart>>[
+      for (final part in parts)
+        if (part case AcpTextPart(:final text)
+            when text.length > kAcpTextVirtualChunkChars)
+          for (final chunk in splitAcpTextForVirtualization(text))
+            <AcpPromptPart>[AcpTextPart(chunk)]
+        else
+          <AcpPromptPart>[part],
+    ];
+    for (var partIndex = 0; partIndex < segments.length; partIndex++) {
+      children.add(
+        AcpThreadChild(
+          entry: entry,
+          entryIndex: entryIndex,
+          depth: depth,
+          userParts: segments[partIndex],
+          userPartIndex: partIndex,
+          userPartCount: segments.length,
+        ),
+      );
+    }
+    return;
+  }
+  if (entry case AcpAssistantMessageEntry(:final markdown)
+      when markdown.length > kAcpMarkdownVirtualChunkChars) {
+    final chunks = _assistantMarkdownChunks[entry] ??=
+        splitAcpMarkdownForVirtualization(markdown);
+    for (var partIndex = 0; partIndex < chunks.length; partIndex++) {
+      children.add(
+        AcpThreadChild(
+          entry: entry,
+          entryIndex: entryIndex,
+          depth: depth,
+          markdown: chunks[partIndex],
+          markdownPartIndex: partIndex,
+          markdownPartCount: chunks.length,
+        ),
+      );
+    }
+    return;
+  }
+  children.add(
+    AcpThreadChild(entry: entry, entryIndex: entryIndex, depth: depth),
+  );
 }
 
 ({
@@ -204,36 +236,52 @@ projectAcpThreadWindow(List<AcpTimelineEntry> entries) {
   var initialVisibleChildren = 0;
   var sourceChars = 0;
   final children = <AcpThreadChild>[];
+  entries:
   while (startEntryIndex > 0 &&
       initialVisibleChildren < _maxInitialTailChildren &&
       sourceChars < _maxInitialTailSourceChars) {
     startEntryIndex -= 1;
-    final entry = entries[startEntryIndex];
     final entryChildren = buildAcpThreadChildren(
       entries,
       startEntryIndex: startEntryIndex,
       endEntryIndex: startEntryIndex + 1,
     );
     children.insertAll(0, entryChildren);
-    final entrySourceChars = switch (entry) {
-      AcpUserPromptEntry(:final parts) => parts.whereType<AcpTextPart>().fold(
-        0,
-        (length, part) => length + part.text.length,
-      ),
-      AcpAssistantMessageEntry(:final markdown) ||
-      AcpThoughtEntry(:final markdown) => markdown.length,
-      _ => 128,
-    };
-    if (entryChildren.length > 1 ||
-        entrySourceChars > _maxInitialTailSourceChars) {
-      // For oversized content, mount only its final virtual segment plus any
-      // already-selected lightweight rows after it. This is the critical
-      // bottom-first path: no older Markdown participates in initial layout.
-      initialVisibleChildren += 1;
-      break;
+    // Budget each rendered entry newest first: the top-level entry itself, or
+    // each descendant (and the header) of a flattened subagent transcript.
+    var unitEnd = entryChildren.length;
+    while (unitEnd > 0) {
+      final unitEntry = entryChildren[unitEnd - 1].entry;
+      var unitStart = unitEnd - 1;
+      while (unitStart > 0 &&
+          identical(entryChildren[unitStart - 1].entry, unitEntry)) {
+        unitStart -= 1;
+      }
+      final unitSourceChars = switch (unitEntry) {
+        AcpUserPromptEntry(:final parts) => parts.whereType<AcpTextPart>().fold(
+          0,
+          (length, part) => length + part.text.length,
+        ),
+        AcpAssistantMessageEntry(:final markdown) ||
+        AcpThoughtEntry(:final markdown) => markdown.length,
+        _ => 128,
+      };
+      if (unitEnd - unitStart > 1 ||
+          unitSourceChars > _maxInitialTailSourceChars) {
+        // For oversized content, mount only its final virtual segment plus any
+        // already-selected lightweight rows after it. This is the critical
+        // bottom-first path: no older Markdown participates in initial layout.
+        initialVisibleChildren += 1;
+        break entries;
+      }
+      initialVisibleChildren += unitEnd - unitStart;
+      sourceChars += unitSourceChars;
+      unitEnd = unitStart;
+      if (initialVisibleChildren >= _maxInitialTailChildren ||
+          sourceChars >= _maxInitialTailSourceChars) {
+        break entries;
+      }
     }
-    initialVisibleChildren += entryChildren.length;
-    sourceChars += entrySourceChars;
   }
   return (
     startEntryIndex: startEntryIndex,

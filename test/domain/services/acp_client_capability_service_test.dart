@@ -77,8 +77,9 @@ void main() {
         when(() => channel.stdout).thenAnswer((_) => const Stream.empty());
         when(() => channel.stderr).thenAnswer((_) => const Stream.empty());
         when(channel.waitForExit).thenAnswer((_) => exit.future);
-        when(channel.close).thenAnswer((_) {
-          if (!exit.isCompleted) exit.complete(-1);
+        // A server that honours signals reports the exit after TERM.
+        when(() => channel.kill(SSHSignal.TERM)).thenAnswer((_) {
+          if (!exit.isCompleted) exit.complete(null);
         });
         service = AcpClientCapabilityService(
           fileSystem: files,
@@ -135,9 +136,12 @@ void main() {
               await tester.pump();
               verify(lateChannel.channel.destroy).called(1);
             }
-            verifyNever(channel.close);
+            verifyNever(() => channel.kill(SSHSignal.TERM));
             await tester.pump(limits.maxTerminalLifetime);
-            verify(channel.close).called(1);
+            verify(() => channel.kill(SSHSignal.TERM)).called(1);
+            await tester.pump(const Duration(seconds: 5));
+            verifyNever(() => channel.kill(SSHSignal.KILL));
+            verifyNever(channel.channel.destroy);
           },
         );
       }
@@ -156,10 +160,56 @@ void main() {
         await tester.pump(
           limits.maxTerminalLifetime - const Duration(seconds: 1),
         );
-        verifyNever(channel.close);
+        verifyNever(() => channel.kill(SSHSignal.TERM));
         await tester.pump(const Duration(seconds: 1));
-        verify(channel.close).called(1);
+        verify(() => channel.kill(SSHSignal.TERM)).called(1);
       });
+
+      testWidgets(
+        'escalates a kill the server ignores and settles waiters on destroy',
+        (tester) async {
+          await configureSshTerminal();
+          // EOF and signals are both ignored, as by `sleep 600` on a server
+          // without signal support.
+          when(() => channel.kill(SSHSignal.TERM)).thenAnswer((_) {});
+          when(() => session.execute(any())).thenAnswer((_) async => channel);
+          createTerminal('ignores');
+          await tester.pump();
+          final terminalId =
+              (transport.responseFor('ignores')['result']! as Map)['terminalId']
+                  as String;
+          transport
+            ..sendRequest('wait', 'terminal/wait_for_exit', {
+              'sessionId': 'session-1',
+              'terminalId': terminalId,
+            })
+            ..sendRequest('kill', 'terminal/kill', {
+              'sessionId': 'session-1',
+              'terminalId': terminalId,
+            });
+          await tester.pump();
+          verify(() => channel.kill(SSHSignal.TERM)).called(1);
+          verifyNever(() => channel.kill(SSHSignal.KILL));
+          verifyNever(channel.close);
+
+          await tester.pump(const Duration(seconds: 2));
+          verify(() => channel.kill(SSHSignal.KILL)).called(1);
+          verifyNever(channel.channel.destroy);
+          expect(transport.responseForOrNull('kill'), isNull);
+
+          await tester.pump(const Duration(seconds: 2));
+          verify(channel.channel.destroy).called(1);
+          expect(transport.responseFor('kill')['result'], isNull);
+          expect(transport.responseFor('wait')['result'], {
+            'exitCode': null,
+            'signal': null,
+          });
+          verifyNever(channel.close);
+          // The lifetime timer finds the terminal already settled.
+          await tester.pump(limits.maxTerminalLifetime);
+          verifyNever(() => channel.kill(SSHSignal.TERM));
+        },
+      );
     });
 
     test('advertises only configured capabilities', () {
@@ -1911,7 +1961,7 @@ final class _FakeTerminalProcess implements AcpTerminalProcess {
   Stream<List<int>> get stderr => _stderr.stream;
 
   @override
-  void kill() {
+  Future<void> kill() async {
     killed = true;
     exit(const AcpTerminalExitStatus(signal: 'KILL'));
   }

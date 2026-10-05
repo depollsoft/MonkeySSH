@@ -435,6 +435,9 @@ func (w *muxWindow) resizePtyIfCurrent(
 	}
 }
 
+// closePty closes ptyFile once. The Windows exit drain closes the pseudo
+// console while the window is still registered and retirement closes it
+// again, so a second close of the same handle is a no-op.
 func (w *muxWindow) closePty(ptyFile muxPty) error {
 	if w == nil || ptyFile == nil {
 		return nil
@@ -442,6 +445,10 @@ func (w *muxWindow) closePty(ptyFile muxPty) error {
 	w.resizeGeneration.Add(1)
 	w.ptyResizeMu.Lock()
 	defer w.ptyResizeMu.Unlock()
+	if w.closedPty == ptyFile {
+		return nil
+	}
+	w.closedPty = ptyFile
 	return ptyFile.Close()
 }
 
@@ -728,6 +735,12 @@ type muxServer struct {
 	// pendingWindowStarts owns admitted launches until watcher registration or
 	// rejected-process cleanup finishes. Add is guarded by s.mu and !s.closed.
 	pendingWindowStarts sync.WaitGroup
+	// pendingWindowStartCount counts admitted launches not yet registered or
+	// rejected, under s.mu, so an idle shutdown never kills one in flight.
+	pendingWindowStartCount int
+	// idleShutdownDeferred records that the last window closed while a start
+	// was pending; that start failing re-runs the idle shutdown decision.
+	idleShutdownDeferred bool
 	// socketRepublishers tracks the path-healing goroutine so close cannot
 	// return while it still owns a replacement listener with unlink disabled.
 	socketRepublishers sync.WaitGroup
@@ -739,6 +752,7 @@ type muxServer struct {
 type muxWindow struct {
 	agentSessionWatch         *agentSessionWatch
 	inputMu                   sync.Mutex
+	replies                   windowReplyQueue
 	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
 	nativePaste               nativeConsolePasteFilter
 	nativeResponse            nativeConsoleResponseFilter
@@ -776,11 +790,13 @@ type muxWindow struct {
 	inPlaceRedrawPid int
 	// foregroundCommandPid is the process group foregroundCommand was read
 	// for.
-	foregroundCommandPid        int
-	foregroundCommand           string
-	paneTitle                   string
-	pty                         muxPty
-	ptyResizeMu                 sync.Mutex
+	foregroundCommandPid int
+	foregroundCommand    string
+	paneTitle            string
+	pty                  muxPty
+	ptyResizeMu          sync.Mutex
+	// closedPty is the handle closePty already closed; guarded by ptyResizeMu.
+	closedPty                   muxPty
 	ptyWidth                    int
 	ptyHeight                   int
 	resizeGeneration            atomic.Uint64
@@ -813,6 +829,7 @@ type muxWindow struct {
 	lastActivity               time.Time
 	outputGeneration           uint64
 	lastProcessMetadataRefresh time.Time
+	metadataRefreshInFlight    bool
 	lastBroadcast              time.Time
 	cursorVisible              bool
 	cursorVisibilityKnown      bool
@@ -951,13 +968,27 @@ type windowBroadcastIdentity struct {
 
 type controlClient struct {
 	conn net.Conn
-	enc  *json.Encoder
 
-	mu sync.Mutex
+	// out holds encoded frames for writeLoop, so a subscriber that stops
+	// reading never stalls a sender; a window's output reader broadcasts.
+	outMu      sync.Mutex
+	out        []controlFrame
+	outBytes   int
+	writing    bool
+	outClosed  bool
+	finishOnce sync.Once
+	finished   chan struct{}
 
 	commandsMu sync.Mutex
 	commands   map[string]context.CancelFunc
 	closed     bool
+}
+
+// controlFrame is one encoded control message. windowID marks a replaceable
+// window_updated: a newer snapshot of the same window supersedes it.
+type controlFrame struct {
+	data     []byte
+	windowID string
 }
 
 type attachFocusResult struct {
@@ -3916,7 +3947,7 @@ func discoverPiSessions(
 			fallbackWindows[key] = append(fallbackWindows[key], i)
 		}
 	}
-	entriesByRoot := map[string][]piSessionEntry{}
+	sessionsByRoot := map[string]*piRootSessions{}
 	keys := make([]fallbackKey, 0, len(fallbackWindows))
 	for key := range fallbackWindows {
 		keys = append(keys, key)
@@ -3929,10 +3960,10 @@ func discoverPiSessions(
 	})
 	for _, key := range keys {
 		indices := fallbackWindows[key]
-		entries, ok := entriesByRoot[key.root]
+		rootSessions, ok := sessionsByRoot[key.root]
 		if !ok {
-			entries = readPiSessionEntries(key.root)
-			entriesByRoot[key.root] = entries
+			rootSessions = &piRootSessions{entries: readPiSessionEntries(key.root)}
+			sessionsByRoot[key.root] = rootSessions
 		}
 		// Pi's interactive /resume picker can switch to a session recorded in a
 		// different working directory without putting the selected path in argv
@@ -3940,7 +3971,10 @@ func discoverPiSessions(
 		// cwd filtering so Pi's published title can retain that exact cross-cwd
 		// candidate. Unnamed titles retain every matching cwd basename and rely
 		// on the existing one-to-one activity/process evidence below.
-		entries = piSessionsWithLatestNamesForTitles(restore, indices, entries)
+		entries := rootSessions.entries
+		if piPaneTitlesMayBeNamed(restore, indices) {
+			entries = rootSessions.withLatestNames()
+		}
 		encodedCwd := piEncodedSessionDirName(key.cwd)
 		candidates := []piSessionEntry{}
 		for _, entry := range entries {
@@ -4320,32 +4354,40 @@ func uniquePiSessionsByPaneTitle(
 	return uniqueAssignments(matchesByWindow, piSessionEntryID)
 }
 
-func piSessionsWithLatestNamesForTitles(
-	restore *serverRestore,
-	indices []int,
-	candidates []piSessionEntry,
-) []piSessionEntry {
-	if len(candidates) == 0 {
-		return candidates
-	}
-	hasNamedTitle := false
+func piPaneTitlesMayBeNamed(restore *serverRestore, indices []int) bool {
 	for _, index := range indices {
 		title := cleanTerminalTitle(restore.Windows[index].PaneTitle)
 		if strings.HasPrefix(title, "π - ") || strings.HasPrefix(title, "Pi - ") {
-			hasNamedTitle = true
-			break
+			return true
 		}
 	}
-	if !hasNamedTitle {
-		return candidates
+	return false
+}
+
+// piRootSessions holds one session root's entries for a single discovery pass.
+// Latest names need a full transcript scan, so they are loaded at most once per
+// root no matter how many cwd buckets share it.
+type piRootSessions struct {
+	entries []piSessionEntry
+	named   []piSessionEntry
+	loaded  bool
+}
+
+func (r *piRootSessions) withLatestNames() []piSessionEntry {
+	if r.loaded {
+		return r.named
 	}
-	result := append([]piSessionEntry(nil), candidates...)
-	for i := range result {
-		if name, found := piLatestSessionName(result[i].path); found {
-			result[i].sessionName = name
+	r.loaded = true
+	r.named = append([]piSessionEntry(nil), r.entries...)
+	var scratch []byte
+	for i := range r.named {
+		name, found, reused := piLatestSessionName(r.named[i].path, scratch)
+		if found {
+			r.named[i].sessionName = name
 		}
+		scratch = reused
 	}
-	return result
+	return r.named
 }
 
 func piSessionMatchesPaneTitle(entry piSessionEntry, paneTitle string) bool {
@@ -4669,11 +4711,14 @@ func readPiSessionEntry(path string) (piSessionEntry, bool) {
 	}
 	reader := bufio.NewReaderSize(file, 64*1024)
 	scannedBytes := 0
+	var scratch []byte
 	for scannedBytes < piSessionHeaderScanLimitBytes {
-		line, truncated, bytesRead, readErr := readBoundedLine(
+		line, truncated, bytesRead, readErr := readBoundedLineInto(
 			reader,
 			piSessionMetadataRecordLimitBytes,
+			scratch,
 		)
+		scratch = line[:0]
 		scannedBytes += bytesRead
 		if readErr != nil {
 			return piSessionEntry{}, false
@@ -4719,7 +4764,14 @@ func readPiSessionEntry(path string) (piSessionEntry, bool) {
 // limit bytes. Oversized message/image records are drained through their newline
 // so later metadata remains readable.
 func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, bool, int, error) {
-	line := make([]byte, 0, min(limit, 64*1024))
+	return readBoundedLineInto(reader, limit, nil)
+}
+
+// readBoundedLineInto is readBoundedLine reusing scratch's storage, so a scan
+// over many records allocates only when a record outgrows every earlier one.
+// The returned line aliases scratch and is valid until the next call.
+func readBoundedLineInto(reader *bufio.Reader, limit int, scratch []byte) ([]byte, bool, int, error) {
+	line := scratch[:0]
 	truncated := false
 	bytesRead := 0
 	for {
@@ -4751,25 +4803,30 @@ func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, bool, int, error)
 // piLatestSessionName mirrors Pi's last-session_info-wins behavior. Empty names
 // are authoritative clears. Oversized unrelated records are skipped, while an
 // actual I/O error makes the name unusable rather than accepting stale metadata.
-func piLatestSessionName(path string) (string, bool) {
+// scratch is reused across records and returned for the next file.
+func piLatestSessionName(path string, scratch []byte) (string, bool, []byte) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", false
+		return "", false, scratch
 	}
 	defer file.Close()
 	reader := bufio.NewReaderSize(file, 64*1024)
 	name := ""
 	found := false
 	for {
-		line, truncated, _, readErr := readBoundedLine(
+		line, truncated, _, readErr := readBoundedLineInto(
 			reader,
 			piSessionMetadataRecordLimitBytes,
+			scratch,
 		)
+		if line != nil {
+			scratch = line[:0]
+		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return name, found
+				return name, found, scratch
 			}
-			return "", false
+			return "", false, scratch
 		}
 		if truncated {
 			continue
@@ -4837,34 +4894,74 @@ func piSessionCreatedAtFromFileName(name string) time.Time {
 // the old file) or may be gone (worktree relocation deletes it); a missing
 // link terminates the chain with the directory name and file-name timestamp
 // taken from the dangling path itself.
+//
+// Each chain is walked once: every entry on a walk shares the walk's result.
+// An entry whose chain loops keeps its own origin.
 func annotatePiSessionOrigins(entries []piSessionEntry) {
-	byPath := map[string]int{}
+	type origin struct {
+		keepOwn      bool
+		hasCreatedAt bool
+		dir          string
+		createdAt    time.Time
+	}
+	const ( // the zero state is unvisited
+		visiting = iota + 1
+		resolved
+	)
+	byPath := make(map[string]int, len(entries))
 	for i := range entries {
 		byPath[entries[i].path] = i
 	}
+	origins := make([]origin, len(entries))
+	states := make([]uint8, len(entries))
+	var walk []int
 	for i := range entries {
-		seen := map[int]struct{}{}
-		current := i
-		for {
-			if _, ok := seen[current]; ok {
+		walk = walk[:0]
+		var result origin
+		for current := i; ; {
+			if states[current] == resolved {
+				result = origins[current]
 				break
 			}
-			seen[current] = struct{}{}
+			if states[current] == visiting {
+				result = origin{keepOwn: true}
+				break
+			}
+			states[current] = visiting
+			walk = append(walk, current)
 			parent := entries[current].parentPath
 			if parent == "" {
-				entries[i].originDir = filepath.Base(filepath.Dir(entries[current].path))
-				entries[i].originCreatedAt = entries[current].createdAt
+				result = origin{
+					hasCreatedAt: true,
+					dir:          filepath.Base(filepath.Dir(entries[current].path)),
+					createdAt:    entries[current].createdAt,
+				}
 				break
 			}
-			if next, ok := byPath[parent]; ok {
-				current = next
-				continue
+			next, ok := byPath[parent]
+			if !ok {
+				createdAt := piSessionCreatedAtFromFileName(filepath.Base(parent))
+				result = origin{
+					hasCreatedAt: !createdAt.IsZero(),
+					dir:          filepath.Base(filepath.Dir(parent)),
+					createdAt:    createdAt,
+				}
+				break
 			}
-			entries[i].originDir = filepath.Base(filepath.Dir(parent))
-			if createdAt := piSessionCreatedAtFromFileName(filepath.Base(parent)); !createdAt.IsZero() {
-				entries[i].originCreatedAt = createdAt
-			}
-			break
+			current = next
+		}
+		for _, index := range walk {
+			origins[index] = result
+			states[index] = resolved
+		}
+	}
+	for i, origin := range origins {
+		if origin.keepOwn {
+			continue
+		}
+		entries[i].originDir = origin.dir
+		if origin.hasCreatedAt {
+			entries[i].originCreatedAt = origin.createdAt
 		}
 	}
 }
@@ -6403,10 +6500,6 @@ type createWindowOptions struct {
 	cursorVisibilityKnown     bool
 	privateModes              map[string]bool
 	terminalProgress          *terminalProgressSnapshot
-	insertModeEnabled         bool
-	insertModeKnown           bool
-	applicationKeypadEnabled  bool
-	applicationKeypadKnown    bool
 	themeHint                 []byte
 	capabilityHint            []byte
 }
@@ -6489,6 +6582,7 @@ func (s *muxServer) createWindowWithStarter(
 		return nil, errServerClosed
 	}
 	s.pendingWindowStarts.Add(1)
+	s.pendingWindowStartCount++
 	cols, rows := s.publishedWidth, s.publishedHeight
 	s.mu.Unlock()
 
@@ -6496,17 +6590,30 @@ func (s *muxServer) createWindowWithStarter(
 	defer finishSessionWatch()
 	windowPty, proc, err := start(cmd, cols, rows)
 	if err != nil {
+		s.mu.Lock()
+		s.pendingWindowStartCount--
+		var teardown func()
+		if s.idleShutdownDeferred {
+			teardown = s.beginIdleShutdownLocked()
+		}
+		s.mu.Unlock()
 		s.pendingWindowStarts.Done()
+		if teardown != nil {
+			go teardown()
+		}
 		return nil, err
 	}
 
+	s.attachMu.Lock()
 	s.mu.Lock()
+	s.pendingWindowStartCount--
 	if s.closed {
 		// close() sets s.closed and snapshots s.windows under this same lock,
 		// so a window registered from here on would never be torn down and its
 		// watchers would join the group after close already waited. Tear the
 		// freshly started process down instead of publishing it.
 		s.mu.Unlock()
+		s.attachMu.Unlock()
 		go func() {
 			defer s.pendingWindowStarts.Done()
 			cleanupRejectedWindow(windowPty, proc)
@@ -6519,6 +6626,7 @@ func (s *muxServer) createWindowWithStarter(
 	// cannot race an Add.
 	s.windowWatchers.Add(2)
 	s.pendingWindowStarts.Done() // Transfer ownership to the watchers under s.mu.
+	s.idleShutdownDeferred = false
 	s.nextID++
 	window := &muxWindow{
 		agentSessionWatch:         sessionWatch,
@@ -6554,10 +6662,6 @@ func (s *muxServer) createWindowWithStarter(
 		cursorVisibilityKnown:     options.cursorVisibilityKnown,
 		privateModes:              copyPrivateModes(options.privateModes),
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
-		insertModeEnabled:         options.insertModeEnabled,
-		insertModeKnown:           options.insertModeKnown,
-		applicationKeypadEnabled:  options.applicationKeypadEnabled,
-		applicationKeypadKnown:    options.applicationKeypadKnown,
 	}
 	s.windows = append(s.windows, window)
 	if s.activeID != "" && s.activeID != window.id {
@@ -6582,7 +6686,9 @@ func (s *muxServer) createWindowWithStarter(
 		s.pendingResizeWidth > 0 && s.pendingResizeHeight > 0
 	s.mu.Unlock()
 
-	s.attachMu.Lock()
+	// attachMu has been held since before activation, as in
+	// selectWindowWithSkip, so a concurrent selection cannot publish another
+	// window's screen between this activation and its replay.
 	redrew := s.broadcastAttachReplayAndResizeLocked(replay, imageFollowUp, window)
 	s.attachMu.Unlock()
 	if refreshPendingFocus || refreshPendingResize {
@@ -6593,13 +6699,18 @@ func (s *muxServer) createWindowWithStarter(
 	}
 	// The watcher count was registered under s.mu above, alongside the s.closed
 	// check, so it is deliberately not incremented here.
+	readerDone := make(chan struct{})
 	go func() {
 		defer s.windowWatchers.Done()
+		defer close(readerDone)
 		s.readWindow(window)
 	}()
 	go func() {
 		defer s.windowWatchers.Done()
 		_ = proc.Wait()
+		// Output the child wrote before exiting may still be buffered in the
+		// terminal. Keep the window registered until its reader has drained it.
+		drainExitedWindowOutput(window, readerDone)
 		s.markWindowClosed(window.id)
 	}()
 	s.broadcast(controlResponse{
@@ -6631,16 +6742,127 @@ func cleanupRejectedWindow(windowPty muxPty, proc muxProcess) {
 	_ = proc.Wait()
 }
 
+// windowReplyQueue carries replies the daemon answers itself (theme and
+// capability answers) from a window's output reader to its input. The reader
+// must never wait for inputMu: a paste can hold it while blocked on a child
+// that is itself blocked writing output only that reader drains. Queued
+// replies are written in order, ahead of any input written after them, by the
+// next input write or by a drainer goroutine (at most one waits for inputMu).
+type windowReplyQueue struct {
+	mu           sync.Mutex
+	pending      [][]byte
+	pendingBytes int
+	drainQueued  bool
+}
+
+const windowReplyQueueLimitBytes = 64 * 1024
+
+func (s *muxServer) queueWindowReply(window *muxWindow, data []byte) {
+	q := &window.replies
+	q.mu.Lock()
+	if q.pendingBytes+len(data) > windowReplyQueueLimitBytes {
+		q.mu.Unlock()
+		return
+	}
+	q.pending = append(q.pending, data)
+	q.pendingBytes += len(data)
+	startDrain := !q.drainQueued
+	q.drainQueued = true
+	q.mu.Unlock()
+	if startDrain {
+		go s.drainWindowReplies(window)
+	}
+}
+
+func (s *muxServer) drainWindowReplies(window *muxWindow) {
+	window.inputMu.Lock()
+	defer window.inputMu.Unlock()
+	window.replies.mu.Lock()
+	window.replies.drainQueued = false
+	window.replies.mu.Unlock()
+	_ = s.writeQueuedWindowRepliesLocked(window)
+}
+
+// writeQueuedWindowRepliesLocked requires window.inputMu.
+func (s *muxServer) writeQueuedWindowRepliesLocked(window *muxWindow) error {
+	replies := window.replies.take()
+	for _, reply := range replies {
+		if _, err := s.writeWindowDataLocked(window, reply, false, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// take removes every queued reply; retiring a window uses it to cancel them.
+func (q *windowReplyQueue) take() [][]byte {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	replies := q.pending
+	q.pending, q.pendingBytes = nil, 0
+	return replies
+}
+
 func (s *muxServer) readWindow(window *muxWindow) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := window.pty.Read(buf)
 		if n > 0 {
+			s.scheduleProcessMetadataRefresh(window)
 			s.handleWindowOutput(window.id, buf[:n])
 		}
 		if err != nil {
 			return
 		}
+	}
+}
+
+// scheduleProcessMetadataRefresh runs a due metadata refresh off the output
+// reader: a process-table query and session discovery can take hundreds of
+// milliseconds, and the reader must keep draining the pane meanwhile. At most
+// one refresh per window is in flight, and the shared process-table cache
+// serves concurrent refreshes from one query. refreshProcessMetadata re-checks
+// the window's process identity before committing what it found.
+func (s *muxServer) scheduleProcessMetadataRefresh(window *muxWindow) {
+	s.mu.Lock()
+	if s.closed || window.closed || window.pty == nil || window.metadataRefreshInFlight ||
+		(!window.lastProcessMetadataRefresh.IsZero() &&
+			time.Since(window.lastProcessMetadataRefresh) < processMetadataInterval) {
+		s.mu.Unlock()
+		return
+	}
+	window.metadataRefreshInFlight = true
+	// Registered under s.mu while open, like the other window watchers, so
+	// close waits for the refresh instead of racing its commit.
+	s.windowWatchers.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.windowWatchers.Done()
+		s.refreshProcessMetadataAndBroadcast(window)
+	}()
+}
+
+func (s *muxServer) refreshProcessMetadataAndBroadcast(window *muxWindow) {
+	s.mu.Lock()
+	before := window.broadcastIdentityLocked()
+	s.mu.Unlock()
+	s.refreshProcessMetadata(window.id)
+	var snapshot *windowSnapshot
+	s.mu.Lock()
+	window.metadataRefreshInFlight = false
+	if s.windowByIDLocked(window.id) == window && !window.closed &&
+		window.broadcastIdentityLocked() != before {
+		snap := s.snapshotLocked(window)
+		snapshot = &snap
+		window.lastBroadcast = time.Now()
+	}
+	s.mu.Unlock()
+	if snapshot != nil {
+		s.broadcast(controlResponse{
+			Type:    "window_updated",
+			Session: s.session,
+			Window:  snapshot,
+		})
 	}
 }
 
@@ -6683,13 +6905,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		return
 	}
 	before := window.broadcastIdentityLocked()
-	s.mu.Unlock()
-	s.refreshProcessMetadata(windowID)
-	s.mu.Lock()
-	if s.windowByIDLocked(windowID) != window || window.closed {
-		s.mu.Unlock()
-		return
-	}
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
@@ -6845,18 +7060,19 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			terminalQueries = nil
 		}
 	}
-	s.mu.Unlock()
-
+	// Queue the replies before forwarding this chunk, so they precede any
+	// answer the terminal sends for a later query in it.
 	if len(themeHintData) > 0 {
-		_ = s.writeWindow(windowID, themeHintData)
+		s.queueWindowReply(window, themeHintData)
 	}
 	// Answers to capability probes the child emitted while no terminal was
 	// showing this window. Delivering them now (rather than only replaying the
 	// queries on the next attach/switch) is what lets a restored agent see a
 	// timely reply and keep its richer rendering mode.
 	if len(capabilityHintData) > 0 {
-		_ = s.writeWindow(windowID, capabilityHintData)
+		s.queueWindowReply(window, capabilityHintData)
 	}
+	s.mu.Unlock()
 
 	if shouldWrite {
 		if len(forwarded) > 0 {
@@ -6935,6 +7151,7 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 
 func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.closed = true
+	window.replies.take()
 	window.wheelGovernor.reset(nil)
 	window.alert = false
 	window.releaseRedrawForwardingStateLocked()
@@ -6968,7 +7185,6 @@ func (s *muxServer) markWindowClosed(windowID string) {
 	var foregroundProcessGroup int
 	var redrawWindow *muxWindow
 	var redrew bool
-	var shouldShutdown bool
 	var windowPty muxPty
 	var nativeAcpBridgeID string
 	var resetViewportParser bool
@@ -7029,7 +7245,10 @@ func (s *muxServer) markWindowClosed(windowID string) {
 		}
 	}
 	snapshots := s.snapshotsLocked()
-	shouldShutdown = len(snapshots) == 0
+	// Commit an idle shutdown under the same lock that retired the last
+	// window, so a start admitted before this point keeps the server and one
+	// admitted after it is rejected.
+	teardown := s.beginIdleShutdownLocked()
 	s.mu.Unlock()
 	if activeChanged {
 		redrew = s.broadcastAttachReplayAndResizeLocked(
@@ -7070,8 +7289,8 @@ func (s *muxServer) markWindowClosed(windowID string) {
 			signalForegroundResize(foregroundProcessGroup)
 		}
 	}
-	if shouldShutdown {
-		go s.close()
+	if teardown != nil {
+		go teardown()
 	}
 }
 
@@ -7389,6 +7608,32 @@ func (c *attachClient) waitForWrite(completion <-chan error) bool {
 	}
 	err, ok := <-completion
 	return ok && err == nil
+}
+
+// closeAfterQueuedWrites lets output already queued reach the terminal before
+// closing, waiting no later than deadline.
+func (c *attachClient) closeAfterQueuedWrites(deadline time.Time) {
+	flushed := make(chan error, 1)
+	c.queueMu.Lock()
+	queued := !c.queueClosed
+	if queued {
+		c.queue = append(c.queue, attachWrite{complete: flushed})
+	}
+	c.queueMu.Unlock()
+	if queued {
+		select {
+		case c.queueReady <- struct{}{}:
+		default:
+		}
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case <-flushed:
+		case <-c.done:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	c.close()
 }
 
 func (c *attachClient) close() {
@@ -8794,7 +9039,9 @@ func (s *muxServer) handleControl(conn net.Conn, reader *bufio.Reader) {
 	defer func() {
 		client.close()
 		s.removeControl(client)
-		_ = conn.Close()
+		// Responses still queued reach a peer that half-closed after its
+		// request before the connection closes.
+		client.closeOutput()
 	}()
 
 	client.send(controlResponse{
@@ -8923,7 +9170,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		}
 		client.send(controlResponse{ID: request.ID, Type: "window_closed", Status: "ok"})
 		if shouldShutdown {
-			go s.close()
+			go s.closeIfIdle()
 		}
 	case "resize":
 		if request.Width <= 0 || request.Height <= 0 {
@@ -9081,26 +9328,121 @@ func (s *muxServer) canUseClientImageSignatures(clientID string) bool {
 }
 
 func newControlClient(conn net.Conn) *controlClient {
-	client := &controlClient{
+	return &controlClient{
 		conn:     conn,
 		commands: map[string]context.CancelFunc{},
+		finished: make(chan struct{}),
 	}
-	if conn != nil {
-		client.enc = json.NewEncoder(conn)
-	}
-	return client
 }
 
+// controlOutgoingLimitBytes bounds what a control client may have queued. A
+// subscriber that falls this far behind is disconnected. Replaceable window
+// updates do not accumulate, so only a client that stopped reading gets here.
+const controlOutgoingLimitBytes = 32 * 1024 * 1024
+
 func (c *controlClient) send(response controlResponse) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.enc == nil {
+	if c.conn == nil {
 		return
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(socketTimeout))
-	if err := c.enc.Encode(response); err != nil {
-		_ = c.conn.Close()
+	if frame, ok := encodeControlFrame(response); ok {
+		c.enqueue(frame)
 	}
+}
+
+func encodeControlFrame(response controlResponse) (controlFrame, bool) {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return controlFrame{}, false
+	}
+	frame := controlFrame{data: append(data, '\n')}
+	if response.Type == "window_updated" && response.Window != nil {
+		frame.windowID = response.Window.ID
+	}
+	return frame, true
+}
+
+// enqueue never blocks on the connection. Frames are written in order, except
+// that a newer window_updated replaces a queued one for the same window and
+// takes its place at the back, behind everything sent before it.
+func (c *controlClient) enqueue(frame controlFrame) {
+	c.outMu.Lock()
+	if c.outClosed {
+		c.outMu.Unlock()
+		return
+	}
+	if frame.windowID != "" {
+		for i, queued := range c.out {
+			if queued.windowID == frame.windowID {
+				c.outBytes -= len(queued.data)
+				c.out = append(c.out[:i], c.out[i+1:]...)
+				break
+			}
+		}
+	}
+	if c.outBytes > 0 && c.outBytes+len(frame.data) > controlOutgoingLimitBytes {
+		c.out, c.outBytes, c.outClosed = nil, 0, true
+		c.outMu.Unlock()
+		// Closing also fails a write blocked on the stalled peer.
+		c.finishOutput()
+		return
+	}
+	c.out = append(c.out, frame)
+	c.outBytes += len(frame.data)
+	start := !c.writing
+	c.writing = true
+	c.outMu.Unlock()
+	if start {
+		go c.writeLoop()
+	}
+}
+
+func (c *controlClient) writeLoop() {
+	for {
+		c.outMu.Lock()
+		if len(c.out) == 0 {
+			c.writing = false
+			closing := c.outClosed
+			c.outMu.Unlock()
+			if closing {
+				c.finishOutput()
+			}
+			return
+		}
+		frame := c.out[0]
+		c.out[0] = controlFrame{}
+		c.out = c.out[1:]
+		c.outBytes -= len(frame.data)
+		c.outMu.Unlock()
+		_ = c.conn.SetWriteDeadline(time.Now().Add(socketTimeout))
+		if err := writeConnection(c.conn, frame.data); err != nil {
+			c.outMu.Lock()
+			c.out, c.outBytes, c.outClosed, c.writing = nil, 0, true, false
+			c.outMu.Unlock()
+			c.finishOutput()
+			return
+		}
+	}
+}
+
+// closeOutput closes the connection once the frames already queued are written.
+func (c *controlClient) closeOutput() {
+	if c.conn == nil {
+		return
+	}
+	c.outMu.Lock()
+	c.outClosed = true
+	writing := c.writing
+	c.outMu.Unlock()
+	if !writing {
+		c.finishOutput()
+	}
+}
+
+func (c *controlClient) finishOutput() {
+	c.finishOnce.Do(func() {
+		_ = c.conn.Close()
+		close(c.finished)
+	})
 }
 
 func (c *controlClient) sendError(request controlMessage, err error) {
@@ -9295,11 +9637,20 @@ func (s *muxServer) broadcast(response controlResponse) {
 	s.mu.Lock()
 	clients := make([]*controlClient, 0, len(s.controls))
 	for client := range s.controls {
-		clients = append(clients, client)
+		if client.conn != nil {
+			clients = append(clients, client)
+		}
 	}
 	s.mu.Unlock()
+	if len(clients) == 0 {
+		return
+	}
+	frame, ok := encodeControlFrame(response)
+	if !ok {
+		return
+	}
 	for _, client := range clients {
-		client.send(response)
+		client.enqueue(frame)
 	}
 }
 
@@ -10652,6 +11003,15 @@ func buildWindowReplay(
 		keyboardModes = window.keyboardModeReplayLocked()
 	}
 	title := terminalTitleReplaySequence(window)
+	// The prefix cleared both screens. Behind an alternate-screen application
+	// the main screen is repainted before the alternate screen is entered
+	// again: the redraw or frame that follows paints only the alternate
+	// screen, and the application's exit would otherwise return to a blank
+	// main screen and lose the shell output and scrollback the model kept.
+	var mainScreen []byte
+	if window.alternateScreenModeActiveLocked() {
+		mainScreen = window.screenLocked().RenderMainScreen()
+	}
 	preModes := terminalModePreReplaySequence(window)
 	preHistoryClear := terminalPreHistoryClearSequence(window)
 	postModes := terminalModePostReplaySequence(window)
@@ -10661,13 +11021,14 @@ func buildWindowReplay(
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(preModes)+
-			len(preHistoryClear)+len(history)+
+		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
 	replay = append(replay, activeWindowReplayPrefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
+	replay = append(replay, mainScreen...)
 	replay = append(replay, preModes...)
 	replay = append(replay, preHistoryClear...)
 	replay = append(replay, history...)
@@ -11670,7 +12031,7 @@ func (s *muxServer) handleAttachKeys(
 					s.ringAttachBell(client)
 					s.replayActiveWindowToClient(client)
 				} else if shouldShutdown {
-					go s.close()
+					go s.closeIfIdle()
 				}
 			} else {
 				s.replayActiveWindowToClient(client)
@@ -12103,10 +12464,28 @@ func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste
 			scheduleFlush()
 		}
 	}()
+	// Replies the output reader queued before this write go first.
+	if err := s.writeQueuedWindowRepliesLocked(window); err != nil {
+		return err
+	}
+	var err error
+	scheduleFlush, err = s.writeWindowDataLocked(window, data, bracketedPaste, response)
+	return err
+}
+
+// writeWindowDataLocked requires window.inputMu. The returned function, if
+// any, must run after inputMu is released.
+func (s *muxServer) writeWindowDataLocked(
+	window *muxWindow,
+	data []byte,
+	bracketedPaste bool,
+	response bool,
+) (func(), error) {
+	var scheduleFlush func()
 	s.mu.Lock()
-	if s.windowByIDLocked(windowID) != window || window.closed {
+	if s.windowByIDLocked(window.id) != window || window.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("window %q not found", windowID)
+		return nil, fmt.Errorf("window %q not found", window.id)
 	}
 	win32InputMode := window.win32InputMode
 	profile := window.wheelAccelerationProfileLocked()
@@ -12126,7 +12505,7 @@ func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste
 	}
 	s.mu.Unlock()
 	if len(data) == 0 {
-		return nil
+		return scheduleFlush, nil
 	}
 	// Native console readers receive encoded protocol bytes as typed keys.
 	// Query the console mode rather than inferring the reader from an app name.
@@ -12175,7 +12554,7 @@ func (s *muxServer) writeWindowData(windowID string, data []byte, bracketedPaste
 		data = encodeTerminalResponsesForWin32InputMode(data)
 	}
 	_, err := window.pty.Write(data)
-	return err
+	return scheduleFlush, err
 }
 
 // terminalOscOrDcsSequencePattern matches complete OSC (`ESC ] ... BEL|ST`) and
@@ -15553,9 +15932,13 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Re-check the process and the inputs the result was derived from. The
+	// output reader keeps running meanwhile, so display-only state it changes
+	// (titles, alerts, progress) must not discard the refresh.
 	if s.windowByIDLocked(windowID) != w || w.closed || w.pty != pty || w.proc != process ||
 		w.lastProcessMetadataRefresh != now || w.foregroundProcessGroupLocked() != pgrp ||
-		w.broadcastIdentityLocked() != identity {
+		w.agentToolLocked() != identity.agentTool || w.cwd != identity.cwd ||
+		agentToolFromRetainedMetadata(w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name) != fallbackTool {
 		return
 	}
 	if command != "" {
@@ -15979,8 +16362,7 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		switch data[escapeIndex+1] {
 		case '[':
 		case 'c':
-			// RIS resets the terminal, keyboard encoding included.
-			w.resetKeyboardModesLocked()
+			w.resetTerminalModesLocked(true)
 			data = data[escapeIndex+2:]
 			continue
 		case '=':
@@ -16009,6 +16391,10 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
 		case 'm':
 			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+		case 'p':
+			if string(data[escapeIndex+2:end]) == "!" {
+				w.resetTerminalModesLocked(false)
+			}
 		}
 		if final == 'h' || final == 'l' {
 			params := string(data[escapeIndex+2 : end])
@@ -16028,6 +16414,30 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		data = data[end+1:]
 	}
+}
+
+// resetTerminalModesLocked applies RIS (full) or DECSTR to the modes a replay
+// restores, as the screen model and the client apply them to their own state,
+// so the next replay does not re-enable what the terminal already reset.
+// DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
+// and focus reporting to their power-up values; RIS also leaves the alternate
+// screen and resets mouse reporting and the keyboard encodings. Neither
+// touches colour-scheme updates (2031), which the client keeps outside its
+// terminal state, or ConPTY's win32-input-mode.
+func (w *muxWindow) resetTerminalModesLocked(full bool) {
+	modes := []string{"1", "6", "7", "1004", "2004"}
+	if full {
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		w.resetKeyboardModesLocked()
+	}
+	for _, mode := range modes {
+		if _, ok := w.privateModes[mode]; ok {
+			w.setPrivateModeLocked(mode, mode == "7")
+		}
+	}
+	w.setPrivateModeLocked("25", true)
+	w.insertModeEnabled, w.insertModeKnown = false, true
+	w.applicationKeypadEnabled, w.applicationKeypadKnown = false, true
 }
 
 func (w *muxWindow) storePartialCsiLocked(data []byte) {
@@ -16755,6 +17165,45 @@ func (s *muxServer) close() {
 		}
 		return
 	}
+	teardown := s.beginShutdownLocked(false)
+	s.mu.Unlock()
+	teardown()
+}
+
+// closeIfIdle ends a session whose last window went away. The decision is
+// re-made under s.mu at the moment of closing: a window registered since, or an
+// admitted start still pending, keeps the server running. A pending start that
+// later fails retries the decision.
+func (s *muxServer) closeIfIdle() {
+	s.mu.Lock()
+	teardown := s.beginIdleShutdownLocked()
+	s.mu.Unlock()
+	if teardown != nil {
+		teardown()
+	}
+}
+
+func (s *muxServer) beginIdleShutdownLocked() func() {
+	if s.closed {
+		return nil
+	}
+	for _, window := range s.windows {
+		if !window.closed {
+			return nil
+		}
+	}
+	if s.pendingWindowStartCount > 0 {
+		s.idleShutdownDeferred = true
+		return nil
+	}
+	return s.beginShutdownLocked(true)
+}
+
+// beginShutdownLocked commits shutdown while the caller holds s.mu and returns
+// the teardown to run after unlocking. flushAttach lets output already queued
+// for attach clients reach them before they close, for a session that ends
+// because its last window did.
+func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 	s.closed = true
 	s.closeDone = make(chan struct{})
 	closeDone := s.closeDone
@@ -16785,81 +17234,103 @@ func (s *muxServer) close() {
 	for _, window := range windows {
 		codexWindows[window] = !window.closed && window.agentToolLocked() == "codex" && window.nativeAcpBridgeID == ""
 		window.closed = true
+		window.replies.take()
 		window.wheelGovernor.reset(nil)
 		window.releaseRedrawForwardingStateLocked()
 		window.clearKittyGraphicsPendingLocked()
 	}
-	s.mu.Unlock()
-	defer close(closeDone)
-
-	if listener != nil {
-		_ = listener.Close()
-	}
-	if socket != "" {
-		removeSocketPathIfUnchanged(socket, identity)
-	}
-	for _, client := range attachClients {
-		client.close()
-	}
-	for _, control := range controls {
-		_ = control.conn.Close()
-	}
-	shutdownDeadline := time.Now().Add(windowWatcherShutdownTimeout)
-	var teardowns sync.WaitGroup
-	var otherWindows []*muxWindow
-	for _, window := range windows {
-		if process, ok := window.proc.(interface {
-			shutdownCodex(*muxWindow, time.Time)
-		}); ok && codexWindows[window] {
-			teardowns.Add(1)
-			go func() {
-				defer teardowns.Done()
-				process.shutdownCodex(window, shutdownDeadline)
-				if window.pty != nil {
-					_ = window.closePty(window.pty)
-				}
-			}()
-			continue
+	return func() {
+		defer close(closeDone)
+		if listener != nil {
+			_ = listener.Close()
 		}
-		otherWindows = append(otherWindows, window)
-		if window.proc != nil {
-			window.proc.Hangup()
+		if socket != "" {
+			removeSocketPathIfUnchanged(socket, identity)
 		}
-		if window.pty != nil {
-			// Closing the master also hangs up the foreground job-control group.
-			_ = window.closePty(window.pty)
+		attachDeadline := time.Now().Add(attachWriteTimeout)
+		for _, client := range attachClients {
+			if flushAttach {
+				client.closeAfterQueuedWrites(attachDeadline)
+			} else {
+				client.close()
+			}
+		}
+		for _, control := range controls {
+			control.closeOutput()
+		}
+		shutdownDeadline := time.Now().Add(windowWatcherShutdownTimeout)
+		var teardowns sync.WaitGroup
+		var otherWindows []*muxWindow
+		for _, window := range windows {
+			if process, ok := window.proc.(interface {
+				shutdownCodex(*muxWindow, time.Time)
+			}); ok && codexWindows[window] {
+				teardowns.Add(1)
+				go func() {
+					defer teardowns.Done()
+					process.shutdownCodex(window, shutdownDeadline)
+					if window.pty != nil {
+						_ = window.closePty(window.pty)
+					}
+				}()
+				continue
+			}
+			otherWindows = append(otherWindows, window)
+			if window.proc != nil {
+				window.proc.Hangup()
+			}
+			if window.pty != nil {
+				// Closing the master also hangs up the foreground job-control group.
+				_ = window.closePty(window.pty)
+			}
+		}
+		// Codex gets its separate graceful lock-release deadline. Other agents
+		// still need forced cleanup when they ignore the initial terminal hangup.
+		killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
+		for _, window := range windows {
+			if window.nativeAcpBridgeID != "" {
+				_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
+			}
+		}
+		teardowns.Wait()
+		// Closing the ptys ends the reader goroutines and the hangup above ends the
+		// child processes, so the watchers finish promptly. Wait for them so no
+		// goroutine mutates server state after close returns. The wait is bounded
+		// because a child that ignores SIGHUP must not be able to hang shutdown;
+		// marking the windows closed above is what makes overrunning a watcher
+		// harmless rather than a late mutation of server state.
+		s.waitForWindowWatchers(time.Until(shutdownDeadline))
+		// A republisher may already have bound a replacement and be waiting to
+		// reacquire s.mu. Join it before close returns so it can observe closed and
+		// remove that listener's path rather than leaving stale socket residue.
+		s.socketRepublishers.Wait()
+		// Admission closed under s.mu before any Wait, so no start can join late.
+		// Unlike normal watchers, unpublished children have no useful work to
+		// preserve: join their forced cleanup through Wait before closing closeDone.
+		s.pendingWindowStarts.Wait()
+		// Let queued control frames (the shutdown reply among them) reach their
+		// clients within the same budget, then drop whatever a stalled one left.
+		for _, control := range controls {
+			if control.conn == nil {
+				continue
+			}
+			select {
+			case <-control.finished:
+			case <-time.After(time.Until(shutdownDeadline)):
+				control.finishOutput()
+			}
 		}
 	}
-	// Codex gets its separate graceful lock-release deadline. Other agents
-	// still need forced cleanup when they ignore the initial terminal hangup.
-	killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
-	for _, window := range windows {
-		if window.nativeAcpBridgeID != "" {
-			_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
-		}
-	}
-	teardowns.Wait()
-	// Closing the ptys ends the reader goroutines and the hangup above ends the
-	// child processes, so the watchers finish promptly. Wait for them so no
-	// goroutine mutates server state after close returns. The wait is bounded
-	// because a child that ignores SIGHUP must not be able to hang shutdown;
-	// marking the windows closed above is what makes overrunning a watcher
-	// harmless rather than a late mutation of server state.
-	s.waitForWindowWatchers(time.Until(shutdownDeadline))
-	// A republisher may already have bound a replacement and be waiting to
-	// reacquire s.mu. Join it before close returns so it can observe closed and
-	// remove that listener's path rather than leaving stale socket residue.
-	s.socketRepublishers.Wait()
-	// Admission closed under s.mu before any Wait, so no start can join late.
-	// Unlike normal watchers, unpublished children have no useful work to
-	// preserve: join their forced cleanup through Wait before closing closeDone.
-	s.pendingWindowStarts.Wait()
 }
 
 // windowWatcherShutdownTimeout includes Codex's parallel graceful escalation
 // and the remaining watcher wait. Do not add the grace period to this budget:
 // server replacement allows only one additional second for the old server exit.
 const windowWatcherShutdownTimeout = 2 * time.Second
+
+// windowOutputDrainTimeout bounds how long an exited window stays registered
+// while its reader drains final output.
+const windowOutputDrainTimeout = 500 * time.Millisecond
 
 // windowHangupGrace bounds how long close waits for hung-up children to exit
 // before killing their process groups. Cooperative children exit within a few

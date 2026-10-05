@@ -3236,16 +3236,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
         return;
       }
-      if (_isTmuxActive &&
-          _tmuxStateConnectionId == session.connectionId &&
-          !_shouldRefreshPlainTerminalTui(session)) {
+      // The TUI that justified these reports may have exited during the
+      // delay; a bare shell would read them as typed input.
+      if (!_shouldRefreshPlainTerminalTui(session)) {
         DiagnosticsLogService.instance.info(
           'terminal.theme',
-          'tmux_outer_late_skipped',
+          'late_refresh_skipped',
           fields: {
             'reason': reason,
             'connectionId': session.connectionId,
-            'colorSchemeUpdatesMode': session.terminalColorSchemeUpdatesMode,
+            'isTmuxActive': _isTmuxActive,
             'focusMode': _terminal.reportFocusMode,
             'altBuffer': _terminal.isUsingAltBuffer,
             'mouseMode': _terminal.mouseMode != MouseMode.none,
@@ -3253,10 +3253,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
         return;
       }
+      // DEC 2031 reports are only solicited while the mode is still on. The
+      // Windows default-color path is gated by the palette query above.
+      final colorSchemeUpdates = session.terminalColorSchemeUpdatesMode;
+      final sendThemeMode = includeThemeModeReport && colorSchemeUpdates;
+      final sendDefaults =
+          includeDefaultColorReports &&
+          (colorSchemeUpdates || requirePaletteQuerySince != null);
+      if (!sendThemeMode && !sendDefaults && !includeFocusReport) {
+        return;
+      }
       _refreshTerminalThemeReportsForTui(
         theme,
-        includeThemeModeReport: includeThemeModeReport,
-        includeDefaultColorReports: includeDefaultColorReports,
+        includeThemeModeReport: sendThemeMode,
+        includeDefaultColorReports: sendDefaults,
         includeFocusReport: includeFocusReport,
         reason: reason,
       );
@@ -4203,6 +4213,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       promptPrefix: _shellCompletionPromptPrefix,
       workingDirectory: workingDirectory,
       shellCommand: shellCommand,
+      windows: _activeSession()?.remoteIsWindows ?? false,
     );
   }
 
@@ -4316,26 +4327,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    var deleteCount = invocation.cursorOffset - suggestion.replacementStart;
-    if (currentInvocation != null &&
-        suggestion.kind == ShellCompletionSuggestionKind.history) {
-      final replacementStart = suggestion.replacementStart == 0
-          ? suggestion.replacementStart
-          : currentInvocation.tokenStart;
-      deleteCount = currentInvocation.cursorOffset - replacementStart;
-    } else if (currentInvocation != null &&
-        currentInvocation.mode == invocation.mode &&
-        currentInvocation.tokenStart == invocation.tokenStart) {
-      deleteCount =
-          currentInvocation.cursorOffset - suggestion.replacementStart;
-    }
-
-    if (deleteCount < 0) {
-      _hideShellCompletionPopup(resetPromptPrefix: false);
+    final deleteCount = shellCompletionBackspaceCount(
+      originalInvocation: invocation,
+      currentInvocation: currentInvocation,
+      suggestion: suggestion,
+    );
+    _hideShellCompletionPopup(resetPromptPrefix: false);
+    if (deleteCount == null) {
       return;
     }
-
-    _hideShellCompletionPopup(resetPromptPrefix: false);
     for (var index = 0; index < deleteCount; index++) {
       _terminal.keyInput(TerminalKey.backspace);
     }
@@ -9149,6 +9149,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (hasActiveNativeSession) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
+          !identical(session, _activeSession()) ||
           _nativeAcpLaunchState != null ||
           _activeNativeAcpSessionKey != null) {
         return;
@@ -9396,6 +9397,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? requestedSessionId,
     int? requestGeneration,
   }) {
+    // A queued open re-enters here once the previous one settles, possibly
+    // after this screen was disposed or switched to another session. Nothing
+    // below may pause parsing or call setState for a session it doesn't own.
+    if (!mounted || !identical(sshSession, _activeSession())) {
+      return Future<void>.value();
+    }
     final opening = _openingNativeAcpWindow;
     if (opening != null &&
         _openingNativeAcpBridgeId == bridgeId &&
@@ -9405,10 +9412,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return opening;
     }
     if (opening != null && requestGeneration == null) {
-      final cancellation = _nativeAcpWindowCancellation;
-      if (cancellation != null && !cancellation.isCompleted) {
-        cancellation.complete();
-      }
+      _cancelNativeAcpWindowOpen();
     }
     final requestedGeneration =
         requestGeneration ?? ++_nativeAcpWindowRequestGeneration;
@@ -9486,6 +9490,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }());
     return completer.future;
+  }
+
+  void _cancelNativeAcpWindowOpen() {
+    final cancellation = _nativeAcpWindowCancellation;
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
   }
 
   Future<void> _performOpenServerOwnedNativeAcpWindow(
@@ -11093,6 +11104,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _agentUpdateCheckTimer?.cancel();
 
     _cancelTerminalThemeRefreshTimers();
+    // Invalidate any queued native window open so it cannot start later.
+    _nativeAcpWindowRequestGeneration++;
+    _cancelNativeAcpWindowOpen();
     _sessionController.dispose();
     _stopSharedClipboardSync();
     _stopTmuxForegroundVerification();

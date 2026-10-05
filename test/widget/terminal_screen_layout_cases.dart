@@ -1434,7 +1434,7 @@ void registerTerminalScreenLayoutTests() {
             ],
           ),
         ];
-        final seen = <String, int>{};
+        final seen = <String, MuxWindowNotification>{};
 
         final shows = collectUnseenMuxForwardedNotifications(
           windows,
@@ -1443,7 +1443,9 @@ void registerTerminalScreenLayoutTests() {
         );
 
         expect(shows.map((show) => show.notification.seq), [1, 2]);
-        expect(seen, {'@1': 2});
+        expect(seen, {
+          '@1': const MuxWindowNotification(seq: 2, payload: '99;second'),
+        });
       });
 
       test('skips active windows but still advances their sequences', () {
@@ -1459,7 +1461,7 @@ void registerTerminalScreenLayoutTests() {
           ),
           windowA,
         ];
-        final seen = <String, int>{};
+        final seen = <String, MuxWindowNotification>{};
 
         final shows = collectUnseenMuxForwardedNotifications(
           windows,
@@ -1468,7 +1470,9 @@ void registerTerminalScreenLayoutTests() {
         );
 
         expect(shows, isEmpty);
-        expect(seen, {'@3': 7});
+        expect(seen, {
+          '@3': const MuxWindowNotification(seq: 7, payload: '99;viewed'),
+        });
       });
 
       test('only reports sequences newer than the recorded ones', () {
@@ -1485,7 +1489,9 @@ void registerTerminalScreenLayoutTests() {
           ),
           windowB,
         ];
-        final seen = <String, int>{'@1': 1};
+        final seen = {
+          '@1': const MuxWindowNotification(seq: 1, payload: '99;old'),
+        };
 
         final shows = collectUnseenMuxForwardedNotifications(
           windows,
@@ -1496,11 +1502,14 @@ void registerTerminalScreenLayoutTests() {
         expect(shows, hasLength(1));
         expect(shows.single.notification.seq, 2);
         expect(shows.single.window.id, '@1');
-        expect(seen, {'@1': 2});
+        expect(seen, {
+          '@1': const MuxWindowNotification(seq: 2, payload: '99;new'),
+        });
       });
 
       test('leaves windows without pending notifications alone', () {
-        final seen = <String, int>{'@9': 3};
+        const seenEntry = MuxWindowNotification(seq: 3, payload: '99;x');
+        final seen = {'@9': seenEntry};
 
         final shows = collectUnseenMuxForwardedNotifications(
           const [windowA, windowB],
@@ -1509,7 +1518,7 @@ void registerTerminalScreenLayoutTests() {
         );
 
         expect(shows, isEmpty);
-        expect(seen, {'@9': 3});
+        expect(seen, {'@9': seenEntry});
       });
     });
   });

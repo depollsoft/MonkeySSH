@@ -1719,6 +1719,79 @@ void main() {
       await stdoutController.close();
     });
 
+    for (final (name, platform, exitCode) in [
+      ('a successful probe enriches windows', 'linux-amd64', 0),
+      ('a failed probe exit is not parsed', 'linux-amd64', 1),
+      ('a Windows helper never runs the POSIX probe', 'windows-amd64', 0),
+    ]) {
+      test('agent metadata: $name', () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(client, connectionId: 908);
+        final stdoutController = StreamController<Uint8List>();
+        final controlSession = _buildSilentControlSession(stdoutController);
+        var probes = 0;
+        when(() => controlSession.write(any())).thenAnswer((invocation) {
+          final data = invocation.positionalArguments.single as List<int>;
+          final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+          final isProbe = request['type'] == 'run_command';
+          if (isProbe) probes++;
+          final response = jsonEncode({
+            'id': request['id'],
+            'status': 'ok',
+            if (isProbe) ...{
+              'type': 'command_output',
+              'data': 'codex\x1fcodex-session\x1f501\x1f42\x1fmedium\x1f\n',
+              'exitCode': exitCode,
+            } else ...{
+              'type': 'window_list',
+              'windows': [
+                {..._fakeWindowJson, 'panePid': 42},
+              ],
+            },
+          });
+          scheduleMicrotask(
+            () => stdoutController.add(
+              Uint8List.fromList(utf8.encode('$response\n')),
+            ),
+          );
+        });
+        when(() => installer.ensureInstalled(session)).thenAnswer(
+          (_) async => MonkeyMuxInstallation(
+            executablePath: _fakeInstallation.executablePath,
+            platform: platform,
+            version: _fakeInstallation.version,
+          ),
+        );
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => controlSession);
+
+        final service = MonkeyMuxService(installer: installer);
+        final sessionIds = <String?>[];
+        final subscription = service.watchWindowChanges(session, 'work').listen(
+          (event) {
+            if (event is TmuxWindowListEvent) {
+              sessionIds.addAll(
+                event.windows.map((w) => w.activeAgentSessionId),
+              );
+            }
+          },
+        );
+        await service.listWindows(session, 'work');
+        await pumpEventQueue();
+
+        expect(probes, platform.startsWith('windows') ? 0 : 1);
+        expect(
+          sessionIds.contains('codex-session'),
+          platform == 'linux-amd64' && exitCode == 0,
+        );
+
+        await subscription.cancel();
+        await service.clearCache(908);
+        await stdoutController.close();
+      });
+    }
+
     test('gives every queued control command a distinct id', () async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();

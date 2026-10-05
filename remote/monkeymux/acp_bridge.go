@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -50,11 +51,29 @@ const (
 	// Provider requests the bridge answered as cancelled, remembered so a
 	// late client response is not forwarded as a second answer.
 	acpCancelledRequestMemory = 1024
+	// Bounds on the frames queued for the provider's stdin. A client write
+	// waits for its own frame, so the queue fills only with the -32800
+	// answers to provider cancellations, which a provider that never reads
+	// its input could otherwise pile up without end.
+	acpProviderInputMaxFrames = 1024
+	acpProviderInputMaxBytes  = acpMaxFrameBytes + 1024*1024
 	acpCancelRequestMethod    = "$/cancel_request"
 	acpRequestCancelledCode   = -32800
 )
 
 var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+var (
+	errAcpProviderInputClosed = errors.New("closed")
+	errAcpProviderInputFull   = errors.New("ACP provider input queue is full")
+)
+
+// acpProviderInput is one frame queued for the provider's stdin; done, when
+// set, receives the result of writing it.
+type acpProviderInput struct {
+	data json.RawMessage
+	done chan<- error
+}
 
 // acpWireMessage is the versioned NDJSON protocol spoken over an SSH exec
 // channel. Data is intentionally opaque: MonkeyMux relays it but never logs or
@@ -149,8 +168,12 @@ type acpBridge struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 
-	mu                   sync.Mutex
-	stdinMu              sync.Mutex
+	mu sync.Mutex
+	// providerInput holds the frames queued for stdin, which one writer
+	// goroutine writes in order while providerInputWriting is set.
+	providerInput        []acpProviderInput
+	providerInputBytes   int
+	providerInputWriting bool
 	state                string
 	startedAt            time.Time
 	lastActivity         time.Time
@@ -1161,6 +1184,20 @@ func (b *acpBridge) publish(
 			}
 		}
 	}
+	// The event must fit the wire once wrapped and encoded, or every client,
+	// and every resume from an earlier ACK, would fail on it. Checked before
+	// it takes a sequence; the caller fails the provider instead.
+	if !acpWireFrameFits(acpWireMessage{
+		Version:  acpBridgeProtocolVersion,
+		Type:     eventType,
+		BridgeID: b.id,
+		Sequence: math.MaxUint64,
+		Data:     data,
+		State:    state,
+		ExitCode: exitCode,
+	}) {
+		return false
+	}
 	messageBytes := len(data) + acpReplayEventOverheadBytes
 	b.mu.Lock()
 	if pendingID != "" &&
@@ -1230,7 +1267,11 @@ func (b *acpBridge) publish(
 	if cancelResponse != nil {
 		// Never block the provider-output reader on provider stdin: a provider
 		// blocked writing output while its input pipe is full would deadlock.
-		go func() { _ = b.writeProvider(cancelResponse) }()
+		// A provider that keeps cancelling without reading fills the queue
+		// and fails.
+		if errors.Is(b.queueProviderInput(cancelResponse, nil), errAcpProviderInputFull) {
+			return false
+		}
 	}
 	return true
 }
@@ -1757,20 +1798,63 @@ func (b *acpBridge) recordAck(clientID string, sequence uint64) {
 	}
 }
 
+// writeProvider writes one frame to the provider's stdin, in order behind any
+// queued frame, and returns the result.
 func (b *acpBridge) writeProvider(data json.RawMessage) error {
-	b.stdinMu.Lock()
-	defer b.stdinMu.Unlock()
-	b.mu.Lock()
-	stdin := b.stdin
-	b.mu.Unlock()
-	if stdin == nil {
-		return errors.New("closed")
-	}
-	if _, err := stdin.Write(data); err != nil {
+	done := make(chan error, 1)
+	if err := b.queueProviderInput(data, done); err != nil {
 		return err
 	}
-	_, err := stdin.Write([]byte{'\n'})
-	return err
+	return <-done
+}
+
+// queueProviderInput queues data for the provider's stdin and starts the
+// writer if it is idle. done, when set, receives the write's result.
+func (b *acpBridge) queueProviderInput(data json.RawMessage, done chan<- error) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stdin == nil {
+		return errAcpProviderInputClosed
+	}
+	if len(b.providerInput) >= acpProviderInputMaxFrames ||
+		b.providerInputBytes+len(data)+1 > acpProviderInputMaxBytes {
+		return errAcpProviderInputFull
+	}
+	b.providerInput = append(b.providerInput, acpProviderInput{data: data, done: done})
+	b.providerInputBytes += len(data) + 1
+	if !b.providerInputWriting {
+		b.providerInputWriting = true
+		go b.writeProviderInput()
+	}
+	return nil
+}
+
+// writeProviderInput is the provider's single stdin writer. It writes the
+// queued frames in order and exits once the queue is empty.
+func (b *acpBridge) writeProviderInput() {
+	for {
+		b.mu.Lock()
+		if len(b.providerInput) == 0 {
+			b.providerInputWriting = false
+			b.mu.Unlock()
+			return
+		}
+		frame := b.providerInput[0]
+		b.providerInput[0] = acpProviderInput{}
+		b.providerInput = b.providerInput[1:]
+		b.providerInputBytes -= len(frame.data) + 1
+		stdin := b.stdin
+		b.mu.Unlock()
+		err := errAcpProviderInputClosed
+		if stdin != nil {
+			if _, err = stdin.Write(frame.data); err == nil {
+				_, err = stdin.Write([]byte{'\n'})
+			}
+		}
+		if frame.done != nil {
+			frame.done <- err
+		}
+	}
 }
 
 func (b *acpBridge) snapshot() acpBridgeInfo {
@@ -1824,15 +1908,23 @@ func (b *acpBridge) stop() {
 	})
 }
 
+// closeProviderInput closes stdin, which interrupts a blocked write, and fails
+// every frame still queued behind it.
 func (b *acpBridge) closeProviderInput() {
-	// Pipe Close must interrupt a blocked Write, not wait for its mutex.
-	// stdinMu only serializes frames; mu protects ownership of the pipe.
 	b.mu.Lock()
 	stdin := b.stdin
 	b.stdin = nil
+	queued := b.providerInput
+	b.providerInput = nil
+	b.providerInputBytes = 0
 	b.mu.Unlock()
 	if stdin != nil {
 		_ = stdin.Close()
+	}
+	for _, frame := range queued {
+		if frame.done != nil {
+			frame.done <- errAcpProviderInputClosed
+		}
 	}
 }
 
@@ -1965,6 +2057,18 @@ func readAcpWireFrame(reader *bufio.Reader) (acpWireMessage, error) {
 		return acpWireMessage{}, &protocolFrameError{err}
 	}
 	return message, nil
+}
+
+// acpWireFrameFits reports whether message stays within the wire limit once
+// written. Encoding compacts the opaque data but escapes <, > and & to six
+// bytes each (U+2028 and U+2029 to twice their size), so data under an eighth
+// of the limit always fits and only larger frames are encoded to check.
+func acpWireFrameFits(message acpWireMessage) bool {
+	if len(message.Data) < acpMaxFrameBytes/8 {
+		return true
+	}
+	data, err := json.Marshal(message)
+	return err == nil && len(data)+1 <= acpMaxFrameBytes
 }
 
 func writeAcpWireFrame(writer io.Writer, message acpWireMessage) error {

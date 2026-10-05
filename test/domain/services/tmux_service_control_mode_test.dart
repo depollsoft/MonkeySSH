@@ -2292,8 +2292,21 @@ void main() {
                 _utf8Bytes('%begin 1 1 1\n4\n%end 1 1 1\n'),
               ),
             );
-          } else if (value.startsWith('set-option ') ||
-              value.startsWith('send-keys ')) {
+          } else if (value.startsWith('set-option ')) {
+            // tmux reads a control-mode line verbatim: `\;` is a literal
+            // argument and `;` starts another command, so anything but
+            // `set-option -w -t <target> <option> <value>` is an error.
+            final ok = _tmuxControlArgs(value).length == 6;
+            scheduleMicrotask(
+              () => stdoutController.add(
+                _utf8Bytes(
+                  ok
+                      ? '%begin 1 1 1\n%end 1 1 1\n'
+                      : '%begin 1 1 1\ntoo many arguments\n%error 1 1 1\n',
+                ),
+              ),
+            );
+          } else if (value.startsWith('send-keys ')) {
             scheduleMicrotask(
               () => stdoutController.add(
                 _utf8Bytes('%begin 1 1 1\n%end 1 1 1\n'),
@@ -2321,21 +2334,25 @@ void main() {
       );
 
       expect(
+        writes.where((write) => write.startsWith('set-option ')).toList(),
+        [
+          "set-option -w -t 'main:4' @flutty_agent_tool 'copilot'\n",
+          "set-option -w -t 'main:4' @flutty_agent_session_id 'copilot-session'\n",
+          "set-option -w -t 'main:4' @flutty_agent_session_confidence 'high'\n",
+          predicate<String>(
+            (write) => write.startsWith(
+              "set-option -w -t 'main:4' @flutty_agent_session_updated_at ",
+            ),
+          ),
+        ],
+      );
+
+      expect(
         writes,
         contains(
           "new-window -P -F '#{window_index}' -t 'main' "
           "-c '/tmp/project' -n 'copilot'\n",
         ),
-      );
-      expect(
-        writes.any(
-          (write) =>
-              write.contains("@flutty_agent_tool 'copilot'") &&
-              write.contains("@flutty_agent_session_id 'copilot-session'") &&
-              write.contains("@flutty_agent_session_confidence 'high'") &&
-              write.contains('@flutty_agent_session_updated_at '),
-        ),
-        isTrue,
       );
       expect(
         writes,
@@ -3093,6 +3110,38 @@ Stream<Uint8List> _closedUtf8Stream(String value) =>
     );
 
 Uint8List _utf8Bytes(String value) => Uint8List.fromList(utf8.encode(value));
+
+/// Splits a control-mode command line the way tmux does for the subset the
+/// service writes: single quotes group, and `;` outside quotes is its own
+/// token (a separator; `\;` stays a literal argument).
+List<String> _tmuxControlArgs(String line) {
+  final args = <String>[];
+  final current = StringBuffer();
+  var quoted = false;
+  var inToken = false;
+  void flush() {
+    if (inToken) args.add(current.toString());
+    current.clear();
+    inToken = false;
+  }
+
+  for (final char in line.trimRight().split('')) {
+    if (char == "'") {
+      quoted = !quoted;
+      inToken = true;
+    } else if (!quoted && char == ' ') {
+      flush();
+    } else if (!quoted && char == ';' && !current.toString().endsWith(r'\')) {
+      flush();
+      args.add(';');
+    } else {
+      current.write(char);
+      inToken = true;
+    }
+  }
+  flush();
+  return args;
+}
 
 void _ignoreInvocation(Invocation _) {}
 

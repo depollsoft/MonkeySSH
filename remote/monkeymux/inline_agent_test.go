@@ -102,8 +102,8 @@ func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
 			if rows[21] != " status redrawn" || rows[23] != "❯" {
 				t.Fatalf("input area was not redrawn: %q", rows[20:])
 			}
-			if len(client.scrollback) == 0 || vtScrollbackText(client.scrollback[0]) != "transcript line 1" {
-				t.Fatalf("scrollback lost the start of the transcript: %d lines", len(client.scrollback))
+			if client.scrollback.len() == 0 || vtScrollbackText(client.scrollback.at(0).text) != "transcript line 1" {
+				t.Fatalf("scrollback lost the start of the transcript: %d lines", client.scrollback.len())
 			}
 		})
 	}

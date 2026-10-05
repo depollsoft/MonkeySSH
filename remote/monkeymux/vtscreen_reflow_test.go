@@ -59,8 +59,8 @@ func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
 }
 
 func vtScrollbackTexts(s *terminalScreen) []string {
-	out := make([]string, len(s.scrollback))
-	for i, line := range s.scrollback {
+	out := make([]string, s.scrollback.len())
+	for i, line := range vtScrollbackLines(s) {
 		out[i] = vtScrollbackText(line)
 	}
 	return out
@@ -93,8 +93,8 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 	if got := s.TextRows(); !slices.Equal(got, []string{"0123456789abcd", "next", ""}) {
 		t.Fatalf("widen: %q", got)
 	}
-	if len(s.scrollback) != 0 || slices.Contains(s.main.wrapped, true) {
-		t.Fatalf("widen left %d scrollback lines, wrapped %v", len(s.scrollback), s.main.wrapped)
+	if s.scrollback.len() != 0 || slices.Contains(s.main.wrapped, true) {
+		t.Fatalf("widen left %d scrollback lines, wrapped %v", s.scrollback.len(), s.main.wrapped)
 	}
 }
 
@@ -147,8 +147,8 @@ func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
 	}
 	for _, autowrap := range []bool{true, false} {
 		s := build(autowrap)
-		if !s.main.wrapped[0] || !slices.Contains(s.scrollbackWrapped, true) {
-			t.Fatalf("setup: wrapped %v scrollback %v", s.main.wrapped, s.scrollbackWrapped)
+		if !s.main.wrapped[0] || !slices.Contains(vtScrollbackWrapped(s), true) {
+			t.Fatalf("setup: wrapped %v scrollback %v", s.main.wrapped, vtScrollbackWrapped(s))
 		}
 		replica := vtRoundTrip(t, s)
 		for _, width := range []int{11, 3, 8} {
@@ -188,7 +188,7 @@ func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 	replica = newTerminalScreen(4, 1)
 	replica.Write([]byte("\x1b[?7h"))
 	replica.Write(s.RenderFrame())
-	if got := replica.scrollback; len(got) != 1 || string(got[0]) != "abc" {
+	if got := vtScrollbackLines(replica); len(got) != 1 || string(got[0]) != "abc" {
 		t.Fatalf("frame left a stand-in in the history: %q", got)
 	}
 	if replica.main.wrapped[0] {
@@ -204,8 +204,8 @@ func TestVTScreenFrameKeepsDefaultPaddingAfterWrappedScrollback(t *testing.T) {
 	s := newTerminalScreen(3, 2)
 	s.Write([]byte("\x1b[44mabcdefghij\r\nx\r\nx"))
 	s.Resize(4, 2)
-	if !slices.Contains(s.scrollbackWrapped, true) {
-		t.Fatalf("setup: scrollback wrapped %v", s.scrollbackWrapped)
+	if !slices.Contains(vtScrollbackWrapped(s), true) {
+		t.Fatalf("setup: scrollback wrapped %v", vtScrollbackWrapped(s))
 	}
 	vtRoundTrip(t, s)
 
@@ -374,8 +374,8 @@ func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
 		replica := vtRoundTrip(t, s)
 		s.Resize(4, 3)
 		replica.Resize(4, 3)
-		if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) || len(replica.scrollback) != len(s.scrollback) {
-			t.Fatalf("%q: replica %q (%d history), model %q (%d history)", tab, got, len(replica.scrollback), want, len(s.scrollback))
+		if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) || replica.scrollback.len() != s.scrollback.len() {
+			t.Fatalf("%q: replica %q (%d history), model %q (%d history)", tab, got, replica.scrollback.len(), want, s.scrollback.len())
 		}
 	}
 }

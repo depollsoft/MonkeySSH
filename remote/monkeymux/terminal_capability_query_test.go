@@ -320,6 +320,7 @@ func TestDetachedTerminalCapabilityResponses(t *testing.T) {
 			for _, chunk := range tt.chunks {
 				server.handleWindowOutput("@1", []byte(chunk))
 			}
+			waitForWindowReplies(t, window)
 
 			if got := pty.String(); got != tt.wantOutput {
 				t.Fatalf("window pty got = %q, want %q", got, tt.wantOutput)
@@ -332,6 +333,62 @@ func TestDetachedTerminalCapabilityResponses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A reply the daemon answers itself must not make the output reader wait for
+// window input: a paste blocked on a child that is itself blocked writing
+// output would otherwise deadlock all three. The reply still reaches the pty
+// after the paste and before input written after it.
+func TestLocallyAnsweredQueryDoesNotWaitForBlockedInput(t *testing.T) {
+	pty := &pasteGatePty{entered: make(chan struct{}), release: make(chan struct{})}
+	window := &muxWindow{id: "@1", agentTool: "copilot", pty: pty, lastActivity: time.Now()}
+	server := newMuxServer("reply-queue")
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.themeHint = []byte(themeHintFixture)
+	pasted := make(chan error, 1)
+	go func() { pasted <- server.writeWindowInput(window.id, []byte("paste"), true) }()
+	<-pty.entered
+
+	outputDone := make(chan struct{})
+	go func() {
+		server.handleWindowOutput(window.id, []byte(colorSchemeQuery))
+		close(outputDone)
+	}()
+	select {
+	case <-outputDone:
+	case <-time.After(time.Second):
+		close(pty.release)
+		t.Fatal("the output reader waited for a blocked paste to answer a query")
+	}
+	typed := make(chan error, 1)
+	go func() { typed <- server.writeWindowInput(window.id, []byte("x"), false) }()
+	close(pty.release)
+	if err := <-pasted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-typed; err != nil {
+		t.Fatal(err)
+	}
+	waitForWindowReplies(t, window)
+	if got, want := pty.String(), "paste\x1b[?997;1nx"; got != want {
+		t.Fatalf("pty writes = %q, want %q", got, want)
+	}
+}
+
+// pasteGatePty blocks the write of "paste" until released, like a pty whose
+// child stopped reading input.
+type pasteGatePty struct {
+	recordingPty
+	entered, release chan struct{}
+}
+
+func (p *pasteGatePty) Write(data []byte) (int, error) {
+	if string(data) == "paste" {
+		close(p.entered)
+		<-p.release
+	}
+	return p.recordingPty.Write(data)
 }
 
 // TestCapabilityHintAnswersBackgroundWindowQueries covers a restored agent
@@ -357,6 +414,7 @@ func TestCapabilityHintAnswersBackgroundWindowQueries(t *testing.T) {
 	client.capabilityHint = []byte(capabilityHintFixture)
 
 	server.handleWindowOutput("@2", []byte(xtversionQuery))
+	waitForWindowReplies(t, background)
 
 	if got := pty.String(); got != "\x1bP>|kitty(0.32.0)\x1b\\" {
 		t.Fatalf("background pty got = %q, want the XTVERSION reply", got)
@@ -393,6 +451,7 @@ func TestCapabilityHintIsNotBorrowedFromAnotherClient(t *testing.T) {
 	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
 
 	server.handleWindowOutput("@2", []byte(xtversionQuery))
+	waitForWindowReplies(t, background)
 
 	if got := pty.String(); got != "" {
 		t.Fatalf("window pty got = %q, want no reply for a hintless client", got)
@@ -427,6 +486,7 @@ func TestCapabilityHintAnswerBurstIsBounded(t *testing.T) {
 		"@1",
 		[]byte(strings.Repeat(da1Query, 4096)),
 	)
+	waitForWindowReplies(t, window)
 
 	if got := len(pty.String()); got > pendingTerminalQueryLimitBytes {
 		t.Fatalf(
@@ -445,6 +505,7 @@ func TestCapabilityHintAnswerBurstIsBounded(t *testing.T) {
 	// The buffer is now full, so later chunks must not resume answering fences.
 	before := len(pty.String())
 	server.handleWindowOutput("@1", []byte(da1Query))
+	waitForWindowReplies(t, window)
 	if got := len(pty.String()); got != before {
 		t.Fatalf("wrote %d more reply bytes after the buffer filled", got-before)
 	}
@@ -470,6 +531,7 @@ func TestCapabilityHintVersionAnswersAreBoundedAcrossChunks(t *testing.T) {
 	for chunk := 0; chunk < 64; chunk++ {
 		server.handleWindowOutput("@1", []byte(strings.Repeat(xtversionQuery, 64)))
 	}
+	waitForWindowReplies(t, window)
 
 	if got := len(pty.String()); got > pendingTerminalQueryLimitBytes {
 		t.Fatalf(
@@ -505,11 +567,13 @@ func TestCapabilityAnswerBudgetResetsWhenWindowIsShown(t *testing.T) {
 
 	// Spend the budget while no terminal is attached.
 	server.handleWindowOutput("@1", []byte(strings.Repeat(xtversionQuery, 4096)))
+	waitForWindowReplies(t, window)
 	spent := len(pty.String())
 	if spent == 0 || spent > pendingTerminalQueryLimitBytes {
 		t.Fatalf("spent %d reply bytes, want a bounded non-zero burst", spent)
 	}
 	server.handleWindowOutput("@1", []byte(xtversionQuery))
+	waitForWindowReplies(t, window)
 	if got := len(pty.String()); got != spent {
 		t.Fatalf("answered %d more bytes with the budget spent", got-spent)
 	}

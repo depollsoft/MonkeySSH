@@ -948,7 +948,7 @@ class _TerminalSection extends ConsumerWidget {
     WidgetRef ref,
     double current,
   ) {
-    var tempValue = current;
+    var tempValue = clampFontSize(current);
     final currentFont = ref.read(fontFamilyNotifierProvider);
     const previewText = 'AaBbCc 0123 {}[]';
 
@@ -988,9 +988,9 @@ class _TerminalSection extends ConsumerWidget {
               const SizedBox(height: 16),
               Slider(
                 value: tempValue,
-                min: 8,
-                max: 24,
-                divisions: 16,
+                min: minFontSize,
+                max: maxFontSize,
+                divisions: (maxFontSize - minFontSize).round(),
                 label: '${tempValue.round()} pt',
                 onChanged: (value) => setState(() => tempValue = value),
               ),

@@ -3,6 +3,47 @@ import 'dart:ui' show Rect;
 
 import 'package:xterm/xterm.dart';
 
+/// Source rectangle of a classic Kitty [placement] within [stored]'s decoded
+/// image, or null when the crop is empty.
+///
+/// Kitty crop coordinates (`x=`, `y=`, `w=`, `h=`) refer to the original
+/// source dimensions. The decoder may have downscaled the image, so the crop
+/// is clamped in source space and then scaled into decoded pixels.
+Rect? resolveKittyPlacementSourceRect(
+  TerminalImage stored,
+  TerminalImagePlacement placement,
+) {
+  final imageWidth = stored.image.width.toDouble();
+  final imageHeight = stored.image.height.toDouble();
+  final sourceWidth = stored.sourceWidth > 0
+      ? stored.sourceWidth.toDouble()
+      : imageWidth;
+  final sourceHeight = stored.sourceHeight > 0
+      ? stored.sourceHeight.toDouble()
+      : imageHeight;
+  final left = placement.srcX.toDouble().clamp(0.0, sourceWidth);
+  final top = placement.srcY.toDouble().clamp(0.0, sourceHeight);
+  final width =
+      (placement.srcWidth > 0
+              ? placement.srcWidth.toDouble()
+              : sourceWidth - left)
+          .clamp(0.0, sourceWidth - left);
+  final height =
+      (placement.srcHeight > 0
+              ? placement.srcHeight.toDouble()
+              : sourceHeight - top)
+          .clamp(0.0, sourceHeight - top);
+  final scaleX = imageWidth / sourceWidth;
+  final scaleY = imageHeight / sourceHeight;
+  final src = Rect.fromLTWH(
+    left * scaleX,
+    top * scaleY,
+    width * scaleX,
+    height * scaleY,
+  );
+  return src.width > 0 && src.height > 0 ? src : null;
+}
+
 /// Minimum density of live cells within their bounding box for a Kitty
 /// Unicode-placeholder image instance to be composited. A solidly displayed
 /// image, or a clean scroll crop where whole rows have scrolled off, fills its

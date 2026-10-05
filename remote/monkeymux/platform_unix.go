@@ -645,6 +645,11 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 // the window closes as usual.
 const agentWindowHoldThresholdSeconds = 12
 
+// launchedWindowOutlivesProgram reports whether a window the app launched a
+// program in can stay open once the program ends: an agent that fails right
+// after launch falls back to an interactive shell (holdAgentWindowCommand).
+const launchedWindowOutlivesProgram = true
+
 // holdAgentWindowCommand wraps an agent launch command so the window survives a
 // fast, abnormal exit. If the agent exits non-zero within
 // agentWindowHoldThresholdSeconds, the terminal is restored to a sane state and
@@ -654,14 +659,11 @@ const agentWindowHoldThresholdSeconds = 12
 // been running for a while, lets the window close normally. An intentional
 // window close signals SIGHUP to the whole process group, terminating this
 // wrapping shell before the fallback runs, so closing a window never lingers.
-// launchedWindowOutlivesProgram reports whether a window the app launched a
-// program in can stay open once the program ends: an agent that fails right
-// after launch falls back to an interactive shell (holdAgentWindowCommand).
-const launchedWindowOutlivesProgram = true
-
+// The wrapper is POSIX shell syntax, so other shells (csh, tcsh, fish, ...) run
+// the command unwrapped rather than failing to parse the wrapper.
 func holdAgentWindowCommand(shell string, command string) string {
 	command = strings.TrimSpace(command)
-	if command == "" {
+	if command == "" || !isPosixShell(shell) {
 		return command
 	}
 	notice := "[MonkeySSH] Agent exited (status %s) right after launch. " +
@@ -676,6 +678,28 @@ func holdAgentWindowCommand(shell string, command string) string {
 		"stty sane 2>/dev/null; " +
 		"printf '\\r\\n" + notice + "\\r\\n' \"$__mm_rc\"; " +
 		"exec " + shellQuote(shell) + " -i; fi"
+}
+
+func isPosixShell(shell string) bool {
+	switch shellProcessName(shell) {
+	case "sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "oksh", "yash":
+		return true
+	default:
+		return false
+	}
+}
+
+// drainExitedWindowOutput waits for the reader of an exited window's terminal
+// to reach EOF, which happens once the child's buffered output has been read
+// and every slave descriptor is closed. A background job that keeps the slave
+// open cannot hold the window past windowOutputDrainTimeout.
+func drainExitedWindowOutput(_ *muxWindow, readerDone <-chan struct{}) {
+	timer := time.NewTimer(windowOutputDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-readerDone:
+	case <-timer.C:
+	}
 }
 
 func readProcessTable() map[int]processInfo {

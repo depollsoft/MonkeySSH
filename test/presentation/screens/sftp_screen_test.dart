@@ -1369,6 +1369,61 @@ void main() {
       );
     }
 
+    testWidgets('video fallback download keeps its file after navigation', (
+      tester,
+    ) async {
+      final directory = Directory.systemTemp.createTempSync('sftp-fallback-');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      const channel = MethodChannel('plugins.flutter.io/path_provider');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => directory.path,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      final remoteFiles = _MockRemoteFileService();
+      final sftp = await _pumpCrashlyticsBrowser(
+        tester,
+        entries: [_fileEntry('demo.mp4', size: 200 * 1024 * 1024)],
+        remoteFiles: remoteFiles,
+      );
+      when(() => sftp.listdir('/home')).thenAnswer((_) async => []);
+      final downloads = <String>[];
+      when(
+        () => remoteFiles.downloadFile(
+          sftp: sftp,
+          remotePath: any(named: 'remotePath'),
+          localPath: any(named: 'localPath'),
+        ),
+      ).thenAnswer((invocation) async {
+        downloads.add(invocation.namedArguments[#remotePath] as String);
+        throw const FileSystemException('stop after capture');
+      });
+
+      // Oversized videos offer the Download fallback immediately.
+      await tester.tap(find.text('demo.mp4'));
+      await tester.pump();
+      expect(find.text('Download'), findsOneWidget);
+      await tester.tap(find.text('home'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 750));
+      await tester.tap(find.text('Download'));
+      // Staging the export creates a real temporary directory.
+      for (var attempt = 0; attempt < 50 && downloads.isEmpty; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+
+      expect(downloads, ['/home/demo/demo.mp4']);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     testWidgets('reopens SFTP when the directory channel goes stale', (
       tester,
     ) async {

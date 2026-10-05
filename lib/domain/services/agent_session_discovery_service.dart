@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
@@ -37,7 +38,21 @@ const _profileSourcingPrefix =
     'esac; '
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 const _remoteFileSnapshotBatchSize = 40;
+
+/// Line-limited snapshot reads also stop at a byte ceiling, because one JSONL
+/// record can carry a whole image or tool result. A batch returns at most
+/// [_snapshotBatchMaxBytes], and one file at most [_snapshotFileMaxBytes],
+/// split between its head and tail.
+const _snapshotBatchMaxBytes = 8 * 1024 * 1024;
+const _snapshotFileMaxBytes = 512 * 1024;
+
+/// Byte ceiling for each line-limited segment of a [fileCount]-file batch.
+@visibleForTesting
+int snapshotSegmentMaxBytes(int fileCount, {required bool withTail}) =>
+    math.min(_snapshotFileMaxBytes, _snapshotBatchMaxBytes ~/ fileCount) ~/
+    (withTail ? 2 : 1);
 const _grokSessionMetadataMaxBytes = 64 * 1024;
+const _piLabelCacheMaxEntries = 512;
 const _openCodeStorageSessionMetadataMaxBytes = 64 * 1024;
 const _piSessionLabelExtractorScript = r'''
 const fs = require("fs");
@@ -67,8 +82,10 @@ async function emitLabel(path) {
   let firstUserMessage = "";
   let sessionName;
   try {
+    // Bounded work per transcript: a name or prompt past this stays unread
+    // and the row keeps its fallback label.
     const lines = readline.createInterface({
-      input: fs.createReadStream(path, { encoding: "utf8" }),
+      input: fs.createReadStream(path, { encoding: "utf8", end: 262143 }),
       crlfDelay: Infinity,
     });
     for await (const line of lines) {
@@ -517,23 +534,31 @@ Iterable<String> _nonEmptyLines(String output) => output
 
 /// A file from [posixListNewestFilesCommand] or [windowsListNewestFilesScript]
 /// with the mtime that listing already computed.
-typedef _ListedFile = ({String path, DateTime? modifiedAt});
+typedef _ListedFile = ({String path, DateTime? modifiedAt, int? size});
 
-/// Parses `<epoch>\t<path>` listing lines; a line without a leading epoch is
-/// taken as a bare path. Duplicate paths keep their first position.
+final _listedSizePattern = RegExp(r'^(\d+)\t');
+
+/// Parses `<epoch>\t[<size>\t]<path>` listing lines; a line without a leading
+/// epoch is taken as a bare path. Listed paths are absolute, so a numeric
+/// second field is a size. Duplicate paths keep their first position.
 List<_ListedFile> _parseListedFiles(String output) {
   final seen = <String>{};
   final files = <_ListedFile>[];
   for (final line in _nonEmptyLines(output)) {
     final tab = line.indexOf('\t');
     final epoch = tab < 0 ? null : int.tryParse(line.substring(0, tab));
-    final path = epoch == null ? line : line.substring(tab + 1).trim();
+    var path = epoch == null ? line : line.substring(tab + 1).trim();
+    final sizeMatch = epoch == null
+        ? null
+        : _listedSizePattern.firstMatch(path);
+    if (sizeMatch != null) path = path.substring(sizeMatch.end);
     if (path.isEmpty || !seen.add(path)) continue;
     files.add((
       path: path,
       modifiedAt: epoch == null || epoch <= 0
           ? null
           : _dateTimeFromEpochValue(epoch),
+      size: sizeMatch == null ? null : int.parse(sizeMatch[1]!),
     ));
   }
   return files;
@@ -1587,6 +1612,14 @@ class AgentSessionDiscoveryService {
   _inFlightRelatedWorkingDirectories =
       <_AgentSessionDiscoveryScopeKey, Future<List<String>>>{};
 
+  /// Pi labels by remote identity and path, valid while the transcript keeps
+  /// its mtime and size. A null label records a bounded miss.
+  final Map<
+    (_AgentSessionDiscoveryScopeKey, String),
+    ({DateTime modifiedAt, int size, String? label})
+  >
+  _piLabelCache = {};
+
   /// Invalidates cached and in-flight discovery state for [session].
   ///
   /// The next picker load starts fresh without reconnecting the SSH session.
@@ -1602,6 +1635,7 @@ class AgentSessionDiscoveryService {
     _inFlightDiscoverySnapshots.removeWhere((key, _) => matches(key.scopeKey));
     _relatedWorkingDirectoriesCache.removeWhere((key, _) => matches(key));
     _inFlightRelatedWorkingDirectories.removeWhere((key, _) => matches(key));
+    _piLabelCache.removeWhere((key, _) => matches(key.$1));
   }
 
   /// Warms the discovery cache for the given scope without changing UI state.
@@ -1752,6 +1786,25 @@ class AgentSessionDiscoveryService {
           final completed = await Future.any(pendingResults.values);
           pendingResults.remove(completed.index)?.ignore();
           completedResults[completed.index] = completed.result;
+          if (completed.result.enrichment case final enrichment?) {
+            pendingResults[completed.index] = enrichment.then(
+              (result) => _IndexedToolDiscoveryResult(completed.index, result),
+            );
+            // Publish the rows already known; the enriched ones replace them.
+            if (toolName != null) {
+              final partial = _buildDiscoveredSessionsResult(
+                completedResults.whereType<_ToolDiscoveryResult>(),
+                workingDirectory: resolvedWorkingDirectory,
+                relatedWorkingDirectories: relatedWorkingDirectories,
+                maxPerTool: maxPerTool,
+              );
+              if (identical(_inFlightDiscoveries[key], stream)) {
+                _inFlightDiscoverySnapshots[key] = partial;
+              }
+              controller.add(partial);
+              continue;
+            }
+          }
           if (toolName == null) {
             final previewResult = _buildToolDiscoveryPreviewResult(
               completed.result,
@@ -2319,7 +2372,9 @@ class AgentSessionDiscoveryService {
         var summary = threadInfo?.threadName;
         var sessionId = threadId;
         String? sessionWorkingDirectory;
-        var lastActive = threadInfo?.updatedAt;
+        // The rollout head records creation, so a resumed session's mtime is
+        // the better recency signal when the index has no update time.
+        var lastActive = threadInfo?.updatedAt ?? file.modifiedAt;
 
         final snapshot = rolloutSnapshots[file.path];
         if (snapshot == null) {
@@ -2338,7 +2393,6 @@ class AgentSessionDiscoveryService {
             hadError = true;
           }
         }
-        lastActive ??= file.modifiedAt;
 
         sessions.add(
           ToolSessionInfo(
@@ -3021,8 +3075,8 @@ class AgentSessionDiscoveryService {
         recentSessionPaths,
         maxLines: 1,
       );
-      final labels = await _readPiSessionLabels(session, recentSessionPaths);
-      final sessions = <ToolSessionInfo>[];
+      final rows =
+          <({_ListedFile file, String id, String cwd, DateTime? at})>[];
       var hadError = false;
 
       for (final file in recentSessionFiles) {
@@ -3042,24 +3096,55 @@ class AgentSessionDiscoveryService {
             hadError = true;
             continue;
           }
-          sessions.add(
-            ToolSessionInfo(
-              toolName: 'Pi',
-              sessionId: sessionId,
-              workingDirectory: sessionWorkingDirectory,
-              // The header timestamp is creation time. File mtime tracks the
-              // latest turn and is therefore the picker ordering authority.
-              lastActive: file.modifiedAt ?? header.createdAt,
-              summary:
-                  labels[file.path] ??
-                  'Pi session ${_truncateSessionIdValue(sessionId)}',
-            ),
-          );
+          rows.add((
+            file: file,
+            id: sessionId,
+            cwd: sessionWorkingDirectory,
+            // The header timestamp is creation time. File mtime tracks the
+            // latest turn and is therefore the picker ordering authority.
+            at: file.modifiedAt ?? header.createdAt,
+          ));
         } on Object {
           hadError = true;
         }
       }
-      final returnedSessions = sortAndLimitDiscoveredSessions(sessions, max);
+      _ToolDiscoveryResult labelled(
+        Map<String, String> labels, {
+        Future<_ToolDiscoveryResult>? enrichment,
+      }) => _ToolDiscoveryResult.success(
+        AgentLaunchTool.pi,
+        sortAndLimitDiscoveredSessions([
+          for (final row in rows)
+            ToolSessionInfo(
+              toolName: 'Pi',
+              sessionId: row.id,
+              workingDirectory: row.cwd,
+              lastActive: row.at,
+              summary:
+                  labels[row.file.path] ??
+                  'Pi session ${_truncateSessionIdValue(row.id)}',
+            ),
+        ], max),
+        hadError: hadError,
+        enrichment: enrichment,
+      );
+      final identity = _AgentSessionDiscoveryScopeKey.fromSession(
+        session,
+        workingDirectory: null,
+      );
+      final cachedLabels = <String, String>{};
+      final misses = <_ListedFile>[];
+      for (final row in rows) {
+        final file = row.file;
+        final cached = _piLabelCache[(identity, file.path)];
+        if (cached != null &&
+            cached.modifiedAt == file.modifiedAt &&
+            cached.size == file.size) {
+          if (cached.label case final label?) cachedLabels[file.path] = label;
+        } else {
+          misses.add(file);
+        }
+      }
       DiagnosticsLogService.instance.debug(
         'agent.discovery',
         'pi_complete',
@@ -3067,17 +3152,42 @@ class AgentSessionDiscoveryService {
           'connectionId': session.connectionId,
           'candidateCount': sessionFiles.length,
           'snapshotCount': snapshots.length,
-          'parsedCount': sessions.length,
-          'labelCount': labels.length,
-          'returnedCount': returnedSessions.length,
+          'parsedCount': rows.length,
+          'cachedLabelCount': cachedLabels.length,
+          'labelMissCount': misses.length,
           'previewOnly': previewOnly,
           'hadError': hadError,
         },
       );
-      return _ToolDiscoveryResult.success(
-        AgentLaunchTool.pi,
-        returnedSessions,
-        hadError: hadError,
+      // Header rows are already resumable; a preview never waits for labels.
+      if (previewOnly || misses.isEmpty || session.remoteIsWindows) {
+        return labelled(cachedLabels);
+      }
+      return labelled(
+        cachedLabels,
+        enrichment:
+            _readPiSessionLabels(
+              session,
+              misses.map((file) => file.path).toList(growable: false),
+            ).then((extracted) {
+              final labels = extracted ?? const <String, String>{};
+              for (final file in misses) {
+                final (:modifiedAt, :size, path: _) = file;
+                // Retry a failed extraction; cache a completed one, misses too.
+                if (extracted == null || modifiedAt == null || size == null) {
+                  continue;
+                }
+                if (_piLabelCache.length >= _piLabelCacheMaxEntries) {
+                  _piLabelCache.remove(_piLabelCache.keys.first);
+                }
+                _piLabelCache[(identity, file.path)] = (
+                  modifiedAt: modifiedAt,
+                  size: size,
+                  label: labels[file.path],
+                );
+              }
+              return labelled({...cachedLabels, ...labels});
+            }),
       );
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
@@ -3093,13 +3203,11 @@ class AgentSessionDiscoveryService {
     }
   }
 
-  Future<Map<String, String>> _readPiSessionLabels(
+  /// Extracts Pi labels for [sessionPaths], or null when extraction failed.
+  Future<Map<String, String>?> _readPiSessionLabels(
     SshSession session,
     List<String> sessionPaths,
   ) async {
-    if (sessionPaths.isEmpty || session.remoteIsWindows) {
-      return const <String, String>{};
-    }
     try {
       final encodedScript = base64Encode(
         utf8.encode(_piSessionLabelExtractorScript),
@@ -3117,7 +3225,7 @@ class AgentSessionDiscoveryService {
     } on Object {
       // Session rows remain resumable with their id when label extraction is
       // unavailable, so metadata polish never breaks discovery itself.
-      return const <String, String>{};
+      return null;
     }
   }
 
@@ -3157,6 +3265,7 @@ class AgentSessionDiscoveryService {
               'find ${buckets.map((bucket) => '"\$HOME"/.pi/agent/sessions/${shellEscapePosix(bucket)}').join(' ')} '
               '-maxdepth 1 -name "*.jsonl" -type f',
               scanLimit,
+              withSize: true,
             ),
           );
     return _parseListedFiles(output).take(scanLimit).toList(growable: false);
@@ -4029,7 +4138,8 @@ class AgentSessionDiscoveryService {
 
   /// Reads bounded file contents in batches: the first [maxBytes] bytes, the
   /// first [maxLines] lines, or the whole file, plus the last [tailLines]
-  /// lines in the same round trip when requested.
+  /// lines in the same round trip when requested. Line reads also stop at
+  /// [snapshotSegmentMaxBytes] and keep only complete records.
   Future<Map<String, _RemoteFileSnapshot>> _readRemoteFileSnapshots(
     SshSession session,
     Iterable<String> paths, {
@@ -4045,8 +4155,16 @@ class AgentSessionDiscoveryService {
       return const <String, _RemoteFileSnapshot>{};
     }
     final snapshots = <String, _RemoteFileSnapshot>{};
+    assert(
+      tailLines == null || (maxLines != null && maxBytes == null),
+      'A tail read pairs with a head line read',
+    );
+    int? lineCeiling(int fileCount) => maxBytes == null && maxLines != null
+        ? snapshotSegmentMaxBytes(fileCount, withTail: tailLines != null)
+        : null;
     if (session.remoteIsWindows) {
       for (final batchPaths in windowsSnapshotPathBatches(uniquePaths)) {
+        final ceiling = lineCeiling(batchPaths.length);
         final output = await _execWindowsPowerShell(
           session,
           windowsFileSnapshotScript(
@@ -4056,7 +4174,7 @@ class AgentSessionDiscoveryService {
             tailLines: tailLines,
           ),
         );
-        snapshots.addAll(await _parseRemoteFileSnapshotOutput(output));
+        snapshots.addAll(await _parseRemoteFileSnapshotOutput(output, ceiling));
       }
       return snapshots;
     }
@@ -4069,6 +4187,7 @@ class AgentSessionDiscoveryService {
           .skip(start)
           .take(_remoteFileSnapshotBatchSize)
           .toList(growable: false);
+      final ceiling = lineCeiling(batchPaths.length);
       final command = StringBuffer()
         ..write(r'SEP=$(printf "\037"); ')
         ..write(
@@ -4079,7 +4198,6 @@ class AgentSessionDiscoveryService {
         )
         ..write(r'TR_BIN=/usr/bin/tr; [ -x "$TR_BIN" ] || TR_BIN=tr; ')
         ..write(r'CAT_BIN=/bin/cat; [ -x "$CAT_BIN" ] || CAT_BIN=cat; ')
-        ..write(r'SED_BIN=/usr/bin/sed; [ -x "$SED_BIN" ] || SED_BIN=sed; ')
         ..write(
           r'TAIL_BIN=/usr/bin/tail; [ -x "$TAIL_BIN" ] || TAIL_BIN=tail; ',
         )
@@ -4099,24 +4217,24 @@ class AgentSessionDiscoveryService {
           r'$CAT_BIN "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ',
         );
       } else {
+        // `head -n` quits at the last line instead of scanning to EOF.
         command.write(
-          r'''$SED_BIN -n '1,'''
-          '$maxLines'
-          r'''p' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ''',
+          '\$HEAD_BIN -n $maxLines "\$path" 2>/dev/null | \$HEAD_BIN -c $ceiling'
+          r' | $BASE64_BIN | $TR_BIN -d "\n"; ',
         );
       }
       if (tailLines != null) {
         command.write(
-          r'printf "%s" "$SEP"; $TAIL_BIN -n '
-          '$tailLines'
-          r' "$path" 2>/dev/null | $BASE64_BIN | $TR_BIN -d "\n"; ',
+          'printf "%s" "\$SEP"; \$TAIL_BIN -n $tailLines "\$path" 2>/dev/null'
+          ' | \$TAIL_BIN -c $ceiling'
+          r' | $BASE64_BIN | $TR_BIN -d "\n"; ',
         );
       }
 
       command.write(r'''printf "\n"; done''');
 
       final output = await _exec(session, command.toString());
-      snapshots.addAll(await _parseRemoteFileSnapshotOutput(output));
+      snapshots.addAll(await _parseRemoteFileSnapshotOutput(output, ceiling));
     }
     return snapshots;
   }
@@ -4441,20 +4559,26 @@ class _ToolDiscoveryResult {
     AgentLaunchTool tool,
     this.sessions, {
     this.hadError = false,
+    this.enrichment,
   }) : toolName = tool.discoveredSessionToolName!;
 
   _ToolDiscoveryResult.failure(AgentLaunchTool tool)
     : toolName = tool.discoveredSessionToolName!,
       sessions = const <ToolSessionInfo>[],
-      hadError = true;
+      hadError = true,
+      enrichment = null;
 
   const _ToolDiscoveryResult.empty(this.toolName)
     : sessions = const <ToolSessionInfo>[],
-      hadError = false;
+      hadError = false,
+      enrichment = null;
 
   final String toolName;
   final List<ToolSessionInfo> sessions;
   final bool hadError;
+
+  /// A more complete result whose rows replace these once it settles.
+  final Future<_ToolDiscoveryResult>? enrichment;
 }
 
 class _IndexedToolDiscoveryResult {
@@ -4511,20 +4635,38 @@ class _RemoteFileSnapshot {
   final String? tailContent;
 }
 
+/// Parses snapshot output; [lineCeiling] is the byte ceiling a line-limited
+/// read stopped at, if any.
 Future<Map<String, _RemoteFileSnapshot>> _parseRemoteFileSnapshotOutput(
   String output,
+  int? lineCeiling,
 ) {
   if (output.length < 8192) {
     return Future<Map<String, _RemoteFileSnapshot>>.value(
-      _parseRemoteFileSnapshotOutputSync(output),
+      _parseRemoteFileSnapshotOutputSync((output, lineCeiling)),
     );
   }
-  return compute(_parseRemoteFileSnapshotOutputSync, output);
+  return compute(_parseRemoteFileSnapshotOutputSync, (output, lineCeiling));
+}
+
+/// Drops the JSONL record a byte ceiling cut: the trailing fragment of a head
+/// read, or the leading fragment of a tail read.
+Uint8List _completeRecords(Uint8List bytes, int? ceiling, {bool tail = false}) {
+  if (ceiling == null || bytes.length < ceiling) return bytes;
+  if (!tail) {
+    return Uint8List.sublistView(bytes, 0, bytes.lastIndexOf(0x0a) + 1);
+  }
+  final firstNewline = bytes.indexOf(0x0a);
+  return Uint8List.sublistView(
+    bytes,
+    firstNewline < 0 ? bytes.length : firstNewline + 1,
+  );
 }
 
 Map<String, _RemoteFileSnapshot> _parseRemoteFileSnapshotOutputSync(
-  String output,
+  (String, int?) input,
 ) {
+  final (output, ceiling) = input;
   final snapshots = <String, _RemoteFileSnapshot>{};
   for (final line in output.split('\n')) {
     if (line.trim().isEmpty) continue;
@@ -4536,10 +4678,18 @@ Map<String, _RemoteFileSnapshot> _parseRemoteFileSnapshotOutputSync(
 
     try {
       snapshots[path] = _RemoteFileSnapshot(
-        content: utf8.decode(base64Decode(parts[1].trim())),
+        content: utf8.decode(
+          _completeRecords(base64Decode(parts[1].trim()), ceiling),
+        ),
         tailContent: parts.length < 3
             ? null
-            : utf8.decode(base64Decode(parts[2].trim())),
+            : utf8.decode(
+                _completeRecords(
+                  base64Decode(parts[2].trim()),
+                  ceiling,
+                  tail: true,
+                ),
+              ),
       );
     } on FormatException {
       continue;
@@ -4639,6 +4789,10 @@ const _posixFileTimestampsScript =
     'if stat -c %Y / >/dev/null 2>&1; then '
     "stat -c '%Y\t%n' \"\$@\"; "
     "else stat -f '%m\t%N' \"\$@\"; fi";
+const _posixFileTimestampsAndSizesScript =
+    'if stat -c %Y / >/dev/null 2>&1; then '
+    "stat -c '%Y\t%s\t%n' \"\$@\"; "
+    "else stat -f '%m\t%z\t%N' \"\$@\"; fi";
 
 String _newestFilePathsCommand(String timestampsCommand, int limit) =>
     '$timestampsCommand | LC_ALL=C sort -t "\t" -k1,1nr | head -n $limit';
@@ -4647,12 +4801,14 @@ String _newestFilePathsCommand(String timestampsCommand, int limit) =>
 ///
 /// Emits `<epoch seconds>\t<path>` lines, newest first, so readers can use
 /// the mtime the listing already computed instead of running `stat` again.
+/// [withSize] adds a `<bytes>\t` field after the mtime.
 @visibleForTesting
 String posixListNewestFilesCommand(
   String findCommand,
-  int limit,
-) => _newestFilePathsCommand(
-  '{ $findCommand -exec sh -c ${shellEscapePosix(_posixFileTimestampsScript)} '
+  int limit, {
+  bool withSize = false,
+}) => _newestFilePathsCommand(
+  '{ $findCommand -exec sh -c ${shellEscapePosix(withSize ? _posixFileTimestampsAndSizesScript : _posixFileTimestampsScript)} '
   'sh {} + 2>/dev/null || true; }',
   limit,
 );
@@ -4883,8 +5039,8 @@ List<List<String>> windowsSnapshotPathBatches(List<String> paths) {
 /// The content selection mirrors the POSIX reader: [maxBytes] reads the first N
 /// bytes, a null [maxLines]/[maxBytes] reads the whole file, otherwise the first
 /// [maxLines] lines are read; [tailLines] appends the last N lines as a second
-/// field. Paths are echoed verbatim so they match the map keys the callers pass
-/// in.
+/// field. Line reads stop at [snapshotSegmentMaxBytes]. Paths are echoed
+/// verbatim so they match the map keys the callers pass in.
 @visibleForTesting
 String windowsFileSnapshotScript(
   List<String> paths, {
@@ -4892,6 +5048,10 @@ String windowsFileSnapshotScript(
   int? maxBytes,
   int? tailLines,
 }) {
+  final ceiling = snapshotSegmentMaxBytes(
+    paths.length,
+    withTail: tailLines != null,
+  );
   final pathsLiteral = paths.map(powerShellSingleQuote).join(',');
   final body = StringBuffer()
     ..write(r'$SEP=[char]0x1f;')
@@ -4910,26 +5070,39 @@ String windowsFileSnapshotScript(
       ..write(r'$bytes=[System.IO.File]::ReadAllBytes($p);')
       ..write(r'$__flB64=[Convert]::ToBase64String($bytes);');
   } else {
+    // The first [maxLines] lines within the ceiling, read as raw bytes.
     body
-      ..write(
-        '\$__flLines=@(Get-Content -LiteralPath \$p -TotalCount $maxLines -Encoding UTF8 2>\$null);',
-      )
-      ..write(r'$__flText=[string]::Join([char]10,$__flLines);')
-      ..write(r'$__flB64=[Convert]::ToBase64String(')
-      ..write(r'[System.Text.Encoding]::UTF8.GetBytes($__flText));');
+      ..write(r'$fs=[System.IO.File]::OpenRead($p);')
+      ..write('\$buf=New-Object byte[] $ceiling;')
+      ..write(r'$read=$fs.Read($buf,0,$buf.Length);$fs.Dispose();')
+      ..write(r'if($read -lt 0){$read=0};$end=0;$n=0;')
+      ..write('while(\$n -lt $maxLines -and \$end -lt \$read){')
+      ..write(r'$i=[Array]::IndexOf($buf,[byte]10,$end,$read-$end);')
+      ..write(r'if($i -lt 0){$end=$read;break};$end=$i+1;$n++};')
+      ..write(r'$__flB64=[Convert]::ToBase64String($buf,0,$end);');
   }
   body
     ..write(r'[void]$__flOut.Append($p);[void]$__flOut.Append($SEP);')
     ..write(r'[void]$__flOut.Append($__flB64);');
   if (tailLines != null) {
+    // The last [tailLines] lines within the ceiling, read from the end.
     body
+      ..write(r'$fs=[System.IO.File]::OpenRead($p);')
+      ..write('\$take=[int][Math]::Min(\$fs.Length,$ceiling);')
+      ..write(r'[void]$fs.Seek(-$take,[System.IO.SeekOrigin]::End);')
+      ..write(r'$buf=New-Object byte[] $take;')
+      ..write(r'$read=$fs.Read($buf,0,$take);$fs.Dispose();')
+      ..write(r'if($read -lt 0){$read=0};$start=0;$n=0;$pos=$read-1;')
+      ..write(r'if($pos -ge 0 -and $buf[$pos] -eq 10){$pos--};')
+      ..write(r'while($pos -ge 0){')
+      ..write(r'$i=[Array]::LastIndexOf($buf,[byte]10,$pos,$pos+1);')
       ..write(
-        '\$__flLines=@(Get-Content -LiteralPath \$p -Tail $tailLines -Encoding UTF8 2>\$null);',
+        'if(\$i -lt 0){break};\$n++;if(\$n -ge $tailLines){\$start=\$i+1;break};',
       )
-      ..write(r'$__flText=[string]::Join([char]10,$__flLines);')
+      ..write(r'$pos=$i-1};')
       ..write(r'[void]$__flOut.Append($SEP);')
       ..write(r'[void]$__flOut.Append([Convert]::ToBase64String(')
-      ..write(r'[System.Text.Encoding]::UTF8.GetBytes($__flText)));');
+      ..write(r'$buf,$start,$read-$start));');
   }
   body
     ..write(r'[void]$__flOut.Append([char]10);')
