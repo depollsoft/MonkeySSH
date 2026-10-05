@@ -385,7 +385,7 @@ func TestRestoreRelaunchesRunningAliasOnly(t *testing.T) {
 		options := createWindowOptionsForRestore(restoreWindowState{
 			CurrentCommand: tc.command, AgentTool: tc.tool, AgentToolConfirmed: true,
 		}, false)
-		want := agentCommands[tc.tool].executable
+		want := agentRegistry[tc.tool].launch.executable
 		if tc.alias != "" {
 			want = tc.alias
 		}

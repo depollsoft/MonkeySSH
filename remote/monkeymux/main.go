@@ -6348,7 +6348,7 @@ func createWindowOptionsForRestore(
 		executable := ""
 		if name := cleanProcessCommandName(state.CurrentCommand); name != "" &&
 			name != agentTool &&
-			name != agentCommands[agentTool].executable &&
+			name != agentRegistry[agentTool].launch.executable &&
 			agentToolFromCommandName(name) == agentTool {
 			executable = name
 		}
