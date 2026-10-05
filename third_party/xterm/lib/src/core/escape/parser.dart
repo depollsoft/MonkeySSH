@@ -241,6 +241,9 @@ class EscapeParser {
   bool _escHandleCSI() {
     final result = _consumeCsi();
     if (result == _SeqParse.incomplete) return false;
+    for (final control in _csiControls) {
+      _processChar(control);
+    }
     if (result == _SeqParse.aborted) return true;
 
     if (_csi.finalByte == Ascii.u && _handleKittyKeyboardProtocol()) {
@@ -283,6 +286,12 @@ class EscapeParser {
   /// object allocations.
   final _csi = _Csi(finalByte: 0, params: []);
 
+  /// C0 controls met inside the last parsed CSI. Like xterm and the MonkeyMux
+  /// screen model they execute as if they preceded it, once the sequence is
+  /// known to be complete: a sequence split across writes is parsed again
+  /// from its start, which would otherwise run them twice.
+  final _csiControls = <int>[];
+
   /// Parse a CSI from the head of the queue. Returns [_SeqParse.incomplete] if
   /// the CSI isn't complete and [_SeqParse.aborted] if ESC, CAN or SUB cut it short.
   /// After a CSI is successfully parsed, [_csi] is updated.
@@ -293,6 +302,7 @@ class EscapeParser {
 
     _csi.params.clear();
     _csi.subParams.clear();
+    _csiControls.clear();
 
     // test whether the csi is a `CSI ? Ps ...` or `CSI Ps ...`
     final prefix = _queue.peek();
@@ -350,6 +360,11 @@ class EscapeParser {
         return _SeqParse.aborted;
       }
 
+      if (char < 0x20) {
+        _csiControls.add(char);
+        continue;
+      }
+
       if (char == Ascii.semicolon) {
         commitParam(emptyAsZero: true);
         pendingEmptyParam = true;
@@ -383,7 +398,7 @@ class EscapeParser {
         continue;
       }
 
-      if (char > Ascii.NULL && char < Ascii.num0) {
+      if (char < Ascii.num0) {
         // Intermediate byte (0x20-0x2F). Only the last one is retained; it
         // disambiguates finals such as `p` (DECRQM `$p` vs DECSTR `!p`).
         _csi.intermediate = char;
@@ -1342,6 +1357,21 @@ class EscapeParser {
   ///
   /// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
   bool _escHandleDCS() {
+    // Only XTGETTCAP (`+ q <hexcap> [ ; <hexcap> ]...`) and DECRQSS
+    // (`$ q <Pt>`, where <Pt> is the intermediate/final of the control
+    // function being queried, for example `r` for DECSTBM or ` q` for
+    // DECSCUSR) are answered. Any other DCS, Sixel included, is skipped
+    // without buffering its payload.
+    if (_queue.isEmpty) return false;
+    final kind = _queue.peek();
+    if (kind != '+'.charCode && kind != r'$'.charCode) {
+      return _skipToStringTerminator();
+    }
+    _queue.consume();
+    if (_queue.isEmpty) return false;
+    if (_queue.peek() != 'q'.charCode) return _skipToStringTerminator();
+    _queue.consume();
+
     final body = StringBuffer();
 
     while (true) {
@@ -1363,17 +1393,10 @@ class EscapeParser {
     }
 
     final payload = body.toString();
-    // XTGETTCAP request: `+ q <hexcap> [ ; <hexcap> ]...`.
-    if (payload.length >= 2 && payload[0] == '+' && payload[1] == 'q') {
-      final caps = payload.substring(2).split(';');
-      handler.sendTermcapReport(caps);
-      return true;
-    }
-    // DECRQSS (Request Status String): `$ q <Pt>`, where <Pt> is the
-    // intermediate/final of the control function being queried (for example
-    // `r` for DECSTBM, `m` for SGR, ` q` for DECSCUSR).
-    if (payload.length >= 2 && payload[0] == '\$' && payload[1] == 'q') {
-      handler.sendStatusStringReport(payload.substring(2));
+    if (kind == '+'.charCode) {
+      handler.sendTermcapReport(payload.split(';'));
+    } else {
+      handler.sendStatusStringReport(payload);
     }
     return true;
   }

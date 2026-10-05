@@ -2,9 +2,6 @@
 
 /// Named ASCII code points.
 abstract class Ascii {
-  ///  Null character
-  static const NULL = 00;
-
   ///  Bell
   static const BEL = 07;
 

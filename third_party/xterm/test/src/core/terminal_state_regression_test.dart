@@ -223,6 +223,25 @@ void main() {
       });
     }
 
+    test('C0 controls inside a CSI run once, before it', () {
+      const sequence = 'ab\x1b[1\r\nmX';
+      for (var split = 0; split <= sequence.length; split++) {
+        final terminal = Terminal()..resize(5, 3);
+        terminal.write(sequence.substring(0, split));
+        terminal.write(sequence.substring(split));
+        expect([
+          row(terminal, 0),
+          row(terminal, 1),
+          row(terminal, 2)
+        ], [
+          'ab',
+          'X',
+          ''
+        ], reason: 'split $split');
+        expect(terminal.cursor.isBold, isTrue, reason: 'split $split');
+      }
+    });
+
     test('DECSTBM reads a zero bottom as the last row and homes the cursor',
         () {
       final terminal = Terminal()..resize(5, 4);
