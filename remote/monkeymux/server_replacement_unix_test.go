@@ -264,3 +264,31 @@ func TestReplacementCaptureRejectsIdentityChangesDuringAncestryRead(t *testing.T
 		})
 	}
 }
+
+func TestReplacementCaptureReadsProcessTableTwiceForAllWindows(t *testing.T) {
+	const owner = 10
+	started := time.Unix(100, 0)
+	processes := map[int]processInfo{}
+	var windows []restoreWindowState
+	for pane := 20; pane < 30; pane++ {
+		processes[pane] = processInfo{pid: pane, ppid: owner}
+		windows = append(windows, restoreWindowState{PanePid: pane})
+	}
+	system := replacementPaneGroupSystem{
+		alive:   func(int) bool { return true },
+		inspect: func(int) processSnapshot { return processSnapshot{known: true, running: true, started: started} },
+		pgid:    func(pid int) (int, error) { return pid, nil },
+		kill:    func(int, syscall.Signal) error { t.Fatal("capture signaled a process"); return nil },
+	}
+	reads := 0
+	groups := system.capture(&serverRestore{Windows: windows}, owner, func() map[int]processInfo {
+		reads++
+		return processes
+	})
+	if reads != 2 {
+		t.Fatalf("process table reads = %d, want 2 for %d windows", reads, len(windows))
+	}
+	if len(groups) != len(windows) {
+		t.Fatalf("captured %d groups, want %d", len(groups), len(windows))
+	}
+}
