@@ -841,6 +841,13 @@ var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	return window.proc.Pid()
 }
 
+// processCommandLine is not implemented on Windows, where a window's pane pid
+// is its shell rather than the agent in the foreground. Agents without a
+// launch entry restore as a shell there.
+func processCommandLine(pid int) []string {
+	return nil
+}
+
 func shellArgument(value string) (string, bool) {
 	if !isCmdShell(defaultShellPath()) {
 		return "'" + strings.ReplaceAll(value, "'", "''") + "'", true
@@ -914,6 +921,10 @@ func isCmdShell(shell string) bool {
 // fast-exit failure (a locked macOS login keychain that makes cursor-agent print
 // an error and exit immediately) is macOS-specific, and the Windows shell exit
 // semantics differ, so the command is returned unchanged here for now.
+// launchedWindowOutlivesProgram is false here: holdAgentWindowCommand keeps no
+// shell behind, so a window the app launched a program in closes with it.
+const launchedWindowOutlivesProgram = false
+
 func holdAgentWindowCommand(shell string, command string) string {
 	_ = shell
 	return command

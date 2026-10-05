@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.224"
+	monkeyMuxVersion                  = "0.1.225"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -492,6 +492,7 @@ type controlMessage struct {
 	Name           string   `json:"name,omitempty"`
 	Cwd            string   `json:"cwd,omitempty"`
 	Command        string   `json:"command,omitempty"`
+	RestoreCommand string   `json:"restoreCommand,omitempty"`
 	ProviderID     string   `json:"providerId,omitempty"`
 	Provider       string   `json:"provider,omitempty"`
 	Args           []string `json:"args,omitempty"`
@@ -617,34 +618,41 @@ type serverRestore struct {
 }
 
 type restoreWindowState struct {
-	ID                        string                    `json:"id,omitempty"`
-	Index                     int                       `json:"index,omitempty"`
-	Name                      string                    `json:"name,omitempty"`
-	Cwd                       string                    `json:"cwd,omitempty"`
-	CurrentCommand            string                    `json:"currentCommand,omitempty"`
-	PanePid                   int                       `json:"panePid,omitempty"`
-	PaneTitle                 string                    `json:"paneTitle,omitempty"`
-	AgentTool                 string                    `json:"agentTool,omitempty"`
-	AgentToolConfirmed        bool                      `json:"agentToolConfirmed,omitempty"`
-	AgentSessionID            string                    `json:"agentSessionId,omitempty"`
-	AgentSessionDir           string                    `json:"agentSessionDir,omitempty"`
-	AgentSessionPath          string                    `json:"agentSessionPath,omitempty"`
-	AgentSessionIdentityExact bool                      `json:"agentSessionIdentityExact,omitempty"`
-	AgentSessionAssigned      bool                      `json:"agentSessionAssigned,omitempty"`
-	NativeAcpBridgeID         string                    `json:"nativeAcpBridgeId,omitempty"`
-	NativeAcpProviderID       string                    `json:"nativeAcpProviderId,omitempty"`
-	LastActivityEpochSeconds  int64                     `json:"lastActivityEpochSeconds,omitempty"`
-	HistoryBase64             string                    `json:"historyBase64,omitempty"`
-	HistoryStartsAtGround     bool                      `json:"historyStartsAtGround,omitempty"`
-	CursorVisible             bool                      `json:"cursorVisible,omitempty"`
-	CursorVisibilityKnown     bool                      `json:"cursorVisibilityKnown,omitempty"`
-	PrivateModes              map[string]bool           `json:"privateModes,omitempty"`
-	InsertModeEnabled         bool                      `json:"insertModeEnabled,omitempty"`
-	InsertModeKnown           bool                      `json:"insertModeKnown,omitempty"`
-	ApplicationKeypadEnabled  bool                      `json:"applicationKeypadEnabled,omitempty"`
-	ApplicationKeypadKnown    bool                      `json:"applicationKeypadKnown,omitempty"`
-	TerminalProgress          *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
-	Active                    bool                      `json:"active,omitempty"`
+	ID                        string `json:"id,omitempty"`
+	Index                     int    `json:"index,omitempty"`
+	Name                      string `json:"name,omitempty"`
+	Cwd                       string `json:"cwd,omitempty"`
+	CurrentCommand            string `json:"currentCommand,omitempty"`
+	PanePid                   int    `json:"panePid,omitempty"`
+	PaneTitle                 string `json:"paneTitle,omitempty"`
+	AgentTool                 string `json:"agentTool,omitempty"`
+	AgentToolConfirmed        bool   `json:"agentToolConfirmed,omitempty"`
+	AgentSessionID            string `json:"agentSessionId,omitempty"`
+	AgentSessionDir           string `json:"agentSessionDir,omitempty"`
+	AgentSessionPath          string `json:"agentSessionPath,omitempty"`
+	AgentSessionIdentityExact bool   `json:"agentSessionIdentityExact,omitempty"`
+	AgentSessionAssigned      bool   `json:"agentSessionAssigned,omitempty"`
+	// CommandLine is the agent's foreground command line when the agent has no
+	// launch entry to restart it from; see enrichRestoreWithAgentCommandLines.
+	CommandLine []string `json:"commandLine,omitempty"`
+	// LaunchCommand and RestoreCommand are the commands the app created the
+	// window with; see launchedCommandForRestore.
+	LaunchCommand            string                    `json:"launchCommand,omitempty"`
+	RestoreCommand           string                    `json:"restoreCommand,omitempty"`
+	NativeAcpBridgeID        string                    `json:"nativeAcpBridgeId,omitempty"`
+	NativeAcpProviderID      string                    `json:"nativeAcpProviderId,omitempty"`
+	LastActivityEpochSeconds int64                     `json:"lastActivityEpochSeconds,omitempty"`
+	HistoryBase64            string                    `json:"historyBase64,omitempty"`
+	HistoryStartsAtGround    bool                      `json:"historyStartsAtGround,omitempty"`
+	CursorVisible            bool                      `json:"cursorVisible,omitempty"`
+	CursorVisibilityKnown    bool                      `json:"cursorVisibilityKnown,omitempty"`
+	PrivateModes             map[string]bool           `json:"privateModes,omitempty"`
+	InsertModeEnabled        bool                      `json:"insertModeEnabled,omitempty"`
+	InsertModeKnown          bool                      `json:"insertModeKnown,omitempty"`
+	ApplicationKeypadEnabled bool                      `json:"applicationKeypadEnabled,omitempty"`
+	ApplicationKeypadKnown   bool                      `json:"applicationKeypadKnown,omitempty"`
+	TerminalProgress         *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
+	Active                   bool                      `json:"active,omitempty"`
 }
 
 type muxServer struct {
@@ -739,6 +747,8 @@ type muxWindow struct {
 	name                      string
 	cwd                       string
 	command                   string
+	launchCommand             string
+	restoreCommand            string
 	agentTool                 string
 	agentToolConfirmed        bool
 	agentModelProvider        string
@@ -3000,7 +3010,148 @@ func collectServerRestore(session string, status runningServerStatus) *serverRes
 		}
 	}
 	enrichRestoreWithAgentSessionIDs(restore)
+	enrichRestoreWithAgentCommandLines(restore)
 	return restore
+}
+
+// processCommandLineForRestore reads a process's command line; tests replace
+// it.
+var processCommandLineForRestore = processCommandLine
+
+// enrichRestoreWithAgentCommandLines records how each agent without a launch
+// entry, such as Hermes or OpenClaw, was started, while its process still
+// runs under the outgoing helper. Restarting one by its name alone could pick
+// the wrong profile or interface; its own command line keeps every flag,
+// --profile included, so the restore can start it again as it was.
+func enrichRestoreWithAgentCommandLines(restore *serverRestore) {
+	if restore == nil {
+		return
+	}
+	for i := range restore.Windows {
+		window := &restore.Windows[i]
+		tool := agentToolCandidateForRestore(*window)
+		if tool == "" || agentToolRelaunchable(tool) || len(window.CommandLine) > 0 || window.PanePid <= 0 {
+			continue
+		}
+		argv := processCommandLineForRestore(window.PanePid)
+		if processTitleOnly(argv) {
+			continue
+		}
+		// The window's foreground process must still be that agent.
+		if !commandLineRunsAgent(argv, tool) || commandLineRelaunchCommand(tool, argv) == "" {
+			continue
+		}
+		window.CommandLine = argv
+	}
+}
+
+// commandLineRunsAgent reports whether argv starts the agent tool itself: as
+// its executable, or as the script a runtime runs, as in `python3 .../hermes`.
+// An argument that only names the agent, as in `vim hermes`, does not count.
+func commandLineRunsAgent(argv []string, tool string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	if agentToolFromCommandName(filepath.Base(argv[0])) == tool {
+		return true
+	}
+	// A versioned interpreter, such as python3.12, is still that runtime.
+	runtime := strings.TrimRight(cleanProcessCommandName(argv[0]), "0123456789.")
+	if !isGenericRuntimeCommandName(runtime) {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if !strings.HasPrefix(arg, "-") {
+			return agentToolFromCommandName(filepath.Base(arg)) == tool
+		}
+	}
+	return false
+}
+
+// processTitleOnly reports whether argv holds no arguments to restart a
+// process from: nothing at all, or what a process that renamed itself leaves
+// where its arguments were, one word with no directory followed only by the
+// blanked rest. OpenClaw renames its Node process to "openclaw" so; starting
+// that word again would drop the interface and profile it was started with.
+func processTitleOnly(argv []string) bool {
+	if len(argv) == 0 {
+		return true
+	}
+	if strings.ContainsAny(argv[0], `/\`) {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if arg != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// commandLineRelaunchCommand starts an agent without a launch entry again from
+// the command line it was started with. Hermes then continues the session it
+// last used in the window's workspace, or starts afresh when there is none;
+// a command line that already names a session to resume is kept as it is.
+func commandLineRelaunchCommand(tool string, argv []string) string {
+	quoted := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		argument, ok := shellArgument(arg)
+		if !ok {
+			return ""
+		}
+		quoted = append(quoted, argument)
+	}
+	launch := strings.Join(quoted, " ")
+	if tool == "hermes" && !hermesCommandLineResumes(argv) {
+		return resumeCommandWithFreshFallback(launch+" --continue", launch)
+	}
+	return launch
+}
+
+// launchedCommandForRestore returns the command that starts a window's program
+// again from the commands the app created the window with, or "" when the
+// window has none or its foreground program is no longer the one launched:
+// the user quit it and ran something else, or it exited to the shell. Where
+// a launched window can outlive its program, the foreground command decides,
+// not the window's agent metadata, which an agent that failed at launch
+// leaves on the recovery shell it falls back to. Elsewhere the window closes
+// with its program, so it is still running, while the process table may not
+// name it: Windows shows a Node or Python agent as its runtime. The
+// app's restore command continues the program's latest session; the launch
+// command, which is also the fallback when nothing is left to continue,
+// starts it afresh. Either keeps every flag the app launched it with.
+func launchedCommandForRestore(window restoreWindowState) string {
+	launch := strings.TrimSpace(window.LaunchCommand)
+	if launch == "" {
+		return ""
+	}
+	if launchedWindowOutlivesProgram {
+		current := cleanProcessCommandName(window.CurrentCommand)
+		if tool := agentToolFromCommandText(launch); tool != "" {
+			if tool != agentToolFromCommandName(current) {
+				return ""
+			}
+		} else if program := commandNameFromShellCommand(launch); program == "" || program != current {
+			return ""
+		}
+	}
+	if restore := strings.TrimSpace(window.RestoreCommand); restore != "" {
+		return resumeCommandWithFreshFallback(restore, launch)
+	}
+	return launch
+}
+
+// hermesCommandLineResumes reports whether a Hermes command line already
+// names a session to resume or continue.
+func hermesCommandLineResumes(argv []string) bool {
+	for _, arg := range argv {
+		switch {
+		case arg == "-c", arg == "--continue", arg == "-r", arg == "--resume",
+			strings.HasPrefix(arg, "--continue="), strings.HasPrefix(arg, "--resume="):
+			return true
+		}
+	}
+	return false
 }
 
 func restoreNeedsWindowActivity(restore *serverRestore) bool {
@@ -4739,18 +4890,20 @@ func agentToolForRestore(window restoreWindowState) string {
 		!window.AgentToolConfirmed {
 		return ""
 	}
-	if !agentToolRelaunchable(tool) {
+	if !agentToolRelaunchable(tool) &&
+		len(window.CommandLine) == 0 &&
+		launchedCommandForRestore(window) == "" {
 		return ""
 	}
 	return tool
 }
 
-// agentToolRelaunchable reports whether a restore can start this agent again.
-// Hermes and OpenClaw are recognized while they run, so their windows replay
-// like any other agent, but they have no launch entry: the app can start them
-// with --profile, and the restore state keeps only the command name, so
-// relaunching them could open the wrong profile. Such a window restores as a
-// plain shell instead.
+// agentToolRelaunchable reports whether this agent has a launch entry a
+// restore can start it from. Hermes and OpenClaw have none: the app can start
+// them with --profile and other flags a fixed command would drop. They restart
+// from their recorded command line (commandLineRelaunchCommand) or the command
+// the app launched them with (launchedCommandForRestore), and restore as a
+// plain shell when there is neither.
 func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
@@ -4763,7 +4916,10 @@ func agentToolRelaunchable(tool string) bool {
 // so a window still named after the agent is not mistaken for it again.
 func agentToolRestoredAsShell(window restoreWindowState) bool {
 	tool := agentToolCandidateForRestore(window)
-	return tool != "" && !agentToolRelaunchable(tool)
+	return tool != "" &&
+		!agentToolRelaunchable(tool) &&
+		len(window.CommandLine) == 0 &&
+		launchedCommandForRestore(window) == ""
 }
 
 type processInfo struct {
@@ -6126,6 +6282,14 @@ func createWindowOptionsForRestore(
 			executable = name
 		}
 		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
+		if !agentToolRelaunchable(agentTool) {
+			if len(state.CommandLine) > 0 {
+				launch = commandLineRelaunchCommand(agentTool, state.CommandLine)
+			} else {
+				launch = launchedCommandForRestore(state)
+			}
+			state.AgentSessionID = ""
+		}
 		if agentTool == "pi" {
 			launch = piLaunchCommand(state.AgentSessionDir)
 		}
@@ -6152,6 +6316,10 @@ func createWindowOptionsForRestore(
 				)
 			}
 		}
+	} else {
+		// A program the helper does not know as an agent, such as Grok Build,
+		// starts again from the command the app launched it with.
+		command = launchedCommandForRestore(state)
 	}
 	history := []byte(nil)
 	if isShellRestoreWindow(state) {
@@ -6175,6 +6343,8 @@ func createWindowOptionsForRestore(
 		name:                      firstNonEmptyString(state.Name, state.PaneTitle, state.CurrentCommand, "shell"),
 		cwd:                       state.Cwd,
 		command:                   command,
+		launchCommand:             state.LaunchCommand,
+		restoreCommand:            state.RestoreCommand,
 		history:                   history,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
@@ -6217,6 +6387,8 @@ type createWindowOptions struct {
 	cwd                       string
 	command                   string
 	args                      []string
+	launchCommand             string
+	restoreCommand            string
 	history                   []byte
 	paneTitle                 string
 	agentTool                 string
@@ -6355,6 +6527,8 @@ func (s *muxServer) createWindowWithStarter(
 		name:                      name,
 		cwd:                       cwd,
 		command:                   filepath.Base(cmd.Path),
+		launchCommand:             options.launchCommand,
+		restoreCommand:            options.restoreCommand,
 		agentTool:                 agentTool,
 		agentToolConfirmed:        agentToolConfirmed,
 		agentSessionID:            options.agentSessionID,
@@ -8676,12 +8850,17 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		})
 	case "create_window":
 		s.focusAttachClientByID(request.ClientID, 0, 0, false)
-		window, err := s.createWindow(createWindowOptions{
+		options := createWindowOptions{
 			name:    request.Name,
 			cwd:     request.Cwd,
 			command: request.Command,
 			args:    request.Args,
-		})
+		}
+		if len(request.Args) == 0 {
+			options.launchCommand = strings.TrimSpace(request.Command)
+			options.restoreCommand = strings.TrimSpace(request.RestoreCommand)
+		}
+		window, err := s.createWindow(options)
 		if err != nil {
 			client.sendError(request, err)
 			return
@@ -9169,6 +9348,8 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 			Name:                      window.name,
 			Cwd:                       window.cwd,
 			CurrentCommand:            window.currentCommandLocked(),
+			LaunchCommand:             window.launchCommand,
+			RestoreCommand:            window.restoreCommand,
 			PanePid:                   window.metadataProcessIDLocked(),
 			PaneTitle:                 window.paneTitle,
 			AgentTool:                 window.agentToolLocked(),

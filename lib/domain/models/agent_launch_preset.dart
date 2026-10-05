@@ -132,6 +132,24 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
   String? get discoveredSessionToolName =>
       this == AgentLaunchTool.openclaw ? null : label;
 
+  /// Arguments that make a launch of this tool continue its most recent
+  /// session in the working directory instead of starting a new one; null
+  /// when the app only resumes this tool's sessions by id.
+  List<String>? get continueArguments => switch (this) {
+    AgentLaunchTool.antigravity ||
+    AgentLaunchTool.openCode ||
+    AgentLaunchTool.cursorAgent ||
+    AgentLaunchTool.pi ||
+    AgentLaunchTool.hermes => const ['--continue'],
+    // OpenClaw reattaches to its default `main` session key on its own.
+    AgentLaunchTool.openclaw => const [],
+    AgentLaunchTool.grokBuild => const ['--resume'],
+    AgentLaunchTool.claudeCode ||
+    AgentLaunchTool.copilotCli ||
+    AgentLaunchTool.codex ||
+    AgentLaunchTool.museCode => null,
+  };
+
   /// Whether this tool exposes isolated launch profiles.
   bool get supportsLaunchProfiles =>
       this == AgentLaunchTool.hermes || this == AgentLaunchTool.openclaw;
@@ -598,6 +616,69 @@ String replaceDefaultAgentExecutable(
   return command.substring(0, offset) +
       _quoteShellArgument(executable) +
       command.substring(offset + token.end);
+}
+
+/// Builds the command MonkeyMux runs to start the agent [command] launches
+/// again when an update restores its window: the same command, continuing
+/// the agent's most recent session in the window's directory. A command that
+/// already resumes or continues a session is kept as it is. Returns null when
+/// [command] does not plainly launch an agent that can continue a session,
+/// including when it chains other commands after the agent's arguments.
+String? buildAgentRestoreCommand(String? command) {
+  final trimmed = command?.trim();
+  if (trimmed == null || trimmed.isEmpty) return null;
+  final tool = agentLaunchToolForCommandText(trimmed);
+  final continueArguments = tool?.continueArguments;
+  if (tool == null || continueArguments == null) return null;
+  var agentCommand = trimmed;
+  while (true) {
+    final prefix =
+        _leadingCdCommandPattern.firstMatch(agentCommand) ??
+        _leadingEnvironmentAssignmentPattern.firstMatch(agentCommand);
+    if (prefix == null) break;
+    agentCommand = agentCommand.substring(prefix.end);
+  }
+  if (_chainsOutsideQuotes(agentCommand)) return null;
+  final sessionFlags = {
+    ...continueArguments,
+    _buildAgentResumeArguments(tool, 'id').first,
+  };
+  final resumes = agentCommand
+      .split(RegExp(r'\s+'))
+      .any(
+        (token) => sessionFlags.any(
+          (flag) => token == flag || token.startsWith('$flag='),
+        ),
+      );
+  if (resumes || continueArguments.isEmpty) return trimmed;
+  return '$trimmed ${continueArguments.join(' ')}';
+}
+
+/// Whether [command] chains, pipes or redirects outside its quoted
+/// arguments, so arguments appended to its end would not reach its first
+/// command. Quotes as the launch builders write them for POSIX shells,
+/// PowerShell and cmd keep `work & review` inside a profile argument.
+/// Unbalanced quotes count as chaining, since the command cannot be read.
+bool _chainsOutsideQuotes(String command) {
+  String? quote;
+  for (var i = 0; i < command.length; i++) {
+    final char = command[i];
+    if (quote != null) {
+      if (char == quote) {
+        quote = null;
+      } else if (quote == '"' && char == r'\') {
+        i++;
+      }
+    } else if (char == "'" || char == '"') {
+      quote = char;
+    } else if (char == r'\') {
+      i++;
+    } else if (';&|<>`'.contains(char) ||
+        (char == r'$' && command.startsWith('(', i + 1))) {
+      return true;
+    }
+  }
+  return quote != null;
 }
 
 /// Builds the base shell command for resuming a saved [tool] session.

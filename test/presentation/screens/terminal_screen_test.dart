@@ -68,6 +68,7 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -5575,6 +5576,73 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets('a window switch waits for a held Return to reach its window', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const sessionName = 'work';
+      const windows = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'agent', isActive: false, id: '@1'),
+      ];
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: sessionName,
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final muxFixture =
+          createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+            ..stubPrefetch()
+            ..stubPaneContext()
+            ..stubForegroundClient()
+            ..stubWindows(() => windows)
+            ..stubWindowEvents();
+      String? writtenAtSelect;
+      when(
+        () => monkeyMuxService.selectWindow(
+          session,
+          sessionName,
+          1,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+          suppressReplay: any(named: 'suppressReplay'),
+        ),
+      ).thenAnswer((_) async {
+        writtenAtSelect = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(),
+        );
+      });
+      muxFixture.stubThemeRefresh();
+
+      await muxFixture.pump(tester);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('agent'), findsOneWidget);
+
+      shellWrites.clear();
+      final terminal = session.terminal!..textInput('hi?');
+      sendTerminalEnterInput(
+        terminal,
+        shiftActive: false,
+        altActive: false,
+        ctrlActive: false,
+      );
+      await tester.tap(find.text('agent'));
+      await tester.pump();
+      expect(writtenAtSelect, isNull);
+
+      await tester.pump(TerminalEnterPacer.defaultGap);
+      await tester.pump();
+      expect(writtenAtSelect, 'hi?\r');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'MonkeyMux window switches wait for replay before following output',
       (tester) async {
@@ -7176,6 +7244,28 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    testWidgets(
+      'a Return held when the screen closes still reaches the shell',
+      (tester) async {
+        await pumpScreen(tester);
+        await tester.pump();
+        shellWrites.clear();
+
+        final terminal = session.terminal!..textInput('hi?');
+        sendTerminalEnterInput(
+          terminal,
+          shiftActive: false,
+          altActive: false,
+          ctrlActive: false,
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(shellWrites.map(String.fromCharCodes).join(), 'hi?');
+
+        await tester.pump(TerminalEnterPacer.defaultGap);
+        expect(shellWrites.map(String.fromCharCodes).join(), 'hi?\r');
+      },
+    );
+
     for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
       testWidgets(
         'shell completion tap discards stale IME text on ${platform.name}',
@@ -7208,7 +7298,8 @@ void main() {
           );
           await tester.pump();
           await tester.testTextInput.receiveAction(TextInputAction.done);
-          await tester.pump();
+          // The Return follows the text it came with after the pacer's gap.
+          await tester.pump(TerminalEnterPacer.defaultGap);
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             '\x7f\x7fcheckout \r',
@@ -7259,7 +7350,8 @@ void main() {
             );
           }
           await tester.testTextInput.receiveAction(TextInputAction.done);
-          await tester.pump();
+          // The Return follows the text it came with after the pacer's gap.
+          await tester.pump(TerminalEnterPacer.defaultGap);
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             '\x7f\x7fcheckout hotfix\r',

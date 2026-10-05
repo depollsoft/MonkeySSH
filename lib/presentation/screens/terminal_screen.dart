@@ -105,6 +105,7 @@ import '../widgets/monkey_terminal_view.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/system_bottom_inset.dart';
+import '../widgets/terminal_key_input.dart';
 import '../widgets/terminal_menu_style.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_paste_upload_strip.dart';
@@ -822,6 +823,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   StreamSubscription<String>? _shellStdoutSubscription;
   Terminal? _terminalWithOwnedCallbacks;
   void Function(String)? _terminalOutputHandler;
+  TerminalEnterPacer? _terminalEnterPacer;
   void Function(int, int, int, int)? _terminalResizeHandler;
   void Function(int, int)? _terminalHostResizeHandler;
   bool _suppressMonkeyMuxResizeSyncFromTerminalRefresh = false;
@@ -4563,7 +4565,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // Clean up any previous connection state before reconnecting.
     await _releaseShellStreams(awaitCancel: true);
     _hideShellCompletionPopup();
-    _clearOwnedTerminalCallbacks();
+    _clearOwnedTerminalCallbacks(dropHeldInput: true);
     _shell = null;
     // Allow the build-path safety-net call to fire once for the new session.
     _lastBuildAppliedTheme = null;
@@ -4936,6 +4938,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       },
     );
 
+    final enterPacer = TerminalEnterPacer(
+      write: (output) {
+        try {
+          session.writeToShell(output);
+        } on Object catch (error) {
+          DiagnosticsLogService.instance.warning(
+            'terminal.input',
+            'write_failed',
+            fields: {
+              'connectionId': session.connectionId,
+              'errorType': error.runtimeType,
+            },
+          );
+          unawaited(
+            _cleanupUnexpectedDisconnect(
+              session.connectionId,
+              message: 'Connection became unresponsive. Reconnect to continue.',
+            ),
+          );
+        }
+      },
+    );
+    _terminalEnterPacer = enterPacer;
+
     void handleTerminalOutput(String data) {
       // Enter keystroke CRLF collapse lives in sendTerminalEnterInput so paste
       // and other producers of exact "\r\n" are not rewritten here.
@@ -4951,24 +4977,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       _clearDetectedSensitiveKeyboardPromptAfterInput(output);
       _handleTerminalOutputForShellCompletion(output);
-      try {
-        session.writeToShell(output);
-      } on Object catch (error) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.input',
-          'write_failed',
-          fields: {
-            'connectionId': session.connectionId,
-            'errorType': error.runtimeType,
-          },
-        );
-        unawaited(
-          _cleanupUnexpectedDisconnect(
-            session.connectionId,
-            message: 'Connection became unresponsive. Reconnect to continue.',
-          ),
-        );
-      }
+      enterPacer.add(output, enter: isWritingTerminalEnterKey);
     }
 
     _terminalOutputHandler = handleTerminalOutput;
@@ -5135,7 +5144,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  void _clearOwnedTerminalCallbacks() {
+  /// Releases the terminal callbacks this screen installed. A Return the
+  /// pacer still holds back goes out on its own once its gap has passed, since
+  /// the session can outlive this screen; [dropHeldInput] discards it instead,
+  /// for a session that is being replaced or has been lost.
+  void _clearOwnedTerminalCallbacks({bool dropHeldInput = false}) {
+    if (dropHeldInput) {
+      _terminalEnterPacer?.dispose();
+    }
+    _terminalEnterPacer = null;
     final terminal = _terminalWithOwnedCallbacks;
     final outputHandler = _terminalOutputHandler;
     if (terminal != null &&
@@ -10086,6 +10103,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    // A Return still held back belongs to the window it was typed in.
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
     final targetWindowId = windowId != null && isValidTmuxWindowId(windowId)
         ? windowId
@@ -10256,6 +10276,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
     final configuredWorkingDirectory = _configuredRemoteMuxWorkingDirectory(
       backend: backend.remoteMuxBackend ?? _activeMuxBackend,
@@ -10337,6 +10359,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final closesLastMonkeyMuxWindow =
         !preserveMuxSession &&
         await _isClosingLastMonkeyMuxWindow(
@@ -10847,7 +10871,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     unawaited(_releaseShellStreams());
     _stopSharedClipboardSync();
     _hideShellCompletionPopup();
-    _clearOwnedTerminalCallbacks();
+    _clearOwnedTerminalCallbacks(dropHeldInput: true);
     _pathVerifier.disposeTerminalPathVerificationSftp();
     _sessionController.clearObservedSession(session: session);
     _clearTmuxState();
