@@ -275,7 +275,9 @@ void registerTmuxWindowNavigatorTests() {
                     promptStatus: AcpPromptStatus.streaming,
                   ),
                 ),
-                const AcpMuxWindowStatusBadge(fallbackLabel: 'native'),
+                const AcpMuxWindowStatusBadge(
+                  fallback: AcpMuxWindowFallback.native,
+                ),
               ],
             ),
           ),

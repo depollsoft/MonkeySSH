@@ -13,6 +13,18 @@ import 'acp_path_text.dart';
 import 'acp_resource_chip.dart';
 import 'acp_terminal_output.dart';
 
+final _whitespaceRun = RegExp(r'\s+');
+final _fenceLine = RegExp('^```', multiLine: true);
+final _headingLine = RegExp(r'^#{1,6}\s', multiLine: true);
+final _quoteLine = RegExp(r'^>\s', multiLine: true);
+final _listLine = RegExp(r'^\s*(?:[-*+]|\d+\.)\s+', multiLine: true);
+final _inlineLink = RegExp(r'\[[^\]]+\]\([^)]+\)');
+final _inlineCode = RegExp('`[^`]+`');
+final _tableLine = RegExp(r'^\|.+\|$', multiLine: true);
+
+/// Whether a call's raw output renders as Markdown, decided once per call.
+final _richOutputCache = Expando<bool>('ACP rich tool output');
+
 /// Presentation helpers for [AcpToolStatus].
 extension AcpToolStatusPresentation on AcpToolStatus {
   /// Short human-readable label for the status.
@@ -78,6 +90,7 @@ class AcpToolCallView extends StatefulWidget {
 
 class _AcpToolCallViewState extends State<AcpToolCallView> {
   late bool _expanded = widget.initiallyExpanded || _isActive(widget.toolCall);
+  late String? _headerPreview = _buildHeaderPreview();
 
   static bool _isActive(AcpToolCall call) =>
       call.status == AcpToolStatus.pending ||
@@ -90,6 +103,9 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
     final isActive = _isActive(widget.toolCall);
     if (wasActive != isActive) {
       _expanded = isActive;
+    }
+    if (!identical(oldWidget.toolCall, widget.toolCall)) {
+      _headerPreview = _buildHeaderPreview();
     }
   }
 
@@ -104,7 +120,7 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
         call.terminalIds.isNotEmpty;
   }
 
-  String? get _headerPreview {
+  String? _buildHeaderPreview() {
     final call = widget.toolCall;
     if (call.locations.isNotEmpty) {
       final location = call.locations.first;
@@ -118,7 +134,7 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
       return name == null || name.isEmpty || name == call.title ? null : name;
     }
     final line = input.split('\n').firstWhere((line) => line.trim().isNotEmpty);
-    final compact = line.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final compact = line.trim().replaceAll(_whitespaceRun, ' ');
     return compact.length <= 96 ? compact : '${compact.substring(0, 95)}…';
   }
 
@@ -360,7 +376,7 @@ class _ToolCallDetails extends StatelessWidget {
     final richOutput =
         hasOutput &&
         !toolCall.rawOutputIsStructured &&
-        _looksLikeRichToolOutput(output!);
+        (_richOutputCache[toolCall] ??= _looksLikeRichToolOutput(output!));
     final terminals = AcpTerminalOutputScope.maybeOf(context);
     final showsTerminals = terminals != null && toolCall.terminalIds.isNotEmpty;
     if ((input?.isNotEmpty ?? false) ||
@@ -398,15 +414,16 @@ class _ToolCallDetails extends StatelessWidget {
       }
     }
     if (richOutput) {
+      final markdown = output!;
       children.add(
         _RichToolResult(
           onTapLink: onTapLink,
           markdown: active
               ? _ToolPayloadStream._boundedLiveValue(
-                  output,
-                  keepTail: !output.contains('```'),
+                  markdown,
+                  keepTail: !markdown.contains('```'),
                 )
-              : output,
+              : markdown,
         ),
       );
     }
@@ -452,15 +469,19 @@ class _ToolCallDetails extends StatelessWidget {
 }
 
 bool _looksLikeRichToolOutput(String value) {
-  final text = value.trimLeft();
-  return RegExp('^```', multiLine: true).hasMatch(text) ||
-      RegExp(r'^#{1,6}\s', multiLine: true).hasMatch(text) ||
-      RegExp(r'^>\s', multiLine: true).hasMatch(text) ||
-      RegExp(r'^\s*(?:[-*+]|\d+\.)\s+', multiLine: true).hasMatch(text) ||
-      RegExp(r'\[[^\]]+\]\([^)]+\)').hasMatch(text) ||
-      RegExp('`[^`]+`').hasMatch(text) ||
+  // Markdown syntax shows up early; the live view is bounded to 4 KiB anyway.
+  const probeChars = 8192;
+  final text = value.length > probeChars
+      ? value.substring(0, probeChars).trimLeft()
+      : value.trimLeft();
+  return _fenceLine.hasMatch(text) ||
+      _headingLine.hasMatch(text) ||
+      _quoteLine.hasMatch(text) ||
+      _listLine.hasMatch(text) ||
+      _inlineLink.hasMatch(text) ||
+      _inlineCode.hasMatch(text) ||
       text.contains('**') ||
-      RegExp(r'^\|.+\|$', multiLine: true).hasMatch(text);
+      _tableLine.hasMatch(text);
 }
 
 class _RichToolResult extends StatelessWidget {
@@ -494,7 +515,7 @@ class _RichToolResult extends StatelessWidget {
   }
 }
 
-class _ToolPayloadStream extends StatelessWidget {
+class _ToolPayloadStream extends StatefulWidget {
   const _ToolPayloadStream({
     required this.input,
     required this.output,
@@ -506,6 +527,9 @@ class _ToolPayloadStream extends StatelessWidget {
   final String? output;
   final bool active;
   final MarkdownTapLinkCallback? onTapLink;
+
+  @override
+  State<_ToolPayloadStream> createState() => _ToolPayloadStreamState();
 
   String get _text {
     final sections = <String>[];
@@ -560,6 +584,22 @@ class _ToolPayloadStream extends StatelessWidget {
     final indented = value.split('\n').map((line) => '  $line').join('\n');
     return '$label:\n$indented';
   }
+}
+
+class _ToolPayloadStreamState extends State<_ToolPayloadStream> {
+  // The indented payload is re-derived only when the payload itself changes,
+  // not on every thread rebuild while a long-running call streams.
+  late String _text = widget._text;
+
+  @override
+  void didUpdateWidget(_ToolPayloadStream oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.input != widget.input ||
+        oldWidget.output != widget.output ||
+        oldWidget.active != widget.active) {
+      _text = widget._text;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -576,7 +616,7 @@ class _ToolPayloadStream extends StatelessWidget {
           scrollDirection: Axis.horizontal,
           child: AcpPathText(
             text: _text,
-            onTapPath: acpPathTapHandler(onTapLink),
+            onTapPath: acpPathTapHandler(widget.onTapLink),
             style: AcpChatTypography.monoStyleOf(
               context,
             ).copyWith(fontSize: 11.5, color: scheme.onSurface, height: 1.35),

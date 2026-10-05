@@ -88,6 +88,40 @@ void registerAcpPermissionSurfaceTests() {
       await tester.pumpAndSettle();
     });
 
+    testWidgets('a vanished session is reported instead of thrown', (
+      tester,
+    ) async {
+      final prompt = AcpToolPermissionPrompt(
+        stableKey: 'gone',
+        title: 'Allow this action?',
+        options: const [
+          AcpPermissionOption(
+            id: 'opt-allow',
+            name: 'Allow',
+            kind: AcpPermissionOptionKind.allowOnce,
+          ),
+        ],
+        onSelect: (_) async =>
+            throw StateError('No ACP session for the requested key.'),
+        onCancel: () async {},
+      );
+      await _pump(tester, [prompt]);
+
+      await tester.tap(find.text('Allow'));
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('The agent is no longer waiting for this request.'),
+        findsOneWidget,
+      );
+      // The card is usable again once the failure is reported.
+      expect(
+        tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+        isNotNull,
+      );
+    });
+
     testWidgets('write prompt shows metadata but hides content by default', (
       tester,
     ) async {

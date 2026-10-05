@@ -12,6 +12,8 @@ const int kAcpMarkdownVirtualChunkChars = 8 * 1024;
 /// Smaller bound for literal user text, whose long wrapped lines are costly.
 const int kAcpTextVirtualChunkChars = 2 * 1024;
 
+final _fenceOpenPattern = RegExp('^(`{3,}|~{3,})');
+
 /// Splits a large Markdown document into independently renderable segments.
 ///
 /// Short documents retain their original identity. Long documents prefer
@@ -220,7 +222,7 @@ void _updateFenceState(
     }
     return;
   }
-  final match = RegExp('^(`{3,}|~{3,})').firstMatch(trimmed);
+  final match = _fenceOpenPattern.firstMatch(trimmed);
   if (match == null) return;
   final marker = match.group(1)!;
   onOpen(marker, trimmed);

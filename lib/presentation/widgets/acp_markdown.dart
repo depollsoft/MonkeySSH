@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -46,20 +47,15 @@ class AcpMarkdown extends StatefulWidget {
   const AcpMarkdown({
     required this.data,
     super.key,
-    this.selectable = true,
     this.onTapLink,
     this.imageResolver,
     this.onTapImage,
     this.onCopyCode,
-    this.syntaxTheme,
     this.machineContent = false,
   });
 
   /// The Markdown source to render.
   final String data;
-
-  /// Whether text is selectable.
-  final bool selectable;
 
   /// Custom link tap handler; defaults to [launchAcpLink].
   final MarkdownTapLinkCallback? onTapLink;
@@ -72,9 +68,6 @@ class AcpMarkdown extends StatefulWidget {
 
   /// Called after a code block's contents are copied.
   final ValueChanged<String>? onCopyCode;
-
-  /// Optional highlight.js theme map for code blocks.
-  final Map<String, TextStyle>? syntaxTheme;
 
   /// Keeps prose in the terminal monospace face for literal tool output.
   ///
@@ -108,14 +101,14 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
     if (oldWidget.data != widget.data) {
       _normalizedData = normalizeAcpMarkdownDataImages(widget.data);
     }
+    // `MarkdownBody` captures its builders and image widgets at parse time, so
+    // callbacks are read through this State when invoked and only their
+    // presence (which decides path detection and image wiring) re-parses.
     if (oldWidget.data != widget.data ||
-        oldWidget.selectable != widget.selectable ||
-        oldWidget.onTapLink != widget.onTapLink ||
-        oldWidget.imageResolver != widget.imageResolver ||
-        oldWidget.onTapImage != widget.onTapImage ||
-        oldWidget.onCopyCode != widget.onCopyCode ||
-        oldWidget.syntaxTheme != widget.syntaxTheme ||
-        oldWidget.machineContent != widget.machineContent) {
+        oldWidget.machineContent != widget.machineContent ||
+        (oldWidget.onTapLink == null) != (widget.onTapLink == null) ||
+        (oldWidget.imageResolver == null) != (widget.imageResolver == null) ||
+        (oldWidget.onTapImage == null) != (widget.onTapImage == null)) {
       _body = _buildMarkdownBody(context);
     }
   }
@@ -212,17 +205,16 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
 
     return MarkdownBody(
       data: _normalizedData,
-      selectable: widget.selectable,
+      selectable: true,
       styleSheet: styleSheet,
       softLineBreak: true,
       inlineSyntaxes: [if (widget.onTapLink != null) AcpMarkdownPathSyntax()],
-      onTapLink: widget.onTapLink ?? _defaultOnTapLink,
+      onTapLink: _onTapLink,
       imageBuilder: _buildImage,
       builders: {
         'pre': _AcpCodeBlockBuilder(
-          syntaxTheme: widget.syntaxTheme,
-          onCopy: widget.onCopyCode,
-          onTapLink: widget.onTapLink,
+          onCopy: _copyCode,
+          onTapPath: widget.onTapLink == null ? null : _tapPath,
         ),
       },
     );
@@ -231,26 +223,39 @@ class _AcpMarkdownState extends State<AcpMarkdown> {
   @override
   Widget build(BuildContext context) => _body;
 
-  void _defaultOnTapLink(String text, String? href, String title) {
-    unawaited(launchAcpLink(href));
+  void _onTapLink(String text, String? href, String title) {
+    final onTapLink = widget.onTapLink;
+    if (onTapLink == null) {
+      unawaited(launchAcpLink(href));
+    } else {
+      onTapLink(text, href, title);
+    }
   }
+
+  void _tapPath(String path) => acpPathTapHandler(widget.onTapLink)?.call(path);
+
+  void _copyCode(String code) => widget.onCopyCode?.call(code);
+
+  Future<Uint8List?> _resolveImage(AcpImageContent image) =>
+      widget.imageResolver!(image);
+
+  void _tapImage(AcpImageContent image) => widget.onTapImage!(image);
 
   Widget _buildImage(Uri uri, String? title, String? alt) => Padding(
     padding: const EdgeInsets.symmetric(vertical: FluttyTheme.spacingSm),
     child: AcpInlineImage(
       image: AcpImageContent(uri: uri.toString(), label: alt ?? title),
-      resolver: widget.imageResolver,
-      onTap: widget.onTapImage,
+      resolver: widget.imageResolver == null ? null : _resolveImage,
+      onTap: widget.onTapImage == null ? null : _tapImage,
     ),
   );
 }
 
 class _AcpCodeBlockBuilder extends MarkdownElementBuilder {
-  _AcpCodeBlockBuilder({this.syntaxTheme, this.onCopy, this.onTapLink});
+  _AcpCodeBlockBuilder({required this.onCopy, required this.onTapPath});
 
-  final Map<String, TextStyle>? syntaxTheme;
-  final ValueChanged<String>? onCopy;
-  final MarkdownTapLinkCallback? onTapLink;
+  final ValueChanged<String> onCopy;
+  final ValueChanged<String>? onTapPath;
 
   @override
   bool isBlockElement() => true;
@@ -282,9 +287,8 @@ class _AcpCodeBlockBuilder extends MarkdownElementBuilder {
       child: AcpCodeBlock(
         code: code,
         language: language,
-        syntaxTheme: syntaxTheme,
         onCopy: onCopy,
-        onTapPath: acpPathTapHandler(onTapLink),
+        onTapPath: onTapPath,
       ),
     );
   }

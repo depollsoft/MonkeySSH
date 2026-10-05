@@ -8,6 +8,7 @@ import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/agent_launch_preset.dart';
+import '../../domain/models/command_names.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/monkeymux_acp_bridge_service.dart';
@@ -336,8 +337,7 @@ AcpLaunchCommand applyAcpAgentLaunchSettings({
 }
 
 bool _isResolvedTerminalExecutable(AgentLaunchTool tool, String executable) {
-  var name = executable.replaceAll(r'\\', '/').split('/').last.toLowerCase();
-  name = name.replaceFirst(RegExp(r'\.(?:exe|cmd|bat|ps1|com)$'), '');
+  final name = normalizeCommandBasename(executable);
   return tool.candidateCommandNames.any(
     (candidate) => candidate.toLowerCase() == name,
   );

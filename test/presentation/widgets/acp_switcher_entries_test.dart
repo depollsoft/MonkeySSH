@@ -45,6 +45,26 @@ void main() {
       expect(entries.last.keyValue, otherRecent.key.value);
     });
 
+    test('recent entries get a provider label instead of a bare separator', () {
+      final recent = AcpSwitcherEntry.recent(
+        AcpRecentSessionRef(
+          hostId: 1,
+          providerId: 'builtin:copilot-cli',
+          bridgeId: 'bridge-1',
+          acpSessionId: 'archived',
+          createdAt: DateTime(2026),
+          lastActivityAt: DateTime(2026, 1, 1, 11),
+          cwd: '/home/demo/proj',
+        ),
+      );
+      final subtitle = acpSwitcherEntrySubtitle(
+        recent,
+        now: DateTime(2026, 1, 1, 12),
+      );
+      expect(subtitle, startsWith('Copilot CLI · '));
+      expect(subtitle, isNot(startsWith(' · ')));
+    });
+
     test('orders entries by most recent activity first', () {
       final older = fakeAcpSession(
         key: fakeAcpKey(acpSessionId: 'a'),
