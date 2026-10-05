@@ -6340,8 +6340,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           await session.stopAllForwards();
           if (scenario == 'refused' ||
               scenario == 'late refusal' ||
-              scenario == 'late open' ||
-              scenario == 'peer closes before open') {
+              scenario == 'late open') {
+            // The relay never listened to these channels' streams.
             await forward._streamController.stream.listen((_) {}).cancel();
           }
           await forward.close();
