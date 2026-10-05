@@ -461,7 +461,7 @@ class _FakeCapabilityTerminalProcess implements AcpTerminalProcess {
   Future<AcpTerminalExitStatus> waitForExit() => _exit.future;
 
   @override
-  void kill() {
+  Future<void> kill() async {
     killed = true;
     if (!_exit.isCompleted) {
       _exit.complete(const AcpTerminalExitStatus(signal: 'KILL'));
