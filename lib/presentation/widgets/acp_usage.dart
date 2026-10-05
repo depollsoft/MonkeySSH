@@ -36,25 +36,13 @@ class AcpUsageView extends StatelessWidget {
     final labelStyle = AcpChatTypography.monoStyleOf(context)
         .copyWith(fontSize: 11, color: scheme.onSurfaceVariant);
 
-    final stats = <String>[];
-    if (usage.inputTokens != null) {
-      stats.add('↑ ${_formatTokens(usage.inputTokens!)}');
-    }
-    if (usage.outputTokens != null) {
-      stats.add('↓ ${_formatTokens(usage.outputTokens!)}');
-    }
-    if (usage.totalTokens != null) {
-      stats.add('Σ ${_formatTokens(usage.totalTokens!)}');
-    }
-    if (stats.isEmpty && usage.contextUsedTokens != null) {
-      final used = usage.contextUsedTokens!;
-      final window = usage.contextWindow;
-      stats.add(
-        window != null && window > 0
-            ? '${_formatTokens(used)} / ${_formatTokens(window)} context'
-            : '${_formatTokens(used)} context tokens',
-      );
-    }
+    final used = usage.contextUsedTokens;
+    final window = usage.contextWindow;
+    final stats = used == null
+        ? ''
+        : window != null && window > 0
+        ? '${_formatTokens(used)} / ${_formatTokens(window)} context'
+        : '${_formatTokens(used)} context tokens';
     final fraction = usage.contextFraction;
 
     return Semantics(
@@ -73,7 +61,7 @@ class AcpUsageView extends StatelessWidget {
           const SizedBox(width: FluttyTheme.spacingXs),
           Flexible(
             child: Text(
-              stats.join('   '),
+              stats,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: labelStyle,

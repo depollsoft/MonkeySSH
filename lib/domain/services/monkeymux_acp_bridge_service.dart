@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
@@ -11,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_authentication.dart';
 import '../models/acp_json.dart';
 import '../models/acp_provider.dart';
+import '../models/command_names.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import '../models/remote_multiplexer.dart';
 import 'acp_transport.dart';
@@ -97,10 +99,10 @@ String buildMonkeyMuxAcpProviderCommand(
     for (final entry in environment.entries)
       '\$env:${entry.key}=${powerShellSingleQuote(entry.value)};',
     r"$ErrorActionPreference='Stop';",
-    if (providerId == AcpBuiltinProviderIds.museCode)
-      _museWindowsExecutablePreamble,
-    if (providerId == AcpBuiltinProviderIds.antigravity)
-      _antigravityWindowsTerminalProgramPreamble,
+    ?acpBuiltinProviders
+        .firstWhereOrNull((provider) => provider.id == providerId)
+        ?.windowsLaunchPreamble,
+    _windowsTerminalProgramPreamble,
     '$executableVariable=${powerShellSingleQuote(launchArgv.first)};',
     '$argumentsVariable=@(',
     launchArgv.skip(1).map(powerShellSingleQuote).join(','),
@@ -112,7 +114,7 @@ String buildMonkeyMuxAcpProviderCommand(
       ? buildCompactWindowsPowerShellCommand(windowsScript)
       : '$_profileSourcingPrefix'
             '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
-            '${providerId == AcpBuiltinProviderIds.antigravity ? _antigravityTerminalProgramPreamble : ''}'
+            '$_terminalProgramPreamble'
             '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
             'exec ${launchArgv.map(shellEscapePosix).join(' ')}';
   if (utf8.encode(command).length > 8192) {
@@ -150,39 +152,16 @@ String buildAcpTerminalAuthCommand(
       '${shellEscapePosix(providerCommand)}';
 }
 
-// agy-acp drives agy through its own PTY. With no TERM_PROGRAM, agy opens by
-// asking the terminal to identify itself (ESC [ > c) and waits for a reply
-// the adapter never sends, so every prompt hangs. Any value skips the query.
-// Shells started by MonkeyMux over SSH usually have none.
-const _antigravityTerminalProgramPreamble =
+// Shells started by MonkeyMux over SSH usually have no TERM_PROGRAM. Some
+// adapters stall without one: agy-acp drives agy through its own PTY, and agy
+// opens by asking the terminal to identify itself (ESC [ > c), waiting for a
+// reply the adapter never sends. Any value skips the query, and a value from
+// the user's profile is kept.
+const _terminalProgramPreamble =
     r'[ -n "${TERM_PROGRAM-}" ] || export TERM_PROGRAM=MonkeySSH; ';
-const _antigravityWindowsTerminalProgramPreamble =
+const _windowsTerminalProgramPreamble =
     r'if([string]::IsNullOrEmpty($env:TERM_PROGRAM)){ '
     r"$env:TERM_PROGRAM='MonkeySSH' };";
-
-// Node's spawn cannot execute the official muse.cmd shim without a shell.
-// Resolve the launcher's selected native binary for the adapter's subprocess.
-// Preserve explicit overrides and never run the updater while opening chat.
-const _museWindowsExecutablePreamble =
-    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
-    r'$__flMuse=Get-Command muse -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1; '
-    r'if($null -ne $__flMuse){ '
-    r'$__flMusePath=$__flMuse.Source; '
-    r"if([IO.Path]::GetExtension($__flMusePath) -eq '.exe'){ "
-    r'$env:MUSE_CODE_EXECUTABLE=$__flMusePath '
-    '}else{ '
-    r'$__flMuseDir=Split-Path -Parent $__flMusePath; '
-    r"$__flMuseVersionFile=Join-Path $__flMuseDir '.muse-version'; "
-    r'if(Test-Path -LiteralPath $__flMuseVersionFile -PathType Leaf){ '
-    r'$__flMuseVersion=[IO.File]::ReadAllText($__flMuseVersionFile).Trim(); '
-    r"if($__flMuseVersion -match '^\d+\.\d+\.\d+-R\d+(\.\d+)?$'){ "
-    r'$__flMuseBinary=Join-Path $__flMuseDir ("muse-bin-"+$__flMuseVersion+".exe"); '
-    r'if(Test-Path -LiteralPath $__flMuseBinary -PathType Leaf){ '
-    r'$env:MUSE_CODE_EXECUTABLE=$__flMuseBinary '
-    '}}}}}; '
-    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
-    "throw 'Muse native executable was not found. Install or update Muse Code in Agent Management.' "
-    '}};';
 
 const _acpExecutableProbeSeparator = '\u001f';
 
@@ -191,14 +170,24 @@ const _acpExecutableProbeSeparator = '\u001f';
 /// The user's interactive shell is required for npm/nvm/asdf/mise installs
 /// commonly exposed only from `.zshrc` or `.bashrc`. Only absolute external
 /// command paths are emitted; aliases and shell functions are ignored.
-String buildMonkeyMuxAcpExecutableProbeCommand(Iterable<String> executables) {
+/// [overrideVariables] maps an executable name to an environment variable
+/// that, when set, names the executable to report instead of the PATH lookup.
+String buildMonkeyMuxAcpExecutableProbeCommand(
+  Iterable<String> executables, {
+  Map<String, String> overrideVariables = const {},
+}) {
   final names = _validatedExecutableProbeNames(executables);
+  final overrides = _validatedExecutableOverrides(names, overrideVariables);
+  final overrideChecks = overrides.entries.map((entry) {
+    final variable = entry.value;
+    return 'if [ "\$c" = ${entry.key} ] && [ -n "\${$variable:-}" ]; then '
+        'p=; if [ -f "\$$variable" ] && [ -x "\$$variable" ]; then '
+        'p=\$$variable; fi; fi; ';
+  }).join();
   final inner =
       'for c in ${names.join(' ')}; do '
       r'p=$(command -v "$c" 2>/dev/null || true); '
-      r'if [ "$c" = muse ] && [ -n "${MUSE_CODE_EXECUTABLE:-}" ]; then '
-      r'p=; if [ -f "$MUSE_CODE_EXECUTABLE" ] && [ -x "$MUSE_CODE_EXECUTABLE" ]; then '
-      r'p=$MUSE_CODE_EXECUTABLE; fi; fi; '
+      '$overrideChecks'
       r'case "$p" in /*) printf "%s'
       '$_acpExecutableProbeSeparator'
       r'%s\n" "$c" "$p";; esac; '
@@ -211,24 +200,37 @@ String buildMonkeyMuxAcpExecutableProbeCommand(Iterable<String> executables) {
 
 /// Builds the equivalent profile-aware Windows PowerShell probe.
 String buildMonkeyMuxAcpWindowsExecutableProbeScript(
-  Iterable<String> executables,
-) {
+  Iterable<String> executables, {
+  Map<String, String> overrideVariables = const {},
+}) {
   final names = _validatedExecutableProbeNames(executables);
+  final overrides = _validatedExecutableOverrides(names, overrideVariables);
   final quotedNames = names.map(powerShellSingleQuote).join(',');
   final separator = powerShellSingleQuote(_acpExecutableProbeSeparator);
-  final body = [
-    powerShellProfilePathPreamble,
-    '\$__flNames=@($quotedNames);',
-    r'foreach($__flName in $__flNames){',
-    r"if($__flName -eq 'muse' -and ![string]::IsNullOrEmpty($env:MUSE_CODE_EXECUTABLE)){",
-    r'if(!(Test-Path -LiteralPath $env:MUSE_CODE_EXECUTABLE -PathType Leaf)){continue};',
-    r'$__flPath=$env:MUSE_CODE_EXECUTABLE;',
-    '}else{',
+  final lookup = [
     r'$__flCmd=Get-Command -Name $__flName -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1;',
     r'if($__flCmd -eq $null){continue};',
     r'$__flPath=$__flCmd.Path;',
     r'if([string]::IsNullOrWhiteSpace($__flPath)){$__flPath=$__flCmd.Source};',
-    '}',
+  ].join();
+  final overrideClauses = overrides.entries.map((entry) {
+    final variable = entry.value;
+    return [
+      'if(\$__flName -eq ${powerShellSingleQuote(entry.key)} -and ',
+      '![string]::IsNullOrEmpty(\$env:$variable)){',
+      'if(!(Test-Path -LiteralPath \$env:$variable -PathType Leaf)){continue};',
+      '\$__flPath=\$env:$variable;',
+      '}',
+    ].join();
+  }).toList();
+  final body = [
+    powerShellProfilePathPreamble,
+    '\$__flNames=@($quotedNames);',
+    r'foreach($__flName in $__flNames){',
+    if (overrideClauses.isEmpty)
+      lookup
+    else
+      '${overrideClauses.join('else')}else{$lookup}',
     r'if([string]::IsNullOrWhiteSpace($__flPath)){continue};',
     r"$__flPath=$__flPath -replace '\\','/';",
     '[void]\$__flOut.Append(\$__flName).Append($separator).Append(\$__flPath).Append("`n");',
@@ -257,8 +259,7 @@ Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
         path.startsWith('//'))) {
       continue;
     }
-    var basename = path.split('/').last.toLowerCase();
-    basename = basename.replaceFirst(RegExp(r'\.(?:exe|cmd|bat|ps1|com)$'), '');
+    final basename = normalizeCommandBasename(path.split('/').last);
     if (basename != fields.first.toLowerCase() &&
         !dependencyNames.contains(fields.first)) {
       continue;
@@ -266,6 +267,18 @@ Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
     resolved[fields.first] = fields.last;
   }
   return Map.unmodifiable(resolved);
+}
+
+Map<String, String> _validatedExecutableOverrides(
+  List<String> names,
+  Map<String, String> overrideVariables,
+) {
+  if (overrideVariables.values.any(
+    (variable) => !_environmentNamePattern.hasMatch(variable),
+  )) {
+    throw ArgumentError.value(overrideVariables, 'overrideVariables');
+  }
+  return {for (final name in names) name: ?overrideVariables[name]};
 }
 
 List<String> _validatedExecutableProbeNames(Iterable<String> executables) {

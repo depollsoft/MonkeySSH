@@ -31,18 +31,12 @@ final class AcpMcpServerValidationException implements Exception {
 /// are stored as plain configuration. Nothing here is logged.
 class AcpMcpServerService {
   /// Creates an MCP server store.
-  AcpMcpServerService(
-    this._settings,
-    this._encryption, {
-    Random? random,
-    int maxServers = kAcpMcpServerMaxCount,
-  }) : _random = random ?? Random.secure(),
-       _maxServers = maxServers;
+  AcpMcpServerService(this._settings, this._encryption, {Random? random})
+    : _random = random ?? Random.secure();
 
   final SettingsService _settings;
   final SecretEncryptionService _encryption;
   final Random _random;
-  final int _maxServers;
 
   final _mutations = SerializedMutations();
 
@@ -92,9 +86,9 @@ class AcpMcpServerService {
       if (index >= 0) {
         entries[index] = encoded;
       } else {
-        if (entries.length >= _maxServers) {
-          throw AcpMcpServerValidationException(
-            'You can save up to $_maxServers MCP servers.',
+        if (entries.length >= kAcpMcpServerMaxCount) {
+          throw const AcpMcpServerValidationException(
+            'You can save up to $kAcpMcpServerMaxCount MCP servers.',
           );
         }
         entries.add(encoded);
@@ -226,7 +220,7 @@ class AcpMcpServerService {
       final server = await _decodeEntry(entry);
       if (server == null || !seenIds.add(server.id)) continue;
       servers.add(server);
-      if (servers.length >= _maxServers) break;
+      if (servers.length >= kAcpMcpServerMaxCount) break;
     }
     return List<AcpMcpServerConfig>.unmodifiable(servers);
   }

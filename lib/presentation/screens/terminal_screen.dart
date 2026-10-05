@@ -9295,39 +9295,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     var result = await launch();
     if (result is AcpSessionLaunchBlocked && mounted) {
-      final choice = await showAcpConcurrencyChoice(
+      final resolved = await resolveAcpConcurrencyBlock(
         context,
-        decision: result.decision,
-        managerState: manager.state,
+        ref,
+        result.decision,
+        relaunch: (replace) => launch(replace: replace),
       );
-      if (!mounted || choice == null) {
+      if (!mounted || resolved == null) {
         return;
       }
-      switch (choice) {
-        case AcpConcurrencyChoice.stopAndContinue:
-          final blocking = [
-            for (final value in result.decision.blockingSessionKeys)
-              manager.state.byKeyValue(value)?.key,
-          ].whereType<AcpSessionKey>().toList(growable: false);
-          result = await launch(replace: blocking);
-        case AcpConcurrencyChoice.upgrade:
-          await context.push<void>(
-            Uri(
-              path: '/upgrade',
-              queryParameters: {
-                'feature': MonetizationFeature.concurrentAcpSessions.name,
-              },
-            ).toString(),
-          );
-          if (!mounted ||
-              !ref
-                  .read(monetizationServiceProvider)
-                  .currentState
-                  .isProUnlocked) {
-            return;
-          }
-          result = await launch();
-      }
+      result = resolved;
     }
     if (!mounted) {
       return;
@@ -9746,47 +9723,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
       if (result is AcpSessionLaunchBlocked && mounted) {
-        final choice = await showAcpConcurrencyChoice(
+        final resolved = await resolveAcpConcurrencyBlock(
           context,
-          decision: result.decision,
-          managerState: manager.state,
+          ref,
+          result.decision,
+          relaunch: (replace) => reconnectWithTransportRetry(replace: replace),
           cancellation: cancellation,
         );
-        if (!mounted ||
-            requestGeneration != _nativeAcpWindowRequestGeneration) {
-          await restoreTerminalAfterFailedHandoff(allowSuperseded: true);
+        if (resolved == null) {
+          // A superseding request dismisses the sheet; restore for it too.
+          await restoreTerminalAfterFailedHandoff(
+            allowSuperseded:
+                requestGeneration != _nativeAcpWindowRequestGeneration,
+          );
           return;
         }
-        if (choice == null) {
-          await restoreTerminalAfterFailedHandoff();
-          return;
-        }
-        switch (choice) {
-          case AcpConcurrencyChoice.stopAndContinue:
-            final blocking = [
-              for (final value in result.decision.blockingSessionKeys)
-                manager.state.byKeyValue(value)?.key,
-            ].whereType<AcpSessionKey>().toList(growable: false);
-            result = await reconnectWithTransportRetry(replace: blocking);
-          case AcpConcurrencyChoice.upgrade:
-            await context.push<void>(
-              Uri(
-                path: '/upgrade',
-                queryParameters: {
-                  'feature': MonetizationFeature.concurrentAcpSessions.name,
-                },
-              ).toString(),
-            );
-            if (!mounted) return;
-            if (!ref
-                .read(monetizationServiceProvider)
-                .currentState
-                .isProUnlocked) {
-              await restoreTerminalAfterFailedHandoff();
-              return;
-            }
-            result = await reconnectWithTransportRetry();
-        }
+        result = resolved;
       }
       if (!mounted) return;
       if (requestGeneration != _nativeAcpWindowRequestGeneration) {

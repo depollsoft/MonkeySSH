@@ -632,12 +632,6 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         } else if (providerId != null) {
           await _showAuthRequired(providerId);
         }
-      case AcpSessionErrorKind.commandNotApproved:
-        setState(
-          () => _error =
-              'This provider needs its command reviewed again before it '
-              'can launch. Edit it to re-approve.',
-        );
       default:
         setState(() => _error = error.message);
     }
@@ -685,9 +679,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final hostsAsync = ref.watch(allHostsProvider);
     final providersAsync = ref.watch(acpProvidersProvider);
     final hosts = hostsAsync.asData?.value;
-    final providers = providersAsync.asData?.value
-        .where((provider) => !provider.isCustom)
-        .toList(growable: false);
+    final providers = providersAsync.asData?.value;
     if (hosts != null && providers != null) {
       _scheduleDefaults(hosts, providers);
     } else if (!_defaultsScheduled &&
@@ -802,14 +794,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               const SizedBox(height: FluttyTheme.spacingMd),
               _sectionLabel(context, 'Provider'),
               providersAsync.when(
-                data: (allProviders) {
-                  final builtins = allProviders
-                      .where((provider) => !provider.isCustom)
-                      .toList(growable: false);
-                  return widget.lockProvider
-                      ? _buildLockedProvider(builtins)
-                      : _buildProviderPicker(builtins);
-                },
+                data: (providers) => widget.lockProvider
+                    ? _buildLockedProvider(providers)
+                    : _buildProviderPicker(providers),
                 loading: () => const Padding(
                   padding: EdgeInsets.all(FluttyTheme.spacingMd),
                   child: LinearProgressIndicator(),

@@ -275,7 +275,12 @@ void main() {
       final binary = File('${temp.path}/custom muse');
       await binary.writeAsString('#!/bin/sh\nexit 99\n');
       await Process.run('chmod', ['+x', binary.path]);
-      final command = buildMonkeyMuxAcpExecutableProbeCommand(const ['muse']);
+      final command = buildMonkeyMuxAcpExecutableProbeCommand(
+        const ['muse'],
+        overrideVariables: acpMuseCodeProvider
+            .executableProbe
+            .executableOverrideEnvironmentVariables,
+      );
       for (final override in [
         binary.path,
         '${temp.path}/missing',
@@ -308,9 +313,12 @@ void main() {
   test(
     'PowerShell Muse prerequisite probe honors an executable override',
     () async {
-      final script = buildMonkeyMuxAcpWindowsExecutableProbeScript(const [
-        'muse',
-      ]).replaceFirst(powerShellProfilePathPreamble, '');
+      final script = buildMonkeyMuxAcpWindowsExecutableProbeScript(
+        const ['muse'],
+        overrideVariables: acpMuseCodeProvider
+            .executableProbe
+            .executableOverrideEnvironmentVariables,
+      ).replaceFirst(powerShellProfilePathPreamble, '');
       final temp = await Directory.systemTemp.createTemp('muse windows probe ');
       addTearDown(() => temp.delete(recursive: true));
       final binary = File('${temp.path}/custom muse.exe');

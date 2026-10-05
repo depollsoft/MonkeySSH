@@ -19,7 +19,6 @@ import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_mcp_server_service.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
@@ -292,7 +291,6 @@ void main() {
   AcpSessionManager build(_Connector connector) {
     final manager = AcpSessionManager(
       connector: connector,
-      providerService: AcpProviderService(settings),
       recentSessions: recents,
       mcpServerService: mcpServers,
       isProUnlocked: () => true,

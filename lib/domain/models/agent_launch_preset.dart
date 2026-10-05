@@ -364,9 +364,11 @@ String? _readLeadingShellToken(String value) {
       return trimmed.substring(1, end);
     }
   }
-  return trimmed.split(RegExp(r'\s+')).first;
+  return trimmed.split(_whitespacePattern).first;
 }
 
+final _whitespacePattern = RegExp(r'\s+');
+final _unsafeWindowsShellArgumentPattern = RegExp(r'["%!$`\r\n\u201c-\u201e]');
 final _unquotedTmuxFlagTokenPattern = RegExp(r'^[A-Za-z0-9_./~:=,+-]+$');
 final _leadingCdCommandPattern = RegExp(
   r'''^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*''',
@@ -703,7 +705,7 @@ String? _stripArgumentPatterns(
         trimmedAdditionalArguments,
         (value, pattern) => value.replaceAll(pattern, ' '),
       )
-      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_whitespacePattern, ' ')
       .trim();
   return normalizedArguments.isEmpty ? null : normalizedArguments;
 }
@@ -843,7 +845,7 @@ String _quoteShellArgument(String value) =>
     '\'${value.replaceAll('\'', '\'"\'"\'')}\'';
 
 String _quoteWindowsShellArgument(String value) {
-  if (value.contains(RegExp(r'["%!$`\r\n\u201c-\u201e]'))) {
+  if (value.contains(_unsafeWindowsShellArgumentPattern)) {
     throw const FormatException(
       'Profile name is unsafe for the Windows shell.',
     );
@@ -855,7 +857,7 @@ String _quoteShellEnvironmentAssignment(String key, String value) =>
     '$key="${_escapeForDoubleQuotedShellContent(value)}"';
 
 String _escapeForDoubleQuotedShellContent(String value) => value
-    .replaceAll(RegExp(r'\\'), r'\\')
+    .replaceAll(r'\', r'\\')
     .replaceAll('"', r'\"')
     .replaceAll(r'$', r'\$')
     .replaceAll('`', r'\`');
