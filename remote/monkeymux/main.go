@@ -3103,7 +3103,7 @@ func commandLineRelaunchCommand(tool string, argv []string) string {
 	}
 	launch := strings.Join(quoted, " ")
 	if tool == "hermes" && !hermesCommandLineResumes(argv) {
-		return agentResumeCommandWithFreshFallback(launch+" --continue", launch)
+		return resumeCommandWithFreshFallback(launch+" --continue", launch)
 	}
 	return launch
 }
@@ -3136,7 +3136,7 @@ func launchedCommandForRestore(window restoreWindowState) string {
 		}
 	}
 	if restore := strings.TrimSpace(window.RestoreCommand); restore != "" {
-		return agentResumeCommandWithFreshFallback(restore, launch)
+		return resumeCommandWithFreshFallback(restore, launch)
 	}
 	return launch
 }
