@@ -105,11 +105,16 @@ class _TerminalPathLinkHarnessState extends State<_TerminalPathLinkHarness> {
     }
 
     final textOffset = offset.x.clamp(0, lineText.length);
-    final detectedPath = detectTerminalFilePathAtTextOffset(
-      lineText,
-      textOffset,
-    );
-    final path = detectedPath?.path;
+    final path =
+        detectTerminalFilePathMatches(
+              normalizeTerminalFilePathDetectionText(lineText),
+            )
+            .where(
+              (match) =>
+                  textOffset >= match.start && textOffset < match.hitTestEnd,
+            )
+            .firstOrNull
+            ?.path;
     if (path == null) {
       return null;
     }

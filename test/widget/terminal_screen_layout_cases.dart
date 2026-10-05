@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/command_names.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
@@ -17,16 +18,11 @@ void registerTerminalScreenLayoutTests() {
       });
 
       test('positions the upsell snackbar above visible bottom chrome only', () {
-        const mediaQuery = MediaQueryData(padding: EdgeInsets.only(bottom: 34));
-
         // Flutter's floating SnackBar already lifts above the home-indicator
         // safe area, so the margin just needs a small visual gap when there is
         // no in-body keyboard toolbar to clear.
-        expect(upgradeSnackBarBottomMargin(mediaQuery), 16);
-        expect(
-          upgradeSnackBarBottomMargin(mediaQuery, showKeyboardToolbar: true),
-          100,
-        );
+        expect(upgradeSnackBarBottomMargin(), 16);
+        expect(upgradeSnackBarBottomMargin(showKeyboardToolbar: true), 100);
       });
 
       test('tmux bar expansion uses the available terminal height', () {
@@ -877,18 +873,18 @@ void registerTerminalScreenLayoutTests() {
       test(
         'identifies shell-like tmux foreground commands for completions',
         () {
-          expect(isShellCompletionTmuxShellCommand('zsh'), isTrue);
-          expect(isShellCompletionTmuxShellCommand('/bin/bash'), isTrue);
-          expect(isShellCompletionTmuxShellCommand('-fish'), isTrue);
-          expect(isShellCompletionTmuxShellCommand('cmd.exe'), isTrue);
+          expect(isShellCommandBasename('zsh'), isTrue);
+          expect(isShellCommandBasename('/bin/bash'), isTrue);
+          expect(isShellCommandBasename('-fish'), isTrue);
+          expect(isShellCommandBasename('cmd.exe'), isTrue);
           expect(
-            isShellCompletionTmuxShellCommand(
+            isShellCommandBasename(
               r'C:\Windows\System32\WindowsPowerShell\v1.0\PowerShell.EXE',
             ),
             isTrue,
           );
-          expect(isShellCompletionTmuxShellCommand('vim'), isFalse);
-          expect(isShellCompletionTmuxShellCommand(null), isFalse);
+          expect(isShellCommandBasename('vim'), isFalse);
+          expect(isShellCommandBasename(null), isFalse);
         },
       );
 

@@ -43,6 +43,60 @@ final class _StreamOnlyFile extends PlatformFile {
   Stream<Uint8List> readAsByteStream() => stream;
 }
 
+/// Test harness over the public detection entry points: the first path match
+/// on a row, resolved through the row's column offsets.
+({String text, int startColumn, int endColumn})?
+resolveTerminalFilePathSegmentOnRowForPath({
+  required String snapshotText,
+  required String rowText,
+  required int rowStartOffset,
+  required List<int> rowColumnOffsets,
+  required String path,
+}) {
+  final normalizedSnapshot = normalizeTerminalFilePathDetectionText(
+    snapshotText,
+  );
+  for (final match in detectTerminalFilePathMatches(normalizedSnapshot)) {
+    if (match.path != path) {
+      continue;
+    }
+    final segment = resolveTerminalFilePathSegmentOnRow(
+      rowText: rowText,
+      rowStartOffset: rowStartOffset,
+      rowColumnOffsets: rowColumnOffsets,
+      originalToNormalizedOffsets:
+          normalizedSnapshot.originalToNormalizedOffsets,
+      normalizedPathStart: match.normalizedStart,
+      normalizedPathEnd: match.normalizedEnd,
+    );
+    if (segment != null) {
+      return segment;
+    }
+  }
+  return null;
+}
+
+/// Test harness: the detected path whose hit-test range contains [offset].
+({String path, int start, int end})? detectTerminalFilePathAtTextOffset(
+  String text,
+  int offset,
+) {
+  final clampedOffset = offset.clamp(0, text.length);
+  for (final detectedPath in detectTerminalFilePathMatches(
+    normalizeTerminalFilePathDetectionText(text),
+  )) {
+    if (clampedOffset >= detectedPath.start &&
+        clampedOffset < detectedPath.hitTestEnd) {
+      return (
+        path: detectedPath.path,
+        start: detectedPath.start,
+        end: detectedPath.end,
+      );
+    }
+  }
+  return null;
+}
+
 void registerTerminalScreenSelectionTests() {
   group('terminal_screen_selection', () {
     test('picked-file failures preserve category and safe messages', () {
@@ -2162,6 +2216,23 @@ void registerTerminalScreenSelectionTests() {
         );
       });
 
+      test(
+        'includes the partially visible bottom row at a fractional offset',
+        () {
+          // Rows 2..8 are on screen: row 8 spans y 96..108 and the viewport
+          // ends at y 102.
+          expect(
+            resolveVisibleTerminalRowRange(
+              scrollOffset: 30,
+              lineHeight: 12,
+              viewportHeight: 72,
+              bufferHeight: 200,
+            ),
+            (topRow: 2, bottomRow: 8),
+          );
+        },
+      );
+
       test('returns null when layout metrics are not ready', () {
         expect(
           resolveVisibleTerminalRowRange(
@@ -2466,6 +2537,40 @@ void registerTerminalScreenSelectionTests() {
             appendedText: 'he ',
           ),
           'the ',
+        );
+      });
+    });
+
+    group('terminalCursorMayFollowSensitivePrompt', () {
+      test(
+        'is false when the cursor row ends in something other than a colon',
+        () {
+          final terminal = Terminal()
+            ..resize(40, 24)
+            ..write('Password: hunter2');
+          expect(terminalCursorMayFollowSensitivePrompt(terminal), isFalse);
+          terminal.write('\r\n\$ ls -la ');
+          expect(terminalCursorMayFollowSensitivePrompt(terminal), isFalse);
+        },
+      );
+
+      test('is true for a trailing ASCII or full-width colon', () {
+        final terminal = Terminal()
+          ..resize(40, 24)
+          ..write('Password:   ');
+        expect(terminalCursorMayFollowSensitivePrompt(terminal), isTrue);
+        terminal.write('\r\n密码： ');
+        expect(terminalCursorMayFollowSensitivePrompt(terminal), isTrue);
+      });
+
+      test('defers to the full scan when the cursor row is blank', () {
+        final terminal = Terminal()
+          ..resize(10, 24)
+          ..write('${'x' * 9}:          ');
+        expect(terminalCursorMayFollowSensitivePrompt(terminal), isTrue);
+        expect(
+          terminalSensitivePromptTextBeforeCursor(terminal),
+          '${'x' * 9}:',
         );
       });
     });

@@ -37,10 +37,12 @@ import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_runtime_info.dart';
 import '../../domain/models/agent_usage_rings.dart';
 import '../../domain/models/auto_connect_command.dart';
+import '../../domain/models/command_names.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_variables.dart';
 import '../../domain/models/terminal_capability_hint.dart';
 import '../../domain/models/terminal_progress.dart';
 import '../../domain/models/terminal_theme.dart';
@@ -82,6 +84,7 @@ import '../../domain/services/tmux_service.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
+import '../providers/connection_actions.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
@@ -371,21 +374,15 @@ String _telemetryMuxBackendName(RemoteMuxBackend backend) => switch (backend) {
 };
 
 /// Resolves whether the active tmux window requested mouse-wheel input.
-@visibleForTesting
 bool? resolveTmuxBarActiveWindowReportsMouseWheel(
   Iterable<TmuxWindow>? windows,
-) => windows
-    ?.where((window) => window.isActive)
-    .firstOrNull
-    ?.terminalReportsMouseWheel;
+) => windows == null
+    ? null
+    : activeTmuxWindow(windows)?.terminalReportsMouseWheel;
 
 /// Resolves whether the active tmux window requested SGR mouse reporting.
-@visibleForTesting
 bool? resolveTmuxBarActiveWindowMouseReportSgr(Iterable<TmuxWindow>? windows) =>
-    windows
-        ?.where((window) => window.isActive)
-        .firstOrNull
-        ?.terminalMouseReportSgr;
+    windows == null ? null : activeTmuxWindow(windows)?.terminalMouseReportSgr;
 
 final _terminalMouseReportOutputPattern = RegExp(
   '^(?:\x1B\\[<\\d+;\\d+;\\d+[mM])+\$',
@@ -1066,7 +1063,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   _MonkeyMuxResizeSyncKey? _lastMonkeyMuxResizeSync;
   final Set<_MonkeyMuxResizeSyncKey> _pendingMonkeyMuxResizeSyncs =
       <_MonkeyMuxResizeSyncKey>{};
-  bool _terminalWakeLockSetting = false;
   int _shellCompletionGeneration = 0;
   String? _shellCompletionPromptPrefix;
   ({String text, int cursorOffset})? _shellCompletionOptimisticSnapshot;
@@ -1133,7 +1129,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // Cache the notifier for use in dispose
   ActiveSessionsNotifier? _sessionsNotifier;
   late final TmuxService _tmuxService;
-  late final RemoteMultiplexerService _tmuxMultiplexerService;
   late final MonkeyMuxService _monkeyMuxService;
   late final MonkeyMuxInstallerService _monkeyMuxInstallerService;
   late final Listenable _uploadProgressListenable;
@@ -1323,6 +1318,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       startupTool: _remoteMuxStartupTool,
       hasWindowSnapshot: windows != null,
       currentCommand: _tmuxCurrentCommand,
+      isUsingAltBuffer: _isUsingAltBuffer,
+      terminalReportsMouseWheel: _terminalReportsMouseWheelForScroll,
+      bracketedPasteMode:
+          resolveTmuxBarActiveWindowBracketedPasteMode(windows) ??
+          _terminal.bracketedPasteMode,
     );
   }
 
@@ -1621,7 +1621,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _terminalOverflowCheckboxMenuItem(
         context: context,
         label: 'Shell Completion Popups',
-        checked: ref.read(shellCompletionsNotifierProvider),
+        checked: _shellCompletionsEnabled,
         action: 'toggle_shell_completions',
       ),
   ];
@@ -1757,7 +1757,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ..isSendModifierArmed = (() => _toolbarController.isCtrlActive)
       ..consumeSendModifier = _toolbarController.consumeOneShot;
     _tmuxService = ref.read(tmuxServiceProvider);
-    _tmuxMultiplexerService = _tmuxService;
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);
     _monkeyMuxInstallerService = ref.read(monkeyMuxInstallerServiceProvider);
     _uploadProgressListenable = Listenable.merge([
@@ -1816,12 +1815,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       isBackgrounded: () => _wasBackgrounded,
       onSessionMetadataChanged: _handleSessionMetadataChanged,
     );
-    _terminalWakeLockSetting = ref.read(terminalWakeLockNotifierProvider);
-    _sessionController.wakeLockEnabled = _terminalWakeLockSetting;
+    _sessionController.wakeLockEnabled = ref.read(
+      terminalWakeLockNotifierProvider,
+    );
     _terminalWakeLockSubscription = ref.listenManual<bool>(
       terminalWakeLockNotifierProvider,
       (previous, next) {
-        _terminalWakeLockSetting = next;
         _sessionController.wakeLockEnabled = next;
         _syncTerminalWakeLock();
       },
@@ -1926,8 +1925,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     final detectedSensitiveKeyboardPrompt =
         _isMobilePlatform &&
+        terminalCursorMayFollowSensitivePrompt(_terminal) &&
         terminalTextLooksLikeSensitiveInputPrompt(
           terminalSensitivePromptTextBeforeCursor(_terminal),
+          stripEscapeSequences: false,
         );
     final sensitiveKeyboardPromptChanged =
         detectedSensitiveKeyboardPrompt != _detectedSensitiveKeyboardPrompt;
@@ -2322,6 +2323,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Whether a foreground TUI has enabled any mode a real TUI uses. When none
+  /// is set the foreground is almost certainly a shell prompt, so neither a
+  /// plain-terminal theme refresh nor an outer-tmux focus report is safe: if
+  /// the user detached tmux while [_isTmuxActive] still reads true, synthetic
+  /// focus bytes would reach the bare shell as typed input.
   bool _shouldRefreshPlainTerminalTui(SshSession session) =>
       session.terminalColorSchemeUpdatesMode ||
       _terminal.reportFocusMode ||
@@ -2338,17 +2344,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         isAgentToolActive: _isAgentToolActive,
         currentCommand: _tmuxCurrentCommand,
       );
-
-  /// Whether outer-tmux focus reports are safe to push through the SSH stream.
-  ///
-  /// If the user has detached the tmux client (or tmux exited entirely) while
-  /// the screen still believes [_isTmuxActive] is true, even synthetic focus
-  /// bytes reach a bare shell as typed input. Reuses the same foreground TUI
-  /// signals as [_shouldRefreshPlainTerminalTui]: if no app has enabled any of
-  /// the modes a real TUI uses, the foreground is almost certainly a shell
-  /// prompt.
-  bool _isOuterTuiSignalingActive(SshSession session) =>
-      _shouldRefreshPlainTerminalTui(session);
 
   bool get _isTerminalThemeRefreshViewReady {
     final terminalViewWidget = _terminalViewKey.currentWidget;
@@ -3196,7 +3191,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     if (request.sendOuterFocusReport) {
-      if (!_isOuterTuiSignalingActive(request.session)) {
+      if (!_shouldRefreshPlainTerminalTui(request.session)) {
         DiagnosticsLogService.instance.info(
           'terminal.theme',
           'tmux_outer_focus_skipped',
@@ -3253,7 +3248,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       if (_isTmuxActive &&
           _tmuxStateConnectionId == session.connectionId &&
-          !_isOuterTuiSignalingActive(session)) {
+          !_shouldRefreshPlainTerminalTui(session)) {
         DiagnosticsLogService.instance.info(
           'terminal.theme',
           'tmux_outer_late_skipped',
@@ -3593,8 +3588,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (!_ownsClipboardSync(session, generation)) return;
       if (RemoteClipboardSyncService.outputIndicatesUnsupported(output)) {
         _remoteClipboardUnsupported = true;
-        _remoteClipboardSyncTimer?.cancel();
-        _remoteClipboardSyncTimer = null;
+        _stopSharedClipboardSync();
         return;
       }
       _lastObservedLocalClipboardText = localText;
@@ -3677,6 +3671,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final parsed = RemoteClipboardSyncService.parseReadOutput(output);
     if (!parsed.supported) {
       _remoteClipboardUnsupported = true;
+      _stopSharedClipboardSync();
       return null;
     }
     return parsed.text;
@@ -3795,7 +3790,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _hideShellCompletionPopup();
       return;
     }
-    if (!ref.read(shellCompletionsNotifierProvider)) {
+    if (!_shellCompletionsEnabled) {
       _hideShellCompletionPopup();
       return;
     }
@@ -3836,7 +3831,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final command = _tmuxCurrentCommand?.trim();
       return command != null &&
           command.isNotEmpty &&
-          !isShellCompletionTmuxShellCommand(command);
+          !isShellCommandBasename(command);
     }
     return _shellStatus == TerminalShellStatus.runningCommand;
   }
@@ -3875,7 +3870,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _queueShellCompletionRefresh({bool resetAnchorRetries = true}) {
-    if (!ref.read(shellCompletionsNotifierProvider)) {
+    if (!_shellCompletionsEnabled) {
       _hideShellCompletionPopup();
       return;
     }
@@ -3940,7 +3935,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final cachedTmuxCommand = _tmuxCurrentCommand?.trim();
     final shellCommand =
-        _isTmuxActive && isShellCompletionTmuxShellCommand(cachedTmuxCommand)
+        _isTmuxActive && isShellCommandBasename(cachedTmuxCommand)
         ? cachedTmuxCommand
         : null;
     final invocation = _buildCurrentShellCompletionInvocation(
@@ -3956,7 +3951,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _refreshShellCompletions(int generation) async {
     if (!mounted ||
         generation != _shellCompletionGeneration ||
-        !ref.read(shellCompletionsNotifierProvider)) {
+        !_shellCompletionsEnabled) {
       return;
     }
 
@@ -3984,7 +3979,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     if (!mounted ||
         generation != _shellCompletionGeneration ||
-        !ref.read(shellCompletionsNotifierProvider)) {
+        !_shellCompletionsEnabled) {
       return;
     }
     if (!shellCompletionContext.canComplete) {
@@ -4031,7 +4026,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           .complete(session, invocation);
       if (!mounted ||
           generation != _shellCompletionGeneration ||
-          !ref.read(shellCompletionsNotifierProvider)) {
+          !_shellCompletionsEnabled) {
         return;
       }
       final latestInvocation = _buildCurrentShellCompletionInvocation(
@@ -4084,7 +4079,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _shellCompletionRefreshAfterInFlight &&
           mounted &&
           generation != _shellCompletionGeneration &&
-          ref.read(shellCompletionsNotifierProvider);
+          _shellCompletionsEnabled;
       _shellCompletionRefreshAfterInFlight = false;
       if (_shellCompletionInFlightRequestKey == requestKey) {
         _shellCompletionInFlightRequestKey = null;
@@ -4099,7 +4094,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           generation != _shellCompletionGeneration ||
-          !ref.read(shellCompletionsNotifierProvider)) {
+          !_shellCompletionsEnabled) {
         return;
       }
       _queueShellCompletionRefresh(resetAnchorRetries: false);
@@ -4189,7 +4184,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final tmuxCommand = _tmuxCurrentCommand?.trim();
     final tmuxShellCommand =
-        tmuxCommand != null && isShellCompletionTmuxShellCommand(tmuxCommand)
+        tmuxCommand != null && isShellCommandBasename(tmuxCommand)
         ? tmuxCommand
         : null;
     final tmuxWorkingDirectory = _tmuxWorkingDirectory?.trim();
@@ -4208,7 +4203,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? shellCommand,
     bool requirePromptContext = true,
   }) {
-    if (!ref.read(shellCompletionsNotifierProvider) ||
+    if (!_shellCompletionsEnabled ||
         (_isUsingAltBuffer && !_isTmuxActive) ||
         _isNativeSelectionMode) {
       return null;
@@ -4593,14 +4588,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) return;
 
     // Clean up any previous connection state before reconnecting.
-    await _doneSubscription?.cancel();
-    _doneSubscription = null;
-    await _shellCommandCompletedSubscription?.cancel();
-    _shellCommandCompletedSubscription = null;
-    await _shellStdoutSubscription?.cancel();
-    _shellStdoutSubscription = null;
-    _promptOutputImeResetTimer?.cancel();
-    _promptOutputImeResetTimer = null;
+    await _releaseShellStreams(awaitCancel: true);
     _hideShellCompletionPopup();
     _clearOwnedTerminalCallbacks();
     _shell = null;
@@ -4679,7 +4667,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final establishedConnectionId = _connectionId;
       _connectionId = null;
       if (establishedConnectionId != null && !result.reusedConnection) {
-        await _sessionsNotifier!.disconnect(establishedConnectionId);
+        await _disconnectConnection(establishedConnectionId);
       }
       if (!mounted) return;
       setState(() {
@@ -4744,34 +4732,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           session: session,
           reason: 'open_existing_terminal',
         );
-        await _applySharedClipboardSetting(
-          enabled: sharedClipboardEnabled,
-          allowLocalClipboardRead: sharedClipboardLocalReadEnabled,
-          session: session,
-          waitForInitialSync: false,
-        );
-        if (!stillOwnsSession()) return;
-        await _restoreSessionThemeOverride(
+        final stillOwned = await _finishShellOpen(
           session,
-          forceRemoteRefresh: true,
-          reason: 'open_existing_restore_override',
+          sharedClipboardEnabled: sharedClipboardEnabled,
+          sharedClipboardLocalReadEnabled: sharedClipboardLocalReadEnabled,
+          reusedTerminal: true,
         );
-        if (!stillOwnsSession()) return;
-        setState(() {
-          _sessionFontSizeOverride = session.terminalFontSize;
-          _isConnecting = false;
-        });
-        _syncTerminalWakeLock(SshConnectionState.connected);
-        if (_activeMuxBackend == RemoteMuxBackend.monkeyMux) {
-          _refreshTerminalAfterMonkeyMuxWindowChange(session);
-        } else {
-          _scheduleTerminalSizeRefresh();
-        }
-        _restoreTerminalFocus(
-          forceShowSystemKeyboard: widget.initiallyShowKeyboard,
-        );
-        _maybePasteStoreDemoImage();
-        _scheduleAgentUpdateCheck(session, initialCheck: false);
+        if (!stillOwned) return;
 
         // Detect tmux on existing sessions too (may not have been detected
         // yet if the terminal was opened before tmux started).
@@ -4859,37 +4826,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       _wireTerminalCallbacks(session);
-      await _applySharedClipboardSetting(
-        enabled: sharedClipboardEnabled,
-        allowLocalClipboardRead: sharedClipboardLocalReadEnabled,
-        session: session,
-        waitForInitialSync: false,
-      );
-
-      if (!stillOwnsSession()) return;
-
-      await _restoreSessionThemeOverride(
+      final stillOwned = await _finishShellOpen(
         session,
-        forceRemoteRefresh: true,
-        reason: 'open_new_restore_override',
+        sharedClipboardEnabled: sharedClipboardEnabled,
+        sharedClipboardLocalReadEnabled: sharedClipboardLocalReadEnabled,
+        reusedTerminal: false,
       );
-      if (!stillOwnsSession()) return;
-      setState(() {
-        _sessionFontSizeOverride = session.terminalFontSize;
-        _isConnecting = false;
-      });
-      _syncTerminalWakeLock(SshConnectionState.connected);
-      if (_activeMuxBackend == RemoteMuxBackend.monkeyMux) {
-        _refreshTerminalAfterMonkeyMuxWindowChange(session);
-        unawaited(prewarmAcpRemoteExecutables(session));
-      } else {
-        _scheduleTerminalSizeRefresh();
-      }
-      _restoreTerminalFocus(
-        forceShowSystemKeyboard: widget.initiallyShowKeyboard,
-      );
-      _maybePasteStoreDemoImage();
-      _scheduleAgentUpdateCheck(session);
+      if (!stillOwned) return;
 
       // Start port forwards
       await _startPortForwards(session);
@@ -4937,6 +4880,52 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _error = 'Failed to start shell. Try reconnecting.';
       });
     }
+  }
+
+  /// Shared tail of [_openShell] once [session]'s shell is attached: clipboard
+  /// sync, theme override, connected state, focus and the agent update check.
+  /// Returns false when the screen stopped owning [session] midway.
+  Future<bool> _finishShellOpen(
+    SshSession session, {
+    required bool sharedClipboardEnabled,
+    required bool sharedClipboardLocalReadEnabled,
+    required bool reusedTerminal,
+  }) async {
+    bool stillOwnsSession() => mounted && identical(session, _activeSession());
+    await _applySharedClipboardSetting(
+      enabled: sharedClipboardEnabled,
+      allowLocalClipboardRead: sharedClipboardLocalReadEnabled,
+      session: session,
+      waitForInitialSync: false,
+    );
+    if (!stillOwnsSession()) return false;
+    await _restoreSessionThemeOverride(
+      session,
+      forceRemoteRefresh: true,
+      reason: reusedTerminal
+          ? 'open_existing_restore_override'
+          : 'open_new_restore_override',
+    );
+    if (!stillOwnsSession()) return false;
+    setState(() {
+      _sessionFontSizeOverride = session.terminalFontSize;
+      _isConnecting = false;
+    });
+    _syncTerminalWakeLock(SshConnectionState.connected);
+    if (_activeMuxBackend == RemoteMuxBackend.monkeyMux) {
+      _refreshTerminalAfterMonkeyMuxWindowChange(session);
+      if (!reusedTerminal) {
+        unawaited(prewarmAcpRemoteExecutables(session));
+      }
+    } else {
+      _scheduleTerminalSizeRefresh();
+    }
+    _restoreTerminalFocus(
+      forceShowSystemKeyboard: widget.initiallyShowKeyboard,
+    );
+    _maybePasteStoreDemoImage();
+    _scheduleAgentUpdateCheck(session, initialCheck: !reusedTerminal);
+    return true;
   }
 
   /// Wire terminal onOutput/onResize callbacks for this screen instance.
@@ -5377,11 +5366,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  bool _isMonkeyMuxSession(SshSession? session) =>
+      _activeMuxBackend == RemoteMuxBackend.monkeyMux ||
+      session?.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
+
   bool _isWindowsMonkeyMuxSession(SshSession? session) =>
       session != null &&
       session.remoteIsWindows &&
-      (_activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-          session.remoteMuxBackend == RemoteMuxBackend.monkeyMux);
+      _isMonkeyMuxSession(session);
 
   void _refreshTerminalAfterWindowsMonkeyMuxResume() {
     _monkeyMuxResizeRedrawFollowUpTimer?.cancel();
@@ -5649,10 +5641,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required int columns,
     required int rows,
   }) {
-    final isMonkeyMuxSession =
-        _activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-        session.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
-    if (!isMonkeyMuxSession) {
+    if (!_isMonkeyMuxSession(session)) {
       return;
     }
     final sessionName = _activeMonkeyMuxSessionName(session);
@@ -5758,10 +5747,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _scheduleMonkeyMuxResizeRedrawFollowUp(SshSession session) {
-    final isMonkeyMuxSession =
-        _activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-        session.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
-    if (!isMonkeyMuxSession) {
+    if (!_isMonkeyMuxSession(session)) {
       return;
     }
     if (_wasBackgrounded || _isSettlingTerminalMetricsAfterAppResume) {
@@ -5823,10 +5809,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session, {
     required String reason,
   }) {
-    final isMonkeyMuxSession =
-        _activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-        session.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
-    if (!isMonkeyMuxSession) {
+    if (!_isMonkeyMuxSession(session)) {
       return;
     }
     _cancelMonkeyMuxSettledRedrawDisplayRefreshes();
@@ -5969,7 +5952,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           'monospace';
       final painter = MonkeyTerminalPainter(
         theme: _resolveEffectiveTerminalTheme().toXtermTheme(),
-        textStyle: TerminalStyle.fromTextStyle(
+        textStyle: _terminalStyleFrom(
           _getTerminalFlutterTextStyle(fontFamily, fontSize),
         ),
         textScaler: mediaQuery.textScaler,
@@ -6027,10 +6010,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool refreshVisibleTerminal = false,
   }) async {
     final generation = _monkeyMuxRefreshAndResizeGeneration;
-    final isMonkeyMuxSession =
-        _activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-        session.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
-    if (!isMonkeyMuxSession) {
+    if (!_isMonkeyMuxSession(session)) {
       return;
     }
     final sessionName = _tmuxSessionName ?? session.remoteMuxSessionName;
@@ -6168,7 +6148,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   bool _shellOutputLooksLikePromptReturn(String data) {
-    final sanitizedData = stripTerminalPromptEscapeSequences(data);
+    // Only the text after the last line break can be a prompt, so strip
+    // escape sequences from that tail rather than the whole chunk.
+    final lineBreak = max(data.lastIndexOf('\n'), data.lastIndexOf('\r'));
+    final sanitizedData = stripTerminalPromptEscapeSequences(
+      lineBreak < 0 ? data : data.substring(lineBreak + 1),
+    );
     if (sanitizedData.isEmpty) {
       return false;
     }
@@ -6387,7 +6372,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!hasAccess) {
       if (mounted) {
         final bottomMargin = upgradeSnackBarBottomMargin(
-          MediaQuery.of(context),
           showKeyboardToolbar: _showKeyboardToolbar,
           keyboardToolbarHeight: resolveKeyboardToolbarHeight(
             MediaQuery.of(context),
@@ -6419,18 +6403,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    if (agentPreset?.tool == AgentLaunchTool.openCode &&
+    if (agentPreset != null &&
+        agentPreset.tool.needsExecutableProbe &&
         host.autoConnectSnippetId == null &&
         resolvedStoredCommand != null) {
       final executable = await _tmuxService.resolveAgentToolExecutable(
         session,
-        AgentLaunchTool.openCode,
+        agentPreset.tool,
       );
       resolvedStoredCommand = buildAgentLaunchCommand(
-        agentPreset!,
+        agentPreset,
         startInYoloMode: _startClisInYoloMode,
         windows: session.remoteIsWindows,
-        executable: executable == AgentLaunchTool.openCode.commandName
+        executable: executable == agentPreset.tool.commandName
             ? null
             : executable,
       );
@@ -7291,7 +7276,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final executable =
-        session.remoteIsWindows && preset.tool == AgentLaunchTool.openCode
+        session.remoteIsWindows && preset.tool.needsExecutableProbe
         ? await _tmuxService.resolveAgentToolExecutable(session, preset.tool)
         : null;
     final launchCommand = buildAgentToolCommand(
@@ -7471,7 +7456,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   RemoteMultiplexerService get _activeRemoteMultiplexerService =>
       _activeMuxBackend == RemoteMuxBackend.monkeyMux
       ? _monkeyMuxService
-      : _tmuxMultiplexerService;
+      : _tmuxService;
 
   TerminalConnectionBackend _activeTerminalConnectionBackend(
     SshSession session,
@@ -7498,9 +7483,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   RemoteMultiplexerService _remoteMultiplexerServiceForBackend(
     RemoteMuxBackend backend,
-  ) => backend == RemoteMuxBackend.monkeyMux
-      ? _monkeyMuxService
-      : _tmuxMultiplexerService;
+  ) => backend == RemoteMuxBackend.monkeyMux ? _monkeyMuxService : _tmuxService;
 
   String? get _activeTmuxExtraFlags =>
       _activeMuxBackend == RemoteMuxBackend.tmux ? _host?.tmuxExtraFlags : null;
@@ -7553,8 +7536,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (session != null) {
       unawaited(session.updateAutomaticPortForwardProcessRoots(const {}));
     }
-    if (_activeMuxBackend == RemoteMuxBackend.monkeyMux ||
-        session?.remoteMuxBackend == RemoteMuxBackend.monkeyMux) {
+    if (_isMonkeyMuxSession(session)) {
       _terminal.resetHostResizeState();
       if (session != null) {
         session
@@ -8033,7 +8015,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         var tmuxCwd = preferredWorkingDirectory;
         String? tmuxCurrentCommand;
         try {
-          final activeWindow = windows.where((w) => w.isActive).firstOrNull;
+          final activeWindow = activeTmuxWindow(windows);
           tmuxLaunchCwd ??= activeWindow?.currentPath;
           tmuxCwd ??= activeWindow?.currentPath;
           tmuxCurrentCommand = activeWindow?.currentCommand;
@@ -8724,7 +8706,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     List<TmuxWindow> windows,
   ) {
-    final active = windows.where((window) => window.isActive).firstOrNull;
+    final active = activeTmuxWindow(windows);
     ref
         .read(activeSessionsProvider.notifier)
         .updateSessionMuxWindowFocus(
@@ -8757,9 +8739,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (requestedWindow != null) {
       _pendingInitialNativeAcpSessionKey = null;
     }
-    final active =
-        requestedWindow ??
-        windows.where((window) => window.isActive).firstOrNull;
+    final active = requestedWindow ?? activeTmuxWindow(windows);
     final bridgeId = active?.nativeAcpBridgeId;
     final providerId = active?.nativeAcpProviderId;
     if (active == null || bridgeId == null || providerId == null) {
@@ -10521,7 +10501,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     Iterable<TmuxWindow> windows,
   ) {
-    final activeWindow = windows.where((window) => window.isActive).firstOrNull;
+    final activeWindow = activeTmuxWindow(windows);
     session.synchronizeTerminalProgress(activeWindow?.terminalProgress);
   }
 
@@ -10798,14 +10778,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     var removedTerminalListener = false;
     var closedExistingShell = false;
 
-    unawaited(_doneSubscription?.cancel());
-    _doneSubscription = null;
-    unawaited(_shellCommandCompletedSubscription?.cancel());
-    _shellCommandCompletedSubscription = null;
-    unawaited(_shellStdoutSubscription?.cancel());
-    _shellStdoutSubscription = null;
-    _promptOutputImeResetTimer?.cancel();
-    _promptOutputImeResetTimer = null;
+    unawaited(_releaseShellStreams());
 
     final viewportCellSize = _localTerminalViewportCellSize();
     final pty = SSHPtyConfig(
@@ -10959,16 +10932,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     });
   }
 
-  void _prepareTerminalForLostConnection(SshSession? session) {
-    _shell = null;
-    unawaited(_doneSubscription?.cancel());
+  /// Drops the shell stream subscriptions and the prompt IME reset timer.
+  /// [awaitCancel] waits for the cancellations where a new shell must not
+  /// race the old listeners.
+  Future<void> _releaseShellStreams({bool awaitCancel = false}) async {
+    final cancellations = [
+      _doneSubscription?.cancel(),
+      _shellCommandCompletedSubscription?.cancel(),
+      _shellStdoutSubscription?.cancel(),
+    ].nonNulls.toList();
     _doneSubscription = null;
-    unawaited(_shellCommandCompletedSubscription?.cancel());
     _shellCommandCompletedSubscription = null;
-    unawaited(_shellStdoutSubscription?.cancel());
     _shellStdoutSubscription = null;
     _promptOutputImeResetTimer?.cancel();
     _promptOutputImeResetTimer = null;
+    if (awaitCancel) {
+      await Future.wait(cancellations);
+    } else {
+      cancellations.forEach(unawaited);
+    }
+  }
+
+  void _prepareTerminalForLostConnection(SshSession? session) {
+    _shell = null;
+    unawaited(_releaseShellStreams());
     _stopSharedClipboardSync();
     _hideShellCompletionPopup();
     _clearOwnedTerminalCallbacks();
@@ -10982,10 +10969,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final connectionId = _connectionId;
     _rememberMonkeyMuxReconnectTarget(_observedSession ?? _activeSession());
     _shell = null;
-    unawaited(_doneSubscription?.cancel());
-    _doneSubscription = null;
-    unawaited(_shellCommandCompletedSubscription?.cancel());
-    _shellCommandCompletedSubscription = null;
+    unawaited(_releaseShellStreams());
     _syncTerminalWakeLock(SshConnectionState.disconnected);
     if (!mounted) {
       if (connectionId != null) {
@@ -11024,6 +11008,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Disconnects [connectionId] and drops its mux caches. `ref` asserts once
+  /// the screen is unmounted, which these call sites can be after their
+  /// awaits, so the unmounted path uses the cached services instead.
+  Future<void> _disconnectConnection(int connectionId) async {
+    if (mounted) {
+      await disconnectConnectionAndClearMuxCaches(ref, connectionId);
+      return;
+    }
+    await _tmuxService.clearCache(connectionId);
+    await _monkeyMuxService.clearCache(connectionId);
+    await _sessionsNotifier?.disconnect(connectionId);
+  }
+
   Future<void> _cleanupUnexpectedDisconnect(
     int connectionId, {
     required String message,
@@ -11047,15 +11044,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pathVerifier.disposeTerminalPathVerificationSftp();
     _suppressNextAutomaticReconnectConnectionId = null;
     _syncTerminalWakeLock(SshConnectionState.disconnected);
-    unawaited(_doneSubscription?.cancel());
-    _doneSubscription = null;
-    unawaited(_shellCommandCompletedSubscription?.cancel());
-    _shellCommandCompletedSubscription = null;
+    unawaited(_releaseShellStreams());
     _shell = null;
     if (connectionId != null) {
-      await _tmuxService.clearCache(connectionId);
-      await _monkeyMuxService.clearCache(connectionId);
-      await _sessionsNotifier?.disconnect(connectionId);
+      await _disconnectConnection(connectionId);
     }
     if (mounted) {
       Navigator.of(context).pop();
@@ -11133,15 +11125,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _syncTerminalWakeLock(SshConnectionState.disconnected);
     _connectionLostWhileBackgrounded = false;
     try {
-      await _doneSubscription?.cancel();
-      _doneSubscription = null;
-      await _shellCommandCompletedSubscription?.cancel();
-      _shellCommandCompletedSubscription = null;
+      await _releaseShellStreams(awaitCancel: true);
       _shell = null;
       if (previousConnectionId != null) {
-        await _tmuxService.clearCache(previousConnectionId);
-        await _monkeyMuxService.clearCache(previousConnectionId);
-        await _sessionsNotifier?.disconnect(previousConnectionId);
+        await _disconnectConnection(previousConnectionId);
       }
       if (!mounted) {
         return;
@@ -11197,7 +11184,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _sessionController.dispose();
     _stopSharedClipboardSync();
     _stopTmuxForegroundVerification();
-    _promptOutputImeResetTimer?.cancel();
     _shellCompletionDebounceTimer?.cancel();
     _cancelMonkeyMuxServerReplacementRetry();
     _cancelMonkeyMuxRefreshAndResizeState();
@@ -11216,9 +11202,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _terminalScrollController
       ..removeListener(_handleTerminalScroll)
       ..dispose();
-    _doneSubscription?.cancel();
-    _shellCommandCompletedSubscription?.cancel();
-    _shellStdoutSubscription?.cancel();
+    unawaited(_releaseShellStreams());
     _terminalFocusNode.dispose();
     _systemKeyboardVisibilityController.removeListener(
       _handleTerminalKeyboardVisibilityChanged,
@@ -12614,9 +12598,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       fontFamily,
       fontSize,
     );
-    final terminalTextStyle = TerminalStyle.fromTextStyle(
-      terminalFlutterTextStyle,
-    );
+    final terminalTextStyle = _terminalStyleFrom(terminalFlutterTextStyle);
     final routeTouchScrollToTerminal = _routesTouchScrollToTerminal;
     final terminalPathLinksEnabled = ref.watch(
       terminalPathLinksNotifierProvider,
@@ -12672,7 +12654,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // mouse reporting, but fall back to synthetic arrows when they do not.
       simulateScroll: shouldUseSyntheticAltBufferScrollFallback(
         isUsingAltBuffer: _isUsingAltBuffer,
-        preferExplicitMouseReporting: true,
         terminalReportsMouseWheel: _terminalReportsMouseWheelForScroll,
         isAgentToolActive: _isAgentToolActive,
       ),
@@ -12935,6 +12916,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       buttonItems: buttonItems,
     );
   }
+
+  /// Hands the view one [TerminalStyle] instance until its inputs change; the
+  /// render object clears its glyph caches whenever the style is replaced.
+  TerminalStyle _terminalStyleFrom(TextStyle textStyle) {
+    final cached = _terminalStyle;
+    if (cached != null && _terminalStyleSource == textStyle) {
+      return cached;
+    }
+    _terminalStyleSource = textStyle;
+    return _terminalStyle = TerminalStyle.fromTextStyle(textStyle);
+  }
+
+  TextStyle? _terminalStyleSource;
+  TerminalStyle? _terminalStyle;
 
   /// Resolves the terminal text style for the given font family and size.
   TextStyle _getTerminalFlutterTextStyle(String fontFamily, double fontSize) =>
@@ -13274,7 +13269,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         break;
       case 'toggle_shell_completions':
         final notifier = ref.read(shellCompletionsNotifierProvider.notifier);
-        final enabled = !ref.read(shellCompletionsNotifierProvider);
+        final enabled = !_shellCompletionsEnabled;
         await notifier.setEnabled(enabled: enabled);
         if (!enabled) {
           _hideShellCompletionPopup();
@@ -13623,10 +13618,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return _terminalPathSnapshotCache[cacheKey];
     }
 
-    String lineTextAt(int lineIndex) => _buildNativeSelectionLineSnapshot(
-      buffer.lines[lineIndex],
-      buffer.viewWidth,
-    ).text;
+    final lineSnapshots = <int, ({String text, List<int> columnOffsets})>{};
+    ({String text, List<int> columnOffsets}) lineSnapshotAt(int lineIndex) =>
+        lineSnapshots.putIfAbsent(
+          lineIndex,
+          () => _buildNativeSelectionLineSnapshot(
+            buffer.lines[lineIndex],
+            buffer.viewWidth,
+          ),
+        );
+    String lineTextAt(int lineIndex) => lineSnapshotAt(lineIndex).text;
 
     var startRow = cacheKey;
     var endRow = row;
@@ -13655,10 +13656,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final columnOffsets = <List<int>>[];
     for (var lineIndex = startRow; lineIndex <= endRow; lineIndex++) {
       rowStarts.add(builder.length);
-      final lineSnapshot = _buildNativeSelectionLineSnapshot(
-        buffer.lines[lineIndex],
-        buffer.viewWidth,
-      );
+      final lineSnapshot = lineSnapshotAt(lineIndex);
       builder.write(lineSnapshot.text);
       columnOffsets.add(lineSnapshot.columnOffsets);
       if (lineIndex < endRow && !buffer.lines[lineIndex + 1].isWrapped) {
@@ -16125,8 +16123,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final variablePattern = RegExp(r'\{\{(\w+)\}\}');
-
     final result = await showModalBottomSheet<KeyboardToolbarSnippet>(
       context: context,
       isScrollControlled: true,
@@ -16175,7 +16171,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 itemCount: snippets.length,
                 itemBuilder: (context, index) {
                   final snippet = snippets[index];
-                  final hasVariables = variablePattern.hasMatch(
+                  final hasVariables = snippetVariablePattern.hasMatch(
                     snippet.command,
                   );
                   return ListTile(
@@ -16228,9 +16224,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Shows dialog for variable substitution if snippet has variables.
   Future<({String command, bool hadVariableSubstitution})?>
   _substituteVariables(BuildContext context, Snippet snippet) async {
-    final regex = RegExp(r'\{\{(\w+)\}\}');
-    final matches = regex.allMatches(snippet.command);
-    final variables = matches.map((m) => m.group(1)!).toSet().toList();
+    final variables = extractSnippetVariables(snippet.command);
 
     if (variables.isEmpty) {
       return (command: snippet.command, hadVariableSubstitution: false);
@@ -16289,7 +16283,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (result != true) return null;
     return (
       command: snippet.command.replaceAllMapped(
-        regex,
+        snippetVariablePattern,
         (match) => values[match.group(1)]!,
       ),
       hadVariableSubstitution: true,
