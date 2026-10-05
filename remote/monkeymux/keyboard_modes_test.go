@@ -196,3 +196,47 @@ func TestReplayLeavesKeyboardModesAloneUntilAWindowUsesThem(t *testing.T) {
 		t.Fatalf("replay = %q, want no keyboard mode sequences", got)
 	}
 }
+
+func TestWindowResetsTrackedModesOnRISAndDECSTR(t *testing.T) {
+	setup := "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?1h\x1b[?7l\x1b=\x1b[4h\x1b[?25l\x1b[>1u"
+	replay := func(window *muxWindow) string {
+		return string(terminalModePreReplaySequence(window)) +
+			string(terminalModePostReplaySequence(window)) +
+			cursorVisibilityReplaySequence(window.cursorVisibleForReplayLocked())
+	}
+	reset := []string{"\x1b[?2004h", "\x1b[?1004h", "\x1b[?1h", "\x1b[?7l", "\x1b=", "\x1b[4h", "\x1b[?25l"}
+	kept := []string{"\x1b[?1049h", "\x1b[?1002h", "\x1b[?1006h"}
+
+	// DECSTR resets only its own subset: the alternate screen, mouse
+	// reporting and the keyboard flags stay, as in the client's softReset.
+	window := &muxWindow{}
+	window.observeTerminalModesLocked([]byte(setup + "\x1b[!p"))
+	got := replay(window)
+	for _, sequence := range reset {
+		if strings.Contains(got, sequence) {
+			t.Errorf("replay after DECSTR re-enables %q: %q", sequence, got)
+		}
+	}
+	for _, sequence := range kept {
+		if !strings.Contains(got, sequence) {
+			t.Errorf("replay after DECSTR lost %q: %q", sequence, got)
+		}
+	}
+	if window.kittyKeyboard[1].flags != 1 {
+		t.Errorf("DECSTR reset the kitty keyboard flags: %+v", window.kittyKeyboard)
+	}
+
+	// RIS resets all of it.
+	window = &muxWindow{}
+	window.observeTerminalModesLocked([]byte(setup + "\x1bc"))
+	got = replay(window)
+	for _, sequence := range append(reset, kept...) {
+		if strings.Contains(got, sequence) {
+			t.Errorf("replay after RIS re-enables %q: %q", sequence, got)
+		}
+	}
+	if window.alternateScreenModeActiveLocked() || window.reportsMouseWheelRawLocked() ||
+		window.focusModeEnabled || !reflect.DeepEqual(window.kittyKeyboard, [2]kittyKeyboardModes{}) {
+		t.Errorf("RIS left tracked state behind: %+v", window)
+	}
+}

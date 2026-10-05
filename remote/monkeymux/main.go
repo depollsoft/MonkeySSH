@@ -15798,8 +15798,7 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		switch data[escapeIndex+1] {
 		case '[':
 		case 'c':
-			// RIS resets the terminal, keyboard encoding included.
-			w.resetKeyboardModesLocked()
+			w.resetTerminalModesLocked(true)
 			data = data[escapeIndex+2:]
 			continue
 		case '=':
@@ -15828,6 +15827,10 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
 		case 'm':
 			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+		case 'p':
+			if string(data[escapeIndex+2:end]) == "!" {
+				w.resetTerminalModesLocked(false)
+			}
 		}
 		if final == 'h' || final == 'l' {
 			params := string(data[escapeIndex+2 : end])
@@ -15847,6 +15850,30 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		data = data[end+1:]
 	}
+}
+
+// resetTerminalModesLocked applies RIS (full) or DECSTR to the modes a replay
+// restores, as the screen model and the client apply them to their own state,
+// so the next replay does not re-enable what the terminal already reset.
+// DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
+// and focus reporting to their power-up values; RIS also leaves the alternate
+// screen and resets mouse reporting and the keyboard encodings. Neither
+// touches colour-scheme updates (2031), which the client keeps outside its
+// terminal state, or ConPTY's win32-input-mode.
+func (w *muxWindow) resetTerminalModesLocked(full bool) {
+	modes := []string{"1", "6", "7", "1004", "2004"}
+	if full {
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		w.resetKeyboardModesLocked()
+	}
+	for _, mode := range modes {
+		if _, ok := w.privateModes[mode]; ok {
+			w.setPrivateModeLocked(mode, mode == "7")
+		}
+	}
+	w.setPrivateModeLocked("25", true)
+	w.insertModeEnabled, w.insertModeKnown = false, true
+	w.applicationKeypadEnabled, w.applicationKeypadKnown = false, true
 }
 
 func (w *muxWindow) storePartialCsiLocked(data []byte) {
