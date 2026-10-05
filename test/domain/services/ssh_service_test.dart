@@ -784,6 +784,9 @@ class _FakeActiveSessionsSshService extends SshService {
   Map<int, SshSession> get sessions => Map.unmodifiable(_sessions);
 
   @override
+  Iterable<SshSession> get allSessions => _sessions.values;
+
+  @override
   Future<SshConnectionResult> connectToHost(
     int hostId, {
     ConnectionProgressCallback? onProgress,
@@ -1486,6 +1489,68 @@ LISTEN ::1:4201
 
         expect(session.automaticForwardedRemotePorts, {4000});
         verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+      },
+    );
+
+    test(
+      'reapplies the watcher snapshot when only exclusions change',
+      () async {
+        final client = _MockSshClient();
+        final watcher = _MockExecSession();
+        final stdout = StreamController<Uint8List>();
+        final done = Completer<void>();
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => watcher);
+        when(() => watcher.stdout).thenAnswer((_) => stdout.stream);
+        when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => watcher.done).thenAnswer((_) => done.future);
+        when(watcher.close).thenAnswer((_) {});
+        final session = _testSession(
+          client,
+          connectionId: 7,
+          hostname: 'dev.example.com',
+        );
+        addTearDown(() async {
+          await session.configureAutomaticPortForwarding(enabled: false);
+          if (!stdout.isClosed) {
+            await stdout.close();
+          }
+          if (!done.isCompleted) {
+            done.complete();
+          }
+        });
+
+        final configured = session.configureAutomaticPortForwarding(
+          enabled: true,
+          proxyHost: 'dev-box.localhost',
+        );
+        await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
+        stdout.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '$_automaticPortWatcherSnapshotBeginMarker\n'
+              'LISTEN 127.0.0.1:3000\n'
+              'LISTEN 127.0.0.2:3000\n'
+              '$_automaticPortWatcherSnapshotEndMarker\n',
+            ),
+          ),
+        );
+        await configured;
+        await _waitUntil(
+          () => session.automaticForwardedRemoteListeners.length == 2,
+        );
+
+        await session.configureAutomaticPortForwarding(
+          enabled: true,
+          proxyHost: 'dev-box.localhost',
+          excludedRemoteListeners: {remoteTcpListenerKey('127.0.0.2', 3000)},
+        );
+
+        expect(session.automaticForwardedRemoteListeners, {
+          remoteTcpListenerKey('127.0.0.1', 3000),
+        });
+        expect(session.automaticPortForwardWatcherActive, isTrue);
+        verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
       },
     );
 
@@ -4227,6 +4292,7 @@ LISTEN ::1:4201
         final sshService = _MockSshService();
         final telemetry = _MockTelemetryService();
         when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
         when(
           () => sshService.connectToHost(
             any(),
@@ -5389,6 +5455,54 @@ LISTEN ::1:4201
         remoteTcpListenerExclusionKeys('localhost', 3000),
       );
     });
+
+    test(
+      'single-host endpoint skips discovery for shell-owned forwards',
+      () async {
+        final changes = StreamController<void>.broadcast(sync: true);
+        addTearDown(changes.close);
+        final service = _FakeActiveSessionsSshService(
+          useRecordedTunnels: true,
+          tunnelChanges: changes,
+        );
+        final hosts = _MockHostRepository();
+        when(() => hosts.getById(42))
+            .thenAnswer((_) async => _automaticForwardHost(enabled: true));
+        final localContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(service),
+            hostRepositoryProvider.overrideWithValue(hosts),
+            portForwardRepositoryProvider.overrideWithValue(
+              _emptyPortForwardRepository(),
+            ),
+          ],
+        );
+        addTearDown(localContainer.dispose);
+        final notifier = localContainer.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        await pumpEventQueue();
+        final session =
+            service.getSession(result.connectionId!)!
+                as _RecordingAutomaticForwardSession;
+        final configured = session.automaticConfigurations.length;
+        expect(configured, greaterThan(0));
+
+        session.tunnels[-1] = const ActiveTunnelInfo(
+          portForwardId: -1,
+          localHost: '127.0.0.1',
+          localPort: 4000,
+          remoteHost: '127.0.0.1',
+          remotePort: 3000,
+          isLocal: true,
+          isAutomatic: true,
+          isShellRelated: true,
+        );
+        changes.add(null);
+        await pumpEventQueue();
+
+        expect(session.automaticConfigurations, hasLength(configured));
+      },
+    );
 
     test('excludes stopped saved local forwards from discovery', () async {
       final primary = _RecordingAutomaticForwardSession(
@@ -6996,6 +7110,82 @@ LISTEN ::1:4201
         await result.closeAll();
       },
     );
+
+    test('parses shared auto identities once for host and jump host', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final repository = KnownHostsRepository(db);
+      final hostKey = _ed25519HostKeyBlob([1, 2, 3]);
+      for (final hostname in ['destination', 'jump']) {
+        await _seedTrustedHost(
+          repository,
+          hostname: hostname,
+          hostKeyBytes: hostKey,
+        );
+      }
+      final endpoint = _FakeForwardHostKeySocket(hostKey);
+      final identityLists = <List<SSHKeyPair>?>[];
+      final service = SshService(
+        knownHostsRepository: repository,
+        socketConnector: (host, port, {timeout}) async =>
+            _FakeHostKeySocket(hostKey),
+        clientFactory:
+            (
+              socket, {
+              required username,
+              onVerifyHostKey,
+              onPasswordRequest,
+              onUserInfoRequest,
+              identities,
+              keepAliveInterval,
+            }) {
+              identityLists.add(identities);
+              final client = _MockSshClient();
+              when(client.close).thenAnswer((_) async {});
+              when(() => client.forwardLocal('destination', 22))
+                  .thenAnswer((_) async => endpoint);
+              when(() => client.authenticated).thenAnswer((_) async {
+                final bytes = await (socket as HostKeySource).hostKeyBytes;
+                await onVerifyHostKey!(
+                  'ssh-ed25519',
+                  _hostKeyCallbackFingerprint(bytes),
+                );
+              });
+              return client;
+            },
+      );
+      final identityKeys = [
+        SshKey(
+          id: 1,
+          name: 'auto',
+          keyType: 'ssh-ed25519',
+          publicKey: '',
+          privateKey: sshEd25519PrivateKey,
+          createdAt: DateTime(2026),
+        ),
+      ];
+
+      final result = await service.connect(
+        SshConnectionConfig(
+          hostname: 'destination',
+          port: 22,
+          username: 'test',
+          identityKeys: identityKeys,
+          jumpHost: SshConnectionConfig(
+            hostname: 'jump',
+            port: 22,
+            username: 'test',
+            identityKeys: identityKeys,
+          ),
+        ),
+      );
+
+      expect(result.success, isTrue);
+      expect(identityLists, hasLength(2));
+      expect(identityLists.first, hasLength(1));
+      expect(identical(identityLists.first, identityLists.last), isTrue);
+      await result.closeAll();
+    });
 
     for (final phase in ['trusted', 'untrusted', 'probe', 'jump']) {
       test(

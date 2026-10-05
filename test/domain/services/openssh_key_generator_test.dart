@@ -9,6 +9,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/domain/services/openssh_key_generator.dart';
 
+import '../../helpers/ssh_key_fixtures.dart';
+
 bool _sshKeygenAvailable() {
   try {
     // We only care that the binary can be launched; any exit code means it is
@@ -71,6 +73,20 @@ Future<String> _sshKeygenPublicKey(String pem, String passphrase) async {
 
 void main() {
   final sshKeygen = _sshKeygenAvailable();
+
+  group('parseOpenSshPrivateKeys', () {
+    test('parses a batch in one call and isolates unusable keys', () async {
+      final parsed = await parseOpenSshPrivateKeys([
+        ('invalid PEM', null),
+        (sshEd25519EncryptedPrivateKey, 'incorrect'),
+        (sshEd25519EncryptedPrivateKey, sshKeyFixturePassphrase),
+        (sshEd25519PrivateKey, ''),
+      ]);
+
+      expect(parsed.map((keys) => keys.length), [0, 0, 1, 1]);
+      expect(await parseOpenSshPrivateKeys(const []), isEmpty);
+    });
+  });
 
   group('generateOpenSshKey', () {
     test('generates a parseable unencrypted Ed25519 key', () async {

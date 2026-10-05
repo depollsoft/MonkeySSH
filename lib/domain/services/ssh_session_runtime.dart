@@ -35,6 +35,7 @@ class _SshSessionRuntime {
   // application, MonkeyMux's private 9002 around server redraws) withheld from
   // the parser until the end marker arrives. See _processTerminalParseSlice.
   String _synchronizedOutputHold = '';
+  SynchronizedOutputScanState? _synchronizedOutputResume;
   Timer? _synchronizedOutputWatchdog;
   bool _terminalParsingPaused = false;
   Duration _terminalOutputFlushInterval = _defaultTerminalOutputFlushInterval;
@@ -1446,12 +1447,14 @@ if(!$__flResolved){$__flResolved='cmd'}
   ///
   /// Returns whether any bytes reached the parser.
   bool _processTerminalParseSlice(Terminal terminal, String slice) {
-    final input = _synchronizedOutputHold.isEmpty
-        ? slice
-        : _synchronizedOutputHold + slice;
+    final hold = _synchronizedOutputHold;
     _synchronizedOutputHold = '';
-    final split = splitSynchronizedOutputHold(input);
+    final split = splitSynchronizedOutputHold(
+      hold.isEmpty ? slice : hold + slice,
+      resume: hold.isEmpty ? null : _synchronizedOutputResume,
+    );
     _synchronizedOutputHold = split.hold;
+    _synchronizedOutputResume = split.resume;
     if (split.apply.isEmpty) {
       return false;
     }

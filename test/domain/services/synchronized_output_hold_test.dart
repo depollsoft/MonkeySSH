@@ -41,6 +41,47 @@ void main() {
   registerFallbackValue(Uint8List(0));
 
   group('splitSynchronizedOutputHold', () {
+    test('resuming a hold matches scanning the joined input afresh', () {
+      const cases = [
+        (
+          'a$_begin\x1b[2Jb',
+          'c$_end'
+              'd',
+        ),
+        (
+          'a$_begin\x1b[2Jb',
+          'c\x1b[?9002h'
+              'd$_end',
+        ),
+        (
+          'text\x1b[?20',
+          '26h\x1b[2J$_end'
+              'tail',
+        ),
+        (
+          'text\x1b[?2',
+          '5h'
+              'tail',
+        ),
+        (
+          'a$_begin\x1b[2Jb\x1b',
+          '[?2026l'
+              'tail',
+        ),
+      ];
+      for (final (first, second) in cases) {
+        final held = splitSynchronizedOutputHold(first);
+        expect(held.hold, isNotEmpty, reason: first);
+        final resumed = splitSynchronizedOutputHold(
+          held.hold + second,
+          resume: held.resume,
+        );
+        final fresh = splitSynchronizedOutputHold(held.hold + second);
+        expect(resumed.apply, fresh.apply, reason: '$first | $second');
+        expect(resumed.hold, fresh.hold, reason: '$first | $second');
+      }
+    });
+
     test('passes plain output straight through', () {
       final split = splitSynchronizedOutputHold('hello\x1b[?25l');
       expect(split.apply, 'hello\x1b[?25l');

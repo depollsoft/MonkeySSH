@@ -94,11 +94,20 @@ const _monkeyMuxSynchronizedOutputMode = 9002;
 /// that is still incomplete and could open a transaction (for example
 /// `ESC [ ? 20`) is withheld too, so a marker split across two chunks is not
 /// parsed as an already-open transaction's body.
-({String apply, String hold}) splitSynchronizedOutputHold(String input) {
-  var synchronizedOpen = false;
-  var monkeyMuxOpen = false;
-  var holdFrom = -1;
-  var index = 0;
+///
+/// Pass the previous call's [resume] when [input] starts with the hold that
+/// call returned: scanning restarts where it stopped instead of rescanning the
+/// whole transaction on every slice.
+({String apply, String hold, SynchronizedOutputScanState? resume})
+splitSynchronizedOutputHold(
+  String input, {
+  SynchronizedOutputScanState? resume,
+}) {
+  var synchronizedOpen = resume?.synchronizedOpen ?? false;
+  var monkeyMuxOpen = resume?.monkeyMuxOpen ?? false;
+  var holdFrom = resume == null ? -1 : 0;
+  var index = resume?.index ?? 0;
+  var resumeIndex = input.length;
   while (index < input.length) {
     final escape = input.indexOf('\x1b', index);
     if (escape < 0) {
@@ -112,6 +121,7 @@ const _monkeyMuxSynchronizedOutputMode = 9002;
     if (sequence.end < 0) {
       // Incomplete at the end of the input. Withhold it if it could still
       // become a begin marker for a transaction that is not already held.
+      resumeIndex = escape;
       if (holdFrom < 0 && sequence.couldOpenTransaction) {
         holdFrom = escape;
       }
@@ -136,10 +146,26 @@ const _monkeyMuxSynchronizedOutputMode = 9002;
   }
   if (holdFrom < 0 ||
       input.length - holdFrom > maxSynchronizedOutputHoldChars) {
-    return (apply: input, hold: '');
+    return (apply: input, hold: '', resume: null);
   }
-  return (apply: input.substring(0, holdFrom), hold: input.substring(holdFrom));
+  return (
+    apply: input.substring(0, holdFrom),
+    hold: input.substring(holdFrom),
+    resume: (
+      index: resumeIndex - holdFrom,
+      synchronizedOpen: synchronizedOpen,
+      monkeyMuxOpen: monkeyMuxOpen,
+    ),
+  );
 }
+
+/// Where [splitSynchronizedOutputHold] stopped scanning its returned hold:
+/// the offset into the hold to resume at and the modes open at that point.
+typedef SynchronizedOutputScanState = ({
+  int index,
+  bool synchronizedOpen,
+  bool monkeyMuxOpen,
+});
 
 /// A `CSI ? Pm h/l` sequence starting at an ESC, or an incomplete prefix of
 /// one at the end of the input ([end] < 0).
@@ -2145,6 +2171,21 @@ class SshService {
     ConnectionProgressCallback? onProgress,
     bool isJumpHost = false,
     SshConnectionCancellationToken? cancellationToken,
+  }) => _connect(
+    config,
+    onProgress: onProgress,
+    isJumpHost: isJumpHost,
+    cancellationToken: cancellationToken,
+  );
+
+  /// [parsedIdentities] are [config]'s already-parsed identities, handed down
+  /// by the jump-host recursion so each key is decrypted once per attempt.
+  Future<SshConnectionResult> _connect(
+    SshConnectionConfig config, {
+    ConnectionProgressCallback? onProgress,
+    bool isJumpHost = false,
+    SshConnectionCancellationToken? cancellationToken,
+    List<SSHKeyPair>? parsedIdentities,
   }) async {
     SSHClient? client;
     SSHSocket? unownedSocket;
@@ -2191,7 +2232,8 @@ class SshService {
       final authGate = _InteractiveAuthGate();
       final authHandlers = _buildInteractiveAuthHandlers(config, authGate);
 
-      final identities = await guard(_parseIdentities(config));
+      final identities =
+          parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
 
       Future<void> authenticate(
@@ -2235,13 +2277,20 @@ class SshService {
           };
 
       // Handle jump host
-      if (config.jumpHost != null) {
+      final jumpHost = config.jumpHost;
+      if (jumpHost != null) {
         report(SshConnectionState.connecting, 'Connecting to jump host…');
-        final jumpResult = await connect(
-          config.jumpHost!,
+        final jumpResult = await _connect(
+          jumpHost,
           onProgress: onProgress,
           isJumpHost: true,
           cancellationToken: cancellationToken,
+          parsedIdentities:
+              identical(jumpHost.identityKeys, config.identityKeys) &&
+                  jumpHost.privateKey == config.privateKey &&
+                  jumpHost.passphrase == config.passphrase
+              ? identities
+              : null,
         );
         if (!jumpResult.success || jumpResult.client == null) {
           if (jumpResult.cancelled) {
@@ -3454,6 +3503,8 @@ typedef RemoteTcpListener = ({String host, int port, bool isShellRelated});
 /// Stable identity for one remote listener.
 typedef RemoteTcpListenerKey = ({String host, int port});
 
+final _lsofPidLinePattern = RegExp(r'^p(\d+)$');
+
 /// Extracts listening TCP ports and reachable loopback targets from remote
 /// `ss`, `netstat`, `lsof`, or PowerShell output.
 Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
@@ -3481,7 +3532,7 @@ Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
       );
       continue;
     }
-    final lsofPidMatch = RegExp(r'^p(\d+)$').firstMatch(line);
+    final lsofPidMatch = _lsofPidLinePattern.firstMatch(line);
     if (lsofPidMatch != null) {
       lsofPid = int.parse(lsofPidMatch.group(1)!);
       lsofIsIpv6 = null;
@@ -4082,6 +4133,8 @@ class SshSession {
   // ignore: cancel_subscriptions
   StreamSubscription<String>? _automaticPortForwardWatcherStdoutSubscription;
   StringBuffer? _automaticPortForwardWatcherSnapshot;
+  Map<RemoteTcpListenerKey, RemoteTcpListener>?
+  _automaticPortForwardLastWatcherSnapshot;
   Completer<bool>? _automaticPortForwardWatcherReady;
   bool _automaticPortForwardWatcherSnapshotUnavailable = false;
   bool _automaticPortDiscoveryUnavailable = false;
@@ -5032,7 +5085,18 @@ class SshSession {
       _automaticPortForwardExcludedListeners = Set.unmodifiable(
         excludedRemoteListeners,
       );
-      await refreshAutomaticPortForwards();
+      // Only the exclusions changed: re-reconcile the listeners the watcher
+      // already streamed instead of running the discovery exec again.
+      final lastSnapshot = _automaticPortForwardLastWatcherSnapshot;
+      if (_automaticPortForwardWatcherSession != null && lastSnapshot != null) {
+        await _queueAutomaticPortForwardSnapshot(
+          lastSnapshot,
+          generation: _automaticPortForwardGeneration,
+          removeMissingImmediately: true,
+        );
+      } else {
+        await refreshAutomaticPortForwards();
+      }
       return;
     }
 
@@ -5408,6 +5472,7 @@ class SshSession {
       _automaticPortForwardWatcherSnapshot = null;
       if (_automaticPortForwardWatcherSnapshotUnavailable) {
         _automaticPortDiscoveryUnavailable = true;
+        _automaticPortForwardLastWatcherSnapshot = const {};
         _queueAutomaticPortForwardSnapshot(
           const {},
           generation: generation,
@@ -5421,8 +5486,10 @@ class SshSession {
       }
       _automaticPortDiscoveryUnavailable = false;
       final ready = _automaticPortForwardWatcherReady;
+      final listeners = parseRemoteListeningTcpListeners(snapshot);
+      _automaticPortForwardLastWatcherSnapshot = listeners;
       final applied = _queueAutomaticPortForwardSnapshot(
-        parseRemoteListeningTcpListeners(snapshot),
+        listeners,
         generation: generation,
         removeMissingImmediately: true,
       );
@@ -5534,6 +5601,7 @@ class SshSession {
   }) async {
     final watcher = _automaticPortForwardWatcherSession;
     _automaticPortForwardWatcherSession = null;
+    _automaticPortForwardLastWatcherSnapshot = null;
     final ready = _automaticPortForwardWatcherReady;
     _automaticPortForwardWatcherReady = null;
     if (ready != null && !ready.isCompleted) {
@@ -5778,18 +5846,28 @@ while($true){
   Future<String> _readAutomaticPortDiscoveryOutput(
     SSHSession execSession,
   ) async {
+    const marker = _automaticPortDiscoveryDoneMarker;
     final output = StringBuffer();
+    // Only the previous chunk's tail can hold a marker that straddles chunks,
+    // so search that window rather than the whole accumulated output.
+    var tail = '';
     await for (final chunk
         in execSession.stdout
             .cast<List<int>>()
             .transform(utf8.decoder)
             .timeout(_automaticPortDiscoveryTimeout)) {
       output.write(chunk);
-      final text = output.toString();
-      final markerIndex = text.indexOf(_automaticPortDiscoveryDoneMarker);
+      final window = tail + chunk;
+      final markerIndex = window.indexOf(marker);
       if (markerIndex >= 0) {
-        return text.substring(0, markerIndex);
+        return output.toString().substring(
+          0,
+          output.length - window.length + markerIndex,
+        );
       }
+      tail = window.length < marker.length
+          ? window
+          : window.substring(window.length - marker.length + 1);
     }
     throw StateError('Remote listener scan ended before its completion marker');
   }
@@ -8743,7 +8821,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   /// Get all active connection IDs for a host.
   List<int> getConnectionsForHost(int hostId) {
     final matches = <SshSession>[];
-    for (final session in _sshService.sessions.values) {
+    for (final session in _sshService.allSessions) {
       if (session.hostId == hostId) {
         matches.add(session);
       }
@@ -8757,7 +8835,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   /// Get a preferred existing connection ID for a host.
   int? getPreferredConnectionForHost(int hostId) {
     final activeConnections = <SshSession>[];
-    for (final session in _sshService.sessions.values) {
+    for (final session in _sshService.allSessions) {
       final connectionId = session.connectionId;
       final sessionHostId = _connectionHostIds[connectionId];
       final connectionState = state[connectionId];
@@ -8778,7 +8856,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   /// Get the newest active connection that already owns a local forward.
   int? getConnectionForActiveLocalForward(int portForwardId) {
     final activeConnections = <SshSession>[];
-    for (final session in _sshService.sessions.values) {
+    for (final session in _sshService.allSessions) {
       final connectionState = state[session.connectionId];
       if (connectionState == null ||
           connectionState == SshConnectionState.error ||
@@ -9181,14 +9259,22 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     final endpointKey = endpointSession == null
         ? null
         : _sshEndpointKey(endpointSession.config);
-    final shellOwnedListeners = endpointKey == null
-        ? const <RemoteTcpListenerKey>{}
+    final endpointSessions = endpointKey == null
+        ? const <SshSession>[]
         : state.keys
               .map(getSession)
               .whereType<SshSession>()
               .where(
                 (session) => _sshEndpointKey(session.config) == endpointKey,
               )
+              .toList(growable: false);
+    // Shell-owned listeners only matter as exclusions for a sibling saved
+    // host on the same endpoint; with one host they would just re-run the
+    // remote discovery for every automatic forward this host starts.
+    final shellOwnedListeners =
+        endpointSessions.map((session) => session.hostId).toSet().length < 2
+        ? null
+        : endpointSessions
               .expand((session) => session.activeTunnels)
               .where(
                 (tunnel) =>
@@ -9206,7 +9292,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       manualRemoteListeners,
     );
     final shellOwnershipUnchanged =
-        endpointKey == null ||
+        shellOwnedListeners == null ||
         setEquals(
           _automaticForwardShellOwnedByEndpoint[endpointKey],
           shellOwnedListeners,
@@ -9217,8 +9303,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     _automaticForwardDesiredExclusionsByHost[hostId] = Set.unmodifiable(
       manualRemoteListeners,
     );
-    if (endpointKey != null) {
-      _automaticForwardShellOwnedByEndpoint[endpointKey] = Set.unmodifiable(
+    if (shellOwnedListeners != null) {
+      _automaticForwardShellOwnedByEndpoint[endpointKey!] = Set.unmodifiable(
         shellOwnedListeners,
       );
     }
