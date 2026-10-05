@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/security/secret_encryption_service.dart';
 import '../models/acp_json.dart';
 import '../models/acp_mcp_server.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 
 /// Raised when an MCP server definition fails validation on save.
@@ -43,9 +44,7 @@ class AcpMcpServerService {
   final Random _random;
   final int _maxServers;
 
-  // Serializes read-modify-write cycles so overlapping edits cannot drop one
-  // another's changes.
-  Future<void> _mutationQueue = Future<void>.value();
+  final _mutations = SerializedMutations();
 
   /// Loads every configured server, in stored order, with secrets decrypted.
   ///
@@ -74,7 +73,7 @@ class AcpMcpServerService {
   /// its name collides with another server, or the server limit is reached.
   Future<AcpMcpServerConfig> saveServer(AcpMcpServerConfig server) async {
     final normalized = _normalized(server);
-    await _withMutationLock(() async {
+    await _mutations.run(() async {
       final entries = await _readRawEntries();
       final otherNames = <String>[
         for (final entry in entries)
@@ -106,7 +105,7 @@ class AcpMcpServerService {
   }
 
   /// Removes the server identified by [id], if present.
-  Future<void> deleteServer(String id) => _withMutationLock(() async {
+  Future<void> deleteServer(String id) => _mutations.run(() async {
     final entries = await _readRawEntries();
     final before = entries.length;
     entries.removeWhere((entry) => entry['id'] == id);
@@ -118,7 +117,7 @@ class AcpMcpServerService {
   /// Only the flag is rewritten: stored secrets are never decrypted or
   /// re-encrypted, so an unreadable server keeps its original ciphertext.
   Future<void> setUseByDefault(String id, {required bool enabled}) =>
-      _withMutationLock(() async {
+      _mutations.run(() async {
         final entries = await _readRawEntries();
         final index = entries.indexWhere((entry) => entry['id'] == id);
         if (index < 0) return;
@@ -307,20 +306,10 @@ class AcpMcpServerService {
   Future<List<AcpJsonMap>> _readRawEntries() async =>
       _decodeRawEntries(await _settings.getString(SettingKeys.acpMcpServers));
 
-  List<AcpJsonMap> _decodeRawEntries(String? raw) {
-    if (raw == null || raw.isEmpty) return <AcpJsonMap>[];
-    Object? decoded;
-    try {
-      decoded = jsonDecode(raw);
-    } on FormatException {
-      return <AcpJsonMap>[];
-    }
-    if (decoded is! List) return <AcpJsonMap>[];
-    return <AcpJsonMap>[
-      for (final item in decoded)
-        if (item is Map) item.cast<String, Object?>(),
-    ];
-  }
+  List<AcpJsonMap> _decodeRawEntries(String? raw) => <AcpJsonMap>[
+    for (final item in decodeJsonList(raw))
+      if (item is Map) item.cast<String, Object?>(),
+  ];
 
   Future<void> _writeRawEntries(List<AcpJsonMap> entries) async {
     if (entries.isEmpty) {
@@ -328,12 +317,6 @@ class AcpMcpServerService {
       return;
     }
     await _settings.setString(SettingKeys.acpMcpServers, jsonEncode(entries));
-  }
-
-  Future<void> _withMutationLock(Future<void> Function() action) {
-    final operation = _mutationQueue.then((_) => action());
-    _mutationQueue = operation.catchError((_) {});
-    return operation;
   }
 
   static String? _string(Object? value) => value is String ? value : null;
