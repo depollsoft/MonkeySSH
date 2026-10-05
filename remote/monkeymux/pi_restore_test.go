@@ -166,7 +166,7 @@ func TestDiscoverPiSessionsResumesSessionRelocatedToWorktree(t *testing.T) {
 		AgentSessionDir:  got.sessionDir,
 		AgentSessionPath: got.sessionPath,
 	}, false)
-	want := piResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		piResumeCommand(got.sessionID, got.sessionDir, got.sessionPath),
 		piLaunchCommand(got.sessionDir),
 	)
@@ -392,7 +392,7 @@ func TestPiAgentToolMappingAndResumeCommand(t *testing.T) {
 		CurrentCommand: "pi",
 		AgentSessionID: "session-id",
 	}, true)
-	want := piResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		piResumeCommand("session-id", "", ""),
 		piLaunchCommand(""),
 	)
@@ -487,7 +487,7 @@ func TestDiscoverPiSessionsUsesConfirmedWindowActivityWithoutProcessTable(t *tes
 		AgentSessionDir:  session.sessionDir,
 		AgentSessionPath: session.sessionPath,
 	}, false)
-	want := piResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		piResumeCommand(session.sessionID, session.sessionDir, session.sessionPath),
 		piLaunchCommand(session.sessionDir),
 	)
@@ -759,7 +759,7 @@ func TestDiscoverPiSessionsRestoresInteractiveResumeIntoWorktree(t *testing.T) {
 		AgentSessionDir:  got.sessionDir,
 		AgentSessionPath: got.sessionPath,
 	}, false)
-	want := piResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		piResumeCommand(got.sessionID, got.sessionDir, got.sessionPath),
 		piLaunchCommand(got.sessionDir),
 	)
@@ -926,7 +926,7 @@ func TestDiscoverPiSessionsHonorsProcessSessionDir(t *testing.T) {
 		AgentSessionDir:  got.sessionDir,
 		AgentSessionPath: got.sessionPath,
 	}, false)
-	want := piResumeCommandWithFreshFallback(
+	want := resumeCommandWithFreshFallback(
 		piResumeCommand(got.sessionID, got.sessionDir, got.sessionPath),
 		piLaunchCommand(got.sessionDir),
 	)
@@ -1192,7 +1192,7 @@ func TestDiscoverPiSessionsUsesWindowActivityForUnnamedSameCwdSessions(t *testin
 			AgentSessionDir:  got[i].sessionDir,
 			AgentSessionPath: got[i].sessionPath,
 		}, false)
-		want := piResumeCommandWithFreshFallback(
+		want := resumeCommandWithFreshFallback(
 			piResumeCommand(got[i].sessionID, got[i].sessionDir, path),
 			piLaunchCommand(got[i].sessionDir),
 		)

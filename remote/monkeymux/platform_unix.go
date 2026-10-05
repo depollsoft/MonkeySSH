@@ -589,16 +589,10 @@ func shellExecutableCommand(value string) (string, bool) {
 	return shellArgument(value)
 }
 
-func piResumeCommandWithFreshFallback(resume string, launch string) string {
-	resume = strings.TrimSpace(resume)
-	launch = strings.TrimSpace(launch)
-	if resume == "" {
-		return launch
-	}
-	if launch == "" || launch == resume {
-		return resume
-	}
-	return resume + " || " + launch
+// shellOrElseJoin chains [fallback] after [first] so it only runs when [first]
+// fails to start.
+func shellOrElseJoin(first string, fallback string) string {
+	return first + " || " + fallback
 }
 
 func defaultShellPath() string {
@@ -786,10 +780,6 @@ func forwardResizeSignals(
 		close(done)
 		signal.Stop(signals)
 	}
-}
-
-func (id socketIdentity) valid() bool {
-	return id.device != 0 || id.inode != 0
 }
 
 func socketInfoIdentity(info os.FileInfo) (socketIdentity, error) {
