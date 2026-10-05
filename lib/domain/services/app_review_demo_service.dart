@@ -118,8 +118,21 @@ class AppReviewDemoService {
       createdKeys += 1;
     }
     final keyId = keyResult.id;
+    // Read each table once; every label below is unique within one pass.
+    final snippets = {
+      for (final snippet in await _snippetRepository.getAll())
+        snippet.name: snippet.id,
+    };
+    final hosts = {
+      for (final host in await _hostRepository.getAll()) host.label: host.id,
+    };
+    final portForwards = {
+      for (final forward in await _portForwardRepository.getAll())
+        (forward.name, forward.hostId),
+    };
 
     final bootstrapSnippet = await _ensureSnippet(
+      snippets,
       name: 'Review: launch Copilot in MonkeyMux',
       command: 'cd ~/work/monkeyssh-demo && copilot --yolo',
       description:
@@ -131,6 +144,7 @@ class AppReviewDemoService {
       createdSnippets += 1;
     }
     final logsSnippet = await _ensureSnippet(
+      snippets,
       name: 'Review: tail app logs',
       command: 'tail -f ~/work/monkeyssh-demo/logs/app.log',
       description: 'A reusable terminal snippet for the demo workspace.',
@@ -141,6 +155,7 @@ class AppReviewDemoService {
       createdSnippets += 1;
     }
     final deploySnippet = await _ensureSnippet(
+      snippets,
       name: 'Review: dry-run deploy',
       command: './scripts/deploy-demo.sh --dry-run --target staging',
       description: 'Demonstrates saved automation that requires review.',
@@ -152,6 +167,7 @@ class AppReviewDemoService {
     }
 
     final bastionHost = await _ensureHost(
+      hosts,
       label: _bastionHostLabel,
       hostname: '127.0.0.1',
       port: 2200,
@@ -170,6 +186,7 @@ class AppReviewDemoService {
     }
 
     final workspaceHost = await _ensureHost(
+      hosts,
       label: _workspaceHostLabel,
       hostname: '127.0.0.1',
       port: 2201,
@@ -197,6 +214,7 @@ class AppReviewDemoService {
     }
 
     final agentHost = await _ensureHost(
+      hosts,
       label: _agentHostLabel,
       hostname: '127.0.0.1',
       port: 2202,
@@ -222,6 +240,7 @@ class AppReviewDemoService {
     }
 
     final sftpHost = await _ensureHost(
+      hosts,
       label: _sftpHostLabel,
       hostname: '127.0.0.1',
       port: 2222,
@@ -242,6 +261,7 @@ class AppReviewDemoService {
     }
 
     createdPortForwards += await _ensurePortForward(
+      portForwards,
       name: 'Review web preview',
       hostId: workspaceHost.id,
       forwardType: 'local',
@@ -251,6 +271,7 @@ class AppReviewDemoService {
       autoStart: true,
     );
     createdPortForwards += await _ensurePortForward(
+      portForwards,
       name: 'Review API tunnel',
       hostId: sftpHost.id,
       forwardType: 'local',
@@ -344,19 +365,16 @@ class AppReviewDemoService {
     return (created: true, id: keyId);
   }
 
-  Future<({bool created, int id})> _ensureSnippet({
+  Future<({bool created, int id})> _ensureSnippet(
+    Map<String, int> existing, {
     required String name,
     required String command,
     required String description,
     required int folderId,
     required int sortOrder,
   }) async {
-    final snippets = await _snippetRepository.getAll();
-    for (final snippet in snippets) {
-      if (snippet.name == name) {
-        return (created: false, id: snippet.id);
-      }
-    }
+    final existingId = existing[name];
+    if (existingId != null) return (created: false, id: existingId);
     final id = await _snippetRepository.insert(
       SnippetsCompanion.insert(
         name: name,
@@ -369,7 +387,8 @@ class AppReviewDemoService {
     return (created: true, id: id);
   }
 
-  Future<({bool created, int id})> _ensureHost({
+  Future<({bool created, int id})> _ensureHost(
+    Map<String, int> existing, {
     required String label,
     required String hostname,
     required String username,
@@ -387,15 +406,10 @@ class AppReviewDemoService {
     bool autoConnectRequiresConfirmation = false,
     String? tmuxSessionName,
     String? tmuxWorkingDirectory,
-    String? tmuxExtraFlags,
     RemoteMuxBackend? remoteMuxBackend,
   }) async {
-    final hosts = await _hostRepository.getAll();
-    for (final host in hosts) {
-      if (host.label == label) {
-        return (created: false, id: host.id);
-      }
-    }
+    final existingId = existing[label];
+    if (existingId != null) return (created: false, id: existingId);
     final id = await _hostRepository.insert(
       HostsCompanion.insert(
         label: label,
@@ -415,11 +429,6 @@ class AppReviewDemoService {
         autoConnectRequiresConfirmation: Value(autoConnectRequiresConfirmation),
         tmuxSessionName: Value(tmuxSessionName),
         tmuxWorkingDirectory: Value(tmuxWorkingDirectory),
-        tmuxExtraFlags: Value(
-          remoteMuxBackend == RemoteMuxBackend.monkeyMux
-              ? null
-              : tmuxExtraFlags,
-        ),
         remoteMuxBackend: Value(remoteMuxBackend?.storageValue),
         sortOrder: Value(sortOrder),
       ),
@@ -427,7 +436,8 @@ class AppReviewDemoService {
     return (created: true, id: id);
   }
 
-  Future<int> _ensurePortForward({
+  Future<int> _ensurePortForward(
+    Set<(String, int)> existing, {
     required String name,
     required int hostId,
     required String forwardType,
@@ -436,12 +446,7 @@ class AppReviewDemoService {
     required int remotePort,
     required bool autoStart,
   }) async {
-    final portForwards = await _portForwardRepository.getAll();
-    for (final portForward in portForwards) {
-      if (portForward.name == name && portForward.hostId == hostId) {
-        return 0;
-      }
-    }
+    if (existing.contains((name, hostId))) return 0;
     await _portForwardRepository.insert(
       PortForwardsCompanion.insert(
         name: name,

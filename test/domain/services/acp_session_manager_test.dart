@@ -459,9 +459,6 @@ class _FakeCapabilityTerminalProcess implements AcpTerminalProcess {
   Stream<List<int>> get stderr => const Stream.empty();
 
   @override
-  Future<void> get done => _exit.future.then((_) {});
-
-  @override
   Future<AcpTerminalExitStatus> waitForExit() => _exit.future;
 
   @override
