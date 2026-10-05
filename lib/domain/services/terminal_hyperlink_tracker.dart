@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:xterm/xterm.dart';
 
@@ -310,17 +312,19 @@ class _TrackedTerminalHyperlink {
     required this.startAnchor,
     required this.lastCellAnchor,
   }) {
-    final start = startAnchor.offset;
-    final end = lastCellAnchor.offset;
-    final width = buffer.viewWidth;
-    final count = width <= 0
-        ? 0
-        : (end.y - start.y) * width + end.x - start.x + 1;
-    _cells = List<int>.filled(count > 0 ? count * 2 : 0, 0);
-    for (var index = 0; index < count; index++) {
-      final x = start.x + index;
-      _readCell(CellOffset(x % width, start.y + x ~/ width), index);
-    }
+    _forEachRow(lastCellAnchor.y, (line, column, y, from, to) {
+      while (_lines.length <= line) {
+        _lines.add([]);
+      }
+      final cells = _lines[line];
+      for (var x = from; x < to; x++) {
+        _readCell(CellOffset(x, y));
+        cells
+          ..add(_cell.content)
+          ..add(_styleHash());
+      }
+      return false;
+    });
   }
 
   final Uri uri;
@@ -328,8 +332,9 @@ class _TrackedTerminalHyperlink {
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
 
-  /// Content and style hash of each linked cell, in reading order.
-  late final List<int> _cells;
+  /// Content and style hash of each linked cell, by logical line counted from
+  /// the start anchor's, in column order.
+  final _lines = <List<int>>[];
   static final _cell = CellData.empty();
 
   bool get attached => startAnchor.attached && lastCellAnchor.attached;
@@ -342,48 +347,87 @@ class _TrackedTerminalHyperlink {
     return _compareOffsets(startAnchor.offset, lastCellAnchor.offset) > 0;
   }
 
-  bool contains(CellOffset offset) {
-    if (!attached) {
-      return false;
-    }
-    final start = startAnchor.offset;
-    if (!_containsInclusiveOffset(
-      start: start,
-      end: lastCellAnchor.offset,
-      target: offset,
-    )) {
-      return false;
-    }
-    // Anchors move with reflow, so the cell's reading-order index within the
-    // span uses the current width.
-    final index = (offset.y - start.y) * buffer.viewWidth + offset.x - start.x;
-    if (index < 0 || index * 2 >= _cells.length) {
-      return false;
-    }
-    final content = _cells[index * 2];
-    final style = _cells[index * 2 + 1];
-    return _readCell(offset, null) &&
-        _cell.content == content &&
-        _styleHash() == style;
-  }
+  bool contains(CellOffset offset) =>
+      attached &&
+      _containsInclusiveOffset(
+        start: startAnchor.offset,
+        end: lastCellAnchor.offset,
+        target: offset,
+      ) &&
+      _matchesRow(offset.y, offset.x, offset.x);
 
   /// Whether a surviving linked cell lies on [row] within the inclusive
   /// column range.
-  bool coversRowRange(int row, int startColumn, int endColumn) {
-    if (!attached || row < startAnchor.y || row > lastCellAnchor.y) {
-      return false;
-    }
-    for (var x = startColumn; x <= endColumn; x++) {
-      if (contains(CellOffset(x, row))) {
-        return true;
+  bool coversRowRange(int row, int startColumn, int endColumn) =>
+      attached &&
+      row >= startAnchor.y &&
+      row <= lastCellAnchor.y &&
+      _matchesRow(row, startColumn, endColumn);
+
+  /// Whether a cell on [row] in the inclusive column range still holds what
+  /// the link wrote there.
+  bool _matchesRow(int row, int startColumn, int endColumn) =>
+      _forEachRow(row, (line, column, y, from, to) {
+        if (y != row || line >= _lines.length) {
+          return false;
+        }
+        final cells = _lines[line];
+        for (var x = max(from, startColumn); x < min(to, endColumn + 1); x++) {
+          final index = (column + x - from) * 2;
+          if (index < cells.length &&
+              _readCell(CellOffset(x, y)) &&
+              _cell.content == cells[index] &&
+              _styleHash() == cells[index + 1]) {
+            return true;
+          }
+        }
+        return false;
+      });
+
+  /// Visits the linked rows through [lastRow] with the logical line (counted
+  /// from the start anchor's), the column of the row's first visited cell on
+  /// that line, and the visited cells [from, to). Stops and returns true when
+  /// [visit] does.
+  ///
+  /// A reflow keeps logical lines and the order of their cells but drops the
+  /// cells past the content of a row that wraps, such as the blank left
+  /// before a wide character that did not fit, and pads anew at the new
+  /// width. Skipping those cells makes (line, column) name the same cell at
+  /// any width, where a reading-order index would shift after the padding.
+  bool _forEachRow(
+    int lastRow,
+    bool Function(int line, int column, int y, int from, int to) visit,
+  ) {
+    final start = startAnchor.offset;
+    final end = lastCellAnchor.offset;
+    final lines = buffer.lines;
+    final width = buffer.viewWidth;
+    var line = 0;
+    var column = 0;
+    for (var y = start.y; y <= min(lastRow, end.y); y++) {
+      final row = lines[y];
+      if (y > start.y && !row.isWrapped) {
+        line++;
+        column = 0;
+      }
+      final from = y == start.y ? start.x : 0;
+      var to = min(row.length, y == end.y ? end.x + 1 : width);
+      if (y + 1 < lines.length && lines[y + 1].isWrapped) {
+        to = min(to, row.getTrimmedLength(width));
+      }
+      if (from < to) {
+        if (visit(line, column, y, from, to)) {
+          return true;
+        }
+        column += to - from;
       }
     }
     return false;
   }
 
-  /// Loads the cell at [offset] into [_cell], recording it at snapshot
-  /// [index] when given. Returns false when the cell does not exist.
-  bool _readCell(CellOffset offset, int? index) {
+  /// Loads the cell at [offset] into [_cell]. Returns false when the cell
+  /// does not exist.
+  bool _readCell(CellOffset offset) {
     if (offset.y < 0 || offset.y >= buffer.lines.length) {
       return false;
     }
@@ -392,10 +436,6 @@ class _TrackedTerminalHyperlink {
       return false;
     }
     line.getCellData(offset.x, _cell);
-    if (index != null) {
-      _cells[index * 2] = _cell.content;
-      _cells[index * 2 + 1] = _styleHash();
-    }
     return true;
   }
 

@@ -232,6 +232,35 @@ void main() {
       expect(tracker.resolveLinkAt(const CellOffset(0, 2)), isNull);
     });
 
+    test('keeps every link cell when reflow moves wide-character padding', () {
+      const url = 'https://example.com/wide';
+      terminal
+        ..resize(4, terminal.viewHeight)
+        ..write('\x1b]8;;$url\x07abc漢d\x1b]8;;\x07')
+        ..resize(5, terminal.viewHeight);
+
+      // abc漢 now fills row 0 with no padding before 漢; d moved to row 1.
+      for (var x = 0; x < 5; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
+      }
+      expect(tracker.resolveLinkAt(const CellOffset(0, 1)), url);
+      expect(tracker.resolveLinkAt(const CellOffset(1, 1)), isNull);
+
+      terminal
+        ..write('\x1b[2J\x1b[H')
+        ..resize(20, terminal.viewHeight)
+        ..write('\x1b]8;;$url/2\x07abcd界ef\x1b]8;;\x07')
+        ..resize(5, terminal.viewHeight);
+
+      // abcd plus padding on row 0, then 界ef on row 1.
+      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), '$url/2');
+      for (var x = 0; x < 4; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/2', reason: '$x');
+      }
+      expect(tracker.hasLinkInRowRange(1, 3, 3), isTrue);
+      expect(tracker.resolveLinkAt(const CellOffset(4, 1)), isNull);
+    });
+
     test('prunes detached hyperlinks while processing later OSC 8 output', () {
       terminal = Terminal(maxLines: 200);
       tracker = TerminalHyperlinkTracker()..attach(terminal);
