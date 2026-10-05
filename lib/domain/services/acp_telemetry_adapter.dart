@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:collection/collection.dart';
+
 import '../models/acp_provider.dart';
 import 'acp_telemetry.dart';
 import 'telemetry_service.dart';
@@ -9,8 +11,8 @@ import 'telemetry_service.dart';
 ///
 /// This is the only place a raw ACP provider ID is mapped down to a coarse,
 /// allowlisted category before it ever reaches telemetry: built-in providers
-/// map to their stable category and every custom (user-defined) provider
-/// collapses to `custom` so a user's chosen label or command is never sent.
+/// map to their [AcpBuiltinProvider.telemetryCategory] and any other id
+/// collapses to `unknown`, so a raw id is never sent.
 final class AcpTelemetryAdapter implements AcpTelemetrySink {
   /// Creates an adapter over [telemetryService].
   const AcpTelemetryAdapter(this._telemetryService);
@@ -67,21 +69,9 @@ final class AcpTelemetryAdapter implements AcpTelemetrySink {
     unawaited(_telemetryService.logAcpFailure(category: category));
   }
 
-  static String _providerCategory(String providerId) {
-    if (providerId == AcpBuiltinProviderIds.copilotCli) return 'copilot_cli';
-    if (providerId == AcpBuiltinProviderIds.claudeAgent) return 'claude_agent';
-    if (providerId == AcpBuiltinProviderIds.codex) return 'codex';
-    if (providerId == AcpBuiltinProviderIds.openCode) return 'opencode';
-    if (providerId == AcpBuiltinProviderIds.cursorAgent) return 'cursor_agent';
-    if (providerId == AcpBuiltinProviderIds.antigravity) return 'antigravity';
-    if (providerId == AcpBuiltinProviderIds.pi) return 'pi';
-    if (providerId == AcpBuiltinProviderIds.grokBuild) return 'grok_build';
-    if (providerId == AcpBuiltinProviderIds.museCode) return 'muse_code';
-    if (providerId == AcpBuiltinProviderIds.hermes) return 'hermes';
-    if (providerId == AcpBuiltinProviderIds.openClaw) return 'openclaw';
-    if (providerId.startsWith(acpCustomProviderReservedIdPrefix)) {
-      return 'unknown';
-    }
-    return 'custom';
-  }
+  static String _providerCategory(String providerId) =>
+      acpBuiltinProviders
+          .firstWhereOrNull((provider) => provider.id == providerId)
+          ?.telemetryCategory ??
+      'unknown';
 }

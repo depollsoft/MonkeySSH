@@ -18,14 +18,11 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 
 class _FakeConnector extends Fake implements AcpBridgeConnector {}
-
-class _FakeProviderService extends Fake implements AcpProviderService {}
 
 class _FakeRecent extends Fake implements AcpRecentSessionsService {}
 
@@ -40,7 +37,6 @@ class FakeAcpSessionManager extends AcpSessionManager {
   }) : _current = AcpSessionManagerState(sessions: sessions),
        super(
          connector: _FakeConnector(),
-         providerService: _FakeProviderService(),
          recentSessions: _FakeRecent(),
          isProUnlocked: () => isProUnlocked,
        );

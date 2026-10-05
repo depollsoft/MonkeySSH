@@ -28,7 +28,6 @@ import 'acp_client_capability_service.dart';
 import 'acp_concurrency_policy.dart';
 import 'acp_json_rpc_connection.dart';
 import 'acp_mcp_server_service.dart';
-import 'acp_provider_service.dart';
 import 'acp_recent_sessions_service.dart';
 import 'acp_telemetry.dart';
 import 'acp_telemetry_adapter.dart';
@@ -159,7 +158,6 @@ class AcpSessionManager {
   /// Creates a session manager.
   AcpSessionManager({
     required AcpBridgeConnector connector,
-    required AcpProviderService providerService,
     required AcpRecentSessionsService recentSessions,
     required bool Function() isProUnlocked,
     AcpMcpServerService? mcpServerService,
@@ -169,7 +167,6 @@ class AcpSessionManager {
     DateTime Function() clock = DateTime.now,
     Duration detachedTurnPollInterval = const Duration(seconds: 3),
   }) : _connector = connector,
-       _providerService = providerService,
        _recentSessions = recentSessions,
        _isProUnlocked = isProUnlocked,
        _mcpServerService = mcpServerService,
@@ -180,7 +177,6 @@ class AcpSessionManager {
        _detachedTurnPollInterval = detachedTurnPollInterval;
 
   final AcpBridgeConnector _connector;
-  final AcpProviderService _providerService;
   final AcpRecentSessionsService _recentSessions;
   final bool Function() _isProUnlocked;
   final AcpMcpServerService? _mcpServerService;
@@ -764,7 +760,6 @@ class AcpSessionManager {
           providerId: key.providerId,
           label: controller._providerLabel,
           argv: controller._launchArgv,
-          isCustom: controller._isCustomProvider,
         );
         final cwd = controller._cwd;
         final workspace = controller._workspace;
@@ -1011,7 +1006,6 @@ class AcpSessionManager {
       manager: this,
       attachment: attachment,
       providerLabel: launch.label,
-      isCustomProvider: launch.isCustom,
       launchArgv: launch.argv,
       cwd: cwd,
       workspace: workspace,
@@ -1322,7 +1316,6 @@ class AcpSessionManager {
       providerId: launch.providerId,
       label: label,
       argv: launch.argv,
-      isCustom: launch.isCustom,
     );
   }
 
@@ -1481,7 +1474,7 @@ class AcpSessionManager {
           !isApprovedAcpBuiltinLaunchOverride(builtin, launchCommandOverride)) {
         return const _LaunchError(
           AcpSessionError(
-            kind: AcpSessionErrorKind.commandNotApproved,
+            kind: AcpSessionErrorKind.unknown,
             message: 'The adapter launch command is not approved.',
           ),
         );
@@ -1490,31 +1483,13 @@ class AcpSessionManager {
         providerId: builtin.id,
         label: builtin.label,
         argv: (launchCommandOverride ?? builtin.launchCommand).argv,
-        isCustom: false,
       );
     }
-    final custom = await _providerService.getCustomProvider(providerId);
-    if (custom == null) {
-      return const _LaunchError(
-        AcpSessionError(
-          kind: AcpSessionErrorKind.unknown,
-          message: 'Unknown ACP provider.',
-        ),
-      );
-    }
-    if (!custom.isCommandApproved) {
-      return const _LaunchError(
-        AcpSessionError(
-          kind: AcpSessionErrorKind.commandNotApproved,
-          message: 'This provider\'s launch command must be re-approved.',
-        ),
-      );
-    }
-    return _ResolvedLaunch(
-      providerId: custom.id,
-      label: custom.label,
-      argv: custom.launchCommand.argv,
-      isCustom: true,
+    return const _LaunchError(
+      AcpSessionError(
+        kind: AcpSessionErrorKind.unknown,
+        message: 'Unknown ACP provider.',
+      ),
     );
   }
 
@@ -1793,7 +1768,6 @@ class _SessionController {
     required AcpSessionManager manager,
     required this.attachment,
     required String providerLabel,
-    required bool isCustomProvider,
     required List<String> launchArgv,
     required String cwd,
     required _ResolvedWorkspace workspace,
@@ -1804,7 +1778,6 @@ class _SessionController {
     required Duration detachedTurnPollInterval,
   }) : _manager = manager,
        _providerLabel = providerLabel,
-       _isCustomProvider = isCustomProvider,
        _launchArgv = List<String>.unmodifiable(launchArgv),
        _cwd = cwd,
        _workspace = workspace,
@@ -1820,7 +1793,6 @@ class _SessionController {
   _BridgeAttachment attachment;
 
   final String _providerLabel;
-  final bool _isCustomProvider;
 
   /// Exact provider argv this session's agent was launched with. Reused, with
   /// a method's arguments appended, to rerun the agent for terminal sign-in.
@@ -2000,7 +1972,6 @@ class _SessionController {
     _state = AcpSessionState(
       key: _key,
       providerLabel: _providerLabel,
-      isCustomProvider: _isCustomProvider,
       cwd: _cwd,
       status: AcpConnectionStatus.connecting,
       autoApprovePermissions: _autoApprovePermissions,
@@ -3161,7 +3132,6 @@ class _SessionController {
         manager: _manager,
         attachment: attachment,
         providerLabel: _providerLabel,
-        isCustomProvider: _isCustomProvider,
         launchArgv: _launchArgv,
         cwd: _cwd,
         workspace: _workspace,
@@ -3216,7 +3186,6 @@ class _SessionController {
     _state = AcpSessionState(
       key: _key,
       providerLabel: _providerLabel,
-      isCustomProvider: _isCustomProvider,
       cwd: _cwd,
       status: AcpConnectionStatus.ready,
       autoApprovePermissions: _autoApprovePermissions,
@@ -3761,13 +3730,11 @@ final class _ResolvedLaunch extends _LaunchOutcome {
     required this.providerId,
     required this.label,
     required this.argv,
-    required this.isCustom,
   });
 
   final String providerId;
   final String label;
   final List<String> argv;
-  final bool isCustom;
 }
 
 final class _LaunchError extends _LaunchOutcome {
@@ -3822,7 +3789,6 @@ final acpBridgeConnectorProvider = Provider<AcpBridgeConnector>((ref) {
 final acpSessionManagerProvider = Provider<AcpSessionManager>((ref) {
   final manager = AcpSessionManager(
     connector: ref.watch(acpBridgeConnectorProvider),
-    providerService: ref.watch(acpProviderServiceProvider),
     recentSessions: ref.watch(acpRecentSessionsServiceProvider),
     mcpServerService: ref.watch(acpMcpServerServiceProvider),
     isProUnlocked: () =>

@@ -16,7 +16,6 @@ import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
@@ -199,7 +198,6 @@ void main() {
     connector = _Connector();
     manager = AcpSessionManager(
       connector: connector,
-      providerService: AcpProviderService(settings),
       recentSessions: AcpRecentSessionsService(settings),
       isProUnlocked: () => true,
       diagnostics: const NoopDiagnosticsLogger(),

@@ -205,28 +205,6 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
 void main() {
   final key = fakeAcpKey();
 
-  testWidgets('provider picker excludes custom ACP definitions', (
-    tester,
-  ) async {
-    final custom = AcpCustomProviderDefinition.create(
-      id: 'custom-provider',
-      label: 'Custom provider',
-      launchCommand: AcpLaunchCommand(executable: '/opt/custom-acp'),
-      now: DateTime.utc(2026),
-    );
-
-    await _pumpAndLaunch(
-      tester,
-      FakeAcpSessionManager(),
-      startSession: false,
-      providers: <AcpProvider>[acpCopilotCliProvider, custom],
-    );
-
-    expect(find.text('Copilot CLI'), findsOneWidget);
-    expect(find.text('Custom provider'), findsNothing);
-    expect(find.text('Add custom provider'), findsNothing);
-  });
-
   testWidgets('generic sheet launches Cursor through its resolved binary', (
     tester,
   ) async {

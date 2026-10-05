@@ -21,7 +21,6 @@ import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
-import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_telemetry.dart';
@@ -634,7 +633,6 @@ class _FakeConnector implements AcpBridgeConnector {
 void main() {
   late AppDatabase database;
   late SettingsService settings;
-  late AcpProviderService providerService;
   late AcpRecentSessionsService recentSessions;
   late _FakeConnector connector;
   late AcpSessionManager manager;
@@ -642,7 +640,6 @@ void main() {
 
   AcpSessionManager buildManager() => AcpSessionManager(
     connector: connector,
-    providerService: providerService,
     recentSessions: recentSessions,
     isProUnlocked: () => isPro,
     diagnostics: const NoopDiagnosticsLogger(),
@@ -655,7 +652,6 @@ void main() {
   }) {
     final built = AcpSessionManager(
       connector: custom,
-      providerService: providerService,
       recentSessions: recentSessions,
       isProUnlocked: () => isPro,
       diagnostics: const NoopDiagnosticsLogger(),
@@ -669,7 +665,6 @@ void main() {
   setUp(() {
     database = AppDatabase.forTesting(NativeDatabase.memory());
     settings = SettingsService(database);
-    providerService = AcpProviderService(settings);
     recentSessions = AcpRecentSessionsService(settings);
     connector = _FakeConnector();
     isPro = false;
@@ -910,36 +905,6 @@ void main() {
     expect(ref.cwd, '/repo');
     // No content keys are ever stored.
     expect(ref.toJson().containsKey('messages'), isFalse);
-  });
-
-  test('refuses an unapproved custom provider command', () async {
-    final definition = AcpCustomProviderDefinition.create(
-      id: 'custom-1',
-      label: 'My Agent',
-      launchCommand: AcpLaunchCommand(executable: 'agent'),
-    );
-    final changedDefinition = AcpCustomProviderDefinition.tryFromJson({
-      ...definition.toJson(),
-      'launchCommand': AcpLaunchCommand(
-        executable: 'agent',
-        arguments: const ['--changed'],
-      ).toJson(),
-    })!;
-    await settings.setString(
-      SettingKeys.acpCustomProviders,
-      jsonEncode([changedDefinition.toJson()]),
-    );
-    final result = await manager.startNewSession(
-      hostId: 1,
-      providerId: 'custom-1',
-      cwd: '/repo',
-    );
-    expect(result, isA<AcpSessionLaunchFailed>());
-    expect(
-      (result as AcpSessionLaunchFailed).error.kind,
-      AcpSessionErrorKind.commandNotApproved,
-    );
-    expect(connector.startedBridges, isEmpty);
   });
 
   group('concurrency', () {

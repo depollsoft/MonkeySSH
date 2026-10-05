@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/app_metadata.dart';
+import '../models/acp_provider.dart';
 import '../models/agent_launch_preset.dart';
 import '../models/monetization.dart';
 import 'diagnostics_log_service.dart';
@@ -183,19 +184,8 @@ class TelemetryService {
     'search_web',
     'share',
   };
-  static const _allowedAcpProviderCategories = <String>{
-    'copilot_cli',
-    'claude_agent',
-    'codex',
-    'opencode',
-    'cursor_agent',
-    'antigravity',
-    'pi',
-    'grok_build',
-    'muse_code',
-    'hermes',
-    'openclaw',
-    'custom',
+  static final _allowedAcpProviderCategories = <String>{
+    for (final provider in acpBuiltinProviders) provider.telemetryCategory,
     'unknown',
   };
   static const _allowedAcpSessionEndReasons = <String>{
@@ -223,7 +213,6 @@ class TelemetryService {
     'provider_exited',
     'authentication_required',
     'unsupported_capability',
-    'command_not_approved',
     'transport',
     'protocol',
     'timeout',

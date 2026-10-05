@@ -99,9 +99,6 @@ abstract final class SettingKeys {
   /// App-wide default for ACP-capable agent windows.
   static const agentWindowModePreference = 'agent_window_mode_preference';
 
-  /// Saved user-defined ACP provider definitions (JSON array).
-  static const acpCustomProviders = 'acp_custom_providers';
-
   /// Saved non-content references to recently used ACP sessions (JSON array).
   ///
   /// Only host/provider/bridge/session identifiers, an optional title and

@@ -13,27 +13,22 @@ import 'diagnostics_log_service.dart';
 import 'local_notification_service.dart';
 import 'ssh_service.dart';
 
-/// Generic, privacy-safe display label used for any provider whose real
-/// label cannot be shown safely (every custom/user-defined provider, and any
-/// provider id this coordinator does not recognize).
+/// Generic, privacy-safe display label used for any provider id this
+/// coordinator does not recognize.
 const acpGenericAgentLabel = 'Coding agent';
 
 /// Resolves a safe, allowlisted display label for [session].
 ///
-/// Built-in providers (Copilot CLI, OpenCode, Pi) use their fixed, known-safe
-/// label. Every custom provider's user-chosen label is never used here: it
-/// is arbitrary, user-controlled text that must never appear in an OS
-/// notification (visible on a lock screen, in notification history, and to
-/// any other app that can read notifications).
-String acpSafeAgentDisplayLabel(AcpSessionState session) {
-  if (!session.isCustomProvider) {
-    final builtin = acpBuiltinProviders.firstWhereOrNull(
-      (provider) => provider.id == session.key.providerId,
-    );
-    if (builtin != null) return builtin.label;
-  }
-  return acpGenericAgentLabel;
-}
+/// Built-in providers use their fixed, known-safe label. The session's own
+/// [AcpSessionState.providerLabel] is never used here: it can carry
+/// caller-supplied text that must never appear in an OS notification
+/// (visible on a lock screen, in notification history, and to any other app
+/// that can read notifications).
+String acpSafeAgentDisplayLabel(AcpSessionState session) =>
+    acpBuiltinProviders
+        .firstWhereOrNull((provider) => provider.id == session.key.providerId)
+        ?.label ??
+    acpGenericAgentLabel;
 
 /// Coordinates ACP session behavior with app foreground/background state,
 /// auth lock, and SSH host disconnects.
