@@ -9132,6 +9132,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (hasActiveNativeSession) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
+          !identical(session, _activeSession()) ||
           _nativeAcpLaunchState != null ||
           _activeNativeAcpSessionKey != null) {
         return;
@@ -9379,6 +9380,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? requestedSessionId,
     int? requestGeneration,
   }) {
+    // A queued open re-enters here once the previous one settles, possibly
+    // after this screen was disposed or switched to another session. Nothing
+    // below may pause parsing or call setState for a session it doesn't own.
+    if (!mounted || !identical(sshSession, _activeSession())) {
+      return Future<void>.value();
+    }
     final opening = _openingNativeAcpWindow;
     if (opening != null &&
         _openingNativeAcpBridgeId == bridgeId &&
@@ -9388,10 +9395,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return opening;
     }
     if (opening != null && requestGeneration == null) {
-      final cancellation = _nativeAcpWindowCancellation;
-      if (cancellation != null && !cancellation.isCompleted) {
-        cancellation.complete();
-      }
+      _cancelNativeAcpWindowOpen();
     }
     final requestedGeneration =
         requestGeneration ?? ++_nativeAcpWindowRequestGeneration;
@@ -9469,6 +9473,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }());
     return completer.future;
+  }
+
+  void _cancelNativeAcpWindowOpen() {
+    final cancellation = _nativeAcpWindowCancellation;
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
   }
 
   Future<void> _performOpenServerOwnedNativeAcpWindow(
@@ -11069,6 +11080,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _agentUpdateCheckTimer?.cancel();
 
     _cancelTerminalThemeRefreshTimers();
+    // Invalidate any queued native window open so it cannot start later.
+    _nativeAcpWindowRequestGeneration++;
+    _cancelNativeAcpWindowOpen();
     _sessionController.dispose();
     _stopSharedClipboardSync();
     _stopTmuxForegroundVerification();

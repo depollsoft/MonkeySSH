@@ -136,6 +136,38 @@ class _TrackedPeriodicTimer implements Timer {
   int get tick => _inner.tick;
 }
 
+/// Records every parsing pause/resume request the screen makes.
+class _ParsingPauseRecordingSshSession extends SshSession {
+  _ParsingPauseRecordingSshSession(SshSession source)
+    : super(
+        connectionId: source.connectionId,
+        hostId: source.hostId,
+        client: source.client,
+        config: source.config,
+      );
+
+  final parsingPauseCalls = <bool>[];
+
+  @override
+  void setTerminalParsingPaused({required bool paused}) {
+    parsingPauseCalls.add(paused);
+    super.setTerminalParsingPaused(paused: paused);
+  }
+}
+
+/// Holds every remote bridge lookup until [remoteBridgesGate] completes.
+class _GatedRemoteBridgesAcpSessionManager extends FakeAcpSessionManager {
+  final remoteBridgesGate = Completer<void>();
+  int remoteBridgeLookups = 0;
+
+  @override
+  Future<List<MonkeyMuxAcpBridgeMetadata>> listRemoteBridges(int hostId) async {
+    remoteBridgeLookups++;
+    await remoteBridgesGate.future;
+    return remoteBridges;
+  }
+}
+
 class _ListenerTrackingTerminal extends Terminal {
   final listeners = <VoidCallback>{};
   int listenerRegistrations = 0;
@@ -9577,6 +9609,94 @@ void main() {
           find.text('The native agent window is no longer running.'),
           findsNothing,
         );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'a queued native window open does not start after the screen is disposed',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1100, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+
+        final recordingSession = _ParsingPauseRecordingSshSession(session)
+          ..getOrCreateTerminal();
+        session = recordingSession;
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        addTearDown(windowEvents.close);
+        final acpManager = _GatedRemoteBridgesAcpSessionManager();
+        addTearDown(acpManager.dispose);
+
+        const windows = <TmuxWindow>[
+          TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+          TmuxWindow(
+            index: 2,
+            id: '@3',
+            name: 'Claude Agent',
+            isActive: false,
+            nativeAcpBridgeId: '0123456789abcdef0123456789abcdef',
+            nativeAcpProviderId: AcpBuiltinProviderIds.claudeAgent,
+          ),
+          TmuxWindow(
+            index: 3,
+            id: '@4',
+            name: 'Codex',
+            isActive: false,
+            nativeAcpBridgeId: 'abcdef0123456789abcdef0123456789',
+            nativeAcpProviderId: AcpBuiltinProviderIds.codex,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work'))
+            .thenAnswer((_) async => windows);
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => windowEvents.stream);
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await pumpScreen(
+          tester,
+          activeSessions: _TestActiveSessionsNotifier(session),
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+          acpSessionManager: acpManager,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        windowEvents.add(TmuxWindowListEvent(windows.sublist(1)));
+        await tester.pump();
+
+        // Opening the first window waits on the remote bridge lookup; the
+        // second open queues behind it.
+        await tester.tap(find.byKey(const ValueKey('tmux-sidebar-window-2')));
+        await tester.pump();
+        expect(acpManager.remoteBridgeLookups, 1);
+        await tester.tap(
+          find.byKey(const ValueKey('tmux-sidebar-window-3')),
+          warnIfMissed: false,
+        );
+        await tester.pump();
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        final pauseCallsAtDisposal = List<bool>.of(
+          recordingSession.parsingPauseCalls,
+        );
+
+        acpManager.remoteBridgesGate.complete();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(tester.takeException(), isNull);
+        expect(acpManager.remoteBridgeLookups, 1);
+        expect(recordingSession.parsingPauseCalls, pauseCallsAtDisposal);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
