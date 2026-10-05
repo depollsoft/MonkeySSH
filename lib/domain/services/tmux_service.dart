@@ -4,9 +4,11 @@ import 'dart:convert';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
+import '../models/command_names.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
 import 'command_output_marker_reader.dart';
@@ -18,6 +20,19 @@ import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
 
 const _backslashCodeUnit = 0x5C;
+
+/// Whether the app is in the foreground, so periodic remote polling may run.
+///
+/// An unknown lifecycle state (before the first platform event, or without a
+/// widgets binding in unit tests) counts as foreground.
+bool isAppInForeground() {
+  try {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  } on Object {
+    return true;
+  }
+}
 
 enum _ShellQuoteMode { none, single, double }
 
@@ -64,7 +79,6 @@ class TmuxService implements RemoteMultiplexerService {
   const TmuxService({
     Duration execOpenTimeout = const Duration(seconds: 10),
     Duration execOutputTimeout = const Duration(seconds: 10),
-    DateTime Function()? execChannelNow,
     DateTime Function() now = DateTime.now,
     Duration Function(int failureCount) execChannelBackoff =
         resolveTmuxExecChannelBackoffDelay,
@@ -75,25 +89,26 @@ class TmuxService implements RemoteMultiplexerService {
       seconds: 10,
     ),
     Duration windowSwitchActivityGracePeriod = const Duration(seconds: 1),
+    bool Function() isAppForeground = isAppInForeground,
   }) : _execOpenTimeout = execOpenTimeout,
        _execOutputTimeout = execOutputTimeout,
-       _execChannelNow = execChannelNow,
        _now = now,
        _execChannelBackoff = execChannelBackoff,
        _agentSessionMetadataRefreshDebounce =
            agentSessionMetadataRefreshDebounce,
        _agentSessionMetadataPeriodicRefreshInterval =
            agentSessionMetadataPeriodicRefreshInterval,
-       _windowSwitchActivityGracePeriod = windowSwitchActivityGracePeriod;
+       _windowSwitchActivityGracePeriod = windowSwitchActivityGracePeriod,
+       _isAppForeground = isAppForeground;
 
   final Duration _execOpenTimeout;
   final Duration _execOutputTimeout;
-  final DateTime Function()? _execChannelNow;
   final DateTime Function() _now;
   final Duration Function(int failureCount) _execChannelBackoff;
   final Duration _agentSessionMetadataRefreshDebounce;
   final Duration _agentSessionMetadataPeriodicRefreshInterval;
   final Duration _windowSwitchActivityGracePeriod;
+  final bool Function() _isAppForeground;
 
   static final _connectionStates = <int, _TmuxConnectionState>{};
 
@@ -179,10 +194,10 @@ class TmuxService implements RemoteMultiplexerService {
   /// Any in-flight result from before this call is prevented from repopulating
   /// the cache. The next detection or prefetch starts a fresh remote probe.
   void invalidateInstalledAgentTools(int connectionId) {
-    final state = _stateFor(connectionId);
-    state.installedAgentToolsRequest?.ignore();
+    final state = _connectionStates[connectionId];
+    state?.installedAgentToolsRequest?.ignore();
     state
-      ..installedAgentTools = null
+      ?..installedAgentTools = null
       ..installedAgentToolsRequest = null;
     DiagnosticsLogService.instance.info(
       'tmux.agent',
@@ -229,11 +244,11 @@ class TmuxService implements RemoteMultiplexerService {
   /// period keeps those helpers off the critical path while leaving control-mode
   /// commands untouched.
   void deferExecsForRedraw(SshSession session, Duration duration) {
-    final state = _stateFor(session.connectionId);
-    if (duration <= Duration.zero) {
+    final state = _connectionStates[session.connectionId];
+    if (state == null || duration <= Duration.zero) {
       return;
     }
-    final until = DateTime.now().add(duration);
+    final until = _now().add(duration);
     final existing = state.execQuietUntil;
     if (existing == null || existing.isBefore(until)) {
       state.execQuietUntil = until;
@@ -241,53 +256,6 @@ class TmuxService implements RemoteMultiplexerService {
   }
 
   // ── Detection ──────────────────────────────────────────────────────────
-
-  /// Returns `true` if the primary SSH terminal is attached to tmux.
-  ///
-  /// This deliberately ignores tmux servers and clients that belong to other
-  /// SSH logins on the same host.
-  Future<bool> isTmuxActive(SshSession session, {String? extraFlags}) async {
-    try {
-      return await isTmuxActiveOrThrow(session, extraFlags: extraFlags);
-    } on Object catch (error) {
-      if (!_isExpectedTmuxOperationError(error)) rethrow;
-      DiagnosticsLogService.instance.warning(
-        'tmux.detect',
-        'active_check_failed',
-        fields: {
-          'connectionId': session.connectionId,
-          'errorType': error.runtimeType,
-        },
-      );
-      return false;
-    }
-  }
-
-  /// Returns `true` if the primary SSH terminal is attached to tmux, and throws
-  /// when the remote check could not complete.
-  ///
-  /// Unlike [isTmuxActive], this distinguishes "not attached to tmux" from
-  /// infrastructure failures so callers can preserve existing UI on
-  /// indeterminate detection results.
-  Future<bool> isTmuxActiveOrThrow(
-    SshSession session, {
-    String? extraFlags,
-  }) async {
-    DiagnosticsLogService.instance.debug(
-      'tmux.detect',
-      'active_check_start',
-      fields: {'connectionId': session.connectionId},
-    );
-    final active =
-        await foregroundSessionNameOrThrow(session, extraFlags: extraFlags) !=
-        null;
-    DiagnosticsLogService.instance.info(
-      'tmux.detect',
-      'active_check_complete',
-      fields: {'connectionId': session.connectionId, 'active': active},
-    );
-    return active;
-  }
 
   /// Returns the tmux session attached to the primary SSH terminal, if any.
   Future<String?> foregroundSessionName(
@@ -384,10 +352,9 @@ class TmuxService implements RemoteMultiplexerService {
   Future<Set<AgentLaunchTool>> detectInstalledAgentTools(
     SshSession session,
   ) async {
-    final state = _stateFor(session.connectionId);
-    final cached = state.installedAgentTools;
+    final cached = _connectionStates[session.connectionId]?.installedAgentTools;
     if (cached != null) {
-      final age = DateTime.now().difference(cached.cachedAt);
+      final age = _now().difference(cached.cachedAt);
       DiagnosticsLogService.instance.info(
         'tmux.agent',
         'tool_detection_cached',
@@ -436,11 +403,9 @@ class TmuxService implements RemoteMultiplexerService {
 
   /// Warms the installed agent CLI cache in the background.
   Future<void> prefetchInstalledAgentTools(SshSession session) async {
-    final state = _stateFor(session.connectionId);
-    final cached = state.installedAgentTools;
+    final cached = _connectionStates[session.connectionId]?.installedAgentTools;
     if (cached != null &&
-        DateTime.now().difference(cached.cachedAt) <
-            _installedAgentToolsFreshTtl) {
+        _now().difference(cached.cachedAt) < _installedAgentToolsFreshTtl) {
       return;
     }
     if (_isExecChannelCoolingDown(session)) {
@@ -503,7 +468,7 @@ class TmuxService implements RemoteMultiplexerService {
           identical(state.installedAgentToolsRequest, request)) {
         state.installedAgentTools = _CachedInstalledAgentTools(
           tools: Set<AgentLaunchTool>.unmodifiable(installed),
-          cachedAt: DateTime.now(),
+          cachedAt: _now(),
         );
       }
       DiagnosticsLogService.instance.info(
@@ -558,106 +523,6 @@ class TmuxService implements RemoteMultiplexerService {
       fields: {'connectionId': session.connectionId},
     );
     return null;
-  }
-
-  /// Returns `true` if [sessionName] exists on the remote tmux server.
-  Future<bool> hasSession(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) async {
-    try {
-      return await hasSessionOrThrow(
-        session,
-        sessionName,
-        extraFlags: extraFlags,
-      );
-    } on Object catch (error) {
-      if (!_isExpectedTmuxOperationError(error)) rethrow;
-      DiagnosticsLogService.instance.warning(
-        'tmux.query',
-        'has_session_failed',
-        fields: {
-          'connectionId': session.connectionId,
-          'errorType': error.runtimeType,
-        },
-      );
-      return false;
-    }
-  }
-
-  /// Returns `true` if [sessionName] exists, and throws when the remote check
-  /// could not complete.
-  ///
-  /// Unlike [hasSession], this distinguishes a missing tmux session from
-  /// transient SSH exec/channel failures.
-  Future<bool> hasSessionOrThrow(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) async {
-    final state = _stateFor(session.connectionId);
-    final requestKey = _TmuxWindowWatchKey(
-      connectionId: session.connectionId,
-      sessionName: sessionName,
-      extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
-    );
-    final existingRequest = state.hasSessionRequests[requestKey];
-    if (existingRequest != null) {
-      DiagnosticsLogService.instance.debug(
-        'tmux.query',
-        'has_session_join',
-        fields: {
-          'connectionId': session.connectionId,
-          'sessionHash': sessionName.hashCode.abs(),
-        },
-      );
-      return existingRequest;
-    }
-
-    final request = _hasSessionOrThrow(
-      session,
-      sessionName,
-      extraFlags: extraFlags,
-    );
-    state.hasSessionRequests[requestKey] = request;
-    request.whenComplete(() {
-      if (identical(state.hasSessionRequests[requestKey], request)) {
-        state.hasSessionRequests.remove(requestKey);
-      }
-    }).ignore();
-    return request;
-  }
-
-  Future<bool> _hasSessionOrThrow(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) async {
-    DiagnosticsLogService.instance.debug(
-      'tmux.query',
-      'has_session_start',
-      fields: {'connectionId': session.connectionId},
-    );
-    final state = _stateFor(session.connectionId);
-    await _cacheTmuxPath(session);
-    _requireState(session.connectionId, state);
-    final output = await _exec(
-      session,
-      '${_tmuxCommand('has-session -t ${shellEscapePosix(sessionName)}', extraFlags: extraFlags)} 2>/dev/null; '
-      r'status=$?; '
-      r'if [ "$status" -eq 0 ]; then printf 1; '
-      r'elif [ "$status" -eq 1 ]; then printf 0; '
-      'else false; fi',
-      priority: SshExecPriority.low,
-    );
-    final exists = output.trim() == '1';
-    DiagnosticsLogService.instance.info(
-      'tmux.query',
-      'has_session_complete',
-      fields: {'connectionId': session.connectionId, 'exists': exists},
-    );
-    return exists;
   }
 
   // ── Window queries ─────────────────────────────────────────────────────
@@ -772,20 +637,29 @@ class TmuxService implements RemoteMultiplexerService {
         key,
         parsedWindows,
       );
-      final windows = List<TmuxWindow>.unmodifiable(
-        _enrichWindowsWithCachedAgentSessionMetadata(
-          session.connectionId,
-          activityFilteredWindows,
-        ),
+      final enrichedWindows = _enrichWindowsWithCachedAgentSessionMetadata(
+        session.connectionId,
+        activityFilteredWindows,
       );
+      // Hand back the cached instance when nothing changed so heartbeat
+      // reloads let listeners skip their rebuilds by identity.
+      final cachedWindows = state.windowSnapshotCache[key];
+      final windows =
+          cachedWindows != null && listEquals(cachedWindows, enrichedWindows)
+          ? cachedWindows
+          : List<TmuxWindow>.unmodifiable(enrichedWindows);
       if (_ownsState(session.connectionId, state) && windows.isNotEmpty) {
-        state.windowSnapshotCache[_TmuxWindowWatchKey(
-              connectionId: session.connectionId,
-              sessionName: sessionName,
-              extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
-            )] =
-            windows;
-        _scheduleAgentSessionMetadataRefresh(session, windows);
+        state.windowSnapshotCache[key] = windows;
+        _scheduleAgentSessionMetadataRefresh(
+          session,
+          windows,
+          agentPanesChanged:
+              cachedWindows == null ||
+              !setEquals(
+                _agentPaneSignatures(cachedWindows),
+                _agentPaneSignatures(windows),
+              ),
+        );
       }
 
       DiagnosticsLogService.instance.info(
@@ -794,20 +668,13 @@ class TmuxService implements RemoteMultiplexerService {
         fields: {
           'connectionId': session.connectionId,
           'windowCount': windows.length,
-          'activeWindowCount': windows
-              .where((window) => window.isActive)
-              .length,
+          'hasActiveWindow': activeTmuxWindow(windows) != null,
           'alertWindowCount': windows.where((window) => window.hasAlert).length,
         },
       );
       return windows;
     } on Object catch (error) {
-      final cachedWindows =
-          state.windowSnapshotCache[_TmuxWindowWatchKey(
-            connectionId: session.connectionId,
-            sessionName: sessionName,
-            extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
-          )];
+      final cachedWindows = state.windowSnapshotCache[key];
       if (cachedWindows != null &&
           cachedWindows.isNotEmpty &&
           shouldUseCachedTmuxWindowsAfterListFailure(error)) {
@@ -840,10 +707,16 @@ class TmuxService implements RemoteMultiplexerService {
     ).windows;
   }
 
+  /// Schedules the live agent-session probe for [windows].
+  ///
+  /// A full reload whose agent panes (pid, command, tool) are unchanged only
+  /// keeps the periodic refresh armed; the probe itself is left to that timer,
+  /// since the heartbeat reload would otherwise re-run it every few seconds.
   void _scheduleAgentSessionMetadataRefresh(
     SshSession session,
     List<TmuxWindow> windows, {
     bool force = false,
+    bool agentPanesChanged = true,
   }) {
     final agentPanePids = _agentPanePids(windows);
     if (agentPanePids.isEmpty) {
@@ -855,6 +728,7 @@ class TmuxService implements RemoteMultiplexerService {
     if (_hasWindowObserverForConnection(session.connectionId)) {
       _ensureAgentSessionMetadataPeriodicRefresh(session);
     }
+    if (!agentPanesChanged && !force) return;
     _scheduleAgentSessionMetadataRefreshForPanePids(
       session,
       agentPanePids,
@@ -890,31 +764,33 @@ class TmuxService implements RemoteMultiplexerService {
           state.metadataPeriodicSession = null;
           return;
         }
-        _scheduleAgentSessionMetadataRefreshForPanePids(
-          queuedSession,
-          panePids,
-          force: true,
-        );
+        // Backgrounded: keep the timer alive but skip the remote probe.
+        if (_isAppForeground()) {
+          _scheduleAgentSessionMetadataRefreshForPanePids(
+            queuedSession,
+            panePids,
+            force: true,
+          );
+        }
         _ensureAgentSessionMetadataPeriodicRefresh(queuedSession);
       },
     );
   }
 
   void _cancelAgentSessionMetadataPeriodicRefresh(int connectionId) {
-    final state = _stateFor(connectionId);
-    state.metadataPeriodicTimer?.cancel();
+    final state = _connectionStates[connectionId];
+    state?.metadataPeriodicTimer?.cancel();
     state
-      ..metadataPeriodicTimer = null
+      ?..metadataPeriodicTimer = null
       ..metadataPeriodicSession = null;
   }
 
   Set<int> _cachedAgentPanePidsForConnection(int connectionId) {
-    final state = _stateFor(connectionId);
-    final panePids = <int>{};
-    for (final entry in state.windowSnapshotCache.entries) {
-      panePids.addAll(_agentPanePids(entry.value));
-    }
-    return panePids;
+    final snapshots = _connectionStates[connectionId]?.windowSnapshotCache;
+    return {
+      if (snapshots != null)
+        for (final windows in snapshots.values) ..._agentPanePids(windows),
+    };
   }
 
   bool _hasWindowObserverForConnection(int connectionId) =>
@@ -999,8 +875,7 @@ class TmuxService implements RemoteMultiplexerService {
     final lastRefresh = state.metadataRefreshedAt;
     if (!force &&
         lastRefresh != null &&
-        DateTime.now().difference(lastRefresh) <
-            _activeAgentSessionMetadataFreshTtl) {
+        _now().difference(lastRefresh) < _activeAgentSessionMetadataFreshTtl) {
       return;
     }
 
@@ -1069,7 +944,7 @@ class TmuxService implements RemoteMultiplexerService {
       if (!_ownsState(connectionId, state)) {
         return;
       }
-      state.metadataRefreshedAt = DateTime.now();
+      state.metadataRefreshedAt = _now();
       final metadataByPanePid = parseAgentActiveSessionMetadataOutput(
         output,
         panePids,
@@ -1149,13 +1024,27 @@ class TmuxService implements RemoteMultiplexerService {
     );
   }
 
-  Set<int> _agentPanePids(Iterable<TmuxWindow> windows) => windows
-      .where(
-        (window) =>
-            window.foregroundAgentTool != null && window.panePid != null,
-      )
-      .map((window) => window.panePid!)
-      .toSet();
+  Set<int> _agentPanePids(Iterable<TmuxWindow> windows) => {
+    for (final window in windows)
+      if (window.panePid case final panePid?
+          when agentSessionMetadataProbeTools.contains(
+            window.foregroundAgentTool,
+          ))
+        panePid,
+  };
+
+  /// The (pid, command, tool) triples of the panes the probe would inspect;
+  /// a reload whose triples are unchanged does not need a fresh probe.
+  Set<(int, String?, AgentLaunchTool?)> _agentPaneSignatures(
+    Iterable<TmuxWindow> windows,
+  ) => {
+    for (final window in windows)
+      if (window.panePid case final panePid?
+          when agentSessionMetadataProbeTools.contains(
+            window.foregroundAgentTool,
+          ))
+        (panePid, window.currentCommand, window.foregroundAgentTool),
+  };
 
   ({List<TmuxWindow> windows, bool changed})
   _applyAgentSessionMetadataToWindows(
@@ -1226,9 +1115,10 @@ class TmuxService implements RemoteMultiplexerService {
     Map<int, _ActiveAgentSessionMetadata> metadataByPanePid, {
     Set<int>? refreshedPanePids,
   }) {
-    final state = _stateFor(connectionId);
-    if (metadataByPanePid.isEmpty &&
-        (refreshedPanePids == null || refreshedPanePids.isEmpty)) {
+    final state = _connectionStates[connectionId];
+    if (state == null ||
+        metadataByPanePid.isEmpty &&
+            (refreshedPanePids == null || refreshedPanePids.isEmpty)) {
       return;
     }
     for (final entry in state.windowSnapshotCache.entries.toList(
@@ -1356,9 +1246,9 @@ class TmuxService implements RemoteMultiplexerService {
     String sessionName, {
     String? extraFlags,
   }) {
-    final state = _stateFor(session.connectionId);
     final windows =
-        state.windowSnapshotCache[_TmuxWindowWatchKey(
+        _connectionStates[session.connectionId]
+            ?.windowSnapshotCache[_TmuxWindowWatchKey(
           connectionId: session.connectionId,
           sessionName: sessionName,
           extraFlags: resolveTmuxClientFlagsFromExtraFlags(extraFlags),
@@ -1366,7 +1256,7 @@ class TmuxService implements RemoteMultiplexerService {
     if (windows == null || windows.isEmpty) {
       return null;
     }
-    final activeWindow = windows.where((window) => window.isActive).firstOrNull;
+    final activeWindow = activeTmuxWindow(windows);
     final currentPath = activeWindow?.currentPath;
     if (currentPath == null) {
       return null;
@@ -1375,36 +1265,6 @@ class TmuxService implements RemoteMultiplexerService {
       currentPath: currentPath,
       currentCommand: activeWindow?.currentCommand,
     );
-  }
-
-  /// Returns whether [sessionName] is attached in the primary SSH terminal.
-  ///
-  /// Control-mode observers are excluded by the foreground-session probe
-  /// because MonkeySSH uses one for live window updates even after the visible
-  /// interactive shell has left tmux.
-  Future<bool> hasForegroundClient(
-    SshSession session,
-    String sessionName, {
-    String? extraFlags,
-  }) async {
-    try {
-      return await hasForegroundClientOrThrow(
-        session,
-        sessionName,
-        extraFlags: extraFlags,
-      );
-    } on Object catch (error) {
-      if (!_isExpectedTmuxOperationError(error)) rethrow;
-      DiagnosticsLogService.instance.warning(
-        'tmux.query',
-        'foreground_client_failed',
-        fields: {
-          'connectionId': session.connectionId,
-          'errorType': error.runtimeType,
-        },
-      );
-      return false;
-    }
   }
 
   /// Returns whether [sessionName] is attached in the primary SSH terminal, and
@@ -1680,7 +1540,7 @@ class TmuxService implements RemoteMultiplexerService {
         if (agentSessionId != null)
           'set-option -w -t ${shellEscapePosix(target)} @flutty_agent_session_confidence ${shellEscapePosix(AgentSessionConfidence.high.name)}',
         if (agentSessionId != null)
-          'set-option -w -t ${shellEscapePosix(target)} @flutty_agent_session_updated_at ${DateTime.now().millisecondsSinceEpoch ~/ 1000}',
+          'set-option -w -t ${shellEscapePosix(target)} @flutty_agent_session_updated_at ${_now().millisecondsSinceEpoch ~/ 1000}',
       ];
       await _execTmuxCommand(
         session,
@@ -1922,9 +1782,7 @@ class TmuxService implements RemoteMultiplexerService {
     final state = _connectionStates[session.connectionId];
     final backoff = state?.execChannelBackoff;
     if (backoff == null) return null;
-    final remaining = backoff.cooldownUntil.difference(
-      _execChannelNow?.call() ?? DateTime.now(),
-    );
+    final remaining = backoff.cooldownUntil.difference(_now());
     if (remaining > Duration.zero) {
       return remaining;
     }
@@ -1942,12 +1800,13 @@ class TmuxService implements RemoteMultiplexerService {
       _isExecSessionClosed(session) || _isExecChannelCoolingDown(session);
 
   void _recordExecChannelFailure(int connectionId, Object error) {
-    final state = _stateFor(connectionId);
+    final state = _connectionStates[connectionId];
+    if (state == null) return;
     final failureCount = (state.execChannelBackoff?.failureCount ?? 0) + 1;
     final delay = _execChannelBackoff(failureCount);
     state.execChannelBackoff = _TmuxExecChannelBackoff(
       failureCount: failureCount,
-      cooldownUntil: (_execChannelNow?.call() ?? DateTime.now()).add(delay),
+      cooldownUntil: _now().add(delay),
     );
     DiagnosticsLogService.instance.warning(
       'tmux.exec',
@@ -1962,8 +1821,8 @@ class TmuxService implements RemoteMultiplexerService {
   }
 
   void _clearExecChannelBackoff(int connectionId) {
-    final state = _stateFor(connectionId);
-    if (state.execChannelBackoff != null) {
+    final state = _connectionStates[connectionId];
+    if (state != null && state.execChannelBackoff != null) {
       state.execChannelBackoff = null;
       DiagnosticsLogService.instance.debug(
         'tmux.exec',
@@ -2241,7 +2100,7 @@ class TmuxService implements RemoteMultiplexerService {
       _requireState(session.connectionId, state);
       final quietUntil = state.execQuietUntil;
       if (quietUntil != null) {
-        final delay = quietUntil.difference(DateTime.now());
+        final delay = quietUntil.difference(_now());
         if (delay > Duration.zero) {
           DiagnosticsLogService.instance.debug(
             'tmux.exec',
@@ -2352,7 +2211,7 @@ class TmuxService implements RemoteMultiplexerService {
       )];
 
   Future<String> _execUnqueued(SshSession session, String command) async {
-    final startedAt = DateTime.now();
+    final startedAt = _now();
     final wrappedCommand = _wrapCommand(session, command);
     final execSession = await _openExec(
       session,
@@ -2371,7 +2230,7 @@ class TmuxService implements RemoteMultiplexerService {
         fields: {
           'connectionId': session.connectionId,
           'commandKind': _diagnosticTmuxCommandKind(command),
-          'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
+          'durationMs': _now().difference(startedAt).inMilliseconds,
           'outputChars': output.length,
         },
       );
@@ -2383,7 +2242,7 @@ class TmuxService implements RemoteMultiplexerService {
         fields: {
           'connectionId': session.connectionId,
           'commandKind': _diagnosticTmuxCommandKind(command),
-          'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
+          'durationMs': _now().difference(startedAt).inMilliseconds,
           'errorType': error.runtimeType,
         },
       );
@@ -2666,7 +2525,6 @@ class _TmuxConnectionState {
   String? profileSource;
   Future<void>? tmuxPathRequest;
   DateTime? execQuietUntil;
-  final hasSessionRequests = <_TmuxWindowWatchKey, Future<bool>>{};
   _CachedInstalledAgentTools? installedAgentTools;
   Future<Set<AgentLaunchTool>>? installedAgentToolsRequest;
   final windowObservers = <_TmuxWindowWatchKey, _TmuxWindowChangeObserver>{};
@@ -2951,21 +2809,14 @@ TmuxPaneContext? parseTmuxCurrentPaneContext(String output) {
     final line = rawLine.trim();
     if (line.isNotEmpty) {
       final fields = line.split(tmuxWindowFieldSeparator);
-      final path = _nonEmptyTmuxPaneField(fields.first);
-      final command = fields.length > 1
-          ? _nonEmptyTmuxPaneField(fields[1])
-          : null;
+      final path = nonEmptyTmuxField(fields.first);
+      final command = fields.length > 1 ? nonEmptyTmuxField(fields[1]) : null;
       if (path != null || command != null) {
         return TmuxPaneContext(currentPath: path, currentCommand: command);
       }
     }
   }
   return null;
-}
-
-String? _nonEmptyTmuxPaneField(String value) {
-  final trimmed = value.trim();
-  return trimmed.isEmpty ? null : trimmed;
 }
 
 /// Parses pane process IDs emitted by `tmux list-panes`.
@@ -3055,6 +2906,12 @@ String buildTmuxRefreshTerminalThemeCommand(
       'node|nodejs|npm|npx|bun|deno|python|python3) return 0 ;; '
       '*) return 1 ;; '
       'esac; }; '
+      'flutty_is_shell_command_name() { '
+      r'case "${1##*/}" in '
+      '${(shellCommandBasenames.toList()..sort()).join('|')}'
+      ') return 0 ;; '
+      '*) return 1 ;; '
+      'esac; }; '
       'flutty_set_agent_tool_from_command_text() { '
       r'command_text=$1; '
       'while :; do '
@@ -3091,6 +2948,13 @@ String buildTmuxRefreshTerminalThemeCommand(
       '( ${_buildTmuxSendPaneFocusTransitionCommand(extraFlags: extraFlags)} '
       '2>/dev/null || true ) & ;; '
       'esac; '
+      // Any other full-screen program or non-shell foreground command may be
+      // a theme-aware TUI, so nudge it the same way instead of keying on a
+      // fixed list of agent binaries.
+      r'elif [ "$alternate" = 1 ] || ! flutty_is_shell_command_name "$pane_command"; then '
+      'injected=1; '
+      '( ${_buildTmuxSendPaneFocusTransitionCommand(extraFlags: extraFlags)} '
+      '2>/dev/null || true ) & '
       'fi; '
       r'printf "flutty_theme_refresh_pane:%s,%s,%s\n" "$active" "$alternate" "$injected"; '
       'done; wait; }; '
@@ -3227,17 +3091,12 @@ String _buildTmuxProvideClientThemeReportsCommand(
 }
 
 String _buildTmuxSendPaneFocusRefreshCommand({String? extraFlags}) =>
-    _buildTmuxSendPaneFocusReportCommand('\x1b[I', extraFlags: extraFlags);
+    _buildTmuxSendPaneReportCommand('\x1b[I', extraFlags: extraFlags);
 
 String _buildTmuxSendPaneFocusTransitionCommand({String? extraFlags}) =>
-    '${_buildTmuxSendPaneFocusReportCommand('\x1b[O', extraFlags: extraFlags)} '
+    '${_buildTmuxSendPaneReportCommand('\x1b[O', extraFlags: extraFlags)} '
     '2>/dev/null || true; sleep 0.12; '
-    '${_buildTmuxSendPaneFocusReportCommand('\x1b[I', extraFlags: extraFlags)}';
-
-String _buildTmuxSendPaneFocusReportCommand(
-  String report, {
-  String? extraFlags,
-}) => _buildTmuxSendPaneReportCommand(report, extraFlags: extraFlags);
+    '${_buildTmuxSendPaneReportCommand('\x1b[I', extraFlags: extraFlags)}';
 
 String _buildTmuxSendPaneReportCommand(String report, {String? extraFlags}) =>
     TmuxService._tmuxCommand(
@@ -3734,9 +3593,7 @@ class _TmuxWindowChangeObserver {
     required this.sessionName,
     required this.onDispose,
     this.extraFlags,
-    DateTime Function()? now,
-  }) : _now = now ?? DateTime.now,
-       _controller = StreamController<TmuxWindowChangeEvent>.broadcast() {
+  }) : _controller = StreamController<TmuxWindowChangeEvent>.broadcast() {
     _controller
       ..onListen = _ensureStarted
       ..onCancel = () => unawaited(dispose());
@@ -3754,7 +3611,6 @@ class _TmuxWindowChangeObserver {
   final String sessionName;
   final String? extraFlags;
   final VoidCallback onDispose;
-  final DateTime Function() _now;
   final StreamController<TmuxWindowChangeEvent> _controller;
 
   // Cancelled in _cleanupControlSession().
@@ -3937,7 +3793,7 @@ class _TmuxWindowChangeObserver {
       );
       _configureControlSession();
       _restartAttempts = 0;
-      _lastControlActivity = _now();
+      _lastControlActivity = service._now();
       _startHeartbeat();
       DiagnosticsLogService.instance.info(
         'tmux.watch',
@@ -3978,7 +3834,7 @@ class _TmuxWindowChangeObserver {
 
   void _handleStdoutLine(String line) {
     if (_disposed) return;
-    _lastControlActivity = _now();
+    _lastControlActivity = service._now();
     final trimmed = _normalizeTmuxControlLine(line);
     if (_handleControlCommandLine(trimmed)) {
       return;
@@ -4140,7 +3996,7 @@ class _TmuxWindowChangeObserver {
 
   void _handleStderrLine(String line) {
     if (_disposed || line.trim().isEmpty) return;
-    _lastControlActivity = _now();
+    _lastControlActivity = service._now();
     DiagnosticsLogService.instance.warning(
       'tmux.watch',
       'stderr_line',
@@ -4269,7 +4125,7 @@ class _TmuxWindowChangeObserver {
     final lastActivity = _lastControlActivity;
     if (lastActivity == null) return;
     final action = decideTmuxHeartbeatAction(
-      silence: _now().difference(lastActivity),
+      silence: service._now().difference(lastActivity),
       heartbeatInterval: _heartbeatInterval,
     );
     switch (action) {
@@ -4281,7 +4137,7 @@ class _TmuxWindowChangeObserver {
           'heartbeat_refresh',
           fields: {
             'connectionId': session.connectionId,
-            'silenceMs': _now().difference(lastActivity).inMilliseconds,
+            'silenceMs': service._now().difference(lastActivity).inMilliseconds,
           },
         );
         _scheduleReloadEvent();
@@ -5117,10 +4973,7 @@ END {
   for (pid in parent) {
     tool = ""
     if (is_codex(raw_command[pid])) tool = "codex"
-    else if (command[pid] ~ /(^|[\\/@[:space:]])claude([\\/._[:space:]-]|\$)/) tool = "claude"
-    else if (command[pid] ~ /(^|[\\/@[:space:]])copilot([\\/._[:space:]-]|\$)/) tool = "copilot"
-    else if (command[pid] ~ /(^|[\\/@[:space:]])opencode2?([\\/._[:space:]-]|\$)/) tool = "opencode"
-    else if (command[pid] ~ /(^|[\\/@[:space:]])(agy|antigravity|antigravity-cli)([\\/._[:space:]-]|\$)/) tool = "antigravity"
+$_agentSessionMetadataAwkToolMatchers
     if (tool == "") continue
     current = pid
     seen = 0
@@ -5215,6 +5068,37 @@ END {
 fi
 ''';
 }
+
+/// Tools whose live session [buildAgentActiveSessionMetadataCommand] can
+/// identify; panes running any other agent are left out of the probe.
+const agentSessionMetadataProbeTools = <AgentLaunchTool>{
+  AgentLaunchTool.codex,
+  AgentLaunchTool.claudeCode,
+  AgentLaunchTool.copilotCli,
+  AgentLaunchTool.openCode,
+  AgentLaunchTool.antigravity,
+};
+
+/// Script labels for the non-Codex tools, matched by `candidateCommandNames`.
+const _agentSessionMetadataToolLabels = <AgentLaunchTool, String>{
+  AgentLaunchTool.claudeCode: 'claude',
+  AgentLaunchTool.copilotCli: 'copilot',
+  AgentLaunchTool.openCode: 'opencode',
+  AgentLaunchTool.antigravity: 'antigravity',
+};
+
+const _agentSessionMetadataAwkToolMatcher =
+    '    else if (command[pid] ~ '
+    r'/(^|[\/@[:space:]])(NAMES)([\/._[:space:]-]|$)/) tool = "LABEL"';
+
+final _agentSessionMetadataAwkToolMatchers = _agentSessionMetadataToolLabels
+    .entries
+    .map(
+      (entry) => _agentSessionMetadataAwkToolMatcher
+          .replaceFirst('NAMES', entry.key.candidateCommandNames.join('|'))
+          .replaceFirst('LABEL', entry.value),
+    )
+    .join('\n');
 
 /// Parses [buildAgentActiveSessionMetadataCommand] output and returns live
 /// session metadata keyed by tmux pane PID.
