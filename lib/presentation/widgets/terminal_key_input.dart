@@ -97,7 +97,9 @@ void _writeEnterKey(void Function(String)? output, String payload) {
 /// such an Enter until [gap] after the text, so it arrives as the separate
 /// keystroke the user pressed. Output written while an Enter waits queues
 /// behind it, so the order never changes. An Enter with no recent text goes
-/// out at once.
+/// out at once. Anything that changes where input goes, such as switching the
+/// active window, waits for [idle] first, so a held keystroke reaches the
+/// program it was typed into.
 class TerminalEnterPacer {
   /// Creates a pacer that passes output to [write].
   TerminalEnterPacer({
@@ -118,6 +120,12 @@ class TerminalEnterPacer {
   final _pending = Queue<({String data, bool enter})>();
   DateTime? _lastTextAt;
   Timer? _timer;
+  Completer<void>? _idle;
+
+  /// Completes once the held Enter and anything queued behind it have gone
+  /// out; null when nothing is held back.
+  Future<void>? get idle =>
+      _timer == null ? null : (_idle ??= Completer<void>()).future;
 
   /// Sends [data], an Enter keystroke when [enter] is set.
   void add(String data, {required bool enter}) {
@@ -146,6 +154,13 @@ class TerminalEnterPacer {
       _lastTextAt = next.enter ? null : _now();
       _write(next.data);
     }
+    _completeIdle();
+  }
+
+  void _completeIdle() {
+    final idle = _idle;
+    _idle = null;
+    idle?.complete();
   }
 
   /// Drops anything still waiting; the connection it was for is gone.
@@ -153,5 +168,6 @@ class TerminalEnterPacer {
     _timer?.cancel();
     _timer = null;
     _pending.clear();
+    _completeIdle();
   }
 }

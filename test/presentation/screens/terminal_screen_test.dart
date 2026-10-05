@@ -5414,6 +5414,73 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets('a window switch waits for a held Return to reach its window', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const sessionName = 'work';
+      const windows = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'agent', isActive: false, id: '@1'),
+      ];
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: sessionName,
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final muxFixture =
+          createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+            ..stubPrefetch()
+            ..stubPaneContext()
+            ..stubForegroundClient()
+            ..stubWindows(() => windows)
+            ..stubWindowEvents();
+      String? writtenAtSelect;
+      when(
+        () => monkeyMuxService.selectWindow(
+          session,
+          sessionName,
+          1,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+          suppressReplay: any(named: 'suppressReplay'),
+        ),
+      ).thenAnswer((_) async {
+        writtenAtSelect = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(),
+        );
+      });
+      muxFixture.stubThemeRefresh();
+
+      await muxFixture.pump(tester);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('agent'), findsOneWidget);
+
+      shellWrites.clear();
+      final terminal = session.terminal!..textInput('hi?');
+      sendTerminalEnterInput(
+        terminal,
+        shiftActive: false,
+        altActive: false,
+        ctrlActive: false,
+      );
+      await tester.tap(find.text('agent'));
+      await tester.pump();
+      expect(writtenAtSelect, isNull);
+
+      await tester.pump(TerminalEnterPacer.defaultGap);
+      await tester.pump();
+      expect(writtenAtSelect, 'hi?\r');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'MonkeyMux window switches wait for replay before following output',
       (tester) async {

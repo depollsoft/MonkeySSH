@@ -3059,7 +3059,7 @@ func enrichRestoreWithAgentCommandLines(restore *serverRestore) {
 			continue
 		}
 		argv := processCommandLineForRestore(window.PanePid)
-		if len(argv) == 0 {
+		if processTitleOnly(argv) {
 			continue
 		}
 		// The window's foreground process must still be that agent.
@@ -3069,6 +3069,26 @@ func enrichRestoreWithAgentCommandLines(restore *serverRestore) {
 		}
 		window.CommandLine = argv
 	}
+}
+
+// processTitleOnly reports whether argv holds no arguments to restart a
+// process from: nothing at all, or what a process that renamed itself leaves
+// where its arguments were, one word with no directory followed only by the
+// blanked rest. OpenClaw renames its Node process to "openclaw" so; starting
+// that word again would drop the interface and profile it was started with.
+func processTitleOnly(argv []string) bool {
+	if len(argv) == 0 {
+		return true
+	}
+	if strings.ContainsAny(argv[0], `/\`) {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if arg != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // commandLineRelaunchCommand starts an agent without a launch entry again from

@@ -841,8 +841,9 @@ var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	return window.proc.Pid()
 }
 
-// processCommandLine is unavailable on Windows; agents without a launch entry
-// restore as a shell there.
+// processCommandLine is not implemented on Windows, where a window's pane pid
+// is its shell rather than the agent in the foreground. Agents without a
+// launch entry restore as a shell there.
 func processCommandLine(pid int) []string {
 	return nil
 }

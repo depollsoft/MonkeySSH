@@ -10186,6 +10186,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    // A Return still held back belongs to the window it was typed in.
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
     final targetWindowId = windowId != null && isValidTmuxWindowId(windowId)
         ? windowId
@@ -10356,6 +10359,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
     final configuredWorkingDirectory = _configuredRemoteMuxWorkingDirectory(
       backend: backend.remoteMuxBackend ?? _activeMuxBackend,
@@ -10437,6 +10442,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
+    final heldInput = _terminalEnterPacer?.idle;
+    if (heldInput != null) await heldInput;
     final closesLastMonkeyMuxWindow =
         !preserveMuxSession &&
         await _isClosingLastMonkeyMuxWindow(

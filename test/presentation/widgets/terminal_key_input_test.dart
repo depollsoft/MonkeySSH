@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
@@ -241,6 +243,40 @@ void main() {
           ..add('\r', enter: true)
           ..add('\r', enter: true);
         expect(written, ['\r', 'ls', '\r', '\r']);
+      });
+    });
+
+    test('idle completes once a held Enter has gone out', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now);
+        expect(pacer.idle, isNull);
+
+        var idle = false;
+        pacer
+          ..add('a', enter: false)
+          ..add('\r', enter: true);
+        unawaited(pacer.idle!.then((_) => idle = true));
+        async
+          ..elapse(const Duration(milliseconds: 99))
+          ..flushMicrotasks();
+        expect(idle, isFalse);
+        async
+          ..elapse(const Duration(milliseconds: 1))
+          ..flushMicrotasks();
+        expect(idle, isTrue);
+        expect(written, ['a', '\r']);
+        expect(pacer.idle, isNull);
+
+        idle = false;
+        pacer
+          ..add('b', enter: false)
+          ..add('\r', enter: true);
+        unawaited(pacer.idle!.then((_) => idle = true));
+        pacer.dispose();
+        async.flushMicrotasks();
+        expect(idle, isTrue);
       });
     });
 
