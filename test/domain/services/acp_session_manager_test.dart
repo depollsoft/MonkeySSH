@@ -1609,6 +1609,55 @@ void main() {
       );
     });
 
+    test(
+      'a queued prompt starts its own reply after the previous turn tail',
+      () async {
+        final key = await startCopilot();
+        final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+        final first = manager.prompt(key, const [AcpTextContent('first')]);
+        await _pump();
+        final second = manager.prompt(key, const [AcpTextContent('second')]);
+        await _pump();
+
+        // More unlabelled chunks than one update-pump turn applies, arriving
+        // together with the first turn's response.
+        for (var index = 0; index < 20; index++) {
+          server.pushUpdate(key.acpSessionId, {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': 'a$index '},
+          });
+        }
+        server.completeNextPrompt();
+        await first;
+        await _pump();
+        server.pushUpdate(key.acpSessionId, {
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': 'second reply'},
+        });
+        await _pump();
+
+        final replies = manager.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpMessageEntry>()
+            .where((entry) => entry.role == AcpMessageRole.agent)
+            .map(
+              (entry) => entry.content
+                  .whereType<AcpTextContent>()
+                  .map((block) => block.text)
+                  .join(),
+            )
+            .toList();
+        expect(replies, [
+          List.generate(20, (index) => 'a$index ').join(),
+          'second reply',
+        ]);
+        server.completeNextPrompt();
+        await second;
+      },
+    );
+
     test('cancel notifies the agent', () async {
       final key = await startCopilot();
       await manager.cancelPrompt(key);

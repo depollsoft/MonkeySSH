@@ -2590,6 +2590,21 @@ class _SessionController {
     }
   }
 
+  /// Applies every already-received update now, so a pump that yielded
+  /// mid-burst cannot land the previous turn's tail after a turn boundary.
+  void _applyReceivedSessionUpdates() {
+    final coalescing = _coalescingSessionUpdateNotifications;
+    _coalescingSessionUpdateNotifications = true;
+    try {
+      while (_pendingSessionUpdates.isNotEmpty) {
+        _applySessionUpdate(_pendingSessionUpdates.removeFirst());
+        _sessionUpdatesApplied += 1;
+      }
+    } finally {
+      _coalescingSessionUpdateNotifications = coalescing;
+    }
+  }
+
   void _scheduleRecentPersistence() {
     _recentPersistTimer?.cancel();
     _recentPersistTimer = Timer(
@@ -2936,6 +2951,7 @@ class _SessionController {
           _state.attached) {
         final queued = _promptQueue.removeFirst();
         _queuedPromptBytes -= queued.encodedBytes;
+        _applyReceivedSessionUpdates();
         final dispatchedTimeline = _timelineBuilder
             .markLocalUserPromptDispatched(queued.localMessageId);
         _update(

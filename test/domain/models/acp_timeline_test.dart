@@ -208,6 +208,29 @@ void main() {
       );
     });
 
+    test('a dispatched queued prompt does not extend the previous reply', () {
+      final builder = AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('one')]);
+      final second = builder.appendLocalUserPrompt(const [
+        AcpTextContent('two'),
+      ], queued: true);
+      builder
+        // The first turn's late unlabelled tail reopens a reply.
+        ..apply(_chunk('agent_message_chunk', 'first reply'))
+        ..markLocalUserPromptDispatched(second)
+        ..apply(_chunk('agent_message_chunk', 'second reply'));
+
+      expect(
+        builder
+            .snapshot()
+            .entries
+            .whereType<AcpMessageEntry>()
+            .where((entry) => entry.role == AcpMessageRole.agent)
+            .map((entry) => (entry.content.single as AcpTextContent).text),
+        ['first reply', 'second reply'],
+      );
+    });
+
     test('rolls back only the failed optimistic prompt', () {
       final builder = AcpTimelineBuilder()
         ..apply(_chunk('agent_message_chunk', 'earlier', messageId: 'agent-1'));
