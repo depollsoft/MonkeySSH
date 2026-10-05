@@ -10617,140 +10617,29 @@ func (s *muxServer) resumePausedAttachForwarding(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
-	if len(queryData) > 0 {
-		type queryFallback struct {
-			client              *attachClient
-			queryCompletion     <-chan error
-			queryGate           *attachWriteGate
-			secondaryOutputGate *attachWriteGate
-		}
-		responseCount := terminalQueryResponseCount(queryData)
-		initialOutput := primaryOutput
-		if primaryNeedsFailover {
-			initialOutput = failoverOutput
-		}
-		var primaryCompletion <-chan error
-		primaryQueued := false
-		if primaryClient != nil {
-			primaryCompletion, primaryQueued =
-				primaryClient.enqueueTerminalQuery(
-					initialOutput,
-					true,
-					windowID,
-					responseCount,
-				)
-		}
-		sortedClients := append([]*attachClient(nil), clients...)
-		sort.Slice(sortedClients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(
-				sortedClients[i],
-				sortedClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(sortedClients))
-		for _, client := range sortedClients {
-			if client == primaryClient {
-				continue
-			}
-			queryGate := &attachWriteGate{done: make(chan struct{})}
-			queryCompletion, queued :=
-				client.enqueueConditionalTerminalQuery(
-					failoverOutput,
-					true,
-					windowID,
-					responseCount,
-					queryGate,
-				)
-			if !queued {
-				continue
-			}
-			fallback := queryFallback{
-				client:          client,
-				queryCompletion: queryCompletion,
-				queryGate:       queryGate,
-			}
-			if len(secondaryOutput) > 0 {
-				secondaryGate := &attachWriteGate{done: make(chan struct{})}
-				if _, queued := client.enqueueWrite(
-					secondaryOutput,
-					false,
-					"",
-					0,
-					secondaryGate,
-				); queued {
-					fallback.secondaryOutputGate = secondaryGate
-				}
-			}
-			fallbacks = append(fallbacks, fallback)
-		}
-		s.attachMu.Unlock()
-		primaryDelivered := primaryQueued &&
-			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
-			tryFallback := !primaryDelivered
-			fallback.queryGate.deliver.Store(tryFallback)
-			close(fallback.queryGate.done)
-			if tryFallback &&
-				fallback.client.waitForWrite(fallback.queryCompletion) {
-				primaryDelivered = true
-			}
-			if fallback.secondaryOutputGate != nil {
-				fallback.secondaryOutputGate.deliver.Store(!tryFallback)
-				close(fallback.secondaryOutputGate.done)
-			}
-		}
-		if !primaryDelivered {
-			s.redeliverTerminalQueries(
-				windowID,
-				queryData,
-				nil,
-				nil,
-			)
-		}
-		if refreshPendingFocus || refreshPendingResize {
-			go s.refreshPendingClientViewport(
-				refreshPendingFocus,
-				refreshPendingResize,
-			)
-		}
-		return
+	initialOutput := primaryOutput
+	if primaryNeedsFailover {
+		initialOutput = failoverOutput
 	}
-	if primaryClient != nil {
-		_, queued := primaryClient.enqueue(primaryOutput, false)
-		if queued {
-			deliveredPrimary = primaryClient
-		}
-	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			_, queued := client.enqueue(failoverOutput, false)
-			if !queued {
-				continue
-			}
-			deliveredPrimary = client
-			break
-		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary || len(secondaryOutput) == 0 {
-			continue
-		}
-		_, _ = client.enqueue(secondaryOutput, false)
-	}
+	sort.Slice(clients, func(i int, j int) bool {
+		return moreRecentlyFocusedAttachClient(clients[i], clients[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		initialOutput,
+		clients,
+		queryData,
+		func(*attachClient) ([]byte, []byte) {
+			return failoverOutput, secondaryOutput
+		},
+	)
 	if refreshPendingFocus || refreshPendingResize {
 		go s.refreshPendingClientViewport(
 			refreshPendingFocus,
 			refreshPendingResize,
 		)
 	}
-	s.attachMu.Unlock()
 }
 
 func (w *muxWindow) foregroundProcessGroupLocked() int {
@@ -11401,61 +11290,92 @@ func (s *muxServer) writeAttachOutputIfActive(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
+	data := primaryData
+	if primaryClient != nil &&
+		primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		data = queryData
+	}
+	// Every client can answer a query, but only the ones attached before this
+	// output was produced are missing it.
+	fallbacks := clients
 	if len(queryData) > 0 {
-		responseCount := terminalQueryResponseCount(queryData)
+		fallbacks = allClients
+	}
+	sort.Slice(fallbacks, func(i int, j int) bool {
+		iCurrent := fallbacks[i].conn == currentPrimary
+		jCurrent := fallbacks[j].conn == currentPrimary
+		if iCurrent != jCurrent {
+			return iCurrent
+		}
+		return moreRecentlyFocusedAttachClient(fallbacks[i], fallbacks[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		data,
+		fallbacks,
+		queryData,
+		func(client *attachClient) ([]byte, []byte) {
+			if client.sequence > maxAttachSequence ||
+				client.suppressesReplayedOutput(windowID, outputGeneration) {
+				return queryData, nil
+			}
+			return failoverPrimaryData, secondaryData
+		},
+	)
+}
+
+// deliverWithQueryFallback hands one window's output to the attached clients
+// so that the terminal queries in queryData are answered by exactly one of
+// them. primaryClient (nil once it is gone) gets primaryData; when it is
+// absent or its write fails, the first client in fallbacks (in preference
+// order; primaryClient itself is skipped) whose failover write succeeds takes
+// over, and every other client gets its secondary output. fallbackData picks
+// both per client; an empty failover means the client already holds the
+// output and counts as delivered without a write.
+//
+// With queries pending, the primary's write is awaited before any fallback
+// is released: the conditional query writes are queued behind gates while
+// attachMu is still held, which fixes their order ahead of later output,
+// and the gates are flipped once the primary's outcome is known. Called with
+// s.attachMu held; it is released before returning.
+func (s *muxServer) deliverWithQueryFallback(
+	windowID string,
+	primaryClient *attachClient,
+	primaryData []byte,
+	fallbacks []*attachClient,
+	queryData []byte,
+	fallbackData func(client *attachClient) (failover []byte, secondary []byte),
+) {
+	if len(queryData) > 0 {
 		type queryFallback struct {
 			client              *attachClient
 			queryCompletion     <-chan error
 			queryGate           *attachWriteGate
 			secondaryOutputGate *attachWriteGate
 		}
+		responseCount := terminalQueryResponseCount(queryData)
 		var primaryCompletion <-chan error
 		primaryQueued := false
 		if primaryClient != nil {
-			data := primaryData
-			if primaryClient.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			) {
-				data = queryData
-			}
 			primaryCompletion, primaryQueued =
 				primaryClient.enqueueTerminalQuery(
-					data,
+					primaryData,
 					true,
 					windowID,
 					responseCount,
 				)
 		}
-		sort.Slice(allClients, func(i int, j int) bool {
-			iCurrent := allClients[i].conn == currentPrimary
-			jCurrent := allClients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(
-				allClients[i],
-				allClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(allClients))
-		for _, client := range allClients {
+		gated := make([]queryFallback, 0, len(fallbacks))
+		for _, client := range fallbacks {
 			if client == primaryClient {
 				continue
 			}
-			suppressesOutput := client.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			)
-			data := queryData
-			if client.sequence <= maxAttachSequence && !suppressesOutput {
-				data = failoverPrimaryData
-			}
+			failover, secondary := fallbackData(client)
 			queryGate := &attachWriteGate{done: make(chan struct{})}
 			queryCompletion, queued :=
 				client.enqueueConditionalTerminalQuery(
-					data,
+					failover,
 					true,
 					windowID,
 					responseCount,
@@ -11469,12 +11389,10 @@ func (s *muxServer) writeAttachOutputIfActive(
 				queryCompletion: queryCompletion,
 				queryGate:       queryGate,
 			}
-			if client.sequence <= maxAttachSequence &&
-				len(secondaryData) > 0 &&
-				!suppressesOutput {
+			if len(secondary) > 0 {
 				secondaryGate := &attachWriteGate{done: make(chan struct{})}
 				if _, queued := client.enqueueWrite(
-					secondaryData,
+					secondary,
 					false,
 					"",
 					0,
@@ -11483,13 +11401,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 					fallback.secondaryOutputGate = secondaryGate
 				}
 			}
-			fallbacks = append(fallbacks, fallback)
+			gated = append(gated, fallback)
 		}
 		s.attachMu.Unlock()
-
 		primaryDelivered := primaryQueued &&
 			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
+		for _, fallback := range gated {
 			tryFallback := !primaryDelivered
 			fallback.queryGate.deliver.Store(tryFallback)
 			close(fallback.queryGate.done)
@@ -11512,47 +11429,31 @@ func (s *muxServer) writeAttachOutputIfActive(
 		}
 		return
 	}
+	var deliveredPrimary *attachClient
 	if primaryClient != nil {
-		if primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		if _, queued := primaryClient.enqueue(primaryData, false); queued {
 			deliveredPrimary = primaryClient
-		} else {
-			_, queued := primaryClient.enqueue(primaryData, false)
-			if queued {
-				deliveredPrimary = primaryClient
-			}
 		}
 	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			iCurrent := clients[i].conn == currentPrimary
-			jCurrent := clients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			if client.suppressesReplayedOutput(windowID, outputGeneration) {
-				deliveredPrimary = client
-				break
-			}
-			_, queued := client.enqueue(failoverPrimaryData, false)
-			if queued {
-				deliveredPrimary = client
-				break
-			}
+	for _, client := range fallbacks {
+		if deliveredPrimary != nil {
+			break
 		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary ||
-			len(secondaryData) == 0 ||
-			client.suppressesReplayedOutput(windowID, outputGeneration) {
+		if client == primaryClient {
 			continue
 		}
-		_, _ = client.enqueue(secondaryData, false)
+		failover, _ := fallbackData(client)
+		if _, queued := client.enqueue(failover, false); queued {
+			deliveredPrimary = client
+		}
+	}
+	for _, client := range fallbacks {
+		if client == deliveredPrimary {
+			continue
+		}
+		if _, secondary := fallbackData(client); len(secondary) > 0 {
+			_, _ = client.enqueue(secondary, false)
+		}
 	}
 	s.attachMu.Unlock()
 }
