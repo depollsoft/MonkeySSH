@@ -1118,6 +1118,7 @@ class TelemetryCollectionNotifier extends Notifier<bool> {
   int _revision = 0;
   Future<void> _preferenceUpdates = Future<void>.value();
 
+    ref.watch(settingsGenerationProvider);
   @override
   bool build() {
     _settingsService = ref.watch(settingsServiceProvider);
@@ -1244,6 +1245,7 @@ class TelemetryOptInPromptNotifier extends Notifier<TelemetryOptInPromptState> {
     _settingsService = ref.watch(settingsServiceProvider);
     _disposed = false;
     ref.onDispose(() => _disposed = true);
+    ref.watch(settingsGenerationProvider);
     Future.microtask(_init);
     return const TelemetryOptInPromptState(
       choice: TelemetryOptInPromptChoice.notShown,

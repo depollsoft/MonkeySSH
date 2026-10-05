@@ -1445,6 +1445,9 @@ void main() {
         tester.element(find.byType(EntityProviderProbe)),
       );
 
+            // main.dart pins one service instance, so a reload must not rely
+            // on recreating settingsServiceProvider.
+            settingsServiceProvider.overrideWithValue(SettingsService(db)),
       expect(
         await container
             .read(terminalNotificationsNotifierProvider.notifier)

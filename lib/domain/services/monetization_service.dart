@@ -897,6 +897,7 @@ Future<String> _loadPackageName() async {
   return packageInfo.packageName;
 }
 
+  ref.watch(settingsGenerationProvider);
 /// Stream provider for the latest [MonetizationState].
 final monetizationStateProvider = StreamProvider<MonetizationState>((ref) {
   final service = ref.watch(monetizationServiceProvider);

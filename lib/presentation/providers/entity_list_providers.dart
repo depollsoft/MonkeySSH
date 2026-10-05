@@ -79,8 +79,8 @@ void invalidateImportedEntityProviders(ProviderInvalidator invalidate) {
 
 /// Refreshes presentation providers that depend on synced settings and data.
 void invalidateSyncedDataProviders(ProviderInvalidator invalidate) {
-  // Settings notifiers and theme providers watch this service. Recreating it
-  // reloads all persisted settings, including those added after this helper.
-  invalidate(settingsServiceProvider);
+  // Settings notifiers, monetization and telemetry watch the generation, so
+  // bumping it reloads every cached setting from the database.
+  invalidate(settingsGenerationProvider);
   invalidateImportedEntityProviders(invalidate);
 }

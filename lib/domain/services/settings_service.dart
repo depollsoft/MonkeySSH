@@ -241,6 +241,15 @@ class SettingsService {
     _db.settings,
   )..where((s) => s.key.equals(key))).watchSingleOrNull().map((s) => s?.value);
 }
+/// Changes identity whenever persisted settings are replaced behind the
+/// running notifiers (for example by a migration import).
+///
+/// Providers that cache a value read from [SettingsService] watch this so
+/// invalidating it reloads them. Invalidating [settingsServiceProvider] is not
+/// enough: production overrides it with a fixed instance, and Riverpod only
+/// notifies dependents when the provider's value changes.
+final settingsGenerationProvider = Provider<Object>((ref) => Object());
+
 
 /// Provider for [SettingsService].
 final settingsServiceProvider = Provider<SettingsService>(
@@ -257,6 +266,7 @@ abstract class _AsyncSettingsNotifier<T> extends Notifier<T> {
 
   bool get _isDisposed => _disposed;
 
+    ref.watch(settingsGenerationProvider);
   T get _defaultValue;
 
   Future<T> _loadValue(SettingsService settings);
