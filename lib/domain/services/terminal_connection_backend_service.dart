@@ -1,6 +1,3 @@
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/remote_multiplexer.dart';
@@ -12,6 +9,7 @@ import 'remote_file_service.dart' show shellEscapePosix;
 import 'remote_multiplexer_service.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
+import 'tmux_service.dart' show runSshClientCommand;
 
 /// Provides backend adapters for active terminal sessions.
 final terminalConnectionBackendServiceProvider =
@@ -93,12 +91,12 @@ class TerminalConnectionBackendService {
   /// Creates a terminal backend resolver.
   const TerminalConnectionBackendService({
     required RemoteMultiplexerService tmuxMultiplexer,
-    required MonkeyMuxService monkeyMuxService,
+    required RemoteMultiplexerService monkeyMuxService,
   }) : _tmuxMultiplexer = tmuxMultiplexer,
        _monkeyMuxService = monkeyMuxService;
 
   final RemoteMultiplexerService _tmuxMultiplexer;
-  final MonkeyMuxService _monkeyMuxService;
+  final RemoteMultiplexerService _monkeyMuxService;
 
   /// Resolves the active backend for [session].
   TerminalConnectionBackend resolve(
@@ -123,7 +121,6 @@ class TerminalConnectionBackendService {
         remoteMuxBackend: RemoteMuxBackend.monkeyMux,
         sessionName: muxSessionName,
         remoteMultiplexer: _monkeyMuxService,
-        monkeyMuxService: _monkeyMuxService,
       ),
       RemoteMuxBackend.tmux => _MultiplexedTerminalConnectionBackend(
         session: session,
@@ -188,7 +185,7 @@ class _DirectTerminalConnectionBackend implements TerminalConnectionBackend {
     String command, {
     SshExecPriority priority = SshExecPriority.normal,
     String? workingDirectory,
-  }) => _runSshClientCommand(
+  }) => runSshClientCommand(
     _session,
     _wrapClientCommandWorkingDirectory(command, workingDirectory),
     priority: priority,
@@ -236,40 +233,29 @@ class _MultiplexedTerminalConnectionBackend
     required RemoteMuxBackend remoteMuxBackend,
     required String sessionName,
     required RemoteMultiplexerService remoteMultiplexer,
-    MonkeyMuxService? monkeyMuxService,
     String? extraFlags,
   }) : _session = session,
        _type = type,
        _remoteMuxBackend = remoteMuxBackend,
        _sessionName = sessionName,
        _remoteMultiplexer = remoteMultiplexer,
-       _monkeyMuxService = monkeyMuxService,
        _extraFlags = extraFlags;
-
-  static const _tmuxCapabilities = TerminalBackendCapabilities(
-    clientCommandsUseControlChannel: false,
-  );
-
-  static const _monkeyMuxCapabilities = TerminalBackendCapabilities(
-    clientCommandsUseControlChannel: true,
-  );
 
   final SshSession _session;
   final TerminalBackendType _type;
   final RemoteMuxBackend _remoteMuxBackend;
   final String _sessionName;
   final RemoteMultiplexerService _remoteMultiplexer;
-  final MonkeyMuxService? _monkeyMuxService;
   final String? _extraFlags;
 
   @override
   TerminalBackendType get type => _type;
 
   @override
-  TerminalBackendCapabilities get capabilities =>
-      _type == TerminalBackendType.monkeyMux
-      ? _monkeyMuxCapabilities
-      : _tmuxCapabilities;
+  TerminalBackendCapabilities get capabilities => TerminalBackendCapabilities(
+    clientCommandsUseControlChannel:
+        _remoteMultiplexer.clientCommandsUseControlChannel,
+  );
 
   @override
   RemoteMuxBackend get remoteMuxBackend => _remoteMuxBackend;
@@ -308,22 +294,12 @@ class _MultiplexedTerminalConnectionBackend
     String command, {
     SshExecPriority priority = SshExecPriority.normal,
     String? workingDirectory,
-  }) {
-    final commandToRun = _wrapClientCommandWorkingDirectory(
-      command,
-      workingDirectory,
-    );
-    final monkeyMuxService = _monkeyMuxService;
-    if (_type == TerminalBackendType.monkeyMux && monkeyMuxService != null) {
-      return monkeyMuxService.runClientCommand(
-        _session,
-        _sessionName,
-        commandToRun,
-        priority: priority,
-      );
-    }
-    return _runSshClientCommand(_session, commandToRun, priority: priority);
-  }
+  }) => _remoteMultiplexer.runClientCommand(
+    _session,
+    _sessionName,
+    _wrapClientCommandWorkingDirectory(command, workingDirectory),
+    priority: priority,
+  );
 
   @override
   Future<void> refreshTerminalTheme(TerminalThemeData theme) =>
@@ -378,54 +354,6 @@ class _MultiplexedTerminalConnectionBackend
   bool isExecChannelCoolingDown() =>
       _remoteMultiplexer.isExecChannelCoolingDown(_session);
 }
-
-/// Deadline for opening the exec channel of a client command.
-const _clientCommandOpenTimeout = Duration(seconds: 10);
-
-/// Deadline for a client command to finish once its channel is open, matching
-/// the MonkeyMux `run_command` budget so a hung command cannot hold a queued
-/// exec slot forever.
-const _clientCommandResponseTimeout = Duration(seconds: 25);
-
-/// Runs [command] on a short-lived exec channel and collects its output.
-///
-/// [command] must already carry any working-directory wrapping.
-Future<TerminalClientCommandResult> _runSshClientCommand(
-  SshSession session,
-  String command, {
-  required SshExecPriority priority,
-}) => session.runQueuedExec(() async {
-  final exec = await openSshExec(
-    session.execute(command),
-    _clientCommandOpenTimeout,
-  );
-  try {
-    final stdout = StringBuffer();
-    final stderr = StringBuffer();
-    final stdoutFuture = exec.stdout
-        .cast<List<int>>()
-        .transform(utf8.decoder)
-        .forEach(stdout.write);
-    final stderrFuture = exec.stderr
-        .cast<List<int>>()
-        .transform(utf8.decoder)
-        .forEach(stderr.write);
-    await Future.wait<void>([stdoutFuture, stderrFuture, exec.done])
-        .timeout(_clientCommandResponseTimeout);
-    final stdoutText = stdout.toString();
-    return TerminalClientCommandResult(
-      output: stdoutText.isNotEmpty ? stdoutText : stderr.toString(),
-      exitCode: exec.exitCode,
-    );
-  } on TimeoutException {
-    // close() only sends EOF; a command that ignores it would keep the exec
-    // slot occupied, so tear the channel down.
-    exec.channel.destroy();
-    rethrow;
-  } finally {
-    exec.close();
-  }
-}, priority: priority);
 
 String _wrapClientCommandWorkingDirectory(String command, String? directory) {
   final cwd = trimmedOrNull(directory);

@@ -14,6 +14,8 @@ import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
+import 'package:monkeyssh/domain/services/tmux_service.dart'
+    show runSshClientCommand;
 
 import '../../helpers/mock_ssh_exec_session.dart';
 
@@ -352,6 +354,17 @@ class _FakeRemoteMultiplexerService implements RemoteMultiplexerService {
 
   @override
   bool isExecChannelCoolingDown(SshSession session) => false;
+
+  @override
+  bool get clientCommandsUseControlChannel => false;
+
+  @override
+  Future<TerminalClientCommandResult> runClientCommand(
+    SshSession session,
+    String sessionName,
+    String command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => runSshClientCommand(session, command, priority: priority);
 
   @override
   Future<bool> hasForegroundClientOrThrow(
