@@ -130,6 +130,7 @@ final class _FakeInstaller extends MonkeyMuxInstallerService {
     SshSession session, {
     SshExecPriority priority = SshExecPriority.low,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    MonkeyMuxInstallation? Function()? reuseInstallation,
   }) async {
     ensureCount += 1;
     lastConfirmInstall = confirmInstall;

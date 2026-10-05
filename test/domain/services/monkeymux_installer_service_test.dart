@@ -360,6 +360,45 @@ void main() {
     });
   }
 
+  test('deferring an update reuses and caches the installed helper', () async {
+    final harness = _InstallHarness();
+    const existing = MonkeyMuxInstallation(
+      executablePath:
+          '/home/proof/.monkeyssh/bin/monkeymux/9.9.8/darwin-arm64/monkeymux',
+      platform: 'darwin-arm64',
+      version: '9.9.8',
+    );
+    final reported = <Map<int, MonkeyMuxInstallProgress>>[];
+    void recordProgress() =>
+        reported.add(harness.installer.uploadProgress.value);
+    harness.installer.uploadProgress.addListener(recordProgress);
+    addTearDown(
+      () => harness.installer.uploadProgress.removeListener(recordProgress),
+    );
+    final confirmation = Completer<bool>();
+    final install = harness.installer.ensureInstalled(
+      harness.session,
+      confirmInstall: (_) => confirmation.future,
+      reuseInstallation: () => existing,
+    );
+    await _waitUntil(() => harness.commands.length == 2);
+    final passiveInstall = harness.installer.ensureInstalled(harness.session);
+    confirmation.complete(false);
+
+    expect(await install, same(existing));
+    expect(await passiveInstall, same(existing));
+    expect(
+      await harness.installer.ensureInstalled(harness.session),
+      same(existing),
+    );
+    expect(harness.bundle.loads, isEmpty);
+    expect(harness.remote.uploadCount, 0);
+    expect(reported, isEmpty);
+    // Reusing the helper must not change the managed launcher either.
+    expect(harness.commands, hasLength(2));
+    verify(harness.sftp.close).called(1);
+  });
+
   for (final outcome in ['verified', 'upload-failure']) {
     test('reports helper upload progress until $outcome', () async {
       final harness = _InstallHarness(

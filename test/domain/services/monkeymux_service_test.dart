@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -1586,6 +1587,144 @@ void main() {
       },
     );
   });
+
+  group('MonkeyMuxService.runningServerStatusFromInstalledHelpers', () {
+    setUpAll(() => registerFallbackValue(Uint8List(0)));
+
+    for (final nativeAcp in [false, true]) {
+      test('finds a matching helper path, native ACP=$nativeAcp', () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(
+          client,
+          connectionId: nativeAcp ? 919 : 918,
+        );
+        const helperPath =
+            '/home/test user/.monkeyssh/bin/monkeymux/0.2.4/linux-amd64/monkeymux';
+        final commands = <String>[];
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              final command = invocation.positionalArguments.single as String;
+              commands.add(command);
+              if (command.contains(r'"$helper" version')) {
+                return _buildOutputSession(
+                  'Login banner\n__monkeymux_helper__:$helperPath\n',
+                );
+              }
+              return _buildOutputSession(
+                'Login banner\n'
+                '${jsonEncode({
+                  "type": "hello",
+                  "status": "ok",
+                  "version": "0.2.4",
+                  "capabilities": nativeAcp ? ["acp-window-v1"] : <String>[],
+                })}\n'
+                '{"type":"window_list","status":"ok","windows":['
+                '{"id":"@1","index":0,"name":"Pi","active":true,'
+                '"nativeAcpBridgeId":"0123456789abcdef0123456789abcdef"}]}\n',
+              );
+            });
+        final status = await MonkeyMuxService(installer: installer)
+            .runningServerStatusFromInstalledHelpers(session, 'work');
+
+        expect(status?.version, '0.2.4');
+        expect(status?.installation?.executablePath, helperPath);
+        expect(status?.installation?.version, '0.2.4');
+        expect(status?.installation?.platform, 'linux-amd64');
+        expect(status?.installation?.installedDuringCall, isFalse);
+        expect(status?.hasMatchingInstallation, isTrue);
+        expect(status?.nativeAcpWindowCount, nativeAcp ? 1 : 0);
+        expect(commands, hasLength(2));
+        expect(
+          commands.last,
+          contains(r'''[ "$("$helper" version 2>/dev/null)" = '0.2.4' ]'''),
+        );
+        expect(
+          commands.last,
+          contains(r'''printf '__monkeymux_helper__:%s\n' "$helper"'''),
+        );
+        verifyNever(() => installer.ensureInstalled(session));
+      });
+    }
+  });
+
+  test('selects the server binary version rather than the first installed helper', () async {
+    final home = await Directory.systemTemp.createTemp('monkeymux selection ');
+    addTearDown(() => home.delete(recursive: true));
+    final client = _MockSshClient();
+    final installer = _MockMonkeyMuxInstaller();
+    final session = _buildSession(client, connectionId: 920);
+    // Both helpers successfully open the same server socket. The matching
+    // binary's packaging label deliberately differs from its actual version.
+    final binaries = {'0.1.100': '0.1.100', '0.1.220': '0.1.221'};
+    for (final entry in binaries.entries) {
+      final helper = File(
+        '${home.path}/.monkeyssh/bin/monkeymux/${entry.key}/linux-amd64/monkeymux',
+      );
+      await helper.parent.create(recursive: true);
+      await helper.writeAsString(
+        '#!/bin/sh\n'
+        'if [ "\$1" = version ]; then printf "%s\\n" "${entry.value}"; '
+        'else printf \'%s\\n\' \'{"type":"hello","status":"ok","version":"0.1.221","capabilities":[]}\'; fi\n',
+      );
+      final chmod = await Process.run('chmod', ['700', helper.path]);
+      expect(chmod.exitCode, 0);
+    }
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((invocation) async {
+          final command = invocation.positionalArguments.single as String;
+          final result = await Process.run(
+            '/bin/sh',
+            ['-c', command],
+            environment: {'HOME': home.path},
+          );
+          expect(result.exitCode, 0);
+          return _buildOutputSession(result.stdout as String);
+        });
+
+    final status = await MonkeyMuxService(installer: installer)
+        .runningServerStatusFromInstalledHelpers(session, 'work');
+    expect(status?.version, '0.1.221');
+    expect(
+      status?.installation?.executablePath,
+      '${home.path}/.monkeyssh/bin/monkeymux/0.1.220/linux-amd64/monkeymux',
+    );
+    expect(status?.installation?.version, '0.1.221');
+    expect(status?.hasMatchingInstallation, isTrue);
+    verifyNever(() => installer.ensureInstalled(session));
+  }, skip: Platform.isWindows);
+
+  for (final selectionFails in [false, true]) {
+    test(
+      'keeps server status without a matching helper, selection error=$selectionFails',
+      () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(
+          client,
+          connectionId: selectionFails ? 922 : 921,
+        );
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((invocation) async {
+              final command = invocation.positionalArguments.single as String;
+              if (command.contains(r'"$helper" version')) {
+                if (selectionFails) {
+                  throw StateError('selection unavailable');
+                }
+                return _buildOutputSession('');
+              }
+              return _buildOutputSession(
+                '{"type":"hello","status":"ok","version":"0.1.221","capabilities":[]}\n',
+              );
+            });
+        final status = await MonkeyMuxService(installer: installer)
+            .runningServerStatusFromInstalledHelpers(session, 'work');
+        expect(status?.version, '0.1.221');
+        expect(status?.installation, isNull);
+        expect(status?.hasMatchingInstallation, isFalse);
+      },
+    );
+  }
 
   group('MonkeyMuxService.installedHelperVersion', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));

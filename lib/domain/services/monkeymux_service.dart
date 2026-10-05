@@ -84,7 +84,21 @@ class MonkeyMuxServerStatus {
     required this.version,
     required this.capabilities,
     this.nativeAcpWindowCount = 0,
+    this.installation,
   });
+
+  /// Already-installed helper whose binary version matches the running server.
+  ///
+  /// Available on the pre-install probe so a deferred update can reuse it.
+  final MonkeyMuxInstallation? installation;
+
+  /// Whether a reusable helper matches the version reported by the server.
+  bool get hasMatchingInstallation {
+    final installedVersion = installation?.version.trim();
+    return installedVersion != null &&
+        installedVersion.isNotEmpty &&
+        installedVersion == version?.trim();
+  }
 
   /// Running helper version reported by the server.
   final String? version;
@@ -1074,7 +1088,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         'version';
     try {
       final version = await session.runQueuedExec(
-        () => _readHelperVersion(session, command),
+        () => _readHelperOutput(session, command),
         priority: priority,
       );
       DiagnosticsLogService.instance.debug(
@@ -1123,18 +1137,82 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         () => _readRunningServerStatus(session, command),
         priority: priority,
       );
-      if (status != null) {
-        _serverStatusCache[_MonkeyMuxWatchKey(
-              session.connectionId,
-              sessionName,
-            )] =
-            status;
+      if (status == null) {
+        return null;
       }
-      return status;
+      // Any old helper can dial the workspace socket. Its hello reports the
+      // server's version, not the client's, so do not reuse the first helper
+      // in glob order. Match the binary's version, not its packaging directory.
+      final installation = await _findInstalledHelperForVersion(
+        session,
+        status.version,
+        priority: priority,
+      );
+      final discoveredStatus = MonkeyMuxServerStatus(
+        version: status.version,
+        capabilities: status.capabilities,
+        nativeAcpWindowCount: status.nativeAcpWindowCount,
+        installation: installation,
+      );
+      _serverStatusCache[_MonkeyMuxWatchKey(
+            session.connectionId,
+            sessionName,
+          )] =
+          discoveredStatus;
+      return discoveredStatus;
     } on Object catch (error) {
       DiagnosticsLogService.instance.debug(
         'monkeymux.status',
         'installed_helper_unavailable',
+        fields: {
+          'connectionId': session.connectionId,
+          'errorType': error.runtimeType,
+        },
+      );
+      return null;
+    }
+  }
+
+  Future<MonkeyMuxInstallation?> _findInstalledHelperForVersion(
+    SshSession session,
+    String? version, {
+    required SshExecPriority priority,
+  }) async {
+    final runningVersion = version?.trim();
+    if (runningVersion == null || runningVersion.isEmpty) {
+      return null;
+    }
+    const helperMarker = '__monkeymux_helper__:';
+    final command =
+        r'for helper in "$HOME"/.monkeyssh/bin/monkeymux/*/*/monkeymux; do '
+        r'[ -x "$helper" ] || continue; '
+        r'[ "$("$helper" version 2>/dev/null)" = '
+        '${shellEscapePosix(runningVersion)} ] || continue; '
+        r'''printf '__monkeymux_helper__:%s\n' "$helper"; '''
+        'exit 0; done; exit 1';
+    try {
+      final executablePath = await session.runQueuedExec(
+        () => _readHelperOutput(session, command, outputMarker: helperMarker),
+        priority: priority,
+      );
+      if (executablePath == null) {
+        return null;
+      }
+      final parts = executablePath.split('/');
+      if (!executablePath.startsWith('/') ||
+          parts.length < 4 ||
+          parts.last != 'monkeymux') {
+        return null;
+      }
+      return MonkeyMuxInstallation(
+        executablePath: executablePath,
+        platform: parts[parts.length - 2],
+        version: runningVersion,
+      );
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.debug(
+        'monkeymux.status',
+        'matching_helper_unavailable',
         fields: {
           'connectionId': session.connectionId,
           'errorType': error.runtimeType,
@@ -1555,7 +1633,11 @@ final _monkeyMuxHelperVersionPattern = RegExp(
   r'^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$',
 );
 
-Future<String?> _readHelperVersion(SshSession session, String command) async {
+Future<String?> _readHelperOutput(
+  SshSession session,
+  String command, {
+  String? outputMarker,
+}) async {
   final execSession = await openSshExec(
     session.execute(command),
     const Duration(seconds: 5),
@@ -1571,6 +1653,12 @@ Future<String?> _readHelperVersion(SshSession session, String command) async {
     return await (() async {
       while (await lines.moveNext()) {
         final line = lines.current;
+        if (outputMarker != null) {
+          if (line.startsWith(outputMarker)) {
+            return line.substring(outputMarker.length);
+          }
+          continue;
+        }
         // Login shells can print profile/banner text on stdout before the command
         // output. Treating that as the version would make the comparison
         // unparsable and silently suppress a legitimate update, so only accept
@@ -1590,7 +1678,7 @@ Future<String?> _readHelperVersion(SshSession session, String command) async {
     await _closeMonkeyMuxExecSession(
       execSession,
       ownerSession: session,
-      operation: 'helper_version',
+      operation: outputMarker == null ? 'helper_version' : 'helper_selection',
     );
   }
 }

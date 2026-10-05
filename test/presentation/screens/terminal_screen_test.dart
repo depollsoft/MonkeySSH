@@ -507,6 +507,7 @@ class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
     SshSession session, {
     SshExecPriority priority = SshExecPriority.low,
     MonkeyMuxInstallConfirmation? confirmInstall,
+    MonkeyMuxInstallation? Function()? reuseInstallation,
   }) async {
     ensureInstalledCalls++;
     if (confirmInstall == null) {
@@ -515,6 +516,10 @@ class _PromptingMonkeyMuxInstallerService implements MonkeyMuxInstallerService {
     final accepted = await confirmInstall(request);
     acceptedConfirmations.add(accepted);
     if (!accepted) {
+      final existingInstallation = reuseInstallation?.call();
+      if (existingInstallation != null) {
+        return existingInstallation;
+      }
       throw const MonkeyMuxInstallDeclinedException();
     }
     final upload = this.upload;
@@ -4576,6 +4581,7 @@ void main() {
           session,
           priority: any(named: 'priority'),
           confirmInstall: any(named: 'confirmInstall'),
+          reuseInstallation: any(named: 'reuseInstallation'),
         ),
       ).thenAnswer(
         (_) async => const MonkeyMuxInstallation(
@@ -4745,6 +4751,7 @@ void main() {
           session,
           priority: any(named: 'priority'),
           confirmInstall: any(named: 'confirmInstall'),
+          reuseInstallation: any(named: 'reuseInstallation'),
         ),
       ).thenAnswer(
         (_) async => const MonkeyMuxInstallation(
@@ -10381,6 +10388,7 @@ void main() {
               testSession,
               priority: any(named: 'priority'),
               confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
             ),
           ).thenAnswer(
             (_) async => const MonkeyMuxInstallation(
@@ -10488,6 +10496,7 @@ void main() {
             session,
             priority: SshExecPriority.normal,
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).called(1);
         verifyNever(
@@ -10820,6 +10829,147 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    for (final helper in ['matching', 'mismatched', 'missing']) {
+      testWidgets(
+        'defers MonkeyMux update during agent launch with $helper helper',
+        (tester) async {
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final installer = _PromptingMonkeyMuxInstallerService(
+            request: const MonkeyMuxInstallRequest(
+              platform: 'darwin-arm64',
+              version: '0.1.14',
+              size: 1536,
+            ),
+            // Any unintended upload stays pending and prevents startup.
+            upload: Completer<void>(),
+          );
+          addTearDown(installer.progress.dispose);
+          final monkeyMuxService = _MockMonkeyMuxService()
+            ..installedHelpersStatus = MonkeyMuxServerStatus(
+              version: '0.1.13',
+              capabilities: const {'shutdown'},
+              installation: helper == 'missing'
+                  ? null
+                  : MonkeyMuxInstallation(
+                      executablePath: '/tmp/existing-monkeymux',
+                      platform: 'darwin-arm64',
+                      version: helper == 'matching' ? '0.1.13' : '0.1.12',
+                    ),
+            )
+            ..runningStatus = const MonkeyMuxServerStatus(
+              version: '0.1.13',
+              capabilities: {'shutdown'},
+            );
+          final tmuxService = _MockTmuxService();
+          const sessionName = 'agents';
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              workingDirectory: '/work/project',
+              tmuxSessionName: sessionName,
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+            ),
+          );
+          final executedCommands = <String>[];
+          when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                executedCommands.add(
+                  invocation.positionalArguments.single as String,
+                );
+                return shellChannel;
+              });
+          when(
+            () => monkeyMuxService.hasForegroundClientOrThrow(
+              session,
+              sessionName,
+            ),
+          ).thenAnswer((_) async => true);
+          when(() => monkeyMuxService.listWindows(session, sessionName))
+              .thenAnswer(
+                (_) async => const <TmuxWindow>[
+                  TmuxWindow(index: 0, name: 'Copilot CLI', isActive: true),
+                ],
+              );
+          when(() => monkeyMuxService.watchWindowChanges(session, sessionName))
+              .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              ],
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(find.text('Update running MonkeyMux?'), findsOneWidget);
+          expect(executedCommands, isEmpty);
+          final canReuse = helper == 'matching';
+          if (!canReuse) {
+            expect(
+              find.textContaining('No installed helper matches'),
+              findsOneWidget,
+            );
+            expect(find.text('Use 0.1.13 for now'), findsNothing);
+          }
+          await tester.tap(
+            find.text(canReuse ? 'Use 0.1.13 for now' : 'Open shell for now'),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(installer.acceptedConfirmations, <bool>[false]);
+          expect(installer.progress.value, isEmpty);
+          expect(
+            find.byKey(const ValueKey('terminal-paste-upload-line')),
+            findsNothing,
+          );
+          expect(find.text('Update running MonkeyMux?'), findsNothing);
+          expect(find.text('MonkeyMux is unavailable.'), findsNothing);
+          expect(find.byType(SnackBar), findsNothing);
+          final startupCommands = executedCommands
+              .where((command) => command.contains(' attach'))
+              .toList();
+          if (canReuse) {
+            expect(startupCommands, hasLength(1));
+            final command = startupCommands.single;
+            expect(command, contains('/tmp/existing-monkeymux'));
+            expect(command, isNot(contains("'/tmp/monkeymux'")));
+            expect(command, contains('--update-policy never'));
+            expect(command, contains('--command'));
+            expect(command, contains('copilot'));
+            expect(command, contains('--cwd'));
+            expect(command, contains('/work/project'));
+            expect(command, contains('--name'));
+            expect(command, contains('Copilot CLI'));
+            expect(command, contains(sessionName));
+            expect(session.remoteMuxBackend, RemoteMuxBackend.monkeyMux);
+          } else {
+            expect(startupCommands, isEmpty);
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+
     for (final testCase in const [
       (
         name: 'updates and restores an older MonkeyMux server',
@@ -10937,18 +11087,29 @@ void main() {
       ),
     ]) {
       testWidgets(testCase.name, (tester) async {
+        final deferred =
+            testCase.showsUpgradeDecision &&
+            testCase.updatePolicy == MonkeyMuxServerUpdatePolicy.never;
         final monkeyMuxInstallerService = _PromptingMonkeyMuxInstallerService(
           request: const MonkeyMuxInstallRequest(
             platform: 'darwin-arm64',
             version: '0.1.14',
             size: 1536,
           ),
+          // A deferred update must attach without ever starting this upload.
+          upload: deferred ? Completer<void>() : null,
         );
+        addTearDown(monkeyMuxInstallerService.progress.dispose);
         final monkeyMuxService = _MockMonkeyMuxService()
           ..installedHelpersStatus = MonkeyMuxServerStatus(
             version: testCase.runningVersion,
             capabilities: testCase.capabilities,
             nativeAcpWindowCount: testCase.nativeAcpWindowCount,
+            installation: MonkeyMuxInstallation(
+              executablePath: '/tmp/existing-monkeymux',
+              platform: 'darwin-arm64',
+              version: testCase.runningVersion ?? '0.1.13',
+            ),
           )
           ..runningStatus = MonkeyMuxServerStatus(
             version: testCase.runningVersion,
@@ -11051,13 +11212,22 @@ void main() {
             .toList(growable: false);
         expect(attachCommands, hasLength(1));
         final startupCommand = attachCommands.single;
-        expect(startupCommand, contains('/tmp/monkeymux'));
+        expect(
+          startupCommand,
+          contains(deferred ? '/tmp/existing-monkeymux' : '/tmp/monkeymux'),
+        );
         expect(
           startupCommand,
           contains('--update-policy ${testCase.updatePolicy.cliValue}'),
         );
         expect(shellWrites.map(utf8.decode).join(), isEmpty);
-        expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[true]);
+        expect(monkeyMuxInstallerService.acceptedConfirmations, <bool>[
+          !deferred,
+        ]);
+        expect(
+          find.byKey(const ValueKey('terminal-paste-upload-line')),
+          findsNothing,
+        );
         expect(
           monkeyMuxService.runningServerStatusFromInstalledHelpersCalls,
           1,
@@ -11117,6 +11287,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
           // The manifest labels this install 0.1.14 while the binary it
           // shipped still reports 0.1.13.
@@ -11204,6 +11375,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).thenAnswer(
           (_) async => const MonkeyMuxInstallation(
@@ -11371,6 +11543,7 @@ void main() {
             session,
             priority: any(named: 'priority'),
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).thenThrow(Exception('install failed'));
         when(() => tmuxService.prefetchInstalledAgentTools(session))
@@ -11402,6 +11575,7 @@ void main() {
             session,
             priority: SshExecPriority.normal,
             confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
           ),
         ).called(1);
         await tester.pumpWidget(const SizedBox.shrink());
