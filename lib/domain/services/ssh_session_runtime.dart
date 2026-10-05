@@ -354,7 +354,7 @@ if(!$__flResolved){$__flResolved='cmd'}
         );
       } on Object catch (error) {
         if (openedShell != null) {
-          _closeShellBestEffort(openedShell);
+          _closeShellBestEffort(openedShell, immediately: true);
         }
         if (generation == _shellGeneration) {
           _isReplacingShell = false;
@@ -656,7 +656,9 @@ if(!$__flResolved){$__flResolved='cmd'}
     );
   }
 
-  void _closeShellBestEffort(SSHSession shell) {
+  /// Closes [shell] without waiting. A shell nobody consumed is destroyed
+  /// [immediately]; others get a bounded graceful close first.
+  void _closeShellBestEffort(SSHSession shell, {bool immediately = false}) {
     void logFailure(Object error) {
       DiagnosticsLogService.instance.warning(
         'ssh.shell',
@@ -668,7 +670,13 @@ if(!$__flResolved){$__flResolved='cmd'}
       );
     }
 
-    runZonedGuarded(shell.close, (error, _) => logFailure(error));
+    runZonedGuarded(
+      () => closeAbandonedSshExec(
+        shell,
+        grace: immediately ? Duration.zero : abandonedSshExecCloseGrace,
+      ),
+      (error, _) => logFailure(error),
+    );
   }
 
   void _ensureShellStreamPipes() {
@@ -854,7 +862,7 @@ if(!$__flResolved){$__flResolved='cmd'}
       _applyLatestTerminalWindowMetrics(loginShell);
     } on Object catch (error) {
       if (loginShell != null) {
-        _closeShellBestEffort(loginShell);
+        _closeShellBestEffort(loginShell, immediately: true);
       }
 
       if (generation != _shellGeneration ||
@@ -881,7 +889,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     final replacementShell = loginShell;
 
     if (generation != _shellGeneration || !identical(_shell, completedShell)) {
-      _closeShellBestEffort(replacementShell);
+      _closeShellBestEffort(replacementShell, immediately: true);
       return;
     }
 

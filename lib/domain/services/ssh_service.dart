@@ -3669,7 +3669,6 @@ class SshSession {
   static const _defaultPortForwardStartTimeout = Duration(seconds: 10);
   static const _automaticPortDiscoveryTimeout = Duration(seconds: 8);
   static const _automaticPortWatcherStartTimeout = Duration(seconds: 10);
-  static const _automaticPortWatcherCloseTimeout = Duration(seconds: 2);
   static const _sftpOpenRetryDelays = [
     Duration(milliseconds: 250),
     Duration(milliseconds: 750),
@@ -5278,9 +5277,26 @@ class SshSession {
     required int generation,
   }) async {
     final command = buildAutomaticPortForwardWatcherCommand();
-    SSHSession watcher;
+    // One deadline covers the channel open and the first snapshot, so a
+    // server that never answers the open still lets the fallback start.
+    final startup = Stopwatch()..start();
+    final SSHSession watcher;
     try {
-      watcher = await execute(command);
+      final opening = openSshExec(
+        execute(command),
+        _automaticPortWatcherStartTimeout,
+      );
+      final opened = await Future.any<SSHSession?>([
+        opening,
+        _closeStarted.future.then((_) => null),
+      ]);
+      if (opened == null) {
+        opening
+            .then((late) => closeAbandonedSshExec(late, grace: Duration.zero))
+            .ignore();
+        return false;
+      }
+      watcher = opened;
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
         'ssh.forward',
@@ -5326,7 +5342,7 @@ class SshSession {
         );
     try {
       final started = await ready.future.timeout(
-        _automaticPortWatcherStartTimeout,
+        _automaticPortWatcherStartTimeout - startup.elapsed,
       );
       if (started) {
         DiagnosticsLogService.instance.info(
@@ -5458,7 +5474,7 @@ class SshSession {
     _automaticPortForwardWatcherSession = null;
     _automaticPortForwardWatcherStdoutSubscription = null;
     _automaticPortForwardWatcherSnapshot = null;
-    watcher.close();
+    unawaited(_closeAutomaticPortForwardWatcherSession(watcher));
     final ready = _automaticPortForwardWatcherReady;
     _automaticPortForwardWatcherReady = null;
     if (ready != null && !ready.isCompleted) {
@@ -5500,24 +5516,27 @@ class SshSession {
     _automaticPortForwardWatcherSnapshotUnavailable = false;
     await subscription?.cancel();
     if (watcher != null) {
+      final closing = _closeAutomaticPortForwardWatcherSession(watcher);
       if (waitForClose) {
-        await _closeAutomaticPortForwardWatcherSession(watcher);
+        await closing;
       } else {
-        watcher.close();
+        unawaited(closing);
       }
     }
   }
 
+  /// The Windows watcher polls forever without reading stdin, so EOF alone
+  /// never ends it; the shared cleanup destroys the channel after the grace.
   Future<void> _closeAutomaticPortForwardWatcherSession(
     SSHSession watcher,
   ) async {
-    watcher.close();
     try {
-      await watcher.done.timeout(_automaticPortWatcherCloseTimeout);
+      await closeAbandonedSshExec(watcher);
     } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       DiagnosticsLogService.instance.warning(
         'ssh.forward',
-        'automatic_watcher_close_wait_failed',
+        'automatic_watcher_close_failed',
         fields: {
           'connectionId': connectionId,
           'hostId': hostId,

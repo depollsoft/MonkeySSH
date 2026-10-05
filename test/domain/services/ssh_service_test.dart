@@ -43,6 +43,7 @@ import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../helpers/handshake_chunk_socket.dart';
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/powershell_test_helpers.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
@@ -197,7 +198,7 @@ class _AuthenticationFixture {
   }
 }
 
-class _MockExecSession extends Mock implements SSHSession {}
+class _MockExecSession extends MockSessionWithChannel {}
 
 class _MockSftpClient extends Mock implements SftpClient {}
 
@@ -1519,8 +1520,34 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
         expect(session.automaticForwardedRemotePorts, {4000});
         verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+
+        // The watcher ignores EOF (done never completes), so shutdown must
+        // destroy the channel after its grace instead of leaving it open.
+        await session.configureAutomaticPortForwarding(enabled: false);
+        await untilCalled(watcher.channel.destroy);
+        verify(watcher.close).called(1);
       },
     );
+
+    testWidgets('bounds a watcher channel open that never answers', (
+      tester,
+    ) async {
+      final client = _MockSshClient();
+      final opening = Completer<SSHSession>();
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) => opening.future);
+      final session = _testSession(client);
+
+      final started = session.startAutomaticPortForwardWatcher(generation: 0);
+      await tester.pump(const Duration(seconds: 11));
+      expect(await started, isFalse);
+
+      final late = _MockExecSession();
+      opening.complete(late);
+      await tester.pump();
+      verify(late.channel.destroy).called(1);
+      verifyNever(() => late.stdout);
+    });
 
     test(
       'reapplies the watcher snapshot when only exclusions change',

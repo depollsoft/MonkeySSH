@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
@@ -59,6 +60,10 @@ void main() {
     verify(lateProbe.channel.destroy).called(1);
     verifyNever(() => lateProbe.stdout);
     await session.closeShell(waitForStreams: false);
+    // The shell ignores EOF (done never completes), so the bounded close
+    // destroys its channel instead of leaving the remote process running.
+    await tester.pump(abandonedSshExecCloseGrace);
+    verify(shell.channel.destroy).called(1);
   });
 
   group('concurrent shell opens', () {
@@ -190,7 +195,7 @@ void main() {
 
         expect(await results, [same(shell), same(shell)]);
         verify(() => client.execute(any(), pty: any(named: 'pty'))).called(2);
-        verify(discarded.close).called(1);
+        verify(discarded.channel.destroy).called(1);
         verifyNever(() => discarded.stdout);
       },
     );
@@ -234,7 +239,7 @@ void main() {
       opening.complete(lateShell);
       await rejected;
       expect(await session.getShell(), same(replacement));
-      verify(lateShell.close).called(1);
+      verify(lateShell.channel.destroy).called(1);
       verifyNever(() => lateShell.stdout);
     },
   );

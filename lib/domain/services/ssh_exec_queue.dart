@@ -37,6 +37,30 @@ Future<T> runQueuedSshExec<T>(
   return queue.run(operation, priority: priority);
 }
 
+/// How long an abandoned channel may finish after EOF before it is destroyed.
+const abandonedSshExecCloseGrace = Duration(seconds: 2);
+
+/// Closes an exec or shell channel that nobody will read again.
+///
+/// [SSHSession.close] only sends EOF and waits for the peer, so a command that
+/// ignores stdin EOF (a polling loop, a PTY shell) would keep its channel slot
+/// forever. This sends EOF, waits up to [grace] for the peer to close, then
+/// destroys the channel. A zero [grace] destroys it immediately.
+Future<void> closeAbandonedSshExec(
+  SSHSession session, {
+  Duration grace = abandonedSshExecCloseGrace,
+}) async {
+  if (grace > Duration.zero) {
+    session.close();
+    try {
+      await session.done.timeout(grace);
+    } on TimeoutException {
+      // The peer ignored EOF; destroy below frees the slot.
+    }
+  }
+  session.channel.destroy();
+}
+
 /// Bounds channel creation and closes channels that arrive after the deadline.
 /// Late opening failures are consumed without changing the timeout result.
 Future<SSHSession> openSshExec(
@@ -47,9 +71,7 @@ Future<SSHSession> openSshExec(
   timeout,
   onTimeout: () {
     opening
-        // SSHSession.close only sends EOF until the peer finishes. A command
-        // that ignores EOF must not keep an abandoned session slot occupied.
-        .then((session) => session.channel.destroy())
+        .then((session) => closeAbandonedSshExec(session, grace: Duration.zero))
         .then<void>(
           (_) {},
           onError: (Object error, StackTrace stackTrace) {
