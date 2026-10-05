@@ -724,10 +724,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         );
         return entry.isSubagent ? _SubagentLaunchSurface(child: tool) : tool;
       case AcpSubagentTranscriptEntry():
-        return _SubagentTranscriptSurface(
-          entry: entry,
-          childBuilder: (child) => _buildEntry(context, child),
-        );
+        // Its descendants are separate thread children; see [_SubagentRails].
+        return const _SubagentTranscriptHeader();
       case AcpUsageEntry():
         return AcpUsageView(usage: entry.usage);
       case AcpStatusEntry():
@@ -790,14 +788,40 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     } else {
       content = _buildEntry(context, entry);
     }
-    return Padding(
+    var gap = absoluteIndex == 0 || threadChild.isEntryContinuation
+        ? 0.0
+        : FluttyTheme.spacingSm;
+    if (threadChild.depth == 0) {
+      return Padding(
+        key: ValueKey(threadChild.keyValue),
+        padding: EdgeInsets.only(top: gap),
+        child: content,
+      );
+    }
+    final header = entry is AcpSubagentTranscriptEntry;
+    final previous = absoluteIndex > 0
+        ? _threadChildren[absoluteIndex - 1]
+        : null;
+    // A descendant directly below its transcript header sits closer to it.
+    if (gap > 0 &&
+        !header &&
+        !(previous?.entry is AcpSubagentTranscriptEntry &&
+            previous?.depth == threadChild.depth)) {
+      gap = FluttyTheme.spacingMd;
+    }
+    return KeyedSubtree(
       key: ValueKey(threadChild.keyValue),
-      padding: EdgeInsets.only(
-        top: absoluteIndex == 0 || threadChild.isEntryContinuation
-            ? 0
-            : FluttyTheme.spacingSm,
+      child: _SubagentRails(
+        depth: threadChild.depth,
+        // A header starts its own rail below the gap; other rows keep the gap
+        // inside their innermost rail so the rail stays continuous.
+        gapDepth: header ? threadChild.depth - 1 : threadChild.depth,
+        gap: gap,
+        headerKey: entry is AcpSubagentTranscriptEntry
+            ? ValueKey('acp-subagent-transcript-${entry.launchToolCallId}')
+            : null,
+        child: content,
       ),
-      child: content,
     );
   }
 
@@ -1136,14 +1160,56 @@ class _SubagentLaunchSurface extends StatelessWidget {
   );
 }
 
-class _SubagentTranscriptSurface extends StatelessWidget {
-  const _SubagentTranscriptSurface({
-    required this.entry,
-    required this.childBuilder,
+/// Indents a flattened subagent transcript row inside one left rail per
+/// nesting level. [gap] is applied inside the rail at [gapDepth] (outside all
+/// rails at 0), and [headerKey] marks the innermost rail a header starts.
+class _SubagentRails extends StatelessWidget {
+  const _SubagentRails({
+    required this.depth,
+    required this.gapDepth,
+    required this.gap,
+    required this.child,
+    this.headerKey,
   });
 
-  final AcpSubagentTranscriptEntry entry;
-  final Widget Function(AcpTimelineEntry entry) childBuilder;
+  final int depth;
+  final int gapDepth;
+  final double gap;
+  final Key? headerKey;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final rail = BoxDecoration(
+      border: Border(
+        left: BorderSide(
+          color: Theme.of(context).colorScheme.primary,
+          width: 2,
+        ),
+      ),
+    );
+    var nested = child;
+    for (var level = depth; level >= 1; level--) {
+      nested = Container(
+        key: level == depth ? headerKey : null,
+        margin: const EdgeInsets.only(left: FluttyTheme.spacingSm),
+        padding: EdgeInsets.only(
+          left: FluttyTheme.spacingMd,
+          top: level == gapDepth ? gap : 0,
+        ),
+        decoration: rail,
+        child: nested,
+      );
+    }
+    return Padding(
+      padding: EdgeInsets.only(top: gapDepth == 0 ? gap : 0),
+      child: nested,
+    );
+  }
+}
+
+class _SubagentTranscriptHeader extends StatelessWidget {
+  const _SubagentTranscriptHeader();
 
   @override
   Widget build(BuildContext context) {
@@ -1151,41 +1217,16 @@ class _SubagentTranscriptSurface extends StatelessWidget {
     return Semantics(
       container: true,
       label: 'Nested subagent transcript',
-      child: Container(
-        key: ValueKey('acp-subagent-transcript-${entry.launchToolCallId}'),
-        margin: const EdgeInsets.only(left: FluttyTheme.spacingSm),
-        padding: const EdgeInsets.only(left: FluttyTheme.spacingMd),
-        decoration: BoxDecoration(
-          border: Border(left: BorderSide(color: scheme.primary, width: 2)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.smart_toy_outlined, size: 14, color: scheme.primary),
-                const SizedBox(width: FluttyTheme.spacingXs),
-                Text(
-                  'Subagent transcript',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: scheme.primary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-            for (var index = 0; index < entry.entries.length; index++)
-              Padding(
-                padding: EdgeInsets.only(
-                  top: index == 0
-                      ? FluttyTheme.spacingSm
-                      : FluttyTheme.spacingMd,
-                ),
-                child: childBuilder(entry.entries[index]),
-              ),
-          ],
-        ),
+      child: Row(
+        children: [
+          Icon(Icons.smart_toy_outlined, size: 14, color: scheme.primary),
+          const SizedBox(width: FluttyTheme.spacingXs),
+          Text(
+            'Subagent transcript',
+            style: Theme.of(context).textTheme.labelSmall
+                ?.copyWith(color: scheme.primary, fontWeight: FontWeight.w700),
+          ),
+        ],
       ),
     );
   }

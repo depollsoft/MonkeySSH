@@ -1070,6 +1070,40 @@ void main() {
     expect(border.left.width, 2);
   });
 
+  testWidgets('mounts only the tail of a long subagent transcript', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      wrap(
+        AcpMessageThread(
+          followTail: true,
+          entries: [
+            AcpSubagentTranscriptEntry(
+              id: 'subagent-agent-launch',
+              launchToolCallId: 'agent-launch',
+              entries: [
+                for (var i = 0; i < 300; i++)
+                  AcpAssistantMessageEntry(
+                    id: 'nested-$i',
+                    markdown: 'Nested response $i',
+                    parentToolCallId: 'agent-launch',
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Nested response 299'), findsOneWidget);
+    expect(find.text('Nested response 0'), findsNothing);
+    expect(
+      find.textContaining('Nested response').evaluate().length,
+      lessThanOrEqualTo(48),
+    );
+  });
+
   testWidgets('renders a tool image inline without expansion', (tester) async {
     await tester.pumpWidget(
       wrap(
