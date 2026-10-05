@@ -67,8 +67,6 @@ class MuxWindowNotification {
   int get hashCode => Object.hash(seq, payload);
 }
 
-/// Represents a single window within a tmux session.
-@immutable
 /// Returns the active window of [windows], if any.
 TmuxWindow? activeTmuxWindow(Iterable<TmuxWindow> windows) {
   for (final window in windows) {
@@ -77,6 +75,8 @@ TmuxWindow? activeTmuxWindow(Iterable<TmuxWindow> windows) {
   return null;
 }
 
+/// Represents a single window within a tmux session.
+@immutable
 class TmuxWindow {
   /// Creates a new [TmuxWindow].
   const TmuxWindow({

@@ -110,10 +110,3 @@ Color _resolveBackgroundColor(
   };
 }
 
-double contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
-}
