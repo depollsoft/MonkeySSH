@@ -4062,7 +4062,9 @@ class MonkeyRenderTerminal extends RenderBox
       _cancelPendingTerminalResize();
     }
     _updateViewportSize(notifyIfUnchanged: true);
-    markNeedsPaint();
+    // A resize outside performLayout changes the buffer height, so the scroll
+    // extent and bottom-following offset need a fresh layout.
+    markNeedsLayout();
   }
 
   void _refreshTerminalDisplay({bool revealLatestOutput = false}) {
@@ -4179,6 +4181,7 @@ class MonkeyRenderTerminal extends RenderBox
             pendingResize.viewportSize,
             pendingResize.pixelSize,
           );
+          markNeedsLayout();
         } else {
           _notifyTerminalResize(
             pendingResize.viewportSize,

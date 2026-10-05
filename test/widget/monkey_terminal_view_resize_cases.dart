@@ -516,6 +516,43 @@ void registerMonkeyTerminalViewResizeTests() {
       expect(resizeEvents.last.pixelHeight, initialEvent.pixelHeight);
     });
 
+    testWidgets('debounced keyboard resize recomputes the scroll extent', (
+      tester,
+    ) async {
+      final terminal = Terminal()..write('quiet prompt');
+      ScrollPosition position() => tester
+          .state<ScrollableState>(
+            find.descendant(
+              of: find.byType(MonkeyTerminalView),
+              matching: find.byType(Scrollable),
+            ),
+          )
+          .position;
+      await tester.pumpWidget(
+        buildTerminal(terminal: terminal, size: const Size(320, 400)),
+      );
+      final initialRows = terminal.viewHeight;
+
+      await tester.pumpWidget(
+        buildTerminal(
+          terminal: terminal,
+          size: const Size(320, 240),
+          keyboardInset: 160,
+        ),
+      );
+      // Until the debounce fires, the taller buffer overflows the viewport.
+      expect(terminal.viewHeight, initialRows);
+      expect(position().maxScrollExtent, greaterThan(0));
+
+      await tester.pump(terminalKeyboardResizeDebounceDuration);
+
+      // The resize drops the trailing blank rows, so everything fits again.
+      expect(terminal.viewHeight, lessThan(initialRows));
+      expect(terminal.buffer.lines.length, terminal.viewHeight);
+      expect(position().maxScrollExtent, 0);
+      expect(position().pixels, 0);
+    });
+
     testWidgets('size refresh can flush a pending keyboard resize', (
       tester,
     ) async {
