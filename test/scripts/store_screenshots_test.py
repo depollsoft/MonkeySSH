@@ -314,6 +314,11 @@ class ProCaptionTest(unittest.TestCase):
         announced = re.findall(r'await _announceScene\((\d+)\)', source)
         self.assertEqual([int(index) for index in announced], list(range(8)))
 
+    def test_validator_sizes_match_capture_targets(self):
+        expected = {size for devices in validate.IOS_SCREENSHOTS.values() for size in devices.values()}
+        expected |= set(validate.ANDROID_SCREENSHOTS.values())
+        self.assertEqual({target.size for target in capture.TARGETS.values()}, expected)
+
     def test_agent_scenes_resolve_live_names_not_stale_numeric_indices(self):
         source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
         self.assertNotRegex(source, r'_selectMonkeyMuxWindow\(\d+')
@@ -383,6 +388,15 @@ class ProCaptionTest(unittest.TestCase):
                 with patch.object(validate, '_ocr_texts', return_value={path: valid.replace(missing, '')}):
                     with self.assertRaisesRegex(ValueError, 'missing expected'):
                         validate._validate_ocr_content([path])
+
+    def test_identical_listing_captures_are_ocr_checked_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            production, private, other = (Path(directory) / name for name in ('a.png', 'b.png', 'c.png'))
+            production.write_bytes(b'same capture')
+            private.write_bytes(b'same capture')
+            other.write_bytes(b'different capture')
+            self.assertEqual(validate._unique_by_content([production, private, other]),
+                             [production, other])
 
     def test_screenshot_ocr_uses_shared_completeness_check(self):
         path = ROOT / 'ios/fastlane/screenshots/en-US/08_iphone_6_9.png'
@@ -595,6 +609,67 @@ class CaptureLaunchTest(unittest.TestCase):
         process.send_signal.assert_called_once_with(capture.signal.SIGTERM)
         process.wait.assert_called_once_with(timeout=2)
         thread.return_value.join.assert_called_once_with(timeout=1)
+
+    def test_failed_helper_extraction_removes_the_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / 'demo'
+            scratch.mkdir()
+            with patch.object(capture, 'require_agent_executables', return_value={}), \
+                 patch.object(capture.tempfile, 'mkdtemp', return_value=str(scratch)), \
+                 patch.object(capture.StoreDemoEnvironment, '_extract_monkeymux',
+                              side_effect=RuntimeError('checksum mismatch')):
+                with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                    capture.StoreDemoEnvironment()
+            self.assertFalse(scratch.exists())
+
+    def test_environment_teardown_continues_after_a_failed_step(self):
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        demo._tmpdir = Path('/nonexistent/monkeyssh-store-test')
+        calls = []
+        def step(name, error=None):
+            def run(*args, **kwargs):
+                calls.append(name)
+                if error is not None:
+                    raise error
+            return run
+        with patch.object(demo, '_teardown_monkeymux', step('teardown', BrokenPipeError())), \
+             patch.object(demo, '_stop_sshd', step('sshd')), \
+             patch.object(demo, '_remove_demo_dir', step('demo_dir')), \
+             patch.object(demo, '_restore_copilot_streamer_mode', step('settings')), \
+             patch.object(capture, '_warn_cleanup'):
+            with self.assertRaises(BrokenPipeError):
+                demo.__exit__(None, None, None)
+            self.assertEqual(calls, ['teardown', 'sshd', 'demo_dir', 'settings'])
+            # A capture failure stays the reported error.
+            demo.__exit__(RuntimeError, RuntimeError('capture'), None)
+
+    def test_control_pipe_failures_raise_runtime_error_and_still_reap(self):
+        control = object.__new__(capture._MonkeyMuxControl)
+        control._process = Mock()
+        control._process.poll.return_value = None
+        control._process.stdin.write.side_effect = BrokenPipeError()
+        control._counter = 0
+        control._reader = Mock()
+        with self.assertRaisesRegex(RuntimeError, 'control pipe failed'):
+            control.request({'type': 'shutdown'})
+        control._process.stdin.close.side_effect = BrokenPipeError()
+        with patch.object(capture, '_terminate_process') as terminate:
+            control.close()
+        terminate.assert_called_once_with(control._process, timeout=2)
+        control._reader.join.assert_called_once_with(timeout=1)
+
+    def test_sshd_output_goes_to_a_log_file_not_an_undrained_pipe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            demo = object.__new__(capture.StoreDemoEnvironment)
+            demo._tmpdir = Path(directory)
+            demo.port, demo.username = 2223, 'demo'
+            with patch.object(capture.subprocess, 'run'), \
+                 patch.object(capture.subprocess, 'Popen') as popen, \
+                 patch.object(demo, '_wait_for_sshd'):
+                demo._start_sshd()
+            stdout = popen.call_args.kwargs['stdout']
+            self.assertNotEqual(stdout, capture.subprocess.PIPE)
+            self.assertEqual(Path(stdout.name), Path(directory) / 'sshd.log')
 
     def test_shared_flutter_launch_configuration(self):
         from types import SimpleNamespace

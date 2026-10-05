@@ -66,14 +66,8 @@ const _themeMode = String.fromEnvironment(
   'STORE_SCREENSHOT_THEME_MODE',
   defaultValue: 'dark',
 );
-const _terminalThemeLightId = String.fromEnvironment(
-  'STORE_SCREENSHOT_TERMINAL_THEME_LIGHT_ID',
-  defaultValue: 'clean-white',
-);
-const _terminalThemeDarkId = String.fromEnvironment(
-  'STORE_SCREENSHOT_TERMINAL_THEME_DARK_ID',
-  defaultValue: 'velvet',
-);
+const _terminalThemeLightId = 'clean-white';
+const _terminalThemeDarkId = 'velvet';
 const _postReadyCaptureDelay = Duration(
   milliseconds: int.fromEnvironment(
     'STORE_SCREENSHOT_SCENE_HOLD_MS',
@@ -87,17 +81,11 @@ const _lightDemoImageMode = bool.fromEnvironment(
 const _lightDemoImageOutput = String.fromEnvironment(
   'STORE_SCREENSHOT_LIGHT_DEMO_OUTPUT',
 );
+// Video-only prompts, always passed by scripts/generate_store_demo_videos.py.
 const _copilotPrompt = String.fromEnvironment(
   'STORE_SCREENSHOT_COPILOT_PROMPT',
-  defaultValue:
-      'Visually describe only what is shown in the attached light-mode '
-      'MonkeySSH screenshot and call out the strongest store-listing details. '
-      'Do not run tools, read other files, or load skills.',
 );
-const _claudePrompt = String.fromEnvironment(
-  'STORE_SCREENSHOT_CLAUDE_PROMPT',
-  defaultValue: 'Summarize the riskiest release checks',
-);
+const _claudePrompt = String.fromEnvironment('STORE_SCREENSHOT_CLAUDE_PROMPT');
 const _fallbackOffer = MonetizationOffer(
   id: 'fallback',
   productId: 'store-screenshot-fallback',

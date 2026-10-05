@@ -12,9 +12,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from store_media import _ocr_texts, require_agent_family
+from store_media import ROOT, _ocr_texts, display_path, float_or_none, require_agent_family
 
-ROOT = Path(__file__).resolve().parents[1]
+SAMPLES_PER_SECOND = 2
 BAD_VIDEO_OCR_PATTERNS = {
     'placeholder agent pane': re.compile(r'agent session ready|CLI \(demo\)', re.IGNORECASE),
     'Android system error dialog': re.compile(
@@ -122,7 +122,7 @@ def main() -> None:
         )
         if target.requires_audio and not infos[path].has_audio:
             raise ValueError(
-                f'{_display_path(path)} ({target.slot}) has no audio track; '
+                f'{display_path(path)} ({target.slot}) has no audio track; '
                 'App Store app previews require an audio track',
             )
         _validate_dynamics(ffmpeg, path, target=target, info=infos[path])
@@ -169,23 +169,21 @@ def _validate_video(
     max_duration: float,
     info: VideoInfo,
 ) -> None:
-    if not path.exists():
-        raise FileNotFoundError(f'Missing demo video: {path}')
     if path.stat().st_size < 500_000:
-        raise ValueError(f'{_display_path(path)} is too small for a real recording')
+        raise ValueError(f'{display_path(path)} is too small for a real recording')
     actual_size = (info.width, info.height)
     if actual_size != expected_size:
         raise ValueError(
-            f'{_display_path(path)} is {info.width}x{info.height}; '
+            f'{display_path(path)} is {info.width}x{info.height}; '
             f'expected {expected_size[0]}x{expected_size[1]}',
         )
     if info.duration < min_duration or info.duration > max_duration:
         raise ValueError(
-            f'{_display_path(path)} is {info.duration:.1f}s; '
+            f'{display_path(path)} is {info.duration:.1f}s; '
             f'expected {min_duration:.1f}-{max_duration:.1f}s',
         )
     print(
-        f'Validated {_display_path(path)} '
+        f'Validated {display_path(path)} '
         f'({info.width}x{info.height}, {info.duration:.1f}s)',
     )
 
@@ -218,13 +216,13 @@ def _validate_dynamics(
     )
     if black_total > 1.0:
         raise ValueError(
-            f'{_display_path(path)} contains {black_total:.1f}s of near-black '
+            f'{display_path(path)} contains {black_total:.1f}s of near-black '
             'frames; the screen capture likely failed — regenerate the demo video',
         )
     # Native previews hold still during scene reads; branded backdrops animate.
     if target.animated_bg and 'freeze_start' in full:
         raise ValueError(
-            f'{_display_path(path)} contains a frozen/static segment of 2s or '
+            f'{display_path(path)} contains a frozen/static segment of 2s or '
             'more; the promotional animation is missing — regenerate the demo video',
         )
     frozen = sum(
@@ -241,7 +239,7 @@ def _validate_dynamics(
     fraction = frozen / info.duration
     if fraction > 0.97:
         raise ValueError(
-            f'{_display_path(path)} live app region is frozen '
+            f'{display_path(path)} live app region is frozen '
             f'{fraction * 100:.0f}% of the time; the device capture likely '
             'failed or stalled — regenerate the demo video',
         )
@@ -251,12 +249,12 @@ def _validate_dynamics(
     )
     if scene_changes < 4:
         raise ValueError(
-            f'{_display_path(path)} live app region only changes '
+            f'{display_path(path)} live app region only changes '
             f'{scene_changes} time(s); the device capture likely stalled on '
             'a single screen — regenerate the demo video',
         )
     print(
-        f'Validated live app progression for {_display_path(path)} '
+        f'Validated live app progression for {display_path(path)} '
         f'({scene_changes} scene changes)',
     )
 
@@ -271,28 +269,31 @@ def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> 
         frames_by_video: dict[Path, list[Path]] = {}
         tmpdir_path = Path(tmpdir)
         for video_path, info in infos.items():
-            for index, timestamp in enumerate(_sample_times(info.duration)):
-                frame_path = tmpdir_path / f'{video_path.stem}-{index}.png'
-                subprocess.run(
-                    [
-                        ffmpeg,
-                        '-y',
-                        '-loglevel',
-                        'error',
-                        '-ss',
-                        f'{timestamp:.3f}',
-                        '-i',
-                        str(video_path),
-                        '-frames:v',
-                        '1',
-                        str(frame_path),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                )
-                frame_paths.append(frame_path)
-                frames_by_video.setdefault(video_path, []).append(frame_path)
+            # One decode per video instead of one seek-and-decode per sample.
+            count = _sample_count(info.duration)
+            subprocess.run(
+                [
+                    ffmpeg,
+                    '-y',
+                    '-loglevel',
+                    'error',
+                    '-i',
+                    str(video_path),
+                    '-vf',
+                    f'fps={SAMPLES_PER_SECOND}',
+                    '-frames:v',
+                    str(count),
+                    '-start_number',
+                    '0',
+                    str(tmpdir_path / f'{video_path.stem}-%d.png'),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            frames = [tmpdir_path / f'{video_path.stem}-{index}.png' for index in range(count)]
+            frame_paths.extend(frames)
+            frames_by_video[video_path] = frames
 
         texts = _ocr_texts(frame_paths)
         for frame_path, text in texts.items():
@@ -308,10 +309,10 @@ def _validate_sampled_ocr_content(ffmpeg: str, infos: dict[Path, VideoInfo]) -> 
             )
 
 
-def _sample_times(duration: float) -> list[float]:
+def _sample_count(duration: float) -> int:
     # The navigator scrolls during a short beat. Sparse percentage samples can
     # miss either end of its agent list, so inspect frames every half second.
-    return [index / 2 for index in range(max(1, int(duration * 2)))]
+    return max(1, int(duration * SAMPLES_PER_SECOND))
 
 
 def _probe_videos(
@@ -340,12 +341,12 @@ def _probe_videos(
         streams = payload.get('streams', [])
         stream = next((s for s in streams if s.get('codec_type') == 'video'), None)
         if stream is None:
-            raise ValueError(f'{_display_path(path)} does not contain a video stream')
-        duration = _float_or_none(stream.get('duration'))
+            raise ValueError(f'{display_path(path)} does not contain a video stream')
+        duration = float_or_none(stream.get('duration'))
         if duration is None:
-            duration = _float_or_none(payload.get('format', {}).get('duration'))
+            duration = float_or_none(payload.get('format', {}).get('duration'))
         if duration is None:
-            raise ValueError(f'Could not read duration for {_display_path(path)}')
+            raise ValueError(f'Could not read duration for {display_path(path)}')
         infos[path] = VideoInfo(
             width=int(stream['width']),
             height=int(stream['height']),
@@ -353,26 +354,6 @@ def _probe_videos(
             has_audio=any(s.get('codec_type') == 'audio' for s in streams),
         )
     return infos
-
-
-def _float_or_none(value: object) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (float, int)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 """Failure-path checks for store video recording."""
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import generate_store_demo_videos as video
+import validate_store_demo_videos as validator
 
 
 class RecordingCleanupTest(unittest.TestCase):
@@ -42,6 +44,58 @@ class RecordingCleanupTest(unittest.TestCase):
                     watchdog.stop.assert_called_once_with()
                 if failure in ('start', 'stop'):
                     terminate.assert_called_once_with(process, timeout=20)
-                    recorder.stop.assert_called_once_with()
                 else:
                     terminate.assert_not_called()
+                # stop() collects the recording, so it must not run after a
+                # failed start() and replace that error with its own.
+                if failure == 'stop':
+                    recorder.stop.assert_called_once_with()
+                else:
+                    recorder.stop.assert_not_called()
+
+    def test_android_recorder_start_failure_reaps_and_stop_is_a_no_op(self):
+        with patch.object(video.store_screenshots, '_adb_path', return_value=Path('/adb')):
+            recorder = video._AndroidScreenRecorder(
+                device_id='device', output_path=Path('/unused.mp4'), size=(720, 1280))
+        process = Mock()
+        with patch.object(video.subprocess, 'Popen', return_value=process), \
+             patch.object(recorder, '_wait_for_remote_pid', side_effect=RuntimeError('timed out')), \
+             patch.object(video.store_screenshots, '_terminate_process') as terminate, \
+             patch.object(video.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'timed out'):
+                recorder.start()
+            terminate.assert_called_once_with(process, timeout=5)
+            recorder.stop()
+            run.assert_not_called()
+
+
+class BeatTimingTest(unittest.TestCase):
+    def test_incomplete_or_extra_beats_fail_instead_of_even_slicing(self):
+        count = len(video._promo_segments())
+        complete = {beat: float(beat) for beat in range(1, count + 1)}
+        self.assertEqual(video._compute_beat_offsets(complete, count),
+                         [float(beat) for beat in range(count)])
+        for beats in ({k: v for k, v in complete.items() if k != 3},
+                      {**complete, count + 1: 99.0}, {}):
+            with self.subTest(beats=sorted(beats)):
+                with self.assertRaisesRegex(RuntimeError, 'expected'):
+                    video._compute_beat_offsets(beats, count)
+
+    def test_validator_slots_match_generated_outputs(self):
+        generated = {}
+        for target in video.TARGETS.values():
+            for output in target.outputs:
+                size = {
+                    'app_preview': (output.width, output.height),
+                    'portrait_ads': target.screenshot_target.size,
+                    'landscape_promo': (1920, 1080),
+                }[output.kind]
+                generated[output.rel_path] = size
+        layout = video._landscape_layout()
+        self.assertEqual((layout['canvas_width'], layout['canvas_height']), (1920, 1080))
+        self.assertEqual(generated, {t.rel_path: t.size for t in validator.TARGETS})
+
+    def test_app_emits_one_beat_per_caption_segment(self):
+        source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
+        beats = sorted(int(beat) for beat in re.findall(r'_emitBeat\((\d+)\)', source))
+        self.assertEqual(beats, list(range(1, len(video._promo_segments()) + 1)))

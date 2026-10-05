@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
 
 # Shared by capture preflight and media validation. These are actual CLI panes,
 # not labels attached to shell placeholders.
@@ -154,3 +155,25 @@ def _video_duration(path: Path) -> float:
         check=True,
     )
     return float(result.stdout.strip())
+
+
+def float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (float, int)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def display_path(path: Path | str) -> str:
+    if isinstance(path, str):
+        return path
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)

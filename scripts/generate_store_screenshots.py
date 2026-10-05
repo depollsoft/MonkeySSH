@@ -31,9 +31,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from store_media import require_agent_executables
+from store_media import ROOT, float_or_none, require_agent_executables
 
-ROOT = Path(__file__).resolve().parents[1]
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
 DONE_MARKER = 'STORE_SCREENSHOT_DONE'
@@ -190,11 +189,7 @@ def _run_target(
     print(f'Generating {target.name} screenshots...')
     demo._require_live_agent_windows()
     demo.reset_monkeymux()
-    if target.platform == 'ios':
-        device_id = _boot_ios_simulator(_ios_simulator_name(target))
-        _reset_ios_app_state(device_id)
-    else:
-        device_id = _android_device_id()
+    device_id = _prepare_device(target)
 
     dart_defines = _capture_defines(target, demo)
     dart_defines.append('--dart-define=STORE_SCREENSHOT_HIDE_KEYBOARD_TOOLBAR=true')
@@ -353,7 +348,11 @@ class StoreDemoEnvironment:
         self.mux_session = f'monkeyssh-store-{os.getpid()}'
         self.demo_dir = Path('/tmp') / self.mux_session
         self._process: subprocess.Popen[str] | None = None
-        self._monkeymux = self._extract_monkeymux()
+        try:
+            self._monkeymux = self._extract_monkeymux()
+        except BaseException:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            raise
         self._monkeymux_env = self._build_monkeymux_env()
         self._monkeymux_process: subprocess.Popen[str] | None = None
         self._monkeymux_control: _MonkeyMuxControl | None = None
@@ -397,20 +396,32 @@ class StoreDemoEnvironment:
             raise
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        try:
-            self._teardown_monkeymux(unregister=True)
-            self._stop_sshd()
-            self._remove_demo_dir()
-            shutil.rmtree(self._tmpdir, ignore_errors=True)
-        finally:
-            self._restore_copilot_streamer_mode()
+        # Each step runs even if an earlier one fails, so a broken MonkeyMux
+        # control pipe cannot leave sshd listening with the temporary keys.
+        # A capture error stays the reported failure; cleanup errors are only
+        # raised when the capture itself succeeded.
+        errors: list[Exception] = []
+        for step in (
+            lambda: self._teardown_monkeymux(unregister=True),
+            self._stop_sshd,
+            self._remove_demo_dir,
+            lambda: shutil.rmtree(self._tmpdir, ignore_errors=True),
+            self._restore_copilot_streamer_mode,
+        ):
+            try:
+                step()
+            except Exception as error:
+                errors.append(error)
+                _warn_cleanup(f'Store demo cleanup step failed: {error!r}')
+        if errors and exc is None:
+            raise errors[0]
 
     def reset_monkeymux(self) -> None:
         self._monkeymux_select('copilot')
 
     def _extract_monkeymux(self) -> Path:
         subprocess.run(
-            [str(ROOT / 'scripts/ensure_monkeymux_assets.sh')],
+            [str(ROOT / 'scripts/build_monkeymux_assets.sh')],
             cwd=ROOT,
             check=True,
         )
@@ -549,12 +560,14 @@ class StoreDemoEnvironment:
             )
         )
         subprocess.run(['/usr/sbin/sshd', '-t', '-f', str(config)], check=True)
-        self._process = subprocess.Popen(
-            ['/usr/sbin/sshd', '-D', '-e', '-f', str(config)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        # Nothing reads sshd's output during a capture, so a pipe would block
+        # sshd once its buffer filled. Log to a file instead.
+        with (self._tmpdir / 'sshd.log').open('w') as log:
+            self._process = subprocess.Popen(
+                ['/usr/sbin/sshd', '-D', '-e', '-f', str(config)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         self._wait_for_sshd()
 
     def _wait_for_sshd(self) -> None:
@@ -576,7 +589,7 @@ class StoreDemoEnvironment:
         deadline = time.time() + 10
         while time.time() < deadline:
             if self._process is not None and self._process.poll() is not None:
-                output = self._process.stdout.read() if self._process.stdout else ''
+                output = (self._tmpdir / 'sshd.log').read_text(errors='replace')
                 raise RuntimeError(f'sshd exited before accepting connections: {output}')
             result = subprocess.run(
                 command,
@@ -761,11 +774,7 @@ class StoreDemoEnvironment:
         print(
             f'Capturing light-mode demo image on {target.name} at {output_path}...',
         )
-        if target.platform == 'ios':
-            device_id = _boot_ios_simulator(_ios_simulator_name(target))
-            _reset_ios_app_state(device_id)
-        else:
-            device_id = _android_device_id()
+        device_id = _prepare_device(target)
 
         dart_defines = _capture_defines(target, self) + [
             '--dart-define=STORE_SCREENSHOT_THEME_MODE=light',
@@ -932,7 +941,7 @@ class StoreDemoEnvironment:
         # captures should show a normal named session with the checklist image
         # rendered inside Copilot CLI, not a redacted placeholder session.
         self._drive_copilot_image_review()
-        self._assert_copilot_pane_privacy_safe()
+        self._assert_pane_privacy_safe('copilot')
 
     def _wait_for_copilot_ready(self) -> None:
         deadline = time.time() + 30
@@ -1012,7 +1021,7 @@ class StoreDemoEnvironment:
         while time.time() < deadline:
             text = self._capture_visible_pane('claude')
             if _claude_response_ready(text):
-                self._assert_claude_pane_privacy_safe()
+                self._assert_pane_privacy_safe('claude', allow_billing_label=True)
                 return
             time.sleep(1)
         raise RuntimeError('Claude Code did not finish its live store-demo response.')
@@ -1044,23 +1053,6 @@ class StoreDemoEnvironment:
                 self._monkeymux_send_keys('claude', 'Enter')
             time.sleep(1)
         raise RuntimeError('claude pane did not show the Claude Code prompt.')
-
-    def _wait_for_visible_text(self, window: str, markers: list[str]) -> None:
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            text = self._capture_visible_pane(window)
-            if all(_visible_text_contains_marker(text, marker) for marker in markers):
-                return
-            time.sleep(1)
-        raise RuntimeError(
-            f'{window} pane did not show expected text: {", ".join(markers)}.',
-        )
-
-    def _assert_copilot_pane_privacy_safe(self) -> None:
-        self._assert_pane_privacy_safe('copilot')
-
-    def _assert_claude_pane_privacy_safe(self) -> None:
-        self._assert_pane_privacy_safe('claude', allow_billing_label=True)
 
     def _copilot_settings_path(self) -> Path:
         return Path.home() / '.copilot' / 'settings.json'
@@ -1431,8 +1423,6 @@ class StoreDemoEnvironment:
             except subprocess.TimeoutExpired:
                 self._process.kill()
                 self._process.wait(timeout=10)
-        if self._process.stdout is not None:
-            self._process.stdout.close()
 
 
 class _MonkeyMuxControl:
@@ -1469,8 +1459,11 @@ class _MonkeyMuxControl:
         self._counter += 1
         request_id = f'capture-{os.getpid()}-{self._counter}'
         payload = {'id': request_id, **message}
-        self._process.stdin.write(json.dumps(payload) + '\n')
-        self._process.stdin.flush()
+        try:
+            self._process.stdin.write(json.dumps(payload) + '\n')
+            self._process.stdin.flush()
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f'MonkeyMux control pipe failed: {error}') from error
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1485,10 +1478,14 @@ class _MonkeyMuxControl:
         raise RuntimeError(f'MonkeyMux control request timed out: {message.get("type")}')
 
     def close(self) -> None:
-        if self._process.stdin is not None:
-            self._process.stdin.close()
-        _terminate_process(self._process, timeout=2)
-        self._reader.join(timeout=1)
+        try:
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+        except OSError:
+            pass  # The process already exited; it is still reaped below.
+        finally:
+            _terminate_process(self._process, timeout=2)
+            self._reader.join(timeout=1)
 
     def _wait_for_hello(self) -> None:
         deadline = time.time() + 2
@@ -1856,7 +1853,7 @@ def _decode_registry_entry(item: object) -> MonkeyMuxSessionRegistryEntry | None
         session=session.strip(),
         owner_pid=_int_or_none(item.get('ownerPid')),
         owner_start_time=_int_or_none(item.get('ownerStartTime')),
-        registered_at=_float_or_none(item.get('registeredAt')),
+        registered_at=float_or_none(item.get('registeredAt')),
     )
 
 
@@ -1954,19 +1951,6 @@ def _int_or_none(value: object) -> int | None:
     if isinstance(value, str):
         try:
             return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _float_or_none(value: object) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (float, int)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
         except ValueError:
             return None
     return None
@@ -2108,6 +2092,15 @@ def _capture_native_screenshot(
                     f'Wrote {display_path} '
                     f'({target.size[0]}x{target.size[1]})',
                 )
+
+
+def _prepare_device(target: ScreenshotTarget) -> str:
+    """Returns a ready device id: a freshly reset simulator or the emulator."""
+    if target.platform != 'ios':
+        return _android_device_id()
+    device_id = _boot_ios_simulator(_ios_simulator_name(target))
+    _reset_ios_app_state(device_id)
+    return device_id
 
 
 def _boot_ios_simulator(name: str) -> str:

@@ -92,7 +92,9 @@ class VideoValidationTest(unittest.TestCase):
                 with ocr, self.assertRaisesRegex(ValueError, error):
                     videos._validate_sampled_ocr_content('ffmpeg', {Path('/video.mov'): info})
                 captures = [c.args[0] for c in run.call_args_list if c.args[0][0] == 'ffmpeg']
-                self.assertEqual([c[5] for c in captures], [f'{index / 2:.3f}' for index in range(40)])
+                self.assertEqual(len(captures), 1)
+                self.assertEqual(captures[0][captures[0].index('-vf') + 1], 'fps=2')
+                self.assertEqual(captures[0][captures[0].index('-frames:v') + 1], '40')
 
 
     def test_each_video_requires_the_full_agent_family(self):
