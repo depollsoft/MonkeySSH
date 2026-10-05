@@ -39,6 +39,19 @@ WINDOWS_TEST_INPUTS = {
     'test/domain/services/monkeymux_installer_service_test.dart',
     'test/domain/services/monkeymux_windows_cleanup_test.dart',
 }
+# Inputs of the other Windows-only tests in build-windows. They gate only the
+# merge-queue build (not `windows_native`), so a PR keeps the cheap path.
+# ci_changes_test derives the required set from ci.yml so the two cannot drift.
+WINDOWS_GATING_INPUTS = {
+    'lib/domain/models/agent_runtime_info.dart',
+    'lib/domain/services/agent_management_service.dart',
+    'lib/domain/services/agent_usage_windows_command.dart',
+    'test/domain/services/agent_management_service_test.dart',
+    'test/domain/services/agent_probe_parallel_test.dart',
+    'test/domain/services/agent_usage_windows_command_test.dart',
+    'test/helpers/powershell_test_helpers.dart',
+    'test/scripts/agent_usage_windows_test.cjs',
+}
 
 # Keep the non-required preview/deployment workflow triggers aligned with these
 # inputs. The regression test checks all three YAML lists against this one.
@@ -100,7 +113,8 @@ def classify(paths):
             path.startswith('third_party/') or path == '.github/workflows/ci.yml'
         )
         result['deps'] |= path in DEPENDENCY_LOCKS
-        result['windows'] |= path in WINDOWS_TEST_INPUTS
+        windows_test_input = path in WINDOWS_TEST_INPUTS or path in WINDOWS_GATING_INPUTS
+        result['windows'] |= windows_test_input
         result['windows_native'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
 
@@ -133,8 +147,10 @@ def classify(paths):
             result[f'{platform}_native'] |= platform_source
             result[platform] |= global_build or platform_source
             native |= platform_source
+        # build-windows needs the monkeymux-assets job, which run_check enables.
         result['run_check'] |= (
-            global_build or native or payload or path.endswith('.dart')
+            global_build or native or payload or windows_test_input
+            or path.endswith('.dart')
             or path == 'analysis_options.yaml' or path.startswith('web/')
         )
     return result
