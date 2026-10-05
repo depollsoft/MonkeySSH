@@ -458,47 +458,67 @@ func captureReplacementPaneGroups(restore *serverRestore, ownerPID int) []replac
 	return replacementPaneGroupsSystem().capture(restore, ownerPID, readProcessTable)
 }
 
+// replacementWrapperPID returns the direct child of ownerPID on pid's ancestry
+// chain (pid itself when the pane is that child), or 0 when ownerPID is not a
+// proper ancestor of pid in processes.
+func replacementWrapperPID(processes map[int]processInfo, pid int, ownerPID int) int {
+	depth := processDepthFromAncestor(processes, pid, ownerPID)
+	if depth <= 0 {
+		return 0
+	}
+	wrapperPID := pid
+	for step := 1; step < depth; step++ {
+		wrapperPID = processes[wrapperPID].ppid
+	}
+	return wrapperPID
+}
+
 func (system replacementPaneGroupSystem) capture(restore *serverRestore, ownerPID int, readProcesses func() map[int]processInfo) []replacementPaneGroup {
-	var wrappers, panes []replacementPaneGroup
+	type capturedPane struct {
+		pane, wrapper replacementPaneGroup
+		wrapperPID    int
+		wrapperOK     bool
+	}
+	// Two process-table reads cover every window: one to find each wrapper, and
+	// one fresh ancestry read bracketed by the pane and wrapper identities. A
+	// previous ps snapshot must never authorize a newly reused PID.
+	var captured []capturedPane
+	processes := readProcesses()
 	for _, window := range restore.Windows {
 		pid := window.PanePid
 		pane, ok := system.identity(pid)
 		if !ok {
 			continue
 		}
-		processes := readProcesses()
-		depth := processDepthFromAncestor(processes, pid, ownerPID)
-		if depth <= 0 {
+		wrapperPID := replacementWrapperPID(processes, pid, ownerPID)
+		if wrapperPID <= 0 {
 			continue
-		}
-		wrapperPID := pid
-		for step := 1; step < depth; step++ {
-			wrapperPID = processes[wrapperPID].ppid
 		}
 		wrapper, wrapperOK := system.identity(wrapperPID)
-		// Bracket a fresh ancestry read with the pane and wrapper identities.
-		// A previous ps snapshot must never authorize a newly reused PID.
-		processes = readProcesses()
-		freshDepth := processDepthFromAncestor(processes, pid, ownerPID)
-		if freshDepth <= 0 {
+		captured = append(captured, capturedPane{pane, wrapper, wrapperPID, wrapperOK})
+	}
+	if len(captured) == 0 {
+		return nil
+	}
+	processes = readProcesses()
+	var wrappers, panes []replacementPaneGroup
+	for _, entry := range captured {
+		pid := entry.pane.pid
+		if replacementWrapperPID(processes, pid, ownerPID) != entry.wrapperPID {
 			continue
-		}
-		freshWrapper := pid
-		for step := 1; step < freshDepth; step++ {
-			freshWrapper = processes[freshWrapper].ppid
 		}
 		current, ok := system.identity(pid)
-		if !ok || !current.started.Equal(pane.started) || freshWrapper != wrapperPID {
+		if !ok || !current.started.Equal(entry.pane.started) {
 			continue
 		}
-		if wrapperPID != pid && wrapperOK {
-			currentWrapper, ok := system.identity(wrapperPID)
-			if !ok || !currentWrapper.started.Equal(wrapper.started) {
+		if entry.wrapperPID != pid && entry.wrapperOK {
+			currentWrapper, ok := system.identity(entry.wrapperPID)
+			if !ok || !currentWrapper.started.Equal(entry.wrapper.started) {
 				continue
 			}
-			wrappers = append(wrappers, wrapper)
+			wrappers = append(wrappers, entry.wrapper)
 		}
-		panes = append(panes, pane)
+		panes = append(panes, entry.pane)
 	}
 	// Put every verified wrapper first, even if another window lists it as a
 	// pane. Deduplicate shared groups without losing their kill ordering.
