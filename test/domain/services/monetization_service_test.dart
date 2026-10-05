@@ -1456,6 +1456,43 @@ void main() {
         );
 
         test(
+          'foreground check offline keeps an unlock verified at startup',
+          () async {
+            final restored = _purchase(
+              MonetizationProductIds.iosMonthlyProd,
+              PurchaseStatus.restored,
+            );
+            when(() => inAppPurchase.completePurchase(restored))
+                .thenAnswer((_) async {});
+            when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {
+              purchaseController.add([restored]);
+            });
+            final service = await startWithCachedUnlock(
+              MonetizationProductIds.iosMonthlyProd,
+            );
+            expect(service.currentState.isProUnlocked, isTrue);
+
+            // Offline, the subscription has expired from StoreKit's local cache
+            // and the catalog query returns nothing.
+            when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+              (_) async => ProductDetailsResponse(
+                productDetails: const [],
+                notFoundIDs: const [],
+              ),
+            );
+            when(() => inAppPurchase.restorePurchases())
+                .thenAnswer((_) async {});
+            await service.refreshStoreEntitlement();
+
+            expect(service.currentState.isProUnlocked, isTrue);
+            expect(
+              await settings.getBool(SettingKeys.monetizationProUnlocked),
+              isTrue,
+            );
+          },
+        );
+
+        test(
           'preserves a lifetime unlock as an explicit restore does',
           () async {
             when(() => inAppPurchase.restorePurchases())

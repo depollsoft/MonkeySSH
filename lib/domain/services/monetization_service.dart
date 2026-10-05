@@ -73,7 +73,8 @@ class MonetizationService {
   bool _restoreInFlight = false;
   bool _restoreObservedPurchaseUpdate = false;
   // Whether the last catalog query reached the store and returned products.
-  // Apple reconciliation only revokes a cached unlock after such an answer.
+  // Apple reconciliation only revokes a cached unlock after such an answer
+  // from a query made for that pass.
   bool _storeReachable = false;
   Future<void>? _appleReconciliation;
   bool _appleReconciliationObservedEntitlement = false;
@@ -194,22 +195,23 @@ class MonetizationService {
     if (!await _settings.getBool(SettingKeys.monetizationProUnlocked)) {
       return;
     }
-    if (!_storeReachable) {
-      await _refreshCatalogInternal();
-    }
-    await _startAppleReconciliation();
+    await _startAppleReconciliation(queryStore: true);
   }
 
   bool get _isApplePlatform =>
       defaultTargetPlatform == TargetPlatform.iOS ||
       defaultTargetPlatform == TargetPlatform.macOS;
 
-  Future<void> _startAppleReconciliation() {
+  /// Starts a reconciliation pass, first querying the catalog when
+  /// [queryStore] is set; startup passes reuse the query initialization just
+  /// made.
+  Future<void> _startAppleReconciliation({bool queryStore = false}) {
     if (!_isApplePlatform) {
       return Future.value();
     }
-    return _appleReconciliation ??= _reconcileAppleStoreEntitlement()
-        .whenComplete(() => _appleReconciliation = null);
+    return _appleReconciliation ??= _reconcileAppleStoreEntitlement(
+      queryStore: queryStore,
+    ).whenComplete(() => _appleReconciliation = null);
   }
 
   /// Revokes a cached Apple subscription that StoreKit no longer lists.
@@ -218,12 +220,19 @@ class MonetizationService {
   /// (verified, unexpired and unrevoked transactions) through the purchase
   /// stream, so an entitlement that arrives keeps or refreshes the unlock.
   /// Offline grace: the cached unlock is revoked only after verified absence,
-  /// meaning the catalog query reached the store, the restore call succeeded,
-  /// and no entitlement arrived within the empty-result grace period. An
-  /// unreachable store, a failed or timed-out restore, or a user purchase or
-  /// restore in progress keeps it unlocked. A lifetime unlock is preserved, as
-  /// in an explicit restore.
-  Future<void> _reconcileAppleStoreEntitlement() async {
+  /// meaning this pass's catalog query reached the store, the restore call
+  /// succeeded, and no entitlement arrived within the empty-result grace
+  /// period. StoreKit answers the restore from its local cache, so a query
+  /// that succeeded in an earlier pass does not show the store is reachable
+  /// now. An unreachable store, a failed or timed-out restore, or a user
+  /// purchase or restore in progress keeps it unlocked. A lifetime unlock is
+  /// preserved, as in an explicit restore.
+  Future<void> _reconcileAppleStoreEntitlement({
+    required bool queryStore,
+  }) async {
+    if (queryStore) {
+      await _refreshCatalogInternal();
+    }
     if (!_storeReachable ||
         _pendingPurchaseResult != null ||
         _restoreInFlight) {
