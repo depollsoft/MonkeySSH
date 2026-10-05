@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 
@@ -290,7 +291,7 @@ final class AcpJsonRpcConnection {
 
   final AcpTransport _transport;
   final AcpRequestIdFactory _requestIdFactory;
-  final _frameBytes = <int>[];
+  final _frameBytes = BytesBuilder(copy: false);
   final _pending = <AcpRequestId, _PendingResponse>{};
   // Unanswered peer requests by their exact JSON-RPC id. Dart map keys keep
   // numeric `1` and string `"1"` distinct, matching JSON-RPC identity.
@@ -432,21 +433,27 @@ final class AcpJsonRpcConnection {
 
   void _handleBytes(List<int> bytes) {
     if (_closed) return;
-    for (final byte in bytes) {
-      if (byte == 0x0a) {
-        final frame = List<int>.of(_frameBytes);
-        _frameBytes.clear();
-        if (frame.isNotEmpty && frame.last == 0x0d) frame.removeLast();
-        if (frame.isNotEmpty) _handleFrame(frame);
-        if (_closed) return;
-        continue;
+    final chunk = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+    var start = 0;
+    while (start < chunk.length) {
+      final end = chunk.indexOf(0x0a, start);
+      final segmentEnd = end < 0 ? chunk.length : end;
+      if (segmentEnd > start) {
+        _frameBytes.add(Uint8List.sublistView(chunk, start, segmentEnd));
+        // A trailing CR may be the first byte of a split CRLF delimiter.
+        final trailingCr = chunk[segmentEnd - 1] == 0x0d ? 1 : 0;
+        if (!_validateIncomingFrameSize(_frameBytes.length - trailingCr)) {
+          return;
+        }
       }
-      _frameBytes.add(byte);
-      // A trailing CR may be the first byte of a split CRLF delimiter.
-      final frameSize = _frameBytes.length - (byte == 0x0d ? 1 : 0);
-      if (!_validateIncomingFrameSize(frameSize)) {
-        return;
+      if (end < 0) return;
+      var frame = _frameBytes.takeBytes();
+      if (frame.isNotEmpty && frame.last == 0x0d) {
+        frame = Uint8List.sublistView(frame, 0, frame.length - 1);
       }
+      if (frame.isNotEmpty) _handleFrame(frame);
+      if (_closed) return;
+      start = end + 1;
     }
   }
 

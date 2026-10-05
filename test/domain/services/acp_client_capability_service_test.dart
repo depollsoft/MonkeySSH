@@ -624,6 +624,36 @@ void main() {
       expect(await read('closed', 'session-a', '/docs/a.txt'), isNot(allowed));
     });
 
+    test('resolves allowed roots once per session until they change', () async {
+      files.files['/docs/a.txt'] = Uint8List.fromList(utf8.encode('ok'));
+      service.setSessionAllowedRoots('session-a', const [
+        '/workspace',
+        '/docs',
+      ]);
+      Future<void> read(String id) async {
+        transport.sendRequest(id, 'fs/read_text_file', {
+          'sessionId': 'session-a',
+          'path': '/docs/a.txt',
+        });
+        await _settle();
+        expect(transport.responseFor(id)['result'], {'content': 'ok'});
+      }
+
+      await read('first');
+      await read('second');
+      expect(
+        files.canonicalizedPaths.where((path) => path == '/docs'),
+        hasLength(1),
+      );
+
+      service.setSessionAllowedRoots('session-a', const ['/docs']);
+      await read('third');
+      expect(
+        files.canonicalizedPaths.where((path) => path == '/docs'),
+        hasLength(2),
+      );
+    });
+
     test('rejects a read that resolves through an escaping symlink', () async {
       files.canonicalPaths['/workspace/link/private.txt'] = '/private.txt';
       transport.sendRequest('read-link', 'fs/read_text_file', {
@@ -1789,6 +1819,7 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
   final files = <String, Uint8List>{};
   final canonicalPaths = <String, String>{};
   final canonicalWritePaths = <String, String>{};
+  final canonicalizedPaths = <String>[];
   final readPaths = <String>[];
   Exception? writeFailure;
   Future<void>? canonicalizeGate;
@@ -1798,6 +1829,7 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
 
   @override
   Future<String> canonicalizeExistingPath(String path) async {
+    canonicalizedPaths.add(path);
     if (canonicalizeGate case final gate?) await gate;
     return canonicalPaths[path] ?? path;
   }
@@ -1879,9 +1911,6 @@ final class _FakeTerminalProcess implements AcpTerminalProcess {
 
   @override
   Stream<List<int>> get stderr => _stderr.stream;
-
-  @override
-  Future<void> get done => _exit.future.then((_) {});
 
   @override
   void kill() {
