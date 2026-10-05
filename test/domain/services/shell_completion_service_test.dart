@@ -10,9 +10,8 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
-
-class _MockSshClient extends Mock implements ssh.SSHClient {}
 
 class _MockSshExecSession extends MockSessionWithChannel {}
 
@@ -118,7 +117,7 @@ void main() {
           maxHistoryOutputChars: history ? retained.length : 80000,
           maxOutputChars: history ? 12000 : retained.length,
         );
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _buildShellCompletionSession(
           client,
           connectionId: 101,
@@ -162,7 +161,7 @@ void main() {
         timeout: const Duration(milliseconds: 10),
         historyTimeout: const Duration(milliseconds: 10),
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 102,
@@ -196,7 +195,7 @@ void main() {
         timeout: const Duration(milliseconds: 10),
         historyTimeout: const Duration(milliseconds: 10),
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 104,
@@ -239,7 +238,7 @@ void main() {
   for (final stdinCloseHangs in [false, true]) {
     test('interactive collector subscribes before writing and closes once '
         '(stdin close hangs: $stdinCloseHangs)', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 103,
@@ -701,8 +700,8 @@ void main() {
       'service reuses host-cached history while fresh connection loads',
       () async {
         final service = ShellCompletionService();
-        final firstClient = _MockSshClient();
-        final secondClient = _MockSshClient();
+        final firstClient = MockSshClient();
+        final secondClient = MockSshClient();
         final firstSession = _buildShellCompletionSession(
           firstClient,
           connectionId: 1,
@@ -756,7 +755,7 @@ void main() {
       'runs PowerShell completion and history probes on Windows remotes',
       () async {
         final service = ShellCompletionService();
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _buildShellCompletionSession(
           client,
           connectionId: 7,
@@ -811,7 +810,7 @@ void main() {
 
     test('uses TabExpansion2 for Windows argument completions', () async {
       final service = ShellCompletionService();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 8,
@@ -872,8 +871,8 @@ void main() {
       'service keeps in-flight history loads scoped to their connection',
       () async {
         final service = ShellCompletionService();
-        final firstClient = _MockSshClient();
-        final secondClient = _MockSshClient();
+        final firstClient = MockSshClient();
+        final secondClient = MockSshClient();
         final firstSession = _buildShellCompletionSession(
           firstClient,
           connectionId: 1,

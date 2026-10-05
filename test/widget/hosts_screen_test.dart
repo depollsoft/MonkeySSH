@@ -16,7 +16,7 @@ import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/hosts_screen.dart';
 import 'package:monkeyssh/presentation/widgets/brand_list_skeleton.dart';
 
-class _MockHostRepository extends Mock implements HostRepository {}
+import '../helpers/mocks.dart';
 
 void _callReorderItemCallback(
   ReorderCallback? callback,
@@ -193,7 +193,7 @@ void main() {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
 
-    final hostRepository = _MockHostRepository();
+    final hostRepository = MockHostRepository();
     when(() => hostRepository.reorderByIds(any())).thenAnswer((_) async {});
 
     await tester.pumpWidget(

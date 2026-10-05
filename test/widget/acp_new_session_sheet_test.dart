@@ -28,6 +28,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
+import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
 
 class _FakeActiveSessions extends ActiveSessionsNotifier {
@@ -54,10 +55,6 @@ class _FakeActiveSessions extends ActiveSessionsNotifier {
 }
 
 class _MockSshService extends Mock implements SshService {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockExecSession extends Mock implements SSHSession {}
 
 class _MockAgentLaunchPresetService extends Mock
     implements AgentLaunchPresetService {}
@@ -230,8 +227,8 @@ void main() {
   testWidgets('generic sheet launches Cursor through its resolved binary', (
     tester,
   ) async {
-    final client = _MockSshClient();
-    final exec = _MockExecSession();
+    final client = MockSshClient();
+    final exec = MockSSHSession();
     when(() => exec.stdout).thenAnswer(
       (_) => Stream.value(
         Uint8List.fromList(
@@ -644,13 +641,13 @@ void main() {
       List<SSHPtyConfig?>? ptys,
     }) {
       registerFallbackValue(const SSHPtyConfig());
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         invocation,
       ) async {
         commands?.add(invocation.positionalArguments.single as String);
         ptys?.add(invocation.namedArguments[#pty] as SSHPtyConfig?);
-        final exec = _MockExecSession();
+        final exec = MockSSHSession();
         when(() => exec.stdout).thenAnswer(
           (_) => Stream.value(
             Uint8List.fromList(utf8.encode('copilot\u001f/usr/bin/copilot\n')),

@@ -15,7 +15,7 @@ import 'package:url_launcher_platform_interface/link.dart';
 // ignore: depend_on_referenced_packages
 import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 
-class _MockMonetizationService extends Mock implements MonetizationService {}
+import '../helpers/mocks.dart';
 
 class _FakeUrlLauncher extends UrlLauncherPlatform {
   Future<bool> Function() launchResult = () async => true;
@@ -47,7 +47,7 @@ Future<MonetizationActionResult> _cancelledPurchaseResult(Invocation _) =>
 Future<MonetizationActionResult> _restoredPurchaseResult(Invocation _) =>
     Future.value(const MonetizationActionResult.success('Restored purchases.'));
 
-void _stubRestorePurchases(_MockMonetizationService service) {
+void _stubRestorePurchases(MockMonetizationService service) {
   // ignore: unnecessary_lambdas
   when(() => service.restorePurchases()).thenAnswer(_restoredPurchaseResult);
 }
@@ -66,7 +66,7 @@ void main() {
     });
 
     Future<void> showUpgrade(WidgetTester tester) async {
-      final service = _MockMonetizationService();
+      final service = MockMonetizationService();
       const state = MonetizationState(
         billingAvailability: MonetizationBillingAvailability.available,
         entitlements: MonetizationEntitlements.free(),
@@ -159,7 +159,7 @@ void main() {
   testWidgets('feature-triggered paywall leads with the blocked action', (
     tester,
   ) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.free(),
@@ -202,7 +202,7 @@ void main() {
   testWidgets('shows subscription legal details and policy links', (
     tester,
   ) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.free(),
@@ -253,7 +253,7 @@ void main() {
   });
 
   testWidgets('plan cards stay legible in dark mode', (tester) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.pro(),
@@ -372,7 +372,7 @@ void main() {
   testWidgets('shows switch action for a different plan when subscribed', (
     tester,
   ) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.pro(),
@@ -428,7 +428,7 @@ void main() {
   });
 
   testWidgets('highlights annual savings and best value copy', (tester) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.free(),
@@ -502,7 +502,7 @@ void main() {
   testWidgets('shared trial copy mentions monthly and annual plans', (
     tester,
   ) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const trialLabel = '2 weeks free trial for eligible new customers';
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
@@ -571,7 +571,7 @@ void main() {
   testWidgets('shows inline store progress while processing loaded plans', (
     tester,
   ) async {
-    final service = _MockMonetizationService();
+    final service = MockMonetizationService();
     const state = MonetizationState(
       billingAvailability: MonetizationBillingAvailability.available,
       entitlements: MonetizationEntitlements.free(),
@@ -625,7 +625,7 @@ void main() {
       testWidgets(
         'purchase result with disposed=$disposeBeforeCompletion: ${result.message}',
         (tester) async {
-          final service = _MockMonetizationService();
+          final service = MockMonetizationService();
           final purchase = Completer<MonetizationActionResult>();
           const state = MonetizationState(
             billingAvailability: MonetizationBillingAvailability.available,
@@ -685,7 +685,7 @@ void main() {
   testWidgets(
     'shows lifetime ownership info and hides recurring plan actions',
     (tester) async {
-      final service = _MockMonetizationService();
+      final service = MockMonetizationService();
       final state = MonetizationState(
         billingAvailability: MonetizationBillingAvailability.available,
         entitlements: const MonetizationEntitlements.pro(),

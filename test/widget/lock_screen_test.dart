@@ -5,19 +5,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/presentation/screens/lock_screen.dart';
 
+import '../helpers/mocks.dart';
+
 const _shortPinHash = 'AAECAwQFBgcICQoLDA0ODw==';
 const _validPinSalt = 'AAECAwQFBgcICQoLDA0ODw==';
-
-class _MockAuthService extends Mock implements AuthService {}
-
-class _MockFlutterSecureStorage extends Mock implements FlutterSecureStorage {}
 
 class _MockLocalAuthentication extends Mock implements LocalAuthentication {}
 
@@ -40,7 +37,7 @@ void main() {
     testWidgets('stays fail-closed when auth method lookup throws', (
       tester,
     ) async {
-      final authService = _MockAuthService();
+      final authService = MockAuthService();
       final reportedErrors = <FlutterErrorDetails>[];
       final originalOnError = FlutterError.onError;
 
@@ -79,7 +76,7 @@ void main() {
     testWidgets(
       'retry refreshes auth state when storage recovers without auth configured',
       (tester) async {
-        final authService = _MockAuthService();
+        final authService = MockAuthService();
         final container = ProviderContainer(
           overrides: [authServiceProvider.overrideWithValue(authService)],
         );
@@ -132,7 +129,7 @@ void main() {
     testWidgets(
       'keeps retry UI when auth method recovers to none but refresh stays locked',
       (tester) async {
-        final authService = _MockAuthService();
+        final authService = MockAuthService();
         final container = ProviderContainer(
           overrides: [authServiceProvider.overrideWithValue(authService)],
         );
@@ -189,7 +186,7 @@ void main() {
     testWidgets(
       'shows retry UI on initial load when state is locked without an auth method',
       (tester) async {
-        final authService = _MockAuthService();
+        final authService = MockAuthService();
         final container = ProviderContainer(
           overrides: [authServiceProvider.overrideWithValue(authService)],
         );
@@ -225,7 +222,7 @@ void main() {
     testWidgets(
       'shows retry UI when auth is enabled but PIN material is partial and biometrics are unavailable',
       (tester) async {
-        final storage = _MockFlutterSecureStorage();
+        final storage = MockFlutterSecureStorage();
         final localAuth = _MockLocalAuthentication();
         final authService = AuthService(storage: storage, localAuth: localAuth);
         final reportedErrors = <FlutterErrorDetails>[];
@@ -280,7 +277,7 @@ void main() {
     testWidgets(
       'shows retry UI when auth is enabled but PIN hash is decodable with an invalid length',
       (tester) async {
-        final storage = _MockFlutterSecureStorage();
+        final storage = MockFlutterSecureStorage();
         final localAuth = _MockLocalAuthentication();
         final authService = AuthService(storage: storage, localAuth: localAuth);
         final reportedErrors = <FlutterErrorDetails>[];
@@ -335,7 +332,7 @@ void main() {
     testWidgets('ignores an unlock result after the screen is removed', (
       tester,
     ) async {
-      final authService = _MockAuthService();
+      final authService = MockAuthService();
       final notifier = _BlockingUnlockAuthStateNotifier();
 
       when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
@@ -368,7 +365,7 @@ void main() {
     testWidgets('balances PIN field icon spacing to keep entry centered', (
       tester,
     ) async {
-      final authService = _MockAuthService();
+      final authService = MockAuthService();
 
       when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
 

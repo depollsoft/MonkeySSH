@@ -16,8 +16,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mocks.dart';
 
 class _MockSshExecSession extends MockSessionWithChannel {}
 
@@ -29,7 +28,7 @@ void main() {
       tester,
     ) async {
       final opening = Completer<SSHSession>();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) => opening.future);
       final session = _buildSession(client);
@@ -78,7 +77,7 @@ void main() {
         monkeyMuxService: _MockMonkeyMuxService(),
       );
 
-      final backend = service.resolve(_buildSession(_MockSshClient()));
+      final backend = service.resolve(_buildSession(MockSshClient()));
 
       expect(backend.type, TerminalBackendType.direct);
       expect(backend.remoteMuxBackend, isNull);
@@ -86,7 +85,7 @@ void main() {
     });
 
     test('runs direct client commands through the SSH exec queue', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
@@ -154,7 +153,7 @@ void main() {
         tmuxMultiplexer: tmuxMultiplexer,
         monkeyMuxService: _MockMonkeyMuxService(),
       );
-      final session = _buildSession(_MockSshClient())
+      final session = _buildSession(MockSshClient())
         ..remoteMuxBackend = RemoteMuxBackend.tmux
         ..remoteMuxSessionName = 'dev';
 
@@ -191,7 +190,7 @@ void main() {
       'runs MonkeyMux client commands through the control channel',
       () async {
         final monkeyMuxService = _MockMonkeyMuxService();
-        final session = _buildSession(_MockSshClient())
+        final session = _buildSession(MockSshClient())
           ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
           ..remoteMuxSessionName = 'dev';
         when(

@@ -3,7 +3,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,11 +14,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockShellChannel extends Mock implements SSHSession {}
+import 'mocks.dart';
 
 class TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   TestActiveSessionsNotifier(this.session);
@@ -71,9 +66,9 @@ class TerminalSessionFixture {
   }) {
     final database = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(database.close);
-    final hostRepository = _MockHostRepository();
-    final sshClient = _MockSshClient();
-    final shellChannel = _MockShellChannel();
+    final hostRepository = MockHostRepository();
+    final sshClient = MockSshClient();
+    final shellChannel = MockSSHSession();
     final host = buildSelectionTestHost(id: hostId);
     final shellDoneCompleter = Completer<void>();
     final shellStdoutController = stdout == null

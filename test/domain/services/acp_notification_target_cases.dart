@@ -1,15 +1,13 @@
 import 'dart:async';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_notification_target.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mocks.dart';
 
 void registerAcpNotificationTargetTests() {
   group('acp_notification_target', () {
@@ -21,7 +19,7 @@ void registerAcpNotificationTargetTests() {
     );
     SshSession connection(int id, {int hostId = 7}) =>
         SshSession(
-            client: _MockSshClient(),
+            client: MockSshClient(),
             connectionId: id,
             hostId: hostId,
             config: const SshConnectionConfig(
