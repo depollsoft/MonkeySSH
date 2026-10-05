@@ -19,15 +19,12 @@ class MonkeyTerminalGestureHandler extends StatefulWidget {
     required this.terminalView,
     required this.terminalController,
     this.child,
-    this.onSingleTapUp,
     this.onTapDown,
     this.onDoubleTapDown,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.onTertiaryTapDown,
     this.onTertiaryTapUp,
-    this.onLongPressStart,
-    this.onLongPressMoveUpdate,
     this.onTouchScrollDown,
     this.onTouchScrollStart,
     this.onTouchScrollUpdate,
@@ -48,8 +45,6 @@ class MonkeyTerminalGestureHandler extends StatefulWidget {
   final TerminalController terminalController;
 
   final Widget? child;
-
-  final GestureTapUpCallback? onSingleTapUp;
 
   final GestureTapDownCallback? onTapDown;
 
@@ -76,14 +71,6 @@ class MonkeyTerminalGestureHandler extends StatefulWidget {
   final GestureVelocityTrackerBuilder? touchScrollVelocityTrackerBuilder;
 
   final MultitouchDragStrategy? touchScrollMultitouchDragStrategy;
-
-  /// Optional override for touch long-press start. When provided, the default
-  /// behavior of selecting a word in the terminal is suppressed.
-  final GestureLongPressStartCallback? onLongPressStart;
-
-  /// Optional override for touch long-press move update. When provided, the
-  /// default behavior of extending the terminal selection is suppressed.
-  final GestureLongPressMoveUpdateCallback? onLongPressMoveUpdate;
 
   /// Resolves a tappable link at the given local position, if any.
   final String? Function(Offset localPosition)? resolveLinkTap;
@@ -235,7 +222,7 @@ class _TerminalGestureHandlerState extends State<MonkeyTerminalGestureHandler> {
       widget.onLinkTap?.call(pendingLinkTap);
       return;
     }
-    _tapUp(widget.onSingleTapUp, details, TerminalMouseButton.left);
+    _tapUp(null, details, TerminalMouseButton.left);
   }
 
   void onSecondaryTapDown(TapDownDetails details) {
@@ -292,20 +279,10 @@ class _TerminalGestureHandlerState extends State<MonkeyTerminalGestureHandler> {
   void onLongPressStart(LongPressStartDetails details) {
     _pendingLinkTap = null;
     _lastLongPressStartDetails = details;
-    final override = widget.onLongPressStart;
-    if (override != null) {
-      override(details);
-      return;
-    }
     renderTerminal.selectWord(details.localPosition);
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
-    final override = widget.onLongPressMoveUpdate;
-    if (override != null) {
-      override(details);
-      return;
-    }
     if (widget.suppressLongPressDragSelection) {
       // Skip xterm's drag-to-extend on touch so the parent's selection UI
       // (e.g. native selection overlay) isn't thrashed by repeated selection

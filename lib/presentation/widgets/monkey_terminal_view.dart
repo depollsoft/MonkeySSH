@@ -517,21 +517,16 @@ class MonkeyTerminalView extends StatefulWidget {
     this.cursorFocusNode,
     this.autofocus = false,
     this.onTapDown,
-    this.onTapUp,
     this.onDoubleTapDown,
-    this.onLongPressStart,
     this.suppressLongPressDragSelection = false,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.resolveLinkTap,
     this.onLinkTapDown,
     this.onLinkTap,
-    this.keyboardType = TextInputType.emailAddress,
     this.keyboardAppearance = Brightness.dark,
-    this.cursorType = TerminalCursorType.block,
     this.deleteDetection = false,
     this.shortcuts,
-    this.onKeyEvent,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -599,19 +594,12 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Callback for when the user taps down on the terminal.
   final void Function(TapDownDetails, CellOffset)? onTapDown;
 
-  /// Callback for when the user taps on the terminal.
-  final void Function(TapUpDetails, CellOffset)? onTapUp;
-
   /// Callback for when the user double taps on the terminal.
   final void Function(TapDownDetails, CellOffset)? onDoubleTapDown;
 
-  /// Callback for when the user long presses on the terminal.
-  final void Function(LongPressStartDetails, CellOffset)? onLongPressStart;
-
   /// When true, the terminal's built-in drag-to-extend selection on touch
-  /// long-press is suppressed. When no [onLongPressStart] override is
-  /// provided, the initial word selection on long-press start still occurs,
-  /// but subsequent move updates do not extend the selection.
+  /// long-press is suppressed. The initial word selection on long-press start
+  /// still occurs, but subsequent move updates do not extend the selection.
   final bool suppressLongPressDragSelection;
 
   /// Function called when the user taps on the terminal with a secondary
@@ -630,17 +618,10 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Called when a primary tap should open a resolved terminal link.
   final ValueChanged<String>? onLinkTap;
 
-  /// The type of information for which to optimize the text input control.
-  /// [TextInputType.emailAddress] by default.
-  final TextInputType keyboardType;
-
   /// The appearance of the keyboard. [Brightness.dark] by default.
   ///
   /// This setting is only honored on iOS devices.
   final Brightness keyboardAppearance;
-
-  /// The type of cursor to use. [TerminalCursorType.block] by default.
-  final TerminalCursorType cursorType;
 
   /// Workaround to detect delete key for platforms and IMEs that does not
   /// emit hardware delete event. Preferred on mobile platforms. [false] by
@@ -650,10 +631,6 @@ class MonkeyTerminalView extends StatefulWidget {
   /// Shortcuts for this terminal. This has higher priority than input handler
   /// of the terminal If not provided, [defaultTerminalShortcuts] will be used.
   final Map<ShortcutActivator, Intent>? shortcuts;
-
-  /// Keyboard event handler of the terminal. This has higher priority than
-  /// [shortcuts] and input handler of the terminal.
-  final FocusOnKeyEventCallback? onKeyEvent;
 
   /// True if no input should send to the terminal.
   final bool readOnly;
@@ -1222,7 +1199,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           terminal: widget.terminal,
           controller: _controller,
           offset: offset,
-          padding: EdgeInsets.zero,
           alignToTrailingEdges: shouldAlignTerminalToTrailingEdges(mediaQuery),
           autoResize: widget.autoResize,
           resizeTerminalToViewport: widget.resizeTerminalToViewport,
@@ -1234,7 +1210,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           theme: widget.theme,
           inlineUnderlines: widget.inlineUnderlines,
           focusNode: cursorFocusNode,
-          cursorType: widget.cursorType,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
           selectionRegistrar: SelectionContainer.maybeOf(context),
@@ -1278,7 +1253,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         key: _customTextEditKey,
         focusNode: _focusNode,
         autofocus: widget.autofocus,
-        inputType: widget.keyboardType,
+        inputType: TextInputType.emailAddress,
         keyboardAppearance: widget.keyboardAppearance,
         deleteDetection: widget.deleteDetection,
         onInsert: _onInsert,
@@ -1309,12 +1284,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       key: ValueKey<int>(widget.scrollResetGeneration),
       terminalView: this,
       terminalController: _controller,
-      onSingleTapUp: _onTapUp,
       onTapDown: _onTapDown,
       onDoubleTapDown: widget.onDoubleTapDown != null ? _onDoubleTapDown : null,
-      onLongPressStart: widget.onLongPressStart != null
-          ? _onLongPressStart
-          : null,
       suppressLongPressDragSelection: widget.suppressLongPressDragSelection,
       onSecondaryTapDown: widget.onSecondaryTapDown != null
           ? _onSecondaryTapDown
@@ -1410,11 +1381,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         renderTerminal.cellSize;
   }
 
-  void _onTapUp(TapUpDetails details) {
-    final offset = renderTerminal.getCellOffset(details.localPosition);
-    widget.onTapUp?.call(details, offset);
-  }
-
   void _onTapDown(TapDownDetails details) {
     _stopTouchScrollInertia();
     if (_controller.selection != null) {
@@ -1444,11 +1410,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _stopTouchScrollInertia();
     final offset = renderTerminal.getCellOffset(details.localPosition);
     widget.onLinkTapDown?.call(details, offset);
-  }
-
-  void _onLongPressStart(LongPressStartDetails details) {
-    final offset = renderTerminal.getCellOffset(details.localPosition);
-    widget.onLongPressStart?.call(details, offset);
   }
 
   void _onSecondaryTapDown(TapDownDetails details) {
@@ -1830,11 +1791,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   }
 
   KeyEventResult _handleKeyEvent(FocusNode focusNode, KeyEvent event) {
-    final resultOverride = widget.onKeyEvent?.call(focusNode, event);
-    if (resultOverride != null && resultOverride != KeyEventResult.ignored) {
-      return resultOverride;
-    }
-
     // Match Shortcuts' guard when a focus node has been detached.
     final shortcutContext = focusNode.context;
     if (shortcutContext != null) {
@@ -1982,7 +1938,6 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.terminal,
     required this.controller,
     required this.offset,
-    required this.padding,
     required this.alignToTrailingEdges,
     required this.autoResize,
     required this.resizeTerminalToViewport,
@@ -1994,7 +1949,6 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.theme,
     required this.inlineUnderlines,
     required this.focusNode,
-    required this.cursorType,
     this.onEditableRect,
     this.composingText,
     this.selectionRegistrar,
@@ -2005,8 +1959,6 @@ class _TerminalView extends LeafRenderObjectWidget {
   final TerminalController controller;
 
   final ViewportOffset offset;
-
-  final EdgeInsets padding;
 
   final bool alignToTrailingEdges;
 
@@ -2030,8 +1982,6 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final FocusNode focusNode;
 
-  final TerminalCursorType cursorType;
-
   final EditableRectCallback? onEditableRect;
 
   final String? composingText;
@@ -2044,7 +1994,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       terminal: terminal,
       controller: controller,
       offset: offset,
-      padding: padding,
       alignToTrailingEdges: alignToTrailingEdges,
       autoResize: autoResize,
       resizeTerminalToViewport: resizeTerminalToViewport,
@@ -2056,7 +2005,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       theme: theme,
       inlineUnderlines: inlineUnderlines,
       focusNode: focusNode,
-      cursorType: cursorType,
       onEditableRect: onEditableRect,
       composingText: composingText,
       selectionRegistrar: selectionRegistrar,
@@ -2072,7 +2020,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..terminal = terminal
       ..controller = controller
       ..offset = offset
-      ..padding = padding
       ..alignToTrailingEdges = alignToTrailingEdges
       ..autoResize = autoResize
       ..resizeTerminalToViewport = resizeTerminalToViewport
@@ -2084,7 +2031,6 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..theme = theme
       ..inlineUnderlines = inlineUnderlines
       ..focusNode = focusNode
-      ..cursorType = cursorType
       ..onEditableRect = onEditableRect
       ..composingText = composingText
       ..selectionRegistrar = selectionRegistrar;
@@ -2963,7 +2909,6 @@ class MonkeyRenderTerminal extends RenderBox
     required Terminal terminal,
     required TerminalController controller,
     required ViewportOffset offset,
-    required EdgeInsets padding,
     required bool alignToTrailingEdges,
     required bool autoResize,
     required bool resizeTerminalToViewport,
@@ -2975,14 +2920,12 @@ class MonkeyRenderTerminal extends RenderBox
     required TerminalTheme theme,
     required List<TerminalTextUnderline> inlineUnderlines,
     required FocusNode focusNode,
-    required TerminalCursorType cursorType,
     EditableRectCallback? onEditableRect,
     String? composingText,
     SelectionRegistrar? selectionRegistrar,
   }) : _terminal = terminal,
        _controller = controller,
        _offset = offset,
-       _padding = padding,
        _alignToTrailingEdges = alignToTrailingEdges,
        _autoResize = autoResize,
        _resizeTerminalToViewport = resizeTerminalToViewport,
@@ -2991,7 +2934,6 @@ class MonkeyRenderTerminal extends RenderBox
        _liveOutputAutoScroll = liveOutputAutoScroll,
        _inlineUnderlines = inlineUnderlines,
        _focusNode = focusNode,
-       _cursorType = cursorType,
        _onEditableRect = onEditableRect,
        _composingText = composingText,
        _selectionGeometry = SelectionGeometry(
@@ -3033,13 +2975,6 @@ class MonkeyRenderTerminal extends RenderBox
     if (attached) _offset.removeListener(_onScroll);
     _offset = value;
     if (attached) _offset.addListener(_onScroll);
-    markNeedsLayout();
-  }
-
-  EdgeInsets _padding;
-  set padding(EdgeInsets value) {
-    if (value == _padding) return;
-    _padding = value;
     markNeedsLayout();
   }
 
@@ -3133,13 +3068,6 @@ class MonkeyRenderTerminal extends RenderBox
     if (attached) _focusNode.removeListener(_onFocusChange);
     _focusNode = value;
     if (attached) _focusNode.addListener(_onFocusChange);
-    markNeedsPaint();
-  }
-
-  TerminalCursorType _cursorType;
-  set cursorType(TerminalCursorType value) {
-    if (value == _cursorType) return;
-    _cursorType = value;
     markNeedsPaint();
   }
 
@@ -3358,7 +3286,6 @@ class MonkeyRenderTerminal extends RenderBox
     cellSize: _painter.cellSize,
     columns: _terminal.viewWidth,
     rows: _terminal.viewHeight,
-    padding: _padding,
     alignToTrailingEdges: _alignToTrailingEdges,
   );
 
@@ -4018,7 +3945,7 @@ class MonkeyRenderTerminal extends RenderBox
   }
 
   void _updateViewportSize({bool notifyIfUnchanged = false}) {
-    final availableWidth = size.width - _padding.horizontal;
+    final availableWidth = size.width;
     final availableHeight = _viewportHeight;
     final cellWidth = _painter.cellSize.width;
     final cellHeight = _painter.cellSize.height;
@@ -4040,10 +3967,7 @@ class MonkeyRenderTerminal extends RenderBox
       availableWidth ~/ cellWidth,
       availableHeight ~/ cellHeight,
     );
-    final pixelSize = resolveTerminalResizePixelDimensions(
-      viewportSize: size,
-      padding: _padding,
-    );
+    final pixelSize = resolveTerminalResizePixelDimensions(viewportSize: size);
 
     final terminalNeedsResize =
         _terminal.viewWidth != viewportSize.width ||
@@ -4129,11 +4053,7 @@ class MonkeyRenderTerminal extends RenderBox
       return;
     }
     final nextPixelSize =
-        pixelSize ??
-        resolveTerminalResizePixelDimensions(
-          viewportSize: size,
-          padding: _padding,
-        );
+        pixelSize ?? resolveTerminalResizePixelDimensions(viewportSize: size);
 
     if (_isDebouncingKeyboardResize) {
       _pendingTerminalResize = (
@@ -4247,7 +4167,7 @@ class MonkeyRenderTerminal extends RenderBox
 
   bool get _shouldShowCursor => _terminal.cursorVisibleMode || _isComposingText;
 
-  double get _viewportHeight => size.height - _padding.vertical;
+  double get _viewportHeight => size.height;
 
   double get _maxScrollExtent =>
       math.max(_terminalHeight - _viewportHeight, 0.0);
@@ -5000,7 +4920,7 @@ class MonkeyRenderTerminal extends RenderBox
       _painter.paintCursor(
         canvas,
         offset,
-        cursorType: _cursorType,
+        cursorType: TerminalCursorType.block,
         hasFocus: _focusNode.hasFocus,
       );
       return;
@@ -5010,7 +4930,7 @@ class MonkeyRenderTerminal extends RenderBox
       canvas,
       offset,
       cellData,
-      cursorType: _cursorType,
+      cursorType: TerminalCursorType.block,
       hasFocus: _focusNode.hasFocus,
     );
   }
@@ -5175,7 +5095,7 @@ class MonkeyRenderTerminal extends RenderBox
     int firstLine,
     int lastLine,
   ) {
-    for (final highlight in _controller.highlights) {
+    for (final highlight in highlights) {
       final range = highlight.range?.normalized;
 
       if (range == null ||
