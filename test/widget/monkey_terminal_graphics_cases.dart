@@ -4,6 +4,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/terminal_preview.dart';
+import 'package:monkeyssh/domain/services/kitty_placeholder_runs.dart';
+import 'package:monkeyssh/domain/services/terminal_preview_graphics.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
@@ -1358,6 +1361,130 @@ void registerMonkeyTerminalGraphicsTests() {
         );
       },
     );
+
+    group('preview placeholder resolution', () {
+      // The connection preview composites through the same placeholder-run
+      // resolver as the live painter, so the density, recency and crop rules
+      // pinned by the widget tests above hold for the preview as well.
+      const imageId = 0xA5E30B;
+
+      Future<void> placeImage(
+        WidgetTester tester,
+        Terminal terminal, {
+        required int cols,
+        required int rows,
+        bool drawGrid = true,
+      }) async {
+        await tester.runAsync(() async {
+          final png = await _buildSolidPngBase64(const Color(0xFFFF0000), 24);
+          terminal.write(
+            '\x1b_Ga=T,U=1,i=$imageId,c=$cols,r=$rows,f=100,q=2;$png\x1b\\',
+          );
+          if (drawGrid) {
+            terminal.write(_placeholderGrid(imageId, cols: cols, rows: rows));
+          }
+        });
+        await _pumpUntilImagesDecoded(tester, terminal, [imageId]);
+      }
+
+      List<TerminalPreviewImage> previewImages(Terminal terminal) =>
+          buildTerminalPreviewImages(
+            terminal,
+            startRow: 0,
+            endRow: terminal.buffer.lines.length - 1,
+          );
+
+      testWidgets('a solid image becomes one strip covering its grid', (
+        tester,
+      ) async {
+        final terminal = Terminal()..resize(10, 6);
+        await placeImage(tester, terminal, cols: 8, rows: 4);
+
+        final images = previewImages(terminal);
+        expect(images, hasLength(1));
+        final image = images.single;
+        expect(image.col, 0);
+        expect(image.row, 0);
+        expect(image.colSpan, 8);
+        expect(image.rowSpan, 4);
+        expect(image.src, const Rect.fromLTWH(0, 0, 24, 24));
+
+        // Only the requested rows are examined, and each row is its own run.
+        final runs = resolveKittyPlaceholderRuns(
+          terminal,
+          firstRow: 2,
+          lastRow: 3,
+        ).runs;
+        expect(runs.map((run) => run.cellRow), [2, 3]);
+        expect(runs.map((run) => run.imgRow), [2, 3]);
+        expect(runs.every((run) => run.colSpan == 8), isTrue);
+      });
+
+      testWidgets('a holey remnant resolves to nothing', (tester) async {
+        final terminal = Terminal()..resize(10, 6);
+        await placeImage(tester, terminal, cols: 8, rows: 4);
+        for (var row = 0; row < 4; row++) {
+          terminal
+            ..write('\x1b[${row + 1};3H')
+            ..write('    ');
+        }
+        expect(previewImages(terminal), isEmpty);
+      });
+
+      testWidgets('only the newest dense copy of an image resolves', (
+        tester,
+      ) async {
+        final terminal = Terminal(maxLines: 100)
+          ..resize(8, 22)
+          ..write('\x1b[?1049h');
+        await placeImage(tester, terminal, cols: 8, rows: 4, drawGrid: false);
+        for (final top in [1, 14]) {
+          for (var row = 0; row < 4; row++) {
+            terminal
+              ..write('\x1b[${top + row};1H')
+              ..write(_placeholderRow(imageId, row: row, cols: 8));
+          }
+        }
+
+        final images = previewImages(terminal);
+        expect(images, hasLength(1));
+        expect(images.single.row, 13, reason: 'the ghost at the top is gone');
+        expect(images.single.rowSpan, 4);
+      });
+
+      testWidgets('a scroll crop keeps its source slice', (tester) async {
+        final terminal = Terminal(maxLines: 100)
+          ..resize(8, 16)
+          ..write('\x1b[?1049h');
+        await placeImage(tester, terminal, cols: 8, rows: 12);
+        terminal.write('\x1b[16;1H');
+        for (var i = 0; i < 8; i++) {
+          terminal.write('\n');
+        }
+
+        final images = previewImages(terminal);
+        expect(images, hasLength(1));
+        final image = images.single;
+        expect(image.row, 0);
+        expect(image.rowSpan, 4);
+        expect(image.src, const Rect.fromLTWH(0, 16, 24, 8));
+      });
+
+      testWidgets('an unresolved image is reported, not drawn', (tester) async {
+        final terminal = Terminal()
+          ..resize(10, 6)
+          ..write(_placeholderGrid(imageId, cols: 8, rows: 4));
+        final resolution = resolveKittyPlaceholderRuns(
+          terminal,
+          firstRow: 0,
+          lastRow: 5,
+        );
+        expect(resolution.runs, isEmpty);
+        expect(resolution.unresolved, hasLength(4));
+        expect(resolution.unresolved.first.imageId, imageId);
+        expect(previewImages(terminal), isEmpty);
+      });
+    });
 
     testWidgets('Kitty Unicode placeholder resolves high-byte image ids', (
       tester,

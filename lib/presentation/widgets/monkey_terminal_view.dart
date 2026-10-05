@@ -23,6 +23,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
+import 'package:monkeyssh/domain/services/kitty_placeholder_runs.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/cell_flags.dart';
 import 'package:xterm/src/core/buffer/line.dart';
@@ -79,45 +80,6 @@ const _backgroundAlphaCandidates = <int>[
   0xB8,
   0xCC,
 ];
-
-/// A single Kitty Unicode-placeholder cell resolved for compositing.
-///
-/// Each cell carries both its on-screen position ([cellRow]/[cellCol]) and the
-/// position it represents *within the source image* ([imgRow]/[imgCol], decoded
-/// from the Kitty row/column diacritics). Painting per cell — rather than over a
-/// single bounding region — keeps the image aligned even when it is partially
-/// scrolled off, wrapped, or only sparsely redrawn by the application.
-class _KittyPlaceholderCell {
-  const _KittyPlaceholderCell({
-    required this.imageKey,
-    required this.imageId,
-    required this.bitWidth,
-    required this.cellRow,
-    required this.cellCol,
-    required this.imgRow,
-    required this.imgCol,
-  });
-
-  final String imageKey;
-  final int imageId;
-  final int bitWidth;
-  final int cellRow;
-  final int cellCol;
-  final int imgRow;
-  final int imgCol;
-}
-
-/// Stride used to fold a (row, column) pair into a single int key. Larger than
-/// any realistic terminal width or image column count so pairs never collide.
-const _kittyGridStride = 100003;
-
-/// Minimum density of live cells within their bounding box for a Kitty
-/// Unicode-placeholder image to be composited. A solidly displayed image — or a
-/// clean scroll crop where whole rows have scrolled off — fills its bounding box
-/// (~1.0). A torn-down remnant, whose cells are overwritten in a scattered
-/// pattern, leaves a box full of holes (well below this), so it is dismissed
-/// rather than drawn as stale fragments/stripes.
-const _kittyPlaceholderRenderThreshold = 0.85;
 
 double _contrastRatio(Color a, Color b) {
   final luminanceA = a.computeLuminance();
@@ -2052,6 +2014,8 @@ class MonkeyTerminalPainter extends TerminalPainter {
   final _runParagraphCache = ParagraphCache(4096);
   final _inlineUnderlineParagraphCache = ParagraphCache(1024);
   final _cursorCellData = CellData.empty();
+  // Scratch cell for the per-row passes. They never nest, so one is enough.
+  final _scratchCellData = CellData.empty();
 
   // OpenType features that turn adjacent glyphs into a single ligature or a
   // context-dependent alternate. A batched run concatenates several cells into
@@ -2126,6 +2090,39 @@ class MonkeyTerminalPainter extends TerminalPainter {
     _inlineUnderlineParagraphCache.clear();
     _runParagraphCache.clear();
     _foregroundPictureCache.clear();
+    _backgroundPaintColorCache.clear();
+    _cellForegroundColorCache.clear();
+  }
+
+  // Memoised results of the WCAG contrast resolvers below. Backgrounds are
+  // painted outside the picture cache, so without these every coloured cell
+  // on every frame would redo the luminance math (several `pow` calls per
+  // contrast check, dozens on the low-contrast path). Both are pure functions
+  // of the cell colours and flags once the theme is fixed, so they are cleared
+  // with the other caches. Bounded so a program cycling through true-colour
+  // gradients cannot grow them without limit.
+  final _backgroundPaintColorCache = <int, Color>{};
+  final _cellForegroundColorCache = <int, Color>{};
+  static const _maxColorCacheEntries = 4096;
+
+  /// Number of contrast resolutions that missed the memo caches.
+  @visibleForTesting
+  int readableColorResolutions = 0;
+
+  Color _memoisedColor(
+    Map<int, Color> cache,
+    int key,
+    Color Function() resolve,
+  ) {
+    final cached = cache[key];
+    if (cached != null) {
+      return cached;
+    }
+    if (cache.length >= _maxColorCacheEntries) {
+      cache.remove(cache.keys.first);
+    }
+    readableColorResolutions++;
+    return cache[key] = resolve();
   }
 
   @override
@@ -2188,7 +2185,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
     BufferLine line,
     List<TerminalTextUnderline> inlineUnderlines,
   ) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
 
     for (var i = 0; i < line.length; i++) {
@@ -2223,7 +2220,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// behind the next row's background.
   void paintLineBackgrounds(Canvas canvas, Offset offset, BufferLine line) {
     paintLineBackground(canvas, offset, line);
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     for (var i = 0; i < line.length; i++) {
       line.getCellData(i, cellData);
@@ -2278,7 +2275,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// may fall back to a non-monospace font, which would shape or advance
   /// differently once concatenated into one paragraph).
   void _paintLineForegroundsInto(Canvas canvas, BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     final length = line.length;
 
@@ -2462,7 +2459,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// `background`, since the readable-foreground resolution tints the glyph
   /// against the cell's background.
   int _lineForegroundHash(BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     const mask = 0x3FFFFFFFFFFFFFFF;
     const prime = 0x100000001b3;
     final length = line.length;
@@ -2483,7 +2480,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// below the cell, so drawing them after every line's opaque background keeps
   /// the next line's background from clipping the wave's lower edge.
   void paintLineCellUnderlines(Canvas canvas, Offset offset, BufferLine line) {
-    final cellData = CellData.empty();
+    final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     for (var i = 0; i < line.length; i++) {
       line.getCellData(i, cellData);
@@ -2843,11 +2840,41 @@ class MonkeyTerminalPainter extends TerminalPainter {
   Color resolveMonkeyTerminalCellForegroundColor(CellData cellData) {
     final cellFlags = cellData.flags;
     final inverse = cellFlags & CellFlags.inverse != 0;
+    final faint = cellFlags & CellFlags.faint != 0;
+    final blockElement = _isRectPaintedBlockElement(
+      cellData.content & CellContent.codepointMask,
+    );
+    // Cell colours use 27 bits (24-bit value + 2-bit type), so the pair plus
+    // three flag bits packs into a 57-bit key.
+    final key =
+        (cellData.background << 30) |
+        (cellData.foreground << 3) |
+        (inverse ? 4 : 0) |
+        (faint ? 2 : 0) |
+        (blockElement ? 1 : 0);
+    return _memoisedColor(
+      _cellForegroundColorCache,
+      key,
+      () => _resolveCellForegroundColor(
+        cellData,
+        inverse: inverse,
+        faint: faint,
+        blockElement: blockElement,
+      ),
+    );
+  }
+
+  Color _resolveCellForegroundColor(
+    CellData cellData, {
+    required bool inverse,
+    required bool faint,
+    required bool blockElement,
+  }) {
     var color = inverse
         ? resolveBackgroundColor(cellData.background)
         : resolveForegroundColor(cellData.foreground);
 
-    if (cellFlags & CellFlags.faint != 0) {
+    if (faint) {
       final background = inverse
           ? resolveForegroundColor(cellData.foreground)
           : resolveBackgroundColor(cellData.background);
@@ -2856,9 +2883,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
         background: background,
       );
     }
-    if (_isRectPaintedBlockElement(
-      cellData.content & CellContent.codepointMask,
-    )) {
+    if (blockElement) {
       return color;
     }
 
@@ -2881,8 +2906,28 @@ class MonkeyTerminalPainter extends TerminalPainter {
     CellData cellData, {
     bool toneNeutralBackgrounds = true,
   }) {
-    final cellFlags = cellData.flags;
-    final inverse = cellFlags & CellFlags.inverse != 0;
+    final inverse = cellData.flags & CellFlags.inverse != 0;
+    final key =
+        (cellData.background << 29) |
+        (cellData.foreground << 2) |
+        (inverse ? 2 : 0) |
+        (toneNeutralBackgrounds ? 1 : 0);
+    return _memoisedColor(
+      _backgroundPaintColorCache,
+      key,
+      () => _resolveCellBackgroundPaintColorUncached(
+        cellData,
+        inverse: inverse,
+        toneNeutralBackgrounds: toneNeutralBackgrounds,
+      ),
+    );
+  }
+
+  Color _resolveCellBackgroundPaintColorUncached(
+    CellData cellData, {
+    required bool inverse,
+    required bool toneNeutralBackgrounds,
+  }) {
     final background = inverse
         ? resolveForegroundColor(cellData.foreground)
         : resolveBackgroundColor(cellData.background);
@@ -3075,6 +3120,7 @@ class MonkeyRenderTerminal extends RenderBox
   set onEditableRect(EditableRectCallback? value) {
     if (value == _onEditableRect) return;
     _onEditableRect = value;
+    _forgetEditableRect();
     markNeedsLayout();
   }
 
@@ -3136,9 +3182,7 @@ class MonkeyRenderTerminal extends RenderBox
     if (_hasSelectableTextSelection) {
       _updateSelectionGeometry(deferNotification: true);
     }
-    if (_onEditableRect != null) {
-      _notifyEditableRect();
-    }
+    _notifyEditableRect();
   }
 
   void _onFocusChange() {
@@ -3164,7 +3208,11 @@ class MonkeyRenderTerminal extends RenderBox
     } else {
       markNeedsPaint();
     }
-    if (_onEditableRect != null) {
+    final cursorX = _terminal.buffer.cursorX;
+    final cursorY = _terminal.buffer.absoluteCursorY;
+    if (cursorX != _lastEditableCursorX || cursorY != _lastEditableCursorY) {
+      _lastEditableCursorX = cursorX;
+      _lastEditableCursorY = cursorY;
       _notifyEditableRect();
     }
   }
@@ -3215,6 +3263,7 @@ class MonkeyRenderTerminal extends RenderBox
   @override
   void detach() {
     super.detach();
+    _forgetEditableRect();
     _offset.removeListener(_onScroll);
     _terminal.removeListener(_onTerminalChange);
     _controller.removeListener(_onControllerUpdate);
@@ -3260,6 +3309,7 @@ class MonkeyRenderTerminal extends RenderBox
   @override
   void performLayout() {
     size = constraints.biggest;
+    _forgetEditableRect();
 
     _updateViewportSize();
     _terminal.graphics.setCellPixelSize(
@@ -3929,7 +3979,27 @@ class MonkeyRenderTerminal extends RenderBox
     return _terminal.mouseInput(button, buttonState, position);
   }
 
+  // The last editable/caret rects handed to the IME, and the cursor cell they
+  // were computed for. Every write and scroll tick lands here, and on desktop
+  // each notification costs an ancestor transform walk plus two platform
+  // channel messages, so unchanged rects are not re-sent.
+  Rect? _lastEditableRect;
+  Rect? _lastCaretRect;
+  int _lastEditableCursorX = -1;
+  int _lastEditableCursorY = -1;
+
+  void _forgetEditableRect() {
+    _lastEditableRect = null;
+    _lastCaretRect = null;
+    _lastEditableCursorX = -1;
+    _lastEditableCursorY = -1;
+  }
+
   void _notifyEditableRect() {
+    final onEditableRect = _onEditableRect;
+    if (onEditableRect == null) {
+      return;
+    }
     final cursor = localToGlobal(cursorOffset);
 
     final rect = Rect.fromLTRB(
@@ -3940,8 +4010,12 @@ class MonkeyRenderTerminal extends RenderBox
     );
 
     final caretRect = cursor & _painter.cellSize;
-
-    _onEditableRect?.call(rect, caretRect);
+    if (rect == _lastEditableRect && caretRect == _lastCaretRect) {
+      return;
+    }
+    _lastEditableRect = rect;
+    _lastCaretRect = caretRect;
+    onEditableRect(rect, caretRect);
   }
 
   void _updateViewportSize({bool notifyIfUnchanged = false}) {
@@ -4240,6 +4314,8 @@ class MonkeyRenderTerminal extends RenderBox
     final lines = _terminal.buffer.lines;
     final charHeight = _painter.cellSize.height;
     final origin = _contentOrigin;
+    _paintOrigin = origin;
+    _paintLineOffset = -_scrollOffset + origin.dy;
     final firstLineOffset = _scrollOffset - origin.dy;
     final lastLineOffset = _scrollOffset - origin.dy + size.height;
     final firstLine = firstLineOffset ~/ charHeight;
@@ -4336,9 +4412,15 @@ class MonkeyRenderTerminal extends RenderBox
     _paintSelectionHandleLayers(context, offset);
   }
 
+  // Grid origin and line offset of the frame being painted, resolved once at
+  // the top of [_paint] so the per-row and per-segment helpers below do not
+  // recompute them for every visible row.
+  Offset _paintOrigin = Offset.zero;
+  double _paintLineOffset = 0;
+
   Offset _linePaintOffset(Offset offset, int row) => offset.translate(
-    _contentOrigin.dx,
-    (row * _painter.cellSize.height + _lineOffset).truncateToDouble(),
+    _paintOrigin.dx,
+    (row * _painter.cellSize.height + _paintLineOffset).truncateToDouble(),
   );
 
   /// Composites Kitty-graphics-protocol images over the cell grid for the
@@ -4628,270 +4710,31 @@ class MonkeyRenderTerminal extends RenderBox
     double cellWidth,
     double cellHeight,
   ) {
-    final graphics = _terminal.graphics;
-    final buffer = _terminal.buffer;
-    final placeholders = graphics.placeholdersInRows(
-      buffer.lines,
-      firstLine,
-      lastLine,
+    // Instance grouping, density/recency filtering and run merging are shared
+    // with the connection preview (see `resolveKittyPlaceholderRuns`), so both
+    // elect the same "current" copy of an image.
+    final resolution = resolveKittyPlaceholderRuns(
+      _terminal,
+      firstRow: firstLine,
+      lastRow: lastLine,
     );
-    if (placeholders.isEmpty) {
-      return;
-    }
-
-    final lineCount = buffer.lines.length;
-
-    bool cellIsLivePlaceholder(int cellRow, int cellCol) {
-      if (cellRow < 0 || cellRow >= lineCount) {
-        return false;
-      }
-      final line = buffer.lines[cellRow];
-      if (cellCol < 0 || cellCol >= line.length) {
-        return false;
-      }
-      return line.getCodePoint(cellCol) == kittyGraphicsPlaceholderCodePoint;
-    }
-
-    // Pass 1: group live placeholder cells into display *instances* and decide
-    // which instances are coherent and current enough to paint.
-    //
-    // A Kitty Unicode-placeholder image is conceptually a solid rectangle:
-    // clients (e.g. Copilot CLI) emit every cell of the grid. The same image id
-    // can be displayed several times at different screen positions, and an image
-    // can be partially scrolled off or partially overwritten. We group cells by
-    // the placement offset they share — every cell of one on-screen placement
-    // has the same `cellRow - imgRow` and `cellCol - imgCol` — so distinct
-    // placements (and the holes punched by an app overwriting an image) fall
-    // into separate groups. Each group is then judged on two axes:
-    //
-    //  * Density — a solid image or a clean scroll crop (whole rows scrolled
-    //    off) fills its bounding box (~1.0); a torn remnant overwritten in a
-    //    scattered pattern leaves a box full of holes. Sparse groups are
-    //    dropped so stale fragments/stripes are not painted.
-    //  * Recency — when an app re-displays an image (e.g. closing its full-screen
-    //    viewer and redrawing) without clearing the previous copy's cells, the
-    //    old copy lingers as a ghost. Among the surviving dense groups of one
-    //    image id we keep only the most recently written placement.
-    //
-    // The instance grouping and lookup are scoped to visible buffer lines.
-    // GraphicsManager resolves placeholders through each line's CellAnchors, so
-    // a scroll frame never walks the thousands of off-screen cells retained by a
-    // long agent transcript. Grid dimensions remain correct for cropped images:
-    // every placeholder shares a small grid tracker that records the largest
-    // row/column ever seen for that image, while virtual placements still win
-    // when the protocol supplied explicit dimensions.
-    final gridColsByImage = <int, int>{};
-    final gridRowsByImage = <int, int>{};
-    final instanceCellCount = <String, int>{};
-    final instanceRowBounds = <String, List<int>>{};
-    final instanceColBounds = <String, List<int>>{};
-    // Recency of each instance: the highest monotonic placeholder sequence seen
-    // for it, independent of visible row/anchor traversal order. A redraw that re-displays an image
-    // elsewhere appends fresh placeholders, so the current placement has a
-    // higher recency than a stale leftover (ghost) of the same image.
-    final instanceRecency = <String, int>{};
-    final instanceImageKey = <String, String>{};
-
-    String instanceKeyFor(TerminalImagePlaceholder p, String imageKey) {
-      final offsetRow = p.cellRow - p.row;
-      final offsetCol = p.cellCol - p.col;
-      return '$imageKey@$offsetRow,$offsetCol';
-    }
-
-    for (final placeholder in placeholders) {
-      if (!placeholder.attached) {
-        continue;
-      }
-      final virtualPlacement = graphics.virtualPlacementById(
-        placeholder.imageId,
-      );
-      final imageIntKey =
-          placeholder.imageId * 64 + placeholder.imageIdBitWidth;
-      gridColsByImage[imageIntKey] = (virtualPlacement?.cols ?? 0) > 0
-          ? virtualPlacement!.cols
-          : placeholder.gridColumns;
-      gridRowsByImage[imageIntKey] = (virtualPlacement?.rows ?? 0) > 0
-          ? virtualPlacement!.rows
-          : placeholder.gridRows;
-
-      final cellRow = placeholder.cellRow;
-      if (cellRow < firstLine || cellRow > lastLine) {
-        continue;
-      }
-      if (!cellIsLivePlaceholder(cellRow, placeholder.cellCol)) {
-        continue;
-      }
-      final key = '${placeholder.imageIdBitWidth}:${placeholder.imageId}';
-      final instanceKey = instanceKeyFor(placeholder, key);
-      instanceImageKey[instanceKey] = key;
-      instanceCellCount[instanceKey] =
-          (instanceCellCount[instanceKey] ?? 0) + 1;
-      instanceRecency[instanceKey] = math.max(
-        instanceRecency[instanceKey] ?? -1,
-        placeholder.sequence,
-      );
-      final rowBounds = instanceRowBounds[instanceKey] ??= <int>[
-        placeholder.row,
-        placeholder.row,
-      ];
-      rowBounds[0] = math.min(rowBounds[0], placeholder.row);
-      rowBounds[1] = math.max(rowBounds[1], placeholder.row);
-      final colBounds = instanceColBounds[instanceKey] ??= <int>[
-        placeholder.col,
-        placeholder.col,
-      ];
-      colBounds[0] = math.min(colBounds[0], placeholder.col);
-      colBounds[1] = math.max(colBounds[1], placeholder.col);
-    }
-
-    // Filter to instances that are dense enough to be a real display (not a
-    // scattered torn remnant).
-    final denseInstances = <String>[];
-    for (final entry in instanceCellCount.entries) {
-      final rowBounds = instanceRowBounds[entry.key];
-      final colBounds = instanceColBounds[entry.key];
-      if (rowBounds == null || colBounds == null) {
-        continue;
-      }
-      final boxRows = rowBounds[1] - rowBounds[0] + 1;
-      final boxCols = colBounds[1] - colBounds[0] + 1;
-      final boxArea = boxRows * boxCols;
-      if (boxArea <= 0) {
-        continue;
-      }
-      if (entry.value >= boxArea * _kittyPlaceholderRenderThreshold) {
-        denseInstances.add(entry.key);
+    for (final miss in resolution.unresolved) {
+      _kittyUnresolvedInstances++;
+      if (_kittyFirstUnresolvedImageId == 0) {
+        _kittyFirstUnresolvedImageId = miss.imageId;
+        _kittyFirstUnresolvedBitWidth = miss.bitWidth;
       }
     }
-    if (denseInstances.isEmpty) {
-      return;
-    }
 
-    // Among dense instances of the same image id, keep only the most recently
-    // drawn one. When the app re-displays an image (e.g. closing its full-screen
-    // viewer and redrawing the conversation) without clearing the previous
-    // copy's cells, the older copy lingers as a ghost; its placeholders were
-    // written earlier, so it loses to the current placement here.
-    final newestInstanceForImage = <String, String>{};
-    for (final instanceKey in denseInstances) {
-      final imageKey = instanceImageKey[instanceKey]!;
-      final current = newestInstanceForImage[imageKey];
-      if (current == null ||
-          instanceRecency[instanceKey]! > instanceRecency[current]!) {
-        newestInstanceForImage[imageKey] = instanceKey;
-      }
-    }
-    final renderableInstances = newestInstanceForImage.values.toSet();
-    if (renderableInstances.isEmpty) {
-      return;
-    }
-
-    // Pass 2: collect the visible cells that belong to a renderable instance.
-    // Keep at most one live cell per on-screen position. The visible-range check
-    // runs first so off-screen placeholders cost nothing but an integer compare.
-    final cellByPosition = <int, _KittyPlaceholderCell>{};
-    for (final placeholder in placeholders) {
-      if (!placeholder.attached) {
-        continue;
-      }
-      final cellRow = placeholder.cellRow;
-      if (cellRow < firstLine || cellRow > lastLine) {
-        continue;
-      }
-      final key = '${placeholder.imageIdBitWidth}:${placeholder.imageId}';
-      if (!renderableInstances.contains(instanceKeyFor(placeholder, key))) {
-        continue;
-      }
-      final cellCol = placeholder.cellCol;
-      if (!cellIsLivePlaceholder(cellRow, cellCol)) {
-        continue;
-      }
-      cellByPosition[cellRow * _kittyGridStride +
-          cellCol] = _KittyPlaceholderCell(
-        imageKey: key,
-        imageId: placeholder.imageId,
-        bitWidth: placeholder.imageIdBitWidth,
-        cellRow: cellRow,
-        cellCol: cellCol,
-        imgRow: placeholder.row,
-        imgCol: placeholder.col,
-      );
-    }
-    final visible = cellByPosition.values.toList();
-    if (visible.isEmpty) {
-      return;
-    }
-
-    // Sort so contiguous cells in the same screen row can be merged into a
-    // single draw, then composite the matching slice of each source image.
-    visible.sort((a, b) {
-      final byImage = a.imageKey.compareTo(b.imageKey);
-      if (byImage != 0) return byImage;
-      if (a.cellRow != b.cellRow) return a.cellRow - b.cellRow;
-      return a.cellCol - b.cellCol;
-    });
-
-    final imageCache = <String, TerminalImage?>{};
-
-    var i = 0;
-    while (i < visible.length) {
-      final start = visible[i];
-      var end = i;
-      while (end + 1 < visible.length) {
-        final cur = visible[end];
-        final next = visible[end + 1];
-        if (next.imageKey == cur.imageKey &&
-            next.cellRow == cur.cellRow &&
-            next.cellCol == cur.cellCol + 1 &&
-            next.imgRow == cur.imgRow &&
-            next.imgCol == cur.imgCol + 1) {
-          end++;
-        } else {
-          break;
-        }
-      }
-      final last = visible[end];
-      i = end + 1;
-
-      final stored = imageCache.putIfAbsent(
-        start.imageKey,
-        () => graphics.imageByPlaceholderColorId(
-          start.imageId,
-          bitWidth: start.bitWidth,
-        ),
-      );
-      if (stored == null) {
-        _kittyUnresolvedInstances++;
-        if (_kittyFirstUnresolvedImageId == 0) {
-          _kittyFirstUnresolvedImageId = start.imageId;
-          _kittyFirstUnresolvedBitWidth = start.bitWidth;
-        }
-        continue;
-      }
+    for (final run in resolution.runs) {
       _kittyResolvedInstances++;
-      _visibleGraphicsImageIds.add(stored.id);
-      final imageIntKey = start.imageId * 64 + start.bitWidth;
-      final cols = gridColsByImage[imageIntKey] ?? 1;
-      final rows = gridRowsByImage[imageIntKey] ?? 1;
-      if (cols <= 0 || rows <= 0) {
-        continue;
-      }
-
-      final image = stored.image;
-      final srcCellWidth = image.width / cols;
-      final srcCellHeight = image.height / rows;
-      final srcRect = Rect.fromLTWH(
-        start.imgCol * srcCellWidth,
-        start.imgRow * srcCellHeight,
-        (last.imgCol - start.imgCol + 1) * srcCellWidth,
-        srcCellHeight,
-      );
-
+      _visibleGraphicsImageIds.add(run.stored.id);
+      final srcRect = run.src;
       final topLeft = _linePaintOffset(
         offset,
-        start.cellRow,
-      ).translate(start.cellCol * cellWidth, 0);
-      final dstWidth = (last.cellCol - start.cellCol + 1) * cellWidth;
+        run.cellRow,
+      ).translate(run.cellCol * cellWidth, 0);
+      final dstWidth = run.colSpan * cellWidth;
       if (!topLeft.dx.isFinite ||
           !topLeft.dy.isFinite ||
           !dstWidth.isFinite ||
@@ -4902,7 +4745,7 @@ class MonkeyRenderTerminal extends RenderBox
       }
       try {
         canvas.drawImageRect(
-          image,
+          run.stored.image,
           srcRect,
           Rect.fromLTWH(topLeft.dx, topLeft.dy, dstWidth, cellHeight),
           _imagePaint,
@@ -5122,8 +4965,8 @@ class MonkeyRenderTerminal extends RenderBox
     final start = segment.start ?? 0;
     final end = segment.end ?? _terminal.viewWidth;
     final startOffset = Offset(
-      _contentOrigin.dx + (start * _painter.cellSize.width),
-      (segment.line * _painter.cellSize.height) + _lineOffset,
+      _paintOrigin.dx + (start * _painter.cellSize.width),
+      (segment.line * _painter.cellSize.height) + _paintLineOffset,
     );
 
     _painter.paintHighlight(canvas, startOffset, end - start, color);
