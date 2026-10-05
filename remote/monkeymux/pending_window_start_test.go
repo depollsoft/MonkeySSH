@@ -226,3 +226,152 @@ func TestPendingWindowStartWatcherHandoff(t *testing.T) {
 	go func() { server.windowWatchers.Wait(); close(watchersDone) }()
 	awaitWindowStart(t, "watcher balance", watchersDone)
 }
+
+// lifecyclePty delivers scripted output to the window reader and reaches EOF
+// when the script is closed or the terminal is.
+type lifecyclePty struct {
+	output    chan []byte
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newLifecyclePty() *lifecyclePty {
+	return &lifecyclePty{output: make(chan []byte), closed: make(chan struct{})}
+}
+
+func (p *lifecyclePty) Read(b []byte) (int, error) {
+	select {
+	case data, ok := <-p.output:
+		if !ok {
+			return 0, io.EOF
+		}
+		return copy(b, data), nil
+	case <-p.closed:
+		return 0, io.EOF
+	}
+}
+func (p *lifecyclePty) Write(b []byte) (int, error) { return len(b), nil }
+func (p *lifecyclePty) Close() error                { p.closeOnce.Do(func() { close(p.closed) }); return nil }
+func (p *lifecyclePty) Resize(int, int) error       { return nil }
+func (p *lifecyclePty) Fd() uintptr                 { return ^uintptr(0) }
+
+// lifecycleProcess exits when the test says so or when it is hung up.
+type lifecycleProcess struct {
+	exited   chan struct{}
+	exitOnce sync.Once
+}
+
+func newLifecycleProcess() *lifecycleProcess {
+	return &lifecycleProcess{exited: make(chan struct{})}
+}
+
+func (p *lifecycleProcess) Pid() int    { return 0 }
+func (p *lifecycleProcess) Wait() error { <-p.exited; return nil }
+func (p *lifecycleProcess) Hangup()     { p.exit() }
+func (p *lifecycleProcess) Kill()       { p.exit() }
+func (p *lifecycleProcess) exit()       { p.exitOnce.Do(func() { close(p.exited) }) }
+
+func startLifecycleWindow(*exec.Cmd, int, int) (muxPty, muxProcess, error) {
+	return newLifecyclePty(), newLifecycleProcess(), nil
+}
+
+// The last window ending naturally must not tear down a server whose next
+// window is already starting; if that start then fails, the deferred idle
+// shutdown runs after all.
+func TestLastWindowExitDefersToPendingStart(t *testing.T) {
+	for _, failStart := range []bool{false, true} {
+		name := "start-succeeds"
+		if failStart {
+			name = "start-fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			server := newMuxServer(name)
+			t.Cleanup(server.close)
+			last := &muxWindow{id: "@1", lastActivity: time.Now()}
+			server.windows = []*muxWindow{last}
+			server.activeID, server.nextID = last.id, 1
+			start := newWindowStartGate(t)
+			created := make(chan error, 1)
+			go func() {
+				_, err := server.createWindowWithStarter(createWindowOptions{}, func(cmd *exec.Cmd, cols, rows int) (muxPty, muxProcess, error) {
+					start.pass()
+					if failStart {
+						return nil, nil, errors.New("injected start failure")
+					}
+					return startLifecycleWindow(cmd, cols, rows)
+				})
+				created <- err
+			}()
+			awaitWindowStart(t, "startup entry", start.entered)
+
+			server.markWindowClosed(last.id)
+			if server.isClosed() {
+				t.Fatal("last window exit shut down the server with a start pending")
+			}
+			start.open()
+			var err error
+			select {
+			case err = <-created:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for create")
+			}
+			server.mu.Lock()
+			closeDone, windows := server.closeDone, len(server.windows)
+			server.mu.Unlock()
+			if failStart {
+				if closeDone == nil {
+					t.Fatal("failed start did not finish the deferred idle shutdown")
+				}
+				awaitWindowStart(t, "idle shutdown", closeDone)
+				return
+			}
+			if err != nil || closeDone != nil || windows != 1 {
+				t.Fatalf("create = %v, closing = %v, windows = %d; want the new window to keep the server", err, closeDone != nil, windows)
+			}
+		})
+	}
+}
+
+// Creation activates its window and publishes its replay under attachMu, as
+// selectWindowWithSkip does, so a concurrent selection cannot slip between
+// the activation and the replay and leave the screen showing another window.
+func TestCreateWindowActivatesUnderAttachLock(t *testing.T) {
+	server := newMuxServer("create-attach-lock")
+	t.Cleanup(server.close)
+	server.windows = []*muxWindow{{id: "@1", lastActivity: time.Now()}}
+	server.activeID, server.nextID = "@1", 1
+	registerTestAttachClient(t, server, &recordingConn{}, "primary", server.width, server.height)
+	started := make(chan struct{})
+	created := make(chan *muxWindow, 1)
+	server.attachMu.Lock()
+	go func() {
+		window, _ := server.createWindowWithStarter(createWindowOptions{}, func(cmd *exec.Cmd, cols, rows int) (muxPty, muxProcess, error) {
+			close(started)
+			return startLifecycleWindow(cmd, cols, rows)
+		})
+		created <- window
+	}()
+	awaitWindowStart(t, "startup entry", started)
+	for deadline := time.Now().Add(25 * time.Millisecond); time.Now().Before(deadline); {
+		server.mu.Lock()
+		active := server.activeID
+		server.mu.Unlock()
+		if active != "@1" {
+			server.attachMu.Unlock()
+			t.Fatalf("creation activated %s while a selection held attachMu", active)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server.attachMu.Unlock()
+	var window *muxWindow
+	select {
+	case window = <-created:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for create")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if window == nil || server.activeID != window.id {
+		t.Fatalf("active = %q after creating %v", server.activeID, window)
+	}
+}

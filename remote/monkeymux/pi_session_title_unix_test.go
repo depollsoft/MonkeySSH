@@ -26,11 +26,11 @@ func TestRefreshProcessMetadataPublishesPiSessionTitle(t *testing.T) {
 		lastActivity:       time.Now(),
 	}
 	_, server := newThemeQueryTestServer(t, window)
-	control := &recordingConn{}
+	control := newControlRecorder(server)
 	server.controls[newControlClient(control)] = struct{}{}
 	server.activeID = window.id
 
-	server.handleWindowOutput(window.id, []byte("x"))
+	server.refreshProcessMetadataAndBroadcast(window)
 	if got := server.snapshotLocked(window).AgentSessionTitle; got != "Fix the window bar" {
 		t.Fatalf("snapshot title = %q, want first prompt", got)
 	}

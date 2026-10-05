@@ -914,6 +914,22 @@ func isCmdShell(shell string) bool {
 // fast-exit failure (a locked macOS login keychain that makes cursor-agent print
 // an error and exit immediately) is macOS-specific, and the Windows shell exit
 // semantics differ, so the command is returned unchanged here for now.
+// drainExitedWindowOutput closes an exited window's pseudo console while the
+// window is still registered. ConPTY keeps the output pipe open until then, and
+// ClosePseudoConsole flushes the final frame through the still-running reader,
+// which then reaches EOF. The window is retired only after that drain.
+func drainExitedWindowOutput(window *muxWindow, readerDone <-chan struct{}) {
+	if window.pty != nil {
+		_ = window.closePty(window.pty)
+	}
+	timer := time.NewTimer(windowOutputDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-readerDone:
+	case <-timer.C:
+	}
+}
+
 func holdAgentWindowCommand(shell string, command string) string {
 	_ = shell
 	return command

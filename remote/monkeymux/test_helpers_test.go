@@ -130,6 +130,56 @@ func waitForRecordedContains(
 	t.Fatalf("recorded output = %q, want it to contain %q", conn.String(), want)
 }
 
+// waitForWindowReplies waits until every reply the output reader queued for
+// window has been written to its pty.
+func waitForWindowReplies(t *testing.T, window *muxWindow) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		window.inputMu.Lock()
+		window.replies.mu.Lock()
+		idle := !window.replies.drainQueued && len(window.replies.pending) == 0
+		window.replies.mu.Unlock()
+		window.inputMu.Unlock()
+		if idle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queued window replies were not written")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// controlRecorder records a control client's frames. String waits for the
+// client's writer to drain first, so assertions see every frame queued so far.
+type controlRecorder struct {
+	recordingConn
+	server *muxServer
+}
+
+func newControlRecorder(server *muxServer) *controlRecorder {
+	return &controlRecorder{server: server}
+}
+
+func (c *controlRecorder) String() string {
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		idle := true
+		c.server.mu.Lock()
+		for client := range c.server.controls {
+			client.outMu.Lock()
+			idle = idle && !client.writing && len(client.out) == 0
+			client.outMu.Unlock()
+		}
+		c.server.mu.Unlock()
+		if idle {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return c.recordingConn.String()
+}
+
 type testAddr string
 
 func (a testAddr) Network() string {
