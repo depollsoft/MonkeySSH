@@ -246,8 +246,6 @@ Future<_ComparisonResult> _runTerminalSequence(
         body: TerminalTextInputHandler(
           terminal: terminal,
           focusNode: focusNode,
-          deleteDetection: true,
-          manageFocus: false,
           child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
         ),
       ),
@@ -447,9 +445,8 @@ void main() {
           body: TerminalTextInputHandler(
             terminal: terminal,
             focusNode: focusNode,
-            deleteDetection: true,
             sensitiveInput: sensitiveInput,
-            child: const SizedBox.expand(),
+            child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
           ),
         ),
       );
@@ -767,12 +764,11 @@ void main() {
           LogicalKeyboardKey.androidPlane + 66,
         );
 
-        // Production terminal screen uses manageFocus: false and routes keys
+        // The production terminal screen routes keys
         // through the global HardwareKeyboard handler.
         final harness = await pumpTerminalInputHarness(
           tester,
           attachController: false,
-          manageFocus: false,
         );
         expect(tester.testTextInput.isVisible, isTrue);
 
@@ -835,7 +831,6 @@ void main() {
         final harness = await pumpTerminalInputHarness(
           tester,
           attachController: false,
-          manageFocus: false,
           resolveTerminalKeyModifiers: () =>
               (ctrl: false, alt: false, shift: shiftActive),
           consumeTerminalKeyModifiers: () => shiftActive = false,
@@ -881,7 +876,6 @@ void main() {
         var shiftActive = true;
         final harness = await pumpTerminalInputHarness(
           tester,
-          manageFocus: false,
           resolveTerminalKeyModifiers: () =>
               (ctrl: false, alt: false, shift: shiftActive),
           consumeTerminalKeyModifiers: () => shiftActive = false,
@@ -907,7 +901,6 @@ void main() {
         var altActive = true;
         final harness = await pumpTerminalInputHarness(
           tester,
-          manageFocus: false,
           resolveTerminalKeyModifiers: () =>
               (ctrl: false, alt: altActive, shift: false),
           consumeTerminalKeyModifiers: () => altActive = false,
@@ -996,7 +989,6 @@ void main() {
         harness = await pumpTerminalInputHarness(
           tester,
           attachController: false,
-          manageFocus: false,
           initialTerminalOutput: '\x1b[>1u',
         );
 
@@ -1078,7 +1070,6 @@ void main() {
         try {
           harness = await pumpTerminalInputHarness(
             tester,
-            manageFocus: false,
             initialTerminalOutput: '\x1b[>9u',
             controller: controller,
           );
@@ -1157,7 +1148,6 @@ void main() {
         try {
           harness = await pumpTerminalInputHarness(
             tester,
-            manageFocus: false,
             initialTerminalOutput: '\x1b[>1u',
             resolveTerminalKeyModifiers: () =>
                 (ctrl: ctrlActive, alt: false, shift: false),
@@ -1215,8 +1205,7 @@ void main() {
           body: TerminalTextInputHandler(
             terminal: terminal,
             focusNode: focusNode,
-            deleteDetection: true,
-            child: const SizedBox.expand(),
+            child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
           ),
         ),
       );
@@ -1246,7 +1235,6 @@ void main() {
       try {
         harness = await pumpTerminalInputHarness(
           tester,
-          manageFocus: false,
           initialTerminalOutput: '\x1b[>1u',
           controller: controller,
         );
@@ -1309,7 +1297,6 @@ void main() {
       try {
         harness = await pumpTerminalInputHarness(
           tester,
-          manageFocus: false,
           initialTerminalOutput: '\x1b[>1u',
           resolveTerminalKeyModifiers: () =>
               (ctrl: ctrlActive, alt: false, shift: false),
@@ -1376,7 +1363,6 @@ void main() {
         try {
           harness = await pumpTerminalInputHarness(
             tester,
-            manageFocus: false,
             initialTerminalOutput: '\x1b[>11u',
             resolveTerminalKeyModifiers: () =>
                 (ctrl: ctrlActive, alt: false, shift: false),
@@ -1447,8 +1433,6 @@ void main() {
             body: TerminalTextInputHandler(
               terminal: terminal,
               focusNode: focusNode,
-              deleteDetection: true,
-              manageFocus: false,
               child: Focus(
                 focusNode: focusNode,
                 child: const SizedBox.expand(),
@@ -1565,14 +1549,17 @@ void main() {
               body: TerminalTextInputHandler(
                 terminal: terminal,
                 focusNode: focusNode,
-                deleteDetection: true,
                 showKeyboardOnFocus: false,
-                child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                child: Focus(
+                  focusNode: focusNode,
+                  child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                ),
               ),
             ),
           ),
         );
 
+        focusNode.requestFocus();
         await tester.pump();
 
         expect(focusNode.hasFocus, isTrue);
@@ -1820,16 +1807,19 @@ void main() {
               body: TerminalTextInputHandler(
                 terminal: terminal,
                 focusNode: focusNode,
-                deleteDetection: true,
                 tapToShowKeyboard: false,
-                child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                child: Focus(
+                  focusNode: focusNode,
+                  child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                ),
               ),
             ),
           ),
         );
 
-        // The handler uses autofocus: true, which triggers _onFocusChange.
+        // Focusing the terminal triggers _onFocusChange.
         // With tapToShowKeyboard off, the connection is attached but not shown.
+        focusNode.requestFocus();
         await tester.pump();
 
         expect(focusNode.hasFocus, isTrue);
@@ -1870,10 +1860,12 @@ void main() {
                   child: TerminalTextInputHandler(
                     terminal: terminal,
                     focusNode: focusNode,
-                    deleteDetection: true,
                     tapToShowKeyboard: false,
-                    child: const SizedBox.expand(
-                      key: ValueKey('terminal-child'),
+                    child: Focus(
+                      focusNode: focusNode,
+                      child: const SizedBox.expand(
+                        key: ValueKey('terminal-child'),
+                      ),
                     ),
                   ),
                 ),
@@ -1883,6 +1875,7 @@ void main() {
         ),
       );
 
+      focusNode.requestFocus();
       await tester.pump();
       expect(focusNode.hasFocus, isTrue);
       expect(tester.testTextInput.isVisible, isFalse);
@@ -1917,14 +1910,17 @@ void main() {
                 terminal: terminal,
                 focusNode: focusNode,
                 controller: controller,
-                deleteDetection: true,
                 tapToShowKeyboard: false,
-                child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                child: Focus(
+                  focusNode: focusNode,
+                  child: const SizedBox.expand(key: ValueKey('terminal-child')),
+                ),
               ),
             ),
           ),
         );
 
+        focusNode.requestFocus();
         await tester.pump();
         expect(focusNode.hasFocus, isTrue);
         expect(tester.testTextInput.isVisible, isFalse);
@@ -1964,8 +1960,6 @@ void main() {
                   child: TerminalTextInputHandler(
                     terminal: terminal,
                     focusNode: focusNode,
-                    deleteDetection: true,
-                    manageFocus: false,
                     child: Focus(
                       focusNode: focusNode,
                       child: const SizedBox.expand(
@@ -2019,9 +2013,11 @@ void main() {
             body: TerminalTextInputHandler(
               terminal: terminal,
               focusNode: focusNode,
-              deleteDetection: true,
               onPasteText: () => pasteCount++,
-              child: const SizedBox.expand(),
+              child: Focus(
+                focusNode: focusNode,
+                child: const SizedBox.expand(),
+              ),
             ),
           ),
         ),
@@ -2055,8 +2051,6 @@ void main() {
             body: TerminalTextInputHandler(
               terminal: terminal,
               focusNode: focusNode,
-              deleteDetection: true,
-              manageFocus: false,
               child: Focus(
                 focusNode: focusNode,
                 child: const SizedBox.expand(

@@ -40,6 +40,7 @@ DateTime _readModifierChordClock() =>
 class _AndroidTerminalImeKeyBridge {
   static _TerminalTextInputHandlerState? _state;
   static bool _handlerInstalled = false;
+  static bool? _lastRequestedEnabled;
   static final List<({TerminalKey key, TerminalKeyEventType type})>
   _pendingPhysicalEvents = <({TerminalKey key, TerminalKeyEventType type})>[];
 
@@ -55,6 +56,7 @@ class _AndroidTerminalImeKeyBridge {
     if (identical(_state, state)) {
       _state = null;
       _pendingPhysicalEvents.clear();
+      _lastRequestedEnabled = null;
     }
   }
 
@@ -70,9 +72,12 @@ class _AndroidTerminalImeKeyBridge {
     } else {
       return;
     }
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+    if (kIsWeb ||
+        defaultTargetPlatform != TargetPlatform.android ||
+        enabled == _lastRequestedEnabled) {
       return;
     }
+    _lastRequestedEnabled = enabled;
     unawaited(_setEnabled(enabled));
   }
 
@@ -289,7 +294,6 @@ class TerminalTextInputHandler extends StatefulWidget {
     required this.focusNode,
     required this.child,
     this.controller,
-    this.deleteDetection = false,
     this.keyboardAppearance = Brightness.dark,
     this.onUserInput,
     this.onPasteText,
@@ -305,7 +309,6 @@ class TerminalTextInputHandler extends StatefulWidget {
     this.readOnly = false,
     this.tapToShowKeyboard = true,
     this.showKeyboardOnFocus,
-    this.manageFocus = true,
     super.key,
   });
 
@@ -320,9 +323,6 @@ class TerminalTextInputHandler extends StatefulWidget {
 
   /// Optional controller for externally coordinating touch/keyboard behavior.
   final TerminalTextInputHandlerController? controller;
-
-  /// Whether to use the delete-detection workaround for mobile.
-  final bool deleteDetection;
 
   /// The appearance of the keyboard (iOS only).
   final Brightness keyboardAppearance;
@@ -392,12 +392,6 @@ class TerminalTextInputHandler extends StatefulWidget {
   /// the user explicitly taps the terminal.
   final bool? showKeyboardOnFocus;
 
-  /// Whether this widget should wrap [child] in a [Focus] using [focusNode].
-  ///
-  /// Set this to false when the child already owns the same [focusNode], for
-  /// example a [SelectionArea] that must share focus with the input connection.
-  final bool manageFocus;
-
   @override
   State<TerminalTextInputHandler> createState() =>
       _TerminalTextInputHandlerState();
@@ -409,7 +403,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     platform: defaultTargetPlatform,
     isWeb: kIsWeb,
     readOnly: widget.readOnly,
-    deleteDetection: widget.deleteDetection,
     sensitiveInput: widget.sensitiveInput,
     keyboardAppearance: widget.keyboardAppearance,
   );
@@ -461,9 +454,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     _AndroidTerminalImeKeyBridge.attach();
     widget.focusNode.addListener(_onFocusChange);
     widget.controller?._attach(this);
-    if (!widget.manageFocus) {
-      HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
-    }
+    HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
   }
 
   @override
@@ -486,13 +477,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     if (widget.controller != oldWidget.controller) {
       oldWidget.controller?._detach(this);
       widget.controller?._attach(this);
-    }
-    if (widget.manageFocus != oldWidget.manageFocus) {
-      if (widget.manageFocus) {
-        HardwareKeyboard.instance.removeHandler(_handleGlobalKeyEvent);
-      } else {
-        HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
-      }
     }
     if (hasInputConnection &&
         widget.sensitiveInput != oldWidget.sensitiveInput) {
@@ -517,9 +501,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   @override
   void dispose() {
     widget.controller?._detach(this);
-    if (!widget.manageFocus) {
-      HardwareKeyboard.instance.removeHandler(_handleGlobalKeyEvent);
-    }
+    HardwareKeyboard.instance.removeHandler(_handleGlobalKeyEvent);
     widget.focusNode.removeListener(_onFocusChange);
     _stopHardwareKeyRepeat();
     _ime.cancelDeferredTrailingBackspaceImeClear();
@@ -538,27 +520,18 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     // Platform and read-only state are read live in HEAD; keep the engine's
     // snapshot current on every build, not only on didUpdateWidget.
     _ime.options = _imeOptions;
-    final child = widget.manageFocus
-        ? Focus(
-            focusNode: widget.focusNode,
-            autofocus: true,
-            onKeyEvent: _onKeyEvent,
-            child: widget.child,
-          )
-        : widget.child;
-
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _handlePointerDown,
       onPointerMove: _handlePointerMove,
       onPointerUp: _handlePointerUp,
       onPointerCancel: _handlePointerCancel,
-      child: child,
+      child: widget.child,
     );
   }
 
   bool _handleGlobalKeyEvent(KeyEvent event) {
-    if (widget.manageFocus || !widget.focusNode.hasFocus) {
+    if (!widget.focusNode.hasFocus) {
       return false;
     }
     final result = _onKeyEvent(widget.focusNode, event);
@@ -877,9 +850,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       _ime.cancelAndroidBackspace();
       return;
     }
-    if (key == TerminalKey.shiftLeft || key == TerminalKey.shiftRight) {
-      return;
-    }
     if (key != TerminalKey.backspace) {
       return;
     }
@@ -1059,14 +1029,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     }
     // Always show — this is an explicit request (e.g. from a toolbar button).
     _openInputConnection();
-  }
-
-  /// Hides the soft keyboard.
-  void closeKeyboard() {
-    if (hasInputConnection) {
-      _connection?.close();
-    }
-    _setInputConnectionShown(shown: false);
   }
 
   void _suppressNextTouchKeyboardRequest() {

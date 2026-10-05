@@ -76,12 +76,11 @@ void main() {
         body: TerminalTextInputHandler(
           terminal: terminal,
           focusNode: focusNode,
-          deleteDetection: true,
           onReviewInsertedText: (_) {
             reviews++;
             return decision.future;
           },
-          child: const SizedBox.expand(),
+          child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
         ),
       ),
     );
@@ -137,7 +136,7 @@ void main() {
         body: TerminalTextInputHandler(
           terminal: terminal,
           focusNode: focusNode,
-          child: const SizedBox.expand(),
+          child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
         ),
       ),
     );
@@ -169,8 +168,7 @@ void main() {
         body: TerminalTextInputHandler(
           terminal: terminal,
           focusNode: focusNode,
-          deleteDetection: true,
-          child: const SizedBox.expand(),
+          child: Focus(focusNode: focusNode, child: const SizedBox.expand()),
         ),
       ),
     );
