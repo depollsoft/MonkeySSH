@@ -15,8 +15,10 @@ import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
-class _ThrowingPresetService extends AgentLaunchPresetService {
-  _ThrowingPresetService(super.settings);
+/// A [AgentLaunchPresetService] subclass whose [setPresetForHost] always
+/// throws, used to trigger transaction rollback in tests.
+class ThrowingPresetService extends AgentLaunchPresetService {
+  ThrowingPresetService(super.settings);
 
   @override
   Future<void> setPresetForHost(int hostId, AgentLaunchPreset preset) async =>
@@ -107,7 +109,7 @@ void registerDuplicateHostCommandTests() {
       final throwingCommand = DuplicateHostCommand(
         db: db,
         hostRepository: hostRepository,
-        presetService: _ThrowingPresetService(settingsService),
+        presetService: ThrowingPresetService(settingsService),
         cliPreferencesService: cliPreferencesService,
       );
 
