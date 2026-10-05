@@ -12796,7 +12796,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       terminal: _terminal,
       focusNode: _terminalFocusNode,
       controller: _terminalTextInputController,
-      deleteDetection: true,
       keyboardAppearance: keyboardAppearance,
       onUserInput: _handleTerminalUserInput,
       onPasteText: _pasteClipboard,
@@ -12821,7 +12820,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           !_isNativeSelectionMode &&
           overlayMessage == null,
       showKeyboardOnFocus: false,
-      manageFocus: false,
       child: TerminalPinchZoomGestureHandler(
         onPinchStart: () => _handleTerminalScaleStart(storedFontSize),
         onPinchUpdate: (scale) =>

@@ -16,7 +16,12 @@ const defaultAutoConnectCommandSuggestion = 'tmux new -As MonkeySSH';
 final _disallowedCommandControlCharacters = RegExp(
   r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]',
 );
-final _multilinePattern = RegExp(r'[\r\n]');
+
+/// Matches any control character that terminal text must not carry.
+final terminalControlCharacterPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
+
+/// Matches a CR or LF line break.
+final terminalNewlinePattern = RegExp(r'[\r\n]');
 
 /// Reasons a terminal command should be reviewed before it is inserted or run.
 enum TerminalCommandReviewReason {
@@ -210,7 +215,7 @@ List<TerminalCommandReviewReason> _collectSuspiciousCommandReasons(
 ) {
   final reasons = <TerminalCommandReviewReason>[];
   final shellTokens = _collectSuspiciousShellTokens(command);
-  if (_multilinePattern.hasMatch(command)) {
+  if (terminalNewlinePattern.hasMatch(command)) {
     reasons.add(TerminalCommandReviewReason.multiline);
   }
   if (_disallowedCommandControlCharacters.hasMatch(command)) {

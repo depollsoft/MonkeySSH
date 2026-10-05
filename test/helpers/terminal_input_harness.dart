@@ -20,10 +20,8 @@ Future<TerminalInputHarness> pumpTerminalInputHarness(
   TextEditingValue? initialEditingValue,
   String? initialTerminalOutput,
   bool readOnly = false,
-  bool deleteDetection = true,
   bool tapToShowKeyboard = true,
   bool sensitiveInput = false,
-  bool manageFocus = true,
   FutureOr<void> Function()? onPasteText,
   TerminalTextInputReviewCallback? onReviewInsertedText,
   String Function()? resolveTextBeforeCursor,
@@ -42,28 +40,26 @@ Future<TerminalInputHarness> pumpTerminalInputHarness(
   final effectiveController =
       controller ?? TerminalTextInputHandlerController();
 
-  Widget body = TerminalTextInputHandler(
-    terminal: terminal,
+  // Production wraps the handler in an external Focus (the terminal view).
+  final body = Focus(
     focusNode: focusNode,
-    controller: attachController ? effectiveController : null,
-    deleteDetection: deleteDetection,
-    readOnly: readOnly,
-    tapToShowKeyboard: tapToShowKeyboard,
-    sensitiveInput: sensitiveInput,
-    manageFocus: manageFocus,
-    onPasteText: onPasteText,
-    onReviewInsertedText: onReviewInsertedText,
-    resolveTextBeforeCursor: resolveTextBeforeCursor,
-    resolveTerminalKeyModifiers: resolveTerminalKeyModifiers,
-    consumeTerminalKeyModifiers: consumeTerminalKeyModifiers,
-    applyTerminalTextInputModifiers: applyTerminalTextInputModifiers,
-    hasActiveToolbarModifier: hasActiveToolbarModifier,
-    child: const SizedBox.expand(),
+    child: TerminalTextInputHandler(
+      terminal: terminal,
+      focusNode: focusNode,
+      controller: attachController ? effectiveController : null,
+      readOnly: readOnly,
+      tapToShowKeyboard: tapToShowKeyboard,
+      sensitiveInput: sensitiveInput,
+      onPasteText: onPasteText,
+      onReviewInsertedText: onReviewInsertedText,
+      resolveTextBeforeCursor: resolveTextBeforeCursor,
+      resolveTerminalKeyModifiers: resolveTerminalKeyModifiers,
+      consumeTerminalKeyModifiers: consumeTerminalKeyModifiers,
+      applyTerminalTextInputModifiers: applyTerminalTextInputModifiers,
+      hasActiveToolbarModifier: hasActiveToolbarModifier,
+      child: const SizedBox.expand(),
+    ),
   );
-  // Production uses manageFocus: false with an external Focus (terminal view).
-  if (!manageFocus) {
-    body = Focus(focusNode: focusNode, child: body);
-  }
 
   await tester.pumpWidget(MaterialApp(home: Scaffold(body: body)));
 

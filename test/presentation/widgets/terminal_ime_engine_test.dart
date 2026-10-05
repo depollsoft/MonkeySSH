@@ -983,6 +983,21 @@ _LoggedEditingState _loggedTerminalClientState(TextEditingValue value) {
 }
 
 void main() {
+  for (final key in [TerminalKey.enter, TerminalKey.numpadEnter]) {
+    test('${key.name} collapses LNM CRLF and maps Alt to ESC CR', () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(driver);
+      harness.terminal.write('\x1b[20h');
+      harness.terminalOutput.clear();
+      await driver.hardwareKey(key);
+      expect(harness.terminalOutput.join(), '\r');
+      harness.terminalOutput.clear();
+      await driver.hardwareKey(key, alt: true);
+      expect(harness.terminalOutput.join(), '\x1b\r');
+    });
+  }
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     for (final hardwareEnter in [false, true]) {
       test(
@@ -2165,9 +2180,25 @@ void main() {
       },
     );
 
-    for (final resetReason in TerminalImeResetReason.values) {
+    for (final reset
+        in <({String name, void Function(TerminalImeEngine) apply})>[
+          (
+            name: 'connection',
+            apply: (engine) => engine
+              ..cancelDeferredTrailingBackspaceImeClear()
+              ..resetConnectionEditingState(),
+          ),
+          (
+            name: 'toolbar',
+            apply: (engine) => engine.clearImeBufferForFreshInput(),
+          ),
+          (
+            name: 'completions',
+            apply: (engine) => engine.resetImeCompletions(),
+          ),
+        ]) {
       test(
-        '${platform.name} shell completion protection ends on explicit ${resetReason.name} reset',
+        '${platform.name} shell completion protection ends on explicit ${reset.name} reset',
         () async {
           final driver = _ImeDriver(platform: platform);
           addTearDown(driver.dispose);
@@ -2184,7 +2215,7 @@ void main() {
             ),
           );
           await driver.flush();
-          driver.engine.reset(resetReason);
+          reset.apply(driver.engine);
           harness.terminalOutput.clear();
           driver.updateEditingValue(_editingValue('pip', selectionOffset: 3));
           await driver.flush();
@@ -2524,6 +2555,48 @@ void main() {
       addTearDown(driver.dispose);
       await _swipeSeparatorAfterPromptReset(driver);
     });
+
+    test(
+      'resolves the text before the cursor once per editing update',
+      () async {
+        final driver = _ImeDriver(platform: TargetPlatform.android);
+        addTearDown(driver.dispose);
+        var resolveCount = 0;
+        final harness = await _createImeHarness(
+          driver,
+          resolveTextBeforeCursor: () {
+            resolveCount++;
+            return 'echo ready';
+          },
+        );
+        const text = '$_deleteDetectionMarker world';
+        const selection = TextSelection.collapsed(offset: text.length);
+
+        driver.updateEditingValue(
+          const TextEditingValue(
+            text: text,
+            selection: selection,
+            composing: TextRange(
+              start: _deleteDetectionMarker.length,
+              end: text.length,
+            ),
+          ),
+        );
+        await driver.flush();
+        expect(resolveCount, lessThanOrEqualTo(1));
+
+        resolveCount = 0;
+        driver.updateEditingValue(
+          const TextEditingValue(text: text, selection: selection),
+        );
+        await driver.flush();
+
+        expect(terminalTextFromEvents(harness.terminalOutput), ' world');
+        expect(resolveCount, 1);
+
+        await _disposeImeHarness(driver, harness);
+      },
+    );
 
     test('trims a duplicate swipe separator after an input reset when text already ends with whitespace', () async {
       final driver = _ImeDriver(platform: TargetPlatform.android);
@@ -6197,19 +6270,17 @@ void main() {
       readOnly = true;
       driver.engine.options = TerminalImeOptions(
         platform: driver.platform,
-        deleteDetection: true,
         readOnly: readOnly,
       );
-      driver.engine.reset(TerminalImeResetReason.connection);
+      driver.resetConnection();
       await driver.flush();
 
       readOnly = false;
       driver.engine.options = TerminalImeOptions(
         platform: driver.platform,
-        deleteDetection: true,
         readOnly: readOnly,
       );
-      driver.engine.reset(TerminalImeResetReason.connection);
+      driver.resetConnection();
       await driver.flush();
 
       reviews.clear();
@@ -8574,7 +8645,7 @@ void _batchTests() {
         case 'toolbar key':
           harness.controller.clearImeBuffer();
         case 'connection':
-          driver.engine.reset(TerminalImeResetReason.connection);
+          driver.resetConnection();
           await driver.flush();
       }
       await driver.flush();
@@ -9117,7 +9188,6 @@ class _ImeDriver {
 
   Future<void> attach({
     required Terminal terminal,
-    bool deleteDetection = true,
     bool readOnly = false,
     bool sensitiveInput = false,
     Brightness keyboardAppearance = Brightness.dark,
@@ -9135,7 +9205,6 @@ class _ImeDriver {
       terminal: terminal,
       options: TerminalImeOptions(
         platform: platform,
-        deleteDetection: deleteDetection,
         readOnly: readOnly,
         sensitiveInput: sensitiveInput,
         keyboardAppearance: keyboardAppearance,
@@ -9168,11 +9237,15 @@ class _ImeDriver {
       ),
     );
     _engines.add(engine);
-    engine.reset(TerminalImeResetReason.connection);
+    resetConnection();
     log.add(
       MethodCall('TextInput.setEditingState', engine.editingValue.toJSON()),
     );
   }
+
+  void resetConnection() => engine
+    ..cancelDeferredTrailingBackspaceImeClear()
+    ..resetConnectionEditingState();
 
   void updateEditingValue(TextEditingValue value) =>
       engine.updateEditingValue(value);
@@ -9240,7 +9313,6 @@ Future<_ImeHarness> _createImeHarness(
   TextEditingValue? initialEditingValue,
   String? initialTerminalOutput,
   bool readOnly = false,
-  bool deleteDetection = true,
   bool sensitiveInput = false,
   FutureOr<void> Function()? onPasteText,
   TerminalTextInputReviewCallback? onReviewInsertedText,
@@ -9264,7 +9336,6 @@ Future<_ImeHarness> _createImeHarness(
   await driver.attach(
     terminal: terminal,
     readOnly: readOnly,
-    deleteDetection: deleteDetection,
     sensitiveInput: sensitiveInput,
     onReviewInsertedText: onReviewInsertedText,
     resolveTextBeforeCursor: resolveTextBeforeCursor,
