@@ -7,6 +7,7 @@ import 'agent_launch_preset.dart';
 const acpBuiltinProviderIdPrefix = 'builtin:';
 
 const _listEquality = ListEquality<String>();
+const _mapEquality = MapEquality<String, String>();
 
 /// Stable identifiers for built-in ACP providers.
 abstract final class AcpBuiltinProviderIds {
@@ -94,17 +95,21 @@ class AcpLaunchCommand {
 class AcpExecutableProbe {
   /// Creates a new [AcpExecutableProbe].
   ///
-  /// [candidateExecutableNames], [versionArguments], and
-  /// [requiredExecutableNames] are defensively
-  /// copied so later mutations to a caller-owned list can never change this
-  /// probe after construction.
+  /// [candidateExecutableNames], [versionArguments],
+  /// [requiredExecutableNames], and [executableOverrideEnvironmentVariables]
+  /// are defensively copied so later mutations to a caller-owned collection
+  /// can never change this probe after construction.
   AcpExecutableProbe({
     required List<String> candidateExecutableNames,
     List<String> versionArguments = const ['--version'],
     List<String> requiredExecutableNames = const [],
+    Map<String, String> executableOverrideEnvironmentVariables = const {},
   }) : candidateExecutableNames = List.unmodifiable(candidateExecutableNames),
        versionArguments = List.unmodifiable(versionArguments),
-       requiredExecutableNames = List.unmodifiable(requiredExecutableNames);
+       requiredExecutableNames = List.unmodifiable(requiredExecutableNames),
+       executableOverrideEnvironmentVariables = Map.unmodifiable(
+         executableOverrideEnvironmentVariables,
+       );
 
   /// Executable names or aliases that may resolve to this provider on PATH.
   final List<String> candidateExecutableNames;
@@ -114,6 +119,11 @@ class AcpExecutableProbe {
 
   /// Arguments used to probe the resolved executable's version.
   final List<String> versionArguments;
+
+  /// Environment variables that, when set on the host, name the absolute path
+  /// to use for an executable instead of the PATH lookup, keyed by executable
+  /// name.
+  final Map<String, String> executableOverrideEnvironmentVariables;
 
   @override
   bool operator ==(Object other) =>
@@ -127,6 +137,10 @@ class AcpExecutableProbe {
           _listEquality.equals(
             requiredExecutableNames,
             other.requiredExecutableNames,
+          ) &&
+          _mapEquality.equals(
+            executableOverrideEnvironmentVariables,
+            other.executableOverrideEnvironmentVariables,
           );
 
   @override
@@ -134,6 +148,7 @@ class AcpExecutableProbe {
     _listEquality.hash(candidateExecutableNames),
     _listEquality.hash(versionArguments),
     _listEquality.hash(requiredExecutableNames),
+    _mapEquality.hash(executableOverrideEnvironmentVariables),
   );
 
   @override
@@ -260,6 +275,7 @@ class AcpBuiltinProvider implements AcpProvider {
     this.terminalAuthCommand,
     this.adapterFallbackCommand,
     this.launchProfileSupport,
+    this.windowsLaunchPreamble,
   });
 
   /// Stable identifier for this provider.
@@ -299,6 +315,10 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Optional capability for discovering and selecting isolated CLI profiles.
   final AcpLaunchProfileSupport? launchProfileSupport;
 
+  /// Optional PowerShell statements run before this provider's argv on a
+  /// Windows host.
+  final String? windowsLaunchPreamble;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -311,7 +331,8 @@ class AcpBuiltinProvider implements AcpProvider {
           executableProbe == other.executableProbe &&
           terminalAuthCommand == other.terminalAuthCommand &&
           adapterFallbackCommand == other.adapterFallbackCommand &&
-          launchProfileSupport == other.launchProfileSupport;
+          launchProfileSupport == other.launchProfileSupport &&
+          windowsLaunchPreamble == other.windowsLaunchPreamble;
 
   @override
   int get hashCode => Object.hash(
@@ -324,6 +345,7 @@ class AcpBuiltinProvider implements AcpProvider {
     terminalAuthCommand,
     adapterFallbackCommand,
     launchProfileSupport,
+    windowsLaunchPreamble,
   );
 
   @override
@@ -596,6 +618,9 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
   executableProbe: AcpExecutableProbe(
     candidateExecutableNames: const ['muse-code-acp'],
     requiredExecutableNames: const ['muse'],
+    executableOverrideEnvironmentVariables: const {
+      'muse': _museExecutableVariable,
+    },
   ),
   terminalAuthCommand: AcpLaunchCommand(
     executable: 'muse',
@@ -605,7 +630,34 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
     executable: 'npx',
     arguments: const ['--yes', '@bex-co/muse-code-acp@0.6.0'],
   ),
+  windowsLaunchPreamble: _museWindowsExecutablePreamble,
 );
+
+const _museExecutableVariable = 'MUSE_CODE_EXECUTABLE';
+
+// Node's spawn cannot execute the official muse.cmd shim without a shell.
+// Resolve the launcher's selected native binary for the adapter's subprocess.
+// Preserve explicit overrides and never run the updater while opening chat.
+const _museWindowsExecutablePreamble =
+    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
+    r'$__flMuse=Get-Command muse -CommandType Application,ExternalScript -ErrorAction SilentlyContinue|Select-Object -First 1; '
+    r'if($null -ne $__flMuse){ '
+    r'$__flMusePath=$__flMuse.Source; '
+    r"if([IO.Path]::GetExtension($__flMusePath) -eq '.exe'){ "
+    r'$env:MUSE_CODE_EXECUTABLE=$__flMusePath '
+    '}else{ '
+    r'$__flMuseDir=Split-Path -Parent $__flMusePath; '
+    r"$__flMuseVersionFile=Join-Path $__flMuseDir '.muse-version'; "
+    r'if(Test-Path -LiteralPath $__flMuseVersionFile -PathType Leaf){ '
+    r'$__flMuseVersion=[IO.File]::ReadAllText($__flMuseVersionFile).Trim(); '
+    r"if($__flMuseVersion -match '^\d+\.\d+\.\d+-R\d+(\.\d+)?$'){ "
+    r'$__flMuseBinary=Join-Path $__flMuseDir ("muse-bin-"+$__flMuseVersion+".exe"); '
+    r'if(Test-Path -LiteralPath $__flMuseBinary -PathType Leaf){ '
+    r'$env:MUSE_CODE_EXECUTABLE=$__flMuseBinary '
+    '}}}}}; '
+    r'if([string]::IsNullOrWhiteSpace($env:MUSE_CODE_EXECUTABLE)){ '
+    "throw 'Muse native executable was not found. Install or update Muse Code in Agent Management.' "
+    '}};';
 
 /// Built-in Pi ACP provider.
 final acpPiProvider = AcpBuiltinProvider(

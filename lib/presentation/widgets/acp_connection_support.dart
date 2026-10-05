@@ -74,6 +74,11 @@ Set<String> _allBuiltinAcpExecutableNames() => <String>{
   ],
 };
 
+Map<String, String> _builtinAcpExecutableOverrideVariables() => {
+  for (final provider in acpBuiltinProviders)
+    ...provider.executableProbe.executableOverrideEnvironmentVariables,
+};
+
 Future<Map<String, String>> _loadAcpRemoteExecutables(
   SshSession session,
 ) async {
@@ -95,13 +100,20 @@ Future<Map<String, String>> _loadAcpRemoteExecutables(
   }
   if (cache.pending case final pending?) return pending;
   final requested = _allBuiltinAcpExecutableNames();
+  final overrideVariables = _builtinAcpExecutableOverrideVariables();
   final startedAt = DateTime.now();
   final future = session.runQueuedExec(() async {
     final command = session.remoteIsWindows
         ? buildWindowsPowerShellCommand(
-            buildMonkeyMuxAcpWindowsExecutableProbeScript(requested),
+            buildMonkeyMuxAcpWindowsExecutableProbeScript(
+              requested,
+              overrideVariables: overrideVariables,
+            ),
           )
-        : buildMonkeyMuxAcpExecutableProbeCommand(requested);
+        : buildMonkeyMuxAcpExecutableProbeCommand(
+            requested,
+            overrideVariables: overrideVariables,
+          );
     SSHSession? shell;
     try {
       shell = await session.execute(command);
