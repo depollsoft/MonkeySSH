@@ -120,15 +120,11 @@ class TerminalHyperlinkTracker {
     _pruneDetachedHyperlinks();
 
     final queryStart = CellOffset(startColumn, row);
-    final queryEndInclusive = CellOffset(endColumn, row);
     final queryEndExclusive = CellOffset(endColumn + 1, row);
     bool intersectsExclusive(CellOffset start, CellOffset end) =>
         _compareOffsets(start, end) < 0 &&
         _compareOffsets(start, queryEndExclusive) < 0 &&
         _compareOffsets(queryStart, end) < 0;
-    bool intersectsInclusive(CellOffset start, CellOffset end) =>
-        _compareOffsets(start, queryEndInclusive) <= 0 &&
-        _compareOffsets(queryStart, end) <= 0;
 
     final activeHyperlink = _pendingHyperlink;
     if (activeHyperlink != null &&
@@ -142,10 +138,7 @@ class TerminalHyperlinkTracker {
 
     for (final hyperlink in _trackedHyperlinks) {
       if (identical(hyperlink.buffer, terminal.buffer) &&
-          intersectsInclusive(
-            hyperlink.startAnchor.offset,
-            hyperlink.lastCellAnchor.offset,
-          )) {
+          hyperlink.coversRowRange(row, startColumn, endColumn)) {
         return true;
       }
     }
@@ -184,8 +177,7 @@ class TerminalHyperlinkTracker {
     }
     for (final hyperlink in _trackedHyperlinks) {
       if (!identical(hyperlink.buffer, terminal.buffer) ||
-          row < hyperlink.startAnchor.y ||
-          row > hyperlink.lastCellAnchor.y) {
+          !hyperlink.coversRowRange(row, 0, terminal.buffer.viewWidth - 1)) {
         continue;
       }
       final nextDestination = hyperlink.uri.toString();
@@ -308,18 +300,37 @@ class _PendingTerminalHyperlink {
   }
 }
 
+/// A closed OSC 8 link. Its anchors follow scrolling and reflow, and a
+/// snapshot of the cells written while it was open decides membership: a cell
+/// a later unlinked write replaced is no longer part of the link.
 class _TrackedTerminalHyperlink {
   _TrackedTerminalHyperlink({
     required this.uri,
     required this.buffer,
     required this.startAnchor,
     required this.lastCellAnchor,
-  });
+  }) {
+    final start = startAnchor.offset;
+    final end = lastCellAnchor.offset;
+    final width = buffer.viewWidth;
+    final count = width <= 0
+        ? 0
+        : (end.y - start.y) * width + end.x - start.x + 1;
+    _cells = List<int>.filled(count > 0 ? count * 2 : 0, 0);
+    for (var index = 0; index < count; index++) {
+      final x = start.x + index;
+      _readCell(CellOffset(x % width, start.y + x ~/ width), index);
+    }
+  }
 
   final Uri uri;
   final Buffer buffer;
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
+
+  /// Content and style hash of each linked cell, in reading order.
+  late final List<int> _cells;
+  static final _cell = CellData.empty();
 
   bool get attached => startAnchor.attached && lastCellAnchor.attached;
 
@@ -335,13 +346,65 @@ class _TrackedTerminalHyperlink {
     if (!attached) {
       return false;
     }
-
-    return _containsInclusiveOffset(
-      start: startAnchor.offset,
+    final start = startAnchor.offset;
+    if (!_containsInclusiveOffset(
+      start: start,
       end: lastCellAnchor.offset,
       target: offset,
-    );
+    )) {
+      return false;
+    }
+    // Anchors move with reflow, so the cell's reading-order index within the
+    // span uses the current width.
+    final index = (offset.y - start.y) * buffer.viewWidth + offset.x - start.x;
+    if (index < 0 || index * 2 >= _cells.length) {
+      return false;
+    }
+    final content = _cells[index * 2];
+    final style = _cells[index * 2 + 1];
+    return _readCell(offset, null) &&
+        _cell.content == content &&
+        _styleHash() == style;
   }
+
+  /// Whether a surviving linked cell lies on [row] within the inclusive
+  /// column range.
+  bool coversRowRange(int row, int startColumn, int endColumn) {
+    if (!attached || row < startAnchor.y || row > lastCellAnchor.y) {
+      return false;
+    }
+    for (var x = startColumn; x <= endColumn; x++) {
+      if (contains(CellOffset(x, row))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Loads the cell at [offset] into [_cell], recording it at snapshot
+  /// [index] when given. Returns false when the cell does not exist.
+  bool _readCell(CellOffset offset, int? index) {
+    if (offset.y < 0 || offset.y >= buffer.lines.length) {
+      return false;
+    }
+    final line = buffer.lines[offset.y];
+    if (offset.x < 0 || offset.x >= line.length) {
+      return false;
+    }
+    line.getCellData(offset.x, _cell);
+    if (index != null) {
+      _cells[index * 2] = _cell.content;
+      _cells[index * 2 + 1] = _styleHash();
+    }
+    return true;
+  }
+
+  static int _styleHash() => Object.hash(
+    _cell.foreground,
+    _cell.background,
+    _cell.flags,
+    _cell.underlineColor,
+  );
 
   void dispose() {
     startAnchor.dispose();
