@@ -4358,19 +4358,12 @@ class MonkeyRenderTerminal extends RenderBox
       }
     }
 
-    _paintHighlights(
-      canvas,
-      _controller.highlights,
-      effectFirstLine,
-      effectLastLine,
-    );
-
     final selection = _selectionRangeForPaint;
     if (selection != null) {
       _paintSelection(canvas, selection, effectFirstLine, effectLastLine);
     }
 
-    // Keep link affordances visible over opaque selection/highlight fills while
+    // Keep link affordances visible over opaque selection fills while
     // preserving each cell's own underline styling.
     _paintInlineUnderlines(canvas, offset, effectFirstLine, effectLastLine);
 
@@ -4894,35 +4887,6 @@ class MonkeyRenderTerminal extends RenderBox
       }
 
       _paintSegment(canvas, segment, _painter.theme.selection);
-    }
-  }
-
-  void _paintHighlights(
-    Canvas canvas,
-    List<TerminalHighlight> highlights,
-    int firstLine,
-    int lastLine,
-  ) {
-    for (final highlight in highlights) {
-      final range = highlight.range?.normalized;
-
-      if (range == null ||
-          range.begin.y > lastLine ||
-          range.end.y < firstLine) {
-        continue;
-      }
-
-      for (final segment in range.toSegments()) {
-        if (segment.line < firstLine) {
-          continue;
-        }
-
-        if (segment.line > lastLine) {
-          break;
-        }
-
-        _paintSegment(canvas, segment, highlight.color);
-      }
     }
   }
 
