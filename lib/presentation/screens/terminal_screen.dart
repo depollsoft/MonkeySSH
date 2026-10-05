@@ -102,6 +102,7 @@ import '../widgets/monkey_terminal_view.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/system_bottom_inset.dart';
+import '../widgets/terminal_key_input.dart';
 import '../widgets/terminal_menu_style.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_paste_upload_strip.dart';
@@ -835,6 +836,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   StreamSubscription<String>? _shellStdoutSubscription;
   Terminal? _terminalWithOwnedCallbacks;
   void Function(String)? _terminalOutputHandler;
+  TerminalEnterPacer? _terminalEnterPacer;
   void Function(int, int, int, int)? _terminalResizeHandler;
   void Function(int, int)? _terminalHostResizeHandler;
   bool _suppressMonkeyMuxResizeSyncFromTerminalRefresh = false;
@@ -4974,6 +4976,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       },
     );
 
+    final enterPacer = TerminalEnterPacer(
+      write: (output) {
+        try {
+          session.writeToShell(output);
+        } on Object catch (error) {
+          DiagnosticsLogService.instance.warning(
+            'terminal.input',
+            'write_failed',
+            fields: {
+              'connectionId': session.connectionId,
+              'errorType': error.runtimeType,
+            },
+          );
+          unawaited(
+            _cleanupUnexpectedDisconnect(
+              session.connectionId,
+              message: 'Connection became unresponsive. Reconnect to continue.',
+            ),
+          );
+        }
+      },
+    );
+    _terminalEnterPacer = enterPacer;
+
     void handleTerminalOutput(String data) {
       // Enter keystroke CRLF collapse lives in sendTerminalEnterInput so paste
       // and other producers of exact "\r\n" are not rewritten here.
@@ -4989,24 +5015,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       _clearDetectedSensitiveKeyboardPromptAfterInput(output);
       _handleTerminalOutputForShellCompletion(output);
-      try {
-        session.writeToShell(output);
-      } on Object catch (error) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.input',
-          'write_failed',
-          fields: {
-            'connectionId': session.connectionId,
-            'errorType': error.runtimeType,
-          },
-        );
-        unawaited(
-          _cleanupUnexpectedDisconnect(
-            session.connectionId,
-            message: 'Connection became unresponsive. Reconnect to continue.',
-          ),
-        );
-      }
+      enterPacer.add(output, enter: isWritingTerminalEnterKey);
     }
 
     _terminalOutputHandler = handleTerminalOutput;
@@ -5174,6 +5183,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _clearOwnedTerminalCallbacks() {
+    _terminalEnterPacer?.dispose();
+    _terminalEnterPacer = null;
     final terminal = _terminalWithOwnedCallbacks;
     final outputHandler = _terminalOutputHandler;
     if (terminal != null &&

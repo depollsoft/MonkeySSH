@@ -1,3 +1,4 @@
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:xterm/xterm.dart';
@@ -174,6 +175,88 @@ void main() {
       );
 
       expect(output, isEmpty);
+    });
+  });
+
+  test('sendTerminalEnterInput marks its writes as an Enter keystroke', () {
+    final writes = <(String, bool)>[];
+    final terminal = Terminal(
+      onOutput: (data) => writes.add((data, isWritingTerminalEnterKey)),
+    )..textInput('hi');
+    for (final (shift, alt) in [(false, false), (true, false), (false, true)]) {
+      sendTerminalEnterInput(
+        terminal,
+        shiftActive: shift,
+        altActive: alt,
+        ctrlActive: false,
+      );
+    }
+    terminal.textInput('x');
+
+    expect(writes, [
+      ('hi', false),
+      ('\r', true),
+      ('\n', true),
+      ('\x1b\r', true),
+      ('x', false),
+    ]);
+    expect(isWritingTerminalEnterKey, isFalse);
+  });
+
+  group('TerminalEnterPacer', () {
+    test('holds an Enter sent with text until the gap has passed', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        // A soft keyboard commits the word and its space with the Return.
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('what?', enter: false)
+          ..add(' ', enter: false)
+          ..add('\r', enter: true);
+        expect(written, ['what?', ' ']);
+
+        async.elapse(const Duration(milliseconds: 60));
+        // Anything typed meanwhile waits behind the Enter.
+        pacer.add('n', enter: false);
+        expect(written, ['what?', ' ']);
+
+        async.elapse(const Duration(milliseconds: 39));
+        expect(written, ['what?', ' ']);
+        async.elapse(const Duration(milliseconds: 1));
+        expect(written, ['what?', ' ', '\r', 'n']);
+      });
+    });
+
+    test('sends an Enter at once when no text came just before it', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('\r', enter: true);
+        expect(written, ['\r']);
+
+        pacer.add('ls', enter: false);
+        async.elapse(TerminalEnterPacer.defaultGap);
+        pacer
+          ..add('\r', enter: true)
+          ..add('\r', enter: true);
+        expect(written, ['\r', 'ls', '\r', '\r']);
+      });
+    });
+
+    test('dispose drops a held Enter', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('a', enter: false)
+          ..add('\r', enter: true)
+          ..dispose();
+
+        async.elapse(const Duration(seconds: 1));
+        expect(written, ['a']);
+        expect(async.pendingTimers, isEmpty);
+      });
     });
   });
 }

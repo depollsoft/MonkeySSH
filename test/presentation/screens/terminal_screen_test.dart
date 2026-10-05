@@ -67,6 +67,7 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -7042,7 +7043,8 @@ void main() {
           );
           await tester.pump();
           await tester.testTextInput.receiveAction(TextInputAction.done);
-          await tester.pump();
+          // The Return follows the text it came with after the pacer's gap.
+          await tester.pump(TerminalEnterPacer.defaultGap);
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             '\x7f\x7fcheckout \r',
@@ -7093,7 +7095,8 @@ void main() {
             );
           }
           await tester.testTextInput.receiveAction(TextInputAction.done);
-          await tester.pump();
+          // The Return follows the text it came with after the pacer's gap.
+          await tester.pump(TerminalEnterPacer.defaultGap);
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             '\x7f\x7fcheckout hotfix\r',
