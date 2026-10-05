@@ -332,10 +332,7 @@ class _TrackedTerminalHyperlink {
           ..add(_cell.content)
           ..add(_styleHash());
       }
-      _rows.add((
-        anchor: y == start.y ? startAnchor : line.createAnchor(from),
-        cells: cells,
-      ));
+      _rows.add(_LinkedRow(line.createAnchor(from), cells));
     }
   }
 
@@ -344,11 +341,10 @@ class _TrackedTerminalHyperlink {
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;
 
-  /// For each row the link covered when it closed, an anchor on its first
-  /// linked cell and the content and style hash of its cells in order. Per-row
-  /// anchors keep a row's cells found after an erase elsewhere in the link or
-  /// a change to wrap flags; reflow moves each anchor with its cell.
-  final _rows = <({CellAnchor anchor, List<int> cells})>[];
+  /// The rows the link covered when it closed. Per-row anchors keep a row's
+  /// cells found after an erase elsewhere in the link or a change to wrap
+  /// flags; reflow moves each anchor with its cell.
+  final _rows = <_LinkedRow>[];
   static final _cell = CellData.empty();
 
   bool get attached => startAnchor.attached && lastCellAnchor.attached;
@@ -370,20 +366,36 @@ class _TrackedTerminalHyperlink {
     if (!attached || row < startAnchor.y || row > lastCellAnchor.y) {
       return false;
     }
+    // Deleted characters pull later, unlinked cells into the row, so only
+    // cells up to the end anchor count.
+    final first = row == startAnchor.y ? startAnchor.x : 0;
+    final last = row == lastCellAnchor.y ? lastCellAnchor.x : buffer.viewWidth;
+    final from = max(startColumn, first);
+    final to = min(endColumn, last);
+    if (from > to) {
+      return false;
+    }
     final width = buffer.viewWidth;
-    for (final (:anchor, :cells) in _rows) {
+    // Only a reflowing resize moves cells to another row. Without one, cells
+    // past the edge stay hidden on their row.
+    final reflows = buffer.terminal.reflowEnabled && !buffer.isAltBuffer;
+    for (final _LinkedRow(:anchor, :cells) in _rows) {
       if (!anchor.attached) {
         continue;
       }
       var y = anchor.y;
       var x = anchor.x;
       for (var i = 0; i < cells.length && y <= row; i += 2) {
-        // A row's cells continue on the next row after a narrowing reflow,
-        // which also wraps a wide character that would reach the last column.
+        // A reflow narrower than the snapshot continues a row's cells on the
+        // next row, and wraps a wide character that would reach the last
+        // column.
         if (x >= width ||
             (x == width - 1 &&
                 width > 1 &&
                 cells[i] >> CellContent.widthShift == 2)) {
+          if (!reflows) {
+            break;
+          }
           y++;
           x = 0;
           if (y > row) {
@@ -391,8 +403,8 @@ class _TrackedTerminalHyperlink {
           }
         }
         if (y == row &&
-            x >= startColumn &&
-            x <= endColumn &&
+            x >= from &&
+            x <= to &&
             _readCell(CellOffset(x, y)) &&
             _cell.content == cells[i] &&
             _styleHash() == cells[i + 1]) {
@@ -429,8 +441,37 @@ class _TrackedTerminalHyperlink {
     startAnchor.dispose();
     lastCellAnchor.dispose();
     for (final row in _rows) {
-      row.anchor.dispose();
+      row.dispose();
     }
+  }
+}
+
+/// One row of a closed link: an anchor on its first linked cell and the
+/// content and style hash of its cells in order.
+class _LinkedRow {
+  _LinkedRow(this.anchor, this.cells) {
+    _follow();
+  }
+
+  CellAnchor anchor;
+  final List<int> cells;
+
+  /// Erasing a cell disposes the anchors on it but moves no cell, so an anchor
+  /// on the same cell keeps the row's surviving cells aligned with [cells].
+  void _follow() {
+    anchor.onDispose = (disposed) {
+      final line = disposed.line;
+      if (line != null && disposed.x < line.length) {
+        anchor = line.createAnchor(disposed.x);
+        _follow();
+      }
+    };
+  }
+
+  void dispose() {
+    anchor
+      ..onDispose = null
+      ..dispose();
   }
 }
 

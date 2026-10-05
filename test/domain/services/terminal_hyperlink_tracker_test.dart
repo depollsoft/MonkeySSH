@@ -185,6 +185,32 @@ void main() {
       expect(tracker.resolveLinkOnRow(0), url);
     });
 
+    test('excludes an unlinked cell a deletion pulls into the link', () {
+      const url = 'https://example.com/deleted';
+      terminal.write('\x1b]8;;$url\x07aaaa\x1b]8;;\x07a\x1b[1;2H\x1b[P');
+
+      for (var x = 0; x < 3; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
+      }
+      expect(tracker.resolveLinkAt(const CellOffset(3, 0)), isNull);
+      expect(tracker.hasLinkInRowRange(0, 3, 4), isFalse);
+    });
+
+    test('keeps cells a non-reflowing resize hides on their row', () {
+      const url = 'https://example.com/alt';
+      terminal
+        ..write('\x1b[?1049h')
+        ..resize(10, terminal.viewHeight)
+        ..write('\x1b]8;;$url\x07abcdefgh\r\nijkl\x1b]8;;\x07\x1b[2;1HfghX')
+        ..resize(5, terminal.viewHeight);
+
+      for (var x = 0; x < 5; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 0)), url, reason: '$x');
+        expect(tracker.resolveLinkAt(CellOffset(x, 1)), isNull, reason: '$x');
+      }
+      expect(tracker.resolveLinkOnRow(1), isNull);
+    });
+
     test('tracks an OSC 8 link delivered across separate writes', () {
       terminal
         ..write('\u001b]8;;https://example.com/chunked\u0007')
@@ -285,6 +311,16 @@ void main() {
       // column never included `j`.
       for (var x = 0; x < 4; x++) {
         expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/2', reason: '$x');
+      }
+
+      // Erasing a row's first linked cell leaves the rest of the row linked.
+      terminal
+        ..write('\x1b[2J\x1b[H')
+        ..write('\x1b]8;;$url/3\x07abcdefghijklmn\x1b]8;;\x07\x1b[2;1H\x1b[X');
+
+      expect(tracker.resolveLinkAt(const CellOffset(0, 1)), isNull);
+      for (var x = 1; x < 5; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 1)), '$url/3', reason: '$x');
       }
     });
 
