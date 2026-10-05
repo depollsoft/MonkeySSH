@@ -116,4 +116,127 @@ void main() {
       expect(terminal.buffer.lines[1].getText(), 'Z');
     });
   });
+
+  group('MonkeyMux screen model agreement', () {
+    String row(Terminal terminal, int y) =>
+        terminal.buffer.lines[terminal.buffer.scrollBack + y].getText();
+
+    int foregroundAt(Terminal terminal, int x, int y) {
+      final cell = CellData.empty();
+      terminal.buffer.lines[terminal.buffer.scrollBack + y]
+          .getCellData(x, cell);
+      return cell.foreground;
+    }
+
+    test('a huge forward-tab count stops at the right edge', () {
+      final terminal = Terminal()..resize(20, 2);
+      final stopwatch = Stopwatch()..start();
+      terminal.write('\x1b[2147483647IZ');
+      // Each stop past the edge used to cost a loop iteration: seconds of UI
+      // freeze for one malformed sequence.
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(row(terminal, 0), '');
+      expect(row(terminal, 1), 'Z');
+    });
+
+    test('a huge repeat count writes at most one row', () {
+      final terminal = Terminal()..resize(4, 3);
+      final stopwatch = Stopwatch()..start();
+      terminal.write('a\x1b[2147483647b');
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(row(terminal, 0), 'aaaa');
+      expect(row(terminal, 1), 'a');
+    });
+
+    test('without autowrap output overwrites the last column', () {
+      final terminal = Terminal()..resize(4, 2);
+      terminal.write('\x1b[?7labcde');
+      expect(row(terminal, 0), 'abce');
+      expect(row(terminal, 1), '');
+      terminal.write('\u754c');
+      expect(row(terminal, 0), 'ab\u754c');
+      expect(terminal.buffer.cursorY, 0);
+    });
+
+    test('overwriting the second half of a wide character blanks the first',
+        () {
+      final terminal = Terminal()..resize(6, 1);
+      terminal.write('\u754cZ\x1b[1;2HA');
+      expect(terminal.buffer.lines[0].getWidth(0), isNot(2));
+      expect(row(terminal, 0), ' AZ');
+      terminal.write('\r\u4e2dZ\x1b[1;2H\u754c');
+      expect(row(terminal, 0), ' \u754c');
+    });
+
+    test('zero-width code points do not take a column', () {
+      final terminal = Terminal()..resize(10, 1);
+      terminal.write('e\u0301f\u2764\uFE0Fx\u200D');
+      expect(terminal.buffer.cursorX, 4);
+      expect(row(terminal, 0), 'ef\u2764x');
+      terminal.write('\x1b[b');
+      expect(row(terminal, 0), 'ef\u2764xx');
+    });
+
+    test('vertical moves and VPA stay inside the scroll region', () {
+      final terminal = Terminal()..resize(10, 8);
+      terminal.write('\x1b[3;6r\x1b[?6h\x1b[1;1H\x1b[1AX');
+      expect(terminal.buffer.cursorY, 2);
+      expect(row(terminal, 2), 'X');
+      terminal.write('\x1b[1dY');
+      expect(row(terminal, 2), 'XY');
+      terminal.write('\x1b[20B');
+      expect(terminal.buffer.cursorY, 5);
+      terminal.write('\x1b[20d');
+      expect(terminal.buffer.cursorY, 5);
+      // Without origin mode a cursor inside the region still stops at its
+      // margins, and one outside it moves over the whole screen.
+      terminal.write('\x1b[?6l\x1b[4;1H\x1b[9A');
+      expect(terminal.buffer.cursorY, 2);
+      terminal.write('\x1b[9E');
+      expect(terminal.buffer.cursorY, 5);
+      terminal.write('\x1b[8;1H\x1b[9F');
+      expect(terminal.buffer.cursorY, 0);
+    });
+
+    test('leaving mode 1049 restores the rendition saved on entry', () {
+      final terminal = Terminal();
+      terminal.write('\x1b[31mA\x1b[?1049h\x1b[32mB\x1b[?1049lC');
+      expect(foregroundAt(terminal, 1, 0), NamedColor.red | CellColor.named);
+    });
+
+    for (final entry in <String, List<String>>{
+      '\r\x1b[0P': ['BC', 'D'],
+      '\r\x1b[0@': [' ABC', 'D'],
+      '\r\x1b[0X': [' BC', 'D'],
+      '\x1b[H\x1b[0L': ['', 'ABC'],
+      '\x1b[2;1H\x1b[0M': ['ABC', ''],
+      '\x1b[0S': ['D', ''],
+      '\x1b[0T': ['', 'ABC'],
+    }.entries) {
+      test(
+          'an explicit zero count in ${entry.key.substring(entry.key.length - 2)} means one',
+          () {
+        final terminal = Terminal()..resize(5, 3);
+        terminal.write('ABC\r\nD\x1b[1;4H');
+        terminal.write(entry.key);
+        expect([row(terminal, 0), row(terminal, 1)], entry.value);
+      });
+    }
+
+    test('DECSTBM reads a zero bottom as the last row and homes the cursor',
+        () {
+      final terminal = Terminal()..resize(5, 4);
+      terminal.write('\x1b[3;3H\x1b[1;0r');
+      expect(terminal.buffer.marginTop, 0);
+      expect(terminal.buffer.marginBottom, 3);
+      expect(terminal.buffer.cursorX, 0);
+      expect(terminal.buffer.cursorY, 0);
+      terminal.write('\x1b[3;3H\x1b[3;2r');
+      expect(terminal.buffer.marginTop, 0);
+      expect(terminal.buffer.marginBottom, 3);
+      expect(terminal.buffer.cursorY, 2);
+      terminal.write('\x1b[?6h\x1b[2;3r');
+      expect(terminal.buffer.cursorY, 1);
+    });
+  });
 }

@@ -672,8 +672,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       _pendingKittyPlaceholder = pending;
       _lastKittyPlaceholder = pending;
     }
-    _precedingCodepoint = char;
-    _buffer.writeChar(char);
+    if (_buffer.writeChar(char)) {
+      _precedingCodepoint = char;
+    }
     if (placeholderToBind != null) {
       placeholderToBind.bind(
         _buffer.graphics.addPlaceholder(
@@ -700,24 +701,30 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   @override
-  void tab() {
+  void tab() => _advanceTab();
+
+  /// Moves to the next tab stop, or into the pending-wrap state past the last
+  /// column when none is left. Returns whether a stop was found.
+  bool _advanceTab() {
     final nextStop = _tabStops.find(_buffer.cursorX + 1, _viewWidth);
 
     if (nextStop != null) {
       _buffer.setCursorX(nextStop);
-    } else {
-      _buffer.setCursorX(_viewWidth);
-      _buffer.cursorGoForward(); // Enter pending-wrap state
+      return true;
     }
+    _buffer.setCursorX(_viewWidth);
+    _buffer.cursorGoForward(); // Enter pending-wrap state
+    return false;
   }
 
   @override
   void cursorForwardTab(int amount) {
     // CHT is defined as [amount] repetitions of a horizontal tab, so it reuses
     // [tab] verbatim -- including this terminal's pending-wrap handling at the
-    // right margin.
+    // right margin. Past the last stop a repetition changes nothing, and the
+    // count can be 2^31, so stop there.
     for (var i = 0; i < amount; i++) {
-      tab();
+      if (!_advanceTab()) break;
     }
   }
 
@@ -905,7 +912,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       return;
     }
 
-    for (var i = 0; i < count; i++) {
+    // Capped at one row, like the MonkeyMux screen model: the count can be
+    // 2^31.
+    for (var i = 0; i < count && i < _viewWidth; i++) {
       _buffer.writeChar(_precedingCodepoint);
     }
   }
@@ -922,7 +931,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setCursorY(int y) {
-    _buffer.setCursorY(y);
+    _buffer.setCursor(_buffer.cursorX, y);
   }
 
   @override
@@ -1142,7 +1151,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setMargins(int top, [int? bottom]) {
-    _buffer.setVerticalMargins(top, bottom ?? viewHeight - 1);
+    final lastRow = viewHeight - 1;
+    top = top.clamp(0, lastRow);
+    bottom = (bottom ?? lastRow).clamp(0, lastRow);
+    // Like xterm and the MonkeyMux screen model, a region of fewer than two
+    // rows is ignored and a valid one homes the cursor.
+    if (top >= bottom) return;
+    _buffer.setVerticalMargins(top, bottom);
+    _buffer.setCursor(0, 0);
   }
 
   @override

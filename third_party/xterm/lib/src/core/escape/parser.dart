@@ -456,14 +456,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sb/
   void _csiHandleRepeatPreviousCharacter() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.repeatPreviousCharacter(amount);
+    handler.repeatPreviousCharacter(_countParam());
   }
 
   /// `ESC [ Ps c` Device Attributes (DA)
@@ -545,13 +538,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sd/
   void _csiHandleLinePositionAbsolute() {
-    var y = 1;
-
-    if (_csi.params.isNotEmpty) {
-      y = _csi.params[0];
-    }
-
-    handler.setCursorY(y - 1);
+    handler.setCursorY(_countParam() - 1);
   }
 
   /// `ESC [ Ps ; Ps f` Alias: Set Cursor Position
@@ -928,20 +915,11 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sr/
   void _csiHandleSetMargins() {
-    var top = 1;
-    int? bottom;
-
     if (_csi.params.length > 2) return;
-
-    if (_csi.params.isNotEmpty) {
-      top = _csi.params[0];
-
-      if (_csi.params.length == 2) {
-        bottom = _csi.params[1] - 1;
-      }
-    }
-
-    handler.setMargins(top - 1, bottom);
+    final top = _csi.params.isNotEmpty ? _csi.params[0] : 0;
+    final bottom = _csi.params.length == 2 ? _csi.params[1] : 0;
+    // A zero or absent bottom means the last row.
+    handler.setMargins(top > 0 ? top - 1 : 0, bottom > 0 ? bottom - 1 : null);
   }
 
   /// `ESC [ Ps t` Window operations [DISPATCH]
@@ -1008,95 +986,46 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_ca/
   void _csiHandleCursorUp() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorY(-amount);
+    handler.moveCursorY(-_countParam());
   }
 
   /// `ESC [ Ps B` Cursor Down (CUD)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cb/
   void _csiHandleCursorDown() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorY(amount);
+    handler.moveCursorY(_countParam());
   }
 
   /// `ESC [ Ps C` Cursor Right (CUF)
   ///
   /// Cursor Right (CUF)
   void _csiHandleCursorForward() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorX(amount);
+    handler.moveCursorX(_countParam());
   }
 
   /// `ESC [ Ps D` Cursor Left (CUB)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cd/
   void _csiHandleCursorBackward() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.moveCursorX(-amount);
+    handler.moveCursorX(-_countParam());
   }
 
   /// `ESC [ Ps E` Cursor Next Line (CNL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_ce/
   void _csiHandleCursorNextLine() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.cursorNextLine(amount);
+    handler.cursorNextLine(_countParam());
   }
 
   /// `ESC [ Ps F` Cursor Previous Line (CPL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cf/
   void _csiHandleCursorPrecedingLine() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-      if (amount == 0) amount = 1;
-    }
-
-    handler.cursorPrecedingLine(amount);
+    handler.cursorPrecedingLine(_countParam());
   }
 
   void _csiHandleCursorHorizontalAbsolute() {
-    var x = 1;
-
-    if (_csi.params.isNotEmpty) {
-      x = _csi.params[0];
-      if (x == 0) x = 1;
-    }
-
-    handler.setCursorX(x - 1);
+    handler.setCursorX(_countParam() - 1);
   }
 
   /// ESC [ Ps J Erase Display [Dispatch] (ED)
@@ -1145,65 +1074,35 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cl/
   void _csiHandleInsertLines() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.insertLines(amount);
+    handler.insertLines(_countParam());
   }
 
   /// ESC [ Ps M Delete Line (DL)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cm/
   void _csiHandleDeleteLines() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.deleteLines(amount);
+    handler.deleteLines(_countParam());
   }
 
   /// ESC [ Ps P Delete Character (DCH)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cp/
   void _csiHandleDelete() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.deleteChars(amount);
+    handler.deleteChars(_countParam());
   }
 
   /// `ESC [ Ps S` Scroll Up (SU)
   ///
   /// https://terminalguide.namepad.de/seq/csi_cs/
   void _csiHandleScrollUp() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.scrollUp(amount);
+    handler.scrollUp(_countParam());
   }
 
   /// `ESC [ Ps T `Scroll Down (SD)
   ///
   /// https://terminalguide.namepad.de/seq/csi_ct_1param/
   void _csiHandleScrollDown() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.scrollDown(amount);
+    handler.scrollDown(_countParam());
   }
 
   /// `ESC [ Ps I` Cursor Horizontal Forward Tabulation (CHT)
@@ -1212,7 +1111,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_ci/
   void _csiHandleCursorForwardTab() {
-    handler.cursorForwardTab(_tabAmount());
+    handler.cursorForwardTab(_countParam());
   }
 
   /// `ESC [ Ps Z` Cursor Backward Tabulation (CBT)
@@ -1223,12 +1122,13 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cz/
   void _csiHandleCursorBackwardTab() {
-    handler.cursorBackwardTab(_tabAmount());
+    handler.cursorBackwardTab(_countParam());
   }
 
-  /// The repeat count of a CHT/CBT sequence. Absent, zero and negative
-  /// parameters all mean one tab stop.
-  int _tabAmount() {
+  /// The count of a sequence whose absent or zero parameter means one, as in
+  /// xterm (`params[0] || 1`). ED, EL, SGR and the like, where zero selects an
+  /// operation, read their parameter themselves.
+  int _countParam() {
     if (_csi.params.isEmpty) return 1;
     final amount = _csi.params[0];
     return amount > 0 ? amount : 1;
@@ -1238,13 +1138,7 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_cx/
   void _csiHandleEraseCharacters() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.eraseChars(amount);
+    handler.eraseChars(_countParam());
   }
 
   /// `ESC [ Ps @` Insert Blanks (ICH)
@@ -1255,13 +1149,7 @@ class EscapeParser {
   /// contents to the right. The contents of the amount right-most columns in
   /// the scroll region are lost. The cursor position is not changed.
   void _csiHandleInsertBlankCharacters() {
-    var amount = 1;
-
-    if (_csi.params.isNotEmpty) {
-      amount = _csi.params[0];
-    }
-
-    handler.insertBlankChars(amount);
+    handler.insertBlankChars(_countParam());
   }
 
   void _setMode(int mode, bool enabled) {
@@ -1359,6 +1247,7 @@ class EscapeParser {
           handler.useAltBuffer();
         } else {
           handler.useMainBuffer();
+          handler.restoreCursor();
         }
         return;
       case 2004:
