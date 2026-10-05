@@ -278,6 +278,38 @@ void registerRouterTests() {
         expect(route.allowSnapshotting, isFalse);
       });
 
+      test('slide-up routes name their pages for the route observer', () {
+        final router = container.read(routerProvider);
+        for (final (name, location, pathParameters) in [
+          (Routes.sftp, '/sftp/5', const <String, String>{'hostId': '5'}),
+          (
+            Routes.portForwardBrowser,
+            '/port-forwards/browser',
+            const <String, String>{},
+          ),
+        ]) {
+          final route = router.configuration.routes
+              .whereType<GoRoute>()
+              .singleWhere((candidate) => candidate.name == name);
+          final page = route.pageBuilder!(
+            _MockBuildContext(),
+            GoRouterState(
+              router.configuration,
+              uri: Uri.parse(location),
+              matchedLocation: location,
+              name: name,
+              path: route.path,
+              fullPath: route.path,
+              pathParameters: pathParameters,
+              pageKey: ValueKey<String>(route.path),
+              topRoute: route,
+            ),
+          );
+
+          expect(page.name, name, reason: location);
+        }
+      });
+
       test('terminal route keys distinguish expand tmux requests', () {
         final router = container.read(routerProvider);
         final terminalRoute = router.configuration.routes

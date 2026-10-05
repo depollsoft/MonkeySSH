@@ -398,36 +398,46 @@ bool _isSensitiveTransferAuthSessionUnlocked(
   AuthState Function() readAuthState,
 ) => readAuthState() == AuthState.unlocked;
 
-Future<String?> _showPinDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  try {
-    return await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Enter PIN'),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          obscureText: true,
-          decoration: const InputDecoration(labelText: 'PIN'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Confirm'),
-          ),
-        ],
-      ),
-    );
-  } finally {
-    controller
+Future<String?> _showPinDialog(BuildContext context) =>
+    showDialog<String>(context: context, builder: (context) => _PinDialog());
+
+class _PinDialog extends StatefulWidget {
+  @override
+  State<_PinDialog> createState() => _PinDialogState();
+}
+
+class _PinDialogState extends State<_PinDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    // The TextField still needs its controller during the route's exit animation.
+    _controller
       ..clear()
       ..dispose();
+    super.dispose();
   }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Enter PIN'),
+    content: TextField(
+      controller: _controller,
+      keyboardType: TextInputType.number,
+      obscureText: true,
+      decoration: const InputDecoration(labelText: 'PIN'),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text.trim()),
+        child: const Text('Confirm'),
+      ),
+    ],
+  );
 }
 
 /// Shared merge/replace mode chooser for migration imports.

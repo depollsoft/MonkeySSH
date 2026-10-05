@@ -3,8 +3,17 @@ abstract final class Routes {
   /// Home screen route.
   static const home = 'home';
 
+  /// Lock screen route.
+  static const lock = 'lock';
+
   /// Hosts list route.
   static const hosts = 'hosts';
+
+  /// Add host route.
+  static const hostAdd = 'host-add';
+
+  /// Edit host route.
+  static const hostEdit = 'host-edit';
 
   /// Terminal session route.
   static const terminal = 'terminal';
@@ -14,6 +23,9 @@ abstract final class Routes {
 
   /// Keys management route.
   static const keys = 'keys';
+
+  /// Add key route.
+  static const keyAdd = 'key-add';
 
   /// Snippets route.
   static const snippets = 'snippets';
@@ -29,6 +41,12 @@ abstract final class Routes {
 
   /// Port forwards route.
   static const portForwards = 'port-forwards';
+
+  /// Add port forward route.
+  static const portForwardAdd = 'port-forward-add';
+
+  /// Edit port forward route.
+  static const portForwardEdit = 'port-forward-edit';
 
   /// Embedded port-forward browser route.
   static const portForwardBrowser = 'port-forward-browser';
