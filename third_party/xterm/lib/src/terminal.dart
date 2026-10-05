@@ -486,17 +486,20 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   ///
   /// See also:
   /// - [textInput]
+  /// Terminal control sequences and unsafe controls stripped from pastes, in
+  /// the order they are applied.
+  static final _pasteControlPatterns = [
+    RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), // CSI
+    RegExp(r'\x1b\][\s\S]*?(?:\x07|\x1b\\)'), // OSC
+    RegExp(r'\x1b[P\^_X][\s\S]*?\x1b\\'), // DCS, PM, APC, SOS
+    RegExp(r'\x1b[ -/]*[@-~]'), // other escape sequences
+    RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'), // C0 but tab, LF and CR
+  ];
+
   void paste(String text) {
-    // Strip terminal control sequences and unsafe controls before sending paste
-    // payloads.
-    text = text.replaceAll(RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), '');
-    text = text.replaceAll(RegExp(r'\x1b\][\s\S]*?(?:\x07|\x1b\\)'), '');
-    text = text.replaceAll(RegExp(r'\x1b[P\^_X][\s\S]*?\x1b\\'), '');
-    text = text.replaceAll(RegExp(r'\x1b[ -/]*[@-~]'), '');
-    text = text.replaceAll(
-      RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f]'),
-      '',
-    );
+    for (final pattern in _pasteControlPatterns) {
+      text = text.replaceAll(pattern, '');
+    }
 
     text = text.replaceAll('\r\n', '\n');
     text = text.replaceAll('\r', '\n');
