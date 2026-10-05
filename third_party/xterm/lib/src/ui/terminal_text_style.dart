@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 const _kDefaultFontSize = 13.0;
@@ -99,4 +100,19 @@ class TerminalStyle {
       fontFamilyFallback: fontFamilyFallback ?? this.fontFamilyFallback,
     );
   }
+
+  // Value equality lets a render object skip its cache-clearing style setter
+  // when a widget rebuild hands it an equivalent but freshly built style.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TerminalStyle &&
+          other.fontSize == fontSize &&
+          other.height == height &&
+          other.fontFamily == fontFamily &&
+          listEquals(other.fontFamilyFallback, fontFamilyFallback);
+
+  @override
+  int get hashCode => Object.hash(
+      fontSize, height, fontFamily, Object.hashAll(fontFamilyFallback));
 }

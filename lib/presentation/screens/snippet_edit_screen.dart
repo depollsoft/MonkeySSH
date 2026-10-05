@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/snippet_repository.dart';
+import '../../domain/models/snippet_variables.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/unsaved_changes_guard.dart';
@@ -352,7 +353,7 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
 
   Widget _buildVariablePreview() {
     final content = _contentController.text;
-    final variables = _extractVariables(content);
+    final variables = extractSnippetVariables(content);
 
     if (variables.isEmpty) {
       return const SizedBox.shrink();
@@ -382,12 +383,6 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
         ),
       ),
     );
-  }
-
-  List<String> _extractVariables(String content) {
-    final regex = RegExp(r'\{\{(\w+)\}\}');
-    final matches = regex.allMatches(content);
-    return matches.map((m) => m.group(1)!).toSet().toList();
   }
 
   Future<void> _saveSnippet() async {

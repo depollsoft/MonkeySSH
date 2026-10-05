@@ -13,6 +13,7 @@ import 'package:xterm/xterm.dart' hide TerminalThemes;
 
 import '../../../data/database/database.dart';
 import '../../../domain/models/agent_launch_preset.dart';
+import '../../../domain/models/command_names.dart';
 import '../../../domain/models/remote_multiplexer.dart';
 import '../../../domain/models/tmux_state.dart';
 import '../../../domain/services/local_notification_service.dart';
@@ -125,8 +126,15 @@ resolveTmuxAlertNotificationContent({
   return (title: resolvedTitle, subtitle: subtitle, body: resolvedBody);
 }
 
+final _whitespaceRunPattern = RegExp(r'\s+');
+final _singleWhitespacePattern = RegExp(r'\s');
+final _lineBreakPattern = RegExp(r'[\r\n]');
+final _pathSeparatorPattern = RegExp(r'[/\\]');
+final _windowsDrivePrefixPattern = RegExp(r'^[A-Za-z]:[\\/]');
+final _optionalSlashWindowsDrivePrefixPattern = RegExp(r'^/?[A-Za-z]:[\\/]');
+
 String _tmuxAlertNotificationLabel(String value) =>
-    value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    value.replaceAll(_whitespaceRunPattern, ' ').trim();
 
 /// Resolves how much vertical space the tmux bar can safely expand into.
 double resolveTmuxBarMaxContentHeight(
@@ -160,30 +168,6 @@ const _tmuxDetectionRetrySchedule = <Duration>[
   Duration(milliseconds: 2800),
   Duration(milliseconds: 5600),
 ];
-
-const _shellCompletionShellCommands = <String>{
-  'ash',
-  'bash',
-  'cmd',
-  'csh',
-  'dash',
-  'elvish',
-  'fish',
-  'ion',
-  'ksh',
-  'ksh93',
-  'mksh',
-  'nu',
-  'oil',
-  'osh',
-  'powershell',
-  'pwsh',
-  'sh',
-  'tcsh',
-  'xonsh',
-  'yash',
-  'zsh',
-};
 
 /// Resolves the retry schedule used for tmux detection after connect.
 List<Duration> resolveTmuxDetectionRetrySchedule({bool skipDelay = false}) =>
@@ -399,24 +383,6 @@ bool shouldReviewTerminalCommandInsertion({
   return shellStatus != TerminalShellStatus.runningCommand;
 }
 
-/// Returns whether a tmux pane foreground command is shell-like enough for
-/// shell completion popups.
-bool isShellCompletionTmuxShellCommand(String? command) {
-  var normalized = command?.trim();
-  if (normalized == null || normalized.isEmpty) {
-    return false;
-  }
-  normalized = normalized.replaceAll(r'\', '/').split('/').last;
-  if (normalized.startsWith('-')) {
-    normalized = normalized.substring(1);
-  }
-  normalized = normalized.toLowerCase();
-  if (normalized.endsWith('.exe')) {
-    normalized = normalized.substring(0, normalized.length - 4);
-  }
-  return _shellCompletionShellCommands.contains(normalized);
-}
-
 /// Returns whether terminal input should start a shell completion refresh.
 bool canTerminalOutputTriggerShellCompletion({
   required String output,
@@ -455,7 +421,7 @@ bool isShellCompletionPromptContext({
     final command = tmuxCurrentCommand?.trim();
     return command != null &&
         command.isNotEmpty &&
-        isShellCompletionTmuxShellCommand(command);
+        isShellCommandBasename(command);
   }
   return shellStatus != TerminalShellStatus.runningCommand;
 }
@@ -477,17 +443,13 @@ resolveShellCompletionPopupLayout({
   double verticalMargin = 8,
   double anchorGap = 4,
   double popupVerticalPadding = 6,
-  double minWidth = 220,
   double maxWidth = 340,
   int maxVisibleRows = 5,
 }) {
   final availableWidth = _nonNegativeDouble(
     overlaySize.width - (horizontalMargin * 2),
   );
-  final width = min(
-    availableWidth,
-    min(maxWidth, max(minWidth, availableWidth)),
-  );
+  final width = min(availableWidth, maxWidth);
   final maxLeft = max(
     horizontalMargin,
     overlaySize.width - width - horizontalMargin,
@@ -724,8 +686,7 @@ double resolveTmuxBarRevealOpacity(
 
 /// Resolves the active tmux window title to show in the collapsed bar handle.
 String? resolveTmuxBarActiveWindowTitle(Iterable<TmuxWindow>? windows) {
-  final activeWindow = windows?.where((window) => window.isActive).firstOrNull;
-  final title = activeWindow?.handleTitle.trim();
+  final title = _activeTmuxWindowOrNull(windows)?.handleTitle.trim();
   if (title == null || title.isEmpty) {
     return null;
   }
@@ -735,27 +696,19 @@ String? resolveTmuxBarActiveWindowTitle(Iterable<TmuxWindow>? windows) {
 /// Resolves the supported foreground agent running in the active tmux window.
 AgentLaunchTool? resolveTmuxBarActiveWindowTool(
   Iterable<TmuxWindow>? windows,
-) => windows
-    ?.where((window) => window.isActive)
-    .firstOrNull
-    ?.foregroundAgentTool;
+) => _activeTmuxWindowOrNull(windows)?.foregroundAgentTool;
+
+TmuxWindow? _activeTmuxWindowOrNull(Iterable<TmuxWindow>? windows) =>
+    windows == null ? null : activeTmuxWindow(windows);
 
 /// Resolves bracketed paste mode state tracked for the active mux window.
 bool? resolveTmuxBarActiveWindowBracketedPasteMode(
   Iterable<TmuxWindow>? windows,
-) => windows
-    ?.where((window) => window.isActive)
-    .firstOrNull
-    ?.terminalBracketedPasteMode;
+) => _activeTmuxWindowOrNull(windows)?.terminalBracketedPasteMode;
 
 /// Resolves a stable identity for the active mux window.
-String? resolveTmuxBarActiveWindowKey(Iterable<TmuxWindow>? windows) {
-  final activeWindow = windows?.where((window) => window.isActive).firstOrNull;
-  if (activeWindow == null) {
-    return null;
-  }
-  return activeWindow.id ?? '#${activeWindow.index}';
-}
+String? resolveTmuxBarActiveWindowKey(Iterable<TmuxWindow>? windows) =>
+    _activeTmuxWindowOrNull(windows)?.stableKey;
 
 /// Whether attachment input still targets the same settled mux window.
 bool terminalAttachmentPasteTargetsCurrentMuxWindow({
@@ -961,7 +914,7 @@ String? formatRemoteMuxVersionLabel(RemoteMuxBackend backend, String? version) {
 /// treated as a change.
 ({bool? reportsMouseWheel, bool? mouseReportSgr, bool? bracketedPasteMode})?
 activeTmuxWindowTerminalModeSignature(Iterable<TmuxWindow>? windows) {
-  final activeWindow = windows?.where((window) => window.isActive).firstOrNull;
+  final activeWindow = _activeTmuxWindowOrNull(windows);
   if (activeWindow == null) {
     return null;
   }
@@ -1013,10 +966,7 @@ int? resolveTmuxBarPendingSelectedWindowIndex(
   if (!windowList.any((window) => window.index == pendingSelectedWindowIndex)) {
     return null;
   }
-  final activeWindow = windowList
-      .where((window) => window.isActive)
-      .firstOrNull;
-  if (activeWindow?.index == pendingSelectedWindowIndex) {
+  if (activeTmuxWindow(windowList)?.index == pendingSelectedWindowIndex) {
     return null;
   }
   return pendingSelectedWindowIndex;
@@ -1052,24 +1002,6 @@ String stripTerminalPromptEscapeSequences(String text) => text
     .replaceAll(_oscEscapeSequencePattern, '')
     .replaceAll(_csiEscapeSequencePattern, '')
     .replaceAll(_singleCharEscapeSequencePattern, '');
-
-bool _isShellCommandName(String? command) {
-  final trimmed = command?.trim();
-  if (trimmed == null || trimmed.isEmpty) return false;
-  final token = trimmed.split(RegExp(r'\s+')).first;
-  final basename = token.split(RegExp(r'[\\/]')).last.toLowerCase();
-  switch (basename.replaceFirst(RegExp(r'\.exe$'), '')) {
-    case 'sh':
-    case 'bash':
-    case 'zsh':
-    case 'fish':
-    case 'dash':
-    case 'ksh':
-      return true;
-    default:
-      return false;
-  }
-}
 
 /// Whether a MonkeyMux terminal mouse/focus control report should be dropped
 /// before it reaches the remote shell.
@@ -1113,7 +1045,7 @@ bool shouldSuppressMonkeyMuxControlReport({
   if (command != null && agentLaunchToolForCommandName(command) != null) {
     return false;
   }
-  return _isShellCommandName(command);
+  return isShellCommandBasename(command);
 }
 
 final _terminalSensitivePromptPattern = RegExp(
@@ -1127,28 +1059,77 @@ final _terminalPasswordPolicyPromptPattern = RegExp(
 );
 
 /// Returns whether the visible terminal text appears to be requesting a secret.
-bool terminalTextLooksLikeSensitiveInputPrompt(String? textBeforeCursor) {
+///
+/// Pass `stripEscapeSequences: false` for text read from buffer cells, which
+/// cannot contain escape sequences.
+bool terminalTextLooksLikeSensitiveInputPrompt(
+  String? textBeforeCursor, {
+  bool stripEscapeSequences = true,
+}) {
   if (textBeforeCursor == null) {
     return false;
   }
 
-  final sanitizedText = stripTerminalPromptEscapeSequences(textBeforeCursor);
+  final sanitizedText = stripEscapeSequences
+      ? stripTerminalPromptEscapeSequences(textBeforeCursor)
+      : textBeforeCursor;
   if (sanitizedText.trimRight().isEmpty) {
     return false;
   }
 
-  final lastLine = sanitizedText.split(RegExp(r'[\r\n]')).last.trimRight();
+  final lastLine = sanitizedText.split(_lineBreakPattern).last.trimRight();
   if (lastLine.isEmpty || lastLine.length > 220) {
     return false;
   }
 
-  final normalizedLine = lastLine.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final normalizedLine = lastLine.replaceAll(_whitespaceRunPattern, ' ').trim();
   if (_terminalPasswordPolicyPromptPattern.hasMatch(normalizedLine)) {
     return false;
   }
 
   return _terminalSensitivePromptPattern.hasMatch(normalizedLine);
 }
+
+/// Cheap gate before [terminalSensitivePromptTextBeforeCursor]: the prompt
+/// pattern needs a trailing `:`/`：`, so the wrapped-prefix walk and the
+/// regexes are skipped when the cursor row's last visible character is
+/// something else. Returns true when the row is blank before the cursor (the
+/// colon may sit on an earlier wrapped row) or the cursor is inside a wide cell.
+bool terminalCursorMayFollowSensitivePrompt(Terminal terminal) {
+  final buffer = terminal.buffer;
+  final row = buffer.absoluteCursorY;
+  if (row < 0 || row >= buffer.height) {
+    return false;
+  }
+  final line = buffer.lines[row];
+  final cursorX = buffer.cursorX.clamp(0, buffer.viewWidth);
+  for (var column = cursorX - 1; column >= 0; column--) {
+    final codePoint = line.getCodePoint(column);
+    if (codePoint == 0 || _isWhitespaceCodePoint(codePoint)) {
+      continue;
+    }
+    if (line.getWidth(column) == 2 && column + 1 == cursorX) {
+      return true;
+    }
+    return codePoint == 0x3A || codePoint == 0xFF1A;
+  }
+  return true;
+}
+
+/// Mirrors the whitespace set `String.trim` removes, without a String per cell.
+bool _isWhitespaceCodePoint(int codePoint) =>
+    (codePoint >= 0x09 && codePoint <= 0x0D) ||
+    codePoint == 0x20 ||
+    codePoint == 0x85 ||
+    codePoint == 0xA0 ||
+    codePoint == 0x1680 ||
+    (codePoint >= 0x2000 && codePoint <= 0x200A) ||
+    codePoint == 0x2028 ||
+    codePoint == 0x2029 ||
+    codePoint == 0x202F ||
+    codePoint == 0x205F ||
+    codePoint == 0x3000 ||
+    codePoint == 0xFEFF;
 
 /// Reads a wrapped cursor prefix, returning null when its trimmed text is too long.
 String? terminalSensitivePromptTextBeforeCursor(Terminal terminal) {
@@ -1172,8 +1153,7 @@ String? terminalSensitivePromptTextBeforeCursor(Terminal terminal) {
       }
       final codePoint = line.getCodePoint(column);
       final character = codePoint == 0 ? 0x20 : codePoint;
-      if (characters.isEmpty &&
-          String.fromCharCode(character).trimRight().isEmpty) {
+      if (characters.isEmpty && _isWhitespaceCodePoint(character)) {
         continue;
       }
       length += character > 0xffff ? 2 : 1;
@@ -1364,8 +1344,7 @@ String trimTerminalSelectionText(String text) =>
 /// bottom chrome the scaffold does not know about is the in-body keyboard
 /// toolbar that sits inside the body `Column`, so the margin only needs to
 /// clear that toolbar with a small visual gap.
-double upgradeSnackBarBottomMargin(
-  MediaQueryData mediaQuery, {
+double upgradeSnackBarBottomMargin({
   bool showKeyboardToolbar = false,
   double keyboardToolbarHeight = 84,
   double baseSpacing = 16,
@@ -1452,7 +1431,7 @@ Future<PlatformFile> platformFileFromPickedTerminalMedia(
   // return names with a temp-dir prefix using `/` (or `\` from web/Windows
   // sources), and `path.basename` only splits on the local platform's
   // separator, so split on both explicitly.
-  name = name.split(RegExp(r'[/\\]')).last;
+  name = name.split(_pathSeparatorPattern).last;
   return AppPlatformFile.fromXFile(
     file,
     name: name.isEmpty ? 'selected-media-${index + 1}' : name,
@@ -1462,39 +1441,41 @@ Future<PlatformFile> platformFileFromPickedTerminalMedia(
 /// Trims punctuation that terminals commonly render immediately after a link.
 String trimTerminalLinkCandidate(String text) {
   var result = text;
+  // One pass over the text; trailing closers are then dropped one at a time
+  // while they outnumber their openers.
+  final excess = _excessClosingBracketCounts(result);
   while (result.isNotEmpty) {
-    if (result.endsWith(')')) {
-      final openCount = '('.allMatches(result).length;
-      final closeCount = ')'.allMatches(result).length;
-      if (closeCount > openCount) {
-        result = result.substring(0, result.length - 1);
-        continue;
-      }
-    } else if (result.endsWith(']')) {
-      final openCount = '['.allMatches(result).length;
-      final closeCount = ']'.allMatches(result).length;
-      if (closeCount > openCount) {
-        result = result.substring(0, result.length - 1);
-        continue;
-      }
-    } else if (result.endsWith('}')) {
-      final openCount = '{'.allMatches(result).length;
-      final closeCount = '}'.allMatches(result).length;
-      if (closeCount > openCount) {
-        result = result.substring(0, result.length - 1);
-        continue;
-      }
-    }
-
     final lastCharacter = result[result.length - 1];
-    if ('.!,?:;'.contains(lastCharacter)) {
-      result = result.substring(0, result.length - 1);
-      continue;
+    final closerIndex = _closingBrackets.indexOf(lastCharacter);
+    if (closerIndex >= 0 && excess[closerIndex] > 0) {
+      excess[closerIndex]--;
+    } else if (!'.!,?:;'.contains(lastCharacter)) {
+      break;
     }
-
-    break;
+    result = result.substring(0, result.length - 1);
   }
   return result;
+}
+
+const _openingBrackets = '([{';
+const _closingBrackets = ')]}';
+
+/// For each bracket pair, how many closers exceed openers in [value].
+List<int> _excessClosingBracketCounts(String value) {
+  final excess = List<int>.filled(_closingBrackets.length, 0);
+  for (var index = 0; index < value.length; index++) {
+    final character = value[index];
+    final openerIndex = _openingBrackets.indexOf(character);
+    if (openerIndex >= 0) {
+      excess[openerIndex]--;
+      continue;
+    }
+    final closerIndex = _closingBrackets.indexOf(character);
+    if (closerIndex >= 0) {
+      excess[closerIndex]++;
+    }
+  }
+  return excess;
 }
 
 /// Normalizes terminal-rendered link text before URI parsing.
@@ -1519,7 +1500,7 @@ String trimTerminalFilePathCandidate(String text) {
   );
   candidate = _trimWrappedTerminalFilePathCountSuffix(candidate);
   candidate = trimTerminalLinkCandidate(candidate);
-  if (RegExp(r'^/?[A-Za-z]:[\\/]').hasMatch(candidate)) {
+  if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(candidate)) {
     return candidate.replaceAll(r'\', '/');
   }
   return candidate;
@@ -1656,43 +1637,8 @@ bool _startsWithKnownTerminalFilePathExtensionAndMore(String suffix) {
   return false;
 }
 
-bool _hasExcessClosingTerminalFilePathBrackets(String value) {
-  var openParens = 0;
-  var closeParens = 0;
-  var openBrackets = 0;
-  var closeBrackets = 0;
-  var openBraces = 0;
-  var closeBraces = 0;
-
-  for (var index = 0; index < value.length; index++) {
-    switch (value[index]) {
-      case '(':
-        openParens++;
-        break;
-      case ')':
-        closeParens++;
-        break;
-      case '[':
-        openBrackets++;
-        break;
-      case ']':
-        closeBrackets++;
-        break;
-      case '{':
-        openBraces++;
-        break;
-      case '}':
-        closeBraces++;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return closeParens > openParens ||
-      closeBrackets > openBrackets ||
-      closeBraces > openBraces;
-}
+bool _hasExcessClosingTerminalFilePathBrackets(String value) =>
+    _excessClosingBracketCounts(value).any((excess) => excess > 0);
 
 /// Alternative terminal-path parses to check when a candidate looks ambiguous.
 List<String> resolveTerminalFilePathVerificationCandidates(String path) {
@@ -1888,11 +1834,11 @@ List<CellOffset> resolveForgivingTerminalTapOffsets(CellOffset offset) {
 
   final maxRow = bufferHeight - 1;
   final topRow = (scrollOffset / lineHeight).floor().clamp(0, maxRow);
-  final visibleRows = (viewportHeight / lineHeight).ceil().clamp(
-    1,
-    bufferHeight,
-  );
-  final bottomRow = (topRow + visibleRows - 1).clamp(0, maxRow);
+  // The scroll offset is a live pixel value, so the viewport can end part way
+  // through a row; that row is still on screen and still needs its links.
+  final lastVisibleRow =
+      ((scrollOffset + viewportHeight) / lineHeight).ceil() - 1;
+  final bottomRow = max(topRow, lastVisibleRow).clamp(0, maxRow);
   return (topRow: topRow, bottomRow: bottomRow);
 }
 
@@ -1978,8 +1924,19 @@ bool isRelativeTerminalFilePathCandidate(String path) {
 
 bool _isTerminalFilePathBodyCharacter(String character) =>
     character.isNotEmpty &&
-    !RegExp(r'''[\s<>"'$#]''').hasMatch(character) &&
+    !_isTerminalFilePathBodyStopCharacter(character) &&
     !_isTerminalPathContinuationDecorationCharacter(character);
+
+/// Whitespace or one of `<>"'$#`; runs per column so it avoids a RegExp.
+bool _isTerminalFilePathBodyStopCharacter(String character) {
+  if (character.trim().isEmpty) {
+    return true;
+  }
+  return switch (character.codeUnitAt(0)) {
+    0x3C || 0x3E || 0x22 || 0x27 || 0x24 || 0x23 => true, // < > " ' $ #
+    _ => false,
+  };
+}
 
 bool _isTerminalPathContinuationDecorationCharacter(String character) {
   if (character.isEmpty) {
@@ -2039,7 +1996,7 @@ bool _terminalTextRangeHasGutterDecoration(String text, int start, int end) {
 bool _startsFreshTerminalFilePathLine(String text) =>
     text == '~' ||
     text.startsWith('~/') ||
-    RegExp(r'^[A-Za-z]:[\\/]').hasMatch(text) ||
+    _windowsDrivePrefixPattern.hasMatch(text) ||
     text.startsWith('/') ||
     text.startsWith('./') ||
     text.startsWith('../');
@@ -2335,38 +2292,6 @@ List<TerminalPathMatch> detectTerminalFilePathMatches(
   return detectedPaths;
 }
 
-/// Resolves the visible row segment for the first matching path on a row.
-({String text, int startColumn, int endColumn})?
-resolveTerminalFilePathSegmentOnRowForPath({
-  required String snapshotText,
-  required String rowText,
-  required int rowStartOffset,
-  required List<int> rowColumnOffsets,
-  required String path,
-}) {
-  final normalizedSnapshot = normalizeTerminalFilePathDetectionText(
-    snapshotText,
-  );
-  for (final match in detectTerminalFilePathMatches(normalizedSnapshot)) {
-    if (match.path != path) {
-      continue;
-    }
-    final segment = resolveTerminalFilePathSegmentOnRow(
-      rowText: rowText,
-      rowStartOffset: rowStartOffset,
-      rowColumnOffsets: rowColumnOffsets,
-      originalToNormalizedOffsets:
-          normalizedSnapshot.originalToNormalizedOffsets,
-      normalizedPathStart: match.normalizedStart,
-      normalizedPathEnd: match.normalizedEnd,
-    );
-    if (segment != null) {
-      return segment;
-    }
-  }
-  return null;
-}
-
 /// Resolves the visible path-only segment for a specific rendered row.
 ({String text, int startColumn, int endColumn})?
 resolveTerminalFilePathSegmentOnRow({
@@ -2442,28 +2367,6 @@ List<({String path, int start, int end})> detectTerminalFilePaths(
     (path: path.path, start: path.start, end: path.end),
 ];
 
-/// Resolves a tappable terminal file path at the given text offset, if present.
-({String path, int start, int end})? detectTerminalFilePathAtTextOffset(
-  String text,
-  int offset,
-) {
-  final clampedOffset = offset.clamp(0, text.length);
-  for (final detectedPath in detectTerminalFilePathMatches(
-    normalizeTerminalFilePathDetectionText(text),
-  )) {
-    if (clampedOffset >= detectedPath.start &&
-        clampedOffset < detectedPath.hitTestEnd) {
-      return (
-        path: detectedPath.path,
-        start: detectedPath.start,
-        end: detectedPath.end,
-      );
-    }
-  }
-
-  return null;
-}
-
 /// Matches a terminal list-item marker (e.g. `- `, `* `, `+ `, `1. `) so a
 /// wrapped URL is not joined to the next bullet.
 final _terminalListMarkerPattern = RegExp(r'^(?:[-*+]\s|\d+[.)]\s)');
@@ -2481,7 +2384,7 @@ bool _endsInsideTerminalLinkToken(String text) {
   // no separating space, as a TUI char-wraps a URL against its right edge) so
   // the token is recognized as a link rather than starting with the border.
   final lastToken = _trimTerminalPathContinuationPrefix(
-    trimmed.split(RegExp(r'\s')).last,
+    trimmed.split(_singleWhitespacePattern).last,
   );
   return _terminalLinkPattern.matchAsPrefix(lastToken) != null;
 }
@@ -2671,24 +2574,9 @@ int resolveTerminalLineSnapshotTextLength({
 /// app has not enabled wheel reporting yet.
 bool shouldUseSyntheticAltBufferScrollFallback({
   required bool isUsingAltBuffer,
-  required bool preferExplicitMouseReporting,
   required bool terminalReportsMouseWheel,
   bool isAgentToolActive = false,
-}) {
-  if (!isUsingAltBuffer) {
-    return false;
-  }
-
-  if (isAgentToolActive) {
-    return false;
-  }
-
-  if (!preferExplicitMouseReporting) {
-    return true;
-  }
-
-  return !terminalReportsMouseWheel;
-}
+}) => isUsingAltBuffer && !isAgentToolActive && !terminalReportsMouseWheel;
 
 /// Whether mobile touch drags should be routed into terminal scroll input.
 ///
@@ -2711,13 +2599,28 @@ bool terminalReportsMouseWheelForScroll({
 }) =>
     localTerminalReportsMouseWheel || (activeWindowReportsMouseWheel ?? false);
 
-/// Whether the active terminal context is a known agent tool for scroll policy.
+/// Whether the foreground program edits a prompt line (a coding agent or any
+/// other REPL), so touch scroll must not synthesize arrow keys and control
+/// reports must reach it.
+///
+/// The behavioural signal is checked first: a program in the alternate screen
+/// that enabled bracketed paste but not mouse reporting is editing a line
+/// (pagers and `htop` never request bracketed paste; mouse-aware TUIs enable
+/// mouse reporting). The agent names stay as a fallback for agents that run
+/// in the main buffer (Claude Code, Copilot CLI), where terminal modes cannot
+/// tell them apart from the shell they run under.
 bool isAgentToolActiveForTerminalScroll({
   required AgentLaunchTool? activeWindowTool,
   required AgentLaunchTool? startupTool,
   required bool hasWindowSnapshot,
   String? currentCommand,
+  bool isUsingAltBuffer = false,
+  bool terminalReportsMouseWheel = false,
+  bool bracketedPasteMode = false,
 }) {
+  if (isUsingAltBuffer && !terminalReportsMouseWheel && bracketedPasteMode) {
+    return true;
+  }
   if (activeWindowTool != null) {
     return true;
   }
@@ -2858,12 +2761,12 @@ bool didDisplayedMuxWindowChange(
   List<TmuxWindow> windows, {
   required RemoteMuxBackend backend,
 }) {
-  final activeWindow = windows.where((window) => window.isActive).firstOrNull;
+  final activeWindow = activeTmuxWindow(windows);
   if (activeWindow == null) {
     return null;
   }
   return (
-    key: activeWindow.id ?? '#${activeWindow.index}',
+    key: activeWindow.stableKey,
     panePid: backend == RemoteMuxBackend.monkeyMux
         ? null
         : activeWindow.panePid,
