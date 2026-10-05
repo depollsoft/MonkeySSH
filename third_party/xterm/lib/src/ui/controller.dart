@@ -26,11 +26,9 @@ class TerminalController with ChangeNotifier {
 
   /// The set of pointer events which will be used as mouse input for the terminal.
   PointerInputs get pointerInput => _pointerInputs;
-  PointerInputs _pointerInputs;
+  final PointerInputs _pointerInputs;
 
-  /// True if sending pointer events to the terminal is suspended.
-  bool get suspendedPointerInputs => _suspendPointerInputs;
-  bool _suspendPointerInputs;
+  final bool _suspendPointerInputs;
 
   List<TerminalHighlight> get highlights => _highlights;
   final _highlights = <TerminalHighlight>[];
@@ -76,38 +74,12 @@ class TerminalController with ChangeNotifier {
     }
   }
 
-  /// Controls how the terminal behaves when the user selects a range of text.
-  /// The default is [SelectionMode.line]. Setting this to [SelectionMode.block]
-  /// enables block selection mode.
-  void setSelectionMode(SelectionMode newSelectionMode) {
-    // If the new mode is the same as the old mode,
-    // nothing has to be changed.
-    if (_selectionMode == newSelectionMode) {
-      return;
-    }
-    // Set the new mode.
-    _selectionMode = newSelectionMode;
-    notifyListeners();
-  }
-
   /// Clears the current selection.
   void clearSelection() {
     _selectionBase?.dispose();
     _selectionBase = null;
     _selectionExtent?.dispose();
     _selectionExtent = null;
-    notifyListeners();
-  }
-
-  // Select which type of pointer events are send to the terminal.
-  void setPointerInputs(PointerInputs pointerInput) {
-    _pointerInputs = pointerInput;
-    notifyListeners();
-  }
-
-  // Toggle sending pointer events to the terminal.
-  void setSuspendPointerInput(bool suspend) {
-    _suspendPointerInputs = suspend;
     notifyListeners();
   }
 

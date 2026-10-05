@@ -28,8 +28,6 @@ abstract class EscapeHandler {
 
   void shiftIn();
 
-  void unknownSBC(int char);
-
   /* ANSI sequence */
 
   void saveCursor();

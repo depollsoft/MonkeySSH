@@ -8,7 +8,6 @@ class TerminalGestureDetector extends StatefulWidget {
     super.key,
     this.child,
     this.onSingleTapUp,
-    this.onTapUp,
     this.onTapDown,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
@@ -23,8 +22,6 @@ class TerminalGestureDetector extends StatefulWidget {
   });
 
   final Widget? child;
-
-  final GestureTapUpCallback? onTapUp;
 
   final GestureTapUpCallback? onSingleTapUp;
 

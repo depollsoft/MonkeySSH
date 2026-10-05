@@ -109,13 +109,28 @@ class Buffer {
   }
 
   /// Writes a single character to the _terminal. Escape sequences or special
-  /// characters are not interpreted and directly added to the buffer.
+  /// characters are not interpreted and directly added to the buffer. Returns
+  /// whether the character took a cell.
   ///
   /// See also: [Terminal.writeChar]
-  void writeChar(int codePoint) {
+  bool writeChar(int codePoint) {
     codePoint = charset.translate(codePoint);
 
     final cellWidth = unicodeV11.wcwidth(codePoint);
+    if (cellWidth == 0) {
+      // Combining marks, variation selectors and ZWJ take no column on the
+      // host (xterm, tmux, the MonkeyMux screen model). A cell has nowhere to
+      // keep them, so drop them rather than shift every later cell right.
+      return false;
+    }
+    if (_cursorX >= viewWidth) {
+      // A wrap is pending. Without autowrap the glyph replaces the last one.
+      if (terminal.autoWrapMode) {
+        _wrapToNextLine();
+      } else {
+        _cursorX = viewWidth - 1;
+      }
+    }
     if (cellWidth == 2 && viewWidth >= 2 && _cursorX == viewWidth - 1) {
       // A wide character does not fit in the last column. Like xterm and the
       // MonkeyMux screen model, blank that cell and wrap (or, without
@@ -124,46 +139,41 @@ class Buffer {
       if (terminal.autoWrapMode) {
         graphics.removePlaceholderAt(currentLine, _cursorX);
         currentLine.eraseCell(_cursorX, terminal.cursor);
-        _cursorX = viewWidth;
+        _wrapToNextLine();
       } else {
         _cursorX = viewWidth - 2;
       }
     }
-    if (_cursorX >= terminal.viewWidth) {
-      index();
-      setCursorX(0);
-      if (terminal.autoWrapMode) {
-        currentLine.isWrapped = true;
-      }
-    }
 
     final line = currentLine;
+    // Overwriting the second half of a wide glyph blanks its first half;
+    // painters skip the cell after a wide glyph, hiding this one.
+    if (_cursorX > 0 && line.getWidth(_cursorX - 1) == 2) {
+      line.eraseCell(_cursorX - 1, terminal.cursor);
+    }
     graphics.removePlaceholderAt(line, _cursorX);
     line.setCell(_cursorX, codePoint, cellWidth, terminal.cursor);
+    _cursorX++;
 
-    if (_cursorX < viewWidth) {
+    // A one-column screen has no room for the second half.
+    if (cellWidth == 2 && _cursorX < viewWidth) {
+      graphics.removePlaceholderAt(line, _cursorX);
+      line.setCell(_cursorX, 0, 0, terminal.cursor);
       _cursorX++;
     }
+    return true;
+  }
 
-    if (cellWidth == 2) {
-      writeChar(0);
-    }
+  /// Autowrap: moves to the start of the next line, which continues this one.
+  void _wrapToNextLine() {
+    index();
+    setCursorX(0);
+    currentLine.isWrapped = true;
   }
 
   /// The line at the current cursor position.
   BufferLine get currentLine {
     return lines[absoluteCursorY];
-  }
-
-  void backspace() {
-    if (_cursorX == 0 && currentLine.isWrapped) {
-      currentLine.isWrapped = false;
-      moveCursor(viewWidth - 1, -1);
-    } else if (_cursorX == viewWidth) {
-      moveCursor(-2, 0);
-    } else {
-      moveCursor(-1, 0);
-    }
   }
 
   /// Erases the viewport from the cursor position to the end of the buffer,
@@ -370,34 +380,37 @@ class Buffer {
     _cursorX = cursorX.clamp(0, viewWidth - 1);
   }
 
-  void setCursorY(int cursorY) {
-    _cursorY = cursorY.clamp(0, viewHeight - 1);
-  }
-
   void moveCursorX(int offset) {
     setCursorX(_cursorX + offset);
   }
 
+  /// Moves the cursor [offset] rows. A cursor inside the scroll region stops
+  /// at the margin it moves toward, as in xterm and the MonkeyMux screen
+  /// model; one outside it can reach any row.
   void moveCursorY(int offset) {
-    setCursorY(_cursorY + offset);
+    var minY = 0;
+    var maxY = viewHeight - 1;
+    if (isInVerticalMargin) {
+      if (offset < 0) minY = _marginTop;
+      if (offset > 0) maxY = _marginBottom;
+    }
+    _cursorY = (_cursorY + offset).clamp(minY, maxY);
   }
 
+  /// Moves the cursor to column [cursorX] of row [cursorY], which counts from
+  /// the top margin and stays inside the scroll region in origin mode.
   void setCursor(int cursorX, int cursorY) {
-    var maxCursorY = viewHeight - 1;
+    var minY = 0;
+    var maxY = viewHeight - 1;
 
     if (terminal.originMode) {
       cursorY += _marginTop;
-      maxCursorY = _marginBottom;
+      minY = _marginTop;
+      maxY = _marginBottom;
     }
 
     _cursorX = cursorX.clamp(0, viewWidth - 1);
-    _cursorY = cursorY.clamp(0, maxCursorY);
-  }
-
-  void moveCursor(int offsetX, int offsetY) {
-    final cursorX = _cursorX + offsetX;
-    final cursorY = _cursorY + offsetY;
-    setCursor(cursorX, cursorY);
+    _cursorY = cursorY.clamp(minY, maxY);
   }
 
   /// Save cursor position, charmap and text attributes.
@@ -816,7 +829,7 @@ class Buffer {
   String getText([BufferRange? range]) {
     range ??= BufferRangeLine(
       CellOffset(0, 0),
-      CellOffset(viewWidth - 1, height - 1),
+      CellOffset(viewWidth, height - 1),
     );
 
     range = range.normalized;

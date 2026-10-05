@@ -5,7 +5,7 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
       : _array = List<T?>.filled(maxLength, null);
 
   /// The backing array for this list. Length is always equal to [maxLength].
-  late List<T?> _array;
+  final List<T?> _array;
 
   /// The number of elements in the list. This is always less than or equal to
   /// [maxLength].
@@ -62,27 +62,6 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   /// The number of elements that can be stored in the list.
   int get maxLength {
     return _array.length;
-  }
-
-  /// Sets the number of elements that can be stored in the list. This operation
-  /// is relatively expensive, as it requires the backing array to be
-  /// reallocated.
-  set maxLength(int value) {
-    if (value <= 0) {
-      throw ArgumentError.value(value, 'value', "maxLength can't be negative!");
-    }
-
-    if (value == _array.length) return;
-
-    // Reconstruct array, starting at index 0. Only transfer values from the
-    // indexes 0 to length.
-    final newArray = List<T?>.generate(
-      value,
-      (index) => index < _length ? _getChild(index) : null,
-    );
-
-    _startIndex = 0;
-    _array = newArray;
   }
 
   /// Number of elements in the list.
@@ -206,21 +185,6 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
     }
   }
 
-  /// Inserts [items] at [index] in order.
-  void insertAll(int index, List<T> items) {
-    for (var i = items.length - 1; i >= 0; i--) {
-      insert(index, items[i]);
-      // when the list is full then we have to move the index down
-      // as newly inserted values remove values with a lower index
-      if (_length >= _array.length && index > 0) {
-        // Generic full-buffer insertion evicts a lower index, so move left for
-        // the next item. At zero, insertion now drops the last item instead;
-        // keep inserting at zero to preserve every leading input item.
-        index--;
-      }
-    }
-  }
-
   /// Removes [count] elements starting at the front of the list, shifting all
   /// remaining elements toward index 0.
   ///
@@ -302,16 +266,6 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   /// Returns a list containing all elements in the list.
   List<T> toList() {
     return List<T>.generate(length, (index) => this[index]);
-  }
-
-  String debugDump() {
-    final buffer = StringBuffer();
-    buffer.writeln('CircularList:');
-    for (var i = 0; i < _length; i++) {
-      final child = _getChild(i);
-      buffer.writeln('  $i: $child');
-    }
-    return buffer.toString();
   }
 }
 

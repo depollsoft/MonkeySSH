@@ -1,5 +1,3 @@
-import 'package:xterm/src/utils/hash_values.dart';
-
 class CellData {
   CellData({
     required this.foreground,
@@ -32,7 +30,7 @@ class CellData {
   int underlineColor;
 
   int getHash() {
-    return hashValues(foreground, background, flags, content, underlineColor);
+    return Object.hash(foreground, background, flags, content, underlineColor);
   }
 
   @override
@@ -53,8 +51,6 @@ abstract class CellAttr {
   static const strikethrough = 1 << 7;
 
   // Underline style occupies bits 8..10 and holds an [UnderlineStyle] index.
-  // Must stay in sync with [CellFlags] in cell_flags.dart, which is the
-  // painter-facing view of the same attribute integer.
   static const underlineStyleShift = 8;
   static const underlineStyleMask = 7 << underlineStyleShift;
 

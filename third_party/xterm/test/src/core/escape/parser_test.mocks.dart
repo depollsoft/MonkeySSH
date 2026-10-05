@@ -120,15 +120,6 @@ class MockEscapeHandler extends _i1.Mock implements _i2.EscapeHandler {
       );
 
   @override
-  void unknownSBC(int? char) => super.noSuchMethod(
-        Invocation.method(
-          #unknownSBC,
-          [char],
-        ),
-        returnValueForMissingStub: null,
-      );
-
-  @override
   void saveCursor() => super.noSuchMethod(
         Invocation.method(
           #saveCursor,

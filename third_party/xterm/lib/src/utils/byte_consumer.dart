@@ -98,11 +98,6 @@ class ByteConsumer {
     }
   }
 
-  /// Rolls back to the state when this consumer had [length] bytes.
-  void rollbackTo(int length) {
-    rollback(length - _length);
-  }
-
   int get length => _length;
 
   int get totalConsumed => _totalConsumed;

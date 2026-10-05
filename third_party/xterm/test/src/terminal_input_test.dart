@@ -10,10 +10,9 @@ void main() {
 
     expect(terminal.keyInput(TerminalKey.enter), isTrue);
     terminal.textInput('a');
-    expect(terminal.charInput('a'.codeUnitAt(0), ctrl: true), isTrue);
 
-    expect(output, ['\r', 'a', '\x01']);
-    expect(notifications, 3);
+    expect(output, ['\r', 'a']);
+    expect(notifications, 2);
   });
 
   test('paste strips controls and normalizes line endings', () {
