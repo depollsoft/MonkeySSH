@@ -163,7 +163,7 @@ class TerminalEnterPacer {
     idle?.complete();
   }
 
-  /// Drops anything still waiting; the connection it was for is gone.
+  /// Drops anything still waiting, for a connection that is gone.
   void dispose() {
     _timer?.cancel();
     _timer = null;

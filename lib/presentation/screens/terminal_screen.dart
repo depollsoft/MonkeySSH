@@ -4604,7 +4604,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _promptOutputImeResetTimer?.cancel();
     _promptOutputImeResetTimer = null;
     _hideShellCompletionPopup();
-    _clearOwnedTerminalCallbacks();
+    _clearOwnedTerminalCallbacks(dropHeldInput: true);
     _shell = null;
     // Allow the build-path safety-net call to fire once for the new session.
     _lastBuildAppliedTheme = null;
@@ -5182,8 +5182,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  void _clearOwnedTerminalCallbacks() {
-    _terminalEnterPacer?.dispose();
+  /// Releases the terminal callbacks this screen installed. A Return the
+  /// pacer still holds back goes out on its own once its gap has passed, since
+  /// the session can outlive this screen; [dropHeldInput] discards it instead,
+  /// for a session that is being replaced or has been lost.
+  void _clearOwnedTerminalCallbacks({bool dropHeldInput = false}) {
+    if (dropHeldInput) {
+      _terminalEnterPacer?.dispose();
+    }
     _terminalEnterPacer = null;
     final terminal = _terminalWithOwnedCallbacks;
     final outputHandler = _terminalOutputHandler;
@@ -10989,7 +10995,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _promptOutputImeResetTimer = null;
     _stopSharedClipboardSync();
     _hideShellCompletionPopup();
-    _clearOwnedTerminalCallbacks();
+    _clearOwnedTerminalCallbacks(dropHeldInput: true);
     _pathVerifier.disposeTerminalPathVerificationSftp();
     _sessionController.clearObservedSession(session: session);
     _clearTmuxState();

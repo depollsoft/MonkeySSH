@@ -7085,6 +7085,28 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    testWidgets(
+      'a Return held when the screen closes still reaches the shell',
+      (tester) async {
+        await pumpScreen(tester);
+        await tester.pump();
+        shellWrites.clear();
+
+        final terminal = session.terminal!..textInput('hi?');
+        sendTerminalEnterInput(
+          terminal,
+          shiftActive: false,
+          altActive: false,
+          ctrlActive: false,
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(shellWrites.map(String.fromCharCodes).join(), 'hi?');
+
+        await tester.pump(TerminalEnterPacer.defaultGap);
+        expect(shellWrites.map(String.fromCharCodes).join(), 'hi?\r');
+      },
+    );
+
     for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
       testWidgets(
         'shell completion tap discards stale IME text on ${platform.name}',
