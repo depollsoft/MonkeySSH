@@ -112,12 +112,7 @@ typedef AcpChatScrollChanged = void Function(
 const double kAgentChatWideBreakpoint = 840;
 
 /// Clamps native agent text to the same supported range as terminal text.
-double clampAgentChatFontSize(num size) {
-  if (!size.isFinite) {
-    return 8;
-  }
-  return size.clamp(8, 32).toDouble();
-}
+double clampAgentChatFontSize(num size) => clampFontSize(size);
 
 /// Full-screen agent chat for one ACP session.
 class AgentChatScreen extends ConsumerStatefulWidget {
