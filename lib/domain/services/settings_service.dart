@@ -230,17 +230,17 @@ class SettingsService {
     await (_db.delete(_db.settings)..where((s) => s.key.equals(key))).go();
   }
 
-  /// Get all settings.
-  Future<Map<String, String>> getAll() async {
-    final results = await _db.select(_db.settings).get();
-    return Map.fromEntries(results.map((s) => MapEntry(s.key, s.value)));
-  }
-
   /// Watch a setting.
   Stream<String?> watchString(String key) => (_db.select(
     _db.settings,
   )..where((s) => s.key.equals(key))).watchSingleOrNull().map((s) => s?.value);
 }
+
+/// Provider for [SettingsService].
+final settingsServiceProvider = Provider<SettingsService>(
+  (ref) => SettingsService(ref.watch(databaseProvider)),
+);
+
 /// Changes identity whenever persisted settings are replaced behind the
 /// running notifiers (for example by a migration import).
 ///
@@ -249,12 +249,6 @@ class SettingsService {
 /// enough: production overrides it with a fixed instance, and Riverpod only
 /// notifies dependents when the provider's value changes.
 final settingsGenerationProvider = Provider<Object>((ref) => Object());
-
-
-/// Provider for [SettingsService].
-final settingsServiceProvider = Provider<SettingsService>(
-  (ref) => SettingsService(ref.watch(databaseProvider)),
-);
 
 abstract class _AsyncSettingsNotifier<T> extends Notifier<T> {
   late SettingsService _settings;
@@ -266,13 +260,13 @@ abstract class _AsyncSettingsNotifier<T> extends Notifier<T> {
 
   bool get _isDisposed => _disposed;
 
-    ref.watch(settingsGenerationProvider);
   T get _defaultValue;
 
   Future<T> _loadValue(SettingsService settings);
 
   @override
   T build() {
+    ref.watch(settingsGenerationProvider);
     _settings = ref.watch(settingsServiceProvider);
     _disposed = false;
     ref.onDispose(() => _disposed = true);

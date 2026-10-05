@@ -402,11 +402,7 @@ class DiagnosticsLogService extends ChangeNotifier
   }
 
   static String _sanitizeString(String value) {
-    final sanitized = value
-        .replaceAll(_controlCharacterPattern, '')
-        .replaceAll('\n', ' ')
-        .replaceAll('\r', ' ')
-        .trim();
+    final sanitized = value.replaceAll(_controlCharacterPattern, '').trim();
     if (sanitized.length <= _maxStringLength) {
       return sanitized;
     }
