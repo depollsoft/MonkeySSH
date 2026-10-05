@@ -452,7 +452,6 @@ final class AcpInitializeResult implements AcpExtensible {
     required this.protocolVersion,
     this.agentCapabilities = const AcpAgentCapabilities(),
     this.authMethods = const <AcpAuthMethod>[],
-    this.agentInfo,
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
@@ -460,7 +459,6 @@ final class AcpInitializeResult implements AcpExtensible {
   /// Parses an initialization result.
   factory AcpInitializeResult.fromJson(AcpJsonMap json) {
     final capabilities = AcpJson.objectField(json, 'agentCapabilities');
-    final info = AcpJson.objectField(json, 'agentInfo');
     return AcpInitializeResult(
       protocolVersion: AcpJson.integer(json, 'protocolVersion') ?? 0,
       agentCapabilities: capabilities == null
@@ -470,13 +468,11 @@ final class AcpInitializeResult implements AcpExtensible {
         json['authMethods'],
         AcpAuthMethod.fromJson,
       ),
-      agentInfo: info == null ? null : AcpImplementation.fromJson(info),
       meta: AcpJson.meta(json),
       extensions: AcpJson.extensions(json, const [
         'protocolVersion',
         'agentCapabilities',
         'authMethods',
-        'agentInfo',
       ]),
     );
   }
@@ -489,9 +485,6 @@ final class AcpInitializeResult implements AcpExtensible {
 
   /// Authentication methods.
   final List<AcpAuthMethod> authMethods;
-
-  /// Optional agent implementation information.
-  final AcpImplementation? agentInfo;
 
   @override
   final AcpJsonMap meta;
@@ -699,15 +692,11 @@ final class AcpModelState implements AcpExtensible {
 
   /// Parses model state.
   factory AcpModelState.fromJson(AcpJsonMap json) {
-    final models = <AcpModelInfo>[];
-    final rawModels =
-        AcpJson.listField(json, 'availableModels') ??
-        AcpJson.listField(json, 'models') ??
-        const <Object?>[];
-    for (final item in rawModels) {
-      final model = AcpJson.object(item);
-      if (model != null) models.add(AcpModelInfo.fromJson(model));
-    }
+    final models = AcpJson.objectList(
+      AcpJson.listField(json, 'availableModels') ??
+          AcpJson.listField(json, 'models'),
+      AcpModelInfo.fromJson,
+    );
     return AcpModelState(
       currentModelId:
           AcpJson.identifier(json, 'currentModelId') ??
@@ -1191,6 +1180,9 @@ extension type const AcpStopReason(String value) {
 
   /// The agent reached its token limit.
   static const maxTokens = AcpStopReason('max_tokens');
+
+  /// The agent reached its per-turn request limit.
+  static const maxTurnRequests = AcpStopReason('max_turn_requests');
 
   /// The agent refused the prompt.
   static const refusal = AcpStopReason('refusal');

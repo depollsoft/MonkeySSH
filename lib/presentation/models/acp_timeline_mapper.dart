@@ -40,6 +40,18 @@ final Expando<_CachedMappedEntry> _sharedStableEntryMappings =
 final Expando<_CachedMappedEntry> _sharedStreamingEntryMappings =
     Expando<_CachedMappedEntry>('ACP streaming timeline entry');
 
+// The builder reuses tool-content and image objects across successive entry
+// snapshots (status updates, appended chunks), so expensive per-object work
+// is memoised by identity rather than redone for every new entry object.
+final Expando<String> _sharedUnifiedDiffs = Expando<String>('ACP unified diff');
+final Expando<AcpImageContent> _sharedMappedImages = Expando<AcpImageContent>(
+  'ACP presentation image',
+);
+final Expando<({String? text, bool isStructured})> _sharedFormattedInputs =
+    Expando('ACP formatted tool input');
+final Expando<({String? text, bool isStructured})> _sharedFormattedOutputs =
+    Expando('ACP formatted tool output');
+
 final class _CachedMappedEntry {
   const _CachedMappedEntry(this.value);
 
@@ -387,29 +399,30 @@ List<AcpAudioClip> _audioFromContent(List<d.AcpContentBlock> content) {
   return audio.isEmpty ? const [] : List.unmodifiable(audio);
 }
 
+/// Maps a domain image once per block object. Re-mapping the same block (every
+/// streamed chunk re-maps its message) would otherwise build a fresh multi-MB
+/// `data:` URI and defeat the widget's identity-based equality.
 AcpImageContent? _mapImage(d.AcpImageContent block) {
+  final cached = _sharedMappedImages[block];
+  if (cached != null) return cached;
   final uri = block.uri;
   final data = block.data;
+  final mimeType = block.mimeType.isEmpty ? null : block.mimeType;
+  AcpImageContent? image;
   // Preflight the decoded size from the base64 length before ever decoding, so
   // an oversized payload can never force an unbounded allocation into memory.
   if (data.isNotEmpty &&
       _base64DecodedLength(data) <= kAcpAttachmentImageDisplayMaxBytes) {
-    final mime = block.mimeType.isEmpty
-        ? 'application/octet-stream'
-        : block.mimeType;
-    return AcpImageContent(
-      dataUri: 'data:$mime;base64,$data',
+    image = AcpImageContent(
+      dataUri: 'data:${mimeType ?? 'application/octet-stream'};base64,$data',
       uri: uri,
-      mimeType: block.mimeType.isEmpty ? null : block.mimeType,
+      mimeType: mimeType,
     );
+  } else if (uri != null && uri.isNotEmpty) {
+    image = AcpImageContent(uri: uri, mimeType: mimeType);
   }
-  if (uri != null && uri.isNotEmpty) {
-    return AcpImageContent(
-      uri: uri,
-      mimeType: block.mimeType.isEmpty ? null : block.mimeType,
-    );
-  }
-  return null;
+  if (image != null) _sharedMappedImages[block] = image;
+  return image;
 }
 
 /// Estimates the number of bytes a base64 [data] string decodes to, without
@@ -515,7 +528,7 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
         diffs.add(
           AcpDiff(
             path: content.path,
-            unifiedDiff: _buildUnifiedDiff(
+            unifiedDiff: _sharedUnifiedDiffs[content] ??= _buildUnifiedDiff(
               path: content.path,
               oldText: content.oldText,
               newText: content.newText,
@@ -553,7 +566,8 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
     }
   }
 
-  final rawInput = formatAcpToolPayload(
+  final rawInput = _formatCached(
+    _sharedFormattedInputs,
     entry.rawInput,
     simplifyProgress: false,
   ).text;
@@ -576,7 +590,7 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   // envelope containing duplicated args, call ids, phases, and results.
   final formattedOutput =
       visibleOutputBlocks.isEmpty && images.isEmpty && audio.isEmpty
-      ? formatAcpToolPayload(entry.rawOutput)
+      ? _formatCached(_sharedFormattedOutputs, entry.rawOutput)
       : null;
   final selectedRawOutput = visibleOutputBlocks.isEmpty
       ? formattedOutput?.text
@@ -616,6 +630,23 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
       images: images,
       audio: audio,
     ),
+  );
+}
+
+/// [formatAcpToolPayload] memoised per decoded JSON payload object, which the
+/// builder carries unchanged through every later `tool_call_update`.
+({String? text, bool isStructured}) _formatCached(
+  Expando<({String? text, bool isStructured})> cache,
+  Object? payload, {
+  bool simplifyProgress = true,
+}) {
+  if (payload is! Map && payload is! List) {
+    return formatAcpToolPayload(payload, simplifyProgress: simplifyProgress);
+  }
+  final key = payload!;
+  return cache[key] ??= formatAcpToolPayload(
+    payload,
+    simplifyProgress: simplifyProgress,
   );
 }
 
@@ -1476,17 +1507,23 @@ AcpStatusSeverity _severityForError(d.AcpSessionErrorKind kind) =>
   if (reason == null) {
     return null;
   }
-  return switch (reason.value) {
-    'max_tokens' => (
+  return switch (reason) {
+    d.AcpStopReason.maxTokens => (
       'Response stopped: token limit reached.',
       AcpStatusSeverity.warning,
     ),
-    'max_turn_requests' => (
+    d.AcpStopReason.maxTurnRequests => (
       'Response stopped: request limit reached.',
       AcpStatusSeverity.warning,
     ),
-    'refusal' => ('The agent declined to continue.', AcpStatusSeverity.warning),
-    'cancelled' => ('The turn was cancelled.', AcpStatusSeverity.info),
+    d.AcpStopReason.refusal => (
+      'The agent declined to continue.',
+      AcpStatusSeverity.warning,
+    ),
+    d.AcpStopReason.cancelled => (
+      'The turn was cancelled.',
+      AcpStatusSeverity.info,
+    ),
     _ => null,
   };
 }

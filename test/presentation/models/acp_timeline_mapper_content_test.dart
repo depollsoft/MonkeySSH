@@ -44,6 +44,50 @@ AcpMessageEntry _message(
 );
 
 void main() {
+  test('reuses diffs, formatted payloads and images across tool updates', () {
+    final initial = AcpToolCallEntry(toolCallId: 't', order: 0).merge(
+      AcpToolCallUpdate.fromJson(<String, Object?>{
+        'toolCallId': 't',
+        'title': 'Edit',
+        'status': 'pending',
+        'rawInput': {'path': '/a.dart', 'edits': 3},
+        'content': [
+          {
+            'type': 'diff',
+            'path': '/a.dart',
+            'oldText': 'a\nb\n',
+            'newText': 'a\nc\n',
+          },
+          {
+            'type': 'content',
+            'content': {
+              'type': 'image',
+              'data': 'QUJD',
+              'mimeType': 'image/png',
+            },
+          },
+        ],
+      }),
+    );
+    final completed = initial.merge(
+      const AcpToolCallUpdate(toolCallId: 't', status: AcpToolStatus.completed),
+    );
+    final first = (_map([initial]).single as p.AcpToolCallEntry).toolCall;
+    final second = (_map([completed]).single as p.AcpToolCallEntry).toolCall;
+
+    expect(second.status, p.AcpToolStatus.completed);
+    expect(second.diffs.single.unifiedDiff, contains('-b'));
+    expect(
+      identical(
+        first.diffs.single.unifiedDiff,
+        second.diffs.single.unifiedDiff,
+      ),
+      isTrue,
+    );
+    expect(identical(first.rawInput, second.rawInput), isTrue);
+    expect(identical(first.images.single, second.images.single), isTrue);
+  });
+
   test('renders a bounded number of terminals and counts the rest', () {
     final tool = _mapTool({
       'title': 'Fan out',
