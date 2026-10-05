@@ -780,13 +780,13 @@ type muxWindow struct {
 	inPlaceRedrawPid int
 	// foregroundCommandPid is the process group foregroundCommand was read
 	// for.
-	foregroundCommandPid        int
-	foregroundCommand           string
-	paneTitle                   string
-	pty                         muxPty
-	ptyResizeMu                 sync.Mutex
+	foregroundCommandPid int
+	foregroundCommand    string
+	paneTitle            string
+	pty                  muxPty
+	ptyResizeMu          sync.Mutex
 	// closedPty is the handle closePty already closed; guarded by ptyResizeMu.
-	closedPty muxPty
+	closedPty                   muxPty
 	ptyWidth                    int
 	ptyHeight                   int
 	resizeGeneration            atomic.Uint64
