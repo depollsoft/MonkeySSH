@@ -2595,7 +2595,7 @@ class AgentSessionDiscoveryService {
               session,
               posixListNewestFilesCommand(
                 'find ~/.antigravity/sessions ~/.agy/sessions '
-                "./.antigravitycli ./.agycli -maxdepth 1 -name '*.json' -type f",
+                "~/.antigravitycli ~/.agycli -maxdepth 1 -name '*.json' -type f",
                 scanLimit,
               ),
             );

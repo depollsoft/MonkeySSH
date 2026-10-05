@@ -2175,7 +2175,10 @@ branch refs/heads/main
         expect(scoped.sessions.single.sessionId, 'encoded');
         expect(scoped.sessions.single.workingDirectory, cwd);
         if (!windows) {
-          expect(commands, anyElement(contains('./.antigravitycli ./.agycli')));
+          // Legacy roots must resolve under the home directory: MonkeyMux runs
+          // client commands from the active window's cwd, where `./` is wrong.
+          expect(commands, anyElement(contains('~/.antigravitycli ~/.agycli')));
+          expect(commands, isNot(anyElement(contains('./.antigravitycli'))));
           expect(commands, anyElement(contains('~/.agy/sessions')));
           expect(commands, isNot(anyElement(contains('python3 -c'))));
         }
