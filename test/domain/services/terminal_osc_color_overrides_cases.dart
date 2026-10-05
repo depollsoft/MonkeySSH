@@ -39,6 +39,21 @@ void registerTerminalOscColorOverridesTests() {
       expect(overrides.isNotEmpty, isFalse);
     });
 
+    test('applied overrides are not equal to the base theme', () {
+      final overrides = TerminalOscColorOverrides()
+        ..handle('11', const ['#ff0000']);
+      final effective = overrides.applyTo(TerminalThemes.dracula);
+
+      expect(effective.id, TerminalThemes.dracula.id);
+      expect(effective, isNot(equals(TerminalThemes.dracula)));
+      expect(
+        terminalThemesMatchForColors(effective, TerminalThemes.dracula),
+        isFalse,
+      );
+      overrides.handle('111', const []);
+      expect(overrides.applyTo(TerminalThemes.dracula), TerminalThemes.dracula);
+    });
+
     test('sets and resets dynamic terminal colors', () {
       final overrides = TerminalOscColorOverrides();
       // Consecutive setter groups are intentionally separated by assertions.

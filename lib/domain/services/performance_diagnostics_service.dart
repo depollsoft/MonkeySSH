@@ -32,36 +32,21 @@ class PerformanceDiagnosticsService {
   // (not-fully-frozen) periods while still ignoring the odd hitch.
   static const _jankThreshold = Duration(milliseconds: 32);
 
-  TimingsCallback? _callback;
+  bool _started = false;
 
   /// Registers the frame-timings callback. Safe to call more than once.
   void start() {
-    if (!_enabled || _callback != null) {
+    if (!_enabled || _started) {
       return;
     }
-    final callback = _handleTimings;
-    _callback = callback;
-    SchedulerBinding.instance.addTimingsCallback(callback);
+    _started = true;
+    SchedulerBinding.instance.addTimingsCallback(handleTimings);
     _logger.info('perf.frame', 'monitor_started');
   }
 
-  /// Removes the frame-timings callback.
-  void stop() {
-    final callback = _callback;
-    if (callback == null) {
-      return;
-    }
-    SchedulerBinding.instance.removeTimingsCallback(callback);
-    _callback = null;
-  }
-
-  void _handleTimings(List<FrameTiming> timings) {
-    handleTimingsForTesting(timings);
-  }
-
-  /// Processes [timings] and logs any janky frame. Exposed for tests.
+  /// Processes [timings] and logs any janky frame.
   @visibleForTesting
-  void handleTimingsForTesting(List<FrameTiming> timings) {
+  void handleTimings(List<FrameTiming> timings) {
     for (final timing in timings) {
       final build = timing.buildDuration;
       final raster = timing.rasterDuration;

@@ -327,6 +327,10 @@ class ShellCompletionService {
     final key = _shellHistoryCacheKey(session, invocation);
     final now = DateTime.now();
     final cached = _historyCache[key];
+    // History is cached per host so [cachedHistorySuggestions] can answer
+    // synchronously after a reconnect, but a connection only trusts history it
+    // loaded itself: a new connection refreshes in the background instead of
+    // serving another connection's snapshot as its own.
     if (cached != null &&
         cached.connectionId == session.connectionId &&
         now.difference(cached.createdAt) <= historyCacheTtl) {
@@ -774,16 +778,6 @@ List<ShellCompletionSuggestion>? buildShellCompletionStaticSuggestions(
   return suggestions;
 }
 
-/// Builds command-line suggestions from normalized shell history patterns.
-@visibleForTesting
-List<ShellCompletionSuggestion> buildShellHistorySuggestions(
-  List<String> historyCommands,
-  ShellCompletionInvocation invocation,
-) => _buildPreparedShellHistorySuggestions(
-  _prepareShellHistoryCommands(historyCommands),
-  invocation,
-);
-
 List<ShellCompletionSuggestion> _buildPreparedShellHistorySuggestions(
   List<_PreparedShellHistoryCommand> historyCommands,
   ShellCompletionInvocation invocation,
@@ -1083,14 +1077,15 @@ int _resolvePromptEnd(String beforeCursor, String? promptPrefix) {
   return _findLikelyPromptEnd(beforeCursor);
 }
 
+final _promptMarkerPattern = RegExp(r'(?:^|\s)(?:\S{1,80}\s+)?[#$%>]\s+');
+
 int _findLikelyPromptEnd(String beforeCursor) {
   const maxPromptSearchLength = 96;
   final searchText = beforeCursor.length > maxPromptSearchLength
       ? beforeCursor.substring(0, maxPromptSearchLength)
       : beforeCursor;
-  final markerPattern = RegExp(r'(?:^|\s)(?:\S{1,80}\s+)?[#$%>]\s+');
   var promptEnd = 0;
-  for (final match in markerPattern.allMatches(searchText)) {
+  for (final match in _promptMarkerPattern.allMatches(searchText)) {
     promptEnd = match.end;
   }
   return promptEnd;
@@ -1229,18 +1224,8 @@ String? normalizeShellHistoryCommandPattern(String command) {
   return pattern.isEmpty || pattern.length > 512 ? null : pattern;
 }
 
-List<String>? _normalizeShellHistoryCommandPatternTokens(String command) {
-  final decoded = _decodeShellHistoryCommand(command).trim();
-  if (!_isSafeHistoryCommand(decoded)) {
-    return null;
-  }
-
-  final tokens = _parseShellHistoryCommandTokens(decoded);
-  if (tokens == null || tokens.isEmpty) {
-    return null;
-  }
-  return _normalizeShellHistoryCommandPatternTokensFromTokens(tokens);
-}
+List<String>? _normalizeShellHistoryCommandPatternTokens(String command) =>
+    _prepareShellHistoryCommand(command)?.patternTokens;
 
 List<String>? _normalizeShellHistoryCommandPatternTokensFromTokens(
   List<_ShellHistoryToken> tokens,
@@ -1657,6 +1642,8 @@ bool _isUnescapedShellTokenChar(String char) {
       char == '~';
 }
 
+final _windowsCompletionQuotePattern = RegExp(r'[ \t&|<>^()";,%!]');
+
 /// Quotes a completion [value] for insertion into a Windows shell (cmd.exe or
 /// PowerShell).
 ///
@@ -1670,8 +1657,7 @@ String escapeWindowsCompletionToken(String value) {
   if (value.isEmpty) {
     return '""';
   }
-  final needsQuoting = value.contains(RegExp(r'[ \t&|<>^()";,%!]'));
-  if (!needsQuoting) {
+  if (!value.contains(_windowsCompletionQuotePattern)) {
     return value;
   }
   return '"${value.replaceAll('"', '')}"';

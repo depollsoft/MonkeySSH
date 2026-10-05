@@ -115,6 +115,13 @@ void main() {
       handleIterm2InlineImageOsc(terminal, const ['File=inline=1:not-base64']),
       isTrue,
     );
+    expect(
+      handleIterm2InlineImageOsc(terminal, [
+        'File=inline=1:$_pngBase64',
+        'trailing',
+      ]),
+      isTrue,
+    );
     final oversized = base64Encode(
       List<int>.filled(maxIterm2InlineImageBytes + 1, 0),
     );

@@ -33,6 +33,20 @@ SshSession _buildShellCompletionSession(
   ),
 );
 
+/// Completes [invocation] against a session whose only exec output is the
+/// remote history listing [commands].
+Future<List<ShellCompletionSuggestion>> _completeFromHistory(
+  ShellCompletionInvocation invocation,
+  List<String> commands,
+) {
+  final client = _MockSshClient();
+  _stubHistoryExec(client, commands);
+  return ShellCompletionService().complete(
+    _buildShellCompletionSession(client, connectionId: 1, hostId: 1),
+    invocation,
+  );
+}
+
 void _stubHistoryExec(ssh.SSHClient client, List<String> commands) {
   final exec = _MockSshExecSession();
   final output = [
@@ -619,8 +633,8 @@ void main() {
     });
 
     test(
-      'buildShellHistorySuggestions ranks by token count frequency and recency',
-      () {
+      'history suggestions rank by token count frequency and recency',
+      () async {
         const invocation = ShellCompletionInvocation(
           commandLine: 'git c',
           cursorOffset: 5,
@@ -633,7 +647,7 @@ void main() {
           workingDirectory: '/Users/depoll/project',
         );
 
-        final suggestions = buildShellHistorySuggestions([
+        final suggestions = await _completeFromHistory(invocation, [
           'git commit',
           'git checkout feature/login',
           'git commit -m "old message"',
@@ -642,7 +656,7 @@ void main() {
           'git commit -m "new message"',
           'git cherry-pick abc',
           'git commit -m "new message"',
-        ], invocation);
+        ]);
 
         expect(suggestions.map((suggestion) => suggestion.label), [
           'commit',
@@ -667,15 +681,15 @@ void main() {
       },
     );
 
-    test('buildShellHistorySuggestions filters encoded command names', () {
+    test('history suggestions filter encoded command names', () async {
       final invocation = _commandInvocation('tmu', '/Users/depoll/project');
 
-      final suggestions = buildShellHistorySuggestions([
+      final suggestions = await _completeFromHistory(invocation, [
         'tmux%20new-session%20-A%20-s%20monkeyssh',
         'tmux new-session -A -s monkeyssh',
         'tmux',
         'tmux',
-      ], invocation);
+      ]);
 
       expect(suggestions.map((suggestion) => suggestion.label), [
         'tmux',
@@ -908,7 +922,7 @@ void main() {
       },
     );
 
-    test('buildShellHistorySuggestions matches patterns around arguments', () {
+    test('history suggestions match patterns around arguments', () async {
       const commandLine = 'codex --prompt "try history" --s';
       const invocation = ShellCompletionInvocation(
         commandLine: commandLine,
@@ -922,9 +936,9 @@ void main() {
         workingDirectory: '/Users/depoll/project',
       );
 
-      final suggestions = buildShellHistorySuggestions([
+      final suggestions = await _completeFromHistory(invocation, [
         'codex --prompt="do something" --sandbox workspace-write',
-      ], invocation);
+      ]);
 
       expect(suggestions.map((suggestion) => suggestion.label), ['--sandbox']);
       expect(suggestions.single.replacementStart, 29);

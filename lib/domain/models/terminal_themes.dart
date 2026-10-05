@@ -1,3 +1,4 @@
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 
 import 'terminal_theme.dart';
@@ -20,10 +21,10 @@ abstract final class TerminalThemes {
   static const defaultLightTheme = monkeyLight;
 
   /// All built-in themes.
-  static List<TerminalThemeData> get all => [...darkThemes, ...lightThemes];
+  static const List<TerminalThemeData> all = [...darkThemes, ...lightThemes];
 
   /// Dark themes collection.
-  static List<TerminalThemeData> get darkThemes => [
+  static const List<TerminalThemeData> darkThemes = [
     monkeyDark,
     dracula,
     catppuccinMocha,
@@ -39,7 +40,7 @@ abstract final class TerminalThemes {
   ];
 
   /// Light themes collection.
-  static List<TerminalThemeData> get lightThemes => [
+  static const List<TerminalThemeData> lightThemes = [
     monkeyLight,
     githubLightDefault,
     catppuccinLatte,
@@ -52,6 +53,10 @@ abstract final class TerminalThemes {
     nightOwlishLight,
     blulocoLight,
   ];
+
+  static final Map<String, TerminalThemeData> _byId = {
+    for (final theme in all) theme.id: theme,
+  };
 
   static const _legacyThemeIdAliases = {
     'dracula': 'iterm2-dracula',
@@ -93,24 +98,14 @@ abstract final class TerminalThemes {
     String id, {
     Iterable<TerminalThemeData> additionalThemes = const [],
   }) {
-    for (final theme in all) {
-      if (theme.id == id) return theme;
-    }
-    for (final theme in additionalThemes) {
-      if (theme.id == id) return theme;
-    }
+    TerminalThemeData? lookup(String themeId) =>
+        _byId[themeId] ??
+        additionalThemes.firstWhereOrNull((theme) => theme.id == themeId);
 
+    final theme = lookup(id);
+    if (theme != null) return theme;
     final resolvedId = resolveThemeId(id);
-    if (resolvedId == id) {
-      return null;
-    }
-    for (final theme in all) {
-      if (theme.id == resolvedId) return theme;
-    }
-    for (final theme in additionalThemes) {
-      if (theme.id == resolvedId) return theme;
-    }
-    return null;
+    return resolvedId == id ? null : lookup(resolvedId);
   }
 
   /// Returns the built-in default theme ID for [brightness].

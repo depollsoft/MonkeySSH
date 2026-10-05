@@ -95,23 +95,24 @@ class TerminalOscColorOverrides {
 
   /// Applies active overrides to [base] without mutating it.
   TerminalThemeData applyTo(TerminalThemeData base) {
-    var theme = base.copyWith(
-      foreground: _foreground,
-      background: _background,
-      cursor: _cursor,
-      selection: _selection,
-    );
+    final ansiColors = base.ansiColors;
     final extendedPalette = <int, Color>{...base.paletteOverrides};
     for (final entry in _ansi.entries) {
-      if (entry.key < 16) {
-        theme = _copyWithAnsiColor(theme, entry.key, entry.value);
+      if (entry.key < ansiColors.length) {
+        ansiColors[entry.key] = entry.value;
       } else {
         extendedPalette[entry.key] = entry.value;
       }
     }
-    return theme.copyWith(
-      paletteOverrides: Map<int, Color>.unmodifiable(extendedPalette),
-    );
+    return base
+        .copyWithAnsiColors(ansiColors)
+        .copyWith(
+          foreground: _foreground,
+          background: _background,
+          cursor: _cursor,
+          selection: _selection,
+          paletteOverrides: Map<int, Color>.unmodifiable(extendedPalette),
+        );
   }
 
   TerminalOscColorMutation _setDynamicColors(int firstRole, List<String> args) {
@@ -195,27 +196,3 @@ Color? parseTerminalOscColor(String value) {
   }
   return Color.fromARGB(0xFF, rgb[0], rgb[1], rgb[2]);
 }
-
-TerminalThemeData _copyWithAnsiColor(
-  TerminalThemeData theme,
-  int index,
-  Color color,
-) => switch (index) {
-  0 => theme.copyWith(black: color),
-  1 => theme.copyWith(red: color),
-  2 => theme.copyWith(green: color),
-  3 => theme.copyWith(yellow: color),
-  4 => theme.copyWith(blue: color),
-  5 => theme.copyWith(magenta: color),
-  6 => theme.copyWith(cyan: color),
-  7 => theme.copyWith(white: color),
-  8 => theme.copyWith(brightBlack: color),
-  9 => theme.copyWith(brightRed: color),
-  10 => theme.copyWith(brightGreen: color),
-  11 => theme.copyWith(brightYellow: color),
-  12 => theme.copyWith(brightBlue: color),
-  13 => theme.copyWith(brightMagenta: color),
-  14 => theme.copyWith(brightCyan: color),
-  15 => theme.copyWith(brightWhite: color),
-  _ => theme,
-};
