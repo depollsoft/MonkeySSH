@@ -11,15 +11,6 @@ import 'system_bottom_inset.dart';
 import 'terminal_key_input.dart';
 import 'terminal_menu_style.dart';
 
-/// Resolves the bottom inset the toolbar reserves below its last key row.
-///
-/// The toolbar is the bottom-most chrome in the terminal body, so it owns the
-/// gesture handle / navigation bar inset. When the system keyboard lifts the
-/// layout above that bar the inset resolves to zero, which avoids an extra gap
-/// above the keyboard.
-double resolveKeyboardToolbarBottomInset(MediaQueryData mediaQuery) =>
-    resolveSystemBottomInset(mediaQuery);
-
 /// Whether the extra-keys toolbar should collapse to a single row.
 ///
 /// In landscape, vertical space is tighter and the toolbar behaves more like a
@@ -30,10 +21,12 @@ bool shouldUseSingleRowKeyboardToolbar(MediaQueryData mediaQuery) =>
     mediaQuery.size.shortestSide < 600;
 
 /// Resolves the total rendered height of the keyboard toolbar.
+///
+/// The toolbar is the bottom-most chrome in the terminal body, so it reserves
+/// the gesture handle / navigation bar inset below its last key row.
 double resolveKeyboardToolbarHeight(MediaQueryData mediaQuery) {
   final rowCount = shouldUseSingleRowKeyboardToolbar(mediaQuery) ? 1 : 2;
-  return rowCount * _KeyRow.height +
-      resolveKeyboardToolbarBottomInset(mediaQuery);
+  return rowCount * _KeyRow.height + resolveSystemBottomInset(mediaQuery);
 }
 
 /// Resolves the terminal output sequence for a Tab action.
@@ -97,13 +90,13 @@ class KeyboardToolbarController extends ChangeNotifier {
   /// Toggles Shift between off and one-shot mode.
   void toggleShift() => _toggleModifier(_Modifier.shift);
 
-  /// Locks or unlocks Ctrl.
+  /// Locks Ctrl; a single tap unlocks it.
   void lockCtrl() => _lockModifier(_Modifier.ctrl);
 
-  /// Locks or unlocks Alt.
+  /// Locks Alt; a single tap unlocks it.
   void lockAlt() => _lockModifier(_Modifier.alt);
 
-  /// Locks or unlocks Shift.
+  /// Locks Shift; a single tap unlocks it.
   void lockShift() => _lockModifier(_Modifier.shift);
 
   /// Clears any one-shot modifiers while preserving locked modifiers.
@@ -174,11 +167,11 @@ class KeyboardToolbarController extends ChangeNotifier {
   void _lockModifier(_Modifier mod) {
     switch (mod) {
       case _Modifier.ctrl:
-        _ctrlState = _ctrlState ?? false ? null : true;
+        _ctrlState = true;
       case _Modifier.alt:
-        _altState = _altState ?? false ? null : true;
+        _altState = true;
       case _Modifier.shift:
-        _shiftState = _shiftState ?? false ? null : true;
+        _shiftState = true;
     }
     notifyListeners();
   }
@@ -384,11 +377,10 @@ class KeyboardToolbar extends StatefulWidget {
   final FocusNode? terminalFocusNode;
 
   @override
-  State<KeyboardToolbar> createState() => KeyboardToolbarState();
+  State<KeyboardToolbar> createState() => _KeyboardToolbarState();
 }
 
-/// State for [KeyboardToolbar].
-class KeyboardToolbarState extends State<KeyboardToolbar> {
+class _KeyboardToolbarState extends State<KeyboardToolbar> {
   static const _pasteOptionsWidth = 200.0;
   static const _pasteSnippetMenuWidth = 180.0;
   static const _menuGap = TerminalMenuStyles.cascadeGap;
@@ -407,6 +399,12 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   OverlayEntry? _keyMenuOverlay;
   _MenuKey? _openKeyMenu;
   int? _highlightedKeyMenuItem;
+  _KeyMenuLayout? _openKeyMenuLayout;
+  late TerminalToolbarDispatcher _dispatcher;
+  late Map<_MenuKey, _KeyMenu?> _keyMenus;
+  late List<_SnippetMenuEntry> _snippetMenuEntries;
+  late Map<int, List<KeyboardToolbarSnippet>> _snippetsByFolder;
+  List<_SnippetMenuEntry> _expandedSnippetMenuEntries = const [];
 
   KeyboardToolbarController get _controller =>
       widget.controller ?? _fallbackController;
@@ -422,6 +420,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     super.initState();
     _fallbackController = KeyboardToolbarController();
     _controller.addListener(_handleControllerChanged);
+    _refreshDispatcherAndMenus();
+    _refreshSnippetMenuEntries();
   }
 
   @override
@@ -429,17 +429,83 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     super.didUpdateWidget(oldWidget);
     final previousController = oldWidget.controller ?? _fallbackController;
     final nextController = _controller;
-    if (!identical(previousController, nextController)) {
+    final controllerChanged = !identical(previousController, nextController);
+    if (controllerChanged) {
       previousController.removeListener(_handleControllerChanged);
       nextController.addListener(_handleControllerChanged);
     }
+    if (controllerChanged ||
+        !identical(oldWidget.terminal, widget.terminal) ||
+        oldWidget.onSpecialKey != widget.onSpecialKey ||
+        oldWidget.onTextInput != widget.onTextInput ||
+        oldWidget.onKeyPressed != widget.onKeyPressed) {
+      _refreshDispatcherAndMenus();
+      if (_openKeyMenu case final key? when _keyMenus[key] == null) {
+        _hideKeyMenu();
+      }
+    }
     if (!identical(oldWidget.snippets, widget.snippets) ||
         !identical(oldWidget.snippetFolders, widget.snippetFolders)) {
+      _refreshSnippetMenuEntries();
       _pasteOptionsOverlay?.markNeedsBuild();
     }
-    if (_openKeyMenu case final key? when _keyMenuFor(key) == null) {
-      _hideKeyMenu();
+  }
+
+  /// The dispatcher and the key menus close over the widget's sinks, so they
+  /// are built once per change to those rather than on every build and
+  /// pointer move.
+  void _refreshDispatcherAndMenus() {
+    _dispatcher = TerminalToolbarDispatcher(
+      terminal: widget.terminal,
+      controller: _controller,
+      refocusTerminal: _refocusTerminal,
+      onSpecialKey: widget.onSpecialKey,
+      onTextInput: widget.onTextInput,
+      onKeyPressed: widget.onKeyPressed,
+    );
+    _keyMenus = {for (final key in _MenuKey.values) key: _buildKeyMenu(key)};
+  }
+
+  /// Groups the snippets once per change, so the Paste menu's hit testing and
+  /// overlay do not rescan them on every pointer move.
+  void _refreshSnippetMenuEntries() {
+    final folderIds = {for (final folder in widget.snippetFolders) folder.id};
+    final byFolder = <int, List<KeyboardToolbarSnippet>>{};
+    final topLevel = <_SnippetMenuEntry>[];
+    for (final snippet in widget.snippets) {
+      if (snippet.folderId case final folderId?
+          when folderIds.contains(folderId)) {
+        (byFolder[folderId] ??= []).add(snippet);
+      } else {
+        topLevel.add(_SnippetMenuEntry.snippet(snippet));
+      }
     }
+    _snippetsByFolder = byFolder;
+    _snippetMenuEntries = [
+      for (final folder in widget.snippetFolders)
+        if (byFolder.containsKey(folder.id)) _SnippetMenuEntry.folder(folder),
+      ...topLevel,
+    ];
+    _expandedSnippetMenuEntries = _expandSnippetMenuEntries(
+      _highlightedSnippetFolder,
+    );
+  }
+
+  /// [_snippetMenuEntries] with [folder]'s snippets listed under it.
+  List<_SnippetMenuEntry> _expandSnippetMenuEntries(
+    KeyboardToolbarSnippetFolder? folder,
+  ) {
+    if (folder == null) {
+      return _snippetMenuEntries;
+    }
+    return [
+      for (final entry in _snippetMenuEntries) ...[
+        entry,
+        if (entry.folder?.id == folder.id)
+          for (final snippet in _snippetsByFolder[folder.id] ?? const [])
+            _SnippetMenuEntry.snippet(snippet, folder),
+      ],
+    ];
   }
 
   @override
@@ -467,7 +533,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     final mediaQuery = MediaQuery.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final bottomInset = resolveKeyboardToolbarBottomInset(mediaQuery);
+    final bottomInset = resolveSystemBottomInset(mediaQuery);
     final useSingleRow = shouldUseSingleRowKeyboardToolbar(mediaQuery);
 
     return DecoratedBox(
@@ -512,7 +578,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   );
 
   List<Widget> _buildModifierButtons() {
-    final ctrlMenu = _keyMenuFor(_MenuKey.ctrl);
+    final ctrlMenu = _keyMenus[_MenuKey.ctrl];
     return [
       _menuKeyButton(
         _MenuKey.escape,
@@ -542,9 +608,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         semanticsHint: ctrlMenu == null
             ? null
             : 'Press and hold or swipe up for Ctrl shortcuts',
-        customSemanticsActions: ctrlMenu == null
-            ? null
-            : _keyMenuSemanticsActions(ctrlMenu),
+        customSemanticsActions: ctrlMenu?.semanticsActions,
         tooltip: 'Ctrl',
       ),
       _ModifierButton(
@@ -592,7 +656,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     IconData? icon,
     bool mirrorIcon = false,
   }) {
-    final menu = _keyMenuFor(menuKey);
+    final menu = _keyMenus[menuKey];
     return _ToolbarButton(
       key: _menuKeyAnchors[menuKey],
       icon: icon,
@@ -604,9 +668,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       semanticsHint: menu == null
           ? null
           : 'Press and hold or swipe up for $menuName',
-      customSemanticsActions: menu == null
-          ? null
-          : _keyMenuSemanticsActions(menu),
+      customSemanticsActions: menu?.semanticsActions,
       tooltip: tooltip,
     );
   }
@@ -769,12 +831,11 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     if (overlayBox is! RenderBox) {
       return const SizedBox.shrink();
     }
-    final layout = _pasteMenuLayout(overlayBox.size);
+    final layout = _pasteMenuLayout(overlayBox);
     if (layout == null) {
       return const SizedBox.shrink();
     }
 
-    final snippetEntries = _expandedSnippetMenuEntries;
     final showSnippetMenu =
         _highlightedPasteAction == _PasteToolbarAction.snippets &&
         _snippetMenuEntries.isNotEmpty;
@@ -785,9 +846,10 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
           rect: layout.mainMenuRect,
           child: _PasteOptionsMenu(
             highlightedAction: _highlightedPasteAction,
-            snippetsEnabled: _areSnippetsEnabled,
-            mediaEnabled: widget.onPasteMediaRequested != null,
-            filesEnabled: widget.onPasteFilesRequested != null,
+            enabled: {
+              for (final action in _PasteToolbarAction.values)
+                if (_isPasteActionEnabled(action)) action,
+            },
             snippetsTrailingIcon: layout.snippetMenuOpensLeft
                 ? Icons.chevron_left_rounded
                 : Icons.chevron_right_rounded,
@@ -797,7 +859,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
           Positioned.fromRect(
             rect: layout.snippetMenuRect!,
             child: _SnippetCascadeMenu(
-              entries: snippetEntries,
+              entries: _expandedSnippetMenuEntries,
               highlightedFolder: _highlightedSnippetFolder,
               highlightedSnippet: _highlightedSnippet,
             ),
@@ -857,7 +919,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
       return null;
     }
     final layout = _pasteMenuLayout(
-      overlayBox.size,
+      overlayBox,
       mainMenuOrigin: menuOrigin == null
           ? null
           : overlayBox.globalToLocal(menuOrigin),
@@ -934,17 +996,14 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   }
 
   _PasteMenuLayout? _pasteMenuLayout(
-    Size overlaySize, {
+    RenderBox overlayBox, {
     Offset? mainMenuOrigin,
   }) {
     final buttonRect = _pasteButtonGlobalRect();
     if (buttonRect == null) {
       return null;
     }
-    final overlayBox = Overlay.of(context).context.findRenderObject();
-    if (overlayBox is! RenderBox) {
-      return null;
-    }
+    final overlaySize = overlayBox.size;
     final topLeft = overlayBox.globalToLocal(buttonRect.topLeft);
     final bottomRight = overlayBox.globalToLocal(buttonRect.bottomRight);
     final targetRect = Rect.fromPoints(topLeft, bottomRight);
@@ -1017,44 +1076,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     return -1;
   }
 
-  List<_SnippetMenuEntry> get _snippetMenuEntries {
-    final folderIds = widget.snippetFolders.map((folder) => folder.id).toSet();
-    final entries = <_SnippetMenuEntry>[
-      for (final folder in widget.snippetFolders)
-        if (_snippetsInFolder(folder.id).isNotEmpty)
-          _SnippetMenuEntry.folder(folder),
-      for (final snippet in widget.snippets)
-        if (snippet.folderId == null || !folderIds.contains(snippet.folderId))
-          _SnippetMenuEntry.snippet(snippet),
-    ];
-    return entries;
-  }
-
-  List<_SnippetMenuEntry> get _expandedSnippetMenuEntries {
-    final entries = _snippetMenuEntries;
-    final folder = _highlightedSnippetFolder;
-    if (folder == null) {
-      return entries;
-    }
-
-    final expandedEntries = <_SnippetMenuEntry>[];
-    for (final entry in entries) {
-      expandedEntries.add(entry);
-      if (entry.folder?.id == folder.id) {
-        expandedEntries.addAll(
-          _snippetsInFolder(folder.id)
-              .map((snippet) => _SnippetMenuEntry.snippet(snippet, folder)),
-        );
-      }
-    }
-    return expandedEntries;
-  }
-
-  List<KeyboardToolbarSnippet> _snippetsInFolder(int folderId) => widget
-      .snippets
-      .where((snippet) => snippet.folderId == folderId)
-      .toList(growable: false);
-
   Rect _localRectToGlobal(RenderBox overlayBox, Rect rect) {
     final topLeft = overlayBox.localToGlobal(rect.topLeft);
     return topLeft & rect.size;
@@ -1062,8 +1083,12 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
 
   void _applyPasteMenuHit(_PasteMenuHit? hit) {
     _highlightedPasteAction = hit?.action;
-    _highlightedSnippetFolder = hit?.folder;
     _highlightedSnippet = hit?.snippet;
+    final folder = hit?.folder;
+    if (folder?.id != _highlightedSnippetFolder?.id) {
+      _expandedSnippetMenuEntries = _expandSnippetMenuEntries(folder);
+    }
+    _highlightedSnippetFolder = folder;
   }
 
   bool _isSamePasteMenuHit(_PasteMenuHit? a, _PasteMenuHit? b) =>
@@ -1097,16 +1122,14 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   void _hidePasteOptionsMenu() {
     _pasteOptionsOverlay?.remove();
     _pasteOptionsOverlay = null;
-    _highlightedPasteAction = null;
-    _highlightedSnippetFolder = null;
-    _highlightedSnippet = null;
+    _applyPasteMenuHit(null);
   }
 
   /// The menu [key] opens, or null when it has none.
   ///
   /// Symbols are plain text and go to any sink; the other menus send terminal
   /// key sequences (see [_sendsToTerminal]).
-  _KeyMenu? _keyMenuFor(_MenuKey key) => switch (key) {
+  _KeyMenu? _buildKeyMenu(_MenuKey key) => switch (key) {
     _MenuKey.escape when _sendsToTerminal => _KeyMenu(
       items: [
         for (final (index, functionKey) in _functionKeys.indexed)
@@ -1170,7 +1193,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     symbolFontSize: 20,
   );
 
-  _KeyMenuGesture? _keyMenuGesture(_MenuKey key) => _keyMenuFor(key) == null
+  _KeyMenuGesture? _keyMenuGesture(_MenuKey key) => _keyMenus[key] == null
       ? null
       : _KeyMenuGesture(
           onOpen: (position) => _showKeyMenu(key, position),
@@ -1179,39 +1202,47 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
           onCancel: () => _hideKeyMenu(key),
         );
 
-  /// Lets screen readers send each menu item from the key itself, since the
-  /// menu exists only while a finger holds it.
-  Map<CustomSemanticsAction, VoidCallback> _keyMenuSemanticsActions(
-    _KeyMenu menu,
-  ) => {
-    for (final item in menu.items)
-      CustomSemanticsAction(label: 'Send ${item.semanticsLabel}'):
-          item.onSelected,
-  };
-
   void _showKeyMenu(_MenuKey key, Offset globalPosition) {
     _hideKeyMenu();
     _hidePasteOptionsMenu();
-    if (_keyMenuFor(key) == null) {
+    if (_keyMenus[key] == null) {
       return;
     }
     HapticFeedback.mediumImpact();
     _openKeyMenu = key;
     // A fast swipe can already be over the nearest item when the menu opens.
-    _highlightedKeyMenuItem = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    _highlightedKeyMenuItem = _keyMenuItemAtGlobalPosition(globalPosition);
     _keyMenuOverlay = OverlayEntry(builder: _buildKeyMenuOverlay);
     Overlay.of(context).insert(_keyMenuOverlay!);
   }
 
+  /// The open menu's layout, laid out when it opens and kept while the overlay
+  /// stays the same size, so pointer moves do not lay it out again.
+  _KeyMenuLayout? _openKeyMenuLayoutIn(RenderBox overlayBox) {
+    final key = _openKeyMenu;
+    final menu = key == null ? null : _keyMenus[key];
+    if (key == null || menu == null) {
+      return null;
+    }
+    final cached = _openKeyMenuLayout;
+    if (cached != null && cached.overlaySize == overlayBox.size) {
+      return cached;
+    }
+    return _openKeyMenuLayout = _keyMenuLayout(key, menu, overlayBox);
+  }
+
   Widget _buildKeyMenuOverlay(BuildContext context) {
     final key = _openKeyMenu;
-    final menu = key == null ? null : _keyMenuFor(key);
-    final layout = menu == null ? null : _keyMenuLayout(key!, menu);
-    if (menu == null || layout == null) {
+    final menu = key == null ? null : _keyMenus[key];
+    final overlayBox = Overlay.of(context).context.findRenderObject();
+    if (menu == null || overlayBox is! RenderBox) {
+      return const SizedBox.shrink();
+    }
+    final layout = _openKeyMenuLayoutIn(overlayBox);
+    if (layout == null) {
       return const SizedBox.shrink();
     }
     final highlighted = _highlightedKeyMenuItem;
-    final overlayBox = Overlay.of(context).context.findRenderObject();
     final colorScheme = Theme.of(context).colorScheme;
     return Stack(
       children: [
@@ -1228,10 +1259,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
             // The highlighted row is already announced as selected.
             child: ExcludeSemantics(
               child: _KeyMenuLoupe(
-                target:
-                    highlighted == null ||
-                        !menu.hasLoupe ||
-                        overlayBox is! RenderBox
+                target: highlighted == null || !menu.hasLoupe
                     ? null
                     : _loupeTarget(
                         layout,
@@ -1307,10 +1335,13 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
   /// down to a single row, until it fits: a phone with the keyboard up can lack
   /// the room, and clamping the menu down over the key would start the finger
   /// inside it, so a plain release would choose an item.
-  _KeyMenuLayout? _keyMenuLayout(_MenuKey key, _KeyMenu menu) {
+  _KeyMenuLayout? _keyMenuLayout(
+    _MenuKey key,
+    _KeyMenu menu,
+    RenderBox overlayBox,
+  ) {
     final button = _menuKeyAnchors[key]!.currentContext?.findRenderObject();
-    final overlayBox = Overlay.of(context).context.findRenderObject();
-    if (button is! RenderBox || overlayBox is! RenderBox) {
+    if (button is! RenderBox) {
       return null;
     }
     final buttonRect =
@@ -1326,6 +1357,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
         when count * itemHeight <= roomAbove) {
       final height = count * itemHeight;
       return _KeyMenuLayout(
+        overlaySize: overlaySize,
         rect: Rect.fromLTWH(
           _clampDouble(
             buttonRect.left,
@@ -1369,6 +1401,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     final width = columns * cellWidth;
     final height = rows * itemHeight;
     return _KeyMenuLayout(
+      overlaySize: overlaySize,
       rect: Rect.fromLTWH(
         _clampDouble(
           isMirrored ? center + cellWidth / 2 - width : center - cellWidth / 2,
@@ -1390,21 +1423,21 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     );
   }
 
-  int? _keyMenuItemAtGlobalPosition(_MenuKey key, Offset globalPosition) {
-    final menu = _keyMenuFor(key);
-    final layout = menu == null ? null : _keyMenuLayout(key, menu);
+  /// The open menu's item under [globalPosition], if any.
+  int? _keyMenuItemAtGlobalPosition(Offset globalPosition) {
     final overlayBox = Overlay.of(context).context.findRenderObject();
-    if (layout == null || overlayBox is! RenderBox) {
+    if (overlayBox is! RenderBox) {
       return null;
     }
-    return layout.itemAt(overlayBox.globalToLocal(globalPosition));
+    return _openKeyMenuLayoutIn(overlayBox)
+        ?.itemAt(overlayBox.globalToLocal(globalPosition));
   }
 
   void _updateKeyMenuHighlight(_MenuKey key, Offset globalPosition) {
     if (_openKeyMenu != key) {
       return;
     }
-    final item = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    final item = _keyMenuItemAtGlobalPosition(globalPosition);
     if (item == _highlightedKeyMenuItem) {
       return;
     }
@@ -1424,8 +1457,8 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     if (_openKeyMenu != key) {
       return;
     }
-    final menu = _keyMenuFor(key);
-    final item = _keyMenuItemAtGlobalPosition(key, globalPosition);
+    final menu = _keyMenus[key];
+    final item = _keyMenuItemAtGlobalPosition(globalPosition);
     _hideKeyMenu();
     if (menu == null || item == null) {
       _refocusTerminal();
@@ -1443,6 +1476,7 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     _keyMenuOverlay?.remove();
     _keyMenuOverlay = null;
     _openKeyMenu = null;
+    _openKeyMenuLayout = null;
     _highlightedKeyMenuItem = null;
   }
 
@@ -1463,14 +1497,6 @@ class KeyboardToolbarState extends State<KeyboardToolbar> {
     await action(snippet);
   }
 
-  TerminalToolbarDispatcher get _dispatcher => TerminalToolbarDispatcher(
-    terminal: widget.terminal,
-    controller: _controller,
-    refocusTerminal: _refocusTerminal,
-    onSpecialKey: widget.onSpecialKey,
-    onTextInput: widget.onTextInput,
-    onKeyPressed: widget.onKeyPressed,
-  );
   void _consumeOneShot() {
     _controller.consumeOneShot();
     _refocusTerminal();
@@ -1531,14 +1557,25 @@ class TerminalToolbarDispatcher {
     refocusTerminal();
   }
 
+  /// Hands [key] to [onSpecialKey] when a custom sink is set, returning
+  /// whether it did.
+  bool _trySendToSink(TerminalKey key, {bool consumeOneShot = true}) {
+    final sink = onSpecialKey;
+    if (sink == null) {
+      return false;
+    }
+    sink(key);
+    onKeyPressed?.call();
+    if (consumeOneShot) {
+      _consumeOneShot();
+    }
+    return true;
+  }
+
   /// Sends Escape and delays legacy-terminal refocus by 100 milliseconds.
   void sendEscape() {
     lightImpact();
-    if (onSpecialKey case final sink?) {
-      sink(TerminalKey.escape);
-      onKeyPressed?.call();
-      controller.consumeOneShot();
-      refocusTerminal();
+    if (_trySendToSink(TerminalKey.escape)) {
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
@@ -1559,10 +1596,7 @@ class TerminalToolbarDispatcher {
   /// Sends Tab with explicit toolbar modifiers.
   void sendTab() {
     lightImpact();
-    if (onSpecialKey case final sink?) {
-      sink(TerminalKey.tab);
-      onKeyPressed?.call();
-      _consumeOneShot();
+    if (_trySendToSink(TerminalKey.tab)) {
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
@@ -1584,10 +1618,7 @@ class TerminalToolbarDispatcher {
   /// Sends Enter using the terminal enter-encoding policy.
   void sendEnter() {
     lightImpact();
-    if (onSpecialKey case final sink?) {
-      sink(TerminalKey.enter);
-      onKeyPressed?.call();
-      _consumeOneShot();
+    if (_trySendToSink(TerminalKey.enter)) {
       return;
     }
     sendTerminalEnterInput(
@@ -1691,12 +1722,7 @@ class TerminalToolbarDispatcher {
     if (withHaptic) {
       lightImpact();
     }
-    if (onSpecialKey case final sink?) {
-      sink(key);
-      onKeyPressed?.call();
-      if (consumeOneShot) {
-        _consumeOneShot();
-      }
+    if (_trySendToSink(key, consumeOneShot: consumeOneShot)) {
       return;
     }
     if (_shouldUseKittyKeyboardEncoding()) {
@@ -1777,7 +1803,7 @@ class _KeyMenuItem {
 /// The items a key offers by holding or swiping up from it, and the shapes
 /// the menu may take.
 class _KeyMenu {
-  const _KeyMenu({
+  _KeyMenu({
     required this.items,
     required this.gridColumns,
     required this.cellWidth,
@@ -1806,6 +1832,14 @@ class _KeyMenu {
   /// menus of lone symbols get one: described rows are wide enough to hold
   /// the finger away from the symbol.
   bool get hasLoupe => items.every((item) => item.description == null);
+
+  /// Lets screen readers send each menu item from the key itself, since the
+  /// menu exists only while a finger holds it.
+  late final Map<CustomSemanticsAction, VoidCallback> semanticsActions = {
+    for (final item in items)
+      CustomSemanticsAction(label: 'Send ${item.semanticsLabel}'):
+          item.onSelected,
+  };
 }
 
 enum _PasteToolbarAction { snippets, media, files }
@@ -1851,16 +1885,12 @@ double _clampDouble(double value, double min, double max) {
 class _PasteOptionsMenu extends StatelessWidget {
   const _PasteOptionsMenu({
     required this.highlightedAction,
-    required this.snippetsEnabled,
-    required this.mediaEnabled,
-    required this.filesEnabled,
+    required this.enabled,
     required this.snippetsTrailingIcon,
   });
 
   final _PasteToolbarAction? highlightedAction;
-  final bool snippetsEnabled;
-  final bool mediaEnabled;
-  final bool filesEnabled;
+  final Set<_PasteToolbarAction> enabled;
   final IconData snippetsTrailingIcon;
 
   @override
@@ -1872,20 +1902,20 @@ class _PasteOptionsMenu extends StatelessWidget {
         _PasteOptionsMenuItem(
           icon: Icons.code_rounded,
           label: 'Snippets',
-          enabled: snippetsEnabled,
+          enabled: enabled.contains(_PasteToolbarAction.snippets),
           highlighted: highlightedAction == _PasteToolbarAction.snippets,
           trailingIcon: snippetsTrailingIcon,
         ),
         _PasteOptionsMenuItem(
           icon: Icons.perm_media_outlined,
           label: 'Paste Media',
-          enabled: mediaEnabled,
+          enabled: enabled.contains(_PasteToolbarAction.media),
           highlighted: highlightedAction == _PasteToolbarAction.media,
         ),
         _PasteOptionsMenuItem(
           icon: Icons.attach_file_rounded,
           label: 'Paste Files',
-          enabled: filesEnabled,
+          enabled: enabled.contains(_PasteToolbarAction.files),
           highlighted: highlightedAction == _PasteToolbarAction.files,
         ),
       ],
@@ -1905,38 +1935,30 @@ class _SnippetCascadeMenu extends StatelessWidget {
   final KeyboardToolbarSnippet? highlightedSnippet;
 
   @override
-  Widget build(BuildContext context) => _CascadeMenuFrame(
-    children: [
-      for (final entry in entries)
-        if (entry.folder case final folder?)
-          _PasteOptionsMenuItem(
-            icon: Icons.folder_outlined,
-            label: folder.name,
-            enabled: true,
-            highlighted: highlightedFolder?.id == folder.id,
-            trailingIcon: Icons.expand_more_rounded,
-          )
-        else if (entry.snippet case final snippet?)
-          _PasteOptionsMenuItem(
-            icon: Icons.code_rounded,
-            label: snippet.name,
-            enabled: true,
-            highlighted: highlightedSnippet?.id == snippet.id,
-            leadingIndent: entry.parentFolder == null ? 0 : 18,
-          ),
-    ],
-  );
-}
-
-class _CascadeMenuFrame extends StatelessWidget {
-  const _CascadeMenuFrame({required this.children});
-
-  final List<Widget> children;
-
-  @override
   Widget build(BuildContext context) => TerminalMenuStyles.surface(
     context,
-    child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final entry in entries)
+          if (entry.folder case final folder?)
+            _PasteOptionsMenuItem(
+              icon: Icons.folder_outlined,
+              label: folder.name,
+              enabled: true,
+              highlighted: highlightedFolder?.id == folder.id,
+              trailingIcon: Icons.expand_more_rounded,
+            )
+          else if (entry.snippet case final snippet?)
+            _PasteOptionsMenuItem(
+              icon: Icons.code_rounded,
+              label: snippet.name,
+              enabled: true,
+              highlighted: highlightedSnippet?.id == snippet.id,
+              leadingIndent: entry.parentFolder == null ? 0 : 18,
+            ),
+      ],
+    ),
   );
 }
 
@@ -2019,6 +2041,7 @@ class _PasteOptionsMenuItem extends StatelessWidget {
 /// holds.
 class _KeyMenuLayout {
   const _KeyMenuLayout({
+    required this.overlaySize,
     required this.rect,
     required this.rows,
     required this.columns,
@@ -2026,6 +2049,10 @@ class _KeyMenuLayout {
     this.isList = false,
     this.isMirrored = false,
   });
+
+  /// Size of the overlay the menu was laid out in; a different size means the
+  /// layout is stale.
+  final Size overlaySize;
 
   final Rect rect;
   final int rows;
@@ -2549,12 +2576,7 @@ class _KeyRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SizedBox(
     height: height,
-    child: Row(
-      children: children.map((c) {
-        if (c is Expanded) return c;
-        return Expanded(child: c);
-      }).toList(),
-    ),
+    child: Row(children: [for (final c in children) Expanded(child: c)]),
   );
 }
 
@@ -2951,8 +2973,8 @@ class _ModifierButtonState extends State<_ModifierButton> {
     if (_lastTapTime != null &&
         now.difference(_lastTapTime!) < _doubleTapTimeout) {
       _lastTapTime = null;
-      // Undo the single-tap toggle before applying double-tap lock,
-      // so the lock/unlock sees the original state.
+      // The second tap toggles like the first and then locks, so a double-tap
+      // always ends locked whatever state it started from.
       widget.onTap();
       widget.onDoubleTap();
     } else {

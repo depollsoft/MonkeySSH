@@ -201,7 +201,6 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
             filtered,
             installedThemes: themes,
             liveResultsAsync: liveResultsAsync,
-            isLiveSearchPending: isLiveSearchPending,
           );
         },
       ),
@@ -267,7 +266,6 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
     List<TerminalThemeData> themes, {
     required List<TerminalThemeData> installedThemes,
     required AsyncValue<List<ItermColorSchemeMetadata>>? liveResultsAsync,
-    required bool isLiveSearchPending,
   }) {
     // Separate custom themes
     final builtInThemes = themes.where((t) => !t.isCustom).toList();
@@ -313,7 +311,6 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
         ..._buildLiveRepositorySection(
           installedThemeIds: installedThemeIds,
           liveResultsAsync: liveResultsAsync,
-          isLiveSearchPending: isLiveSearchPending,
         ),
         const SizedBox(height: 24),
       ],
@@ -330,10 +327,17 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
     widget.onThemePreviewed?.call(theme);
   }
 
+  static const _searchingMessage = _LiveThemeMessage(
+    icon: Icons.sync,
+    message: 'Searching live repository...',
+    isLoading: true,
+  );
+
+  /// [liveResultsAsync] is null while a query of the minimum length waits
+  /// for its debounce, which reads as searching.
   List<Widget> _buildLiveRepositorySection({
     required Set<String> installedThemeIds,
     required AsyncValue<List<ItermColorSchemeMetadata>>? liveResultsAsync,
-    required bool isLiveSearchPending,
   }) {
     final query = _searchQuery.trim();
     if (query.isEmpty) {
@@ -353,24 +357,11 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
     return [
       const SizedBox(height: 8),
       const _SectionHeader(title: 'iTerm2ColorSchemes.com'),
-      if (isLiveSearchPending)
-        const _LiveThemeMessage(
-          icon: Icons.sync,
-          message: 'Searching live repository...',
-          isLoading: true,
-        )
-      else if (liveResultsAsync == null)
-        const _LiveThemeMessage(
-          icon: Icons.search,
-          message: 'Type at least 2 characters to search the live repository.',
-        )
+      if (liveResultsAsync == null)
+        _searchingMessage
       else
         liveResultsAsync.when(
-          loading: () => const _LiveThemeMessage(
-            icon: Icons.sync,
-            message: 'Searching live repository...',
-            isLoading: true,
-          ),
+          loading: () => _searchingMessage,
           error: (_, _) => const _LiveThemeMessage(
             icon: Icons.cloud_off_outlined,
             message: 'Could not search iTerm2ColorSchemes.com.',
