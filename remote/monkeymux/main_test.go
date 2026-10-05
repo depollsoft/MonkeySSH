@@ -10185,7 +10185,7 @@ func TestDiscoverCodexSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "codex", args: "codex"},
 	}
 
-	got := discoverAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}})
+	got := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 	if got[100] != sessionID || got[101] != "" {
 		t.Fatalf("Codex sibling assignments = %#v, want only argv-owned pane", got)
 	}
@@ -10220,7 +10220,7 @@ func TestDiscoverClaudeSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "claude", args: "claude"},
 	}
 
-	got := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}, 101: {}})
+	got := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 	if got[100] != sessionID || got[101] != "" {
 		t.Fatalf("Claude sibling assignments = %#v, want only argv-owned pane", got)
 	}
@@ -10259,7 +10259,7 @@ func TestDiscoverCodexSessionIDsUsesOpenRolloutFile(t *testing.T) {
 		},
 	}
 
-	sessions := discoverAgentSessionIDs("codex", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("codex session id = %q, want %q", got, sessionID)
@@ -10320,11 +10320,7 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 	processTableForMetadata = func() map[int]processInfo { return processes }
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
 
-	sessions := discoverAgentSessionIDs("codex",
-		processes,
-		map[int]struct{}{100: {}},
-		map[int]string{100: "/work/project"},
-	)
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("codex session id = %q, want %q", got, sessionID)
@@ -10380,10 +10376,7 @@ func TestDiscoverCodexSessionIDsSkipsUnknownProcessStart(t *testing.T) {
 		201: {pid: 201, ppid: 101, comm: "codex", args: "codex"},
 	}
 
-	sessions := discoverAgentSessionIDs("codex",
-		processes,
-		map[int]struct{}{100: {}, 101: {}},
-	)
+	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("codex sessions = %#v, want none without process start times", sessions)
@@ -10424,7 +10417,7 @@ func TestDiscoverOpenCodeSessionIDsUsesProcessArgs(t *testing.T) {
 		200: {pid: 200, ppid: 100, comm: "opencode", args: "opencode --session ses_arg"},
 	}
 
-	sessions := discoverAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != "ses_arg" {
 		t.Fatalf("opencode session id = %q, want ses_arg", got)
@@ -10468,11 +10461,7 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
 	processWorkingDirectoryForMetadata = func(int) string { return "" }
-	sessions := discoverAgentSessionIDs("opencode",
-		processes,
-		map[int]struct{}{100: {}},
-		map[int]string{100: "/work/project"},
-	)
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
 	if got := sessions[100]; got != "ses_new" {
 		t.Fatalf("opencode session id = %q, want ses_new", got)
@@ -10504,10 +10493,7 @@ func TestDiscoverOpenCodeSessionIDsSkipsAmbiguousWorkingDirectory(t *testing.T) 
 		201: {pid: 201, ppid: 101, comm: "opencode", args: "opencode"},
 	}
 
-	sessions := discoverAgentSessionIDs("opencode",
-		processes,
-		map[int]struct{}{100: {}, 101: {}},
-	)
+	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("opencode sessions = %#v, want none for ambiguous cwd fallback", sessions)
@@ -10542,7 +10528,7 @@ func TestDiscoverClaudeSessionIDsUsesOpenProjectFile(t *testing.T) {
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10594,7 +10580,7 @@ func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10675,7 +10661,7 @@ func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10720,7 +10706,7 @@ func TestDiscoverClaudeSessionIDsIgnoresSessionThatLeftTheWorkingDirectory(t *te
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("relocated Claude session leaked to the original directory: %#v", sessions)
@@ -10810,7 +10796,7 @@ func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T)
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if got := sessions[100]; got != sessionID {
 		t.Fatalf("claude session id = %q, want %q", got, sessionID)
@@ -10919,56 +10905,10 @@ func TestDiscoverClaudeSessionIDsDoesNotResumeSessionFromBeforeFreshProcess(t *t
 		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
 	}
 
-	sessions := discoverAgentSessionIDs("claude", processes, map[int]struct{}{100: {}})
+	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
 
 	if len(sessions) != 0 {
 		t.Fatalf("fresh Claude process inherited stale sessions %#v, want none", sessions)
-	}
-}
-
-func TestAgentStoreFallbacksRejectSessionsFromBeforeProcess(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	project := filepath.Join(home, "project")
-	processStarted := time.Now().UTC().Truncate(time.Second)
-	stale := processStarted.Add(-time.Hour)
-
-	if got := openCodeSessionIDForWorkingDirectory(
-		[]openCodeSessionEntry{{sessionID: "stale-opencode", directory: project, updatedAt: stale}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh OpenCode process inherited stale session %q", got)
-	}
-	if got := antigravitySessionIDForWorkspace(
-		[]antigravityHistoryEntry{{conversationID: "stale-antigravity", workspace: project, updatedAt: stale}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh Antigravity process inherited stale session %q", got)
-	}
-	if got := cursorSessionIDForWorkspace(
-		[]cursorChatEntry{{chatID: "stale-cursor", cwd: project, updatedAt: stale.UnixMilli()}},
-		project,
-		processStarted,
-	); got != "" {
-		t.Fatalf("fresh Cursor process inherited stale session %q", got)
-	}
-
-	codexID := "123e4567-e89b-12d3-a456-426614174099"
-	codexDir := filepath.Join(home, ".codex", "sessions", "2026", "08")
-	if err := os.MkdirAll(codexDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	codexPath := filepath.Join(codexDir, "rollout-2026-08-18T00-00-00-"+codexID+".jsonl")
-	if err := os.WriteFile(codexPath, []byte(`{"cwd":`+fmt.Sprintf("%q", project)+`,"id":"`+codexID+`"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(codexPath, stale, stale); err != nil {
-		t.Fatal(err)
-	}
-	if got := codexRecentSessionIDForWorkingDirectory(project, processStarted); got != "" {
-		t.Fatalf("fresh Codex process inherited stale session %q", got)
 	}
 }
 
