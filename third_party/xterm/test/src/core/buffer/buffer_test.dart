@@ -1,4 +1,9 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:archive/archive.dart';
 import 'package:test/test.dart';
+import 'package:xterm/src/utils/unicode_v11.dart';
 import 'package:xterm/xterm.dart';
 
 void main() {
@@ -128,6 +133,39 @@ void main() {
       expect(terminal.buffer.lines[0].getText(), 'ab界');
       expect(terminal.buffer.lines[1].getText(), isEmpty);
     });
+
+    test('wraps a newer wide emoji like the MonkeyMux screen model', () {
+      final terminal = Terminal()..resize(4, 2);
+
+      terminal.write('abc\u{1FAE0}X');
+
+      expect(terminal.buffer.lines[0].getText(), 'abc');
+      expect(terminal.buffer.lines[1].getText(), '\u{1FAE0}X');
+    });
+  });
+
+  // remote/monkeymux/runewidth_table.go is generated from the same table and
+  // checked against the same digest, so the client and the MonkeyMux screen
+  // model agree on every code point's width.
+  test('wcwidth matches the shared width table digest', () {
+    final digest = <String, String>{};
+    for (final line
+        in File('../../scripts/unicode_width_table.crc32').readAsLinesSync()) {
+      final fields = line.trim().split(' ');
+      if (fields.length == 2 && !line.startsWith('#')) {
+        digest[fields[0]] = fields[1];
+      }
+    }
+    final widths = Uint8List(0x110000);
+    for (var codePoint = 0; codePoint < widths.length; codePoint++) {
+      widths[codePoint] = unicodeV11.wcwidth(codePoint);
+    }
+    expect(digest['unicode'], unicodeWidthVersion);
+    expect(
+      digest['crc32'],
+      getCrc32(widths).toRadixString(16).padLeft(8, '0'),
+      reason: 'rerun scripts/generate_unicode_width_tables.py',
+    );
   });
 
   group('Buffer.resize()', () {

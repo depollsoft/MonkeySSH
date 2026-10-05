@@ -2178,10 +2178,12 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         '\x1b[4h\x1b]0;nano title\x07\x1b[@Z',
       ),
       (
-        // The buffer gives a skin-tone modifier its own two cells.
+        // A skin-tone modifier takes no cell of its own: like the MonkeyMux
+        // screen model and host width libraries, the buffer keeps the pair
+        // in the base emoji's two columns.
         'emoji modifier',
         '\x1b[4h\u{1F44D}\u{1F3FD}Z',
-        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\x1b[@\x1b[@\u{1F3FD}\x1b[@Z',
+        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\u{1F3FD}\x1b[@Z',
       ),
     ]) {
       test('insert mode preserves $name', () {

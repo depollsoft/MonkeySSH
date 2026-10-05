@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"reflect"
 	"slices"
@@ -923,6 +924,43 @@ func TestKittyPlaceholderDiacriticsMatchClient(t *testing.T) {
 	s.Write([]byte("\U0010EEEE\u07EB\u0305\U0010EEEE\u07EB\u030DX"))
 	if r, c := s.CursorPosition(); r != 0 || c != 3 {
 		t.Fatalf("placeholder marks advanced the cursor: col %d", c)
+	}
+}
+
+// TestRuneWidthMatchesSharedTable pins runeWidth to the digest of the table
+// scripts/generate_unicode_width_tables.py generates for both the model and
+// the client's wcwidth, whose own test checks the same digest. Without it the
+// two sides drift, and the model wraps and places the cursor differently from
+// the live client.
+func TestRuneWidthMatchesSharedTable(t *testing.T) {
+	data, err := os.ReadFile("../../scripts/unicode_width_table.crc32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && !strings.HasPrefix(line, "#") {
+			digest[fields[0]] = fields[1]
+		}
+	}
+	widths := make([]byte, 0x110000)
+	for r := range widths {
+		widths[r] = byte(runeWidth(rune(r)))
+	}
+	if got := fmt.Sprintf("%08x", crc32.ChecksumIEEE(widths)); got != digest["crc32"] || digest["unicode"] != runeWidthUnicodeVersion {
+		t.Fatalf("runeWidth (Unicode %s, crc32 %s) differs from the shared table %v; rerun scripts/generate_unicode_width_tables.py",
+			runeWidthUnicodeVersion, got, digest)
+	}
+	// Each side once gave U+1FAE0 or the regional indicators another width.
+	s := newTerminalScreen(4, 2)
+	s.Write([]byte("abc\U0001FAE0X"))
+	if got := s.TextRows(); got[0] != "abc" || got[1] != "\U0001FAE0X" {
+		t.Fatalf("wide emoji at the last column: %q", got)
+	}
+	s = newTerminalScreen(6, 1)
+	s.Write([]byte("\U0001F1FA\U0001F1F8\U0001F44D\U0001F3FDx"))
+	if _, c := s.CursorPosition(); c != 5 {
+		t.Fatalf("flag and modified emoji end at col %d, want 5", c)
 	}
 }
 

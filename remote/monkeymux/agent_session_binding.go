@@ -14,6 +14,9 @@ import (
 
 const agentSessionStorePollInterval = 2 * time.Second
 
+// agentSessionStoreClock times store reads; tests replace it.
+var agentSessionStoreClock = time.Now
+
 // All binding state is owned by muxServer.mu. Store reads and process probes
 // happen outside that lock; their results are checked against the live watch.
 type agentSessionWatch struct {
@@ -339,6 +342,22 @@ func exactAgentSessionForProcess(tool, cwd string, process processInfo, processe
 	return w
 }
 
+// agentSessionFileMetadata is what a Codex rollout or Claude transcript's
+// contents yielded. A poll reuses it while the file keeps its identity, size
+// and modification time, so long-lived installs with thousands of sessions do
+// not reopen every historical file each interval.
+type agentSessionFileMetadata struct {
+	info    os.FileInfo
+	id, cwd string
+}
+
+// agentSessionFileCache holds the metadata from each store root's latest walk;
+// files that disappear drop out with the next walk.
+var agentSessionFileCache struct {
+	sync.Mutex
+	roots map[string]map[string]agentSessionFileMetadata
+}
+
 func readAgentSessionCandidates(tool string) []agentSessionCandidate {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -353,23 +372,46 @@ func readAgentSessionCandidates(tool string) []agentSessionCandidate {
 		if tool == "claude" {
 			root, match, decode = filepath.Join(home, ".claude", "projects"), isClaudeProjectSessionPath, claudeSessionIDFromProjectFile
 		}
+		agentSessionFileCache.Lock()
+		previous := agentSessionFileCache.roots[root]
+		agentSessionFileCache.Unlock()
+		current := make(map[string]agentSessionFileMetadata, len(previous))
 		// The baseline must include old files too, even if they later gain a new
-		// mtime. Unlike the recent-session fallback, it must not have a top-N limit.
-		for _, path := range recentAgentSessionFiles(root, int(^uint(0)>>1), match) {
-			if tool == "claude" && filepath.Dir(filepath.Dir(path)) != root {
-				// Only project/<session>.jsonl, never nested subagent transcripts.
-				continue
+		// mtime: walk the whole tree, with no top-N limit and no ordering.
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				if tool == "claude" && path != root && filepath.Dir(filepath.Dir(path)) == root {
+					return filepath.SkipDir // Only project/<session>.jsonl, never nested subagent transcripts.
+				}
+				return nil
+			}
+			if !match(path) || tool == "claude" && filepath.Dir(filepath.Dir(path)) != root {
+				return nil
 			}
 			info, err := os.Stat(path)
 			if err != nil {
-				continue
+				return nil
 			}
-			cwd := ""
-			if tool == "codex" {
-				cwd = normalizedMetadataPath(codexRolloutWorkingDirectory(path))
+			metadata, ok := previous[path]
+			if !ok || !os.SameFile(metadata.info, info) || metadata.info.Size() != info.Size() || !metadata.info.ModTime().Equal(info.ModTime()) {
+				metadata = agentSessionFileMetadata{info: info, id: decode(path)}
+				if tool == "codex" {
+					metadata.cwd = normalizedMetadataPath(codexRolloutWorkingDirectory(path))
+				}
 			}
-			candidates = append(candidates, agentSessionCandidate{id: decode(path), path: path, cwd: cwd, created: info.ModTime()})
+			current[path] = metadata
+			candidates = append(candidates, agentSessionCandidate{id: metadata.id, path: path, cwd: metadata.cwd, created: info.ModTime()})
+			return nil
+		})
+		agentSessionFileCache.Lock()
+		if agentSessionFileCache.roots == nil {
+			agentSessionFileCache.roots = map[string]map[string]agentSessionFileMetadata{}
 		}
+		agentSessionFileCache.roots[root] = current
+		agentSessionFileCache.Unlock()
 		if tool == "claude" {
 			candidates = append(candidates, readClaudeSessionRegistry(home)...)
 		}
@@ -591,9 +633,13 @@ func (s *muxServer) agentSessionStore(tool string, now time.Time) []agentSession
 		loading := make(chan struct{})
 		s.agentSessionBindings.stores[tool] = agentSessionStoreSnapshot{loading: loading}
 		s.mu.Unlock()
+		started := agentSessionStoreClock()
 		candidates := readAgentSessionCandidates(tool)
+		// Stamp the snapshot when the read completes, so a slow walk is not
+		// already expired and rescanned by the next caller.
+		at := now.Add(agentSessionStoreClock().Sub(started))
 		s.mu.Lock()
-		s.agentSessionBindings.stores[tool] = agentSessionStoreSnapshot{at: now, candidates: candidates}
+		s.agentSessionBindings.stores[tool] = agentSessionStoreSnapshot{at: at, candidates: candidates}
 		close(loading)
 		s.mu.Unlock()
 		return candidates
