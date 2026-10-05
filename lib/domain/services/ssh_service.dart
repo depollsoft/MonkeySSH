@@ -2766,12 +2766,16 @@ Future<void> relayPortForward(
     }
 
     final socketToForward = () async {
-      if (await source.moveNext()) {
-        final channel = await opening;
-        // A delivered channel may already have a completed sink.done future.
-        // Let its observer run before writing queued socket bytes.
-        await Future<void>.value();
-        if (channel == null || finished || forwardSinkClosed) return;
+      final hasUpload = await source.moveNext();
+      // Wait for the channel even when the client half-closed its write side
+      // before it opened: its EOF closes only this direction, and the
+      // response must still reach the socket.
+      final channel = await opening;
+      // A delivered channel may already have a completed sink.done future.
+      // Let its observer run before writing queued socket bytes.
+      await Future<void>.value();
+      if (channel == null || finished || forwardSinkClosed) return;
+      if (hasUpload) {
         // addStream owns the sink until the socket ends: nothing else adds to
         // or closes it meanwhile. SSHForwardChannel pauses it while the SSH
         // window is full, which stops the reads above. Never flush instead:
@@ -2780,13 +2784,11 @@ Future<void> relayPortForward(
         if (readError case final error?) {
           Error.throwWithStackTrace(error, readStackTrace!);
         }
+        if (finished || forwardSinkClosed) return;
       }
-      final channel = forward;
-      if (channel != null && !finished && !forwardSinkClosed) {
-        // EOF closes only this direction. The peer can still send a response.
-        closingForwardSink = true;
-        await channel.sink.close();
-      }
+      // EOF closes only this direction. The peer can still send a response.
+      closingForwardSink = true;
+      await channel.sink.close();
     }();
     final pending = Future.any<SSHForwardChannel?>([
       opening,

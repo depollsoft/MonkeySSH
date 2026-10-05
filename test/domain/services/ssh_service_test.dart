@@ -6189,6 +6189,34 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       await targetClosed.future.timeout(const Duration(seconds: 5));
     });
 
+    test('relay keeps the response direction after an immediate local EOF', () async {
+      // The client half-closes its write side before the channel opens. That
+      // EOF closes only the upload direction; the server's response must still
+      // reach the socket, and the channel must not be destroyed on arrival.
+      final socket = _PipeSocket();
+      final forward = _SingleCloseForwardChannel();
+      final opening = Completer<SSHForwardChannel>();
+      final relay = relayPortForward(
+        socket,
+        () => opening.future,
+        closeGrace: const Duration(milliseconds: 1),
+      );
+      await socket.incoming.close();
+      await pumpEventQueue();
+      expect(forward.destroyCalls, 0);
+
+      opening.complete(forward);
+      await pumpEventQueue();
+      expect(forward.destroyCalls, 0);
+      forward._streamController.add(Uint8List.fromList([7, 8, 9]));
+      await pumpEventQueue();
+      expect(socket.flushes, 1, reason: 'the response reached the socket');
+
+      await forward.closeIncoming();
+      await relay.timeout(const Duration(seconds: 1));
+      expect(forward.destroyCalls, 1);
+    });
+
     for (final ending in ['stop', 'remote close']) {
       test(
         'relay $ending does not wait on a client that stopped reading',
@@ -6312,8 +6340,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           await session.stopAllForwards();
           if (scenario == 'refused' ||
               scenario == 'late refusal' ||
-              scenario == 'late open' ||
-              scenario == 'peer closes before open') {
+              scenario == 'late open') {
+            // The relay never listened to these channels' streams.
             await forward._streamController.stream.listen((_) {}).cancel();
           }
           await forward.close();
@@ -6345,9 +6373,12 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             .fold<List<int>>([], (bytes, chunk) => bytes..addAll(chunk));
         await requested.future;
         if (scenario == 'peer closes before open') {
+          // The client's EOF closes only the upload direction, so the relay
+          // still waits for the channel and for the server to finish.
           await socket.close();
-          await received.timeout(const Duration(seconds: 1));
           opening.complete(forward);
+          await Future<void>.delayed(Duration.zero);
+          await forward.closeIncoming();
         } else if (scenario == 'late open' || scenario == 'late refusal') {
           await session.stopForward(1).timeout(const Duration(seconds: 1));
           if (scenario == 'late open') {
