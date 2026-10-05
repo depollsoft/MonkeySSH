@@ -65,11 +65,9 @@ class TerminalSessionController {
   SshSession? get observedSession => _observedSession;
 
   /// Starts observing metadata for [session].
-  ///
-  /// Returns `true` when the observed session changed.
-  bool observeSessionMetadata(SshSession session) {
+  void observeSessionMetadata(SshSession session) {
     if (identical(_observedSession, session)) {
-      return false;
+      return;
     }
 
     _observedSession?.removeMetadataListener(_handleSessionMetadataChanged);
@@ -79,7 +77,6 @@ class TerminalSessionController {
     _observedSession = session
       ..removeMetadataListener(_handleSessionMetadataChanged)
       ..addMetadataListener(_handleSessionMetadataChanged);
-    return true;
   }
 
   void _handleSessionMetadataChanged() {

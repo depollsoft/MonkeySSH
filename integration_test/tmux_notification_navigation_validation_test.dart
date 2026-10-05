@@ -24,15 +24,8 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
+import '../test/helpers/mocks.dart';
 import '../test/helpers/terminal_session_fixture.dart';
-
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockShellChannel extends Mock implements SSHSession {}
-
-class _MockMonetizationService extends Mock implements MonetizationService {}
 
 class _MockTmuxService extends Mock implements TmuxService {}
 
@@ -77,11 +70,11 @@ void main() {
       const currentTargetWindowIndex = 3;
       const targetWindowId = '@9';
       final db = AppDatabase.forTesting(NativeDatabase.memory());
-      final hostRepository = _MockHostRepository();
-      final sshClient = _MockSshClient();
-      final shellChannel = _MockShellChannel();
+      final hostRepository = MockHostRepository();
+      final sshClient = MockSshClient();
+      final shellChannel = MockSSHSession();
       final tmuxService = _MockTmuxService();
-      final monetizationService = _MockMonetizationService();
+      final monetizationService = MockMonetizationService();
       final host = _buildHost(id: 1, tmuxSessionName: tmuxSessionName);
       final shellDoneCompleter = Completer<void>();
       final shellStdoutController = StreamController<Uint8List>.broadcast();
@@ -120,8 +113,6 @@ void main() {
           .thenAnswer((_) => Future<void>.value());
       when(() => monetizationService.canUseFeature(any()))
           .thenAnswer((_) async => true);
-      when(() => tmuxService.hasSessionOrThrow(session, tmuxSessionName))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.listWindows(session, tmuxSessionName)).thenAnswer(
         (_) async => const <TmuxWindow>[
           TmuxWindow(index: 1, id: '@8', name: 'shell', isActive: true),
@@ -141,8 +132,6 @@ void main() {
           windowId: targetWindowId,
         ),
       ).thenAnswer((_) async {});
-      when(() => tmuxService.hasForegroundClient(session, tmuxSessionName))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.watchWindowChanges(session, tmuxSessionName))
           .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
       when(() => tmuxService.prefetchInstalledAgentTools(session))

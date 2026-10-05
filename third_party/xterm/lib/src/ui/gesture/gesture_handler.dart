@@ -14,7 +14,6 @@ class TerminalGestureHandler extends StatefulWidget {
     required this.terminalView,
     required this.terminalController,
     this.child,
-    this.onTapUp,
     this.onSingleTapUp,
     this.onTapDown,
     this.onSecondaryTapDown,
@@ -29,8 +28,6 @@ class TerminalGestureHandler extends StatefulWidget {
   final TerminalController terminalController;
 
   final Widget? child;
-
-  final GestureTapUpCallback? onTapUp;
 
   final GestureTapUpCallback? onSingleTapUp;
 
@@ -63,7 +60,6 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   Widget build(BuildContext context) {
     return TerminalGestureDetector(
       child: widget.child,
-      onTapUp: widget.onTapUp,
       onSingleTapUp: onSingleTapUp,
       onTapDown: onTapDown,
       onSecondaryTapDown: onSecondaryTapDown,

@@ -45,14 +45,6 @@ type agentSessionBindingState struct {
 	stores  map[string]agentSessionStoreSnapshot
 }
 
-func fileBackedAgent(tool string) bool {
-	switch tool {
-	case "copilot", "claude", "codex", "opencode", "antigravity", "cursor-agent", "muse":
-		return true
-	}
-	return false
-}
-
 func newAgentSessionWatch(tool, cwd string, started time.Time, baseline []agentSessionCandidate) *agentSessionWatch {
 	if !fileBackedAgent(tool) {
 		return nil

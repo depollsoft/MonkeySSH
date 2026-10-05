@@ -83,6 +83,33 @@ void main() {
     });
   });
 
+  group('classifyLoopbackHost', () {
+    test('treats wildcard binds as non-loopback and ignores zones', () {
+      expect(normalizeHostLiteral(' [FE80::1%en0] '), 'fe80::1');
+      expect(normalizeHostLiteral('[::1]%lo'), '::1');
+      expect(classifyLoopbackHost('0.0.0.0'), (
+        isLoopback: false,
+        isWildcard: true,
+        isIpv6: false,
+      ));
+      expect(classifyLoopbackHost('[::]'), (
+        isLoopback: false,
+        isWildcard: true,
+        isIpv6: true,
+      ));
+      expect(classifyLoopbackHost('[::1]%lo'), (
+        isLoopback: true,
+        isWildcard: false,
+        isIpv6: true,
+      ));
+      expect(classifyLoopbackHost('LOCALHOST%lo0'), (
+        isLoopback: true,
+        isWildcard: false,
+        isIpv6: false,
+      ));
+    });
+  });
+
   group('isPortForwardBrowserEntryUri', () {
     test('allows only loopback web URLs on valid ports', () {
       expect(

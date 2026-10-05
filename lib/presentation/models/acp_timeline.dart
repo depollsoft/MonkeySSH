@@ -706,22 +706,7 @@ class AcpPlan extends Equatable {
 @immutable
 class AcpUsage extends Equatable {
   /// Creates usage metrics.
-  const AcpUsage({
-    this.inputTokens,
-    this.outputTokens,
-    this.totalTokens,
-    this.contextWindow,
-    this.contextUsedTokens,
-  });
-
-  /// Prompt (input) tokens, if reported.
-  final int? inputTokens;
-
-  /// Completion (output) tokens, if reported.
-  final int? outputTokens;
-
-  /// Total tokens, if reported.
-  final int? totalTokens;
+  const AcpUsage({this.contextWindow, this.contextUsedTokens});
 
   /// The model context window size in tokens, if reported.
   final int? contextWindow;
@@ -740,19 +725,8 @@ class AcpUsage extends Equatable {
   }
 
   /// Whether any metric is available to render.
-  bool get hasData =>
-      inputTokens != null ||
-      outputTokens != null ||
-      totalTokens != null ||
-      contextWindow != null ||
-      contextUsedTokens != null;
+  bool get hasData => contextWindow != null || contextUsedTokens != null;
 
   @override
-  List<Object?> get props => [
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    contextWindow,
-    contextUsedTokens,
-  ];
+  List<Object?> get props => [contextWindow, contextUsedTokens];
 }

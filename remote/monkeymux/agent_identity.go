@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,22 +25,6 @@ type agentIdentity struct {
 	ID     string `json:"id"`
 	File   string `json:"file,omitempty"`
 	Source string `json:"source,omitempty"`
-}
-
-var agentIdentityUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-var agentIdentityOpenCodePattern = regexp.MustCompile(`^ses_[A-Za-z0-9]+$`)
-
-func agentSessionIDValid(tool, id string) bool {
-	switch tool {
-	case "claude", "codex", "copilot", "cursor-agent", "antigravity", "muse":
-		return agentIdentityUUIDPattern.MatchString(id)
-	case "opencode":
-		return len(id) <= 64 && agentIdentityOpenCodePattern.MatchString(id)
-	case "pi":
-		return safePiSessionIDPattern.MatchString(id)
-	default:
-		return false
-	}
 }
 
 func agentIdentityValid(identity agentIdentity) bool {
@@ -239,12 +222,26 @@ func protectProvisionalAgentSessionBindings(restore *serverRestore) func() {
 	}
 }
 
+// agentHookPayload is the JSON an agent passes its SessionStart (or
+// equivalent) hook on stdin; each agent's descriptor reads the fields it sets.
+type agentHookPayload struct {
+	Event            string          `json:"hook_event_name"`
+	AgentID          string          `json:"agent_id"`
+	SessionID        string          `json:"session_id"`
+	ConversationID   string          `json:"conversation_id"`
+	CopilotSessionID string          `json:"sessionId"`
+	TranscriptPath   string          `json:"transcript_path"`
+	Source           string          `json:"source"`
+	Background       json.RawMessage `json:"is_background_agent"`
+}
+
 func agentIdentityFromHookPayload(tool string, payload []byte, notifyArgument string) (agentIdentity, bool) {
+	descriptor := agentRegistry[tool]
 	identity := agentIdentity{Tool: tool}
-	if len(notifyArgument) > agentIdentityHookInputLimit {
+	if descriptor.hookIdentity == nil || len(notifyArgument) > agentIdentityHookInputLimit {
 		return agentIdentity{}, false
 	}
-	if tool == "codex" && notifyArgument != "" {
+	if descriptor.hookNotifyArgument && notifyArgument != "" {
 		var notify struct {
 			Type     string `json:"type"`
 			ThreadID string `json:"thread-id"`
@@ -258,42 +255,12 @@ func agentIdentityFromHookPayload(tool string, payload []byte, notifyArgument st
 	if len(payload) > agentIdentityHookInputLimit {
 		return agentIdentity{}, false
 	}
-	var hook struct {
-		Event            string          `json:"hook_event_name"`
-		AgentID          string          `json:"agent_id"`
-		SessionID        string          `json:"session_id"`
-		ConversationID   string          `json:"conversation_id"`
-		CopilotSessionID string          `json:"sessionId"`
-		TranscriptPath   string          `json:"transcript_path"`
-		Source           string          `json:"source"`
-		Background       json.RawMessage `json:"is_background_agent"`
-	}
+	var hook agentHookPayload
 	if json.Unmarshal(payload, &hook) != nil {
 		return agentIdentity{}, false
 	}
 	identity.ID, identity.File, identity.Source = hook.SessionID, hook.TranscriptPath, hook.Source
-	switch tool {
-	case "claude":
-		if hook.Event != "SessionStart" || hook.AgentID != "" {
-			return agentIdentity{}, false
-		}
-	case "codex":
-		if hook.Event != "SessionStart" || (hook.Source != "startup" && hook.Source != "resume") {
-			return agentIdentity{}, false
-		}
-	case "copilot":
-		if hook.Source != "startup" && hook.Source != "resume" && hook.Source != "new" {
-			return agentIdentity{}, false
-		}
-		identity.ID, identity.File = hook.CopilotSessionID, ""
-	case "cursor-agent":
-		if hook.Event != "sessionStart" || (len(hook.Background) != 0 && string(hook.Background) != "false") {
-			return agentIdentity{}, false
-		}
-		if identity.ID == "" {
-			identity.ID = hook.ConversationID
-		}
-	default:
+	if !descriptor.hookIdentity(hook, &identity) {
 		return agentIdentity{}, false
 	}
 	return identity, agentIdentityValid(identity)
@@ -330,9 +297,8 @@ func agentIdentityHookCommand(args []string) {
 	if flags.Parse(args) != nil {
 		return
 	}
-	switch *tool {
-	case "claude", "codex", "copilot", "cursor-agent":
-	default:
+	descriptor := agentRegistry[*tool]
+	if descriptor.hookIdentity == nil {
 		return
 	}
 	if !agentIdentityHookAncestryMatches() {
@@ -343,7 +309,7 @@ func agentIdentityHookCommand(args []string) {
 		notifyArgument = flags.Arg(0)
 	}
 	var payload []byte
-	if !(*tool == "codex" && notifyArgument != "") && !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !(descriptor.hookNotifyArgument && notifyArgument != "") && !term.IsTerminal(int(os.Stdin.Fd())) {
 		var err error
 		payload, err = io.ReadAll(io.LimitReader(os.Stdin, agentIdentityHookInputLimit))
 		if err != nil {

@@ -6,25 +6,29 @@ import '../../app/theme.dart';
 import 'acp_chat_typography.dart';
 import 'acp_path_text.dart';
 import 'highlight_nodes.dart';
+import 'syntax_highlight_controller.dart' show syntaxHighlightSizeLimit;
 import 'syntax_highlight_theme.dart';
 
 /// Builds syntax-highlighted [TextSpan]s for a block of [code].
 ///
 /// [language] is a highlight.js language identifier (e.g. `dart`). When it is
-/// `null`, highlight.js auto-detection is used. [theme] maps highlight.js class
-/// names to [TextStyle]s (see [buildSyntaxThemeFromTerminal] and the default
-/// syntax themes). On any failure the whole [code] is returned as a single
-/// unstyled span so rendering never throws.
+/// `null` or empty the code is rendered as plain text: auto-detection would run
+/// every registered grammar over the text on the UI isolate. Code longer than
+/// [syntaxHighlightSizeLimit] is also left plain. [theme] maps highlight.js
+/// class names to [TextStyle]s. On any failure the whole [code] is returned as
+/// a single unstyled span so rendering never throws.
 List<TextSpan> buildAcpHighlightSpans(
   String code, {
   required Map<String, TextStyle> theme,
   String? language,
 }) {
+  if (language == null ||
+      language.isEmpty ||
+      code.length > syntaxHighlightSizeLimit) {
+    return [TextSpan(text: code)];
+  }
   try {
-    final result = language != null && language.isNotEmpty
-        ? highlight.parse(code, language: language)
-        : highlight.parse(code, autoDetection: true);
-    final nodes = result.nodes;
+    final nodes = highlight.parse(code, language: language).nodes;
     if (nodes == null || nodes.isEmpty) {
       return [TextSpan(text: code)];
     }
@@ -43,8 +47,8 @@ Map<String, TextStyle> defaultAcpSyntaxTheme(Brightness brightness) =>
 /// A read-only, syntax-highlighted, horizontally scrollable code block with a
 /// copy action.
 ///
-/// Colors follow the resolved app theme; syntax colors come from [syntaxTheme]
-/// or a brightness-appropriate default so the block stays legible under
+/// Colors follow the resolved app theme; syntax colors come from a
+/// brightness-appropriate default so the block stays legible under
 /// terminal-driven themes. The block never logs its content.
 class AcpCodeBlock extends StatefulWidget {
   /// Creates a code block.
@@ -52,7 +56,6 @@ class AcpCodeBlock extends StatefulWidget {
     required this.code,
     super.key,
     this.language,
-    this.syntaxTheme,
     this.onCopy,
     this.onTapPath,
   });
@@ -60,11 +63,8 @@ class AcpCodeBlock extends StatefulWidget {
   /// The code to display.
   final String code;
 
-  /// The highlight.js language identifier, or `null` to auto-detect.
+  /// The highlight.js language identifier, or `null` for plain text.
   final String? language;
-
-  /// Optional highlight.js theme map; defaults to a brightness-appropriate map.
-  final Map<String, TextStyle>? syntaxTheme;
 
   /// Optional callback invoked (with the copied code) after a successful copy.
   final ValueChanged<String>? onCopy;
@@ -78,6 +78,35 @@ class AcpCodeBlock extends StatefulWidget {
 
 class _AcpCodeBlockState extends State<AcpCodeBlock> {
   bool _copied = false;
+  // Highlighting is tokenised once per (code, language, brightness) so the
+  // copied badge, theme refreshes and unrelated ancestor rebuilds cost nothing.
+  Brightness? _brightness;
+  late List<TextSpan> _spans;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final brightness = Theme.of(context).brightness;
+    if (brightness != _brightness) {
+      _brightness = brightness;
+      _spans = _highlight(brightness);
+    }
+  }
+
+  @override
+  void didUpdateWidget(AcpCodeBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.code != widget.code ||
+        oldWidget.language != widget.language) {
+      _spans = _highlight(_brightness!);
+    }
+  }
+
+  List<TextSpan> _highlight(Brightness brightness) => buildAcpHighlightSpans(
+    widget.code,
+    theme: defaultAcpSyntaxTheme(brightness),
+    language: widget.language,
+  );
 
   Future<void> _copy() async {
     await Clipboard.setData(ClipboardData(text: widget.code));
@@ -94,10 +123,7 @@ class _AcpCodeBlockState extends State<AcpCodeBlock> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final syntaxTheme =
-        widget.syntaxTheme ?? defaultAcpSyntaxTheme(theme.brightness);
+    final scheme = Theme.of(context).colorScheme;
     final baseStyle = AcpChatTypography.monoStyleOf(context)
         .copyWith(color: scheme.onSurface, height: 1.4);
     final language = widget.language;
@@ -134,11 +160,7 @@ class _AcpCodeBlockState extends State<AcpCodeBlock> {
                 child: AcpPathText(
                   text: widget.code,
                   style: baseStyle,
-                  spans: buildAcpHighlightSpans(
-                    widget.code,
-                    theme: syntaxTheme,
-                    language: language,
-                  ),
+                  spans: _spans,
                   onTapPath: widget.onTapPath,
                 ),
               ),

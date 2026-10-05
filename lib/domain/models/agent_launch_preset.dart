@@ -1,4 +1,5 @@
 import '../services/windows_remote_powershell.dart';
+import 'command_names.dart';
 import 'remote_multiplexer.dart';
 import 'tmux_state.dart';
 
@@ -117,23 +118,19 @@ extension AgentLaunchToolPresentation on AgentLaunchTool {
     AgentLaunchTool.museCode => const ['muse'],
   };
 
+  /// Whether the preferred executable for this tool differs from
+  /// [commandName], so a launch should probe the host for the binary that is
+  /// actually installed (for example `opencode2` versus `opencode`) instead of
+  /// assuming the canonical name.
+  bool get needsExecutableProbe => candidateCommandNames.first != commandName;
+
   /// Matching discovered-session provider name, if this tool supports recent
   /// session discovery.
-  String? get discoveredSessionToolName => switch (this) {
-    AgentLaunchTool.claudeCode => 'Claude Code',
-    AgentLaunchTool.copilotCli => 'Copilot CLI',
-    AgentLaunchTool.codex => 'Codex',
-    AgentLaunchTool.openCode => 'OpenCode',
-    AgentLaunchTool.antigravity => 'Antigravity',
-    AgentLaunchTool.cursorAgent => 'Cursor Agent',
-    AgentLaunchTool.pi => 'Pi',
-    AgentLaunchTool.hermes => 'Hermes',
-    // OpenClaw persists sessions in a per-agent SQLite store that has no
-    // reliable working directory, so it cannot back the cwd-scoped picker.
-    AgentLaunchTool.openclaw => null,
-    AgentLaunchTool.grokBuild => 'Grok Build',
-    AgentLaunchTool.museCode => 'Muse Code',
-  };
+  ///
+  /// OpenClaw persists sessions in a per-agent SQLite store that has no
+  /// reliable working directory, so it cannot back the cwd-scoped picker.
+  String? get discoveredSessionToolName =>
+      this == AgentLaunchTool.openclaw ? null : label;
 
   /// Whether this tool exposes isolated launch profiles.
   bool get supportsLaunchProfiles =>
@@ -199,38 +196,37 @@ AgentLaunchTool? agentLaunchToolFromStorageName(String? name) {
 /// The input may be a bare executable (`claude`), a full path
 /// (`/opt/homebrew/bin/codex`), or a command token with trailing arguments.
 AgentLaunchTool? agentLaunchToolForCommandName(String? commandName) {
-  final normalized = _normalizeAgentCommandName(commandName);
+  final normalized = normalizeCommandBasename(commandName);
   if (normalized == null) {
     return null;
   }
-
-  if (RegExp(r'^muse-bin-\d+\.\d+\.\d+-r\d+(?:\.\d+)?$').hasMatch(normalized)) {
+  if (_museNativeBinaryPattern.hasMatch(normalized)) {
     return AgentLaunchTool.museCode;
   }
-
-  return switch (normalized) {
-    'claude' ||
-    'claude-code' ||
-    'claude-agent-acp' => AgentLaunchTool.claudeCode,
-    'copilot' || 'github-copilot' => AgentLaunchTool.copilotCli,
-    'codex' || 'codex-cli' || 'codex-acp' => AgentLaunchTool.codex,
-    'opencode' || 'opencode2' || 'open-code' => AgentLaunchTool.openCode,
-    'agy' ||
-    'antigravity' ||
-    'antigravity-cli' ||
-    'antigravity-acp' ||
-    'agy-acp' => AgentLaunchTool.antigravity,
-    'cursor-agent' ||
-    'cursor-acp' ||
-    'cursor-agent-acp' => AgentLaunchTool.cursorAgent,
-    'pi' || 'pi-acp' => AgentLaunchTool.pi,
-    'hermes' || 'hermes-agent' => AgentLaunchTool.hermes,
-    'openclaw' => AgentLaunchTool.openclaw,
-    'grok' => AgentLaunchTool.grokBuild,
-    'muse' || 'muse-code-acp' => AgentLaunchTool.museCode,
-    _ => null,
-  };
+  return _agentLaunchToolsByCommandName[normalized];
 }
+
+/// ACP adapter executables that identify a tool but are not launch commands.
+const _acpAdapterCommandNames = <String, AgentLaunchTool>{
+  'claude-agent-acp': AgentLaunchTool.claudeCode,
+  'codex-acp': AgentLaunchTool.codex,
+  'antigravity-acp': AgentLaunchTool.antigravity,
+  'agy-acp': AgentLaunchTool.antigravity,
+  'cursor-acp': AgentLaunchTool.cursorAgent,
+  'cursor-agent-acp': AgentLaunchTool.cursorAgent,
+  'pi-acp': AgentLaunchTool.pi,
+  'muse-code-acp': AgentLaunchTool.museCode,
+};
+
+final _agentLaunchToolsByCommandName = <String, AgentLaunchTool>{
+  for (final tool in AgentLaunchTool.values)
+    for (final name in tool.candidateCommandNames) name: tool,
+  ..._acpAdapterCommandNames,
+};
+
+final _museNativeBinaryPattern = RegExp(
+  r'^muse-bin-\d+\.\d+\.\d+-r\d+(?:\.\d+)?$',
+);
 
 /// Resolves a supported agent CLI from a full shell command.
 ///
@@ -358,20 +354,6 @@ enum _ShellQuoteMode { none, single, double }
 
 const _backslashCodeUnit = 0x5C;
 
-String? _normalizeAgentCommandName(String? commandName) {
-  final trimmed = commandName?.trim();
-  if (trimmed == null || trimmed.isEmpty) {
-    return null;
-  }
-
-  final token = trimmed.split(RegExp(r'\s+')).first;
-  final basename = token.split(RegExp(r'[\\/]')).last.toLowerCase();
-  if (basename.isEmpty) {
-    return null;
-  }
-  return basename.replaceFirst(RegExp(r'\.(?:exe|cmd|bat|ps1|com)$'), '');
-}
-
 String? _readLeadingShellToken(String value) {
   final trimmed = value.trimLeft();
   if (trimmed.isEmpty) return null;
@@ -382,9 +364,11 @@ String? _readLeadingShellToken(String value) {
       return trimmed.substring(1, end);
     }
   }
-  return trimmed.split(RegExp(r'\s+')).first;
+  return trimmed.split(_whitespacePattern).first;
 }
 
+final _whitespacePattern = RegExp(r'\s+');
+final _unsafeWindowsShellArgumentPattern = RegExp(r'["%!$`\r\n\u201c-\u201e]');
 final _unquotedTmuxFlagTokenPattern = RegExp(r'^[A-Za-z0-9_./~:=,+-]+$');
 final _leadingCdCommandPattern = RegExp(
   r'''^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*''',
@@ -392,70 +376,67 @@ final _leadingCdCommandPattern = RegExp(
 final _leadingEnvironmentAssignmentPattern = RegExp(
   r'''^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+''',
 );
-final _codexApprovalModeEqualsPattern = RegExp(
-  r'''(?<!\S)--approval-mode=(?:"[^"]*"|'[^']*'|\S+)''',
+
+/// Matches the bare switch [name] as its own argument token.
+RegExp _flag(String name) => RegExp('(?<!\\S)${RegExp.escape(name)}(?=\\s|\$)');
+
+/// Matches the option [name] with its value, as `name=value` or `name value`.
+RegExp _valued(String name) => RegExp(
+  '(?<!\\S)${RegExp.escape(name)}(?:=|\\s+)'
+  r"""(?:"[^"]*"|'[^']*'|\S+)""",
 );
-final _codexApprovalModeSeparatedPattern = RegExp(
-  r'''(?<!\S)--approval-mode\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexAskForApprovalEqualsPattern = RegExp(
-  r'''(?<!\S)--ask-for-approval=(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexAskForApprovalSeparatedPattern = RegExp(
-  r'''(?<!\S)--ask-for-approval\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexShortApprovalPattern = RegExp(
-  r'''(?<!\S)-a\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexSandboxEqualsPattern = RegExp(
-  r'''(?<!\S)--sandbox=(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexSandboxSeparatedPattern = RegExp(
-  r'''(?<!\S)--sandbox\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexShortSandboxPattern = RegExp(
-  r'''(?<!\S)-s\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _codexFullAutoPattern = RegExp(r'(?<!\S)--full-auto(?=\s|$)');
-final _codexYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
-final _codexDangerousBypassPattern = RegExp(
-  r'(?<!\S)--dangerously-bypass-approvals-and-sandbox(?=\s|$)',
-);
-final _claudeDangerouslySkipPermissionsPattern = RegExp(
-  r'(?<!\S)--dangerously-skip-permissions(?=\s|$)',
-);
-final _claudePermissionModeEqualsPattern = RegExp(
-  r'''(?<!\S)--permission-mode=(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _claudePermissionModeSeparatedPattern = RegExp(
-  r'''(?<!\S)--permission-mode\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _copilotAllowAllPattern = RegExp(r'(?<!\S)--allow-all(?=\s|$)');
-final _copilotYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
-final _copilotAllowAllToolsPattern = RegExp(
-  r'(?<!\S)--allow-all-tools(?=\s|$)',
-);
-final _copilotAllowAllPathsPattern = RegExp(
-  r'(?<!\S)--allow-all-paths(?=\s|$)',
-);
-final _copilotAllowAllUrlsPattern = RegExp(r'(?<!\S)--allow-all-urls(?=\s|$)');
-final _antigravityDangerouslySkipPermissionsPattern = RegExp(
-  r'(?<!\S)--dangerously-skip-permissions(?=\s|$)',
-);
-final _openCodeAutoApprovalPattern = RegExp(
-  r'(?<!\S)--(?:auto|yolo|dangerously-skip-permissions)(?=\s|$)',
-);
-final _cursorForcePattern = RegExp(r'(?<!\S)(?:--force|--yolo|-f)(?=\s|$)');
-final _hermesYoloPattern = RegExp(r'(?<!\S)--yolo(?=\s|$)');
-final _grokYoloPattern = RegExp(
-  r'(?<!\S)(?:--always-approve|--yolo|--dangerously-skip-permissions)(?=\s|$)',
-);
-final _grokPermissionModeEqualsPattern = RegExp(
-  r'''(?<!\S)--permission-mode=(?:"[^"]*"|'[^']*'|\S+)''',
-);
-final _grokPermissionModeSeparatedPattern = RegExp(
-  r'''(?<!\S)--permission-mode\s+(?:"[^"]*"|'[^']*'|\S+)''',
-);
+
+/// Approval and sandbox options that conflict with each tool's YOLO flags.
+///
+/// They are stripped, in order, from user-provided additional arguments when
+/// launching in YOLO mode. Tools without an entry keep their arguments as is.
+final _yoloConflictPatterns = <AgentLaunchTool, List<RegExp>>{
+  AgentLaunchTool.claudeCode: [
+    _flag('--dangerously-skip-permissions'),
+    _valued('--permission-mode'),
+  ],
+  AgentLaunchTool.copilotCli: [
+    _flag('--allow-all'),
+    _flag('--yolo'),
+    _flag('--allow-all-tools'),
+    _flag('--allow-all-paths'),
+    _flag('--allow-all-urls'),
+  ],
+  AgentLaunchTool.codex: [
+    _valued('--approval-mode'),
+    _valued('--ask-for-approval'),
+    _valued('-a'),
+    _valued('--sandbox'),
+    _valued('-s'),
+    _flag('--full-auto'),
+    _flag('--yolo'),
+    _flag('--dangerously-bypass-approvals-and-sandbox'),
+  ],
+  AgentLaunchTool.openCode: [
+    _flag('--auto'),
+    _flag('--yolo'),
+    _flag('--dangerously-skip-permissions'),
+  ],
+  AgentLaunchTool.antigravity: [_flag('--dangerously-skip-permissions')],
+  AgentLaunchTool.cursorAgent: [_flag('--force'), _flag('--yolo'), _flag('-f')],
+  AgentLaunchTool.hermes: [_flag('--yolo')],
+  AgentLaunchTool.museCode: [
+    _flag('--yolo'),
+    _valued('--approval-mode'),
+    _valued('--permission-profile'),
+    _valued('--approval-judge'),
+    _valued('--sandbox-network'),
+    _flag('--disable-approval'),
+    _flag('--disable-sandbox'),
+    _flag('--trust-workspace'),
+  ],
+  AgentLaunchTool.grokBuild: [
+    _flag('--always-approve'),
+    _flag('--yolo'),
+    _flag('--dangerously-skip-permissions'),
+    _valued('--permission-mode'),
+  ],
+};
 
 /// Builds the shell command for a saved agent launch preset.
 String buildAgentLaunchCommand(
@@ -691,71 +672,11 @@ String? _normalizeAgentToolArguments({
     return trimmedAdditionalArguments;
   }
 
-  final sanitizedAdditionalArguments = switch (tool) {
-    AgentLaunchTool.claudeCode => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [
-        _claudeDangerouslySkipPermissionsPattern,
-        _claudePermissionModeEqualsPattern,
-        _claudePermissionModeSeparatedPattern,
-      ],
-    ),
-    AgentLaunchTool.copilotCli => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [
-        _copilotAllowAllPattern,
-        _copilotYoloPattern,
-        _copilotAllowAllToolsPattern,
-        _copilotAllowAllPathsPattern,
-        _copilotAllowAllUrlsPattern,
-      ],
-    ),
-    AgentLaunchTool.codex => _stripCodexYoloConflicts(
-      trimmedAdditionalArguments,
-    ),
-    AgentLaunchTool.openCode => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [_openCodeAutoApprovalPattern],
-    ),
-    AgentLaunchTool.antigravity => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [_antigravityDangerouslySkipPermissionsPattern],
-    ),
-    AgentLaunchTool.cursorAgent => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [_cursorForcePattern],
-    ),
-    AgentLaunchTool.pi ||
-    AgentLaunchTool.openclaw => trimmedAdditionalArguments,
-    AgentLaunchTool.hermes => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [_hermesYoloPattern],
-    ),
-    AgentLaunchTool.museCode => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [
-        _hermesYoloPattern,
-        _codexApprovalModeEqualsPattern,
-        _codexApprovalModeSeparatedPattern,
-        RegExp(
-          r'''(?<!\S)--(?:permission-profile|approval-judge|sandbox-network)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)''',
-        ),
-        RegExp(
-          r'(?<!\S)--(?:disable-approval|disable-sandbox|trust-workspace)(?=\s|$)',
-        ),
-      ],
-    ),
-    AgentLaunchTool.grokBuild => _stripArgumentPatterns(
-      trimmedAdditionalArguments,
-      [
-        _grokYoloPattern,
-        _grokPermissionModeEqualsPattern,
-        _grokPermissionModeSeparatedPattern,
-      ],
-    ),
-  };
-
-  return sanitizedAdditionalArguments;
+  final patterns = _yoloConflictPatterns[tool];
+  if (patterns == null) {
+    return trimmedAdditionalArguments;
+  }
+  return _stripArgumentPatterns(trimmedAdditionalArguments, patterns);
 }
 
 List<String> _buildAgentToolEnvironmentAssignments(
@@ -768,21 +689,6 @@ List<String> _buildAgentToolEnvironmentAssignments(
             (entry) => _quoteShellEnvironmentAssignment(entry.key, entry.value),
           )
           .toList(growable: false);
-
-String? _stripCodexYoloConflicts(String? additionalArguments) =>
-    _stripArgumentPatterns(additionalArguments, [
-      _codexApprovalModeEqualsPattern,
-      _codexApprovalModeSeparatedPattern,
-      _codexAskForApprovalEqualsPattern,
-      _codexAskForApprovalSeparatedPattern,
-      _codexShortApprovalPattern,
-      _codexSandboxEqualsPattern,
-      _codexSandboxSeparatedPattern,
-      _codexShortSandboxPattern,
-      _codexFullAutoPattern,
-      _codexYoloPattern,
-      _codexDangerousBypassPattern,
-    ]);
 
 String? _stripArgumentPatterns(
   String? additionalArguments,
@@ -799,7 +705,7 @@ String? _stripArgumentPatterns(
         trimmedAdditionalArguments,
         (value, pattern) => value.replaceAll(pattern, ' '),
       )
-      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_whitespacePattern, ' ')
       .trim();
   return normalizedArguments.isEmpty ? null : normalizedArguments;
 }
@@ -939,7 +845,7 @@ String _quoteShellArgument(String value) =>
     '\'${value.replaceAll('\'', '\'"\'"\'')}\'';
 
 String _quoteWindowsShellArgument(String value) {
-  if (value.contains(RegExp(r'["%!$`\r\n\u201c-\u201e]'))) {
+  if (value.contains(_unsafeWindowsShellArgumentPattern)) {
     throw const FormatException(
       'Profile name is unsafe for the Windows shell.',
     );
@@ -951,7 +857,7 @@ String _quoteShellEnvironmentAssignment(String key, String value) =>
     '$key="${_escapeForDoubleQuotedShellContent(value)}"';
 
 String _escapeForDoubleQuotedShellContent(String value) => value
-    .replaceAll(RegExp(r'\\'), r'\\')
+    .replaceAll(r'\', r'\\')
     .replaceAll('"', r'\"')
     .replaceAll(r'$', r'\$')
     .replaceAll('`', r'\`');

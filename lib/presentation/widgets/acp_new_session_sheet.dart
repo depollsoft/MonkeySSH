@@ -14,10 +14,10 @@ import 'dart:async';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../app/notification_navigation.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/models/acp_authentication.dart';
@@ -26,16 +26,13 @@ import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/agent_launch_preset.dart';
-import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
-import '../../domain/services/acp_concurrency_policy.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
-import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
@@ -68,17 +65,6 @@ Future<AcpSessionKey?> showAcpNewSessionSheet(
   ),
 );
 
-/// Returns the terminal-auth command for [providerId], if the provider is a
-/// built-in that advertises one.
-AcpLaunchCommand? acpTerminalAuthCommandFor(String providerId) {
-  for (final provider in acpBuiltinProviders) {
-    if (provider.id == providerId) {
-      return provider.terminalAuthCommand;
-    }
-  }
-  return null;
-}
-
 /// Defaults resolved for the ACP start-or-resume sheet.
 @immutable
 final class AcpSessionLaunchDefaults {
@@ -103,17 +89,14 @@ final class AcpSessionLaunchDefaults {
 String? acpProviderIdForAgentLaunchTool(
   AgentLaunchTool tool,
   List<AcpProvider> providers,
-) {
-  for (final provider in providers) {
-    if ((provider.id == AcpBuiltinProviderIds.antigravity &&
-            tool == AgentLaunchTool.antigravity) ||
-        agentLaunchToolForCommandName(provider.launchCommand.executable) ==
-            tool) {
-      return provider.id;
-    }
-  }
-  return null;
-}
+) => providers
+    .firstWhereOrNull(
+      (provider) =>
+          agentLaunchToolForBuiltinAcpProviderId(provider.id) == tool ||
+          agentLaunchToolForCommandName(provider.launchCommand.executable) ==
+              tool,
+    )
+    ?.id;
 
 /// Resolves launch defaults from explicit inputs, active/recent sessions, and
 /// the host's saved agent/MonkeyMux configuration.
@@ -237,6 +220,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   var _loadingDefaults = true;
   var _defaultsScheduled = false;
   var _hostDefaultsGeneration = 0;
+  var _presets = const <int, AgentLaunchPreset>{};
   String? _error;
   var _authChooserShown = false;
   var _providerCommandRequested = false;
@@ -300,16 +284,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       final presetService = ref.read(agentLaunchPresetServiceProvider);
       recents = await _recents;
       lastSelected = await manager.loadLastSelected();
-      final presetEntries = await Future.wait(
-        hosts.map(
-          (host) async =>
-              MapEntry(host.id, await presetService.getPresetForHost(host.id)),
-        ),
-      );
-      presets = <int, AgentLaunchPreset>{
-        for (final entry in presetEntries)
-          if (entry.value != null) entry.key: entry.value!,
-      };
+      presets = await presetService.getAllPresets();
       activeHostIds = ref
           .read(sshServiceProvider)
           .allSessions
@@ -341,6 +316,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       return;
     }
     setState(() {
+      _presets = presets;
       _hostId = widget.lockHost ? widget.initialHostId : defaults.hostId;
       _providerId = widget.lockProvider
           ? widget.initialProviderId
@@ -371,15 +347,12 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       return;
     }
     try {
-      final preset = await ref
-          .read(agentLaunchPresetServiceProvider)
-          .getPresetForHost(host.id);
       final defaults = resolveAcpSessionLaunchDefaults(
         hosts: [host],
         providers: providers,
         recents: await _recents,
         activeHostIds: const {},
-        presets: preset == null ? const {} : {host.id: preset},
+        presets: _presets,
         initialHostId: host.id,
       );
       if (!mounted ||
@@ -424,27 +397,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     if (hostId == null) {
       return;
     }
-    final session = providerId == AcpBuiltinProviderIds.openCode
-        ? ref.read(sshServiceProvider).getSessionsForHost(hostId).firstOrNull
-        : null;
-    final authCommand = await resolveAcpTerminalAuthCommand(
+    await copyAcpTerminalAuthCommand(
+      context,
+      ref,
       providerId: providerId,
-      session: session,
+      hostId: hostId,
     );
     if (!mounted) return;
-    final navigator = Navigator.of(context);
     final router = GoRouter.of(context);
-    final messenger = ScaffoldMessenger.of(context);
-    if (authCommand != null) {
-      await Clipboard.setData(ClipboardData(text: authCommand.argv.join(' ')));
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Sign-in command copied — run it in the terminal.'),
-        ),
-      );
-    }
-    navigator.pop();
-    router.go(buildTmuxAlertHomeLocationSafe());
+    Navigator.of(context).pop();
+    router.go(buildTmuxAlertHomeLocation());
     unawaited(router.push<void>('/terminal/$hostId'));
   }
 
@@ -585,7 +547,12 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       var result = await _launch(reuseResolvedLaunch: afterSignIn);
       // Resolve a free-tier concurrency block, then retry once.
       if (result is AcpSessionLaunchBlocked && mounted) {
-        final resolved = await _resolveConcurrency(result.decision);
+        final resolved = await resolveAcpConcurrencyBlock(
+          context,
+          ref,
+          result.decision,
+          relaunch: (replace) => _launch(replace: replace),
+        );
         // Null also covers the sheet being dismissed while the choice dialog
         // or upgrade route was open, so re-check mounted before touching state.
         if (!mounted) {
@@ -651,48 +618,6 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     }
   }
 
-  Future<AcpSessionLaunchResult?> _resolveConcurrency(
-    AcpConcurrencyRequiresChoice decision,
-  ) async {
-    final manager = ref.read(acpSessionManagerProvider);
-    final choice = await showAcpConcurrencyChoice(
-      context,
-      decision: decision,
-      managerState: manager.state,
-    );
-    if (choice == null || !mounted) {
-      return null;
-    }
-    switch (choice) {
-      case AcpConcurrencyChoice.stopAndContinue:
-        final blocking = [
-          for (final value in decision.blockingSessionKeys)
-            manager.state.byKeyValue(value)?.key,
-        ].whereType<AcpSessionKey>().toList(growable: false);
-        return _launch(replace: blocking);
-      case AcpConcurrencyChoice.upgrade:
-        await context.push<void>(
-          Uri(
-            path: '/upgrade',
-            queryParameters: {
-              'feature': MonetizationFeature.concurrentAcpSessions.name,
-            },
-          ).toString(),
-        );
-        if (!mounted) {
-          return null;
-        }
-        final unlocked = ref
-            .read(monetizationServiceProvider)
-            .currentState
-            .isProUnlocked;
-        if (!unlocked) {
-          return null;
-        }
-        return _launch();
-    }
-  }
-
   Future<void> _handleFailure(AcpSessionError error) async {
     final providerId = _providerId;
     switch (error.kind) {
@@ -707,12 +632,6 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         } else if (providerId != null) {
           await _showAuthRequired(providerId);
         }
-      case AcpSessionErrorKind.commandNotApproved:
-        setState(
-          () => _error =
-              'This provider needs its command reviewed again before it '
-              'can launch. Edit it to re-approve.',
-        );
       default:
         setState(() => _error = error.message);
     }
@@ -760,9 +679,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final hostsAsync = ref.watch(allHostsProvider);
     final providersAsync = ref.watch(acpProvidersProvider);
     final hosts = hostsAsync.asData?.value;
-    final providers = providersAsync.asData?.value
-        .where((provider) => !provider.isCustom)
-        .toList(growable: false);
+    final providers = providersAsync.asData?.value;
     if (hosts != null && providers != null) {
       _scheduleDefaults(hosts, providers);
     } else if (!_defaultsScheduled &&
@@ -877,14 +794,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               const SizedBox(height: FluttyTheme.spacingMd),
               _sectionLabel(context, 'Provider'),
               providersAsync.when(
-                data: (allProviders) {
-                  final builtins = allProviders
-                      .where((provider) => !provider.isCustom)
-                      .toList(growable: false);
-                  return widget.lockProvider
-                      ? _buildLockedProvider(builtins)
-                      : _buildProviderPicker(builtins);
-                },
+                data: (providers) => widget.lockProvider
+                    ? _buildLockedProvider(providers)
+                    : _buildProviderPicker(providers),
                 loading: () => const Padding(
                   padding: EdgeInsets.all(FluttyTheme.spacingMd),
                   child: LinearProgressIndicator(),
@@ -1083,10 +995,3 @@ class _ProviderChip extends StatelessWidget {
     avatar: const Icon(Icons.smart_toy_outlined, size: 18),
   );
 }
-
-// Re-exported so this sheet does not depend on the notification-navigation
-// layer just for the home fallback location.
-/// Builds the Connections-tab home location used as the base of the
-/// Open Terminal stack.
-String buildTmuxAlertHomeLocationSafe() =>
-    Uri(path: '/', queryParameters: const {'tab': 'connections'}).toString();

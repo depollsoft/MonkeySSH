@@ -280,17 +280,13 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   List<TmuxWindow>? get _displayedWindows {
     final visibleWindows = _windows
-        ?.where(
-          (window) => !_closingWindowKeys.contains(_windowCloseKey(window)),
-        )
+        ?.where((window) => !_closingWindowKeys.contains(window.stableKey))
         .toList(growable: false);
     return resolveTmuxBarDisplayedWindows(
       visibleWindows,
       pendingSelectedWindowIndex: _pendingSelectedWindowIndex,
     );
   }
-
-  String _windowCloseKey(TmuxWindow window) => window.id ?? '#${window.index}';
 
   @override
   void initState() {
@@ -611,6 +607,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _applyWindows(List<TmuxWindow> windows) {
+    if (identical(windows, _windows)) {
+      // Unchanged reload (same list instance): nothing to track or redraw.
+      if (_isLoading) setState(() => _isLoading = false);
+      return;
+    }
     final previousTerminalModeSignature = activeTmuxWindowTerminalModeSignature(
       _windows,
     );
@@ -620,7 +621,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       connectionId: widget.session.connectionId,
       tmuxSessionName: widget.tmuxSessionName,
       onAlert: _sendAlertNotification,
-      onClear: (id) => unawaited(_localNotifications.clearTmuxAlert(id)),
+      onClear: (id) =>
+          unawaited(_localNotifications.clearTerminalNotification(id)),
     );
     if (hasNewAlert &&
         mounted &&
@@ -736,9 +738,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   String? _resolveRecentSessionScopeWorkingDirectory([
     List<TmuxWindow>? windows,
   ]) {
-    final activeWindow = (windows ?? _windows)
-        ?.where((window) => window.isActive)
-        .firstOrNull;
+    final activeWindow = activeTmuxWindow(windows ?? _windows ?? const []);
     return widget.scopeWorkingDirectory ??
         resolveAgentSessionScopeWorkingDirectory(
           activeWorkingDirectory: activeWindow?.currentPath,
@@ -857,7 +857,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   void _clearSeenAlertNotifications() {
     _alertTracker.clear(
-      (id) => unawaited(_localNotifications.clearTmuxAlert(id)),
+      (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
     );
     _seenForwardedNotificationSeqsByWindowKey.clear();
     for (final key in _forwardedNotificationIdsByWindowKey.keys.toList()) {
@@ -991,7 +991,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       windowKey,
     );
     if (notificationId != null) {
-      unawaited(_localNotifications.clearTmuxAlert(notificationId));
+      unawaited(_localNotifications.clearTerminalNotification(notificationId));
     }
   }
 
@@ -1462,9 +1462,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         tool: tool,
         modelProvider: nativeWindowIndex != null
             ? piUsageModelProvider(_activeNativeAcpEntry)
-            : _displayedWindows
-                  ?.where((window) => window.isActive)
-                  .firstOrNull
+            : activeTmuxWindow(_displayedWindows ?? const [])
                   ?.agentModelProvider,
         diameter: diameter,
         child: icon,
@@ -1998,7 +1996,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     if (!mounted || !confirmed) {
       return;
     }
-    final closeKey = _windowCloseKey(window);
+    final closeKey = window.stableKey;
     setState(() {
       _closingWindowKeys.add(closeKey);
       if (_pendingSelectedWindowIndex == window.index) {
@@ -2023,7 +2021,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     setState(() {
       _closingWindowKeys.remove(closeKey);
       _windows = _windows
-          ?.where((candidate) => _windowCloseKey(candidate) != closeKey)
+          ?.where((candidate) => candidate.stableKey != closeKey)
           .toList();
     });
   }

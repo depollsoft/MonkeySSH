@@ -10,6 +10,7 @@ import '../providers/entity_list_providers.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 
 /// Screen displaying list of SSH keys.
 class KeysScreen extends ConsumerWidget {
@@ -100,28 +101,13 @@ class KeysScreen extends ConsumerWidget {
     WidgetRef ref,
     SshKey key,
   ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Key'),
-        content: Text('Are you sure you want to delete "${key.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Key',
+      message: 'Are you sure you want to delete "${key.name}"?',
     );
 
-    if (confirmed ?? false) {
+    if (confirmed) {
       await ref.read(keyRepositoryProvider).delete(key.id);
       ref.invalidate(allKeysProvider);
       if (context.mounted) {

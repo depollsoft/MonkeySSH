@@ -750,8 +750,6 @@ final class AcpSessionInfoUpdate extends AcpSessionUpdate {
   const AcpSessionInfoUpdate({
     this.title,
     this.hasTitle = false,
-    this.updatedAt,
-    this.hasUpdatedAt = false,
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
@@ -761,14 +759,8 @@ final class AcpSessionInfoUpdate extends AcpSessionUpdate {
       AcpSessionInfoUpdate(
         title: AcpJson.string(json, 'title'),
         hasTitle: json.containsKey('title'),
-        updatedAt: AcpJson.string(json, 'updatedAt'),
-        hasUpdatedAt: json.containsKey('updatedAt'),
         meta: AcpJson.meta(json),
-        extensions: AcpJson.extensions(json, const [
-          'sessionUpdate',
-          'title',
-          'updatedAt',
-        ]),
+        extensions: AcpJson.extensions(json, const ['sessionUpdate', 'title']),
       );
 
   @override
@@ -780,12 +772,6 @@ final class AcpSessionInfoUpdate extends AcpSessionUpdate {
   /// Whether the update contained the title field.
   final bool hasTitle;
 
-  /// New ISO-8601 timestamp, or `null` when clearing it.
-  final String? updatedAt;
-
-  /// Whether the update contained the timestamp field.
-  final bool hasUpdatedAt;
-
   @override
   final AcpJsonMap meta;
 
@@ -793,64 +779,28 @@ final class AcpSessionInfoUpdate extends AcpSessionUpdate {
   final AcpJsonMap extensions;
 }
 
-/// Cumulative monetary cost reported by an agent.
-final class AcpCost implements AcpExtensible {
-  /// Creates cost information.
-  const AcpCost({
-    required this.amount,
-    required this.currency,
-    this.meta = const <String, Object?>{},
-    this.extensions = const <String, Object?>{},
-  });
-
-  /// Parses cost information.
-  factory AcpCost.fromJson(AcpJsonMap json) => AcpCost(
-    amount: AcpJson.number(json, 'amount') ?? 0,
-    currency: AcpJson.string(json, 'currency') ?? '',
-    meta: AcpJson.meta(json),
-    extensions: AcpJson.extensions(json, const ['amount', 'currency']),
-  );
-
-  /// Cumulative amount.
-  final num amount;
-
-  /// ISO 4217 currency code.
-  final String currency;
-
-  @override
-  final AcpJsonMap meta;
-
-  @override
-  final AcpJsonMap extensions;
-}
-
-/// Context-window and cost update.
+/// Context-window update. Any reported `cost` is retained in [extensions],
+/// since nothing renders it.
 final class AcpUsageUpdate extends AcpSessionUpdate {
   /// Creates a usage update.
   const AcpUsageUpdate({
     required this.used,
     required this.size,
-    this.cost,
     this.meta = const <String, Object?>{},
     this.extensions = const <String, Object?>{},
   });
 
   /// Parses a usage update.
-  factory AcpUsageUpdate.fromJson(AcpJsonMap json) {
-    final cost = AcpJson.objectField(json, 'cost');
-    return AcpUsageUpdate(
-      used: AcpJson.integer(json, 'used') ?? 0,
-      size: AcpJson.integer(json, 'size') ?? 0,
-      cost: cost == null ? null : AcpCost.fromJson(cost),
-      meta: AcpJson.meta(json),
-      extensions: AcpJson.extensions(json, const [
-        'sessionUpdate',
-        'used',
-        'size',
-        'cost',
-      ]),
-    );
-  }
+  factory AcpUsageUpdate.fromJson(AcpJsonMap json) => AcpUsageUpdate(
+    used: AcpJson.integer(json, 'used') ?? 0,
+    size: AcpJson.integer(json, 'size') ?? 0,
+    meta: AcpJson.meta(json),
+    extensions: AcpJson.extensions(json, const [
+      'sessionUpdate',
+      'used',
+      'size',
+    ]),
+  );
 
   @override
   String get kind => 'usage_update';
@@ -860,9 +810,6 @@ final class AcpUsageUpdate extends AcpSessionUpdate {
 
   /// Total context-window tokens.
   final int size;
-
-  /// Optional cumulative cost.
-  final AcpCost? cost;
 
   @override
   final AcpJsonMap meta;

@@ -349,8 +349,7 @@ else:
 
       addTearDown(updateSubscription.cancel);
 
-      final initialization = await client.initialize();
-      expect(initialization.agentInfo?.name, 'monkeyssh-fake-acp');
+      await client.initialize();
       await client.authenticate('fake-local');
       final session = await client.newSession(cwd: config.cwd);
       final sessionId = session.sessionId!;

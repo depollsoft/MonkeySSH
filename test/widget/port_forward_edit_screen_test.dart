@@ -1,6 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/drift.dart' hide isNull;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,12 +13,11 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_edit_screen.dart';
 import 'package:monkeyssh/presentation/widgets/host_port_forward_editor_sheet.dart';
 
-class _MockHostRepository extends Mock implements HostRepository {}
+import '../helpers/mocks.dart';
+import '../helpers/terminal_session_fixture.dart';
 
 class _MockPortForwardRepository extends Mock
     implements PortForwardRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 class _RecordingSshSession extends SshSession {
   _RecordingSshSession({
@@ -51,31 +49,6 @@ class _RecordingSshSession extends SshSession {
   }
 }
 
-class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
-  _TestActiveSessionsNotifier(this.session);
-
-  final SshSession session;
-
-  @override
-  Map<int, SshConnectionState> build() => {
-    session.connectionId: SshConnectionState.connected,
-  };
-
-  @override
-  List<int> getConnectionsForHost(int hostId) =>
-      hostId == session.hostId ? [session.connectionId] : const [];
-
-  @override
-  SshConnectionState getState(int connectionId) =>
-      connectionId == session.connectionId
-      ? SshConnectionState.connected
-      : SshConnectionState.disconnected;
-
-  @override
-  SshSession? getSession(int connectionId) =>
-      connectionId == session.connectionId ? session : null;
-}
-
 Host _host() => Host(
   id: 10,
   label: 'Dev box',
@@ -99,7 +72,7 @@ void main() {
     testWidgets(
       '${hostFails ? 'host ' : ''}edit load ${fails ? 'failure' : 'missing record'} leaves loading',
       (tester) async {
-        final hosts = _MockHostRepository();
+        final hosts = MockHostRepository();
         final forwards = _MockPortForwardRepository();
         when(hosts.getAll).thenAnswer((_) async {
           if (hostFails) throw Exception('read failed');
@@ -154,13 +127,13 @@ void main() {
     testWidgets(
       'persists a new rule when live activation succeeds: $startSucceeds',
       (tester) async {
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         final portForwardRepository = _MockPortForwardRepository();
         final session = _RecordingSshSession(
           connectionId: 7,
           startSucceeds: startSucceeds,
           hostId: 10,
-          client: _MockSshClient(),
+          client: MockSshClient(),
         );
         when(hostRepository.getAll).thenAnswer((_) async => [_host()]);
         when(() => portForwardRepository.insert(any()))
@@ -192,7 +165,7 @@ void main() {
                 portForwardRepository,
               ),
               activeSessionsProvider.overrideWith(
-                () => _TestActiveSessionsNotifier(session),
+                () => TestActiveSessionsNotifier(session),
               ),
             ],
             child: MaterialApp.router(routerConfig: router),

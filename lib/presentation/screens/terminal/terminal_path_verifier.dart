@@ -58,6 +58,15 @@ class TerminalPathVerifier {
   void cancelPendingBatch() => _terminalPathVerificationBatchTimer?.cancel();
   final Map<String, _VerifiedTerminalPath> _verifiedTerminalPathCache =
       <String, _VerifiedTerminalPath>{};
+
+  /// `stat` results keyed by resolved remote path, so paths sharing a
+  /// directory prefix probe it once and a shrunken link is a hit on tap.
+  final Map<String, bool> _resolvedPathExists = <String, bool>{};
+
+  /// Memo of the pure ambiguity analysis behind
+  /// [shouldActivateTerminalFilePath]; it runs per path per row refresh while
+  /// verification is pending.
+  final Map<String, bool> _optimisticTerminalFilePaths = <String, bool>{};
   String? _activeTerminalPathVerificationKey;
   String? _terminalPathCacheScope;
   SshSession? _terminalPathVerificationSession;
@@ -86,6 +95,7 @@ class TerminalPathVerifier {
   /// Clears both positive and negative verification results and queued paths.
   void resetVerifiedTerminalPathCache() {
     _verifiedTerminalPathCache.clear();
+    _resolvedPathExists.clear();
     _activeTerminalPathVerificationKey = null;
     _pendingTerminalPathVerifications.clear();
   }
@@ -125,6 +135,7 @@ class TerminalPathVerifier {
 
   /// Forgets the transport, home directory, backoff and pending paths.
   void disposeTerminalPathVerificationSftp() {
+    _resolvedPathExists.clear();
     _terminalPathVerificationSftp = null;
     _terminalPathVerificationSftpFuture = null;
     _terminalPathVerificationSession = null;
@@ -343,8 +354,25 @@ class TerminalPathVerifier {
   }
 
   /// Whether a not-yet-verified path should behave like a link in the meantime.
-  bool _isOptimisticTerminalFilePath(String terminalPath) =>
-      shouldActivateTerminalFilePath(terminalPath, hasVerifiedPath: false);
+  bool _isOptimisticTerminalFilePath(String terminalPath) {
+    final cached = _optimisticTerminalFilePaths[terminalPath];
+    if (cached != null) {
+      return cached;
+    }
+    final optimistic = shouldActivateTerminalFilePath(
+      terminalPath,
+      hasVerifiedPath: false,
+    );
+    _storeBounded(_optimisticTerminalFilePaths, terminalPath, optimistic);
+    return optimistic;
+  }
+
+  static void _storeBounded<T>(Map<String, T> cache, String key, T value) {
+    cache[key] = value;
+    while (cache.length > _maxVerifiedTerminalPathCacheEntries) {
+      cache.remove(cache.keys.first);
+    }
+  }
 
   /// Queues a supported path once, retaining at most 128 pending candidates.
   void primeTerminalFilePathVerification(String terminalPath) {
@@ -553,26 +581,41 @@ class TerminalPathVerifier {
         continue;
       }
 
-      try {
-        await _resolveTerminalPathVerificationSftpOperation(
-          sftp,
-          () => sftp.stat(resolvedPath),
-          scope: scope,
-        );
-      } on SftpStatusError catch (error) {
-        if (!ownsScope()) return null;
-        if (error.code == SftpStatusCode.noSuchFile) {
-          continue;
+      final knownToExist = _resolvedPathExists[resolvedPath];
+      if (knownToExist == false) {
+        continue;
+      }
+      if (knownToExist == null) {
+        try {
+          await _resolveTerminalPathVerificationSftpOperation(
+            sftp,
+            () => sftp.stat(resolvedPath),
+            scope: scope,
+          );
+        } on SftpStatusError catch (error) {
+          if (!ownsScope()) return null;
+          if (error.code == SftpStatusCode.noSuchFile) {
+            _storeBounded(_resolvedPathExists, resolvedPath, false);
+            continue;
+          }
+          rethrow;
         }
-        rethrow;
+        if (!ownsScope()) return null;
+        _storeBounded(_resolvedPathExists, resolvedPath, true);
       }
 
-      if (!ownsScope()) return null;
       _cacheVerifiedTerminalPath(
         cacheKey,
         terminalPath: candidate,
         resolvedPath: resolvedPath,
       );
+      if (candidate != terminalPath) {
+        _cacheVerifiedTerminalPath(
+          '$scope:$candidate',
+          terminalPath: candidate,
+          resolvedPath: resolvedPath,
+        );
+      }
       return resolvedPath;
     }
 

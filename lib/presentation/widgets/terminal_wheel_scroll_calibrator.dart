@@ -145,14 +145,6 @@ class TerminalWheelScrollCalibrator {
     }
   }
 
-  /// Keeps the current estimate but forces the next wheel event to measure it.
-  void invalidate() {
-    _cancelPending(notify: false);
-    if (!_isQuarantined) {
-      _isCalibrated = false;
-    }
-  }
-
   /// Revalidates the current estimate after the input transport changes. A
   /// measured gain is retained as the safe fallback unless the terminal
   /// instance itself was replaced.

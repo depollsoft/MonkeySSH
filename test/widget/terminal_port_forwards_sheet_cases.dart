@@ -2,7 +2,6 @@
 
 import 'dart:async';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,12 +15,10 @@ import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/brand_list_skeleton.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_port_forwards_sheet.dart';
 
+import '../helpers/mocks.dart';
+
 class _MockPortForwardRepository extends Mock
     implements PortForwardRepository {}
-
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 class _LiveTestSession extends SshSession {
   _LiveTestSession({
@@ -223,11 +220,11 @@ void registerTerminalPortForwardsSheetTests() {
       tester,
     ) async {
       final repository = _MockPortForwardRepository();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       final session = _LiveTestSession(
         connectionId: 7,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       addTearDown(session.changes.close);
       var hostListens = 0;
@@ -289,12 +286,12 @@ void registerTerminalPortForwardsSheetTests() {
       final session = _LiveTestSession(
         connectionId: 7,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       final automaticOwner = _LiveTestSession(
         connectionId: 8,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       final openedTunnels = <ActiveTunnelInfo>[];
       automaticOwner.tunnels[-3000] = const ActiveTunnelInfo(
@@ -486,11 +483,11 @@ void registerTerminalPortForwardsSheetTests() {
             ..resetDevicePixelRatio();
         });
         final portForwardRepository = _MockPortForwardRepository();
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         final session = _LiveTestSession(
           connectionId: 7,
           hostId: 10,
-          client: _MockSshClient(),
+          client: MockSshClient(),
         );
         addTearDown(session.changes.close);
         final hosts = StreamController<Host?>.broadcast();
@@ -575,11 +572,11 @@ void registerTerminalPortForwardsSheetTests() {
       tester,
     ) async {
       final portForwardRepository = _MockPortForwardRepository();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       final session = _LiveTestSession(
         connectionId: 7,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       addTearDown(session.changes.close);
       final notifier = _TestActiveSessionsNotifier([session]);
@@ -625,11 +622,11 @@ void registerTerminalPortForwardsSheetTests() {
       tester,
     ) async {
       final portForwardRepository = _MockPortForwardRepository();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       final session = _LiveTestSession(
         connectionId: 7,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       addTearDown(session.changes.close);
 
@@ -661,11 +658,11 @@ void registerTerminalPortForwardsSheetTests() {
       tester,
     ) async {
       final portForwardRepository = _MockPortForwardRepository();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       final session = _LiveTestSession(
         connectionId: 7,
         hostId: 10,
-        client: _MockSshClient(),
+        client: MockSshClient(),
       );
       addTearDown(session.changes.close);
       final notifier = _TestActiveSessionsNotifier([session]);

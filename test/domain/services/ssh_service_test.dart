@@ -42,6 +42,7 @@ import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../helpers/handshake_chunk_socket.dart';
 import '../../helpers/powershell_test_helpers.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
@@ -783,6 +784,9 @@ class _FakeActiveSessionsSshService extends SshService {
   Map<int, SshSession> get sessions => Map.unmodifiable(_sessions);
 
   @override
+  Iterable<SshSession> get allSessions => _sessions.values;
+
+  @override
   Future<SshConnectionResult> connectToHost(
     int hostId, {
     ConnectionProgressCallback? onProgress,
@@ -973,6 +977,36 @@ LISTEN ::1:4201
       expect(remoteTcpListenerExclusionKeys('127.0.0.2', 3000), {
         remoteTcpListenerKey('127.0.0.2', 3000),
       });
+    });
+
+    test('listener identities ignore zones and map wildcard binds', () {
+      expect(
+        remoteTcpListenerKey('[::1%lo0]', 80),
+        remoteTcpListenerKey('::1', 80),
+      );
+      expect(remoteTcpListenerKey('[::1]%lo', 80).host, '::1');
+      expect(remoteTcpListenerKey('0.0.0.0', 80).host, '127.0.0.1');
+      expect(remoteTcpListenerKey('[::]', 80).host, '::1');
+      expect(remoteTcpListenerExclusionKeys('localhost%lo0', 3000), {
+        remoteTcpListenerKey('127.0.0.1', 3000),
+        remoteTcpListenerKey('::1', 3000),
+      });
+      expect(remoteTcpListenerExclusionKeys('0.0.0.0', 3000), {
+        remoteTcpListenerKey('127.0.0.1', 3000),
+      });
+      // A device-scoped loopback listener is still loopback; a device-scoped
+      // wildcard bind is not reachable through loopback.
+      expect(
+        parseRemoteListeningTcpListeners('''
+LISTEN 0 4096 [::1]%lo:631 [::]:*
+LISTEN 0 4096 0.0.0.0%eth0:8443 0.0.0.0:*
+LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
+''').keys,
+        {
+          remoteTcpListenerKey('::1', 631),
+          remoteTcpListenerKey('127.0.0.1', 8000),
+        },
+      );
     });
 
     test('builds a valid persistent POSIX watcher command', () async {
@@ -1485,6 +1519,68 @@ LISTEN ::1:4201
 
         expect(session.automaticForwardedRemotePorts, {4000});
         verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+      },
+    );
+
+    test(
+      'reapplies the watcher snapshot when only exclusions change',
+      () async {
+        final client = _MockSshClient();
+        final watcher = _MockExecSession();
+        final stdout = StreamController<Uint8List>();
+        final done = Completer<void>();
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => watcher);
+        when(() => watcher.stdout).thenAnswer((_) => stdout.stream);
+        when(() => watcher.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => watcher.done).thenAnswer((_) => done.future);
+        when(watcher.close).thenAnswer((_) {});
+        final session = _testSession(
+          client,
+          connectionId: 7,
+          hostname: 'dev.example.com',
+        );
+        addTearDown(() async {
+          await session.configureAutomaticPortForwarding(enabled: false);
+          if (!stdout.isClosed) {
+            await stdout.close();
+          }
+          if (!done.isCompleted) {
+            done.complete();
+          }
+        });
+
+        final configured = session.configureAutomaticPortForwarding(
+          enabled: true,
+          proxyHost: 'dev-box.localhost',
+        );
+        await untilCalled(() => client.execute(any(), pty: any(named: 'pty')));
+        stdout.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '$_automaticPortWatcherSnapshotBeginMarker\n'
+              'LISTEN 127.0.0.1:3000\n'
+              'LISTEN 127.0.0.2:3000\n'
+              '$_automaticPortWatcherSnapshotEndMarker\n',
+            ),
+          ),
+        );
+        await configured;
+        await _waitUntil(
+          () => session.automaticForwardedRemoteListeners.length == 2,
+        );
+
+        await session.configureAutomaticPortForwarding(
+          enabled: true,
+          proxyHost: 'dev-box.localhost',
+          excludedRemoteListeners: {remoteTcpListenerKey('127.0.0.2', 3000)},
+        );
+
+        expect(session.automaticForwardedRemoteListeners, {
+          remoteTcpListenerKey('127.0.0.1', 3000),
+        });
+        expect(session.automaticPortForwardWatcherActive, isTrue);
+        verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
       },
     );
 
@@ -2082,9 +2178,10 @@ LISTEN ::1:4201
         '\x1b[4h\x1b]0;nano title\x07\x1b[@Z',
       ),
       (
+        // The buffer gives a skin-tone modifier its own two cells.
         'emoji modifier',
         '\x1b[4h\u{1F44D}\u{1F3FD}Z',
-        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\u{1F3FD}\x1b[@Z',
+        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\x1b[@\x1b[@\u{1F3FD}\x1b[@Z',
       ),
     ]) {
       test('insert mode preserves $name', () {
@@ -2164,6 +2261,57 @@ LISTEN ::1:4201
         );
       },
     );
+
+    test('insert mode shifts by the cell width the buffer uses', () {
+      // U+231A is wide and U+0301 takes no cell in the buffer's width table.
+      final terminal = Terminal(maxLines: 100)..resize(20, 2);
+      final decoder = TerminalXtermOutputDecoder();
+      terminal.write(
+        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}').output,
+      );
+
+      expect(terminal.buffer.cursorX, 5);
+      expect(terminal.lines[0].getText(5, 11), 'abcdef');
+    });
+
+    test('tracks scroll-region cursor moves the way the buffer does', () {
+      // Each prefix ends with the cursor at the top margin or not; a reverse
+      // index after it is adapted only when the buffer agrees.
+      for (final (prefix, atTopMargin) in [
+        ('\x1b[2;1H\x1b[3;2r', false), // a one-row region is ignored
+        ('\x1b[5;1H\x1b[1;0r', true), // a valid region homes the cursor
+        ('\x1b[?6h\x1b[3;6r', true), // to the top margin in origin mode
+        ('\x1b[3;6r\x1b[?6h\x1b[4d\x1b[1d', true), // VPA in origin mode
+        ('\x1b[3;6r\x1b[4;1H\x1b[9A', true), // CUU stops at the margin
+        ('\x1b[3;6r\x1b[4;1H\x1b[9B\x1b[3A', true), // so does CUD
+        ('\x1b[3;6r\x1b[4;1H\x1b[9E\x1b[3F', true), // and CNL/CPL
+        ('\x1b[3;6r\x1b[8;1H\x1b[9F', false), // outside, the whole screen
+      ]) {
+        final terminal = Terminal(maxLines: 100)
+          ..resize(10, 8)
+          ..write(prefix);
+        expect(
+          terminal.buffer.cursorY == terminal.buffer.marginTop,
+          atTopMargin,
+          reason: 'buffer after ${prefix.replaceAll('\x1b', 'ESC')}',
+        );
+
+        final result = TerminalXtermOutputDecoder().add(
+          input: '$prefix\x1bM',
+          terminalColumns: 10,
+          terminalRows: 8,
+          cursorColumn: 0,
+          cursorRow: 0,
+          marginTop: 0,
+          marginBottom: 7,
+        );
+        expect(
+          result.output,
+          atTopMargin ? '$prefix\x1b[L' : '$prefix\x1bM',
+          reason: prefix.replaceAll('\x1b', 'ESC'),
+        );
+      }
+    });
 
     test('preserves reverse index when cursor is below the top margin', () {
       final decoder = TerminalXtermOutputDecoder();
@@ -2625,7 +2773,7 @@ LISTEN ::1:4201
       );
 
       await expectLater(
-        captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
+        captureHostKeyFromHandshakeChunks(<Uint8List>[
           Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r')),
           Uint8List.fromList(utf8.encode('\n')),
           Uint8List.sublistView(kexReplyPacket, 0, 3),
@@ -2640,7 +2788,7 @@ LISTEN ::1:4201
       'fails host key capture when the handshake packet is too large',
       () async {
         await expectLater(
-          captureHostKeyFromHandshakeChunksForTesting(<Uint8List>[
+          captureHostKeyFromHandshakeChunks(<Uint8List>[
             Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r\n')),
             _oversizedPacketHeader(),
           ]),
@@ -4226,6 +4374,7 @@ LISTEN ::1:4201
         final sshService = _MockSshService();
         final telemetry = _MockTelemetryService();
         when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
         when(
           () => sshService.connectToHost(
             any(),
@@ -5389,6 +5538,54 @@ LISTEN ::1:4201
       );
     });
 
+    test(
+      'single-host endpoint skips discovery for shell-owned forwards',
+      () async {
+        final changes = StreamController<void>.broadcast(sync: true);
+        addTearDown(changes.close);
+        final service = _FakeActiveSessionsSshService(
+          useRecordedTunnels: true,
+          tunnelChanges: changes,
+        );
+        final hosts = _MockHostRepository();
+        when(() => hosts.getById(42))
+            .thenAnswer((_) async => _automaticForwardHost(enabled: true));
+        final localContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(service),
+            hostRepositoryProvider.overrideWithValue(hosts),
+            portForwardRepositoryProvider.overrideWithValue(
+              _emptyPortForwardRepository(),
+            ),
+          ],
+        );
+        addTearDown(localContainer.dispose);
+        final notifier = localContainer.read(activeSessionsProvider.notifier);
+        final result = await notifier.connect(42, forceNew: true);
+        await pumpEventQueue();
+        final session =
+            service.getSession(result.connectionId!)!
+                as _RecordingAutomaticForwardSession;
+        final configured = session.automaticConfigurations.length;
+        expect(configured, greaterThan(0));
+
+        session.tunnels[-1] = const ActiveTunnelInfo(
+          portForwardId: -1,
+          localHost: '127.0.0.1',
+          localPort: 4000,
+          remoteHost: '127.0.0.1',
+          remotePort: 3000,
+          isLocal: true,
+          isAutomatic: true,
+          isShellRelated: true,
+        );
+        changes.add(null);
+        await pumpEventQueue();
+
+        expect(session.automaticConfigurations, hasLength(configured));
+      },
+    );
+
     test('excludes stopped saved local forwards from discovery', () async {
       final primary = _RecordingAutomaticForwardSession(
         connectionId: 1,
@@ -6208,10 +6405,6 @@ LISTEN ::1:4201
       expect(sshService.sessions, isEmpty);
     });
 
-    test('isConnected returns false for unknown host', () {
-      expect(sshService.isConnected(999), isFalse);
-    });
-
     test('getSession returns null for unknown host', () {
       expect(sshService.getSession(999), isNull);
     });
@@ -6265,7 +6458,7 @@ LISTEN ::1:4201
           );
           timestamp.completeError(Exception('timestamp write failed'));
           await pumpEventQueue();
-          expect(service.isConnected(result.connectionId!), isTrue);
+          expect(service.getSession(result.connectionId!), isNotNull);
           verify(() => repository.updateLastConnected(host.id)).called(1);
         },
       );
@@ -6325,8 +6518,8 @@ LISTEN ::1:4201
           }
           await stopped;
 
-          expect(service.isConnected(first.connectionId!), isFalse);
-          expect(service.isConnected(second.connectionId!), isFalse);
+          expect(service.getSession(first.connectionId!), isNull);
+          expect(service.getSession(second.connectionId!), isNull);
           expect(service.sessions.keys, [newest.connectionId]);
           verify(clients[0].close).called(1);
           verify(clients[1].close).called(1);
@@ -6999,6 +7192,82 @@ LISTEN ::1:4201
         await result.closeAll();
       },
     );
+
+    test('parses shared auto identities once for host and jump host', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final repository = KnownHostsRepository(db);
+      final hostKey = _ed25519HostKeyBlob([1, 2, 3]);
+      for (final hostname in ['destination', 'jump']) {
+        await _seedTrustedHost(
+          repository,
+          hostname: hostname,
+          hostKeyBytes: hostKey,
+        );
+      }
+      final endpoint = _FakeForwardHostKeySocket(hostKey);
+      final identityLists = <List<SSHKeyPair>?>[];
+      final service = SshService(
+        knownHostsRepository: repository,
+        socketConnector: (host, port, {timeout}) async =>
+            _FakeHostKeySocket(hostKey),
+        clientFactory:
+            (
+              socket, {
+              required username,
+              onVerifyHostKey,
+              onPasswordRequest,
+              onUserInfoRequest,
+              identities,
+              keepAliveInterval,
+            }) {
+              identityLists.add(identities);
+              final client = _MockSshClient();
+              when(client.close).thenAnswer((_) async {});
+              when(() => client.forwardLocal('destination', 22))
+                  .thenAnswer((_) async => endpoint);
+              when(() => client.authenticated).thenAnswer((_) async {
+                final bytes = await (socket as HostKeySource).hostKeyBytes;
+                await onVerifyHostKey!(
+                  'ssh-ed25519',
+                  _hostKeyCallbackFingerprint(bytes),
+                );
+              });
+              return client;
+            },
+      );
+      final identityKeys = [
+        SshKey(
+          id: 1,
+          name: 'auto',
+          keyType: 'ssh-ed25519',
+          publicKey: '',
+          privateKey: sshEd25519PrivateKey,
+          createdAt: DateTime(2026),
+        ),
+      ];
+
+      final result = await service.connect(
+        SshConnectionConfig(
+          hostname: 'destination',
+          port: 22,
+          username: 'test',
+          identityKeys: identityKeys,
+          jumpHost: SshConnectionConfig(
+            hostname: 'jump',
+            port: 22,
+            username: 'test',
+            identityKeys: identityKeys,
+          ),
+        ),
+      );
+
+      expect(result.success, isTrue);
+      expect(identityLists, hasLength(2));
+      expect(identityLists.first, hasLength(1));
+      expect(identical(identityLists.first, identityLists.last), isTrue);
+      await result.closeAll();
+    });
 
     for (final phase in ['trusted', 'untrusted', 'probe', 'jump']) {
       test(

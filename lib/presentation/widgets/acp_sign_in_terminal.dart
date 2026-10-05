@@ -388,10 +388,7 @@ class _AcpSignInTerminalScreenState extends State<AcpSignInTerminalScreen> {
       terminal = TerminalTextInputHandler(
         terminal: _terminal,
         focusNode: _terminalFocus,
-        // The terminal view already owns this focus node.
-        manageFocus: false,
         keyboardAppearance: keyboardAppearance,
-        deleteDetection: true,
         // Logins prompt for codes, tokens, and passwords: keep the platform
         // keyboard from suggesting, dictating, or learning what is typed.
         sensitiveInput: true,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import platform
 import re
 import shutil
@@ -12,8 +13,19 @@ import store_media
 
 from PIL import Image, ImageChops
 
-ROOT = Path(__file__).resolve().parents[1]
-SCREENSHOT_COUNT = 8
+ROOT = store_media.ROOT
+# OCR markers each scene must show, in the app's scene order.
+SCENE_MARKERS = {
+    1: ['Copilot'],
+    2: ['Hosts', 'Add Host'],
+    3: ['Snippets'],
+    4: ['Workspace'],
+    5: ['AGENTS.md'],
+    6: ['Claude Code'],
+    7: ['Message the agent', 'reconnect'],
+    8: ['Agent Management', 'PRO', 'Copilot CLI', 'Claude Code'],
+}
+SCREENSHOT_COUNT = len(SCENE_MARKERS)
 IOS_SCREENSHOTS = {
     ROOT / 'ios/fastlane/screenshots/en-US': {
         'iphone_6_9': (1320, 2868),
@@ -173,10 +185,11 @@ def _validate_ocr_content(paths: list[Path]) -> None:
 
     monkeymux_texts: dict[str, list[tuple[Path, str]]] = {}
     for path, text in texts.items():
-        filename = path.name
-        if filename in {'01_iphone_6_9.png', '01_ipad_13.png', '1.png'}:
+        # iOS names start with "01_", Android names are "1.png".
+        scene = int(re.match(r'\d+', path.name).group())
+        _require_ocr_markers(path, text, SCENE_MARKERS[scene])
+        if scene == 1:
             _validate_copilot_image_frame(path)
-            _require_ocr_markers(path, text, ['Copilot'])
             # Require labels unique to the embedded light-mode hosts screenshot
             # (not words that also appear in the submitted Copilot prompt).
             _require_ocr_markers(
@@ -185,28 +198,9 @@ def _validate_ocr_content(paths: list[Path]) -> None:
                 ['Add Host', 'Build runner'],
                 require_any=True,
             )
-        elif filename in {'02_iphone_6_9.png', '02_ipad_13.png', '2.png'}:
-            _require_ocr_markers(path, text, ['Hosts', 'Add Host'])
-        elif filename in {'03_iphone_6_9.png', '03_ipad_13.png', '3.png'}:
-            _require_ocr_markers(path, text, ['Snippets'])
-        elif filename in {'04_iphone_6_9.png', '04_ipad_13.png', '4.png'}:
-            _require_ocr_markers(path, text, ['Workspace'])
+        elif scene == 4:
             monkeymux_texts.setdefault(_monkeymux_scene_group(path), []).append(
                 (path, text),
-            )
-        elif filename in {'05_iphone_6_9.png', '05_ipad_13.png', '5.png'}:
-            _require_ocr_markers(path, text, ['AGENTS.md'])
-        elif filename in {'06_iphone_6_9.png', '06_ipad_13.png', '6.png'}:
-            _require_ocr_markers(path, text, ['Claude Code'])
-        elif filename in {'07_iphone_6_9.png', '07_ipad_13.png', '7.png'}:
-            _require_ocr_markers(
-                path, text,
-                ['Message the agent', 'reconnect'],
-            )
-        elif filename in {'08_iphone_6_9.png', '08_ipad_13.png', '8.png'}:
-            _require_ocr_markers(
-                path, text,
-                ['Agent Management', 'PRO', 'Copilot CLI', 'Claude Code'],
             )
 
     for grouped_texts in monkeymux_texts.values():
@@ -245,13 +239,13 @@ def _require_ocr_markers(
         if matched:
             return
         raise ValueError(
-            f'{_display_path(path)} is missing expected store screenshot '
+            f'{store_media.display_path(path)} is missing expected store screenshot '
             f'content (any of: {", ".join(markers)})',
         )
     missing = [marker for marker in markers if marker not in matched]
     if missing:
         raise ValueError(
-            f'{_display_path(path)} is missing expected store screenshot '
+            f'{store_media.display_path(path)} is missing expected store screenshot '
             f'content: {", ".join(missing)}',
         )
 
@@ -275,15 +269,6 @@ def _compact_ocr_text(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', text.casefold())
 
 
-def _display_path(path: Path | str) -> str:
-    if isinstance(path, str):
-        return path
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
-
-
 def _validate_ios() -> None:
     paths = []
     for locale_dir, devices in IOS_SCREENSHOTS.items():
@@ -304,7 +289,15 @@ def _validate_android() -> None:
                 path = images_dir / screenshot_dir / f'{index}.png'
                 _validate_file(path, expected_size)
                 paths.append(path)
-    _validate_ocr_content(paths)
+    # The harness writes each capture to both listings; OCR each image once.
+    _validate_ocr_content(_unique_by_content(paths))
+
+
+def _unique_by_content(paths: list[Path]) -> list[Path]:
+    unique: dict[str, Path] = {}
+    for path in paths:
+        unique.setdefault(hashlib.sha256(path.read_bytes()).hexdigest(), path)
+    return list(unique.values())
 
 
 def main() -> None:

@@ -49,6 +49,7 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
+import 'package:monkeyssh/domain/services/remote_clipboard_sync_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -116,6 +117,24 @@ class _MockSshClient extends Mock implements SSHClient {
 }
 
 class _MockShellChannel extends Mock implements SSHSession {}
+
+/// Records the periodic timers a zone creates so a test can see which are
+/// still armed.
+class _TrackedPeriodicTimer implements Timer {
+  _TrackedPeriodicTimer(this._inner, this.period);
+
+  final Timer _inner;
+  final Duration period;
+
+  @override
+  void cancel() => _inner.cancel();
+
+  @override
+  bool get isActive => _inner.isActive;
+
+  @override
+  int get tick => _inner.tick;
+}
 
 class _ListenerTrackingTerminal extends Terminal {
   final listeners = <VoidCallback>{};
@@ -653,7 +672,7 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
   }
 
   @override
-  Future<void> clearTmuxAlert(int notificationId) async {
+  Future<void> clearTerminalNotification(int notificationId) async {
     clearedNotificationIds.add(notificationId);
   }
 }
@@ -2031,6 +2050,142 @@ void main() {
         );
       }
     }
+
+    testWidgets(
+      'stops both clipboard sync timers once the remote reports unsupported',
+      (tester) async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'local clipboard text'};
+            }
+            if (call.method == 'Clipboard.hasStrings') {
+              return {'value': true};
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        var remoteSupported = true;
+        when(() => sshClient.execute(any())).thenAnswer((invocation) async {
+          final command = invocation.positionalArguments.single as String;
+          final isRead = command.contains('pbpaste');
+          final output = !remoteSupported
+              ? RemoteClipboardSyncService.unsupportedMarker
+              : isRead
+              ? base64Encode(utf8.encode('remote text'))
+              : '';
+          final channel = _MockShellChannel();
+          when(() => channel.stdout).thenAnswer(
+            (_) => Stream.value(Uint8List.fromList(utf8.encode(output))),
+          );
+          when(() => channel.stderr)
+              .thenAnswer((_) => const Stream<Uint8List>.empty());
+          when(() => channel.done).thenAnswer((_) async {});
+          return channel;
+        });
+
+        final timers = <_TrackedPeriodicTimer>[];
+        await runZoned(
+          () => pumpScreen(
+            tester,
+            sharedClipboard: true,
+            sharedClipboardLocalRead: true,
+          ),
+          zoneSpecification: ZoneSpecification(
+            createPeriodicTimer: (self, parent, zone, period, callback) {
+              final timer = _TrackedPeriodicTimer(
+                parent.createPeriodicTimer(zone, period, callback),
+                period,
+              );
+              timers.add(timer);
+              return timer;
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        Iterable<_TrackedPeriodicTimer> activeSyncTimers() => timers.where(
+          (timer) =>
+              timer.isActive &&
+              (timer.period == const Duration(seconds: 1) ||
+                  timer.period == const Duration(milliseconds: 750)),
+        );
+        expect(
+          activeSyncTimers(),
+          hasLength(2),
+          reason: 'remote and local sync timers are armed while supported',
+        );
+
+        remoteSupported = false;
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
+        expect(
+          activeSyncTimers(),
+          isEmpty,
+          reason: 'an unsupported poll must stop both timers, not just flag it',
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('an unrelated rebuild keeps the terminal text style instance', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      final terminalView = find.byType(MonkeyTerminalView);
+      final before = tester.widget<MonkeyTerminalView>(terminalView).textStyle;
+      tester.widget<MonkeyTerminalView>(terminalView).terminal.write('hello');
+      await tester.pump();
+      final renderTerminal = tester.renderObject<MonkeyRenderTerminal>(
+        find.descendant(
+          of: terminalView,
+          matching: find.byElementPredicate(
+            (element) =>
+                element is RenderObjectElement &&
+                element.renderObject is MonkeyRenderTerminal,
+          ),
+        ),
+      );
+      final cachedRuns = renderTerminal.runParagraphCacheLength;
+      expect(cachedRuns, greaterThan(0));
+
+      final screenState = tester.state<State<TerminalScreen>>(
+        find.byType(TerminalScreen),
+      );
+      // ignore: invalid_use_of_protected_member, cascade_invocations
+      screenState.setState(() {});
+      // Stop before paint: a replaced style clears the cache in
+      // updateRenderObject (the view is built during layout), and the next
+      // paint would refill it.
+      await tester.pump(null, EnginePhase.layout);
+      expect(renderTerminal.runParagraphCacheLength, cachedRuns);
+      await tester.pump();
+
+      // The render object drops its glyph and style-run caches whenever it is
+      // handed a style that is not equal to the current one, so the screen must
+      // reuse one instance and equal styles must compare equal.
+      final after = tester.widget<MonkeyTerminalView>(terminalView).textStyle;
+      expect(identical(before, after), isTrue);
+      expect(
+        TerminalStyle.fromTextStyle(const TextStyle(fontSize: 14)),
+        TerminalStyle.fromTextStyle(const TextStyle(fontSize: 14)),
+      );
+      expect(
+        const TerminalStyle(fontSize: 14),
+        isNot(const TerminalStyle(fontSize: 15)),
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
 
     testWidgets('explicit iOS paste still reads clipboard text', (
       tester,
@@ -6294,6 +6449,10 @@ void main() {
         );
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 120));
+        // The focus-changed refresh marks the viewport for repaint from a
+        // post-frame callback, so it paints on the following frame. A touch
+        // down by itself no longer repaints the terminal.
+        await tester.pump();
         expect(monkeyMuxService.focusClientCalls, hasLength(2));
         expect(
           terminalViewState.terminalPaintCount,
@@ -7196,8 +7355,6 @@ void main() {
             windows,
             events: refreshFails ? fixture.windowEvents.stream : null,
           );
-          when(() => tmuxService.hasSessionOrThrow(session, sessionName))
-              .thenAnswer((_) async => true);
           when(() => tmuxService.foregroundSessionNameOrThrow(session))
               .thenAnswer((_) async => sessionName);
           when(() => tmuxService.detectInstalledAgentTools(session))
@@ -7386,8 +7543,6 @@ void main() {
           tmuxSessionName: tmuxSessionName,
           remoteMuxBackend: RemoteMuxBackend.tmux,
         );
-        when(() => tmuxService.hasSessionOrThrow(session, tmuxSessionName))
-            .thenAnswer((_) async => true);
         when(() => tmuxService.foregroundSessionNameOrThrow(session))
             .thenAnswer((_) async => tmuxSessionName);
         when(() => tmuxService.listWindows(session, tmuxSessionName))
@@ -8098,13 +8253,6 @@ void main() {
                 extraFlags: tmuxExtraFlags,
               );
           when(foregroundSession).thenAnswer((_) async => tmuxSessionName);
-          when(
-            () => tmuxService.hasSessionOrThrow(
-              session,
-              tmuxSessionName,
-              extraFlags: tmuxExtraFlags,
-            ),
-          ).thenAnswer((_) async => true);
           Future<void> selectTarget() => tmuxService.selectWindow(
             session,
             tmuxSessionName,

@@ -207,7 +207,7 @@ class _TerminalPortForwardsSheetState
             child: SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: _addForward,
+                onPressed: _openEditor,
                 icon: const Icon(Icons.add),
                 label: const Text('Add Forward'),
               ),
@@ -313,7 +313,7 @@ class _TerminalPortForwardsSheetState
         title: 'no forwards for this host',
         message: 'Add a rule, then start it without leaving the terminal.',
         primaryLabel: 'Add Forward',
-        onPrimary: _addForward,
+        onPrimary: _openEditor,
       ),
     ),
   );
@@ -388,7 +388,9 @@ class _TerminalPortForwardsSheetState
         FluttyTheme.spacingXs,
       ),
       leading: Icon(Icons.radar_rounded, color: colorScheme.primary),
-      onTap: canOpenInBrowser ? () => unawaited(_openInBrowser(tunnel)) : null,
+      onTap: canOpenInBrowser
+          ? () => unawaited(widget.onOpenInBrowser(tunnel))
+          : null,
       title: Text(
         'Port ${tunnel.remotePort}',
         maxLines: 1,
@@ -464,7 +466,7 @@ class _TerminalPortForwardsSheetState
           : null,
       child: InkWell(
         onTap: canOpenInBrowser
-            ? () => unawaited(_openInBrowser(activeTunnel!))
+            ? () => unawaited(widget.onOpenInBrowser(activeTunnel!))
             : null,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
@@ -522,7 +524,7 @@ class _TerminalPortForwardsSheetState
               ),
               IconButton(
                 tooltip: 'Edit ${portForward.name}',
-                onPressed: () => _editForward(portForward),
+                onPressed: () => _openEditor(existing: portForward),
                 icon: const Icon(Icons.edit_outlined),
               ),
               SizedBox(
@@ -558,9 +560,6 @@ class _TerminalPortForwardsSheetState
       ),
     );
   }
-
-  Future<void> _openInBrowser(ActiveTunnelInfo tunnel) =>
-      widget.onOpenInBrowser(tunnel);
 
   Future<void> _setForwardActive(
     PortForward portForward, {
@@ -601,23 +600,11 @@ class _TerminalPortForwardsSheetState
     }
   }
 
-  Future<void> _addForward() async {
+  Future<void> _openEditor({PortForward? existing}) async {
     final result = await showHostPortForwardEditorSheet(
       context: context,
       hostId: widget.hostId,
-      preferredConnectionId: widget.connectionId,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-    );
-    if (result != null && mounted) {
-      _showMessage(result.message);
-    }
-  }
-
-  Future<void> _editForward(PortForward portForward) async {
-    final result = await showHostPortForwardEditorSheet(
-      context: context,
-      hostId: widget.hostId,
-      existing: portForward,
+      existing: existing,
       preferredConnectionId: widget.connectionId,
       requestFocus: terminalOverlayRouteRequestFocus(context),
     );

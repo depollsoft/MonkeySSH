@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,21 +175,21 @@ func TestRestoreRedrawFollowUpSkipsInactiveOrDetachedWindow(t *testing.T) {
 
 	// Not the active window anymore.
 	server.activeID = "@other"
-	server.redrawRestoredWindow("@1")
+	server.forceForegroundRedraw("@1")
 	if len(simulated) != 0 {
 		t.Fatalf("redraw fired for non-active window: %#v", simulated)
 	}
 
 	// Any attached client can keep the restored redraw alive.
 	server.activeID = "@1"
-	server.redrawRestoredWindow("@1")
+	server.forceForegroundRedraw("@1")
 	if !reflect.DeepEqual(simulated, []string{"@1"}) {
 		t.Fatalf("redraw did not run for active attached window: %#v", simulated)
 	}
 
 	// No attached clients: skip.
 	server.removeAttachClient(server.attachClients[attach])
-	server.redrawRestoredWindow("@1")
+	server.forceForegroundRedraw("@1")
 	if !reflect.DeepEqual(simulated, []string{"@1"}) {
 		t.Fatalf("redraw fired without an attached client: %#v", simulated)
 	}
@@ -241,7 +242,7 @@ func TestRestoreRedrawUsesCurrentPrimaryClientSize(t *testing.T) {
 	server.height = 24
 	server.mu.Unlock()
 
-	server.redrawRestoredWindow("@1")
+	server.forceForegroundRedraw("@1")
 
 	server.mu.Lock()
 	width, height := server.width, server.height
@@ -294,8 +295,8 @@ func TestAgentResumeCommandWithFreshFallback(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := agentResumeCommandWithFreshFallback(tc.resume, tc.launch); got != tc.want {
-				t.Fatalf("agentResumeCommandWithFreshFallback(%q, %q) = %q, want %q", tc.resume, tc.launch, got, tc.want)
+			if got := resumeCommandWithFreshFallback(tc.resume, tc.launch); got != tc.want {
+				t.Fatalf("resumeCommandWithFreshFallback(%q, %q) = %q, want %q", tc.resume, tc.launch, got, tc.want)
 			}
 		})
 	}
@@ -366,5 +367,30 @@ func TestRestoreAgentWindowSurvivesFailedResume(t *testing.T) {
 	snaps := server.snapshots()
 	if len(snaps) != 1 {
 		t.Fatalf("restored windows = %d, want 1 (window vanished after failed resume): %+v", len(snaps), snaps)
+	}
+}
+
+func TestRestoreRelaunchesRunningAliasOnly(t *testing.T) {
+	for _, tc := range []struct {
+		tool    string
+		command string
+		alias   string
+	}{
+		{"claude", "claude", ""},
+		{"antigravity", "agy", ""},
+		{"codex", "codex", ""},
+		{"opencode", "opencode2", "opencode2"},
+		{"claude", "claude-code", "claude-code"},
+	} {
+		options := createWindowOptionsForRestore(restoreWindowState{
+			CurrentCommand: tc.command, AgentTool: tc.tool, AgentToolConfirmed: true,
+		}, false)
+		want := agentRegistry[tc.tool].launch.executable
+		if tc.alias != "" {
+			want = tc.alias
+		}
+		if strings.Trim(options.command, "'") != want {
+			t.Fatalf("%s running as %q restored with %q, want %q", tc.tool, tc.command, options.command, want)
+		}
 	}
 }

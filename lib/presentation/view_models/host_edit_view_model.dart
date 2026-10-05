@@ -145,7 +145,6 @@ typedef HostEditDraft = ({
   bool disableTmuxStatusBar,
   bool disableAgentTmuxStatusBar,
   bool startClisInYoloMode,
-  AgentWindowModePreference agentWindowModePreference,
   bool autoForwardPorts,
 });
 
@@ -220,20 +219,18 @@ class HostEditState {
   const HostEditState({
     this.isLoading = false,
     this.existingHost,
-    this.portForwards = const [],
     this.cliLaunchPreferences = const HostCliLaunchPreferences(),
     this.initialDraft,
-    this.isDirty = false,
   });
 
-  /// Whether the screen is loading or saving.
+  /// Whether the existing host is still being loaded.
+  ///
+  /// Saving deliberately does not set this: the form must stay mounted so a
+  /// save-time validation failure can scroll to and focus the offending field.
   final bool isLoading;
 
   /// Host being edited, or null for create mode.
   final Host? existingHost;
-
-  /// Existing port forwards for the host.
-  final List<PortForward> portForwards;
 
   /// Saved host-scoped coding CLI launch preferences.
   final HostCliLaunchPreferences cliLaunchPreferences;
@@ -241,28 +238,21 @@ class HostEditState {
   /// Baseline draft used by the unsaved-changes guard.
   final HostEditDraft? initialDraft;
 
-  /// Whether the current draft differs from [initialDraft].
-  final bool isDirty;
-
   /// Returns a copy with selected fields replaced.
   HostEditState copyWith({
     bool? isLoading,
     Object? existingHost = _sentinel,
-    List<PortForward>? portForwards,
     HostCliLaunchPreferences? cliLaunchPreferences,
     Object? initialDraft = _sentinel,
-    bool? isDirty,
   }) => HostEditState(
     isLoading: isLoading ?? this.isLoading,
     existingHost: identical(existingHost, _sentinel)
         ? this.existingHost
         : existingHost as Host?,
-    portForwards: portForwards ?? this.portForwards,
     cliLaunchPreferences: cliLaunchPreferences ?? this.cliLaunchPreferences,
     initialDraft: identical(initialDraft, _sentinel)
         ? this.initialDraft
         : initialDraft as HostEditDraft?,
-    isDirty: isDirty ?? this.isDirty,
   );
 }
 
@@ -329,7 +319,6 @@ class HostEditViewModel extends Notifier<HostEditState> {
     state = state.copyWith(
       isLoading: false,
       existingHost: host,
-      portForwards: portForwards,
       cliLaunchPreferences: cliLaunchPreferences,
     );
     return HostEditLoadResult(
@@ -342,17 +331,13 @@ class HostEditViewModel extends Notifier<HostEditState> {
 
   /// Resets dirty tracking to [draft].
   void markInitialDraft(HostEditDraft draft) {
-    state = state.copyWith(initialDraft: draft, isDirty: false);
+    state = state.copyWith(initialDraft: draft);
   }
 
-  /// Updates dirty tracking from [draft] and returns the new dirty value.
+  /// Whether [draft] differs from the initial draft.
   bool updateDraft(HostEditDraft draft) {
     final initialDraft = state.initialDraft;
-    final isDirty = initialDraft != null && draft != initialDraft;
-    if (state.isDirty != isDirty) {
-      state = state.copyWith(isDirty: isDirty);
-    }
-    return isDirty;
+    return initialDraft != null && draft != initialDraft;
   }
 
   /// Returns the first validation issue for [draft], if any.
@@ -436,42 +421,32 @@ class HostEditViewModel extends Notifier<HostEditState> {
 
   /// Persists [request] using [SaveHostCommand].
   Future<int> save(HostEditSaveRequest request) async {
-    state = state.copyWith(isLoading: true);
-    try {
-      final input = await _buildSaveInput(
-        draft: request.draft,
-        hasAutomationAccess: request.hasAutomationAccess,
-      );
+    final input = await _buildSaveInput(
+      draft: request.draft,
+      hasAutomationAccess: request.hasAutomationAccess,
+    );
 
-      final savedHostId = await ref
-          .read(saveHostCommandProvider)
-          .execute(
-            input: input,
-            existingHostId: hostId,
-            existingHost: state.existingHost,
-            presetAction: _buildPresetAction(
-              draft: request.draft,
-              hasAutomationAccess: request.hasAutomationAccess,
-              hasAgentPresetAccess: request.hasAgentPresetAccess,
-            ),
-            cliPreferences: HostCliLaunchPreferences(
-              startInYoloMode: request.hasAgentPresetAccess
-                  ? request.draft.startClisInYoloMode
-                  : state.cliLaunchPreferences.startInYoloMode,
-            ),
-          );
+    final savedHostId = await ref
+        .read(saveHostCommandProvider)
+        .execute(
+          input: input,
+          existingHostId: hostId,
+          existingHost: state.existingHost,
+          presetAction: _buildPresetAction(
+            draft: request.draft,
+            hasAutomationAccess: request.hasAutomationAccess,
+            hasAgentPresetAccess: request.hasAgentPresetAccess,
+          ),
+          cliPreferences: HostCliLaunchPreferences(
+            startInYoloMode: request.hasAgentPresetAccess
+                ? request.draft.startClisInYoloMode
+                : state.cliLaunchPreferences.startInYoloMode,
+          ),
+        );
 
-      ref.invalidate(allHostsProvider);
-      state = state.copyWith(
-        isLoading: false,
-        initialDraft: request.draft,
-        isDirty: false,
-      );
-      return savedHostId;
-    } on Exception {
-      state = state.copyWith(isLoading: false);
-      rethrow;
-    }
+    ref.invalidate(allHostsProvider);
+    state = state.copyWith(initialDraft: request.draft);
+    return savedHostId;
   }
 
   Future<SaveHostInput> _buildSaveInput({

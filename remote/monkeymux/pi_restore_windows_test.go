@@ -45,7 +45,7 @@ func TestAgentRestoreCommandUsesWindowsShellSyntax(t *testing.T) {
 	if got := agentResumeCommand("claude", "session id", false); got != `claude --resume "session id"` {
 		t.Fatalf("cmd resume command = %q", got)
 	}
-	if got := agentResumeCommandWithFreshFallback(`claude --resume "session id"`, "claude"); got != `claude --resume "session id" || claude` {
+	if got := resumeCommandWithFreshFallback(`claude --resume "session id"`, "claude"); got != `claude --resume "session id" || claude` {
 		t.Fatalf("cmd fallback command = %q", got)
 	}
 	if got := agentResumeCommand("claude", "session%id", false); got != "" {
@@ -56,7 +56,7 @@ func TestAgentRestoreCommandUsesWindowsShellSyntax(t *testing.T) {
 	if got := agentResumeCommand("claude", "session's id", false); got != `claude --resume 'session''s id'` {
 		t.Fatalf("PowerShell resume command = %q", got)
 	}
-	if got := agentResumeCommandWithFreshFallback("claude --resume session-id", "claude"); got != "claude --resume session-id; if (-not $?) { claude }" {
+	if got := resumeCommandWithFreshFallback("claude --resume session-id", "claude"); got != "claude --resume session-id; if (-not $?) { claude }" {
 		t.Fatalf("PowerShell fallback command = %q", got)
 	}
 }
@@ -67,11 +67,11 @@ func TestPiRestoreCommandIsSafeForCmd(t *testing.T) {
 	if got := piResumeCommand("session-id", "", ""); got != piLaunchCommand("")+" --session session-id" {
 		t.Fatalf("ordinary resume command = %q", got)
 	}
-	if got := piResumeCommandWithFreshFallback("pi --session session-id", "pi"); got != "pi --session session-id || pi" {
+	if got := resumeCommandWithFreshFallback("pi --session session-id", "pi"); got != "pi --session session-id || pi" {
 		t.Fatalf("cmd fallback command = %q", got)
 	}
 	t.Setenv("MONKEYMUX_SHELL", "powershell.exe")
-	if got := piResumeCommandWithFreshFallback("pi --session session-id", "pi"); got != "pi --session session-id; if (-not $?) { pi }" {
+	if got := resumeCommandWithFreshFallback("pi --session session-id", "pi"); got != "pi --session session-id; if (-not $?) { pi }" {
 		t.Fatalf("PowerShell fallback command = %q", got)
 	}
 	t.Setenv("MONKEYMUX_SHELL", "cmd.exe")

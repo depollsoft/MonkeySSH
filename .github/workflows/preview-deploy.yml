@@ -134,66 +134,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      build-name: ${{ steps.provided-version.outputs.build-name || steps.source-version.outputs.build-name }}
-      build-number: ${{ steps.provided-version.outputs.build-number || steps.source-version.outputs.build-number }}
-      build-codename: ${{ steps.version-codename.outputs.build-codename }}
-      build-display: ${{ steps.version-codename.outputs.build-display }}
+      build-name: ${{ steps.version.outputs.build-name }}
+      build-number: ${{ steps.version.outputs.build-number }}
+      build-codename: ${{ steps.version.outputs.build-codename }}
+      build-display: ${{ steps.version.outputs.build-display }}
     steps:
+      # The workflow commit supplies the version action; the deploy source
+      # supplies the version being built.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate-pr.outputs.deploy-sha }}
+          path: source
+          sparse-checkout: |
+            pubspec.yaml
+            scripts/version_codename.py
+            assets/version_codenames.json
+          sparse-checkout-cone-mode: false
 
-      - name: Reuse requested build version
-        id: provided-version
-        if: inputs.preview-build-name != '' && inputs.preview-build-number != ''
-        env:
-          PREVIEW_BUILD_NAME: ${{ inputs.preview-build-name }}
-          PREVIEW_BUILD_NUMBER: ${{ inputs.preview-build-number }}
-        run: |
-          if [[ ! "$PREVIEW_BUILD_NAME" =~ ^[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "::error title=Invalid build name::Expected a semantic version such as 1.2.3 or 1.2.3-pr.42."
-            exit 1
-          fi
-          if [[ ! "$PREVIEW_BUILD_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] ||
-             (( PREVIEW_BUILD_NUMBER > 2147483647 )); then
-            echo "::error title=Invalid build number::Expected a positive Android-compatible build number."
-            exit 1
-          fi
-
-          printf 'build-name=%s\n' "$PREVIEW_BUILD_NAME" >> "$GITHUB_OUTPUT"
-          printf 'build-number=%s\n' "$PREVIEW_BUILD_NUMBER" >> "$GITHUB_OUTPUT"
-
+      # A requested preview version is reused only when both halves are given.
       - name: Compute version
-        id: source-version
-        if: inputs.preview-build-name == '' || inputs.preview-build-number == ''
-        run: |
-          BASE_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
-          BUILD_NUMBER=$(( $(date +%s) / 10 ))
-
-          if [[ ! "$BASE_VERSION" =~ ^[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "::error title=Invalid source version::pubspec.yaml must contain a safe semantic version."
-            exit 1
-          fi
-
-          printf 'build-name=%s\n' "$BASE_VERSION" >> "$GITHUB_OUTPUT"
-          printf 'build-number=%s\n' "$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve codename
-        id: version-codename
-        env:
-          PROVIDED_BUILD_NAME: ${{ steps.provided-version.outputs.build-name }}
-          SOURCE_BUILD_NAME: ${{ steps.source-version.outputs.build-name }}
-        run: |
-          BUILD_NAME="${PROVIDED_BUILD_NAME:-$SOURCE_BUILD_NAME}"
-          BUILD_CODENAME=$(python3 scripts/version_codename.py "$BUILD_NAME")
-          BUILD_DISPLAY="$BUILD_NAME"
-          if [ -n "$BUILD_CODENAME" ]; then
-            BUILD_DISPLAY="$BUILD_NAME \"$BUILD_CODENAME\""
-          fi
-
-          echo "build-codename=${BUILD_CODENAME}" >> "$GITHUB_OUTPUT"
-          echo "build-display=${BUILD_DISPLAY}" >> "$GITHUB_OUTPUT"
+        id: version
+        uses: ./.github/actions/compute-version
+        with:
+          source: source
+          build-name: ${{ inputs.preview-build-number != '' && inputs.preview-build-name || '' }}
+          build-number: ${{ inputs.preview-build-name != '' && inputs.preview-build-number || '' }}
 
   finalize-version:
     name: Finalize Deploy Version
@@ -230,16 +200,11 @@ jobs:
             const requestedBuildCodename = (process.env.INPUT_BUILD_CODENAME || '').trim();
             const requestedBuildDisplay = (process.env.INPUT_BUILD_DISPLAY || '').trim();
             const requestedBuildNumber = (process.env.INPUT_BUILD_NUMBER || '').trim();
-            // Include legacy workflow filenames so old private deploy artifacts
-            // still keep new PR deploy build numbers monotonic after renames.
-            const workflowIds = [
-              'preview-deploy.yml',
-              'deploy-testflight.yml',
-              'deploy-private.yml',
-              'develop.yml',
-            ];
+            const workflowIds = ['preview-deploy.yml', 'deploy-private.yml'];
+            // Every store upload records this marker (retention-days: 30), so
+            // runs older than that cannot hold a live one.
             const markerArtifactPattern = /^private-deploy-build-number-(\d+)(?:-(?:android|ios))?$/;
-            const legacyArtifactPattern = /^(?:android|ios)-private-.+-(\d+)(?:\.(?:aab|apk|ipa))?$/;
+            const markerCutoff = Date.now() - 31 * 24 * 60 * 60 * 1000;
             const maxDiscoveredBuildNumbersPerWorkflow = 20;
             const maxWorkflowRunPages = 3;
 
@@ -253,24 +218,11 @@ jobs:
                 per_page: 100,
               });
 
-            const extractBuildNumbers = ({artifacts, allowLegacyArtifacts}) =>
+            const extractBuildNumbers = (artifacts) =>
               artifacts
                 .flatMap((artifact) => {
-                  if (artifact.expired) {
-                    return [];
-                  }
-
-                  const markerMatch = artifact.name.match(markerArtifactPattern);
-                  if (markerMatch) {
-                    return [Number(markerMatch[1])];
-                  }
-
-                  if (!allowLegacyArtifacts) {
-                    return [];
-                  }
-
-                  const legacyMatch = artifact.name.match(legacyArtifactPattern);
-                  return legacyMatch ? [Number(legacyMatch[1])] : [];
+                  const markerMatch = !artifact.expired && artifact.name.match(markerArtifactPattern);
+                  return markerMatch ? [Number(markerMatch[1])] : [];
                 })
                 .filter((value) => Number.isFinite(value));
 
@@ -295,11 +247,11 @@ jobs:
                   : response.data?.workflow_runs ?? [];
 
                 for (const run of workflowRuns) {
-                  const artifacts = await listArtifacts(run.id);
-                  const runBuildNumbers = extractBuildNumbers({
-                    artifacts,
-                    allowLegacyArtifacts: run.conclusion === 'success',
-                  });
+                  // Runs are listed newest first.
+                  if (Date.parse(run.created_at) < markerCutoff) {
+                    return buildNumbers;
+                  }
+                  const runBuildNumbers = extractBuildNumbers(await listArtifacts(run.id));
 
                   if (runBuildNumbers.length === 0) {
                     continue;
@@ -438,74 +390,43 @@ jobs:
             const repo = context.repo.repo;
             const issueNumber = Number('${{ inputs.pr-number }}');
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const {statusMarker, resolveRequestContext, upsertStatusComment} =
+            const {resolveRequestContext, upsertStatusComment, renderStatusComment, deployRunMeta} =
               require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/preview_deploy_comments.cjs'));
+            const version = ${{ toJSON(needs.finalize-version.outputs) }};
+            const artifacts = ${{ toJSON(needs.resolve-preview-artifacts.outputs) }};
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: issueNumber, per_page: 100,
             });
-            const {requestKey, requestedBy, requestedAt, requestCommentId,
-              requestCommentUrl, deploySha, previewCommentUrl} = resolveRequestContext({
+            const request = resolveRequestContext({
               comments, inputs: ${{ toJSON(inputs) }}, runId: context.runId,
               actor: context.actor, sourceSha: ${{ toJSON(needs.validate-pr.outputs.deploy-sha) }},
             });
-            const requestDetails = requestCommentId
-              ? `@${requestedBy} via \`/deploy\` comment`
-              : `@${requestedBy} via workflow dispatch`;
-            const rebuildRequired =
-              '${{ needs.finalize-version.outputs.rebuild-required }}' === 'true';
-            const rebuildNote =
-              ${{ toJSON(needs.finalize-version.outputs.rebuild-note) }};
             const artifactDetails =
-              rebuildRequired
-                ? `| **Artifacts** | Rebuilding deploy artifacts in this run because requested preview build \`${{ needs.finalize-version.outputs.requested-build-number }}\` is not newer than the highest recent private deploy build \`${{ needs.finalize-version.outputs.previous-private-deploy-build-number }}\` |`
-                : '${{ needs.resolve-preview-artifacts.outputs.reuse-ios-artifact }}' === 'true'
-                ? `| **Artifacts** | Reusing unsigned iOS preview (run #${{ needs.resolve-preview-artifacts.outputs.ios-run-id }}); rebuilding Android as an all-ABI deploy artifact |`
+              version['rebuild-required'] === 'true'
+                ? `| **Artifacts** | Rebuilding deploy artifacts in this run because requested preview build \`${version['requested-build-number']}\` is not newer than the highest recent private deploy build \`${version['previous-private-deploy-build-number']}\` |`
+                : artifacts['reuse-ios-artifact'] === 'true'
+                ? `| **Artifacts** | Reusing unsigned iOS preview (run #${artifacts['ios-run-id']}); rebuilding Android as an all-ABI deploy artifact |`
                 : '| **Artifacts** | Preview intermediates unavailable, so this run is building deploy artifacts from source |';
 
-            const body = [
-              '## 🚀 Preview Deploy',
-              '',
-              '| | Details |',
-              '|---|---|',
-              '| **Status** | 🚀 Deploying |',
-              `| **Requested by** | ${requestDetails} |`,
-              `| **Preview SHA** | \`${deploySha}\` |`,
-              `| **Version** | \`${{ needs.finalize-version.outputs.build-display }}\` |`,
-              `| **Build** | \`${{ needs.finalize-version.outputs.build-number }}\` |`,
-              '| **Android Status** | ⏳ Deploying to Play internal |',
-              '| **iOS Status** | ⏳ Uploading to TestFlight |',
-              artifactDetails,
-              requestCommentUrl
-                ? `| **Request** | [View /deploy comment](${requestCommentUrl}) |`
-                : null,
-              previewCommentUrl
-                ? `| **Preview Comment** | [View preview artifacts](${previewCommentUrl}) |`
-                : null,
-              requestedAt ? `| **Requested at** | ${requestedAt} |` : null,
-              `| **Workflow** | [View deploy run](${runUrl}) |`,
-              '',
-              rebuildNote,
-              '> A newer `/deploy` comment cancels any earlier deploy request for this PR. This workflow reuses the matching unsigned iOS preview when available and always builds a fresh all-ABI Android deploy artifact.',
-               statusMarker,
-               '<!-- preview-deploy-state:in_progress -->',
-               `<!-- preview-deploy-last-command-comment-id:${requestCommentId} -->`,
-               `<!-- preview-deploy-request-key:${requestKey} -->`,
-               `<!-- preview-deploy-requested-by:${requestedBy} -->`,
-               `<!-- preview-deploy-requested-at:${requestedAt} -->`,
-               `<!-- preview-deploy-request-comment-url:${requestCommentUrl} -->`,
-               `<!-- preview-deploy-preview-comment-url:${previewCommentUrl} -->`,
-               `<!-- preview-deploy-workflow-url:${runUrl} -->`,
-                `<!-- preview-deploy-source-sha:${deploySha} -->`,
-                `<!-- preview-deploy-build-name:${{ needs.finalize-version.outputs.build-name }} -->`,
-                `<!-- preview-deploy-build-codename:${{ needs.finalize-version.outputs.build-codename }} -->`,
-                `<!-- preview-deploy-build-number:${{ needs.finalize-version.outputs.build-number }} -->`,
-               `<!-- preview-deploy-requested-build-number:${{ needs.finalize-version.outputs.requested-build-number }} -->`,
-               `<!-- preview-deploy-rebuild-required:${{ needs.finalize-version.outputs.rebuild-required }} -->`,
-            ]
-              .filter(Boolean)
-              .join('\n');
+            const body = renderStatusComment({
+              status: '🚀 Deploying',
+              workflow: `[View deploy run](${runUrl})`,
+              buildDisplay: version['build-display'],
+              buildNumber: version['build-number'],
+              rows: [
+                '| **Android Status** | ⏳ Deploying to Play internal |',
+                '| **iOS Status** | ⏳ Uploading to TestFlight |',
+                artifactDetails,
+              ],
+              notes: [
+                version['rebuild-note'],
+                '> A newer `/deploy` comment cancels any earlier deploy request for this PR. This workflow reuses the matching unsigned iOS preview when available and always builds a fresh all-ABI Android deploy artifact.',
+              ],
+              meta: deployRunMeta({request, state: 'in_progress', runUrl, version}),
+            });
 
-            await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
+            await upsertStatusComment({github, owner, repo, issueNumber, comments, body,
+              requestKey: request.requestKey});
 
   deploy:
     name: Deploy to TestFlight & Play Internal
@@ -616,82 +537,25 @@ jobs:
             const repo = context.repo.repo;
             const issueNumber = Number('${{ inputs.pr-number }}');
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
-            const {statusMarker, resolveRequestContext, upsertStatusComment} =
+            const {resolveRequestContext, upsertStatusComment, renderStatusComment, deployRunMeta,
+              syncManagedReactions} =
               require(require('path').join(process.env.GITHUB_WORKSPACE, 'scripts/preview_deploy_comments.cjs'));
+            const version = ${{ toJSON(needs.finalize-version.outputs) }};
+            const artifacts = ${{ toJSON(needs.resolve-preview-artifacts.outputs) }};
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: issueNumber, per_page: 100,
             });
-            const {requestKey, requestedBy, requestedAt, requestCommentId,
-              requestCommentUrl, deploySha, previewCommentUrl} = resolveRequestContext({
+            const request = resolveRequestContext({
               comments, inputs: ${{ toJSON(inputs) }}, runId: context.runId,
               actor: context.actor, sourceSha: ${{ toJSON(needs.validate-pr.outputs.deploy-sha) }},
               fallbackSha: ${{ toJSON(inputs.source-sha) }},
             });
-            const requestDetails = requestCommentId
-              ? `@${requestedBy} via \`/deploy\` comment`
-              : `@${requestedBy} via workflow dispatch`;
-            const rebuildRequired =
-              '${{ needs.finalize-version.outputs.rebuild-required }}' === 'true';
-            const rebuildNote =
-              ${{ toJSON(needs.finalize-version.outputs.rebuild-note) }};
             const artifactDetails =
-              rebuildRequired
-                ? `| **Artifacts** | Built fresh deploy artifacts in this run because requested preview build \`${{ needs.finalize-version.outputs.requested-build-number }}\` was not newer than the highest recent private deploy build \`${{ needs.finalize-version.outputs.previous-private-deploy-build-number }}\` |`
-                : '${{ needs.resolve-preview-artifacts.outputs.reuse-ios-artifact }}' === 'true'
-                ? `| **Artifacts** | Reused unsigned iOS preview (run #${{ needs.resolve-preview-artifacts.outputs.ios-run-id }}); built Android fresh as an all-ABI deploy artifact |`
+              version['rebuild-required'] === 'true'
+                ? `| **Artifacts** | Built fresh deploy artifacts in this run because requested preview build \`${version['requested-build-number']}\` was not newer than the highest recent private deploy build \`${version['previous-private-deploy-build-number']}\` |`
+                : artifacts['reuse-ios-artifact'] === 'true'
+                ? `| **Artifacts** | Reused unsigned iOS preview (run #${artifacts['ios-run-id']}); built Android fresh as an all-ABI deploy artifact |`
                 : '| **Artifacts** | Built fresh deploy artifacts in this run because matching preview intermediates were unavailable |';
-
-            const syncRequestCommentReaction = async (targetReaction) => {
-              if (!requestCommentId) {
-                return;
-              }
-
-              const commentId = Number(requestCommentId);
-              const reactions = await github.paginate(
-                'GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions',
-                {
-                  owner,
-                  repo,
-                  comment_id: commentId,
-                  per_page: 100,
-                  headers: {accept: 'application/vnd.github+json'},
-                },
-              );
-              const managedReactionContents = new Set(['eyes', 'rocket', '-1']);
-              const botManagedReactions = reactions.filter(
-                (reaction) =>
-                  managedReactionContents.has(reaction.content) &&
-                  reaction.user?.login === 'github-actions[bot]',
-              );
-
-              for (const reaction of botManagedReactions) {
-                await github.request(
-                  'DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions/{reaction_id}',
-                  {
-                    owner,
-                    repo,
-                    comment_id: commentId,
-                    reaction_id: reaction.id,
-                    headers: {accept: 'application/vnd.github+json'},
-                  },
-                );
-              }
-
-              if (!targetReaction) {
-                return;
-              }
-
-              await github.request(
-                'POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions',
-                {
-                  owner,
-                  repo,
-                  comment_id: commentId,
-                  content: targetReaction,
-                  headers: {accept: 'application/vnd.github+json'},
-                },
-              );
-            };
 
             const validationResult = '${{ needs.validate-pr.result }}';
             const deployResult = '${{ needs.deploy.result }}';
@@ -748,57 +612,29 @@ jobs:
                     ? '❌ iOS deploy failed'
                     : '⏳ iOS status unavailable');
 
-            const body = [
-              '## 🚀 Preview Deploy',
-              '',
-              '| | Details |',
-              '|---|---|',
-              `| **Status** | ${status} |`,
-              `| **Requested by** | ${requestDetails} |`,
-              deploySha ? `| **Preview SHA** | \`${deploySha}\` |` : null,
-              '${{ needs.finalize-version.outputs.build-name }}'
-                ? `| **Version** | \`${{ needs.finalize-version.outputs.build-display }}\` |`
-                : null,
-              '${{ needs.finalize-version.outputs.build-number }}'
-                ? `| **Build** | \`${{ needs.finalize-version.outputs.build-number }}\` |`
-                : null,
-              `| **Android Status** | ${androidPlatformStatus} |`,
-              `| **iOS Status** | ${iosPlatformStatus} |`,
-              artifactDetails,
-              requestCommentUrl
-                ? `| **Request** | [View /deploy comment](${requestCommentUrl}) |`
-                : null,
-              previewCommentUrl
-                ? `| **Preview Comment** | [View preview artifacts](${previewCommentUrl}) |`
-                : null,
-              requestedAt ? `| **Requested at** | ${requestedAt} |` : null,
-              `| **Workflow** | [View deploy run](${runUrl}) |`,
-              '',
-              rebuildNote,
-              '> Add a new `/deploy` comment if you want another deploy. A newer request cancels any earlier deploy request for this PR.',
-               statusMarker,
-               `<!-- preview-deploy-state:${state} -->`,
-               `<!-- preview-deploy-last-command-comment-id:${requestCommentId} -->`,
-               `<!-- preview-deploy-request-key:${requestKey} -->`,
-               `<!-- preview-deploy-requested-by:${requestedBy} -->`,
-               `<!-- preview-deploy-requested-at:${requestedAt} -->`,
-               `<!-- preview-deploy-request-comment-url:${requestCommentUrl} -->`,
-               `<!-- preview-deploy-preview-comment-url:${previewCommentUrl} -->`,
-               `<!-- preview-deploy-workflow-url:${runUrl} -->`,
-                `<!-- preview-deploy-source-sha:${deploySha} -->`,
-                `<!-- preview-deploy-build-name:${{ needs.finalize-version.outputs.build-name }} -->`,
-                `<!-- preview-deploy-build-codename:${{ needs.finalize-version.outputs.build-codename }} -->`,
-                `<!-- preview-deploy-build-number:${{ needs.finalize-version.outputs.build-number }} -->`,
-               `<!-- preview-deploy-requested-build-number:${{ needs.finalize-version.outputs.requested-build-number }} -->`,
-               `<!-- preview-deploy-rebuild-required:${{ needs.finalize-version.outputs.rebuild-required }} -->`,
-            ]
-              .filter(Boolean)
-              .join('\n');
+            const body = renderStatusComment({
+              status,
+              workflow: `[View deploy run](${runUrl})`,
+              buildDisplay: version['build-display'],
+              buildNumber: version['build-number'],
+              rows: [
+                `| **Android Status** | ${androidPlatformStatus} |`,
+                `| **iOS Status** | ${iosPlatformStatus} |`,
+                artifactDetails,
+              ],
+              notes: [
+                version['rebuild-note'],
+                '> Add a new `/deploy` comment if you want another deploy. A newer request cancels any earlier deploy request for this PR.',
+              ],
+              meta: deployRunMeta({request, state, runUrl, version}),
+            });
 
-            await upsertStatusComment({github, owner, repo, issueNumber, comments, body, requestKey});
+            await upsertStatusComment({github, owner, repo, issueNumber, comments, body,
+              requestKey: request.requestKey});
 
             try {
-              await syncRequestCommentReaction(targetReaction);
+              await syncManagedReactions({github, owner, repo, commentId: request.requestCommentId,
+                target: targetReaction});
             } catch (error) {
               core.warning(`Failed to update deploy reaction: ${String(error)}`);
             }

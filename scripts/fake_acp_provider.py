@@ -229,7 +229,6 @@ class FakeAcpProvider:
             "cwd": cwd,
             "title": f"Fake session {self.next_session - 1}",
             "history": [],
-            "closed": False,
             "responseStyle": "concise",
             "safeMode": True,
         }
@@ -372,7 +371,6 @@ class FakeAcpProvider:
             session_id = self.require_session(request_id, params)
             if session_id is None:
                 return
-            self.sessions[session_id]["closed"] = False
             if method == "session/load":
                 for recorded in self.sessions[session_id]["history"]:
                     replayed = dict(recorded)
@@ -383,7 +381,6 @@ class FakeAcpProvider:
         elif method == "session/close":
             session_id = self.require_session(request_id, params)
             if session_id is not None:
-                self.sessions[session_id]["closed"] = True
                 self.result(request_id)
         elif method == "session/set_config_option":
             session_id = self.require_session(request_id, params)

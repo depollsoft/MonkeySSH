@@ -1,9 +1,10 @@
 import 'dart:async';
 
 import '../../data/database/database.dart';
+import 'serial_task_queue.dart';
 import 'ssh_service.dart';
 
-final _portForwardRuntimeOperations = <int, Future<void>>{};
+final _portForwardRuntimeOperations = KeyedTaskGate<int>();
 final _deletedPortForwardCreatedAt = <int, DateTime>{};
 
 /// Outcome of applying a saved port forward to a connected SSH session.
@@ -98,7 +99,7 @@ Future<PortForwardActivationResult> activatePortForwardOnConnectedSession({
   if (deletedCreatedAt != null && deletedCreatedAt != portForward.createdAt) {
     _deletedPortForwardCreatedAt.remove(portForward.id);
   }
-  return _runPortForwardRuntimeOperation(portForward.id, () {
+  return _portForwardRuntimeOperations.run(portForward.id, () {
     if (_deletedPortForwardCreatedAt[portForward.id] == portForward.createdAt) {
       return Future<PortForwardActivationResult>.value(
         const PortForwardActivationResult(
@@ -197,7 +198,7 @@ Future<int> stopPortForwardOnConnectedSessions({
   _deletedPortForwardCreatedAt[portForward.id] = portForward.createdAt;
   var completed = false;
   try {
-    final stoppedCount = await _runPortForwardRuntimeOperation(
+    final stoppedCount = await _portForwardRuntimeOperations.run(
       portForward.id,
       () => _stopPortForwardOnConnectedSessions(
         sessions: sessions,
@@ -238,31 +239,6 @@ Future<int> _stopPortForwardOnConnectedSessions({
     }
   }
   return stoppedCount;
-}
-
-Future<T> _runPortForwardRuntimeOperation<T>(
-  int portForwardId,
-  Future<T> Function() operation,
-) async {
-  while (true) {
-    final pendingOperation = _portForwardRuntimeOperations[portForwardId];
-    if (pendingOperation == null) {
-      break;
-    }
-    await pendingOperation;
-  }
-
-  final gate = Completer<void>();
-  final gateFuture = gate.future;
-  _portForwardRuntimeOperations[portForwardId] = gateFuture;
-  try {
-    return await operation();
-  } finally {
-    if (identical(_portForwardRuntimeOperations[portForwardId], gateFuture)) {
-      unawaited(_portForwardRuntimeOperations.remove(portForwardId));
-    }
-    gate.complete();
-  }
 }
 
 List<SshSession> _connectedSessionsForHost(

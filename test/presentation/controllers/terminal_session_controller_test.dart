@@ -1,18 +1,15 @@
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_wake_lock_service.dart';
 import 'package:monkeyssh/presentation/controllers/terminal_session_controller.dart';
 
+import '../../helpers/mocks.dart';
 import 'terminal_wake_lock_service_cases.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 SshSession _session(int id) => SshSession(
   connectionId: id,
   hostId: id,
-  client: _MockSshClient(),
+  client: MockSshClient(),
   config: const SshConnectionConfig(
     hostname: 'example.com',
     port: 22,

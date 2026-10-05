@@ -24,40 +24,6 @@ const (
 	copilotWorkspaceLimitBytes = 64 * 1024
 )
 
-// nativeAgentTitleTools are the agents whose native windows MonkeyMux labels
-// from the agent's own session store. Their ACP adapters host the CLI's own
-// session id, which is how the client resumes a CLI session natively, so the
-// bridge's session id names the same file the terminal window probe reads.
-// Pi has its own reader (see piSessionTitle).
-var nativeAgentTitleTools = map[string]bool{
-	"claude":  true,
-	"codex":   true,
-	"copilot": true,
-}
-
-// nativeAgentToolForProvider maps a built-in ACP provider id to its agent when
-// the window name (a display label such as "Cursor Agent") does not.
-func nativeAgentToolForProvider(providerID string) string {
-	switch strings.TrimPrefix(strings.TrimSpace(providerID), "builtin:") {
-	case "claude-agent-acp":
-		return "claude"
-	case "codex-acp":
-		return "codex"
-	case "copilot-cli":
-		return "copilot"
-	case "pi-acp":
-		return "pi"
-	case "opencode":
-		return "opencode"
-	case "cursor-agent-acp":
-		return "cursor-agent"
-	case "antigravity-acp":
-		return "antigravity"
-	default:
-		return ""
-	}
-}
-
 // nativeAgentSessionTitle holds one native window's title lookup. It
 // serializes on its own lock because snapshots and the quiet title refresh
 // both read it.
@@ -80,8 +46,13 @@ type nativeAgentTitleState struct {
 
 // title returns the label of the session hosted by a native window's bridge,
 // or "" when the agent has no file-backed title or the file is not written yet.
+// An agent's descriptor carries a nativeTitle reader when its ACP adapter
+// hosts the CLI's own session id, which is how the client resumes a CLI
+// session natively, so the bridge's session id names the same file the
+// terminal window probe reads. Pi has its own reader (see piSessionTitle).
 func (lookup *nativeAgentSessionTitle) title(tool, bridgeID string, now time.Time) string {
-	if !nativeAgentTitleTools[tool] || !validAcpBridgeID(bridgeID) {
+	nativeTitle := agentRegistry[tool].nativeTitle
+	if nativeTitle == nil || !validAcpBridgeID(bridgeID) {
 		return ""
 	}
 	lookup.mu.Lock()
@@ -114,15 +85,7 @@ func (lookup *nativeAgentSessionTitle) title(tool, bridgeID string, now time.Tim
 	if err != nil {
 		return ""
 	}
-	switch tool {
-	case "claude":
-		return state.claude.title(home, state.sessionID, now)
-	case "codex":
-		return state.codex.title(codexHomeDirectory(home), state.sessionID, now)
-	case "copilot":
-		return state.copilot.title(home, state.sessionID)
-	}
-	return ""
+	return nativeTitle(state, home, state.sessionID, now)
 }
 
 func codexHomeDirectory(home string) string {

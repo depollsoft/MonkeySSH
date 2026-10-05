@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
@@ -12,6 +11,7 @@ import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 
+import '../../helpers/mocks.dart';
 import '../../helpers/recording_diagnostics_logger.dart';
 
 class _RecordingUploader implements AcpAttachmentUploader {
@@ -43,8 +43,6 @@ class _RecordingUploader implements AcpAttachmentUploader {
     );
   }
 }
-
-class _MockSftpClient extends Mock implements SftpClient {}
 
 class _MockRemoteFileService extends Mock implements RemoteFileService {}
 
@@ -738,11 +736,11 @@ void main() {
   });
 
   group('SftpAcpAttachmentUploader', () {
-    late _MockSftpClient sftp;
+    late MockSftpClient sftp;
     late _MockRemoteFileService remoteFileService;
 
     setUp(() {
-      sftp = _MockSftpClient();
+      sftp = MockSftpClient();
       remoteFileService = _MockRemoteFileService();
       when(() => remoteFileService.resolveInitialDirectory(sftp))
           .thenAnswer((_) async => '/home/demo');

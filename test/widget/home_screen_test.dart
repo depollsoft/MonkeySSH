@@ -1371,11 +1371,8 @@ void main() {
       initialSessions: [session],
     );
 
-    when(() => tmuxService.isTmuxActive(session)).thenAnswer((_) async => true);
     when(() => tmuxService.currentSessionName(session))
         .thenAnswer((_) async => 'wrong-session');
-    when(() => tmuxService.hasSession(session, 'correct-session'))
-        .thenAnswer((_) async => true);
     when(() => tmuxService.watchWindowChanges(session, any()))
         .thenAnswer((_) => _idleWindowChanges());
     when(() => tmuxService.listWindows(session, any())).thenAnswer(
@@ -1642,8 +1639,6 @@ void main() {
           initialSessions: [session],
         );
 
-        when(() => tmuxService.isTmuxActive(session))
-            .thenAnswer((_) async => true);
         when(() => tmuxService.currentSessionName(session))
             .thenAnswer((_) async => 'work');
         when(() => tmuxService.watchWindowChanges(session, 'work')).thenAnswer(
@@ -2160,12 +2155,8 @@ void main() {
         initialSessions: [session],
       );
 
-      when(() => tmuxService.isTmuxActive(session))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.currentSessionName(session))
           .thenAnswer((_) async => null);
-      when(() => tmuxService.hasSession(session, 'correct-session'))
-          .thenAnswer((_) async => true);
       when(() => tmuxService.watchWindowChanges(session, any()))
           .thenAnswer((_) => _idleWindowChanges());
       when(() => tmuxService.listWindows(session, 'correct-session'))
@@ -2243,8 +2234,6 @@ void main() {
       (oldFlags, 'old-server'),
       (newFlags, 'new-server'),
     ]) {
-      when(() => tmuxService.hasSession(session, 'work', extraFlags: flags))
-          .thenAnswer((_) async => true);
       when(
         () =>
             tmuxService.watchWindowChanges(session, 'work', extraFlags: flags),

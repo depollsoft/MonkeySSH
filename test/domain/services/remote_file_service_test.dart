@@ -5,11 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 
+import '../../helpers/mocks.dart';
 import 'remote_file_service_crashlytics_cases.dart';
 import 'remote_file_service_io_cases.dart';
 import 'sftp_screen_path_resolution_cases.dart';
-
-class _MockSftpClient extends Mock implements SftpClient {}
 
 void main() {
   group('remote_file_service', () {
@@ -92,7 +91,7 @@ void main() {
         () async {
           const remotePath = '/tmp/monkeyssh';
           const service = RemoteFileService();
-          final sftp = _MockSftpClient();
+          final sftp = MockSftpClient();
           var statCalls = 0;
 
           when(() => sftp.stat(remotePath)).thenAnswer((_) {

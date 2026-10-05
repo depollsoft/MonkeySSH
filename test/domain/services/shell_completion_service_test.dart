@@ -10,9 +10,8 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
-
-class _MockSshClient extends Mock implements ssh.SSHClient {}
 
 class _MockSshExecSession extends MockSessionWithChannel {}
 
@@ -32,6 +31,20 @@ SshSession _buildShellCompletionSession(
     username: 'tester',
   ),
 );
+
+/// Completes [invocation] against a session whose only exec output is the
+/// remote history listing [commands].
+Future<List<ShellCompletionSuggestion>> _completeFromHistory(
+  ShellCompletionInvocation invocation,
+  List<String> commands,
+) {
+  final client = MockSshClient();
+  _stubHistoryExec(client, commands);
+  return ShellCompletionService().complete(
+    _buildShellCompletionSession(client, connectionId: 1, hostId: 1),
+    invocation,
+  );
+}
 
 void _stubHistoryExec(ssh.SSHClient client, List<String> commands) {
   final exec = _MockSshExecSession();
@@ -104,7 +117,7 @@ void main() {
           maxHistoryOutputChars: history ? retained.length : 80000,
           maxOutputChars: history ? 12000 : retained.length,
         );
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _buildShellCompletionSession(
           client,
           connectionId: 101,
@@ -148,7 +161,7 @@ void main() {
         timeout: const Duration(milliseconds: 10),
         historyTimeout: const Duration(milliseconds: 10),
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 102,
@@ -182,7 +195,7 @@ void main() {
         timeout: const Duration(milliseconds: 10),
         historyTimeout: const Duration(milliseconds: 10),
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 104,
@@ -225,7 +238,7 @@ void main() {
   for (final stdinCloseHangs in [false, true]) {
     test('interactive collector subscribes before writing and closes once '
         '(stdin close hangs: $stdinCloseHangs)', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 103,
@@ -619,8 +632,8 @@ void main() {
     });
 
     test(
-      'buildShellHistorySuggestions ranks by token count frequency and recency',
-      () {
+      'history suggestions rank by token count frequency and recency',
+      () async {
         const invocation = ShellCompletionInvocation(
           commandLine: 'git c',
           cursorOffset: 5,
@@ -633,7 +646,7 @@ void main() {
           workingDirectory: '/Users/depoll/project',
         );
 
-        final suggestions = buildShellHistorySuggestions([
+        final suggestions = await _completeFromHistory(invocation, [
           'git commit',
           'git checkout feature/login',
           'git commit -m "old message"',
@@ -642,7 +655,7 @@ void main() {
           'git commit -m "new message"',
           'git cherry-pick abc',
           'git commit -m "new message"',
-        ], invocation);
+        ]);
 
         expect(suggestions.map((suggestion) => suggestion.label), [
           'commit',
@@ -667,15 +680,15 @@ void main() {
       },
     );
 
-    test('buildShellHistorySuggestions filters encoded command names', () {
+    test('history suggestions filter encoded command names', () async {
       final invocation = _commandInvocation('tmu', '/Users/depoll/project');
 
-      final suggestions = buildShellHistorySuggestions([
+      final suggestions = await _completeFromHistory(invocation, [
         'tmux%20new-session%20-A%20-s%20monkeyssh',
         'tmux new-session -A -s monkeyssh',
         'tmux',
         'tmux',
-      ], invocation);
+      ]);
 
       expect(suggestions.map((suggestion) => suggestion.label), [
         'tmux',
@@ -687,8 +700,8 @@ void main() {
       'service reuses host-cached history while fresh connection loads',
       () async {
         final service = ShellCompletionService();
-        final firstClient = _MockSshClient();
-        final secondClient = _MockSshClient();
+        final firstClient = MockSshClient();
+        final secondClient = MockSshClient();
         final firstSession = _buildShellCompletionSession(
           firstClient,
           connectionId: 1,
@@ -742,7 +755,7 @@ void main() {
       'runs PowerShell completion and history probes on Windows remotes',
       () async {
         final service = ShellCompletionService();
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _buildShellCompletionSession(
           client,
           connectionId: 7,
@@ -797,7 +810,7 @@ void main() {
 
     test('uses TabExpansion2 for Windows argument completions', () async {
       final service = ShellCompletionService();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _buildShellCompletionSession(
         client,
         connectionId: 8,
@@ -858,8 +871,8 @@ void main() {
       'service keeps in-flight history loads scoped to their connection',
       () async {
         final service = ShellCompletionService();
-        final firstClient = _MockSshClient();
-        final secondClient = _MockSshClient();
+        final firstClient = MockSshClient();
+        final secondClient = MockSshClient();
         final firstSession = _buildShellCompletionSession(
           firstClient,
           connectionId: 1,
@@ -908,7 +921,7 @@ void main() {
       },
     );
 
-    test('buildShellHistorySuggestions matches patterns around arguments', () {
+    test('history suggestions match patterns around arguments', () async {
       const commandLine = 'codex --prompt "try history" --s';
       const invocation = ShellCompletionInvocation(
         commandLine: commandLine,
@@ -922,9 +935,9 @@ void main() {
         workingDirectory: '/Users/depoll/project',
       );
 
-      final suggestions = buildShellHistorySuggestions([
+      final suggestions = await _completeFromHistory(invocation, [
         'codex --prompt="do something" --sandbox workspace-write',
-      ], invocation);
+      ]);
 
       expect(suggestions.map((suggestion) => suggestion.label), ['--sandbox']);
       expect(suggestions.single.replacementStart, 29);

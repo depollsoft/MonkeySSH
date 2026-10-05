@@ -11,22 +11,19 @@ import 'package:monkeyssh/domain/models/agent_usage.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
-import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/agent_management_screen.dart';
+
+import '../helpers/mocks.dart';
 
 class _MockAgentManagementService extends Mock
     implements AgentManagementService {}
 
-class _MockSshSession extends Mock implements SshSession {}
-
-class _MockMonetizationService extends Mock implements MonetizationService {}
-
 void main() {
   late _MockAgentManagementService service;
-  late _MockSshSession session;
+  late MockSshSession session;
   late List<AgentRuntimeInfo> runtimes;
   late MonetizationState access;
-  late _MockMonetizationService billing;
+  late MockMonetizationService billing;
 
   setUp(() {
     access = const MonetizationState(
@@ -36,13 +33,13 @@ void main() {
       debugUnlockAvailable: false,
       debugUnlocked: false,
     );
-    billing = _MockMonetizationService();
+    billing = MockMonetizationService();
     when(() => billing.currentState).thenAnswer((_) => access);
     when(() => billing.canUseFeature(MonetizationFeature.agentManagement))
         .thenAnswer((_) async => access.isProUnlocked);
     service = _MockAgentManagementService();
 
-    session = _MockSshSession();
+    session = MockSshSession();
     when(() => service.readUsage(session, any())).thenAnswer((_) async => {});
     runtimes = [
       AgentRuntimeInfo(

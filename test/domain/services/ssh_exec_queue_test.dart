@@ -6,9 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 
+import '../../helpers/mocks.dart';
 import 'ssh_exec_queue_crashlytics_cases.dart';
-
-class _MockExecSession extends Mock implements SSHSession {}
 
 class _MockChannel extends Mock implements SSHChannel {}
 
@@ -41,7 +40,7 @@ void main() {
         final channels = <SSHSession>[];
         for (final opening in openings) {
           if (lateResult == 'channel') {
-            final channel = _MockExecSession();
+            final channel = MockSSHSession();
             when(() => channel.channel).thenReturn(_MockChannel());
             channels.add(channel);
             opening.complete(channel);

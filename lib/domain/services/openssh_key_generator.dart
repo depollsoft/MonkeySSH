@@ -27,6 +27,30 @@ List<SSHKeyPair> _parseOpenSshPrivateKey((String, String?) params) =>
       (params.$2?.isEmpty ?? false) ? null : params.$2,
     );
 
+/// Parses and decrypts several PEM identities in one background isolate.
+///
+/// A key that is malformed, or whose passphrase is missing or wrong, yields
+/// an empty list at its position instead of failing the batch.
+Future<List<List<SSHKeyPair>>> parseOpenSshPrivateKeys(
+  List<(String, String?)> keys,
+) => keys.isEmpty
+    ? Future.value(const [])
+    : compute(_parseOpenSshPrivateKeys, keys);
+
+List<List<SSHKeyPair>> _parseOpenSshPrivateKeys(List<(String, String?)> keys) =>
+    [
+      for (final key in keys)
+        () {
+          try {
+            return _parseOpenSshPrivateKey(key);
+          } on FormatException {
+            return const <SSHKeyPair>[];
+          } on SSHError {
+            return const <SSHKeyPair>[];
+          }
+        }(),
+    ];
+
 /// Parameters passed to the background isolate that builds the key.
 typedef _GenerateParams = ({
   SshKeyType keyType,

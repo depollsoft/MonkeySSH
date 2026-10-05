@@ -3,7 +3,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,13 +23,12 @@ import 'package:monkeyssh/presentation/models/app_platform_file.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
 import 'package:monkeyssh/presentation/screens/settings_screen.dart';
 
+import '../test/helpers/mocks.dart';
 import '../test/support/settings_import_test_helpers.dart';
 
 const _backgroundSshChannel = MethodChannel(
   'xyz.depollsoft.monkeyssh/ssh_service',
 );
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 class _FakeActiveSessionsSshService extends SshService {
   final Map<int, SshSession> _sessions = {};
@@ -51,7 +49,7 @@ class _FakeActiveSessionsSshService extends SshService {
     SshConnectionCancellationToken? cancellationToken,
   }) async {
     final connectionId = _nextConnectionId++;
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final clientDoneCompleter = Completer<void>();
     _clientDoneCompleters[connectionId] = clientDoneCompleter;
     when(() => client.done).thenAnswer((_) => clientDoneCompleter.future);

@@ -387,7 +387,7 @@ func TestRedrawFallbackRejectsFrameWithoutVisibleContent(t *testing.T) {
 	server.attachClients[conn] = client
 	server.attachConn = conn
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	captured := append([]byte(nil), window.redrawForwardingFallbackHistory...)
+	captured := append([]byte(nil), redrawFallbackHistory(window)...)
 	server.mu.Unlock()
 
 	if len(captured) != 0 {

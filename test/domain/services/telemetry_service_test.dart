@@ -8,9 +8,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/app_metadata.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
+
+import '../../helpers/recording_diagnostics_logger.dart';
 
 void main() {
   group('absorbed crash reporting', () {
@@ -484,6 +487,46 @@ void main() {
       expect(analytics.events.last.parameters['platform'], 'i_os');
     });
 
+    test(
+      'every paywall feature and the invalid-name failure are allowlisted',
+      () async {
+        final analytics = _FakeAnalyticsClient();
+        final service = TelemetryService(
+          status: TelemetryServiceStatus.ready,
+          collectionEnabled: true,
+          diagnosticsLogger: const NoopDiagnosticsLogger(),
+          analyticsClient: analytics,
+          crashReporter: _FakeCrashReporter(),
+        );
+
+        for (final feature in MonetizationFeature.values) {
+          await service.logPaywallShown(
+            feature: feature.name,
+            source: 'feature_gate',
+          );
+        }
+        await service.logSftpTransferFailed(
+          direction: 'upload',
+          fileCount: 1,
+          sizeBytes: 10,
+          duration: Duration.zero,
+          failureCategory: 'invalid_name',
+        );
+
+        final paywallFeatures = analytics.events
+            .where((event) => event.name == 'paywall_shown')
+            .map((event) => event.parameters['feature'])
+            .toList();
+        expect(paywallFeatures, hasLength(MonetizationFeature.values.length));
+        expect(paywallFeatures, isNot(contains('unknown')));
+        expect(paywallFeatures, contains('concurrent_acp_sessions'));
+        expect(
+          analytics.events.last.parameters['failure_category'],
+          'invalid_name',
+        );
+      },
+    );
+
     test('logs connection funnel with coarse buckets', () async {
       final analytics = _FakeAnalyticsClient();
       final service = TelemetryService(
@@ -818,6 +861,38 @@ void main() {
       );
     });
 
+    test(
+      'does not re-apply a collection state the service already holds',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        await SettingsService(db)
+            .setBool(SettingKeys.telemetryCollection, value: true);
+        final analytics = _FakeAnalyticsClient();
+        final service = TelemetryService(
+          status: TelemetryServiceStatus.ready,
+          collectionEnabled: true,
+          diagnosticsLogger: const NoopDiagnosticsLogger(),
+          analyticsClient: analytics,
+          crashReporter: _FakeCrashReporter(),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            telemetryServiceProvider.overrideWithValue(service),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        container.read(telemetryCollectionNotifierProvider.notifier);
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(container.read(telemetryCollectionNotifierProvider), isTrue);
+        expect(analytics.collectionUpdates, isEmpty);
+      },
+    );
+
     for (final initiallyEnabled in [false, true]) {
       test(
         'opt-out gates events during queued persistence from '
@@ -1142,6 +1217,40 @@ void main() {
       expect(
         await SettingsService(db).getInt(SettingKeys.telemetryAppLaunchCount),
         TelemetryOptInPromptNotifier.minimumLaunchCountForPrompt,
+      );
+    });
+
+    test('overlapping markShown calls log and persist once', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      final logger = RecordingDiagnosticsLogger();
+      final container = _createTelemetryContainer(
+        db: db,
+        telemetryService: TelemetryService(
+          status: TelemetryServiceStatus.disabledByBuild,
+          collectionEnabled: false,
+          diagnosticsLogger: logger,
+        ),
+      );
+      addTearDown(container.dispose);
+      addTearDown(db.close);
+      final notifier = container.read(
+        telemetryOptInPromptNotifierProvider.notifier,
+      );
+
+      // The prompt card re-requests this after every frame until the state
+      // flips, so the calls overlap while the first write is in flight.
+      await Future.wait([
+        notifier.markShown(trigger: 'launches'),
+        notifier.markShown(trigger: 'launches'),
+      ]);
+
+      expect(
+        logger.events.where((event) => event.message == 'prompt_shown'),
+        hasLength(1),
+      );
+      expect(
+        container.read(telemetryOptInPromptNotifierProvider).choice,
+        TelemetryOptInPromptChoice.shown,
       );
     });
 

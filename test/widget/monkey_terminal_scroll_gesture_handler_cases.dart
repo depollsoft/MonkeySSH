@@ -567,5 +567,37 @@ void registerMonkeyTerminalScrollGestureHandlerTests() {
         accumulator.dispose();
       });
     });
+
+    test('scrollBy cancels a probe the application did not answer', () {
+      fakeAsync((async) {
+        final terminal = Terminal()
+          ..resize(40, 10)
+          ..useAltBuffer();
+        _renderTrackpadCalibrationRows(terminal, 0);
+        final sent = <bool>[];
+        final accumulator = TerminalScrollAccumulator(
+          terminal: () => terminal,
+          getLineHeight: () => 10,
+          sendScrollEvent: ({required up}) {
+            sent.add(up);
+            return false;
+          },
+        );
+        addTearDown(accumulator.dispose);
+
+        accumulator
+          ..calibrator.beginGesture()
+          ..scrollBy(30);
+
+        // The unanswered probe must not block the remaining steps.
+        expect(sent, [false, false, false]);
+        expect(accumulator.calibrator.waitingForResponse, isFalse);
+        expect(accumulator.calibrator.needsMeasurement, isFalse);
+        expect(accumulator.scrollRemainder, 0);
+
+        accumulator.scrollBy(-10);
+        expect(sent, [false, false, false, true]);
+      });
+    });
   });
 }

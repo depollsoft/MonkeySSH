@@ -12,24 +12,28 @@ import 'package:xterm/xterm.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import 'terminal_key_input.dart';
+import 'terminal_prompt_tail.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 final _leadingSwipeNewlineArtifactPattern = RegExp(r'^[\r\n]+ ?(?=\S)');
 final _splitLeadingTokenCandidatePattern = RegExp(r'^\s*\S\s+\S');
-final _terminalTextControlPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
-final _newlinePattern = RegExp(r'[\r\n]');
 bool _isNewlineCodeUnit(int codeUnit) => codeUnit == 0x0A || codeUnit == 0x0D;
 const _enterCommitNewlineSequences = <String>['\r\n', '\n', '\r'];
-bool _isAsciiLetterOrDigitCodeUnit(int codeUnit) =>
-    (codeUnit >= 0x30 && codeUnit <= 0x39) ||
-    (codeUnit >= 0x41 && codeUnit <= 0x5A) ||
-    (codeUnit >= 0x61 && codeUnit <= 0x7A);
 
-bool _isPromptWhitespaceCodeUnit(int codeUnit) =>
-    codeUnit == 0x20 ||
-    codeUnit == 0x09 ||
-    codeUnit == 0x0A ||
-    codeUnit == 0x0D;
+/// Length of the line break starting at [index]: 2 for CRLF, 1 for a lone CR
+/// or LF, 0 when [index] is not a line break.
+int _newlineSequenceLengthAt(String text, int index) {
+  if (index >= text.length) {
+    return 0;
+  }
+  final codeUnit = text.codeUnitAt(index);
+  if (codeUnit == 0x0D) {
+    return index + 1 < text.length && text.codeUnitAt(index + 1) == 0x0A
+        ? 2
+        : 1;
+  }
+  return codeUnit == 0x0A ? 1 : 0;
+}
 
 /// Longest unchanged trailing tail that is retyped (backspaced and re-sent)
 /// instead of navigated around with arrow keys when an IME edits text just
@@ -146,7 +150,7 @@ bool _startsPathLikePaste(int codeUnit) =>
     codeUnit == 0x2E || codeUnit == 0x2F || codeUnit == 0x7E;
 
 bool _isPasteWordCodeUnit(int codeUnit) =>
-    _isAsciiLetterOrDigitCodeUnit(codeUnit) || codeUnit == 0x5F;
+    isAsciiLetterOrDigitCodeUnit(codeUnit) || codeUnit == 0x5F;
 
 /// Maximum delay between a modifier chord and its follow-up character for the
 /// follow-up to be treated as part of the chord (e.g. tmux's Ctrl+b, c).
@@ -198,14 +202,12 @@ class TerminalImeOptions {
     required this.platform,
     this.isWeb = false,
     this.readOnly = false,
-    this.deleteDetection = false,
     this.sensitiveInput = false,
     this.keyboardAppearance = Brightness.dark,
   });
   final TargetPlatform platform;
   final bool isWeb;
   final bool readOnly;
-  final bool deleteDetection;
   final bool sensitiveInput;
   final Brightness keyboardAppearance;
 }
@@ -241,8 +243,6 @@ class TerminalImeEffects {
   final void Function(TextEditingValue)? onEditingState;
 }
 
-enum TerminalImeResetReason { connection, toolbar, completions }
-
 /// Owns terminal editing, composition, review revisions and deferred resets.
 /// No widget, focus node or platform input connection is required.
 class TerminalImeEngine {
@@ -260,21 +260,6 @@ class TerminalImeEngine {
   final Timer Function(Duration, void Function()) schedule;
   bool _active = true;
   TextEditingValue get editingValue => _currentEditingState;
-
-  void reset(TerminalImeResetReason reason) {
-    switch (reason) {
-      case TerminalImeResetReason.connection:
-        cancelDeferredTrailingBackspaceImeClear();
-        resetConnectionEditingState();
-      case TerminalImeResetReason.toolbar:
-        clearImeBufferForFreshInput();
-      case TerminalImeResetReason.completions:
-        resetImeCompletions();
-    }
-  }
-
-  /// Drops queued edits and makes outstanding review decisions stale.
-  void invalidate() => _invalidatePendingEditingUpdates();
 
   /// Records a touch that may move the terminal caret independently of the IME.
   void prepareForTouchCursorMove() => _clearImeAfterNextTouchCursorMove = true;
@@ -308,11 +293,17 @@ class TerminalImeEngine {
   void dispose() {
     _active = false;
     cancelDeferredTrailingBackspaceImeClear();
-    invalidate();
+    _invalidatePendingEditingUpdates();
   }
 
   bool _sawImeComposition = false;
   bool _isProcessingEditingValue = false;
+
+  /// Memo for [TerminalImeEffects.resolveTextBeforeCursor] during the
+  /// synchronous part of one editing update: the resolver rebuilds the
+  /// wrapped command snapshot, and one update asks for it several times.
+  bool _memoizeTextBeforeCursor = false;
+  ({String? text})? _memoizedTextBeforeCursor;
   bool _lastProcessedUserSelectionWasValid = false;
   bool _lastProcessedSelectionWasCollapsed = true;
   bool _trimLeadingSuggestionSpaceAfterDelete = false;
@@ -370,9 +361,6 @@ class TerminalImeEngine {
   bool get _shouldDeferTrailingBackspaceImeClear =>
       !options.isWeb && options.platform == TargetPlatform.iOS;
 
-  bool get _shouldUseIosBackspaceRunway =>
-      options.deleteDetection && _shouldDeferTrailingBackspaceImeClear;
-
   void cancelDeferredTrailingBackspaceImeClear() {
     _deferredTrailingBackspaceImeClearTimer?.cancel();
     _deferredTrailingBackspaceImeClearTimer = null;
@@ -419,7 +407,8 @@ class TerminalImeEngine {
     required bool hasShortcutModifier,
     TerminalKeyEventType type = TerminalKeyEventType.press,
   }) {
-    final handled = key == TerminalKey.enter
+    final isEnter = key == TerminalKey.enter || key == TerminalKey.numpadEnter;
+    final handled = isEnter
         ? sendTerminalEnterInput(
             terminal,
             shiftActive: shift,
@@ -448,7 +437,7 @@ class TerminalImeEngine {
       _hardwareEnterSubmittedText = null;
       // Shortcut chords can reach here mid-composition; the IME still owns
       // that uncommitted text, so leave its buffer alone.
-      if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
+      if (isEnter &&
           type == TerminalKeyEventType.press &&
           _currentEditingState.composing.isCollapsed) {
         _resetAfterHardwareEnter(
@@ -875,11 +864,8 @@ class TerminalImeEngine {
     return _rejectShellCompletionEcho();
   }
 
-  int _leadingEnterSequenceLength(String text) => text.startsWith('\r\n')
-      ? 2
-      : text.startsWith('\r') || text.startsWith('\n')
-      ? 1
-      : 0;
+  int _leadingEnterSequenceLength(String text) =>
+      _newlineSequenceLengthAt(text, 0);
 
   void _captureShellCompletionEnterFollowUp(
     TextEditingValue value,
@@ -1003,18 +989,8 @@ class TerminalImeEngine {
         // IMEs can normalize LF/CR/CRLF between preview and commitment.
         // Compare line breaks semantically but retain the source length for
         // slicing and mapping that native value's editing ranges.
-        prefixOffset +=
-            expected == 0x0D &&
-                prefixOffset + 1 < prefix.length &&
-                prefix.codeUnitAt(prefixOffset + 1) == 0x0A
-            ? 2
-            : 1;
-        textOffset +=
-            actual == 0x0D &&
-                textOffset + 1 < text.length &&
-                text.codeUnitAt(textOffset + 1) == 0x0A
-            ? 2
-            : 1;
+        prefixOffset += _newlineSequenceLengthAt(prefix, prefixOffset);
+        textOffset += _newlineSequenceLengthAt(text, textOffset);
       } else {
         if (expected != actual) {
           return null;
@@ -1224,22 +1200,14 @@ class TerminalImeEngine {
     _currentEditingState = initEditingState.copyWith();
   }
 
-  TextEditingValue get initEditingState => options.deleteDetection
-      ? const TextEditingValue(
-          text: _deleteDetectionMarker,
-          selection: TextSelection.collapsed(
-            offset: _deleteDetectionMarker.length,
-          ),
-        )
-      : TextEditingValue.empty;
+  TextEditingValue get initEditingState => const TextEditingValue(
+    text: _deleteDetectionMarker,
+    selection: TextSelection.collapsed(offset: _deleteDetectionMarker.length),
+  );
 
   late TextEditingValue _currentEditingState = initEditingState.copyWith();
 
   int _editingPrefixLength(String text) {
-    if (!options.deleteDetection) {
-      return 0;
-    }
-
     var prefixLength = 0;
     while (prefixLength < text.length &&
         prefixLength < _deleteDetectionMarker.length &&
@@ -1269,50 +1237,43 @@ class TerminalImeEngine {
     return index;
   }
 
-  int _longestCommonCaseInsensitiveGraphemeSubsequenceLength(
+  /// Whether the two grapheme lists share a case-insensitive common
+  /// subsequence of [length] graphemes, for [length] of 0, 1 or 2.
+  bool _sharesCaseInsensitiveGraphemeSubsequence(
     List<String> previousGraphemes,
     List<String> currentGraphemes, {
-    required int maxLength,
+    required int length,
   }) {
-    if (previousGraphemes.isEmpty || currentGraphemes.isEmpty) {
-      return 0;
+    if (length == 0) {
+      return true;
     }
 
     final currentPositionsByGrapheme = <String, List<int>>{};
     for (var index = 0; index < currentGraphemes.length; index++) {
-      final normalizedCurrentGrapheme = currentGraphemes[index].toLowerCase();
       currentPositionsByGrapheme
-          .putIfAbsent(normalizedCurrentGrapheme, () => <int>[])
+          .putIfAbsent(currentGraphemes[index].toLowerCase(), () => <int>[])
           .add(index);
     }
 
-    var hasLengthOneMatch = false;
-    int? shortestLengthOneEndIndex;
+    int? earliestMatchEnd;
     for (final previousGrapheme in previousGraphemes) {
       final positions =
           currentPositionsByGrapheme[previousGrapheme.toLowerCase()];
-      if (positions == null || positions.isEmpty) {
+      if (positions == null) {
         continue;
       }
-
-      if (maxLength == 1) {
-        return 1;
+      if (length == 1) {
+        return true;
       }
-
-      hasLengthOneMatch = true;
-      if (shortestLengthOneEndIndex != null &&
-          positions.last > shortestLengthOneEndIndex) {
-        return 2;
+      if (earliestMatchEnd != null && positions.last > earliestMatchEnd) {
+        return true;
       }
-
       final firstPosition = positions.first;
-      if (shortestLengthOneEndIndex == null ||
-          firstPosition < shortestLengthOneEndIndex) {
-        shortestLengthOneEndIndex = firstPosition;
+      if (earliestMatchEnd == null || firstPosition < earliestMatchEnd) {
+        earliestMatchEnd = firstPosition;
       }
     }
-
-    return hasLengthOneMatch ? 1 : 0;
+    return false;
   }
 
   int _commonGraphemeSuffixLength(
@@ -1337,7 +1298,7 @@ class TerminalImeEngine {
       text.substring(_editingPrefixLength(text));
 
   String _stripLeakedDeleteSentinelPrefix(String text) {
-    if (!_shouldUseIosBackspaceRunway || text.isEmpty) {
+    if (!_shouldDeferTrailingBackspaceImeClear || text.isEmpty) {
       return text;
     }
 
@@ -1387,7 +1348,7 @@ class TerminalImeEngine {
       return true;
     }
 
-    final textBeforeCursor = effects.resolveTextBeforeCursor?.call();
+    final textBeforeCursor = _resolveTextBeforeCursor();
     if (textBeforeCursor == null || textBeforeCursor.isEmpty) {
       return true;
     }
@@ -1406,41 +1367,25 @@ class TerminalImeEngine {
   }
 
   bool _currentLineLooksLikePromptPrefix(String textBeforeCursor) {
-    var index = textBeforeCursor.length - 1;
-    while (index >= 0) {
-      final codeUnit = textBeforeCursor.codeUnitAt(index);
-      if (codeUnit == 0x0A || codeUnit == 0x0D) {
-        return true;
-      }
-      if (!_isPromptWhitespaceCodeUnit(codeUnit)) {
-        break;
-      }
-      index--;
-    }
+    final tail = scanPromptTail(textBeforeCursor);
+    return tail.endsAtLineStart || tail.promptMarkerLength != null;
+  }
 
-    if (index < 0) {
-      return true;
+  String? _resolveTextBeforeCursor() {
+    final memo = _memoizedTextBeforeCursor;
+    if (memo != null) {
+      return memo.text;
     }
-
-    var visibleCodeUnitCount = 0;
-    while (index >= 0) {
-      final codeUnit = textBeforeCursor.codeUnitAt(index);
-      if (codeUnit == 0x0A || codeUnit == 0x0D) {
-        break;
-      }
-      if (!_isPromptWhitespaceCodeUnit(codeUnit)) {
-        visibleCodeUnitCount++;
-        if (visibleCodeUnitCount > 4) {
-          return false;
-        }
-        if (_isAsciiLetterOrDigitCodeUnit(codeUnit)) {
-          return false;
-        }
-      }
-      index--;
+    final text = effects.resolveTextBeforeCursor?.call();
+    if (_memoizeTextBeforeCursor) {
+      _memoizedTextBeforeCursor = (text: text);
     }
+    return text;
+  }
 
-    return true;
+  void _stopMemoizingTextBeforeCursor() {
+    _memoizeTextBeforeCursor = false;
+    _memoizedTextBeforeCursor = null;
   }
 
   int _sendInputDelta(
@@ -1488,18 +1433,11 @@ class TerminalImeEngine {
     var count = 0;
     var index = 0;
     while (index < text.length) {
-      final codeUnit = text.codeUnitAt(index);
-      if (codeUnit == 0x0D) {
+      final newlineLength = _newlineSequenceLengthAt(text, index);
+      if (newlineLength > 0) {
         count++;
-        index += index + 1 < text.length && text.codeUnitAt(index + 1) == 0x0A
-            ? 2
-            : 1;
-      } else {
-        if (codeUnit == 0x0A) {
-          count++;
-        }
-        index++;
       }
+      index += newlineLength > 0 ? newlineLength : 1;
     }
     return count;
   }
@@ -1552,14 +1490,7 @@ class TerminalImeEngine {
         segmentStart = blockEnd;
         continue;
       }
-      final codeUnit = text.codeUnitAt(index);
-      final newlineLength = codeUnit == 0x0D
-          ? (index + 1 < text.length && text.codeUnitAt(index + 1) == 0x0A
-                ? 2
-                : 1)
-          : codeUnit == 0x0A
-          ? 1
-          : 0;
+      final newlineLength = _newlineSequenceLengthAt(text, index);
       if (newlineLength == 0) {
         index++;
         continue;
@@ -1633,7 +1564,7 @@ class TerminalImeEngine {
 
   /// The part of [text] after its last newline.
   String _currentLineOf(String text) {
-    final lastNewline = text.lastIndexOf(_newlinePattern);
+    final lastNewline = text.lastIndexOf(terminalNewlinePattern);
     return lastNewline < 0 ? text : text.substring(lastNewline + 1);
   }
 
@@ -1643,7 +1574,7 @@ class TerminalImeEngine {
     var length = 0;
     var index = 0;
     while (index < text.length &&
-        _isPromptWhitespaceCodeUnit(text.codeUnitAt(index))) {
+        isPromptWhitespaceCodeUnit(text.codeUnitAt(index))) {
       if (_isNewlineCodeUnit(text.codeUnitAt(index))) {
         length = index + 1;
       }
@@ -1662,17 +1593,17 @@ class TerminalImeEngine {
     }
     var end = text.length;
     while (end > start &&
-        _isPromptWhitespaceCodeUnit(text.codeUnitAt(end - 1))) {
+        isPromptWhitespaceCodeUnit(text.codeUnitAt(end - 1))) {
       end--;
     }
-    if (!_newlinePattern.hasMatch(text.substring(end))) {
+    if (!terminalNewlinePattern.hasMatch(text.substring(end))) {
       // Trailing spaces without a Return stay inside the block.
       end = text.length;
     }
     final block = text.substring(start, end);
-    if (!_newlinePattern.hasMatch(block) ||
-        _terminalTextControlPattern.hasMatch(
-          block.replaceAll(_newlinePattern, ''),
+    if (!terminalNewlinePattern.hasMatch(block) ||
+        terminalControlCharacterPattern.hasMatch(
+          block.replaceAll(terminalNewlinePattern, ''),
         ) ||
         _applyTerminalTextInputModifiers(block) != block) {
       return 0;
@@ -1691,13 +1622,13 @@ class TerminalImeEngine {
     }
     final input = _applyTerminalTextInputModifiers(text);
     final controlCheckText = embedsNewlines
-        ? text.replaceAll(_newlinePattern, '')
+        ? text.replaceAll(terminalNewlinePattern, '')
         : text;
     final isBatch = beforeEnter || text.runes.length > 1;
     if (terminal.bracketedPasteMode &&
         input == text &&
         (isBatch || _continuesFramedImeBatch()) &&
-        !_terminalTextControlPattern.hasMatch(controlCheckText)) {
+        !terminalControlCharacterPattern.hasMatch(controlCheckText)) {
       // IMEs commit whole words at once. Without explicit batch boundaries,
       // prompt TUIs such as Codex infer a paste from the rapid characters and
       // absorb the following Return as a pasted newline. Keep Enter outside
@@ -1717,7 +1648,7 @@ class TerminalImeEngine {
               text.startsWith('~')) &&
           precedingGrapheme != null &&
           precedingGrapheme.length == 1 &&
-          (_isAsciiLetterOrDigitCodeUnit(precedingGrapheme.codeUnitAt(0)) ||
+          (isAsciiLetterOrDigitCodeUnit(precedingGrapheme.codeUnitAt(0)) ||
               precedingGrapheme == '_')) {
         // Pi treats pastes starting with '.', '/' or '~' as file paths and
         // inserts a space after a word character. IME edits are literal text,
@@ -1738,7 +1669,7 @@ class TerminalImeEngine {
           ? splitTerminalImePaste(pasteText)
           : [pasteText];
       if (pasteText.length > terminalImePasteChunkLength ||
-          _newlinePattern.hasMatch(pasteText)) {
+          terminalNewlinePattern.hasMatch(pasteText)) {
         DiagnosticsLogService.instance.debug(
           'terminal.keyboard',
           'ime_paste',
@@ -1818,7 +1749,7 @@ class TerminalImeEngine {
     if (clearPendingDeleteResetBaseline) {
       _clearPendingDeleteResetBaseline();
     }
-    if (armIosBackspaceRunway && _shouldUseIosBackspaceRunway) {
+    if (armIosBackspaceRunway && _shouldDeferTrailingBackspaceImeClear) {
       _syncEditingStateWithIosBackspaceRunway();
     } else {
       _syncEditingStateWithUserText('');
@@ -1933,15 +1864,13 @@ class TerminalImeEngine {
         relatedReplacementTokenGraphemes.length < currentTokenGraphemes.length
         ? relatedReplacementTokenGraphemes.length
         : currentTokenGraphemes.length;
-    final requiredReplacementRelationLength = replacementRelationThreshold < 2
-        ? replacementRelationThreshold
-        : 2;
-    return _longestCommonCaseInsensitiveGraphemeSubsequenceLength(
-          relatedReplacementTokenGraphemes,
-          currentTokenGraphemes,
-          maxLength: requiredReplacementRelationLength,
-        ) >=
-        requiredReplacementRelationLength;
+    return _sharesCaseInsensitiveGraphemeSubsequence(
+      relatedReplacementTokenGraphemes,
+      currentTokenGraphemes,
+      length: replacementRelationThreshold < 2
+          ? replacementRelationThreshold
+          : 2,
+    );
   }
 
   ({String currentText, int? cursorOffset})?
@@ -2450,7 +2379,7 @@ class TerminalImeEngine {
     // (a newline re-sends Enter, a tab reruns completion); keep the
     // cursor-move path for any control tail.
     final tail = previousGraphemes.sublist(delta.deleteCursorOffset).join();
-    return !_terminalTextControlPattern.hasMatch(tail);
+    return !terminalControlCharacterPattern.hasMatch(tail);
   }
 
   ({int deletedCount, String appendedText, int deleteCursorOffset})
@@ -2712,12 +2641,8 @@ class TerminalImeEngine {
     TextSelection? userSelection,
     TextRange userComposing = TextRange.empty,
   }) {
-    final prefixLength = options.deleteDetection
-        ? initEditingState.text.length
-        : 0;
-    final text = options.deleteDetection
-        ? '${initEditingState.text}$userText'
-        : userText;
+    final prefixLength = initEditingState.text.length;
+    final text = '${initEditingState.text}$userText';
     final selection = userSelection == null
         ? TextSelection.collapsed(offset: prefixLength + userText.length)
         : TextSelection(
@@ -2753,7 +2678,7 @@ class TerminalImeEngine {
   }
 
   void _syncEditingStateWithIosBackspaceRunway() {
-    if (!_shouldUseIosBackspaceRunway) {
+    if (!_shouldDeferTrailingBackspaceImeClear) {
       _syncEditingStateWithUserText('');
       return;
     }
@@ -2870,7 +2795,8 @@ class TerminalImeEngine {
   }
 
   bool _handleIosBackspaceRunwayDeletion(TextEditingValue value) {
-    if (!_shouldUseIosBackspaceRunway || _iosBackspaceRunwayLength == 0) {
+    if (!_shouldDeferTrailingBackspaceImeClear ||
+        _iosBackspaceRunwayLength == 0) {
       return false;
     }
     if (_editingPrefixLength(value.text) != initEditingState.text.length) {
@@ -2915,7 +2841,8 @@ class TerminalImeEngine {
   }
 
   void _preserveIosBackspaceRunwayForComposing(TextEditingValue value) {
-    if (!_shouldUseIosBackspaceRunway || _iosBackspaceRunwayLength == 0) {
+    if (!_shouldDeferTrailingBackspaceImeClear ||
+        _iosBackspaceRunwayLength == 0) {
       _iosBackspaceRunwayLength = 0;
       return;
     }
@@ -2931,7 +2858,8 @@ class TerminalImeEngine {
   }
 
   TextEditingValue _stripIosBackspaceRunway(TextEditingValue value) {
-    if (!_shouldUseIosBackspaceRunway || _iosBackspaceRunwayLength == 0) {
+    if (!_shouldDeferTrailingBackspaceImeClear ||
+        _iosBackspaceRunwayLength == 0) {
       return value;
     }
     if (_editingPrefixLength(value.text) != initEditingState.text.length) {
@@ -2994,7 +2922,6 @@ class TerminalImeEngine {
     // delete, and the next typed text lands in front of the markers and
     // sends them to the terminal. Move it back even when the text matches.
     final caretStrandedBeforeMarkers =
-        options.deleteDetection &&
         sourceValue != null &&
         sourceValue.selection.isValid &&
         sourceValue.selection.isCollapsed &&
@@ -3251,11 +3178,6 @@ class TerminalImeEngine {
     } finally {
       _isProcessingEditingValue = false;
     }
-
-    if (_active && _queuedEditingValue != null && !_isProcessingEditingValue) {
-      _isProcessingEditingValue = true;
-      unawaited(_drainEditingValueQueue());
-    }
   }
 
   Future<void> _updateEditingValue(
@@ -3266,6 +3188,7 @@ class TerminalImeEngine {
     _currentEditingState = value;
     var processedUserSelectionWasValid = false;
     var processedUserSelection = const TextSelection.collapsed(offset: 0);
+    _memoizeTextBeforeCursor = true;
     try {
       final pendingTouchCursorCurrentText = _extractInputText(value.text);
       if (_clearImeForPendingTouchCursorMove(
@@ -3280,10 +3203,7 @@ class TerminalImeEngine {
       if (!value.composing.isCollapsed) {
         cancelDeferredTrailingBackspaceImeClear();
         _preserveIosBackspaceRunwayForComposing(value);
-        if (_sendComposingDeletionIfNeeded(value)) {
-          _sawImeComposition = true;
-          return;
-        }
+        _sendComposingDeletionIfNeeded(value);
         _sawImeComposition = true;
         return;
       }
@@ -3318,7 +3238,7 @@ class TerminalImeEngine {
         }
         _sawImeComposition = false;
         _resetCommittedInputState(
-          armIosBackspaceRunway: _shouldUseIosBackspaceRunway,
+          armIosBackspaceRunway: _shouldDeferTrailingBackspaceImeClear,
         );
         _trimLeadingSwipeSpaceAfterBufferClear = clearedBufferedInput;
         return;
@@ -3515,6 +3435,8 @@ class TerminalImeEngine {
         enterModifiers: _payloadEnterModifiers(revision),
       );
       if (review != null) {
+        // The terminal can change while the review is pending.
+        _stopMemoizingTextBeforeCursor();
         final shouldInsert = await effects.onReviewInsertedText!(review);
         if (!_active) {
           return;
@@ -3742,6 +3664,7 @@ class TerminalImeEngine {
       _completePendingComposingEnterAction(revision);
       _sawImeComposition = false;
     } finally {
+      _stopMemoizingTextBeforeCursor();
       _lastProcessedUserSelectionWasValid = processedUserSelectionWasValid;
       _lastProcessedSelectionWasCollapsed = processedUserSelection.isCollapsed;
     }
@@ -3763,17 +3686,11 @@ class TerminalImeEngine {
         index = pasteBlock.end;
         continue;
       }
-      final codeUnit = appendedText.codeUnitAt(index);
-      if (!_isNewlineCodeUnit(codeUnit)) {
+      final newlineLength = _newlineSequenceLengthAt(appendedText, index);
+      if (newlineLength == 0) {
         index++;
         continue;
       }
-      final newlineLength =
-          codeUnit == 0x0D &&
-              index + 1 < appendedText.length &&
-              appendedText.codeUnitAt(index + 1) == 0x0A
-          ? 2
-          : 1;
       lastReturnStart = index;
       index += newlineLength;
       lastReturnEnd = index;

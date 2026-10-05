@@ -46,7 +46,7 @@ func TestBundledManifestMatchesCompiledVersion(t *testing.T) {
 	}
 	if manifest.Version != monkeyMuxVersion {
 		t.Fatalf(
-			"manifest version = %q, want monkeyMuxVersion %q; rebuild with scripts/ensure_monkeymux_assets.sh",
+			"manifest version = %q, want monkeyMuxVersion %q; rebuild with scripts/build_monkeymux_assets.sh",
 			manifest.Version,
 			monkeyMuxVersion,
 		)

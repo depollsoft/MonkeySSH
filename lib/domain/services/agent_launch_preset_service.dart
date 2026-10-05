@@ -36,6 +36,19 @@ class AgentLaunchPresetService {
     );
   }
 
+  /// Loads every saved, still-supported preset keyed by host id, decoding
+  /// the stored payload once.
+  Future<Map<int, AgentLaunchPreset>> getAllPresets() async {
+    final presets =
+        await _settings.getJson(SettingKeys.agentLaunchPresets) ?? {};
+    return {
+      for (final MapEntry(:key, :value) in presets.entries)
+        if (int.tryParse(key) case final hostId?)
+          if (value is Map<String, dynamic>)
+            hostId: ?AgentLaunchPreset.tryFromJson(value),
+    };
+  }
+
   /// Saves [preset] for [hostId].
   Future<void> setPresetForHost(int hostId, AgentLaunchPreset preset) =>
       _settings.updateJson(

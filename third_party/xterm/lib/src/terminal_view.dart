@@ -36,7 +36,6 @@ class TerminalView extends StatefulWidget {
     this.backgroundOpacity = 1,
     this.focusNode,
     this.autofocus = false,
-    this.onTapUp,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.mouseCursor = SystemMouseCursors.text,
@@ -85,9 +84,6 @@ class TerminalView extends StatefulWidget {
   /// True if this widget will be selected as the initial focus when no other
   /// node in its scope is currently focused.
   final bool autofocus;
-
-  /// Callback for when the user taps on the terminal.
-  final void Function(TapUpDetails, CellOffset)? onTapUp;
 
   /// Function called when the user taps on the terminal with a secondary
   /// button.
@@ -297,7 +293,6 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalGestureHandler(
       terminalView: this,
       terminalController: _controller,
-      onTapUp: _onTapUp,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
@@ -335,11 +330,6 @@ class TerminalViewState extends State<TerminalView> {
   Rect get globalCursorRect {
     return renderTerminal.localToGlobal(renderTerminal.cursorOffset) &
         renderTerminal.cellSize;
-  }
-
-  void _onTapUp(TapUpDetails details) {
-    final offset = renderTerminal.getCellOffset(details.localPosition);
-    widget.onTapUp?.call(details, offset);
   }
 
   void _onTapDown(_) {

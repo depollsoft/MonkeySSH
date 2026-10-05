@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -693,10 +694,9 @@ func TestAcpAttachPrimesMaximumPinnedReplay(t *testing.T) {
 func TestAcpPublishSerializesSequenceAndClientVisibility(t *testing.T) {
 	bridge := newTestAcpBridge()
 	client := &acpBridgeClient{
-		id:         "client",
-		send:       make(chan acpWireMessage, 2),
-		done:       make(chan struct{}),
-		writerDone: make(chan struct{}),
+		id:   "client",
+		send: make(chan acpWireMessage, 2),
+		done: make(chan struct{}),
 	}
 	bridge.clients[client.id] = client
 
@@ -1045,21 +1045,24 @@ func TestAcpDetachedIdleClientStopsWriter(t *testing.T) {
 	server, peer := net.Pipe()
 	defer peer.Close()
 	client := &acpBridgeClient{
-		id:         "client",
-		conn:       server,
-		send:       make(chan acpWireMessage, 1),
-		done:       make(chan struct{}),
-		writerDone: make(chan struct{}),
+		id:   "client",
+		conn: server,
+		send: make(chan acpWireMessage, 1),
+		done: make(chan struct{}),
 	}
 	bridge := &acpBridge{
 		clients: map[string]*acpBridgeClient{client.id: client},
 	}
-	go bridge.writeClient(client)
+	writerDone := make(chan struct{})
+	go func() {
+		bridge.writeClient(client)
+		close(writerDone)
+	}()
 
 	bridge.detachClient(client.id)
 
 	select {
-	case <-client.writerDone:
+	case <-writerDone:
 	case <-time.After(time.Second):
 		t.Fatal("idle detached client left its writer goroutine running")
 	}
@@ -1534,8 +1537,8 @@ func TestAcpProviderExitPublishesExitedState(t *testing.T) {
 	for time.Now().Before(deadline) {
 		info := bridge.snapshot()
 		if info.State == "exited" {
-			if bridge.exitCode == nil || *bridge.exitCode != 7 {
-				t.Fatalf("exit code = %#v, want 7", bridge.exitCode)
+			if code := lastPublishedExitCode(bridge); code == nil || *code != 7 {
+				t.Fatalf("exit code = %#v, want 7", code)
 			}
 			return
 		}
@@ -1559,8 +1562,8 @@ func TestAcpProviderCommandUsesPipesNotTerminal(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if bridge.snapshot().State == "exited" {
-			if bridge.exitCode == nil || *bridge.exitCode != 0 {
-				t.Fatalf("non-pipe provider exit = %#v", bridge.exitCode)
+			if code := lastPublishedExitCode(bridge); code == nil || *code != 0 {
+				t.Fatalf("non-pipe provider exit = %#v", code)
 			}
 			return
 		}
@@ -1846,6 +1849,82 @@ func TestAcpWaitSurvivesTransientStatusTimeout(t *testing.T) {
 			}
 			if polls != timeoutRequest+3 {
 				t.Fatalf("status requests = %d, waiter exited before recovery", polls)
+			}
+		})
+	}
+}
+
+func TestAcpAttachWithoutReplayTakesNoReaderHold(t *testing.T) {
+	// An attach before any provider output has no snapshot to drain, so it
+	// must not leave replayReaders raised for the bridge's lifetime.
+	bridge := newTestAcpBridge()
+	server, peer := net.Pipe()
+	attachDone := make(chan struct{})
+	go func() {
+		defer close(attachDone)
+		bridge.handleAttach(
+			server,
+			bufio.NewReader(server),
+			acpWireMessage{Version: acpBridgeProtocolVersion, Type: "hello"},
+		)
+	}()
+	defer func() {
+		_ = peer.Close()
+		select {
+		case <-attachDone:
+		case <-time.After(time.Second):
+			t.Error("attach did not stop")
+		}
+	}()
+	if hello := readTestAcpFrame(t, bufio.NewReader(peer), peer); hello.Type != "hello" {
+		t.Fatalf("first attach frame = %#v, want hello", hello)
+	}
+	bridge.mu.Lock()
+	readers := bridge.replayReaders
+	bridge.mu.Unlock()
+	if readers != 0 {
+		t.Fatalf("replayReaders = %d after an attach with no replay, want 0", readers)
+	}
+}
+
+func TestAcpTrimReplayLeavesSnapshotIntactWhileAttachDrains(t *testing.T) {
+	// An attach writer reads its replay snapshot without the lock, so a trim
+	// that runs meanwhile must neither zero evicted slots nor compact into
+	// the shared array.
+	for _, pinned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "prefix", true: "compaction"}[pinned], func(t *testing.T) {
+			bridge := newTestAcpBridge()
+			for i := 0; i < 3; i++ {
+				event := acpReplayEvent{
+					message: acpWireMessage{Sequence: uint64(i + 1), Data: json.RawMessage(`{}`)},
+					bytes:   acpReplayMaxBytes / 2,
+				}
+				if pinned && i == 0 {
+					event.pendingID = "permission"
+					bridge.pendingReplayEvents++
+					bridge.pendingReplayBytes += event.bytes
+				}
+				bridge.replay = append(bridge.replay, event)
+				bridge.replayBytes += event.bytes
+			}
+			snapshot := bridge.replay
+			before := append([]acpReplayEvent(nil), snapshot...)
+			bridge.replayReaders = 1
+			bridge.trimReplayLocked()
+			if !reflect.DeepEqual(snapshot, before) {
+				t.Fatalf("trim rewrote the drained snapshot: %+v", snapshot)
+			}
+			var got []uint64
+			for _, event := range bridge.replay {
+				got = append(got, event.message.Sequence)
+			}
+			// Compaction keeps evicting below the ceiling, leaving only the pin.
+			want := []uint64{2, 3}
+			if pinned {
+				want = []uint64{1}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("retained sequences = %v, want %v", got, want)
 			}
 		})
 	}

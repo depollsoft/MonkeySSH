@@ -11,7 +11,7 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 
-class _MockFlutterSecureStorage extends Mock implements FlutterSecureStorage {}
+import '../helpers/mocks.dart';
 
 const _legacyMasterKeyStorageEntry =
     'flutty_db_'
@@ -131,7 +131,7 @@ void main() {
     );
 
     test('reuses and migrates the legacy master key entry', () async {
-      final storage = _MockFlutterSecureStorage();
+      final storage = MockFlutterSecureStorage();
       final writes = <String, String>{};
       final legacyValue = base64Encode(
         List<int>.generate(32, (index) => index),
@@ -172,7 +172,7 @@ void main() {
       addTearDown(() {
         debugDefaultTargetPlatformOverride = null;
       });
-      final storage = _MockFlutterSecureStorage();
+      final storage = MockFlutterSecureStorage();
       final legacyValue = base64Encode(
         List<int>.generate(32, (index) => index),
       );
@@ -228,7 +228,7 @@ void main() {
         addTearDown(() {
           debugDefaultTargetPlatformOverride = null;
         });
-        final storage = _MockFlutterSecureStorage();
+        final storage = MockFlutterSecureStorage();
         final legacyValue = base64Encode(
           List<int>.generate(32, (index) => index),
         );
@@ -285,7 +285,7 @@ void main() {
         addTearDown(() {
           debugDefaultTargetPlatformOverride = null;
         });
-        final storage = _MockFlutterSecureStorage();
+        final storage = MockFlutterSecureStorage();
         final legacyValue = base64Encode(
           List<int>.generate(32, (index) => index),
         );

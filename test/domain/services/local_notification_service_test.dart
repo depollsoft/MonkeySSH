@@ -84,7 +84,7 @@ void main() {
         }
       }
       calls.clear();
-      await service.clearTmuxAlert(42);
+      await service.clearTerminalNotification(42);
       await service.clearTerminalNotification(43);
       expect(calls.map((call) => (call.method, call.arguments)), [
         ('cancel', 42),
@@ -149,7 +149,7 @@ void main() {
 
           final showing = show(42);
           await started.future;
-          final clearing = service.clearTmuxAlert(42);
+          final clearing = service.clearTerminalNotification(42);
           // A pending permission dialog or platform show must not block other IDs.
           await show(43);
           expect(delivered, {43});
@@ -163,7 +163,7 @@ void main() {
           // The same ID can be used again after its previous queue was removed.
           await show(42);
           expect(delivered, {42, 43});
-          await service.clearTmuxAlert(42);
+          await service.clearTerminalNotification(42);
           expect(delivered, {43});
           expect(service.pendingNotificationOperationCount, 0);
         },
@@ -211,7 +211,7 @@ void main() {
         showing,
         throwsA(isA<PlatformException>()),
       );
-      final clearing = service.clearTmuxAlert(42);
+      final clearing = service.clearTerminalNotification(42);
       await expectedError;
       await clearing;
       expect(cancelled, [42]);

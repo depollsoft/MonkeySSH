@@ -1566,6 +1566,7 @@ void main() {
           final service = buildService(
             android: true,
             restoreTimeout: const Duration(milliseconds: 10),
+            restoreEmptyResultGracePeriod: const Duration(milliseconds: 10),
           );
 
           await service.initialize();
@@ -1579,6 +1580,38 @@ void main() {
           final result = await service.restorePurchases();
 
           expect(result.success, isFalse);
+          expect(service.currentState.isLoading, isFalse);
+        },
+      );
+
+      test(
+        'restore timeout waits for a purchase that is still being applied',
+        () async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          final purchase = _purchase(
+            MonetizationProductIds.iosMonthlyProd,
+            PurchaseStatus.restored,
+          );
+          // The transaction lands just before the deadline and its handler is
+          // mid-apply when the timeout fires.
+          when(() => inAppPurchase.completePurchase(purchase)).thenAnswer(
+            (_) => Future<void>.delayed(const Duration(milliseconds: 30)),
+          );
+          when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {
+            purchaseController.add([purchase]);
+          });
+
+          final service = buildService(
+            restoreTimeout: const Duration(milliseconds: 10),
+          );
+
+          final result = await service.restorePurchases().timeout(
+            const Duration(seconds: 5),
+          );
+
+          expect(result.success, isTrue);
+          expect(service.currentState.isProUnlocked, isTrue);
           expect(service.currentState.isLoading, isFalse);
         },
       );

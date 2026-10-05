@@ -640,14 +640,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.4"
-  zmodem:
-    dependency: "direct main"
-    description:
-      name: zmodem
-      sha256: "3b7e5b29f3a7d8aee472029b05165a68438eff2f3f7766edf13daba1e297adbf"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.0.6"
 sdks:
   dart: ">=3.11.0 <4.0.0"
   flutter: ">=3.19.0"

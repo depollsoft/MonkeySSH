@@ -91,43 +91,36 @@ while (true) {
 }
 ''';
 
-// Read official release metadata as data. Never execute downloaded installers.
-({String url, String pattern})? _officialVersionLookup(
-  AgentRuntimeDefinition definition,
-) => switch (definition.tool) {
-  AgentLaunchTool.cursorAgent => (
-    url: 'https://cursor.com/install',
-    pattern: r'https://downloads\.cursor\.com/lab/[0-9][0-9A-Za-z.+-]*',
-  ),
-  AgentLaunchTool.antigravity when definition.kind == AgentRuntimeKind.cli => (
-    url: 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/',
-    pattern: '"version"[[:space:]]*:[[:space:]]*"[^"]+"',
-  ),
-  AgentLaunchTool.hermes => (
-    url: 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
-    pattern: '__version__[[:space:]]*=[[:space:]]*"[^"]+"',
-  ),
-  AgentLaunchTool.grokBuild => (
-    url: 'https://x.ai/cli/stable',
-    pattern: r'^[0-9]+\.[0-9]+\.[0-9]+[-+0-9A-Za-z.]*',
-  ),
-  AgentLaunchTool.museCode when definition.kind == AgentRuntimeKind.cli => (
-    url: 'https://api.meta.ai/muse-code/channels/muse-stable',
-    pattern: '"version"[[:space:]]*:[[:space:]]*"[^"]+"',
-  ),
-  _ => null,
-};
+// Official release metadata is read as data. Never execute downloaded
+// installers.
+const _jsonVersionPattern = '"version"[[:space:]]*:[[:space:]]*"[^"]+"';
+const _cursorVersionLookup = (
+  url: 'https://cursor.com/install',
+  pattern: r'https://downloads\.cursor\.com/lab/[0-9][0-9A-Za-z.+-]*',
+);
+const _hermesVersionLookup = (
+  url: 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
+  pattern: '__version__[[:space:]]*=[[:space:]]*"[^"]+"',
+);
+const _grokVersionLookup = (
+  url: 'https://x.ai/cli/stable',
+  pattern: r'^[0-9]+\.[0-9]+\.[0-9]+[-+0-9A-Za-z.]*',
+);
+const _openCodeLegacyInstallation = (
+  belowVersion: '2.0.0',
+  message: 'OpenCode 2 uses a new package. Install it from https://opencode.ai/v2/docs, then re-check.',
+);
 
 ({String url, String pattern})? _fallbackVersionLookup(
   AgentRuntimeDefinition definition,
 ) =>
-    _officialVersionLookup(definition) ??
+    definition.officialVersionLookup ??
     (definition.registry == AgentPackageRegistry.npm &&
             definition.packageName != null
         ? (
             url:
                 'https://registry.npmjs.org/${Uri.encodeComponent(definition.packageName!)}/latest',
-            pattern: '"version"[[:space:]]*:[[:space:]]*"[^"]+"',
+            pattern: _jsonVersionPattern,
           )
         : null);
 
@@ -195,6 +188,8 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     packageName: '@opencode/cli',
     homebrewFormula: 'opencode-v2',
     selfUpdateArguments: ['upgrade'],
+    repairScript: _openCodeRepairScript,
+    legacyInstallation: _openCodeLegacyInstallation,
   ),
   AgentRuntimeDefinition(
     id: 'cli:antigravity',
@@ -205,6 +200,11 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://antigravity.google/cli',
     windowsInstallerUrl: 'https://antigravity.google/cli/install.ps1',
     selfUpdateArguments: ['update'],
+    officialVersionLookup: (
+      url: 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/',
+      pattern: _jsonVersionPattern,
+    ),
+    latestVersionUrlPlatformSuffix: true,
   ),
   AgentRuntimeDefinition(
     id: 'cli:cursor',
@@ -215,6 +215,15 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://cursor.com/install',
     windowsInstallerUrl: 'https://cursor.com/install?win32=true',
     selfUpdateArguments: ['update'],
+    officialVersionLookup: _cursorVersionLookup,
+    // Cursor checks the macOS keychain before dispatching even `update`.
+    // Updating needs no credentials. Use its in-memory store for this process
+    // only, avoiding keychain access without moving saved credentials to disk.
+    updateEnvironment: {
+      'AGENT_CLI_CREDENTIAL_STORE': 'memory',
+      'NO_COLOR': '1',
+    },
+    posixVersionFallback: _posixCursorVersionFallback,
   ),
   AgentRuntimeDefinition(
     id: 'cli:pi',
@@ -235,6 +244,7 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
     selfUpdateArguments: ['update', '--yes'],
+    officialVersionLookup: _hermesVersionLookup,
   ),
   AgentRuntimeDefinition(
     id: 'cli:openclaw',
@@ -255,6 +265,7 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://x.ai/cli/install.sh',
     windowsInstallerUrl: 'https://x.ai/cli/install.ps1',
     selfUpdateArguments: ['update'],
+    officialVersionLookup: _grokVersionLookup,
   ),
   AgentRuntimeDefinition(
     id: 'cli:muse',
@@ -265,6 +276,18 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://dev.meta.ai/install.sh',
     windowsInstallerUrl: 'https://dev.meta.ai/install.ps1',
     homebrewFormula: 'muse-code',
+    officialVersionLookup: (
+      url: 'https://api.meta.ai/muse-code/channels/muse-stable',
+      pattern: _jsonVersionPattern,
+    ),
+    versionEnvironment: {'MUSE_NO_AUTO_UPDATE': '1'},
+    // Muse's launcher owns updates. Force its documented synchronous update
+    // path against the resolved installation rather than installing a second
+    // copy.
+    syncUpdateEnvironment: {
+      'MUSE_SYNC_UPDATE': '1',
+      'MUSE_NO_AUTO_UPDATE': '0',
+    },
   ),
 ];
 
@@ -392,22 +415,6 @@ final agentRuntimeDefinitions = List<AgentRuntimeDefinition>.unmodifiable([
   ...agentStandaloneAcpRuntimeDefinitions,
 ]);
 
-/// Key of [tool] in usage probes, cooldowns, and the usage cache.
-String? _usageIdForTool(AgentLaunchTool? tool) => switch (tool) {
-  AgentLaunchTool.claudeCode => 'claude',
-  AgentLaunchTool.codex => 'codex',
-  AgentLaunchTool.copilotCli => 'copilot',
-  AgentLaunchTool.openCode => 'opencode',
-  AgentLaunchTool.antigravity => 'antigravity',
-  AgentLaunchTool.cursorAgent => 'cursor',
-  AgentLaunchTool.pi => 'pi',
-  AgentLaunchTool.hermes => 'hermes',
-  AgentLaunchTool.openclaw => 'openclaw',
-  AgentLaunchTool.grokBuild => 'grok',
-  AgentLaunchTool.museCode => 'muse',
-  null => null,
-};
-
 /// Extracts a normalized version from common CLI output.
 String? parseAgentVersion(String output) {
   // Muse prints the marketing version first and its actual release in brackets.
@@ -516,41 +523,44 @@ String? buildAgentInstallCommand(
   String? executablePath,
   String? installedVersion,
 }) {
-  // V1's updater targets opencode-ai and cannot move to V2's package.
-  // Keep working V1 installations intact until the user installs V2.
+  // A legacy installation's updater targets the old package (OpenCode V1 ->
+  // opencode-ai). Keep it intact until the user installs the new package.
+  final legacy = definition.legacyInstallation;
   if (update &&
-      definition.tool == AgentLaunchTool.openCode &&
       installedVersion != null &&
-      compareAgentVersions(installedVersion, '2.0.0') < 0) {
+      legacy != null &&
+      compareAgentVersions(installedVersion, legacy.belowVersion) < 0) {
     return null;
   }
-  if (repair && definition.id == 'cli:opencode' && executablePath != null) {
+  final repairScript = definition.repairScript;
+  if (repair && repairScript != null && executablePath != null) {
     if (windows) {
       return buildCompactWindowsPowerShellCommand(
         '$powerShellProfilePathPreamble& node -e '
-        '${powerShellSingleQuote(_openCodeRepairScript)} '
+        '${powerShellSingleQuote(repairScript)} '
         '${powerShellSingleQuote(executablePath)}; exit \u0024LASTEXITCODE',
         plainTextOutput: true,
       );
     }
-    return '${_profilePrefix}node -e ${_shellQuote(_openCodeRepairScript)} '
+    return '${_profilePrefix}node -e ${_shellQuote(repairScript)} '
         '${_shellQuote(executablePath)}';
   }
-  // Muse's launcher owns updates. Force its documented synchronous update
-  // path against the resolved installation rather than installing a second copy.
-  if (update && definition.id == 'cli:muse' && detectionSource != 'Homebrew') {
+  if (update &&
+      definition.launcherOwnsUpdates &&
+      detectionSource != 'Homebrew') {
     if (executablePath == null) return null;
+    final arguments = definition.versionArguments;
     if (windows) {
       return buildCompactWindowsPowerShellCommand(
         '$powerShellProfilePathPreamble'
-        r"$env:MUSE_SYNC_UPDATE='1';$env:MUSE_NO_AUTO_UPDATE='0';"
-        '& ${powerShellSingleQuote(executablePath)} --version; '
+        '${_powerShellEnvironment(definition.syncUpdateEnvironment)}'
+        '& ${powerShellSingleQuote(executablePath)} ${arguments.join(' ')}; '
         r'exit $LASTEXITCODE',
         plainTextOutput: true,
       );
     }
-    return '${_profilePrefix}MUSE_SYNC_UPDATE=1 MUSE_NO_AUTO_UPDATE=0 '
-        '${_shellQuote(executablePath)} --version';
+    return '$_profilePrefix${_posixEnvironment(definition.syncUpdateEnvironment)}'
+        '${_shellQuote(executablePath)} ${arguments.join(' ')}';
   }
   if (update && executablePath != null && definition.supportsSelfUpdate) {
     if (windows) {
@@ -563,12 +573,9 @@ String? buildAgentInstallCommand(
         plainTextOutput: true,
       );
     }
-    // Cursor checks the macOS keychain before dispatching even `update`.
-    // Updating needs no credentials. Use its in-memory store for this process
-    // only, avoiding keychain access without moving saved credentials to disk.
-    final environment = definition.tool == AgentLaunchTool.cursorAgent
-        ? 'env AGENT_CLI_CREDENTIAL_STORE=memory NO_COLOR=1 '
-        : '';
+    final environment = definition.updateEnvironment.isEmpty
+        ? ''
+        : 'env ${_posixEnvironment(definition.updateEnvironment)}';
     return '$_profilePrefix$environment${_shellQuote(executablePath)} '
         '${definition.selfUpdateArguments.map(_shellQuote).join(' ')}';
   }
@@ -805,7 +812,7 @@ class AgentManagementService {
       usage: {
         if (sameSession)
           for (final runtime in cached.runtimes)
-            if (_usageIdForTool(runtime.definition.tool) case final id?
+            if (runtime.definition.usageId case final id?
                 when runtime.executablePath != null &&
                     snapshot.paths[id] == runtime.executablePath)
               if (snapshot.values[id] case final usage? when current(usage))
@@ -1043,8 +1050,7 @@ class AgentManagementService {
       );
     }
     var source = metadata?.detectionSource;
-    source ??=
-        definition.id == 'acp:antigravity' && _executableBasename(path) == 'npx'
+    source ??= _executableBasename(path) == 'npx'
         ? 'npx on demand'
         : _detectionSourceFromPath(path);
     installed ??= parseAgentVersion(metadata?.installedVersionOutput ?? '');
@@ -1053,14 +1059,15 @@ class AgentManagementService {
         installed != null &&
         latest != null &&
         compareAgentVersions(installed, latest) < 0;
-    final needsOpenCodeMigration =
-        definition.tool == AgentLaunchTool.openCode &&
+    final legacy = definition.legacyInstallation;
+    final isLegacyInstallation =
+        legacy != null &&
         installed != null &&
-        compareAgentVersions(installed, '2.0.0') < 0;
+        compareAgentVersions(installed, legacy.belowVersion) < 0;
     final managed =
-        !needsOpenCodeMigration &&
+        !isLegacyInstallation &&
         (definition.supportsSelfUpdate ||
-            definition.id == 'cli:muse' ||
+            definition.launcherOwnsUpdates ||
             source == 'Homebrew' ||
             source == 'npm global' ||
             source == 'pipx');
@@ -1075,8 +1082,8 @@ class AgentManagementService {
       detectionSource: source,
       managedByPackageManager: managed,
       message: hasUpdate && !managed
-          ? needsOpenCodeMigration
-                ? 'OpenCode 2 uses a new package. Install it from https://opencode.ai/v2/docs, then re-check.'
+          ? isLegacyInstallation
+                ? legacy.message
                 : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
@@ -1112,8 +1119,8 @@ class AgentManagementService {
     final definition = agentCliRuntimeDefinitions
         .where((item) => item.tool == tool)
         .firstOrNull;
-    if (definition == null) return null;
-    final usageId = definition.id.substring(4);
+    final usageId = definition?.usageId;
+    if (definition == null || usageId == null) return null;
     final cooldown = _activeUsageCooldown(session, usageId);
     if (cooldown != null) {
       // A multi-provider response can contain usable quotas alongside a
@@ -1253,11 +1260,12 @@ class AgentManagementService {
           runtime.status != AgentRuntimeStatus.updateAvailable) {
         continue;
       }
-      final tool = runtime.definition.tool;
-      final id = _usageIdForTool(tool);
+      final id = runtime.definition.usageId;
       if (id != null && runtime.executablePath != null) {
         selected[id] = runtime.executablePath!;
-        refreshIntervals[id] = agentUsageRefreshInterval(tool);
+        refreshIntervals[id] = agentUsageRefreshInterval(
+          runtime.definition.tool,
+        );
       }
       result[runtime.definition.id] = AgentUsage(
         status: id == null
@@ -1430,7 +1438,7 @@ class AgentManagementService {
   ) {
     for (final runtime in runtimes) {
       if (!result.containsKey(runtime.definition.id)) continue;
-      final id = _usageIdForTool(runtime.definition.tool);
+      final id = runtime.definition.usageId;
       if (selected.containsKey(id)) {
         result[runtime.definition.id] =
             parsed[id] ??
@@ -1522,12 +1530,12 @@ class AgentManagementService {
       );
       if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
         var verified = await inspect(session, definition);
-        // OpenCode's updater can leave its package's postinstall scripts
-        // pending. Finish setup on the newly detected launcher, not the old
-        // path or a different global package installation.
+        // An updater can leave its package's postinstall scripts pending.
+        // Finish setup on the newly detected launcher, not the old path or a
+        // different global package installation.
         if (update &&
             !repairing &&
-            definition.id == 'cli:opencode' &&
+            definition.repairScript != null &&
             verified.status == AgentRuntimeStatus.needsRepair) {
           final repairCommand = buildAgentInstallCommand(
             definition,
@@ -1959,7 +1967,7 @@ String buildAgentMetadataProbeCommand(
           '[void]\$__flOut.AppendLine(${powerShellSingleQuote('$_sourceMarker npm global')});'
           r'$__flInstalled=$__flLine.Substring($__flLine.IndexOf($__flNeedle)+$__flNeedle.Length).Split(" ")[0]};',
         );
-        if (_officialVersionLookup(definition) == null) {
+        if (definition.officialVersionLookup == null) {
           body.write(
             '\$__flLatest=Invoke-AgentProbe ${powerShellSingleQuote('& npm view ${powerShellSingleQuote(package)} version --fetch-retries=0 --fetch-timeout=2500 2>\$null; exit \$LASTEXITCODE')};',
           );
@@ -1974,7 +1982,7 @@ String buildAgentMetadataProbeCommand(
           '[void]\$__flOut.AppendLine(${powerShellSingleQuote('$_sourceMarker pipx')});'
           r'$__flInstalled=($__flLine.Trim() -split "\s+")[1]};',
         );
-        if (_officialVersionLookup(definition) == null) {
+        if (definition.officialVersionLookup == null) {
           body.write(
             '\$__flLatest=Invoke-AgentProbe ${powerShellSingleQuote('& py -m pip index versions ${powerShellSingleQuote(package)} --retries 0 --timeout 3 2>\$null; exit \$LASTEXITCODE')};',
           );
@@ -1984,8 +1992,7 @@ String buildAgentMetadataProbeCommand(
       if (official != null) {
         final pattern = official.pattern.replaceAll('[[:space:]]', r'\s');
         var uri = powerShellSingleQuote(official.url);
-        if (definition.tool == AgentLaunchTool.antigravity &&
-            definition.kind == AgentRuntimeKind.cli) {
+        if (definition.latestVersionUrlPlatformSuffix) {
           body.write(
             r'$__flArch = $env:PROCESSOR_ARCHITECTURE.ToLower();'
             r'if($env:PROCESSOR_ARCHITEW6432){$__flArch = $env:PROCESSOR_ARCHITEW6432.ToLower()};',
@@ -2065,7 +2072,7 @@ String buildAgentMetadataProbeCommand(
         '__fl_installed=\u0024{__fl_installed%% *}; '
         'fi; fi; ',
       );
-      if (_officialVersionLookup(definition) == null) {
+      if (definition.officialVersionLookup == null) {
         command.write(
           '__fl_latest=\$(__fl_agent_version npm view ${_shellQuote(package)} version '
           '--fetch-retries=0 --fetch-timeout=2500 2>/dev/null | head -n 1); ',
@@ -2082,7 +2089,7 @@ String buildAgentMetadataProbeCommand(
         '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')}); '
         'fi; fi; ',
       );
-      if (_officialVersionLookup(definition) == null) {
+      if (definition.officialVersionLookup == null) {
         command.write(
           '__fl_latest=\$(__fl_agent_version python3 -m pip index versions ${_shellQuote(package)} 2>/dev/null | head -n 1); ',
         );
@@ -2091,8 +2098,7 @@ String buildAgentMetadataProbeCommand(
     final official = _fallbackVersionLookup(definition);
     if (official != null) {
       var uri = _shellQuote(official.url);
-      if (definition.tool == AgentLaunchTool.antigravity &&
-          definition.kind == AgentRuntimeKind.cli) {
+      if (definition.latestVersionUrlPlatformSuffix) {
         command.write(
           r'__fl_os=$(uname -s | tr "[:upper:]" "[:lower:]"); '
           r'__fl_arch=$(uname -m); '
@@ -2142,8 +2148,8 @@ String _buildWindowsProbeBody(AgentRuntimeDefinition definition) {
     if (definition.kind == AgentRuntimeKind.cli) ...[
       r'''$__flScript = '& ' + (ConvertTo-AgentLiteral $__flCommand.Source) + ' ' ''',
       '+ ${powerShellSingleQuote(definition.versionArguments.map(powerShellSingleQuote).join(' '))} + ${powerShellSingleQuote(r'; exit $LASTEXITCODE')};',
-      if (definition.tool == AgentLaunchTool.museCode)
-        r"$__flScript = '$env:MUSE_NO_AUTO_UPDATE=''1'';' + $__flScript;",
+      if (definition.versionEnvironment.isNotEmpty)
+        '\$__flScript = ${powerShellSingleQuote(_powerShellEnvironment(definition.versionEnvironment))} + \$__flScript;',
       r'$__flVersion = Invoke-AgentProbe $__flScript;',
       'if(\$__flVersion){[void]\$__flOut.AppendLine(${powerShellSingleQuote(_versionMarker)} + ((\$__flVersion -split "`r?`n" | Select-Object -First 4) -join " "))};',
     ] else if (definition.packageName != null &&
@@ -2161,9 +2167,9 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
   final versionArguments = definition.versionArguments
       .map(_shellQuote)
       .join(' ');
-  final versionEnvironment = definition.tool == AgentLaunchTool.museCode
-      ? 'env MUSE_NO_AUTO_UPDATE=1 '
-      : '';
+  final versionEnvironment = definition.versionEnvironment.isEmpty
+      ? ''
+      : 'env ${_posixEnvironment(definition.versionEnvironment)}';
   final versionProbe = definition.kind == AgentRuntimeKind.cli
       ? '__fl_version_file=\$(mktemp "\u0024{TMPDIR:-/tmp}/monkeyssh-version.XXXXXX" 2>/dev/null || true); '
             'if [ -n "\$__fl_version_file" ]; then '
@@ -2174,7 +2180,7 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
             'printf ${_shellQuote('$_repairMarker\n')}; '
             'fi; '
             'rm -f "\$__fl_version_file"; '
-            '${definition.tool == AgentLaunchTool.cursorAgent ? _posixCursorVersionFallback : ''}'
+            '${definition.posixVersionFallback ?? ''}'
             'printf ${_shellQuote('$_versionMarker%s\\n')} "\$version_output"; '
             'fi; '
       : definition.packageName != null &&
@@ -2200,6 +2206,16 @@ String _detectionSourceFromPath(String path) {
 }
 
 String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
+
+/// `K=V K2=V2 ` assignments for a POSIX command prefix. Keys are identifiers
+/// and values plain tokens, so no quoting is needed.
+String _posixEnvironment(Map<String, String> environment) =>
+    environment.entries.map((entry) => '${entry.key}=${entry.value} ').join();
+
+String _powerShellEnvironment(Map<String, String> environment) => environment
+    .entries
+    .map((entry) => '\$env:${entry.key}=${powerShellSingleQuote(entry.value)};')
+    .join();
 
 // Download completely before execution: a failed download must never run a
 // partial installer or look successful because the receiving shell exited zero.

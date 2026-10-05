@@ -200,6 +200,7 @@ final terminalThemeServiceProvider = Provider<TerminalThemeService>(
 final allTerminalThemesProvider = FutureProvider<List<TerminalThemeData>>((
   ref,
 ) {
+  ref.watch(settingsGenerationProvider);
   final service = ref.watch(terminalThemeServiceProvider);
   return service.getAllThemes();
 });
@@ -208,6 +209,7 @@ final allTerminalThemesProvider = FutureProvider<List<TerminalThemeData>>((
 final customTerminalThemesProvider = FutureProvider<List<TerminalThemeData>>((
   ref,
 ) {
+  ref.watch(settingsGenerationProvider);
   final service = ref.watch(terminalThemeServiceProvider);
   return service.getCustomThemes();
 });

@@ -183,6 +183,36 @@ cmd_publish "$@"
                         expected,
                     )
 
+    def run_in(self, workdir, *command):
+        # Sourcing cds to the real repository; run from a fixture tree so
+        # nothing beyond the staged media can reach the manifest.
+        return subprocess.run(
+            ['bash', '-c', 'source "$1" help >/dev/null; cd "$2"; shift 2; "$@"',
+             'store-assets-test', str(SCRIPT), str(workdir), *command],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_package_manifest_lists_the_staged_media(self):
+        work = self.root / 'work'
+        (work / MEDIA).parent.mkdir(parents=True)
+        (work / MEDIA).write_bytes(b'packaged screenshot')
+        archive = self.root / 'packaged.tar.gz'
+        result = self.run_in(work, 'cmd_package', '--output', str(archive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tarfile.open(archive) as tf:
+            manifest = json.load(tf.extractfile('./' + MANIFEST))
+        self.assertEqual(manifest['file_count'], 1)
+        self.assertEqual(manifest['files'][0]['path'], MEDIA)
+        self.assertEqual(self.download(archive).returncode, 0)
+        self.assertEqual((self.dest / MEDIA).read_bytes(), b'packaged screenshot')
+
+    def test_manifest_refuses_an_empty_staging_tree(self):
+        empty = self.root / 'empty'
+        empty.mkdir()
+        result = self.run_in(empty, 'write_manifest', str(self.root / 'a.tar.gz'), str(empty))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((empty / MANIFEST).exists())
+
     def test_publish_local_media_fails_complete_validation_without_restoring(self):
         for platform in ('ios', 'android', 'both'):
             with self.subTest(platform=platform):

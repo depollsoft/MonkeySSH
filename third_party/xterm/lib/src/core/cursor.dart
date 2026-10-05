@@ -108,18 +108,6 @@ class CursorStyle {
 
   bool get isBold => (attrs & CellAttr.bold) != 0;
 
-  bool get isFaint => (attrs & CellAttr.faint) != 0;
-
-  bool get isItalis => (attrs & CellAttr.italic) != 0;
-
-  bool get isUnderline => (attrs & CellAttr.underline) != 0;
-
-  bool get isBlink => (attrs & CellAttr.blink) != 0;
-
-  bool get isInverse => (attrs & CellAttr.inverse) != 0;
-
-  bool get isInvisible => (attrs & CellAttr.invisible) != 0;
-
   bool get isStrikethrough => (attrs & CellAttr.strikethrough) != 0;
 
   bool get isOverline => (attrs & CellAttr.overline) != 0;
@@ -187,12 +175,4 @@ class CursorStyle {
     attrs = 0;
     underlineColor = 0;
   }
-}
-
-class CursorPosition {
-  int x;
-
-  int y;
-
-  CursorPosition(this.x, this.y);
 }

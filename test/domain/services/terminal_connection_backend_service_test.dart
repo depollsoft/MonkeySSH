@@ -14,10 +14,11 @@ import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
+import 'package:monkeyssh/domain/services/tmux_service.dart'
+    show runSshClientCommand;
 
 import '../../helpers/mock_ssh_exec_session.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mocks.dart';
 
 class _MockSshExecSession extends MockSessionWithChannel {}
 
@@ -29,7 +30,7 @@ void main() {
       tester,
     ) async {
       final opening = Completer<SSHSession>();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) => opening.future);
       final session = _buildSession(client);
@@ -78,21 +79,20 @@ void main() {
         monkeyMuxService: _MockMonkeyMuxService(),
       );
 
-      final backend = service.resolve(_buildSession(_MockSshClient()));
+      final backend = service.resolve(_buildSession(MockSshClient()));
 
       expect(backend.type, TerminalBackendType.direct);
       expect(backend.remoteMuxBackend, isNull);
-      expect(backend.capabilities.supportsWindows, isFalse);
-      expect(backend.capabilities.supportsClientCommands, isTrue);
+      expect(backend.capabilities.clientCommandsUseControlChannel, isFalse);
     });
 
     test('runs direct client commands through the SSH exec queue', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
             commands.add(invocation.positionalArguments.single as String);
-            return _buildExecSession(stdout: 'ok');
+            return _buildExecSession(stdout: 'ok', exitCode: 3);
           });
       final service = TerminalConnectionBackendService(
         tmuxMultiplexer: _FakeRemoteMultiplexerService(),
@@ -106,8 +106,42 @@ void main() {
       );
 
       expect(result.output, 'ok');
-      expect(result.exitCode, isNull);
+      expect(result.exitCode, 3);
       expect(commands, contains(r"cd '/tmp/user'\''s repo' && ( printf hi )"));
+    });
+
+    testWidgets('stalled client command output releases the queue', (
+      tester,
+    ) async {
+      final client = MockSshClient();
+      final exec = _MockSshExecSession();
+      final stdout = StreamController<Uint8List>();
+      when(() => exec.stdout).thenAnswer((_) => stdout.stream);
+      when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+      when(() => exec.done).thenAnswer((_) => Completer<void>().future);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => exec);
+      final session = _buildSession(client);
+      final backend = TerminalConnectionBackendService(
+        tmuxMultiplexer: _FakeRemoteMultiplexerService(),
+        monkeyMuxService: _MockMonkeyMuxService(),
+      ).resolve(session);
+
+      // A command that opened fine but never exits used to hold its exec slot
+      // forever; MonkeyMux's run_command path already gave up after 25 s.
+      final failed = expectLater(
+        backend.runClientCommand('probe'),
+        throwsA(isA<TimeoutException>()),
+      );
+      await tester.pump();
+      stdout.add(Uint8List.fromList(utf8.encode('partial')));
+      await tester.pump(const Duration(seconds: 24));
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 1);
+      await tester.pump(const Duration(seconds: 1));
+      await failed;
+      expect(activeQueuedSshExecCountForTesting(session.connectionId), 0);
+      verify(exec.channel.destroy).called(1);
+      await stdout.close();
     });
 
     test('delegates tmux window operations through the multiplexer', () async {
@@ -121,7 +155,7 @@ void main() {
         tmuxMultiplexer: tmuxMultiplexer,
         monkeyMuxService: _MockMonkeyMuxService(),
       );
-      final session = _buildSession(_MockSshClient())
+      final session = _buildSession(MockSshClient())
         ..remoteMuxBackend = RemoteMuxBackend.tmux
         ..remoteMuxSessionName = 'dev';
 
@@ -139,7 +173,7 @@ void main() {
       await backend.killWindow(3, windowId: '@8');
 
       expect(backend.type, TerminalBackendType.tmux);
-      expect(backend.capabilities.supportsWindows, isTrue);
+      expect(backend.capabilities.clientCommandsUseControlChannel, isFalse);
       expect(context?.currentPath, '/repo');
       expect(
         tmuxMultiplexer.calls,
@@ -158,7 +192,7 @@ void main() {
       'runs MonkeyMux client commands through the control channel',
       () async {
         final monkeyMuxService = _MockMonkeyMuxService();
-        final session = _buildSession(_MockSshClient())
+        final session = _buildSession(MockSshClient())
           ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
           ..remoteMuxSessionName = 'dev';
         when(
@@ -207,8 +241,13 @@ SshSession _buildSession(SSHClient client) => SshSession(
   ),
 );
 
-SSHSession _buildExecSession({String stdout = '', String stderr = ''}) {
+SSHSession _buildExecSession({
+  String stdout = '',
+  String stderr = '',
+  int? exitCode,
+}) {
   final exec = _MockSshExecSession();
+  when(() => exec.exitCode).thenReturn(exitCode);
   when(() => exec.stdout).thenAnswer(
     (_) => Stream<Uint8List>.fromIterable([
       Uint8List.fromList(utf8.encode(stdout)),
@@ -314,6 +353,17 @@ class _FakeRemoteMultiplexerService implements RemoteMultiplexerService {
 
   @override
   bool isExecChannelCoolingDown(SshSession session) => false;
+
+  @override
+  bool get clientCommandsUseControlChannel => false;
+
+  @override
+  Future<TerminalClientCommandResult> runClientCommand(
+    SshSession session,
+    String sessionName,
+    String command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => runSshClientCommand(session, command, priority: priority);
 
   @override
   Future<bool> hasForegroundClientOrThrow(

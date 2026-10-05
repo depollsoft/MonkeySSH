@@ -3,6 +3,12 @@ import 'package:xterm/xterm.dart';
 
 void main() {
   group('Buffer.getText()', () {
+    test('without a range includes the last column', () {
+      final terminal = Terminal()..resize(3, 1);
+      terminal.write('abc');
+      expect(terminal.buffer.getText(), 'abc');
+    });
+
     test('should return the text', () {
       final terminal = Terminal();
       terminal.write('Hello World');

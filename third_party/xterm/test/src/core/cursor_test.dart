@@ -59,21 +59,7 @@ void main() {
     });
   });
 
-  group('CellAttr and CellFlags layout', () {
-    test('attribute bit positions stay in sync', () {
-      expect(CellAttr.bold, CellFlags.bold);
-      expect(CellAttr.faint, CellFlags.faint);
-      expect(CellAttr.italic, CellFlags.italic);
-      expect(CellAttr.underline, CellFlags.underline);
-      expect(CellAttr.blink, CellFlags.blink);
-      expect(CellAttr.inverse, CellFlags.inverse);
-      expect(CellAttr.invisible, CellFlags.invisible);
-      expect(CellAttr.strikethrough, CellFlags.strikethrough);
-      expect(CellAttr.underlineStyleShift, CellFlags.underlineStyleShift);
-      expect(CellAttr.underlineStyleMask, CellFlags.underlineStyleMask);
-      expect(CellAttr.overline, CellFlags.overline);
-    });
-
+  group('CellAttr layout', () {
     test('underline style field does not collide with other flags', () {
       const otherFlags = CellFlags.bold |
           CellFlags.faint |

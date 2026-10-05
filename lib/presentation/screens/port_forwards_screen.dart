@@ -15,6 +15,7 @@ import '../providers/entity_list_providers.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import 'port_forward_browser_screen.dart';
 
 /// Screen displaying list of port forwards grouped by host.
@@ -231,29 +232,13 @@ class PortForwardsScreen extends ConsumerWidget {
     WidgetRef ref,
     PortForward portForward,
   ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Port Forward'),
-        content: Text('Delete "${portForward.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-              foregroundColor: Theme.of(context).colorScheme.onError,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete Port Forward',
+      message: 'Delete "${portForward.name}"?',
     );
 
-    if (confirmed ?? false) {
+    if (confirmed) {
       try {
         await stopPortForwardOnConnectedSessions(
           sessions: ref.read(activeSessionsProvider.notifier),

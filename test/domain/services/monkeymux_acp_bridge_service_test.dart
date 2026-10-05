@@ -548,22 +548,28 @@ void main() {
     },
   );
 
-  test('Antigravity ACP gets a TERM_PROGRAM so agy skips its DA2 probe', () {
+  test('ACP providers get a TERM_PROGRAM so agy skips its DA2 probe', () {
     const argv = ['npx', '--yes', '--prefer-offline', 'agy-acp@0.5.2'];
-    final posix = buildMonkeyMuxAcpProviderCommand(
-      argv,
-      isWindows: false,
-      providerId: AcpBuiltinProviderIds.antigravity,
-    );
     // A value from the user's profile wins; the default is set only when
     // TERM_PROGRAM is missing, and it lands before the exec.
     const preamble =
         r'[ -n "${TERM_PROGRAM-}" ] || export TERM_PROGRAM=MonkeySSH; ';
-    expect(posix, contains(preamble));
-    expect(
-      posix.indexOf(preamble),
-      lessThan(posix.indexOf("exec 'npx' '--yes'")),
-    );
+    for (final providerId in [
+      AcpBuiltinProviderIds.antigravity,
+      AcpBuiltinProviderIds.copilotCli,
+      null,
+    ]) {
+      final posix = buildMonkeyMuxAcpProviderCommand(
+        argv,
+        isWindows: false,
+        providerId: providerId,
+      );
+      expect(posix, contains(preamble));
+      expect(
+        posix.indexOf(preamble),
+        lessThan(posix.indexOf("exec 'npx' '--yes'")),
+      );
+    }
     final windows = decodeEncodedPowerShell(
       buildMonkeyMuxAcpProviderCommand(
         argv,
@@ -578,19 +584,6 @@ void main() {
         r"$env:TERM_PROGRAM='MonkeySSH' };",
       ),
     );
-
-    for (final providerId in [
-      AcpBuiltinProviderIds.copilotCli,
-      AcpBuiltinProviderIds.openCode,
-      null,
-    ]) {
-      final other = buildMonkeyMuxAcpProviderCommand(
-        argv,
-        isWindows: false,
-        providerId: providerId,
-      );
-      expect(other, isNot(contains('TERM_PROGRAM')));
-    }
   });
 
   test('Cursor ACP leaves credential handling to Cursor', () {
@@ -747,7 +740,7 @@ void main() {
         priority: any(named: 'priority'),
       ),
     ).thenThrow(
-      const MonkeyMuxInstallException('Cursor Agent login keychain is locked'),
+      const MonkeyMuxInstallException(monkeyMuxCursorKeychainLockedMessage),
     );
     final service = MonkeyMuxAcpBridgeService(
       installer: _FakeInstaller(
@@ -811,6 +804,14 @@ void main() {
         'claude-agent-acp': '/Users/demo/bin/claude-agent-acp',
         'npx': '/opt/homebrew/bin/npx',
       },
+    );
+    expect(
+      parseMonkeyMuxAcpExecutableProbeOutput(
+        'npx\u001fC:/Program Files/nodejs/npx.cmd\n'
+        'pi-acp\u001f/Users/Demo User/bin/not-pi\n',
+        const {'npx', 'pi-acp'},
+      ),
+      {'npx': 'C:/Program Files/nodejs/npx.cmd'},
     );
     expect(
       () => buildMonkeyMuxAcpExecutableProbeCommand(const {'npx; unsafe'}),
@@ -1327,19 +1328,16 @@ void main() {
       // before delivery, so the reconnect would not start from ACK 1.
       await channels.single.remoteClose();
       await _waitUntil(() => !transport.isConnected);
-      await expectLater(
-        transport.write(
-          utf8.encode(
-            '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
-          ),
+      // Input written during the backoff queues instead of failing the
+      // connection, then flushes on the reattached channel.
+      await transport.write(
+        utf8.encode(
+          '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
         ),
-        throwsA(
-          isA<MonkeyMuxAcpBridgeException>().having(
-            (error) => error.kind,
-            'kind',
-            MonkeyMuxAcpBridgeErrorKind.sshChannel,
-          ),
-        ),
+      );
+      expect(
+        channels.single.writes.map(_decodeFrame),
+        isNot(contains(containsPair('type', 'input'))),
       );
       await _waitUntil(() => channels.length == 2);
 
@@ -1348,7 +1346,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(
         channels[1].writes.map(_decodeFrame),
-        isNot(contains(containsPair('type', 'input'))),
+        contains(containsPair('data', containsPair('method', 'initialize'))),
       );
       expect(transport.lastDeliveredSequence, overflow ? 3 : 2);
       expect(errors.map((error) => error.kind), [
@@ -2461,6 +2459,62 @@ void main() {
         .map(_decodeFrame)
         .firstWhere((message) => message['type'] == 'input');
     expect(wrapped['data'], containsPair('method', 'prompt'));
+  });
+
+  test('input written during reconnect flushes after reattach', () async {
+    final client = _MockSshClient();
+    final channels = <_TestChannel>[];
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async {
+          late _TestChannel channel;
+          channel = _TestChannel(
+            onWrite: (value) {
+              if (_decodeFrame(utf8.encode(value))['type'] != 'hello') return;
+              channel.addText(
+                _frame({
+                  'version': 1,
+                  'type': 'hello',
+                  'bridgeId': _bridgeId,
+                  'clientId': _otherBridgeId,
+                  'canSend': true,
+                  'bridge': _metadata(),
+                }),
+              );
+            },
+          );
+          channels.add(channel);
+          return channel.session;
+        });
+    final transport = _bridgeService().connect(
+      sessionProvider: () async => _sshSession(client),
+      bridgeId: _bridgeId,
+      providerId: 'copilot',
+      reconnectBackoff: const [Duration(milliseconds: 20)],
+    );
+    addTearDown(transport.close);
+    await _waitUntil(() => transport.isConnected);
+    await channels.single.remoteClose();
+    await _waitUntil(() => !transport.isConnected);
+
+    await transport.write(
+      utf8.encode(
+        '${jsonEncode({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})}\n',
+      ),
+    );
+
+    List<Map<String, Object?>> inputs(_TestChannel channel) => channel.writes
+        .map(_decodeFrame)
+        .where((message) => message['type'] == 'input')
+        .toList();
+    await _waitUntil(
+      () => channels.length == 2 && inputs(channels[1]).isNotEmpty,
+    );
+    expect(transport.isConnected, isTrue);
+    expect(inputs(channels[0]), isEmpty);
+    expect(
+      inputs(channels[1]).single['data'],
+      containsPair('method', 'initialize'),
+    );
   });
 
   test('explicit close only detaches locally and cancels reconnect', () async {

@@ -213,9 +213,6 @@ abstract interface class AcpTerminalProcess {
   /// Standard-error bytes from the process.
   Stream<List<int>> get stderr;
 
-  /// Completes when the SSH command channel closes.
-  Future<void> get done;
-
   /// Waits for the process exit status.
   Future<AcpTerminalExitStatus> waitForExit();
 
@@ -508,10 +505,38 @@ final class AcpClientCapabilityService {
   void setSessionAllowedRoots(String sessionId, List<String> roots) {
     if (sessionId.isEmpty) return;
     _sessionAllowedRoots[sessionId] = List<String>.unmodifiable(roots);
+    _canonicalRoots.remove(sessionId);
   }
 
   List<String> _allowedRootsForSession(String sessionId) =>
       _sessionAllowedRoots[sessionId] ?? allowedRoots;
+
+  /// Canonical allowed roots per session, filled once every root resolved so
+  /// a root created later is retried instead of staying missing.
+  final Map<String, List<String>> _canonicalRoots = <String, List<String>>{};
+
+  Future<List<String>> _canonicalRootsForSession(String sessionId) async {
+    final cached = _canonicalRoots[sessionId];
+    if (cached != null) return cached;
+    // Resolve each root independently: one missing additional directory
+    // must not make every other root (including the cwd) unusable.
+    final resolved = await Future.wait(
+      _allowedRootsForSession(sessionId).map((root) async {
+        final normalizedRoot = normalizeSftpAbsolutePath(root);
+        if (normalizedRoot == null) return null;
+        try {
+          return normalizeSftpAbsolutePath(
+            await fileSystem!.canonicalizeExistingPath(normalizedRoot),
+          );
+        } on Object {
+          return null;
+        }
+      }),
+    );
+    final roots = List<String>.unmodifiable(resolved.nonNulls);
+    if (roots.length == resolved.length) _canonicalRoots[sessionId] = roots;
+    return roots;
+  }
 
   /// User-decision registry. It may be retained over bridge detach/reconnect.
   final AcpPendingRequestRegistry registry;
@@ -694,6 +719,7 @@ final class AcpClientCapabilityService {
       _activeRequests.removeWhere((_, owner) => owner == sessionId);
       _sessionAutoApprovePermissions.remove(sessionId);
       _sessionAllowedRoots.remove(sessionId);
+      _canonicalRoots.remove(sessionId);
       final owned = _terminals.entries
           .where((entry) => entry.value.sessionId == sessionId)
           .toList(growable: false);
@@ -1382,20 +1408,13 @@ final class AcpClientCapabilityService {
       final resolved = forWrite
           ? await fileSystem!.canonicalizeWritePath(normalized)
           : await fileSystem!.canonicalizeExistingPath(normalized);
-      // Resolve each root independently: one missing additional directory
-      // must not make every other root (including the cwd) unusable.
-      final canonicalRoots = (await Future.wait(
-        _allowedRootsForSession(sessionId).map((root) async {
-          final normalizedRoot = normalizeSftpAbsolutePath(root);
-          if (normalizedRoot == null) return null;
-          try {
-            return await fileSystem!.canonicalizeExistingPath(normalizedRoot);
-          } on Object {
-            return null;
-          }
-        }),
-      )).nonNulls;
-      if (!_isAllowedPath(resolved, canonicalRoots)) {
+      final canonicalRoots = await _canonicalRootsForSession(sessionId);
+      final allowed = canonicalRoots.any(
+        (root) =>
+            resolved == root ||
+            resolved.startsWith(root.endsWith('/') ? root : '$root/'),
+      );
+      if (!allowed) {
         throw const AcpClientCapabilityException('Path is not allowed');
       }
       return resolved;
@@ -1404,20 +1423,6 @@ final class AcpClientCapabilityService {
     } on Object {
       throw const AcpClientCapabilityException('Path is not allowed');
     }
-  }
-
-  bool _isAllowedPath(String candidate, Iterable<String> roots) {
-    for (final root in roots) {
-      final normalizedRoot = normalizeSftpAbsolutePath(root);
-      if (normalizedRoot == null) continue;
-      if (candidate == normalizedRoot ||
-          candidate.startsWith(
-            normalizedRoot.endsWith('/') ? normalizedRoot : '$normalizedRoot/',
-          )) {
-        return true;
-      }
-    }
-    return false;
   }
 }
 
@@ -1489,9 +1494,6 @@ final class _SshAcpTerminalProcess implements AcpTerminalProcess {
 
   @override
   Stream<List<int>> get stdout => _session.stdout.cast<List<int>>();
-
-  @override
-  Future<void> get done => _session.done;
 
   @override
   void kill() => _session.close();

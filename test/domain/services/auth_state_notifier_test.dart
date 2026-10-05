@@ -7,14 +7,14 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/domain/services/auth_service.dart';
 
-class _MockAuthService extends Mock implements AuthService {}
+import '../../helpers/mocks.dart';
 
 void main() {
-  late _MockAuthService authService;
+  late MockAuthService authService;
   late ProviderContainer container;
 
   setUp(() {
-    authService = _MockAuthService();
+    authService = MockAuthService();
     container = ProviderContainer(
       overrides: [authServiceProvider.overrideWithValue(authService)],
     );

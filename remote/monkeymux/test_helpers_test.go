@@ -304,3 +304,61 @@ func assertTestDeadline(t *testing.T, deadlines <-chan time.Time, cleared bool) 
 		t.Fatalf("deadline was not set, want cleared=%t", cleared)
 	}
 }
+
+// foregroundHistoryFallbackHistoryLocked renders the frame a redraw pause
+// would fall back to: the screen model's picture, or nothing when it has no
+// visible content.
+func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
+	window *muxWindow,
+) []byte {
+	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
+		return nil
+	}
+	screen := window.screenLocked()
+	if !screen.HasVisibleContent() {
+		return nil
+	}
+	return screen.RenderFrame()
+}
+
+// redrawFallbackHistory renders the frame retained by the window's current
+// redraw pause, or nil when the pause kept no screen snapshot.
+func redrawFallbackHistory(window *muxWindow) []byte {
+	if window.redrawForwardingFallbackScreen == nil {
+		return nil
+	}
+	return window.redrawForwardingFallbackScreen.RenderFrame()
+}
+
+// activeReplayLocked is the active window's reattach replay without the
+// store-only image follow-up.
+func (s *muxServer) activeReplayLocked() []byte {
+	replay, _ := s.activeReplayWithImageFollowUpLocked()
+	return replay
+}
+
+// replayBytesLocked is window's reattach replay without the store-only image
+// follow-up.
+func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
+	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
+	return replay
+}
+
+// kittyImageReplayLocked is the retained-image replay without its root set.
+func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
+	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
+	return out
+}
+
+// lastPublishedExitCode is the exit code carried by the most recent state
+// event in the bridge's retained replay, or nil before the provider exited.
+func lastPublishedExitCode(bridge *acpBridge) *int {
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	for index := len(bridge.replay) - 1; index >= 0; index-- {
+		if message := bridge.replay[index].message; message.Type == "state" {
+			return message.ExitCode
+		}
+	}
+	return nil
+}

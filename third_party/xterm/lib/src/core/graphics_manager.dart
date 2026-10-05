@@ -1609,14 +1609,6 @@ class GraphicsManager {
     }
   }
 
-  /// Stores [image] and returns its new id, or `0` when it exceeds the memory
-  /// budget.
-  int storeImage(ui.Image image, {int sourceSignature = 0}) =>
-      storeDecodedImage(
-        DecodedTerminalImage.single(image),
-        sourceSignature: sourceSignature,
-      );
-
   /// Stores a decoded static or animated [image] and returns its new id.
   ///
   /// Returns `0` and disposes [image] when its decoded frames exceed
@@ -1729,13 +1721,11 @@ class GraphicsManager {
   /// When [imageIds] is supplied, only those images are considered. The render
   /// widget uses this to stop ticking animations outside the visible viewport.
   bool hasActiveAnimationsFor([Set<int>? imageIds]) {
+    bool Function(int)? isDisplayed = imageIds?.contains;
     for (final entry in _images.entries) {
-      if ((imageIds == null
-              ? _isImageDisplayed(entry.key)
-              : imageIds.contains(entry.key)) &&
-          entry.value._needsAnimationTick) {
-        return true;
-      }
+      if (!entry.value._needsAnimationTick) continue;
+      isDisplayed ??= _displayedImageTest();
+      if (isDisplayed(entry.key)) return true;
     }
     return false;
   }
@@ -1746,11 +1736,10 @@ class GraphicsManager {
   /// calls this from its ticker and repaints through [onChanged].
   bool advanceAnimations(Duration elapsed, {Set<int>? imageIds}) {
     var changed = false;
+    bool Function(int)? isDisplayed = imageIds?.contains;
     for (final entry in _images.entries) {
-      final displayed = imageIds == null
-          ? _isImageDisplayed(entry.key)
-          : imageIds.contains(entry.key);
-      if (displayed && entry.value._advance(elapsed)) {
+      isDisplayed ??= _displayedImageTest();
+      if (isDisplayed(entry.key) && entry.value._advance(elapsed)) {
         entry.value._lastAccess = ++_accessClock;
         changed = true;
       }
@@ -2020,24 +2009,30 @@ class GraphicsManager {
     return TerminalAnimationCompositionResult.success;
   }
 
-  bool _isImageDisplayed(int imageId) {
-    if (_placementsByAnchor.values.any(
-      (placement) => placement.imageId == imageId && placement.attached,
-    )) {
-      return true;
-    }
+  /// Tests whether an image is placed at an attached anchor or referenced by
+  /// an attached placeholder (a retained image also by the low 8 or 24 bits
+  /// of its id). Built once per animation tick rather than scanning every
+  /// placement and placeholder for each image.
+  bool Function(int imageId) _displayedImageTest() {
+    final placed = <int>{
+      for (final placement in _placementsByAnchor.values)
+        if (placement.attached) placement.imageId,
+    };
+    final narrow = <int>{};
+    final wide = <int>{};
     for (final placeholder in _placeholdersByAnchor.values) {
-      if (!placeholder.attached) {
-        continue;
-      }
-      final mask = placeholder.imageIdBitWidth >= 24 ? 0xFFFFFF : 0xFF;
-      if (placeholder.imageId == imageId ||
-          (_retainedImageIds.contains(imageId) &&
-              (imageId & mask) == placeholder.imageId)) {
-        return true;
+      if (placeholder.attached) {
+        (placeholder.imageIdBitWidth >= 24 ? wide : narrow)
+            .add(placeholder.imageId);
       }
     }
-    return false;
+    return (imageId) =>
+        placed.contains(imageId) ||
+        narrow.contains(imageId) ||
+        wide.contains(imageId) ||
+        (_retainedImageIds.contains(imageId) &&
+            (wide.contains(imageId & 0xFFFFFF) ||
+                narrow.contains(imageId & 0xFF)));
   }
 
   /// Creates a placement of [imageId] anchored at [anchor], optionally spanning
@@ -2140,12 +2135,6 @@ class GraphicsManager {
     return placeholder;
   }
 
-  /// Drops placements whose anchor cell has been evicted from the buffer.
-  ///
-  /// Returns true if any placement was removed.
-  bool pruneDetachedPlacements() =>
-      _removePlacementsWhere((placement) => !placement.attached).isNotEmpty;
-
   /// Drops placeholder cells whose anchors have been evicted.
   bool pruneDetachedPlaceholders() {
     final detached = <TerminalImagePlaceholder>[
@@ -2172,28 +2161,6 @@ class GraphicsManager {
       (placement) =>
           !placement.attached ||
           _placementIntersectsRows(placement, firstRow, lastRow),
-    );
-    if (removed.isNotEmpty) {
-      _generation++;
-    }
-    pruneDetachedPlaceholders();
-    _dropUnreferencedImages();
-  }
-
-  /// Removes placements intersecting the rectangular cell region whose rows and
-  /// columns are inclusive. Used by partial erases (`CSI J/K/X`) so an image
-  /// does not remain painted over cells the terminal just cleared.
-  void removePlacementsInRegion(
-    int firstRow,
-    int lastRow,
-    int firstCol,
-    int lastCol,
-  ) {
-    final removed = _removePlacementsWhere(
-      (placement) =>
-          !placement.attached ||
-          (_placementIntersectsRows(placement, firstRow, lastRow) &&
-              _placementIntersectsCols(placement, firstCol, lastCol)),
     );
     if (removed.isNotEmpty) {
       _generation++;

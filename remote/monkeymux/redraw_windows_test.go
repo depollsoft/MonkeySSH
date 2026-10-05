@@ -286,7 +286,7 @@ func TestConPtyNormalScreenExplicitThemeRedraw(t *testing.T) {
 					t.Fatal("explicit redraw lost its fallback frame")
 				}
 			}
-			server.forceForegroundThemeRedraw(window.id)
+			server.forceForegroundRedraw(window.id)
 			if redrew != (command != "powershell") {
 				t.Fatalf("theme redraw = %t for %s", redrew, command)
 			}

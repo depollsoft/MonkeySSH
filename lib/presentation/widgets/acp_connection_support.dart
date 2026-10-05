@@ -1,13 +1,16 @@
 import 'dart:convert';
 
+import 'package:collection/collection.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/agent_launch_preset.dart';
+import '../../domain/models/command_names.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/monkeymux_acp_bridge_service.dart';
@@ -71,6 +74,11 @@ Set<String> _allBuiltinAcpExecutableNames() => <String>{
   ],
 };
 
+Map<String, String> _builtinAcpExecutableOverrideVariables() => {
+  for (final provider in acpBuiltinProviders)
+    ...provider.executableProbe.executableOverrideEnvironmentVariables,
+};
+
 Future<Map<String, String>> _loadAcpRemoteExecutables(
   SshSession session,
 ) async {
@@ -92,13 +100,20 @@ Future<Map<String, String>> _loadAcpRemoteExecutables(
   }
   if (cache.pending case final pending?) return pending;
   final requested = _allBuiltinAcpExecutableNames();
+  final overrideVariables = _builtinAcpExecutableOverrideVariables();
   final startedAt = DateTime.now();
   final future = session.runQueuedExec(() async {
     final command = session.remoteIsWindows
         ? buildWindowsPowerShellCommand(
-            buildMonkeyMuxAcpWindowsExecutableProbeScript(requested),
+            buildMonkeyMuxAcpWindowsExecutableProbeScript(
+              requested,
+              overrideVariables: overrideVariables,
+            ),
           )
-        : buildMonkeyMuxAcpExecutableProbeCommand(requested);
+        : buildMonkeyMuxAcpExecutableProbeCommand(
+            requested,
+            overrideVariables: overrideVariables,
+          );
     SSHSession? shell;
     try {
       shell = await session.execute(command);
@@ -138,24 +153,38 @@ Future<Map<String, String>> _loadAcpRemoteExecutables(
   }
 }
 
-/// Resolves OpenCode sign-in using the same executable probe as native launch.
+/// Returns the terminal sign-in command for [providerId], if the provider is
+/// a built-in that advertises one.
+AcpLaunchCommand? acpTerminalAuthCommandFor(String providerId) =>
+    acpBuiltinProviders
+        .firstWhereOrNull((provider) => provider.id == providerId)
+        ?.terminalAuthCommand;
+
+/// Resolves the terminal sign-in command using the same executable probe as
+/// native launch.
+///
+/// When the command's executable is one of the provider's probe candidates
+/// (for example `opencode` vs `opencode2`, `copilot` vs `github-copilot`), the
+/// first candidate installed on the host is substituted so the copied command
+/// runs there. Any other command is returned as declared.
 Future<AcpLaunchCommand?> resolveAcpTerminalAuthCommand({
   required String providerId,
   SshSession? session,
 }) async {
-  final provider = acpBuiltinProviders
-      .where((candidate) => candidate.id == providerId)
-      .firstOrNull;
+  final provider = acpBuiltinProviders.firstWhereOrNull(
+    (candidate) => candidate.id == providerId,
+  );
   final command = provider?.terminalAuthCommand;
-  if (command == null ||
-      providerId != AcpBuiltinProviderIds.openCode ||
-      session == null) {
+  if (command == null || session == null) {
+    return command;
+  }
+  final candidates = provider!.executableProbe.candidateExecutableNames;
+  if (!candidates.contains(command.executable)) {
     return command;
   }
   try {
     final found = await _loadAcpRemoteExecutables(session);
-    for (final candidate
-        in provider!.executableProbe.candidateExecutableNames) {
+    for (final candidate in candidates) {
       if (found.containsKey(candidate)) {
         return AcpLaunchCommand(
           executable: candidate,
@@ -166,6 +195,36 @@ Future<AcpLaunchCommand?> resolveAcpTerminalAuthCommand({
   } on Object {
     // Keep the normal recovery action available if the probe cannot complete.
   }
+  return command;
+}
+
+/// Copies the provider's terminal sign-in command for [hostId] to the
+/// clipboard and confirms with a snackbar. Returns the resolved command, or
+/// `null` when the provider has none; callers then open the terminal.
+Future<AcpLaunchCommand?> copyAcpTerminalAuthCommand(
+  BuildContext context,
+  WidgetRef ref, {
+  required String providerId,
+  required int hostId,
+}) async {
+  final session = ref
+      .read(sshServiceProvider)
+      .getSessionsForHost(hostId)
+      .firstOrNull;
+  final command = await resolveAcpTerminalAuthCommand(
+    providerId: providerId,
+    session: session,
+  );
+  if (command == null || !context.mounted) {
+    return command;
+  }
+  final messenger = ScaffoldMessenger.of(context);
+  await Clipboard.setData(ClipboardData(text: command.argv.join(' ')));
+  messenger.showSnackBar(
+    const SnackBar(
+      content: Text('Sign-in command copied — run it in the terminal.'),
+    ),
+  );
   return command;
 }
 
@@ -336,8 +395,9 @@ AcpLaunchCommand applyAcpAgentLaunchSettings({
 }
 
 bool _isResolvedTerminalExecutable(AgentLaunchTool tool, String executable) {
-  var name = executable.replaceAll(r'\\', '/').split('/').last.toLowerCase();
-  name = name.replaceFirst(RegExp(r'\.(?:exe|cmd|bat|ps1|com)$'), '');
+  final name = normalizeCommandBasename(
+    executable.replaceAll(r'\', '/').split('/').last,
+  );
   return tool.candidateCommandNames.any(
     (candidate) => candidate.toLowerCase() == name,
   );

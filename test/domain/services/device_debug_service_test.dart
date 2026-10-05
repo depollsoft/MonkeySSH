@@ -11,10 +11,7 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
-
-class _MockSshSession extends Mock implements SshSession {}
-
-class _MockSshClient extends Mock implements SSHClient {}
+import '../../helpers/mocks.dart';
 
 class _MockExecChannel extends MockSessionWithChannel {}
 
@@ -180,7 +177,7 @@ void main() {
   testWidgets(
     'ADB channel opening times out, releases queue and closes late channel',
     (tester) async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       final session = _adbSession(
@@ -270,7 +267,7 @@ void main() {
     });
 
     test('runs ADB through the resolved path and caches it', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final executedCommands = <String>[];
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -301,7 +298,7 @@ void main() {
     test(
       'isolates cached paths by session and clears failed validation',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final executedCommands = <String>[];
         var resolvedPath = '/opt/homebrew/bin/adb';
         var valid = true;
@@ -356,7 +353,7 @@ void main() {
     );
 
     test('reports ADB as unavailable when resolution finds nothing', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final executedCommands = <String>[];
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
@@ -511,7 +508,7 @@ void main() {
   });
 
   group('DeviceDebugSessionController', () {
-    late _MockSshSession session;
+    late MockSshSession session;
     late _FakeAndroidDeviceDebugPlatform platform;
     late _FakeRemoteAdbCommandRunner remoteRunner;
     late List<ActiveTunnelInfo> activeTunnels;
@@ -530,7 +527,7 @@ void main() {
     );
 
     setUp(() {
-      session = _MockSshSession();
+      session = MockSshSession();
       platform = _FakeAndroidDeviceDebugPlatform();
       remoteRunner = _FakeRemoteAdbCommandRunner();
       activeTunnels = [];

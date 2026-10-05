@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -472,38 +473,12 @@ const (
 )
 
 var (
-	leadingCdCommandPattern       = regexp.MustCompile(`^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*`)
-	leadingEnvPattern             = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+`)
-	restoreFileNamePattern        = regexp.MustCompile(`^monkeymux-restore-[a-f0-9]{24}-[0-9]+\.json$`)
-	codexSessionIDPattern         = regexp.MustCompile(`(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-	piSessionDirArgumentPattern   = regexp.MustCompile(`(?:^|\s)--session-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
-	safePiSessionIDPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$`)
-	agentSessionIDArgumentPattern = map[string][]*regexp.Regexp{
-		"claude": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"copilot": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"muse": {
-			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"-][^"]*)"|'([^'-][^']*)'|([^-\s]\S*))`),
-		},
-		"codex": {
-			regexp.MustCompile(`(?:^|\s)resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"opencode": {
-			regexp.MustCompile(`(?:^|\s)--session(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"pi": {
-			regexp.MustCompile(`(?:^|\s)--session(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"antigravity": {
-			regexp.MustCompile(`(?:^|\s)--conversation(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-		"cursor-agent": {
-			regexp.MustCompile(`(?:^|\s)--resume(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`),
-		},
-	}
+	leadingCdCommandPattern     = regexp.MustCompile(`^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*`)
+	leadingEnvPattern           = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+`)
+	restoreFileNamePattern      = regexp.MustCompile(`^monkeymux-restore-[a-f0-9]{24}-[0-9]+\.json$`)
+	codexSessionIDPattern       = regexp.MustCompile(`(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+	piSessionDirArgumentPattern = regexp.MustCompile(`(?:^|\s)--session-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
+	safePiSessionIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$`)
 )
 
 type controlMessage struct {
@@ -858,7 +833,6 @@ type muxWindow struct {
 	redrawForwardingPaused               bool
 	redrawForwardingGeneration           int
 	redrawForwardingReplay               []byte
-	redrawForwardingFallbackHistory      []byte
 	redrawForwardingFallbackScreen       *terminalScreen
 	redrawForwardingBuffer               []byte
 	redrawForwardingFailoverBuffer       []byte
@@ -1293,11 +1267,11 @@ func attachCommand(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	themeHint, err := decodeThemeHintBase64(*themeHintBase64)
+	themeHint, err := decodeHintBase64(*themeHintBase64, themeHintLimitBytes, "theme")
 	if err != nil {
 		fatal(err)
 	}
-	capabilityHint, err := decodeCapabilityHintBase64(*capabilityHintBase64)
+	capabilityHint, err := decodeHintBase64(*capabilityHintBase64, capabilityHintLimitBytes, "capability")
 	if err != nil {
 		fatal(err)
 	}
@@ -1672,7 +1646,11 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 
 	decoder := json.NewDecoder(conn)
 	info := runningSessionInfo{}
-	for info.name == "" || info.windows == nil {
+	// Track receipt rather than content: a server with no windows omits the
+	// "windows" field, so waiting for a non-nil slice would stall until the
+	// socket deadline.
+	sawWindows := false
+	for info.name == "" || !sawWindows {
 		var response controlResponse
 		if err := decoder.Decode(&response); err != nil {
 			return runningSessionInfo{}, err
@@ -1683,6 +1661,7 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 			info.version = response.Version
 			info.attachCount = response.AttachCount
 		case "window_list":
+			sawWindows = true
 			info.windows = response.Windows
 			for _, window := range response.Windows {
 				if window.LastActivityEpochSeconds > info.lastActive {
@@ -1774,11 +1753,11 @@ func serveCommand(args []string) {
 	if strings.TrimSpace(*session) == "" {
 		usageAndExit()
 	}
-	themeHint, err := decodeThemeHintBase64(*themeHintBase64)
+	themeHint, err := decodeHintBase64(*themeHintBase64, themeHintLimitBytes, "theme")
 	if err != nil {
 		fatal(err)
 	}
-	capabilityHint, err := decodeCapabilityHintBase64(*capabilityHintBase64)
+	capabilityHint, err := decodeHintBase64(*capabilityHintBase64, capabilityHintLimitBytes, "capability")
 	if err != nil {
 		fatal(err)
 	}
@@ -1802,34 +1781,31 @@ func serveCommand(args []string) {
 	}
 }
 
-func decodeThemeHintBase64(encoded string) ([]byte, error) {
+// decodeHintBase64 decodes a base64 attach hint (theme or capability) bounded
+// by [limit]; [label] names the hint in errors.
+func decodeHintBase64(encoded string, limit int, label string) ([]byte, error) {
 	encoded = strings.TrimSpace(encoded)
 	if encoded == "" {
 		return nil, nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("invalid theme hint: %w", err)
+		return nil, fmt.Errorf("invalid %s hint: %w", label, err)
 	}
-	if len(decoded) > themeHintLimitBytes {
-		return nil, fmt.Errorf("theme hint is too large")
+	if len(decoded) > limit {
+		return nil, fmt.Errorf("%s hint is too large", label)
 	}
 	return decoded, nil
 }
 
-func decodeCapabilityHintBase64(encoded string) ([]byte, error) {
-	encoded = strings.TrimSpace(encoded)
-	if encoded == "" {
-		return nil, nil
+// hintDataFromString keeps a raw attach hint when it is non-empty and within
+// [limit] bytes.
+func hintDataFromString(data string, limit int) []byte {
+	data = strings.TrimSpace(data)
+	if data == "" || len(data) > limit {
+		return nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("invalid capability hint: %w", err)
-	}
-	if len(decoded) > capabilityHintLimitBytes {
-		return nil, errors.New("capability hint is too large")
-	}
-	return decoded, nil
+	return []byte(data)
 }
 
 func decodeArgsBase64(encoded string) ([]string, error) {
@@ -1880,11 +1856,16 @@ func gcCommand() {
 			clearStalePIDFile(path, "")
 			continue
 		case ".json":
-			removeAbandonedRestoreFile(path)
+			// Upgrade snapshots left behind by a helper that died mid-restart.
+			// Snapshots still being handed to a starting server are kept,
+			// otherwise gc would make that server come up empty.
+			if strings.HasPrefix(entry.Name(), "monkeymux-restore-") {
+				removeAbandonedFile(path, abandonedRestoreFileAge)
+			}
 			continue
 		case ".staging":
 			// Residue of a helper that died while installing a lock file.
-			removeAbandonedStagingFile(path)
+			removeAbandonedFile(path, abandonedPIDFileAge)
 			continue
 		case ".takeover":
 			// Residue of a helper that died while reclaiming a session file.
@@ -1907,23 +1888,10 @@ func gcCommand() {
 	gcAcpArtifacts(runDir)
 }
 
-// removeAbandonedRestoreFile deletes an upgrade snapshot left behind by a
-// helper that died mid-restart. Snapshots still being handed to a starting
-// server are kept, otherwise gc would make that server come up empty.
-func removeAbandonedRestoreFile(path string) {
-	if !strings.HasPrefix(filepath.Base(path), "monkeymux-restore-") {
-		return
-	}
+// removeAbandonedFile deletes [path] once it has not been modified for [age].
+func removeAbandonedFile(path string, age time.Duration) {
 	info, err := os.Stat(path)
-	if err != nil || time.Since(info.ModTime()) < abandonedRestoreFileAge {
-		return
-	}
-	_ = os.Remove(path)
-}
-
-func removeAbandonedStagingFile(path string) {
-	info, err := os.Stat(path)
-	if err != nil || time.Since(info.ModTime()) < abandonedPIDFileAge {
+	if err != nil || time.Since(info.ModTime()) < age {
 		return
 	}
 	_ = os.Remove(path)
@@ -3387,9 +3355,6 @@ func readAttachReplayHistory(conn net.Conn) []byte {
 			_ = conn.SetReadDeadline(deadline)
 		}
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				break
-			}
 			break
 		}
 	}
@@ -3418,91 +3383,50 @@ func enrichRestoreWithAgentSessionIDs(restore *serverRestore) {
 	defer protectExactAgentSessionBindings(restore)()
 	panePids := map[int]struct{}{}
 	paneWorkingDirectories := map[int]string{}
-	hasAntigravityWindows := false
-	hasCursorWindows := false
 	hasPiWindows := false
+	tools := map[string]bool{}
 	for _, window := range restore.Windows {
 		tool := agentToolCandidateForRestore(window)
 		if tool == "pi" {
 			hasPiWindows = true
-			if window.PanePid > 0 {
-				panePids[window.PanePid] = struct{}{}
-			}
-		}
-		switch tool {
-		case "antigravity":
-			hasAntigravityWindows = true
-		case "cursor-agent":
-			hasCursorWindows = true
 		}
 		if tool != "" && window.PanePid > 0 {
 			panePids[window.PanePid] = struct{}{}
 			paneWorkingDirectories[window.PanePid] = window.Cwd
+		}
+		if tool := agentToolForRestore(window); tool != "" && tool != "pi" {
+			tools[tool] = true
 		}
 	}
 	processes := map[int]processInfo{}
 	if len(panePids) > 0 {
 		processes = processTableForMetadata()
 	}
-	antigravitySessions := map[int]string{}
-	if hasAntigravityWindows {
-		antigravitySessions = discoverAntigravitySessionIDs(restore, processes, panePids)
-	}
-	cursorSessions := map[int]string{}
-	if hasCursorWindows {
-		cursorSessions = discoverCursorSessionIDs(restore, processes, panePids)
-	}
-	piSessions := map[int]piRestoreSession{}
 	if hasPiWindows {
-		piSessions = discoverPiSessions(restore, processes, panePids)
-		applyPiRestoreSessions(restore, piSessions)
+		applyPiRestoreSessions(restore, discoverPiSessions(restore, processes, panePids))
 	}
-	processDiscoveredSessions := map[string]map[int]string{}
+	discovered := map[string]map[int]string{}
 	if len(processes) > 0 {
-		processDiscoveredSessions = map[string]map[int]string{
-			"muse":     discoverRestoreAgentSessionIDs("muse", processes, panePids, restore, paneWorkingDirectories),
-			"copilot":  discoverCopilotSessionIDs(processes, panePids),
-			"codex":    discoverRestoreAgentSessionIDs("codex", processes, panePids, restore, paneWorkingDirectories),
-			"opencode": discoverRestoreAgentSessionIDs("opencode", processes, panePids, restore, paneWorkingDirectories),
-			"claude":   discoverRestoreAgentSessionIDs("claude", processes, panePids, restore, paneWorkingDirectories),
+		for tool := range tools {
+			discovered[tool] = discoverRestoreAgentSessionIDs(tool, processes, panePids, restore, paneWorkingDirectories)
 		}
 	}
 	for i := range restore.Windows {
 		tool := agentToolForRestore(restore.Windows[i])
-		panePid := restore.Windows[i].PanePid
-		if tool == "" {
-			continue
-		}
-		if tool == "pi" {
+		if tool == "" || tool == "pi" {
 			// applyPiRestoreSessions already assigned validated identities and
 			// cleared stale carried ones. Do not fall through to ID-only generic
 			// discovery and lose the exact path.
 			continue
 		}
-		discoveredSessionID := ""
-		if panePid > 0 {
-			discoveredSessionID = processDiscoveredSessions[tool][panePid]
-		}
-		switch tool {
-		case "antigravity":
-			discoveredSessionID = antigravitySessions[i]
-		case "cursor-agent":
-			discoveredSessionID = cursorSessions[i]
-		case "claude", "codex", "opencode", "muse":
-			// Discovery already considered argv and reserved its IDs. Retrying
-			// argv here could restore a duplicate identity it deliberately skipped.
-		default:
-			if discoveredSessionID == "" && panePid > 0 && len(processes) > 0 {
-				discoveredSessionID = sessionIDFromSelectedAgentProcessArgs(processes, panePid, tool)
-			}
-		}
 		// A carried ID describes what MonkeyMux tried to resume, not proof that
 		// the resume succeeded. If the command fell back to a fresh agent, its
 		// live argv/open file/store has no matching identity, so clear the stale
 		// ID instead of forcing that old conversation again on the next upgrade.
-		restore.Windows[i].AgentSessionID = discoveredSessionID
+		// Discovery already considered argv and reserved its IDs; retrying argv
+		// here could restore a duplicate identity it deliberately skipped.
+		restore.Windows[i].AgentSessionID = discovered[tool][restore.Windows[i].PanePid]
 	}
-	assignCopilotSessionsByWorkingDirectory(restore, processes, panePids)
 }
 
 func applyPiRestoreSessions(restore *serverRestore, sessions map[int]piRestoreSession) {
@@ -3527,69 +3451,6 @@ type antigravityHistoryEntry struct {
 	conversationID string
 	workspace      string
 	updatedAt      time.Time
-}
-
-func assignAgentSessionsByWorkspace(
-	restore *serverRestore,
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-	provider string,
-	sessionsForWorkspace func(string) []recentAgentSession,
-) map[int]string {
-	sessions := map[int]string{}
-	used := map[string]bool{}
-	for i, window := range restore.Windows {
-		if agentToolCandidateForRestore(window) == provider && window.AgentSessionIdentityExact && window.AgentSessionID != "" {
-			sessions[i] = window.AgentSessionID
-			used[window.AgentSessionID] = true
-		}
-	}
-	unresolved := []agentSessionFallback{}
-	liveProcesses := agentProcessesByPane(processes, panePids, provider)
-	for i, window := range restore.Windows {
-		if agentToolForRestore(window) != provider || sessions[i] != "" {
-			continue
-		}
-		process, ok := liveProcesses[window.PanePid]
-		if !ok {
-			continue
-		}
-		// Reserve exact identities before workspace fallback so a sibling cannot
-		// claim a session identified by a hook, registry, open file, or argv.
-		workspace := normalizedAgentWorkspacePath(window.Cwd)
-		if id := exactAgentSessionForProcess(provider, workspace, process, processes).agentSessionID; id != "" {
-			if !used[id] {
-				sessions[i] = id
-				used[id] = true
-			}
-			continue
-		}
-		unresolved = append(unresolved, agentSessionFallback{
-			key: i, workingDirectory: workspace,
-			windowPids:     agentProcessTree(processes, process.pid),
-			processStarted: processStartedAtForMetadata(process.pid),
-		})
-	}
-	assignRecentAgentSessions(provider, sessions, used, unresolved, sessionsForWorkspace)
-	return sessions
-}
-
-func discoverAntigravitySessionIDs(
-	restore *serverRestore,
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-) map[int]string {
-	entries := readAntigravityHistoryEntries()
-	return assignAgentSessionsByWorkspace(restore, processes, panePids, "antigravity",
-		func(workspace string) []recentAgentSession {
-			candidates := []recentAgentSession{}
-			for _, entry := range entries {
-				if entry.workspace == workspace {
-					candidates = append(candidates, recentAgentSession{entry.conversationID, entry.updatedAt})
-				}
-			}
-			return candidates
-		})
 }
 
 func readAntigravityHistoryEntries() []antigravityHistoryEntry {
@@ -3628,26 +3489,6 @@ func readAntigravityHistoryEntries() []antigravityHistoryEntry {
 	return entries
 }
 
-func antigravitySessionIDForWorkspace(
-	entries []antigravityHistoryEntry,
-	workspace string,
-	processStarted time.Time,
-	windowPids ...map[int]struct{},
-) string {
-	normalizedWorkspace := normalizedAgentWorkspacePath(workspace)
-	if normalizedWorkspace == "" {
-		return ""
-	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].workspace == normalizedWorkspace &&
-			sessionUpdatedDuringProcess(entries[i].updatedAt, processStarted) &&
-			!agentSessionOwnedElsewhere("antigravity", entries[i].conversationID, agentSessionWindowPIDs(windowPids)) {
-			return entries[i].conversationID
-		}
-	}
-	return ""
-}
-
 func normalizedAgentWorkspacePath(value string) string {
 	workspace := strings.TrimSpace(value)
 	if workspace == "" {
@@ -3674,24 +3515,6 @@ type cursorChatEntry struct {
 	chatID    string
 	cwd       string
 	updatedAt int64
-}
-
-func discoverCursorSessionIDs(
-	restore *serverRestore,
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-) map[int]string {
-	entries := readCursorChatEntries()
-	return assignAgentSessionsByWorkspace(restore, processes, panePids, "cursor-agent",
-		func(workspace string) []recentAgentSession {
-			candidates := []recentAgentSession{}
-			for _, entry := range entries {
-				if entry.cwd == workspace {
-					candidates = append(candidates, recentAgentSession{entry.chatID, time.UnixMilli(entry.updatedAt)})
-				}
-			}
-			return candidates
-		})
 }
 
 // readCursorChatEntries reads recent Cursor chat metadata, ordered oldest to
@@ -4096,7 +3919,7 @@ func discoverPiSessions(
 				remainingCandidates,
 			)
 		}
-		provisional := uniquePiSessionAssignments(processMatchesByWindow)
+		provisional := uniqueAssignments(processMatchesByWindow, piSessionEntryID)
 		ownedSessionIDs := map[string]bool{}
 		for _, candidate := range provisional {
 			ownedSessionIDs[candidate.sessionID] = true
@@ -4233,6 +4056,8 @@ func discoverPiSessions(
 	return sessions
 }
 
+func piSessionEntryID(entry piSessionEntry) string { return entry.sessionID }
+
 func uniqueLatestPiSession(candidates []piSessionEntry) (piSessionEntry, bool) {
 	var latest piSessionEntry
 	found := false
@@ -4275,12 +4100,7 @@ func piSessionFreshForRestoreWindow(
 	if window.LastActivityEpochSeconds <= 0 || candidate.modTime.IsZero() {
 		return false
 	}
-	activity := time.Unix(window.LastActivityEpochSeconds, 0)
-	delta := candidate.modTime.Sub(activity)
-	if delta < 0 {
-		delta = -delta
-	}
-	return delta <= piSessionActivityMatchTolerance
+	return withinActivityTolerance(candidate.modTime, time.Unix(window.LastActivityEpochSeconds, 0))
 }
 
 func uniquePiSessionsByWindowActivity(
@@ -4304,34 +4124,29 @@ func uniquePiSessionsByWindowActivity(
 			if candidate.modTime.IsZero() {
 				continue
 			}
-			delta := candidate.modTime.Sub(activity)
-			if delta < 0 {
-				delta = -delta
-			}
-			if delta <= piSessionActivityMatchTolerance {
+			if withinActivityTolerance(candidate.modTime, activity) {
 				matches = append(matches, candidate)
 			}
 		}
 		matchesByWindow[index] = piLeafSessionMatches(matches, candidates)
 	}
-	return uniquePiSessionAssignments(matchesByWindow)
+	return uniqueAssignments(matchesByWindow, piSessionEntryID)
 }
 
-func uniquePiSessionAssignments(
-	matchesByWindow map[int][]piSessionEntry,
-) map[int]piSessionEntry {
+// uniqueAssignments binds each window to its single candidate when no other
+// window also matched that candidate.
+func uniqueAssignments[T any](matchesByWindow map[int][]T, id func(T) string) map[int]T {
 	claimants := map[string]int{}
 	for _, matches := range matchesByWindow {
 		for _, candidate := range matches {
-			claimants[candidate.sessionID]++
+			claimants[id(candidate)]++
 		}
 	}
-	assignments := map[int]piSessionEntry{}
+	assignments := map[int]T{}
 	for index, matches := range matchesByWindow {
-		if len(matches) != 1 || claimants[matches[0].sessionID] != 1 {
-			continue
+		if len(matches) == 1 && claimants[id(matches[0])] == 1 {
+			assignments[index] = matches[0]
 		}
-		assignments[index] = matches[0]
 	}
 	return assignments
 }
@@ -4351,7 +4166,7 @@ func uniquePiSessionsByPaneTitle(
 		}
 		matchesByWindow[index] = piLeafSessionMatches(matches, candidates)
 	}
-	return uniquePiSessionAssignments(matchesByWindow)
+	return uniqueAssignments(matchesByWindow, piSessionEntryID)
 }
 
 func piSessionsWithLatestNamesForTitles(
@@ -4940,8 +4755,7 @@ func agentToolRelaunchable(tool string) bool {
 	if tool == "pi" {
 		return true
 	}
-	_, ok := agentCommands[tool]
-	return ok
+	return agentRegistry[tool].launch.executable != ""
 }
 
 // agentToolRestoredAsShell reports whether restore recognized an agent in this
@@ -4989,19 +4803,6 @@ func cachedProcessTable(now time.Time) map[int]processInfo {
 	return processes
 }
 
-func discoverCopilotSessionIDs(
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-) map[int]string {
-	sessions := map[int]string{}
-	for panePid, process := range agentProcessesByPane(processes, panePids, "copilot") {
-		if exact := exactAgentSessionForProcess("copilot", "", process, processes); exact.agentSessionID != "" {
-			sessions[panePid] = exact.agentSessionID
-		}
-	}
-	return sessions
-}
-
 // copilotLockModTime reports when a copilot inuse lock was last written, used to
 // prefer the freshest session dir when several map to the same pane.
 func copilotLockModTime(lock string) time.Time {
@@ -5011,16 +4812,11 @@ func copilotLockModTime(lock string) time.Time {
 	return time.Time{}
 }
 
-type copilotSessionEntry struct {
-	id        string
-	updatedAt time.Time
-}
-
-// copilotSessionsByWorkingDirectory groups on-disk copilot sessions by the
-// working directory recorded in each session's events log, most recently
-// active first. It supplements authoritative inuse-lock discovery only with
-// sessions updated during the window's current process lifetime.
-func copilotSessionsByWorkingDirectory() map[string][]copilotSessionEntry {
+// copilotRecentSessions lists on-disk copilot sessions with the working
+// directory recorded in each session's events log and its last update time.
+// It supplements authoritative inuse-lock discovery only with sessions updated
+// during the window's current process lifetime.
+func copilotRecentSessions() []recentAgentSession {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -5030,7 +4826,7 @@ func copilotSessionsByWorkingDirectory() map[string][]copilotSessionEntry {
 	if err != nil {
 		return nil
 	}
-	byDirectory := map[string][]copilotSessionEntry{}
+	var sessions []recentAgentSession
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -5044,17 +4840,9 @@ func copilotSessionsByWorkingDirectory() map[string][]copilotSessionEntry {
 		if info, err := os.Stat(eventsPath); err == nil {
 			modTime = info.ModTime()
 		}
-		byDirectory[workingDirectory] = append(
-			byDirectory[workingDirectory],
-			copilotSessionEntry{id: entry.Name(), updatedAt: modTime},
-		)
+		sessions = append(sessions, recentAgentSession{entry.Name(), workingDirectory, modTime})
 	}
-	for _, list := range byDirectory {
-		sort.SliceStable(list, func(i, j int) bool {
-			return list[i].updatedAt.After(list[j].updatedAt)
-		})
-	}
-	return byDirectory
+	return sessions
 }
 
 // copilotSessionWorkingDirectory returns the normalized working directory a
@@ -5110,94 +4898,6 @@ func normalizedWorkingDirectory(path string) string {
 	return cleaned
 }
 
-// assignCopilotSessionsByWorkingDirectory is the on-disk fallback for restored
-// Copilot windows whose inuse lock could not identify a session. It considers
-// only sessions updated during that window process and uses terminal activity
-// to disambiguate multiple candidates. Stale or overlapping evidence stays
-// fresh; sessions claimed by another window are never reused.
-func assignCopilotSessionsByWorkingDirectory(
-	restore *serverRestore,
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-) {
-	if restore == nil {
-		return
-	}
-	sessionsByDirectory := copilotSessionsByWorkingDirectory()
-	if len(sessionsByDirectory) == 0 {
-		return
-	}
-	used := map[string]bool{}
-	for i := range restore.Windows {
-		if id := strings.TrimSpace(restore.Windows[i].AgentSessionID); id != "" {
-			used[id] = true
-		}
-	}
-	liveProcesses := agentProcessesByPane(processes, panePids, "copilot")
-	matchesByWindow := map[int][]copilotSessionEntry{}
-	for i := range restore.Windows {
-		if strings.TrimSpace(restore.Windows[i].AgentSessionID) != "" ||
-			agentToolForRestore(restore.Windows[i]) != "copilot" {
-			continue
-		}
-		process, ok := liveProcesses[restore.Windows[i].PanePid]
-		if !ok {
-			continue
-		}
-		workingDirectory := normalizedWorkingDirectory(restore.Windows[i].Cwd)
-		if workingDirectory == "" {
-			continue
-		}
-		processStarted := processStartedAtForMetadata(process.pid)
-		windowPids := agentProcessTree(processes, process.pid)
-		candidates := []copilotSessionEntry{}
-		for _, session := range sessionsByDirectory[workingDirectory] {
-			if used[session.id] || agentSessionOwnedElsewhere("copilot", session.id, windowPids) ||
-				!sessionUpdatedDuringProcess(session.updatedAt, processStarted) {
-				continue
-			}
-			candidates = append(candidates, session)
-		}
-		if len(candidates) > 1 && restore.Windows[i].LastActivityEpochSeconds > 0 {
-			activity := time.Unix(restore.Windows[i].LastActivityEpochSeconds, 0)
-			activityMatches := candidates[:0]
-			for _, candidate := range candidates {
-				delta := candidate.updatedAt.Sub(activity)
-				if delta < 0 {
-					delta = -delta
-				}
-				if delta <= piSessionActivityMatchTolerance {
-					activityMatches = append(activityMatches, candidate)
-				}
-			}
-			candidates = activityMatches
-		}
-		matchesByWindow[i] = candidates
-	}
-	for index, session := range uniqueCopilotSessionAssignments(matchesByWindow) {
-		restore.Windows[index].AgentSessionID = session.id
-	}
-}
-
-func uniqueCopilotSessionAssignments(
-	matchesByWindow map[int][]copilotSessionEntry,
-) map[int]copilotSessionEntry {
-	claimants := map[string]int{}
-	for _, matches := range matchesByWindow {
-		for _, candidate := range matches {
-			claimants[candidate.id]++
-		}
-	}
-	assignments := map[int]copilotSessionEntry{}
-	for index, matches := range matchesByWindow {
-		if len(matches) != 1 || claimants[matches[0].id] != 1 {
-			continue
-		}
-		assignments[index] = matches[0]
-	}
-	return assignments
-}
-
 func agentProcessesByPane(
 	processes map[int]processInfo,
 	panePids map[int]struct{},
@@ -5251,75 +4951,41 @@ func uniqueShallowestProcessesByPane(
 func agentWorkingDirectoryForMetadata(
 	processPID int,
 	panePID int,
-	fallbackWorkingDirectories []map[int]string,
+	paneWorkingDirectories map[int]string,
 ) string {
 	if workingDirectory := normalizedMetadataPath(
 		processWorkingDirectoryForMetadata(processPID),
 	); workingDirectory != "" {
 		return workingDirectory
 	}
-	if len(fallbackWorkingDirectories) == 0 {
-		return ""
-	}
-	return normalizedMetadataPath(fallbackWorkingDirectories[0][panePID])
+	return normalizedMetadataPath(paneWorkingDirectories[panePID])
 }
 
-func discoverAgentSessionIDs(
-	tool string,
-	processes map[int]processInfo,
-	panePids map[int]struct{},
-	fallbackWorkingDirectories ...map[int]string,
-) map[int]string {
-	return discoverRestoreAgentSessionIDs(tool, processes, panePids, nil, fallbackWorkingDirectories...)
-}
-
+// discoverRestoreAgentSessionIDs maps each pane running tool to the session it
+// owns: an exact identity (hook, registry, lock, open file, argv) first, then
+// a same-directory store entry updated during the pane's process lifetime that
+// no other pane owns. Exact identities captured in restore are reserved first.
+// paneWorkingDirectories supplies a pane's last known directory when the live
+// process cwd is unavailable.
 func discoverRestoreAgentSessionIDs(
 	tool string,
 	processes map[int]processInfo,
 	panePids map[int]struct{},
 	restore *serverRestore,
-	fallbackWorkingDirectories ...map[int]string,
+	paneWorkingDirectories map[int]string,
 ) map[int]string {
-	var recentSessions func(string) []recentAgentSession
-	switch tool {
-	case "muse":
-		entries := readMuseSessionCandidates()
-		recentSessions = func(directory string) []recentAgentSession {
-			var sessions []recentAgentSession
-			for _, entry := range entries {
-				if entry.cwd == normalizedMetadataPath(directory) {
-					sessions = append(sessions, recentAgentSession{entry.id, entry.created})
-				}
-			}
-			return sessions
-		}
-	case "codex":
-		recentSessions = codexRecentSessionsForWorkingDirectory
-	case "claude":
-		recentSessions = claudeRecentSessionsForWorkingDirectory
-	case "opencode":
-		var entries []openCodeSessionEntry
-		loaded := false
-		recentSessions = func(directory string) []recentAgentSession {
-			if !loaded {
-				entries = readOpenCodeSessionEntries()
-				loaded = true
-			}
-			candidates := []recentAgentSession{}
-			for _, entry := range entries {
-				if entry.directory == directory {
-					candidates = append(candidates, recentAgentSession{entry.sessionID, entry.updatedAt})
-				}
-			}
-			return candidates
-		}
-	default:
+	recentSessions := recentSessionsProvider(tool)
+	if recentSessions == nil {
 		return nil
 	}
 	sessions := map[int]string{}
 	used := map[string]bool{}
+	lastActivity := map[int]time.Time{}
 	if restore != nil {
 		for _, window := range restore.Windows {
+			if window.PanePid > 0 && window.LastActivityEpochSeconds > 0 {
+				lastActivity[window.PanePid] = time.Unix(window.LastActivityEpochSeconds, 0)
+			}
 			if agentToolCandidateForRestore(window) == tool && window.AgentSessionIdentityExact && window.AgentSessionID != "" {
 				if window.PanePid > 0 {
 					sessions[window.PanePid] = window.AgentSessionID
@@ -5341,7 +5007,7 @@ func discoverRestoreAgentSessionIDs(
 		}
 		process := liveProcesses[panePid]
 		workingDirectory := agentWorkingDirectoryForMetadata(
-			process.pid, panePid, fallbackWorkingDirectories,
+			process.pid, panePid, paneWorkingDirectories,
 		)
 		sessionID := exactAgentSessionForProcess(tool, workingDirectory, process, processes).agentSessionID
 		if sessionID != "" {
@@ -5357,48 +5023,103 @@ func discoverRestoreAgentSessionIDs(
 			key: panePid, workingDirectory: workingDirectory,
 			windowPids:     agentProcessTree(processes, process.pid),
 			processStarted: processStartedAtForMetadata(process.pid),
+			lastActivity:   lastActivity[panePid],
 		})
 	}
 	assignRecentAgentSessions(tool, sessions, used, unresolved, recentSessions)
 	return sessions
 }
 
-func codexRecentSessionIDForWorkingDirectory(workingDirectory string, processStarted time.Time, windowPids ...map[int]struct{}) string {
-	if processStarted.IsZero() {
-		return ""
+// recentSessionsProvider returns tool's same-directory session lookup for the
+// store fallback, or nil for a tool without one. Each lookup reads its store
+// once, on first use, so a restore with many unresolved panes walks the session
+// tree a single time.
+func recentSessionsProvider(tool string) func(string) []recentAgentSession {
+	switch tool {
+	case "muse":
+		return storedSessionsByDirectory(normalizedMetadataPath, func() []recentAgentSession {
+			var sessions []recentAgentSession
+			for _, entry := range readMuseSessionCandidates() {
+				sessions = append(sessions, recentAgentSession{entry.id, entry.cwd, entry.created})
+			}
+			return sessions
+		})
+	case "codex":
+		return storedSessionsByDirectory(normalizedMetadataPath, codexRecentSessions)
+	case "claude":
+		return claudeRecentSessionsProvider()
+	case "opencode":
+		return storedSessionsByDirectory(normalizedMetadataPath, func() []recentAgentSession {
+			var sessions []recentAgentSession
+			for _, entry := range readOpenCodeSessionEntries() {
+				sessions = append(sessions, recentAgentSession{entry.sessionID, entry.directory, entry.updatedAt})
+			}
+			return sessions
+		})
+	case "copilot":
+		return storedSessionsByDirectory(normalizedWorkingDirectory, copilotRecentSessions)
+	case "antigravity":
+		return storedSessionsByDirectory(normalizedAgentWorkspacePath, func() []recentAgentSession {
+			var sessions []recentAgentSession
+			for _, entry := range readAntigravityHistoryEntries() {
+				sessions = append(sessions, recentAgentSession{entry.conversationID, entry.workspace, entry.updatedAt})
+			}
+			return sessions
+		})
+	case "cursor-agent":
+		return storedSessionsByDirectory(normalizedAgentWorkspacePath, func() []recentAgentSession {
+			var sessions []recentAgentSession
+			for _, entry := range readCursorChatEntries() {
+				sessions = append(sessions, recentAgentSession{entry.chatID, entry.cwd, time.UnixMilli(entry.updatedAt)})
+			}
+			return sessions
+		})
 	}
-	for _, session := range codexRecentSessionsForWorkingDirectory(workingDirectory) {
-		if sessionUpdatedDuringProcess(session.updatedAt, processStarted) &&
-			!agentSessionOwnedElsewhere("codex", session.id, agentSessionWindowPIDs(windowPids)) {
-			return session.id
-		}
-	}
-	return ""
+	return nil
 }
 
-func codexRecentSessionsForWorkingDirectory(
-	workingDirectory string,
-) []recentAgentSession {
-	workingDirectory = normalizedMetadataPath(workingDirectory)
-	if workingDirectory == "" {
-		return nil
+// storedSessionsByDirectory returns a lookup over a session store that loads
+// the store once, on first use, and returns the entries recorded for a
+// directory. normalize canonicalizes the pane directory the way load did.
+func storedSessionsByDirectory(
+	normalize func(string) string,
+	load func() []recentAgentSession,
+) func(string) []recentAgentSession {
+	var entries []recentAgentSession
+	loaded := false
+	return func(directory string) []recentAgentSession {
+		if directory = normalize(directory); directory == "" {
+			return nil
+		}
+		if !loaded {
+			entries, loaded = load(), true
+		}
+		var sessions []recentAgentSession
+		for _, entry := range entries {
+			if entry.directory == directory {
+				sessions = append(sessions, entry)
+			}
+		}
+		return sessions
 	}
+}
+
+func codexRecentSessions() []recentAgentSession {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
-	sessions := []recentAgentSession{}
+	var sessions []recentAgentSession
 	for _, path := range recentAgentSessionFiles(sessionsDir, 30, isCodexRolloutPath) {
 		info, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
-		if normalizedMetadataPath(codexRolloutWorkingDirectory(path)) != workingDirectory {
-			continue
-		}
 		if sessionID := codexSessionIDFromRolloutFile(path); sessionID != "" {
-			sessions = append(sessions, recentAgentSession{sessionID, info.ModTime()})
+			sessions = append(sessions, recentAgentSession{
+				sessionID, normalizedMetadataPath(codexRolloutWorkingDirectory(path)), info.ModTime(),
+			})
 		}
 	}
 	return sessions
@@ -5459,27 +5180,6 @@ var openCodeSessionEntriesReader = defaultOpenCodeSessionEntries
 
 func readOpenCodeSessionEntries() []openCodeSessionEntry {
 	return openCodeSessionEntriesReader()
-}
-
-func openCodeSessionIDForWorkingDirectory(
-	entries []openCodeSessionEntry,
-	workingDirectory string,
-	processStarted time.Time,
-	windowPids ...map[int]struct{},
-) string {
-	workingDirectory = normalizedMetadataPath(workingDirectory)
-	if workingDirectory == "" || processStarted.IsZero() {
-		return ""
-	}
-	// entries are ordered most-recently-updated first.
-	for _, entry := range entries {
-		if entry.directory == workingDirectory &&
-			sessionUpdatedDuringProcess(entry.updatedAt, processStarted) &&
-			!agentSessionOwnedElsewhere("opencode", entry.sessionID, agentSessionWindowPIDs(windowPids)) {
-			return entry.sessionID
-		}
-	}
-	return ""
 }
 
 // defaultOpenCodeSessionEntries reads the most recent top-level OpenCode
@@ -5571,32 +5271,33 @@ var claudeSessionIDPattern = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
 )
 
-func claudeRecentSessionsForWorkingDirectory(
-	workingDirectory string,
-) []recentAgentSession {
-	workingDirectory = normalizedMetadataPath(workingDirectory)
-	if workingDirectory == "" {
-		return nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	projectsDir := filepath.Join(home, ".claude", "projects")
-	sessions := []recentAgentSession{}
-	for _, path := range recentAgentSessionFiles(projectsDir, 60, isClaudeProjectSessionPath) {
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
+// claudeRecentSessionsProvider walks the project tree once and matches the
+// newest files against each directory asked for.
+func claudeRecentSessionsProvider() func(string) []recentAgentSession {
+	var files []string
+	loaded := false
+	return func(directory string) []recentAgentSession {
+		if directory = normalizedMetadataPath(directory); directory == "" {
+			return nil
 		}
-		if !claudeSessionMatchesWorkingDirectory(path, workingDirectory) {
-			continue
+		if !loaded {
+			loaded = true
+			if home, err := os.UserHomeDir(); err == nil {
+				files = recentAgentSessionFiles(filepath.Join(home, ".claude", "projects"), 60, isClaudeProjectSessionPath)
+			}
 		}
-		if sessionID := claudeSessionIDFromProjectFile(path); sessionID != "" {
-			sessions = append(sessions, recentAgentSession{sessionID, info.ModTime()})
+		var sessions []recentAgentSession
+		for _, path := range files {
+			info, err := os.Stat(path)
+			if err != nil || !claudeSessionMatchesWorkingDirectory(path, directory) {
+				continue
+			}
+			if sessionID := claudeSessionIDFromProjectFile(path); sessionID != "" {
+				sessions = append(sessions, recentAgentSession{sessionID, directory, info.ModTime()})
+			}
 		}
+		return sessions
 	}
-	return sessions
 }
 
 // claudeSessionMatchesWorkingDirectory reports whether a project file belongs
@@ -5694,19 +5395,25 @@ func isClaudeProjectSessionPath(path string) bool {
 
 type recentAgentSession struct {
 	id        string
+	directory string
 	updatedAt time.Time
 }
 
 type agentSessionFallback struct {
-	key              int // Pane PID or restore-window index, as used by sessions.
+	key              int // Pane PID, as used by sessions.
 	workingDirectory string
 	processStarted   time.Time
+	lastActivity     time.Time // The pane's last terminal activity, if known.
 	windowPids       map[int]struct{}
 }
 
-// assignRecentAgentSessions reserves exact owners before applying the existing
-// single-pane activity fallback. Mutable activity times cannot distinguish two
-// unresolved panes in the same directory, so keep those panes unbound.
+// assignRecentAgentSessions reserves exact owners before applying the store
+// fallback. A candidate must be unowned and updated during the pane's process
+// lifetime; a lone unresolved pane in a directory takes the newest one. Panes
+// sharing a directory are told apart only by their last terminal activity:
+// each is bound when exactly one candidate was updated within that activity's
+// tolerance and no sibling matched the same candidate. Mutable activity times
+// cannot otherwise distinguish them, so such panes stay unbound.
 func assignRecentAgentSessions(
 	tool string,
 	sessions map[int]string,
@@ -5718,25 +5425,52 @@ func assignRecentAgentSessions(
 	for _, window := range unresolved {
 		counts[window.workingDirectory]++
 	}
+	shared := map[int][]recentAgentSession{}
 	for _, window := range unresolved {
-		if window.workingDirectory == "" || window.processStarted.IsZero() || counts[window.workingDirectory] != 1 {
+		if window.workingDirectory == "" || window.processStarted.IsZero() {
 			continue
 		}
 		candidates := candidatesForDirectory(window.workingDirectory)
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return candidates[i].updatedAt.After(candidates[j].updatedAt)
 		})
+		matches := []recentAgentSession{}
 		for _, candidate := range candidates {
 			if candidate.id == "" || used[candidate.id] ||
 				!sessionUpdatedDuringProcess(candidate.updatedAt, window.processStarted) ||
 				agentSessionOwnedElsewhere(tool, candidate.id, window.windowPids) {
 				continue
 			}
-			sessions[window.key] = candidate.id
-			used[candidate.id] = true
-			break
+			if counts[window.workingDirectory] == 1 {
+				sessions[window.key] = candidate.id
+				used[candidate.id] = true
+				break
+			}
+			matches = append(matches, candidate)
+		}
+		if len(matches) > 1 && !window.lastActivity.IsZero() {
+			matches = slices.DeleteFunc(matches, func(candidate recentAgentSession) bool {
+				return !withinActivityTolerance(candidate.updatedAt, window.lastActivity)
+			})
+		}
+		if counts[window.workingDirectory] > 1 {
+			shared[window.key] = matches
 		}
 	}
+	for key, candidate := range uniqueAssignments(shared, func(session recentAgentSession) string { return session.id }) {
+		sessions[key] = candidate.id
+		used[candidate.id] = true
+	}
+}
+
+// withinActivityTolerance reports whether a session update and a pane's last
+// terminal activity are close enough to have been the same exchange.
+func withinActivityTolerance(updatedAt time.Time, activity time.Time) bool {
+	delta := updatedAt.Sub(activity)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= piSessionActivityMatchTolerance
 }
 
 // sessionUpdatedDuringProcess is the common safety boundary for cwd/history
@@ -6016,7 +5750,7 @@ func sessionIDFromSelectedAgentProcessArgs(
 }
 
 func agentSessionIDFromArgs(tool string, args string) string {
-	for _, pattern := range agentSessionIDArgumentPattern[tool] {
+	for _, pattern := range agentRegistry[tool].resumeArgPatterns {
 		match := pattern.FindStringSubmatch(args)
 		if match == nil {
 			continue
@@ -6312,40 +6046,21 @@ func (s *muxServer) scheduleRestoreRedrawFollowUps(windowID string) {
 	}
 	for _, delay := range restoreRedrawFollowUpDelays {
 		scheduleRestoreRedraw(delay, func() {
-			s.redrawRestoredWindow(windowID)
+			s.forceForegroundRedraw(windowID)
 		})
 	}
 }
 
-func (s *muxServer) redrawRestoredWindow(windowID string) {
-	s.resizeMu.Lock()
-	defer s.resizeMu.Unlock()
-	s.mu.Lock()
-	if s.attachCountLocked() == 0 || s.activeID != windowID {
-		s.mu.Unlock()
-		return
-	}
-	window := s.windowByIDLocked(windowID)
-	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
-		s.mu.Unlock()
-		return
-	}
-	width, height := s.primaryAttachSizeLocked()
-	s.mu.Unlock()
-	s.resizeWithRedraw(width, height, true, true, windowID)
-}
-
-// forceForegroundThemeRedraw makes [windowID] fully repaint after a theme
-// change. A theme switch changes colors without changing the PTY size, so a real
-// same-size SIGWINCH will not make the TUI re-emit explicitly-colored cells (e.g.
-// Copilot CLI's header/footer bars). It therefore uses the synthetic width-1
-// redraw dance — the same mechanism used to repaint a restored window — whose
-// intermediate one-cell frame is hidden from attach clients by the
-// synchronized-redraw transaction. It is pinned to [windowID] (the window that
-// received the theme hint) and is a no-op if that window is no longer active
-// (a concurrent switch will refresh the new window separately), is not a
+// forceForegroundRedraw makes [windowID] fully repaint through the synthetic
+// width-1 redraw dance, whose intermediate one-cell frame is hidden from attach
+// clients by the synchronized-redraw transaction. It repaints a restored window
+// and a window that received a theme hint: a theme switch changes colors
+// without changing the PTY size, so a real same-size SIGWINCH would not make
+// the TUI re-emit explicitly-colored cells (e.g. Copilot CLI's header/footer
+// bars). It is pinned to [windowID] and is a no-op if that window is no longer
+// active (a concurrent switch will refresh the new window separately), is not a
 // foreground-redraw window (plain shell), or when no client is attached.
-func (s *muxServer) forceForegroundThemeRedraw(windowID string) {
+func (s *muxServer) forceForegroundRedraw(windowID string) {
 	if windowID == "" {
 		return
 	}
@@ -6399,12 +6114,16 @@ func createWindowOptionsForRestore(
 	}
 	command := ""
 	if agentTool != "" {
+		// Relaunch the executable that was actually running when it is an
+		// alias of the tool (e.g. opencode2) rather than the canonical
+		// launcher. CurrentCommand is canonicalized to the tool name for
+		// tools that do not keep aliases, so those fall back to the default.
 		executable := ""
-		if agentTool == "opencode" {
-			name := cleanProcessCommandName(state.CurrentCommand)
-			if name == "opencode2" || name == "open-code" {
-				executable = name
-			}
+		if name := cleanProcessCommandName(state.CurrentCommand); name != "" &&
+			name != agentTool &&
+			name != agentRegistry[agentTool].launch.executable &&
+			agentToolFromCommandName(name) == agentTool {
+			executable = name
 		}
 		launch := agentLaunchCommand(agentTool, startInYoloMode, executable)
 		if agentTool == "pi" {
@@ -6419,7 +6138,7 @@ func createWindowOptionsForRestore(
 					state.AgentSessionDir,
 					state.AgentSessionPath,
 				)
-				command = piResumeCommandWithFreshFallback(resume, launch)
+				command = resumeCommandWithFreshFallback(resume, launch)
 			} else {
 				resume = monkeyMuxAgentLaunchCommand(resume)
 				if agentTool == "codex" {
@@ -6427,7 +6146,7 @@ func createWindowOptionsForRestore(
 					// hook remains active when the lock wait completes.
 					resume = codexResumeGateCommand(sessionID, resume)
 				}
-				command = agentResumeCommandWithFreshFallback(
+				command = resumeCommandWithFreshFallback(
 					resume,
 					monkeyMuxAgentLaunchCommand(launch),
 				)
@@ -7154,7 +6873,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 		_ = window.closePty(windowPty)
 	}
 	if nativeAcpBridgeID != "" {
-		_ = requestAcpBridgeStopAndWait(nativeAcpBridgeID)
+		_ = stopNativeAcpBridgeForWindow(nativeAcpBridgeID)
 	}
 
 	s.broadcast(controlResponse{
@@ -7218,7 +6937,7 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		height:          hello.Height,
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
-		capabilityHint:  capabilityHintDataFromString(hello.CapabilityHint),
+		capabilityHint:  hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes),
 		queueReady:      make(chan struct{}, 1),
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
@@ -7428,25 +7147,6 @@ func (c *attachClient) enqueueOptional(data []byte) bool {
 	return queued
 }
 
-func (c *attachClient) enqueueTerminalQuery(
-	data []byte,
-	wait bool,
-	windowID string,
-	responseCount int,
-) (<-chan error, bool) {
-	return c.enqueueWrite(data, wait, windowID, responseCount, nil)
-}
-
-func (c *attachClient) enqueueConditionalTerminalQuery(
-	data []byte,
-	wait bool,
-	windowID string,
-	responseCount int,
-	gate *attachWriteGate,
-) (<-chan error, bool) {
-	return c.enqueueWrite(data, wait, windowID, responseCount, gate)
-}
-
 func (c *attachClient) enqueueWrite(
 	data []byte,
 	wait bool,
@@ -7582,25 +7282,14 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	c.activityMu.Lock()
 	if !c.terminalResponseUntil.IsZero() &&
 		now.After(c.terminalResponseUntil) {
-		if len(c.terminalResponseCarry) > 0 {
+		if len(c.terminalResponseCarry) > 0 ||
+			len(c.terminalResponsePasteStartCarry) > 0 {
 			c.inputMu.Lock()
 			inputLocked = true
 			expiredInput = append(
 				expiredInput,
 				c.terminalResponseCarry...,
 			)
-			expiredInput = append(
-				expiredInput,
-				c.terminalResponsePasteStartCarry...,
-			)
-			if c.focusSequenceSnapshot != nil {
-				expiredFocusSequence = c.focusSequenceSnapshot()
-			}
-			claim = c.focusClaim
-			passthrough = c.inputPassthrough
-		} else if len(c.terminalResponsePasteStartCarry) > 0 {
-			c.inputMu.Lock()
-			inputLocked = true
 			expiredInput = append(
 				expiredInput,
 				c.terminalResponsePasteStartCarry...,
@@ -8105,10 +7794,6 @@ func (c *attachClient) routePostPasteInputLocked(
 			return
 		}
 	}
-	if c.terminalResponseContinuation != 0 {
-		c.routeInputLocked(data, 0, result)
-		return
-	}
 	c.routeInputLocked(data, 0, result)
 }
 
@@ -8505,45 +8190,21 @@ func (s *muxServer) focusSequenceSnapshot() uint64 {
 	return s.nextFocusSequence
 }
 
+// focusAttachClientIfUnchanged focuses [client] only when no other focus
+// change happened since [expectedFocusSequence] was snapshotted.
 func (s *muxServer) focusAttachClientIfUnchanged(
 	client *attachClient,
 	expectedFocusSequence uint64,
 ) bool {
 	s.resizeMu.Lock()
 	defer s.resizeMu.Unlock()
-	if client == nil {
-		return false
-	}
-	s.mu.Lock()
-	if s.nextFocusSequence != expectedFocusSequence {
-		s.mu.Unlock()
-		return false
-	}
-	registered := s.attachClients[client.conn]
-	if registered == nil {
-		s.mu.Unlock()
-		return false
-	}
-	primaryChanged := s.attachConn != registered.conn
-	if primaryChanged {
-		s.pendingFocusRefreshConn = nil
-	}
-	s.nextFocusSequence++
-	registered.focusSequence.Store(s.nextFocusSequence)
-	s.attachConn = registered.conn
-	targetWidth, targetHeight := s.primaryAttachSizeLocked()
-	sizeChanged :=
-		targetWidth != s.publishedWidth ||
-			targetHeight != s.publishedHeight
-	s.mu.Unlock()
-	s.applyFocusedClientViewport(
-		registered,
-		targetWidth,
-		targetHeight,
-		sizeChanged,
-		primaryChanged,
-	)
-	return true
+	return s.focusAttachClientLocked(
+		client,
+		0,
+		0,
+		true,
+		&expectedFocusSequence,
+	).focused
 }
 
 func (s *muxServer) focusAttachClientByID(
@@ -8571,7 +8232,7 @@ func (s *muxServer) focusAttachClientByIDWithResult(
 	s.mu.Lock()
 	client := s.attachClientByIDLocked(clientID)
 	s.mu.Unlock()
-	return s.focusAttachClientLocked(client, width, height, forceRedraw)
+	return s.focusAttachClientLocked(client, width, height, forceRedraw, nil)
 }
 
 func (s *muxServer) focusAttachClient(
@@ -8587,19 +8248,29 @@ func (s *muxServer) focusAttachClient(
 		width,
 		height,
 		forceRedraw,
+		nil,
 	).focused
 }
 
+// focusAttachClientLocked makes [client] the primary attach client. A non-nil
+// [expectedFocusSequence] turns the focus into a no-op when another focus
+// change happened since that sequence was snapshotted.
 func (s *muxServer) focusAttachClientLocked(
 	client *attachClient,
 	width int,
 	height int,
 	forceRedraw bool,
+	expectedFocusSequence *uint64,
 ) attachFocusResult {
 	if client == nil {
 		return attachFocusResult{}
 	}
 	s.mu.Lock()
+	if expectedFocusSequence != nil &&
+		s.nextFocusSequence != *expectedFocusSequence {
+		s.mu.Unlock()
+		return attachFocusResult{}
+	}
 	registered := s.attachClients[client.conn]
 	if registered == nil {
 		s.mu.Unlock()
@@ -8710,11 +8381,7 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		var replacement *attachClient
 		for _, candidate := range s.attachClients {
 			if replacement == nil ||
-				candidate.focusSequence.Load() >
-					replacement.focusSequence.Load() ||
-				(candidate.focusSequence.Load() ==
-					replacement.focusSequence.Load() &&
-					candidate.sequence > replacement.sequence) {
+				moreRecentlyFocusedAttachClient(candidate, replacement) {
 				replacement = candidate
 			}
 		}
@@ -8815,10 +8482,10 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	client.focusSequence.Store(s.nextFocusSequence)
 	s.attachClients[conn] = client
 	s.attachConn = conn
-	if themeHint := themeHintDataFromString(hello.Data); len(themeHint) > 0 {
+	if themeHint := hintDataFromString(hello.Data, themeHintLimitBytes); len(themeHint) > 0 {
 		s.themeHint = append(s.themeHint[:0], themeHint...)
 	}
-	if hint := capabilityHintDataFromString(hello.CapabilityHint); len(hint) > 0 {
+	if hint := hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes); len(hint) > 0 {
 		s.capabilityHint = append(s.capabilityHint[:0], hint...)
 	}
 	width, height := s.primaryAttachSizeLocked()
@@ -9185,7 +8852,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			// explicitly-colored regions (e.g. Copilot CLI's header/footer
 			// bars), so force a full repaint of the window that received the
 			// hint after it has been delivered.
-			s.forceForegroundThemeRedraw(themeWindowID)
+			s.forceForegroundRedraw(themeWindowID)
 		}
 		client.send(controlResponse{ID: request.ID, Type: "theme_hint_ack", Status: "ok"})
 	case "shutdown":
@@ -9375,7 +9042,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 		}
 		windowArgs, err := nativeAcpWindowArguments(bridgeID)
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -9387,7 +9054,7 @@ func (c *controlClient) startAcpBridgeAsync(s *muxServer, request controlMessage
 			nativeAcpProviderID: request.ProviderID,
 		})
 		if err != nil {
-			_ = requestAcpBridgeStopAndWait(bridgeID)
+			_ = stopNativeAcpBridgeForWindow(bridgeID)
 			c.sendError(request, errors.New("unable to create native agent window"))
 			return
 		}
@@ -9577,12 +9244,6 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		PrivateModes:              copyPrivateModes(window.privateModes),
 		TerminalProgress:          copyTerminalProgressSnapshot(window.terminalProgress),
 	}
-}
-
-func (s *muxServer) runShellCommand(command string) (string, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), runCommandTimeout)
-	defer cancel()
-	return s.runShellCommandContext(ctx, command)
 }
 
 func (s *muxServer) runShellCommandContext(
@@ -10031,10 +9692,6 @@ func (s *muxServer) replacementWindowForClosedLocked(closing *muxWindow) *muxWin
 	return nil
 }
 
-func (s *muxServer) resize(width int, height int) {
-	s.resizeWithRedraw(width, height, false, false, "")
-}
-
 func (s *muxServer) resizeForClient(
 	clientID string,
 	width int,
@@ -10173,7 +9830,7 @@ func (s *muxServer) resizeWithRedraw(
 			s.writeAllAttachesLocked(modeReplay)
 		}
 	} else {
-		s.writeAttach(attach, modeReplay)
+		s.writeAttach(modeReplay)
 	}
 	if shouldSignal {
 		signalForegroundResize(foregroundProcessGroup)
@@ -10383,34 +10040,23 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	window.redrawForwardingPrimaryNeedsFailover =
 		len(preservedQueries) > 0 &&
 			!s.isAttachConnectionLocked(preservedPrimary)
-	if !window.redrawForwardingPaused ||
-		len(window.redrawForwardingFallbackHistory) == 0 {
-		// Snapshot the pre-resize frame for every redraw pause, not just
-		// deferred window-switch replays: restore and theme redraws start the
-		// same transaction directly and hit the same coalesced-SIGWINCH
-		// failure. Only a frame with visible content is worth retaining: a
-		// snapshot taken in the instant after the child cleared but before it
-		// repainted would hand the user exactly the emptiness this fallback
-		// exists to avoid.
-		if snapshot := s.foregroundHistoryFallbackHistoryLocked(
-			window,
-		); terminalOutputHasVisibleContent(snapshot) {
-			window.redrawForwardingFallbackHistory = snapshot
-			window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
-		} else {
-			window.redrawForwardingFallbackHistory = nil
-			window.redrawForwardingFallbackScreen = nil
-		}
-	} else if refreshed := s.foregroundHistoryFallbackHistoryLocked(
-		window,
-	); terminalOutputHasVisibleContent(refreshed) {
-		// A pause restarted while another is in flight only re-snapshots when
-		// the history still holds a complete frame. If the first (empty) redraw
-		// already cleared the screen, re-reading it would capture that blank
-		// frame and hand the user exactly the emptiness this fallback exists to
-		// avoid, so the original snapshot is kept instead.
-		window.redrawForwardingFallbackHistory = refreshed
-		window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
+	// Snapshot the pre-resize screen for every redraw pause, not just
+	// deferred window-switch replays: restore and theme redraws start the
+	// same transaction directly and hit the same coalesced-SIGWINCH failure.
+	// The clone is the whole snapshot; the frame bytes are rendered from it
+	// only if the resume actually needs the fallback, which the common
+	// (child repainted) case never does. Only a screen with visible content
+	// is worth retaining: a snapshot taken in the instant after the child
+	// cleared but before it repainted would hand the user exactly the
+	// emptiness this fallback exists to avoid. A frame that paints only a
+	// background color counts as visible: it is the picture the user saw.
+	// A pause restarted while another is in flight likewise keeps the
+	// original snapshot when the first (empty) redraw already cleared the
+	// screen.
+	if screen := window.screenLocked(); screen.HasVisibleContent() {
+		window.redrawForwardingFallbackScreen = screen.Clone()
+	} else if !window.redrawForwardingPaused {
+		window.redrawForwardingFallbackScreen = nil
 	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
@@ -10542,17 +10188,17 @@ func (s *muxServer) resumePausedAttachForwarding(
 		// foreground replay clears the client, so the update needs its base
 		// frame restored first. Paint the retained history and any delta inside
 		// one synchronized transaction so the user sees a complete frame.
-		fallbackReplay := s.foregroundHistoryFallbackReplayLocked(
-			window,
-			window.redrawForwardingFallbackHistory,
-		)
-		// Substitute only a frame that actually paints something. An
-		// escape-only snapshot (a clear the child had just emitted) is long
-		// enough to look like a frame while rendering exactly the blank screen
-		// this fallback exists to prevent.
-		if terminalOutputHasVisibleContent(
-			window.redrawForwardingFallbackHistory,
-		) && len(fallbackReplay) > 0 {
+		// The pause retained the screen only when it had something to paint,
+		// so an escape-only snapshot (a clear the child had just emitted) never
+		// substitutes for the redraw.
+		var fallbackReplay []byte
+		if window.redrawForwardingFallbackScreen != nil {
+			fallbackReplay = s.foregroundHistoryFallbackReplayLocked(
+				window,
+				window.redrawForwardingFallbackScreen.RenderFrame(),
+			)
+		}
+		if len(fallbackReplay) > 0 {
 			if visibleRedraw {
 				// A normal TUI update (for example a spinner tick) can arrive
 				// while the child coalesces both resize notifications. It relies
@@ -10572,12 +10218,9 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// to finish the frame with; the queries are re-attached to the
 					// primary and failover deliveries exactly as the other branches
 					// do, so the response wait still has something to wait for.
-					frame := fallbackReplay
-					if window.redrawForwardingFallbackScreen != nil {
-						screen := window.redrawForwardingFallbackScreen.Clone()
-						screen.Write(secondaryBuffered)
-						frame = s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
-					}
+					screen := window.redrawForwardingFallbackScreen.Clone()
+					screen.Write(secondaryBuffered)
+					frame := s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
 					buffered = append(append([]byte(nil), frame...), queryData...)
 					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 					secondaryBuffered = append([]byte(nil), frame...)
@@ -10632,140 +10275,29 @@ func (s *muxServer) resumePausedAttachForwarding(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
-	if len(queryData) > 0 {
-		type queryFallback struct {
-			client              *attachClient
-			queryCompletion     <-chan error
-			queryGate           *attachWriteGate
-			secondaryOutputGate *attachWriteGate
-		}
-		responseCount := terminalQueryResponseCount(queryData)
-		initialOutput := primaryOutput
-		if primaryNeedsFailover {
-			initialOutput = failoverOutput
-		}
-		var primaryCompletion <-chan error
-		primaryQueued := false
-		if primaryClient != nil {
-			primaryCompletion, primaryQueued =
-				primaryClient.enqueueTerminalQuery(
-					initialOutput,
-					true,
-					windowID,
-					responseCount,
-				)
-		}
-		sortedClients := append([]*attachClient(nil), clients...)
-		sort.Slice(sortedClients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(
-				sortedClients[i],
-				sortedClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(sortedClients))
-		for _, client := range sortedClients {
-			if client == primaryClient {
-				continue
-			}
-			queryGate := &attachWriteGate{done: make(chan struct{})}
-			queryCompletion, queued :=
-				client.enqueueConditionalTerminalQuery(
-					failoverOutput,
-					true,
-					windowID,
-					responseCount,
-					queryGate,
-				)
-			if !queued {
-				continue
-			}
-			fallback := queryFallback{
-				client:          client,
-				queryCompletion: queryCompletion,
-				queryGate:       queryGate,
-			}
-			if len(secondaryOutput) > 0 {
-				secondaryGate := &attachWriteGate{done: make(chan struct{})}
-				if _, queued := client.enqueueWrite(
-					secondaryOutput,
-					false,
-					"",
-					0,
-					secondaryGate,
-				); queued {
-					fallback.secondaryOutputGate = secondaryGate
-				}
-			}
-			fallbacks = append(fallbacks, fallback)
-		}
-		s.attachMu.Unlock()
-		primaryDelivered := primaryQueued &&
-			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
-			tryFallback := !primaryDelivered
-			fallback.queryGate.deliver.Store(tryFallback)
-			close(fallback.queryGate.done)
-			if tryFallback &&
-				fallback.client.waitForWrite(fallback.queryCompletion) {
-				primaryDelivered = true
-			}
-			if fallback.secondaryOutputGate != nil {
-				fallback.secondaryOutputGate.deliver.Store(!tryFallback)
-				close(fallback.secondaryOutputGate.done)
-			}
-		}
-		if !primaryDelivered {
-			s.redeliverTerminalQueries(
-				windowID,
-				queryData,
-				nil,
-				nil,
-			)
-		}
-		if refreshPendingFocus || refreshPendingResize {
-			go s.refreshPendingClientViewport(
-				refreshPendingFocus,
-				refreshPendingResize,
-			)
-		}
-		return
+	initialOutput := primaryOutput
+	if primaryNeedsFailover {
+		initialOutput = failoverOutput
 	}
-	if primaryClient != nil {
-		_, queued := primaryClient.enqueue(primaryOutput, false)
-		if queued {
-			deliveredPrimary = primaryClient
-		}
-	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			_, queued := client.enqueue(failoverOutput, false)
-			if !queued {
-				continue
-			}
-			deliveredPrimary = client
-			break
-		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary || len(secondaryOutput) == 0 {
-			continue
-		}
-		_, _ = client.enqueue(secondaryOutput, false)
-	}
+	sort.Slice(clients, func(i int, j int) bool {
+		return moreRecentlyFocusedAttachClient(clients[i], clients[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		initialOutput,
+		clients,
+		queryData,
+		func(*attachClient) ([]byte, []byte) {
+			return failoverOutput, secondaryOutput
+		},
+	)
 	if refreshPendingFocus || refreshPendingResize {
 		go s.refreshPendingClientViewport(
 			refreshPendingFocus,
 			refreshPendingResize,
 		)
 	}
-	s.attachMu.Unlock()
 }
 
 func (w *muxWindow) foregroundProcessGroupLocked() int {
@@ -10792,35 +10324,14 @@ func (w *muxWindow) modeReplayForAttachedTerminalLocked() []byte {
 	return replay
 }
 
-func (s *muxServer) activeReplayLocked() []byte {
-	replay, _ := s.activeReplayWithImageFollowUpLocked()
-	return replay
-}
-
-// activeReplayWithImageFollowUpLocked is activeReplayLocked plus the separate
-// store-only Kitty transmissions to enqueue behind that replay.
+// activeReplayWithImageFollowUpLocked returns the active window's reattach
+// replay plus the separate store-only Kitty transmissions to enqueue behind it.
 func (s *muxServer) activeReplayWithImageFollowUpLocked() ([]byte, []byte) {
 	window := s.windowByIDLocked(s.activeID)
 	if window == nil || window.closed {
 		return nil, nil
 	}
 	return s.replayBytesWithImageFollowUpLocked(window, nil)
-}
-
-func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, nil)
-	return replay
-}
-
-// replayBytesLockedWithSkip builds the reattach replay, omitting retained Kitty
-// images whose id/signature the client reports already holding in clientHas
-// (nil replays every retained image, as a fresh attach does).
-func (s *muxServer) replayBytesLockedWithSkip(
-	window *muxWindow,
-	clientHas map[string]uint32,
-) []byte {
-	replay, _ := s.replayBytesWithImageFollowUpLocked(window, clientHas)
-	return replay
 }
 
 // replayBytesWithImageFollowUpLocked returns the reattach replay plus the
@@ -10906,7 +10417,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	}
 	w.redrawForwardingPaused = false
 	w.redrawForwardingReplay = nil
-	w.redrawForwardingFallbackHistory = nil
 	w.redrawForwardingFallbackScreen = nil
 	w.redrawForwardingBuffer = nil
 	w.redrawForwardingFailoverBuffer = nil
@@ -10915,32 +10425,6 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
-}
-
-// foregroundHistoryFallbackHistoryLocked snapshots the frame bytes to fall back
-// to if the redraw about to be triggered produces nothing. The result must be a
-// copy: these helpers can return slices aliasing window.history, which
-// appendHistoryLocked rewrites in place as output arrives during the pause,
-// which would mutate the snapshot into the very redraw it exists to recover
-// from.
-func (s *muxServer) foregroundHistoryFallbackHistoryLocked(
-	window *muxWindow,
-) []byte {
-	if window == nil || window.closed || !window.supportsForegroundRedrawLocked() {
-		return nil
-	}
-	// This is a TUI frame recovery. A tail of the raw byte history is not a
-	// frame: an application that streams incremental updates evicts its last
-	// full repaint from that tail, and replaying the remainder onto a cleared
-	// client paints only the rows the updates touched. Render the complete
-	// picture from the screen model instead, which reproduces every visible
-	// cell, the cursor and the main-screen scrollback regardless of how the
-	// application drew them.
-	screen := window.screenLocked()
-	if !screen.HasVisibleContent() {
-		return nil
-	}
-	return screen.RenderFrame()
 }
 
 // foregroundHistoryFallbackReplayLocked renders the snapshot taken when the
@@ -11294,7 +10778,7 @@ func containsString(values []string, value string) bool {
 	return false
 }
 
-func (s *muxServer) writeAttach(conn net.Conn, data []byte) {
+func (s *muxServer) writeAttach(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -11443,61 +10927,93 @@ func (s *muxServer) writeAttachOutputIfActive(
 			break
 		}
 	}
-	var deliveredPrimary *attachClient
+	data := primaryData
+	if primaryClient != nil &&
+		primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		data = queryData
+	}
+	// Every client can answer a query, but only the ones attached before this
+	// output was produced are missing it.
+	fallbacks := clients
 	if len(queryData) > 0 {
-		responseCount := terminalQueryResponseCount(queryData)
+		fallbacks = allClients
+	}
+	sort.Slice(fallbacks, func(i int, j int) bool {
+		iCurrent := fallbacks[i].conn == currentPrimary
+		jCurrent := fallbacks[j].conn == currentPrimary
+		if iCurrent != jCurrent {
+			return iCurrent
+		}
+		return moreRecentlyFocusedAttachClient(fallbacks[i], fallbacks[j])
+	})
+	s.deliverWithQueryFallback(
+		windowID,
+		primaryClient,
+		data,
+		fallbacks,
+		queryData,
+		func(client *attachClient) ([]byte, []byte) {
+			if client.sequence > maxAttachSequence ||
+				client.suppressesReplayedOutput(windowID, outputGeneration) {
+				return queryData, nil
+			}
+			return failoverPrimaryData, secondaryData
+		},
+	)
+}
+
+// deliverWithQueryFallback hands one window's output to the attached clients
+// so that the terminal queries in queryData are answered by exactly one of
+// them. primaryClient (nil once it is gone) gets primaryData; when it is
+// absent or its write fails, the first client in fallbacks (in preference
+// order; primaryClient itself is skipped) whose failover write succeeds takes
+// over, and every other client gets its secondary output. fallbackData picks
+// both per client; an empty failover means the client already holds the
+// output and counts as delivered without a write.
+//
+// With queries pending, the primary's write is awaited before any fallback
+// is released: the conditional query writes are queued behind gates while
+// attachMu is still held, which fixes their order ahead of later output,
+// and the gates are flipped once the primary's outcome is known. Called with
+// s.attachMu held; it is released before returning.
+func (s *muxServer) deliverWithQueryFallback(
+	windowID string,
+	primaryClient *attachClient,
+	primaryData []byte,
+	fallbacks []*attachClient,
+	queryData []byte,
+	fallbackData func(client *attachClient) (failover []byte, secondary []byte),
+) {
+	if len(queryData) > 0 {
 		type queryFallback struct {
 			client              *attachClient
 			queryCompletion     <-chan error
 			queryGate           *attachWriteGate
 			secondaryOutputGate *attachWriteGate
 		}
+		responseCount := terminalQueryResponseCount(queryData)
 		var primaryCompletion <-chan error
 		primaryQueued := false
 		if primaryClient != nil {
-			data := primaryData
-			if primaryClient.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			) {
-				data = queryData
-			}
 			primaryCompletion, primaryQueued =
-				primaryClient.enqueueTerminalQuery(
-					data,
+				primaryClient.enqueueWrite(
+					primaryData,
 					true,
 					windowID,
 					responseCount,
+					nil,
 				)
 		}
-		sort.Slice(allClients, func(i int, j int) bool {
-			iCurrent := allClients[i].conn == currentPrimary
-			jCurrent := allClients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(
-				allClients[i],
-				allClients[j],
-			)
-		})
-		fallbacks := make([]queryFallback, 0, len(allClients))
-		for _, client := range allClients {
+		gated := make([]queryFallback, 0, len(fallbacks))
+		for _, client := range fallbacks {
 			if client == primaryClient {
 				continue
 			}
-			suppressesOutput := client.suppressesReplayedOutput(
-				windowID,
-				outputGeneration,
-			)
-			data := queryData
-			if client.sequence <= maxAttachSequence && !suppressesOutput {
-				data = failoverPrimaryData
-			}
+			failover, secondary := fallbackData(client)
 			queryGate := &attachWriteGate{done: make(chan struct{})}
 			queryCompletion, queued :=
-				client.enqueueConditionalTerminalQuery(
-					data,
+				client.enqueueWrite(
+					failover,
 					true,
 					windowID,
 					responseCount,
@@ -11511,12 +11027,10 @@ func (s *muxServer) writeAttachOutputIfActive(
 				queryCompletion: queryCompletion,
 				queryGate:       queryGate,
 			}
-			if client.sequence <= maxAttachSequence &&
-				len(secondaryData) > 0 &&
-				!suppressesOutput {
+			if len(secondary) > 0 {
 				secondaryGate := &attachWriteGate{done: make(chan struct{})}
 				if _, queued := client.enqueueWrite(
-					secondaryData,
+					secondary,
 					false,
 					"",
 					0,
@@ -11525,13 +11039,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 					fallback.secondaryOutputGate = secondaryGate
 				}
 			}
-			fallbacks = append(fallbacks, fallback)
+			gated = append(gated, fallback)
 		}
 		s.attachMu.Unlock()
-
 		primaryDelivered := primaryQueued &&
 			primaryClient.waitForWrite(primaryCompletion)
-		for _, fallback := range fallbacks {
+		for _, fallback := range gated {
 			tryFallback := !primaryDelivered
 			fallback.queryGate.deliver.Store(tryFallback)
 			close(fallback.queryGate.done)
@@ -11554,47 +11067,31 @@ func (s *muxServer) writeAttachOutputIfActive(
 		}
 		return
 	}
+	var deliveredPrimary *attachClient
 	if primaryClient != nil {
-		if primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
+		if _, queued := primaryClient.enqueue(primaryData, false); queued {
 			deliveredPrimary = primaryClient
-		} else {
-			_, queued := primaryClient.enqueue(primaryData, false)
-			if queued {
-				deliveredPrimary = primaryClient
-			}
 		}
 	}
-	if deliveredPrimary == nil {
-		sort.Slice(clients, func(i int, j int) bool {
-			iCurrent := clients[i].conn == currentPrimary
-			jCurrent := clients[j].conn == currentPrimary
-			if iCurrent != jCurrent {
-				return iCurrent
-			}
-			return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-		})
-		for _, client := range clients {
-			if client == primaryClient {
-				continue
-			}
-			if client.suppressesReplayedOutput(windowID, outputGeneration) {
-				deliveredPrimary = client
-				break
-			}
-			_, queued := client.enqueue(failoverPrimaryData, false)
-			if queued {
-				deliveredPrimary = client
-				break
-			}
+	for _, client := range fallbacks {
+		if deliveredPrimary != nil {
+			break
 		}
-	}
-	for _, client := range clients {
-		if client == deliveredPrimary ||
-			len(secondaryData) == 0 ||
-			client.suppressesReplayedOutput(windowID, outputGeneration) {
+		if client == primaryClient {
 			continue
 		}
-		_, _ = client.enqueue(secondaryData, false)
+		failover, _ := fallbackData(client)
+		if _, queued := client.enqueue(failover, false); queued {
+			deliveredPrimary = client
+		}
+	}
+	for _, client := range fallbacks {
+		if client == deliveredPrimary {
+			continue
+		}
+		if _, secondary := fallbackData(client); len(secondary) > 0 {
+			_, _ = client.enqueue(secondary, false)
+		}
 	}
 	s.attachMu.Unlock()
 }
@@ -11630,11 +11127,12 @@ func (s *muxServer) enqueuePrimaryAttachLocked(
 	})
 	responseCount := terminalQueryResponseCount(data)
 	for _, client := range clients {
-		completion, queued := client.enqueueTerminalQuery(
+		completion, queued := client.enqueueWrite(
 			data,
 			tracked,
 			windowID,
 			responseCount,
+			nil,
 		)
 		if !queued {
 			continue
@@ -12353,7 +11851,7 @@ func (s *muxServer) sendThemeHint(data string) bool {
 // the intended window.
 func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
 	s.refreshProcessMetadata("")
-	themeHint := themeHintDataFromString(data)
+	themeHint := hintDataFromString(data, themeHintLimitBytes)
 	var themeHintData []byte
 	s.mu.Lock()
 	if len(themeHint) > 0 {
@@ -12384,22 +11882,6 @@ func (s *muxServer) sendThemeHintToActiveWindow(data string) (string, bool) {
 		s.sendFocusTransition(windowID)
 	}
 	return windowID, true
-}
-
-func themeHintDataFromString(data string) []byte {
-	data = strings.TrimSpace(data)
-	if data == "" || len(data) > themeHintLimitBytes {
-		return nil
-	}
-	return []byte(data)
-}
-
-func capabilityHintDataFromString(data string) []byte {
-	data = strings.TrimSpace(data)
-	if data == "" || len(data) > capabilityHintLimitBytes {
-		return nil
-	}
-	return []byte(data)
 }
 
 func (s *muxServer) sendFocusTransition(windowID string) {
@@ -13475,25 +12957,6 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 	}.isGround()
 }
 
-// stripLocallyAnsweredThemeQueries removes OSC 10/11/12/17/19 background-color
-// queries and OSC 4 palette queries from chunk when MonkeyMux can answer them
-// locally from hint. The daemon already writes the cached responses directly
-// to the window PTY in handleWindowOutput, so forwarding the same queries to
-// the SSH client would produce a duplicate reply. That duplicate would travel
-// back through the attach socket as keyboard input and surface inside the
-// active TUI as literal text (the user-visible "spew" bug). Queries we cannot
-// answer (no cached response for every queried key) are left in place so the
-// client can still reply.
-func stripLocallyAnsweredThemeQueries(chunk []byte, hint []byte) []byte {
-	window := &muxWindow{}
-	output := window.stripLocallyAnsweredThemeQueriesLocked(chunk, hint)
-	if len(window.attachOscBuffer) == 0 {
-		return output
-	}
-	output = append(output, window.attachOscBuffer...)
-	return output
-}
-
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
 		return chunk
@@ -13687,6 +13150,18 @@ func terminalQueryResponseCount(data []byte) int {
 	return count
 }
 
+// dcsCapabilityCount counts the ";"-separated capability names in an XTGETTCAP
+// query or reply payload after its prefix.
+func dcsCapabilityCount(fields []byte) int {
+	count := 0
+	for _, capability := range bytes.Split(fields, []byte{';'}) {
+		if len(capability) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func terminalQuerySequenceResponseCount(sequence []byte) int {
 	payloadStart := 0
 	osc := false
@@ -13724,16 +13199,7 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 		if !bytes.HasPrefix(payload, []byte("+q")) {
 			return 1
 		}
-		count := 0
-		for _, capability := range bytes.Split(payload[2:], []byte{';'}) {
-			if len(capability) > 0 {
-				count++
-			}
-		}
-		if count > 0 {
-			return count
-		}
-		return 0
+		return dcsCapabilityCount(payload[2:])
 	}
 	code, value, ok := strings.Cut(
 		string(payload),
@@ -13781,13 +13247,7 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 		!bytes.HasPrefix(payload, []byte("1+r")) {
 		return 1
 	}
-	count := 0
-	for _, capability := range bytes.Split(payload[3:], []byte{';'}) {
-		if len(capability) > 0 {
-			count++
-		}
-	}
-	if count > 0 {
+	if count := dcsCapabilityCount(payload[3:]); count > 0 {
 		return count
 	}
 	return 1
@@ -14464,24 +13924,18 @@ func computeKittyImageGlobalBudgetBytes() int {
 	return budget
 }
 
-// kittyImageReplayLocked returns the most-recent retained image transmissions,
-// bounded by count and bytes, so a reattaching client repopulates the images
-// most likely still on screen without decoding many megabytes on its UI thread.
-// Older retained transmissions are omitted; the foreground app re-emits them on
-// its next redraw if they are still visible.
+// kittyImageReplaySelectionLocked returns the most-recent retained image
+// transmissions, bounded by count and bytes, so a reattaching client
+// repopulates the images most likely still on screen without decoding many
+// megabytes on its UI thread. Older retained transmissions are omitted; the
+// foreground app re-emits them on its next redraw if they are still visible.
+// The set of roots it emitted lets a caller that needs more images (a rendered
+// frame whose placeholder cells point at older roots) skip the ones covered.
 //
 // Images whose id maps to a matching signature in clientHas are omitted: the
 // client already holds identical bytes and would re-parse (then discard) them,
 // so re-sending only adds switch latency. The id still counts against the caps
 // so the "most recent N" window is unchanged whether or not the client has them.
-func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
-	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
-	return out
-}
-
-// kittyImageReplaySelectionLocked is kittyImageReplayLocked plus the set of
-// roots it emitted, so a caller that needs more images (a rendered frame whose
-// placeholder cells point at older roots) can skip the ones already covered.
 func (w *muxWindow) kittyImageReplaySelectionLocked(
 	clientHas map[string]uint32,
 ) ([]byte, map[string]struct{}) {
@@ -14495,14 +13949,17 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		return w.kittyImageSeq[candidates[i]] > w.kittyImageSeq[candidates[j]]
 	})
 	selected := make([]string, 0, maxReplayedKittyImages)
+	numberReplays := make(map[string][]byte, maxReplayedKittyImages)
 	total := 0
 	for _, id := range candidates {
-		imageBytes := len(w.kittyImages[id]) +
-			len(w.kittyImageNumberReplayLocked(id)) +
-			len(w.kittyImageAnimations[id])
 		if len(selected) >= maxReplayedKittyImages {
 			break
 		}
+		numberReplay := w.kittyImageNumberReplayLocked(id)
+		numberReplays[id] = numberReplay
+		imageBytes := len(w.kittyImages[id]) +
+			len(numberReplay) +
+			len(w.kittyImageAnimations[id])
 		if imageBytes > maxReplayedKittyImageBytes ||
 			total+imageBytes > maxReplayedKittyImageBytes {
 			continue
@@ -14531,7 +13988,7 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		if !clientHasRoot {
 			out = append(out, w.kittyImageRootReplayLocked(id)...)
 		}
-		out = append(out, w.kittyImageNumberReplayLocked(id)...)
+		out = append(out, numberReplays[id]...)
 		out = append(out, w.kittyImageAnimations[id]...)
 	}
 	return out, selectedSet
@@ -14801,20 +14258,15 @@ func decodeLenientBase64(payload []byte) []byte {
 	return out
 }
 
-// kittyTransmissionPayloadSignature returns the FNV-1a-32 signature of the
-// base64-decoded payload of a stored Kitty transmission, matching the client's
-// terminalGraphicsSourceSignature over the same bytes. Returns 0 when there is
-// no payload, which never matches a client-reported signature.
-//
-// A transmission larger than a single APC is split into m=1 continuation chunks
-// (Kitty caps each APC payload at 4096 base64 bytes), and a stored image buffer
-// concatenates every chunk's full APC. The client appends each chunk's decoded
-// payload into one buffer before hashing, so the signature MUST cover the whole
-// concatenated payload — hashing only the first chunk would never match a
-// multi-chunk image (i.e. every non-trivial screenshot), defeating the switch
-// replay skip and forcing the whole image set to be re-sent on every switch.
 func kittyTransmissionPayloadSignature(buf []byte) uint32 {
-	var payload []byte
+	// Every chunk's base64 body, padding trimmed. The decoded bytes are a
+	// plain 6-bit-per-character bit stream when no other non-base64 byte is
+	// present, which is how Kitty clients emit them, so the sampled bytes
+	// are read straight out of the bodies instead of decoding the whole
+	// image. Any stray byte (whitespace) falls back to the lenient decode.
+	var bodies [][]byte
+	total := 0
+	direct := true
 	for i := 0; i+2 < len(buf); {
 		if buf[i] != '\x1b' || buf[i+1] != '_' || buf[i+2] != 'G' {
 			i++
@@ -14833,21 +14285,55 @@ func kittyTransmissionPayloadSignature(buf []byte) uint32 {
 			if bel := bytes.IndexByte(body, '\a'); bel >= 0 {
 				body = body[:bel]
 			}
-			payload = append(payload, decodeLenientBase64(body)...)
+			body = bytes.TrimRight(body, "=")
+			for _, c := range body {
+				if base64DecodeValue[c] < 0 {
+					direct = false
+					break
+				}
+			}
+			bodies = append(bodies, body)
+			total += len(body) * 6 / 8
 		}
 		i = apcEnd
 	}
-	if len(payload) == 0 {
+	if !direct {
+		var payload []byte
+		for _, body := range bodies {
+			payload = append(payload, decodeLenientBase64(body)...)
+		}
+		return fnv32ImageSignature(payload)
+	}
+	if total == 0 {
 		return 0
 	}
-	return fnv32ImageSignature(payload)
+	body, offset := 0, 0
+	return fnv32SampledSignature(total, func(index int) byte {
+		// Samples are requested in increasing order, so the chunk cursor
+		// only ever moves forward.
+		for index-offset >= len(bodies[body])*6/8 {
+			offset += len(bodies[body]) * 6 / 8
+			body++
+		}
+		bit := (index - offset) * 8
+		chars := bodies[body]
+		pair := uint32(base64DecodeValue[chars[bit/6]])<<6 |
+			uint32(base64DecodeValue[chars[bit/6+1]])
+		return byte(pair >> (4 - uint(bit%6)))
+	})
 }
 
 // fnv32ImageSignature mirrors the client's terminalGraphicsSourceSignature: an
 // FNV-1a-32 over the exact length (4 little-endian bytes) plus an evenly-spaced
 // sample of at most ~4096 bytes. Returns a non-zero value for non-empty input.
 func fnv32ImageSignature(b []byte) uint32 {
-	if len(b) == 0 {
+	return fnv32SampledSignature(len(b), func(index int) byte { return b[index] })
+}
+
+// fnv32SampledSignature is fnv32ImageSignature over a payload of the given
+// length read through byteAt, which is called with increasing indexes.
+func fnv32SampledSignature(length int, byteAt func(index int) byte) uint32 {
+	if length == 0 {
 		return 0
 	}
 	const (
@@ -14855,17 +14341,17 @@ func fnv32ImageSignature(b []byte) uint32 {
 		fnvPrime  = uint32(0x01000193)
 	)
 	hash := fnvOffset
-	length := len(b)
+	remaining := length
 	for i := 0; i < 4; i++ {
-		hash = (hash ^ uint32(length&0xFF)) * fnvPrime
-		length >>= 8
+		hash = (hash ^ uint32(remaining&0xFF)) * fnvPrime
+		remaining >>= 8
 	}
 	step := 1
-	if len(b) > 4096 {
-		step = len(b) / 4096
+	if length > 4096 {
+		step = length / 4096
 	}
-	for i := 0; i < len(b); i += step {
-		hash = (hash ^ uint32(b[i])) * fnvPrime
+	for i := 0; i < length; i += step {
+		hash = (hash ^ uint32(byteAt(i))) * fnvPrime
 	}
 	if hash == 0 {
 		return 1
@@ -15010,120 +14496,114 @@ func terminalQuerySequenceAt(
 	return terminalQuerySequenceAtWithUtf8Prefix(data, index, 0)
 }
 
+// controlString locates one ESC- or C1-introduced control string: kind is the
+// 7-bit introducer ('[' CSI, ']' OSC, 'P' DCS, '_' APC; 0 for a bare trailing
+// ESC), data[payloadStart:payloadEnd] is the payload (the whole sequence for a
+// CSI) and end is the index just past the terminator. incomplete reports a
+// string whose terminator has not arrived yet.
+type controlString struct {
+	kind         byte
+	payloadStart int
+	payloadEnd   int
+	end          int
+	incomplete   bool
+}
+
+// controlStringAt recognises the control string starting at index. It reports
+// false for any other byte, including a continuation byte that belongs to the
+// leading UTF-8 prefix carried over from the previous chunk and a C1 byte that
+// continues a multi-byte character.
+func controlStringAt(
+	data []byte,
+	index int,
+	leadingUtf8Prefix int,
+) (controlString, bool) {
+	if index < 0 || index >= len(data) {
+		return controlString{}, false
+	}
+	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
+		return controlString{}, false
+	}
+	introducer := data[index]
+	payloadStart := index + 1
+	if introducer == '\x1b' {
+		if index+1 >= len(data) {
+			return controlString{incomplete: true}, true
+		}
+		switch data[index+1] {
+		case '[', ']', 'P', '_':
+			introducer = data[index+1]
+			payloadStart = index + 2
+		default:
+			return controlString{}, false
+		}
+	} else if isUtf8ContinuationAt(data, index) {
+		return controlString{}, false
+	} else {
+		switch introducer {
+		case 0x9b:
+			introducer = '['
+		case 0x9d:
+			introducer = ']'
+		case 0x90:
+			introducer = 'P'
+		case 0x9f:
+			introducer = '_'
+		default:
+			return controlString{}, false
+		}
+	}
+	result := controlString{kind: introducer, payloadStart: payloadStart}
+	if introducer == '[' {
+		end := csiSequenceEnd(data, payloadStart)
+		if end < 0 {
+			result.incomplete = true
+			return result, true
+		}
+		result.payloadStart = index
+		result.payloadEnd = end + 1
+		result.end = end + 1
+		return result, true
+	}
+	findTerminator := findStringTerminator
+	if introducer == ']' {
+		findTerminator = findOscTerminator
+	}
+	end, terminatorLength, ok := findTerminator(data[payloadStart:])
+	if !ok {
+		result.incomplete = true
+		return result, true
+	}
+	result.payloadEnd = payloadStart + end
+	result.end = payloadStart + end + terminatorLength
+	return result, true
+}
+
 func terminalQuerySequenceAtWithUtf8Prefix(
 	data []byte,
 	index int,
 	leadingUtf8Prefix int,
 ) (int, bool, bool, bool) {
-	if index < 0 || index >= len(data) {
+	sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+	if !ok {
 		return -1, false, false, false
 	}
-	if index < leadingUtf8Prefix && data[index]&0xc0 == 0x80 {
-		return -1, false, false, false
+	if sequence.incomplete {
+		return -1, false, true, true
 	}
-	introducer := data[index]
-	payloadStart := index + 1
-	escaped := false
-	if introducer == '\x1b' {
-		if index+1 >= len(data) {
-			return -1, false, true, true
-		}
-		escaped = true
-		introducer = data[index+1]
-		payloadStart = index + 2
-	} else if isUtf8ContinuationAt(data, index) {
-		return -1, false, false, false
-	}
-	switch introducer {
+	payload := data[sequence.payloadStart:sequence.payloadEnd]
+	query := false
+	switch sequence.kind {
 	case '[':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
-	case 0x9b:
-		end := csiSequenceEnd(data, payloadStart)
-		if end < 0 {
-			return -1, false, true, true
-		}
-		sequenceEnd := end + 1
-		return sequenceEnd,
-			isReplayUnsafeCsiQuery(data[index:sequenceEnd]),
-			false,
-			true
+		query = isReplayUnsafeCsiQuery(payload)
 	case ']':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9d:
-		end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeOscQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeOscQuery(payload)
 	case 'P':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x90:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeDcsQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
+		query = isReplayUnsafeDcsQuery(payload)
 	case '_':
-		if !escaped {
-			return -1, false, false, false
-		}
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	case 0x9f:
-		end, terminatorLength, ok := findStringTerminator(data[payloadStart:])
-		if !ok {
-			return -1, false, true, true
-		}
-		return payloadStart + end + terminatorLength,
-			isReplayUnsafeKittyQuery(data[payloadStart : payloadStart+end]),
-			false,
-			true
-	default:
-		return -1, false, false, false
+		query = isReplayUnsafeKittyQuery(payload)
 	}
+	return sequence.end, query, false, true
 }
 
 func leadingUtf8ContinuationPrefix(data []byte, remaining int) int {
@@ -15458,120 +14938,34 @@ func scanTerminalResponseInput(
 	}
 	var responseEnds []int
 	for index := 0; index < len(data); {
-		if index < leadingUtf8Prefix &&
-			data[index]&0xc0 == 0x80 {
+		sequence, ok := controlStringAt(data, index, leadingUtf8Prefix)
+		if !ok {
 			return responseEnds, -1, 0, index
 		}
-		sequenceEnd := -1
+		if sequence.incomplete {
+			kind := sequence.kind
+			if kind == '[' {
+				kind = 0
+			}
+			return responseEnds, index, kind, len(data)
+		}
+		payload := data[sequence.payloadStart:sequence.payloadEnd]
 		isResponse := false
-		introducer := data[index]
-		payloadStart := index + 1
-		escaped := false
-		if introducer == '\x1b' {
-			if index+1 >= len(data) {
-				return responseEnds, index, 0, len(data)
-			}
-			escaped = true
-			introducer = data[index+1]
-			payloadStart = index + 2
-		}
-		switch introducer {
+		switch sequence.kind {
 		case '[':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
-		case 0x9b:
-			end := csiSequenceEnd(data, payloadStart)
-			if end < 0 {
-				return responseEnds, index, 0, len(data)
-			}
-			sequenceEnd = end + 1
-			isResponse = isTerminalResponseCsi(data[index:sequenceEnd])
+			isResponse = isTerminalResponseCsi(payload)
 		case ']':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9d:
-			end, terminatorLength, ok := findOscTerminator(data[payloadStart:])
-			if !ok {
-				return responseEnds, index, ']', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseOsc(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseOsc(payload)
 		case 'P':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x90:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, 'P', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseDcs(
-				data[payloadStart : payloadStart+end],
-			)
+			isResponse = isTerminalResponseDcs(payload)
 		case '_':
-			if !escaped {
-				return responseEnds, -1, 0, index
-			}
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		case 0x9f:
-			end, terminatorLength, ok := findStringTerminator(
-				data[payloadStart:],
-			)
-			if !ok {
-				return responseEnds, index, '_', len(data)
-			}
-			sequenceEnd = payloadStart + end + terminatorLength
-			isResponse = isTerminalResponseKitty(
-				data[payloadStart : payloadStart+end],
-			)
-		default:
-			return responseEnds, -1, 0, index
+			isResponse = isTerminalResponseKitty(payload)
 		}
 		if !isResponse {
 			return responseEnds, -1, 0, index
 		}
-		responseEnds = append(responseEnds, sequenceEnd)
-		index = sequenceEnd
+		responseEnds = append(responseEnds, sequence.end)
+		index = sequence.end
 	}
 	return responseEnds, -1, 0, len(data)
 }
@@ -15732,6 +15126,17 @@ func terminalResponseNumericParams(value string) bool {
 	return true
 }
 
+// isTerminalColorOscCode reports the OSC codes whose "?" form queries the
+// terminal's palette, colors, or clipboard and whose reply carries the value.
+func isTerminalColorOscCode(code string) bool {
+	switch code {
+	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalResponseOsc(payload []byte) bool {
 	if len(payload) > 0 && (payload[0] == 'L' || payload[0] == 'l') {
 		return true
@@ -15740,12 +15145,7 @@ func isTerminalResponseOsc(payload []byte) bool {
 	if !ok || value == "?" {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isTerminalResponseDcs(payload []byte) bool {
@@ -15776,12 +15176,7 @@ func isReplayUnsafeOscQuery(payload []byte) bool {
 	if !ok || !strings.Contains(value, "?") {
 		return false
 	}
-	switch code {
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "52":
-		return true
-	default:
-		return false
-	}
+	return isTerminalColorOscCode(code)
 }
 
 func isReplayUnsafeDcsQuery(payload []byte) bool {
@@ -15877,18 +15272,32 @@ func (w *muxWindow) agentToolLocked() string {
 	if tool := agentToolFromCommandName(w.currentCommandLocked()); tool != "" {
 		return tool
 	}
-	if tool := strings.TrimSpace(w.agentTool); tool != "" {
+	return agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
+}
+
+// agentToolFromRetainedMetadata identifies the agent from what a window
+// retains when no live command names it: the recorded tool, then the pane
+// title and window name unless the tool was confirmed to have retired.
+func agentToolFromRetainedMetadata(
+	agentTool string,
+	confirmed bool,
+	paneTitle string,
+	name string,
+) string {
+	if tool := strings.TrimSpace(agentTool); tool != "" {
 		return tool
 	}
 	// A restored retired agent is now a known shell, even if its retained
 	// title/name resembles another tool. Live commands still win above.
-	if w.agentToolConfirmed {
+	if confirmed {
 		return ""
 	}
-	if tool := agentToolFromTerminalTitle(w.paneTitle); tool != "" {
+	if tool := agentToolFromTerminalTitle(paneTitle); tool != "" {
 		return tool
 	}
-	return agentToolFromCommandName(w.name)
+	return agentToolFromCommandName(name)
 }
 
 func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
@@ -15941,10 +15350,9 @@ func (s *muxServer) refreshProcessMetadata(windowID string) {
 	pgrp := w.foregroundProcessGroupLocked()
 	pty, process := w.pty, w.proc
 	identity := w.broadcastIdentityLocked()
-	fallbackTool := (&muxWindow{
-		agentTool: w.agentTool, agentToolConfirmed: w.agentToolConfirmed,
-		paneTitle: w.paneTitle, name: w.name,
-	}).agentToolLocked()
+	fallbackTool := agentToolFromRetainedMetadata(
+		w.agentTool, w.agentToolConfirmed, w.paneTitle, w.name,
+	)
 	sessionID := w.agentSessionID
 	sessionPath := w.agentSessionPath
 	bridgeID := w.nativeAcpBridgeID
@@ -16163,40 +15571,6 @@ func agentToolFromCommandText(command string) string {
 	)
 }
 
-func agentToolFromCommandName(command string) string {
-	if tool := agentLaunchToolFromCommand(command); tool != "" {
-		return tool
-	}
-	normalized := strings.ToLower(cleanProcessCommandName(command))
-	if museBinaryNamePattern.MatchString(normalized) {
-		return "muse"
-	}
-	switch normalized {
-	case "muse", "muse.cmd", "muse-code-acp", "muse-code-acp.cmd":
-		return "muse"
-	case "claude", "claude-code":
-		return "claude"
-	case "copilot", "github-copilot":
-		return "copilot"
-	case "codex", "codex-cli":
-		return "codex"
-	case "opencode", "opencode2", "open-code":
-		return "opencode"
-	case "agy", "antigravity", "antigravity-cli":
-		return "antigravity"
-	case "cursor-agent":
-		return "cursor-agent"
-	case "pi", "pi-agent":
-		return "pi"
-	case "hermes", "hermes-agent":
-		return "hermes"
-	case "openclaw":
-		return "openclaw"
-	default:
-		return ""
-	}
-}
-
 func monkeyMuxAgentLaunchCommand(command string) string {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "pi" {
@@ -16218,27 +15592,12 @@ func monkeyMuxPiAgentLaunchCommand() string {
 	return "monkeymux pi-agent"
 }
 
-var agentCommands = map[string]struct {
-	executable       string
-	permissionFlags  string
-	resumeArgument   string
-	supportsContinue bool
-}{
-	"muse":         {"muse", "--yolo", "resume", true},
-	"claude":       {"claude", "--dangerously-skip-permissions", "--resume", false},
-	"copilot":      {"copilot", "--yolo", "--resume", false},
-	"codex":        {"codex", "--yolo", "resume", false},
-	"opencode":     {"opencode", "--auto", "--session", true},
-	"antigravity":  {"agy", "--dangerously-skip-permissions", "--conversation", true},
-	"cursor-agent": {"cursor-agent", "--force", "--resume", true},
-}
-
 func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string) string {
 	if tool == "pi" {
 		return monkeyMuxPiAgentLaunchCommand()
 	}
-	descriptor := agentCommands[tool]
-	command := descriptor.executable
+	launch := agentRegistry[tool].launch
+	command := launch.executable
 	if len(executables) > 0 && executables[0] != "" {
 		var ok bool
 		command, ok = shellArgument(executables[0])
@@ -16250,8 +15609,8 @@ func agentLaunchCommand(tool string, startInYoloMode bool, executables ...string
 		if tool == "opencode" {
 			return "OPENCODE_PERMISSION=" + shellQuote(`{"*":"allow"}`) + " " + command + " --auto"
 		}
-		if descriptor.permissionFlags != "" {
-			command += " " + descriptor.permissionFlags
+		if launch.permissionFlags != "" {
+			command += " " + launch.permissionFlags
 		}
 	}
 	return command
@@ -16302,14 +15661,14 @@ func agentResumeCommand(tool string, sessionID string, startInYoloMode bool, exe
 	if launch == "" {
 		return ""
 	}
-	descriptor := agentCommands[tool]
+	spec := agentRegistry[tool].launch
 	if sessionID == "_continue" && tool == "muse" {
 		return launch + " resume --last"
 	}
-	if sessionID == "_continue" && descriptor.supportsContinue {
+	if sessionID == "_continue" && spec.supportsContinue {
 		return launch + " --continue"
 	}
-	return launch + " " + descriptor.resumeArgument + " " + quotedSessionID
+	return launch + " " + spec.resumeArgument + " " + quotedSessionID
 }
 
 func canonicalAgentCommandName(command string) string {
@@ -16321,7 +15680,7 @@ func canonicalAgentCommandName(command string) string {
 	return firstNonEmptyString(agentToolFromCommandName(command), cleanProcessCommandName(command))
 }
 
-// agentResumeCommandWithFreshFallback wraps a restored agent's --resume command
+// resumeCommandWithFreshFallback wraps a restored agent's --resume command
 // so a resume that exits immediately falls back to launching the agent fresh,
 // keeping the restored window alive instead of letting it vanish.
 //
@@ -16339,40 +15698,16 @@ func canonicalAgentCommandName(command string) string {
 // the shell before it can reach the fallback, so closing a window never
 // relaunches the agent. During Codex server teardown, shutdownCodex freezes the
 // wrapping shell before TERM and leaves it stopped through the final group kill.
-func agentResumeCommandWithFreshFallback(resume string, launch string) string {
-	return piResumeCommandWithFreshFallback(resume, launch)
-}
-
-func agentToolFromTerminalTitle(title string) string {
-	normalized := strings.ToLower(strings.Join(strings.Fields(title), " "))
-	normalized = strings.Trim(normalized, "·-: ")
-	switch {
-	case normalized == "muse" || normalized == "muse code" || strings.HasPrefix(normalized, "muse code "):
-		return "muse"
-	case normalized == "claude" || normalized == "claude code" ||
-		strings.HasPrefix(normalized, "claude code "):
-		return "claude"
-	case normalized == "copilot" || normalized == "copilot cli" ||
-		strings.HasPrefix(normalized, "copilot cli "):
-		return "copilot"
-	case normalized == "codex" || strings.HasPrefix(normalized, "codex "):
-		return "codex"
-	case normalized == "opencode" || normalized == "open code" ||
-		strings.HasPrefix(normalized, "opencode "):
-		return "opencode"
-	case normalized == "agy" || normalized == "antigravity" ||
-		strings.HasPrefix(normalized, "agy ") || strings.HasPrefix(normalized, "antigravity "):
-		return "antigravity"
-	case normalized == "cursor agent" ||
-		normalized == "cursor-agent" || normalized == "cursor cli" ||
-		strings.HasPrefix(normalized, "cursor agent "):
-		return "cursor-agent"
-	case normalized == "pi" || strings.HasPrefix(normalized, "pi - ") ||
-		normalized == "π" || strings.HasPrefix(normalized, "π - "):
-		return "pi"
-	default:
-		return ""
+func resumeCommandWithFreshFallback(resume string, launch string) string {
+	resume = strings.TrimSpace(resume)
+	launch = strings.TrimSpace(launch)
+	if resume == "" {
+		return launch
 	}
+	if launch == "" || launch == resume {
+		return resume
+	}
+	return shellOrElseJoin(resume, launch)
 }
 
 func isGenericRuntimeCommandName(command string) bool {
@@ -17319,7 +16654,7 @@ func (s *muxServer) close() {
 	killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
 	for _, window := range windows {
 		if window.nativeAcpBridgeID != "" {
-			_ = requestAcpBridgeStopAndWait(window.nativeAcpBridgeID)
+			_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
 		}
 	}
 	teardowns.Wait()
@@ -18098,6 +17433,10 @@ func socketPath(session string) (string, error) {
 type socketIdentity struct {
 	device uint64
 	inode  uint64
+}
+
+func (id socketIdentity) valid() bool {
+	return id.device != 0 || id.inode != 0
 }
 
 func socketFileIdentity(path string) (socketIdentity, error) {

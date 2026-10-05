@@ -8,6 +8,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
+import 'package:monkeyssh/domain/models/port_proxy_name.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
@@ -103,16 +104,22 @@ class _RejectingHostRepository extends FakeHostRepository {
     required super.encryptionService,
     required this.saveError,
     required this.unreadablePassword,
+    this.saveDelay,
   });
 
   final Exception? saveError;
   final bool unreadablePassword;
+
+  /// Real async gap before the save resolves, so a frame can be pumped while
+  /// the save is in flight.
+  final Duration? saveDelay;
 
   @override
   bool hasUnreadablePassword(int hostId) => unreadablePassword;
 
   @override
   Future<int> insert(HostsCompanion host) async {
+    if (saveDelay case final delay?) await Future<void>.delayed(delay);
     if (saveError case final error?) throw error;
     return super.insert(host);
   }
@@ -122,6 +129,7 @@ Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
   WidgetTester tester, {
   bool hasPro = false,
   Exception? saveError,
+  Duration? saveDelay,
   bool unreadablePassword = false,
   List<Snippet> snippets = const [],
 }) async {
@@ -137,6 +145,7 @@ Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
     database: fixture.database,
     encryptionService: fixture.encryptionService,
     saveError: saveError,
+    saveDelay: saveDelay,
     unreadablePassword: unreadablePassword,
   );
   final presetService = _MockAgentLaunchPresetService();
@@ -424,6 +433,58 @@ void main() {
       );
       expect(harness.hostRepository.insertedHost, isNull);
     });
+
+    testWidgets(
+      'keeps the form mounted while saving so a proxy-name conflict can be '
+      'focused',
+      (tester) async {
+        final harness = await _pumpHostCreateScreen(
+          tester,
+          saveError: PortProxyNameConflictException('my.dev'),
+          saveDelay: const Duration(milliseconds: 50),
+        );
+        await _fillRequiredHostFields(tester);
+        final switchFinder = find.byKey(
+          const Key('host-auto-forward-ports-switch'),
+        );
+        await tester.scrollUntilVisible(
+          switchFinder,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.tap(switchFinder);
+        await tester.pump();
+        const proxyNameKey = Key('host-port-proxy-name-field');
+        await tester.enterText(find.byKey(proxyNameKey), 'my.dev');
+
+        final saveButton = find.byKey(
+          const Key('host-save-button'),
+          skipOffstage: false,
+        );
+        await tester.scrollUntilVisible(
+          saveButton,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        tester.widget<FilledButton>(saveButton).onPressed!();
+        await tester.pump();
+
+        // The save is in flight: the form must still be on screen.
+        expect(find.byKey(proxyNameKey), findsOneWidget);
+
+        // Let the save resolve, then the snackbar and scroll animations run.
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+
+        expect(
+          find.textContaining('Choose a different proxy domain.'),
+          findsOneWidget,
+        );
+        expect(_textFieldHasFocus(tester, proxyNameKey), isTrue);
+        expect(harness.hostRepository.insertedHost, isNull);
+      },
+    );
 
     testWidgets('warns before leaving with unsaved host changes', (
       tester,

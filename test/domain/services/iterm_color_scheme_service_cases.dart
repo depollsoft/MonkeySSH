@@ -47,33 +47,41 @@ void registerItermColorSchemeServiceTests() {
     });
 
     group('ItermColorSchemeService', () {
-      test('searchSchemes searches live tree paths by name terms', () async {
-        final service = ItermColorSchemeService(
-          client: MockClient(
-            (request) async => http.Response(
-              jsonEncode({
-                'tree': [
-                  {'type': 'blob', 'path': 'schemes/Dracula.itermcolors'},
-                  {
-                    'type': 'blob',
-                    'path': 'schemes/Solarized Dark.itermcolors',
-                  },
-                  {'type': 'blob', 'path': 'README.md'},
-                  {'type': 'tree', 'path': 'schemes'},
-                ],
-              }),
-              200,
-            ),
-          ),
-        );
-        addTearDown(service.dispose);
+      test(
+        'searchSchemes searches the schemes subtree by name terms',
+        () async {
+          final service = ItermColorSchemeService(
+            client: MockClient((request) async {
+              expect(request.url.host, 'api.github.com');
+              expect(request.url.path, endsWith('/git/trees/master:schemes'));
+              expect(request.url.queryParameters, isEmpty);
+              return http.Response(
+                jsonEncode({
+                  'tree': [
+                    {'type': 'blob', 'path': 'Dracula.itermcolors'},
+                    {'type': 'blob', 'path': 'Solarized Dark.itermcolors'},
+                    {'type': 'blob', 'path': 'README.md'},
+                    {'type': 'tree', 'path': 'extras'},
+                  ],
+                }),
+                200,
+              );
+            }),
+          );
+          addTearDown(service.dispose);
 
-        final results = await service.searchSchemes('solar dark');
+          final results = await service.searchSchemes('solar dark');
 
-        expect(results, hasLength(1));
-        expect(results.single.name, 'Solarized Dark');
-        expect(results.single.id, 'iterm2-solarized-dark');
-      });
+          expect(results, hasLength(1));
+          expect(results.single.name, 'Solarized Dark');
+          expect(results.single.id, 'iterm2-solarized-dark');
+          expect(results.single.path, 'schemes/Solarized Dark.itermcolors');
+          expect(
+            results.single.rawUri.toString(),
+            'https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/schemes/Solarized%20Dark.itermcolors',
+          );
+        },
+      );
 
       test('loadTheme downloads and parses selected scheme', () async {
         final scheme = ItermColorSchemeMetadata.fromPath(
@@ -141,8 +149,8 @@ void registerItermColorSchemeServiceTests() {
           http.Response(
             jsonEncode({
               'tree': [
-                {'type': 'blob', 'path': 'schemes/Dracula.itermcolors'},
-                {'type': 'blob', 'path': 'schemes/Solarized Dark.itermcolors'},
+                {'type': 'blob', 'path': 'Dracula.itermcolors'},
+                {'type': 'blob', 'path': 'Solarized Dark.itermcolors'},
               ],
             }),
             200,

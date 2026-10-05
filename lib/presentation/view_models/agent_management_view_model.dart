@@ -303,9 +303,12 @@ class AgentManagementViewModel extends ChangeNotifier {
         );
         return;
       }
+      // The list may alias the service's cache; never write into it in place.
       _change(() {
-        final index = runtimes.indexWhere((entry) => entry.definition.id == id);
-        if (index >= 0) runtimes[index] = updated;
+        runtimes = [
+          for (final entry in runtimes)
+            if (entry.definition.id == id) updated else entry,
+        ];
       });
       onRuntimesRefreshed(runtimes);
       onProvidersRefreshed();

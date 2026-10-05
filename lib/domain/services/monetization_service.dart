@@ -427,6 +427,17 @@ class MonetizationService {
       _restoreTimeout,
       onTimeout: () async {
         await _finishRestoreWithoutPurchases(completer);
+        if (_pendingPurchaseResult == completer &&
+            _restoreObservedPurchaseUpdate) {
+          // A restored transaction arrived just before the deadline and its
+          // handler is still applying the entitlement. Let it resolve the
+          // restore instead of reporting "no purchase" for a device that is
+          // about to become Pro; only give up if the handler itself hangs.
+          await _purchaseHandlerChain.timeout(
+            _restoreEmptyResultGracePeriod,
+            onTimeout: () {},
+          );
+        }
         if (_pendingPurchaseResult == completer) {
           _emit(_state.copyWith(isLoading: false));
           _resolvePendingPurchase(
@@ -886,6 +897,7 @@ class MonetizationService {
 
 /// Provider for [MonetizationService].
 final monetizationServiceProvider = Provider<MonetizationService>((ref) {
+  ref.watch(settingsGenerationProvider);
   final service = MonetizationService(ref.watch(settingsServiceProvider));
   ref.onDispose(() => unawaited(service.dispose()));
   unawaited(service.initialize());

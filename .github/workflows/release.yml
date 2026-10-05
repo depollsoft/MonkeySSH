@@ -53,9 +53,9 @@ jobs:
       build-number: ${{ steps.version.outputs.build-number }}
       build-codename: ${{ steps.version.outputs.build-codename }}
       build-display: ${{ steps.version.outputs.build-display }}
-      channel: ${{ steps.version.outputs.channel }}
-      release-ios: ${{ steps.version.outputs.release-ios }}
-      release-android: ${{ steps.version.outputs.release-android }}
+      channel: ${{ steps.release.outputs.channel }}
+      release-ios: ${{ steps.release.outputs.release-ios }}
+      release-android: ${{ steps.release.outputs.release-android }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,12 +67,8 @@ jobs:
           ruby-version: '3.3'
           bundler-cache: true
 
-      - name: Test App Store version resolver
-        if: github.event_name == 'release' || (inputs.channel == 'production' && inputs.ios)
-        run: bundle exec ruby scripts/resolve_next_app_store_patch_version_test.rb
-
-      - name: Compute version
-        id: version
+      - name: Resolve release version
+        id: release
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -130,26 +126,35 @@ jobs:
             exit 1
           fi
 
-          BUILD_NUMBER=$(( $(date +%s) / 10 ))
-          BUILD_CODENAME=$(python3 scripts/version_codename.py "$BUILD_NAME")
-          BUILD_DISPLAY="$BUILD_NAME"
-          if [ -n "$BUILD_CODENAME" ]; then
-            BUILD_DISPLAY="$BUILD_NAME \"$BUILD_CODENAME\""
-          fi
+          {
+            echo "build-name=${BUILD_NAME}"
+            echo "channel=${CHANNEL}"
+            echo "release-ios=${RELEASE_IOS}"
+            echo "release-android=${RELEASE_ANDROID}"
+          } >> "$GITHUB_OUTPUT"
 
-          echo "build-name=${BUILD_NAME}" >> "$GITHUB_OUTPUT"
-          echo "build-number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "build-codename=${BUILD_CODENAME}" >> "$GITHUB_OUTPUT"
-          echo "build-display=${BUILD_DISPLAY}" >> "$GITHUB_OUTPUT"
-          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
-          echo "release-ios=${RELEASE_IOS}" >> "$GITHUB_OUTPUT"
-          echo "release-android=${RELEASE_ANDROID}" >> "$GITHUB_OUTPUT"
-          echo "## Release Info" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Version:** ${BUILD_DISPLAY}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Build Number:** ${BUILD_NUMBER}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Channel:** ${CHANNEL}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **iOS:** ${RELEASE_IOS}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Android:** ${RELEASE_ANDROID}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compute version
+        id: version
+        uses: ./.github/actions/compute-version
+        with:
+          build-name: ${{ steps.release.outputs.build-name }}
+
+      - name: Summarize release
+        env:
+          BUILD_DISPLAY: ${{ steps.version.outputs.build-display }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build-number }}
+          CHANNEL: ${{ steps.release.outputs.channel }}
+          RELEASE_IOS: ${{ steps.release.outputs.release-ios }}
+          RELEASE_ANDROID: ${{ steps.release.outputs.release-android }}
+        run: |
+          {
+            echo "## Release Info"
+            echo "- **Version:** ${BUILD_DISPLAY}"
+            echo "- **Build Number:** ${BUILD_NUMBER}"
+            echo "- **Channel:** ${CHANNEL}"
+            echo "- **iOS:** ${RELEASE_IOS}"
+            echo "- **Android:** ${RELEASE_ANDROID}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     name: Build & Deploy Release

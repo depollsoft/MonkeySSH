@@ -10,7 +10,7 @@ outputs and are intentionally ignored by Git.
 Generate or refresh the assets before `flutter pub get`, testing, or packaging:
 
 ```bash
-./scripts/ensure_monkeymux_assets.sh
+./scripts/build_monkeymux_assets.sh
 ```
 
 The script fingerprints the MonkeyMux source, pinned Go toolchain, ConPTY
@@ -19,7 +19,7 @@ present and the fingerprint matches. Force a clean rebuild when diagnosing the
 packaging process:
 
 ```bash
-./scripts/ensure_monkeymux_assets.sh --force
+./scripts/build_monkeymux_assets.sh --force
 ```
 
 The exact packaging toolchain is declared by the `toolchain` directive in

@@ -855,6 +855,31 @@ void main() {
         ]),
         isFalse,
       );
+      // The server already bound this pane to an exact session file, so the
+      // ps/lsof probe has nothing to add.
+      expect(
+        shouldRefreshMonkeyMuxAgentMetadataForTesting([
+          windows.first.copyWith(
+            activeAgentSessionId: 'codex-session',
+            activeAgentSessionConfidence: AgentSessionConfidence.high,
+          ),
+        ]),
+        isFalse,
+      );
+      // The probe cannot identify a Pi session, so a Pi pane alone must not
+      // keep it running.
+      expect(
+        shouldRefreshMonkeyMuxAgentMetadataForTesting(const [
+          TmuxWindow(
+            index: 2,
+            name: 'Pi',
+            isActive: true,
+            currentCommand: 'pi',
+            panePid: 44,
+          ),
+        ]),
+        isFalse,
+      );
     });
 
     test('applies all-agent metadata with confidence to matching panes', () {
@@ -915,13 +940,13 @@ void main() {
         'Stale Copilot session',
       ),
       (
-        'untitled replacement',
+        'server-exact identity outranks a probe guess',
         'session-a',
         'Task A',
         'copilot\x1fsession-b\x1f501\x1f42\x1fmedium\x1f\n',
-        'session-b',
-        null,
-        'Copilot CLI',
+        'session-a',
+        'Task A',
+        'Task A',
       ),
     ]) {
       test('Copilot metadata: $name', () {
@@ -936,7 +961,7 @@ void main() {
             paneTitle: 'Copilot CLI',
             activeAgentSessionId: oldId,
             agentSessionTitle: oldTitle,
-            activeAgentSessionConfidence: name == 'untitled replacement'
+            activeAgentSessionConfidence: name.startsWith('server-exact')
                 ? AgentSessionConfidence.high
                 : null,
           ),
@@ -945,19 +970,32 @@ void main() {
         expect(windows.single.activeAgentSessionId, id);
         expect(windows.single.agentSessionTitle, title);
         expect(windows.single.displayTitle, displayTitle);
-        if (output.isEmpty) expect(windows, same(original));
-        if (name == 'untitled replacement') {
-          expect(
-            windows.single.activeAgentSessionConfidence,
-            AgentSessionConfidence.medium,
-          );
-          expect(
-            applyMonkeyMuxAgentMetadataForTesting(windows, output),
-            same(windows),
-          );
+        if (output.isEmpty || name.startsWith('server-exact')) {
+          expect(windows, same(original));
         }
       });
     }
+
+    test('a high-confidence probe result still updates an exact identity', () {
+      final original = [
+        const TmuxWindow(
+          index: 1,
+          id: '@7',
+          panePid: 42,
+          name: 'Copilot CLI',
+          isActive: true,
+          currentCommand: 'copilot',
+          activeAgentSessionId: 'session-a',
+          activeAgentSessionConfidence: AgentSessionConfidence.high,
+        ),
+      ];
+      final windows = applyMonkeyMuxAgentMetadataForTesting(
+        original,
+        'copilot\x1fsession-b\x1f501\x1f42\x1fhigh\x1fTask B\n',
+      );
+      expect(windows.single.activeAgentSessionId, 'session-b');
+      expect(windows.single.agentSessionTitle, 'Task B');
+    });
   });
 
   group('MonkeyMux input injection', () {
@@ -1482,6 +1520,158 @@ void main() {
 
       await reconnectController.close();
       await service.clearCache(903);
+    });
+
+    test(
+      'low-priority run_command timeout keeps a live control channel',
+      () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(client, connectionId: 905);
+        final stdoutController = StreamController<Uint8List>();
+        final controlSession = _buildSilentControlSession(stdoutController);
+        final requests = <Map<String, Object?>>[];
+
+        when(() => installer.ensureInstalled(session))
+            .thenAnswer((_) async => _fakeInstallation);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => controlSession);
+        when(() => controlSession.write(any())).thenAnswer((invocation) {
+          final data = invocation.positionalArguments.single as List<int>;
+          requests.add(jsonDecode(utf8.decode(data)) as Map<String, Object?>);
+        });
+
+        final service = MonkeyMuxService(
+          installer: installer,
+          agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+          controlResponseTimeout: const Duration(milliseconds: 80),
+        )..watchWindowChanges(session, 'work');
+        // The server runs run_command asynchronously, so a slow probe never
+        // blocks other traffic. Its timeout used to recycle the whole channel
+        // and fail every pending window switch along with it.
+        final probe = service.runClientCommand(
+          session,
+          'work',
+          'slow-probe',
+          priority: SshExecPriority.low,
+        );
+        final windows = service.listWindows(session, 'work');
+        await pumpEventQueue();
+        expect(requests, hasLength(2));
+        _respondToWindowListRequest(
+          stdoutController,
+          requests.singleWhere((request) => request['type'] != 'run_command'),
+          terminalBracketedPasteMode: false,
+        );
+        expect(await windows, hasLength(1));
+
+        await expectLater(probe, throwsA(isA<TimeoutException>()));
+        verifyNever(controlSession.close);
+
+        final reload = service.refreshWindows(session, 'work');
+        await pumpEventQueue();
+        expect(requests, hasLength(3));
+        _respondToWindowListRequest(
+          stdoutController,
+          requests.last,
+          terminalBracketedPasteMode: true,
+        );
+        expect((await reload).single.terminalBracketedPasteMode, isTrue);
+        verify(() => client.execute(any(), pty: any(named: 'pty'))).called(1);
+
+        await stdoutController.close();
+        await service.clearCache(905);
+      },
+    );
+
+    test('low-priority timeout on a silent channel recycles it', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client, connectionId: 906);
+      final stdoutController = StreamController<Uint8List>();
+      final controlSession = _buildSilentControlSession(stdoutController);
+
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
+
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+        controlResponseTimeout: const Duration(milliseconds: 80),
+      )..watchWindowChanges(session, 'work');
+
+      await expectLater(
+        service.runClientCommand(
+          session,
+          'work',
+          'slow-probe',
+          priority: SshExecPriority.low,
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      await pumpEventQueue();
+      verify(controlSession.close).called(1);
+
+      await stdoutController.close();
+      await service.clearCache(906);
+    });
+
+    test('periodic agent metadata probe pauses while backgrounded', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client, connectionId: 907);
+      final stdoutController = StreamController<Uint8List>();
+      final controlSession = _buildSilentControlSession(stdoutController);
+      final writes = <Map<String, Object?>>[];
+      when(() => controlSession.write(any())).thenAnswer((invocation) {
+        final data = invocation.positionalArguments.single as List<int>;
+        final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+        writes.add(request);
+        final response = jsonEncode({
+          'id': request['id'],
+          'type': 'window_list',
+          'status': 'ok',
+          'windows': [
+            {..._fakeWindowJson, 'panePid': 42},
+          ],
+        });
+        scheduleMicrotask(
+          () => stdoutController.add(
+            Uint8List.fromList(utf8.encode('$response\n')),
+          ),
+        );
+      });
+      int probeCount() =>
+          writes.where((request) => request['type'] == 'run_command').length;
+
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => controlSession);
+
+      var backgrounded = true;
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: const Duration(
+          milliseconds: 20,
+        ),
+        isAppBackgrounded: () => backgrounded,
+      )..watchWindowChanges(session, 'work');
+      await service.listWindows(session, 'work');
+      await pumpEventQueue();
+      expect(probeCount(), 1);
+
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(probeCount(), 1);
+
+      backgrounded = false;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(probeCount(), greaterThan(1));
+
+      await service.clearCache(907);
+      await stdoutController.close();
     });
 
     test('gives every queued control command a distinct id', () async {

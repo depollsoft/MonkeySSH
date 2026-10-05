@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:meta/meta.dart';
-import 'package:xterm/src/base/disposable.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/core/buffer/range.dart';
@@ -26,14 +25,9 @@ class TerminalController with ChangeNotifier {
 
   /// The set of pointer events which will be used as mouse input for the terminal.
   PointerInputs get pointerInput => _pointerInputs;
-  PointerInputs _pointerInputs;
+  final PointerInputs _pointerInputs;
 
-  /// True if sending pointer events to the terminal is suspended.
-  bool get suspendedPointerInputs => _suspendPointerInputs;
-  bool _suspendPointerInputs;
-
-  List<TerminalHighlight> get highlights => _highlights;
-  final _highlights = <TerminalHighlight>[];
+  final bool _suspendPointerInputs;
 
   BufferRange? get selection {
     final base = _selectionBase;
@@ -76,38 +70,12 @@ class TerminalController with ChangeNotifier {
     }
   }
 
-  /// Controls how the terminal behaves when the user selects a range of text.
-  /// The default is [SelectionMode.line]. Setting this to [SelectionMode.block]
-  /// enables block selection mode.
-  void setSelectionMode(SelectionMode newSelectionMode) {
-    // If the new mode is the same as the old mode,
-    // nothing has to be changed.
-    if (_selectionMode == newSelectionMode) {
-      return;
-    }
-    // Set the new mode.
-    _selectionMode = newSelectionMode;
-    notifyListeners();
-  }
-
   /// Clears the current selection.
   void clearSelection() {
     _selectionBase?.dispose();
     _selectionBase = null;
     _selectionExtent?.dispose();
     _selectionExtent = null;
-    notifyListeners();
-  }
-
-  // Select which type of pointer events are send to the terminal.
-  void setPointerInputs(PointerInputs pointerInput) {
-    _pointerInputs = pointerInput;
-    notifyListeners();
-  }
-
-  // Toggle sending pointer events to the terminal.
-  void setSuspendPointerInput(bool suspend) {
-    _suspendPointerInputs = suspend;
     notifyListeners();
   }
 
@@ -118,57 +86,5 @@ class TerminalController with ChangeNotifier {
     return _suspendPointerInputs
         ? false
         : _pointerInputs.inputs.contains(pointerInput);
-  }
-
-  /// Creates a new highlight on the terminal from [p1] to [p2] with the given
-  /// [color]. The highlight will be removed when the returned object is
-  /// disposed.
-  TerminalHighlight highlight({
-    required CellAnchor p1,
-    required CellAnchor p2,
-    required Color color,
-  }) {
-    final highlight = TerminalHighlight(
-      this,
-      p1: p1,
-      p2: p2,
-      color: color,
-    );
-
-    _highlights.add(highlight);
-    notifyListeners();
-
-    highlight.registerCallback(() {
-      _highlights.remove(highlight);
-      notifyListeners();
-    });
-
-    return highlight;
-  }
-}
-
-class TerminalHighlight with Disposable {
-  final TerminalController owner;
-
-  final CellAnchor p1;
-
-  final CellAnchor p2;
-
-  final Color color;
-
-  TerminalHighlight(
-    this.owner, {
-    required this.p1,
-    required this.p2,
-    required this.color,
-  });
-
-  /// Returns the range of the highlight. May be null if the anchors that
-  /// define the highlight are not attached to the terminal.
-  BufferRange? get range {
-    if (!p1.attached || !p2.attached) {
-      return null;
-    }
-    return BufferRangeLine(p1.offset, p2.offset);
   }
 }
