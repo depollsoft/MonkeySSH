@@ -57,6 +57,7 @@ import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/reorder_helpers.dart';
 import '../widgets/snippet_folder_dialog.dart';
+import '../widgets/tmux_window_navigator.dart' show confirmMuxWindowClose;
 import '../widgets/tmux_window_status_badge.dart';
 import 'snippet_edit_screen.dart';
 import 'transfer_screen.dart';
@@ -207,6 +208,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_checkIncomingTransferPayload());
+      // Best effort: a failed check keeps the cached entitlement.
+      unawaited(
+        ref
+            .read(monetizationServiceProvider)
+            .refreshStoreEntitlement()
+            .catchError((Object _) {}),
+      );
     }
   }
 
@@ -3396,7 +3404,13 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     return Icon(Icons.window_outlined, size: 14, color: color);
   }
 
-  void _closeWindow(TmuxWindow window) {
+  Future<void> _closeWindow(TmuxWindow window) async {
+    final confirmed = await confirmMuxWindowClose(
+      context: context,
+      ref: ref,
+      title: window.displayTitle,
+    );
+    if (!confirmed || !mounted) return;
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(widget.connectionId);
@@ -3851,7 +3865,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ),
             // Close button.
             GestureDetector(
-              onTap: () => _closeWindow(window),
+              onTap: () => unawaited(_closeWindow(window)),
               child: Icon(
                 Icons.close,
                 size: 14,

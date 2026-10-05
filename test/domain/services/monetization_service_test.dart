@@ -61,6 +61,7 @@ void main() {
 
     setUpAll(() {
       registerFallbackValue(_FakePurchaseParam());
+      registerFallbackValue(MockPurchaseDetails());
     });
 
     test('queries the App Store product IDs for the current Apple bundle', () {
@@ -1343,6 +1344,234 @@ void main() {
         );
       });
 
+      group('Apple entitlement reconciliation', () {
+        Future<MonetizationService> startWithCachedUnlock(
+          String productId, {
+          bool storeReachable = true,
+        }) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          await settings.setBool(
+            SettingKeys.monetizationProUnlocked,
+            value: true,
+          );
+          await settings.setString(
+            SettingKeys.monetizationActiveProductId,
+            productId,
+          );
+          when(() => inAppPurchase.isAvailable()).thenAnswer((_) async => true);
+          when(() => inAppPurchase.queryProductDetails(any())).thenAnswer(
+            (_) async => ProductDetailsResponse(
+              productDetails: [
+                if (storeReachable)
+                  ProductDetails(
+                    id: MonetizationProductIds.iosMonthlyProd,
+                    title: 'Monthly',
+                    description: 'MonkeySSH Pro',
+                    price: r'$5.00',
+                    rawPrice: 5,
+                    currencyCode: 'USD',
+                  ),
+              ],
+              notFoundIDs: const [],
+            ),
+          );
+          final service = buildService(
+            restoreEmptyResultGracePeriod: Duration.zero,
+          );
+          await service.initialize();
+          // Joins the reconciliation started by initialization.
+          await service.refreshStoreEntitlement();
+          return service;
+        }
+
+        test(
+          'startup revokes a subscription StoreKit no longer lists',
+          () async {
+            when(() => inAppPurchase.restorePurchases())
+                .thenAnswer((_) async {});
+
+            final service = await startWithCachedUnlock(
+              MonetizationProductIds.iosMonthlyProd,
+            );
+
+            expect(service.currentState.isProUnlocked, isFalse);
+            expect(
+              await settings.getBool(SettingKeys.monetizationProUnlocked),
+              isFalse,
+            );
+            expect(
+              await settings.getString(SettingKeys.monetizationActiveProductId),
+              isNull,
+            );
+          },
+        );
+
+        test('startup keeps a subscription StoreKit still lists', () async {
+          final restored = _purchase(
+            MonetizationProductIds.iosMonthlyProd,
+            PurchaseStatus.restored,
+          );
+          when(() => inAppPurchase.completePurchase(restored))
+              .thenAnswer((_) async {});
+          when(() => inAppPurchase.restorePurchases()).thenAnswer((_) async {
+            purchaseController.add([restored]);
+          });
+
+          final service = await startWithCachedUnlock(
+            MonetizationProductIds.iosMonthlyProd,
+          );
+
+          expect(service.currentState.isProUnlocked, isTrue);
+          expect(
+            await settings.getBool(SettingKeys.monetizationProUnlocked),
+            isTrue,
+          );
+        });
+
+        test(
+          'keeps the cached unlock while the store is unreachable',
+          () async {
+            when(() => inAppPurchase.restorePurchases())
+                .thenThrow(PlatformException(code: 'storekit2_restore_failed'));
+
+            final failedRestore = await startWithCachedUnlock(
+              MonetizationProductIds.iosMonthlyProd,
+            );
+            expect(failedRestore.currentState.isProUnlocked, isTrue);
+            verify(() => inAppPurchase.restorePurchases())
+                .called(greaterThanOrEqualTo(1));
+
+            final offline = await startWithCachedUnlock(
+              MonetizationProductIds.iosMonthlyProd,
+              storeReachable: false,
+            );
+            expect(offline.currentState.isProUnlocked, isTrue);
+            verifyNever(() => inAppPurchase.restorePurchases());
+            expect(
+              await settings.getBool(SettingKeys.monetizationProUnlocked),
+              isTrue,
+            );
+          },
+        );
+
+        test(
+          'preserves a lifetime unlock as an explicit restore does',
+          () async {
+            when(() => inAppPurchase.restorePurchases())
+                .thenAnswer((_) async {});
+
+            final service = await startWithCachedUnlock(
+              MonetizationProductIds.iosProLifetimeProd,
+            );
+
+            expect(service.currentState.isLifetimeUnlocked, isTrue);
+            expect(
+              await settings.getBool(SettingKeys.monetizationProUnlocked),
+              isTrue,
+            );
+          },
+        );
+      });
+
+      test(
+        'Android restore reports a pending Play payment without unlocking',
+        () async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+            (_) async => QueryPurchaseDetailsResponse(
+              pastPurchases: [
+                _androidPastLifetimePurchase(
+                  purchaseTimeMillis: 1712732400000,
+                  purchaseState: PurchaseStateWrapper.pending,
+                ),
+              ],
+            ),
+          );
+
+          final result = await buildService(android: true).restorePurchases();
+
+          expect(result.success, isFalse);
+          expect(result.message, contains('pending'));
+          expect(
+            await settings.getBool(SettingKeys.monetizationProUnlocked),
+            isFalse,
+          );
+          verifyNever(() => inAppPurchase.completePurchase(any()));
+        },
+      );
+
+      test(
+        'Android reconcile never promotes a pending lifetime purchase',
+        () async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          await settings.setBool(
+            SettingKeys.monetizationProUnlocked,
+            value: true,
+          );
+          await settings.setString(
+            SettingKeys.monetizationActiveProductId,
+            MonetizationProductIds.androidPro,
+          );
+          when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+            (_) async => QueryPurchaseDetailsResponse(
+              pastPurchases: [
+                _androidPastPurchase(purchaseTimeMillis: 1712732400000),
+                _androidPastLifetimePurchase(
+                  purchaseTimeMillis: 1712732500000,
+                  purchaseState: PurchaseStateWrapper.pending,
+                ),
+              ],
+            ),
+          );
+
+          final service = buildService(android: true);
+          await service.initialize();
+
+          expect(service.currentState.isLifetimeUnlocked, isFalse);
+          expect(
+            service.currentState.activeProductId,
+            MonetizationProductIds.androidPro,
+          );
+          expect(
+            await settings.getString(SettingKeys.monetizationActiveProductId),
+            MonetizationProductIds.androidPro,
+          );
+        },
+      );
+
+      test(
+        'Android restore does not unlock when Play rejects the acknowledgement',
+        () async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          final purchase = _androidPastLifetimePurchase(
+            purchaseTimeMillis: 1712732400000,
+          )..pendingCompletePurchase = true;
+          when(() => inAppPurchase.completePurchase(purchase)).thenAnswer(
+            (_) async =>
+                const BillingResultWrapper(responseCode: BillingResponse.error),
+          );
+          when(androidPlatformAddition.queryPastPurchases).thenAnswer(
+            (_) async =>
+                QueryPurchaseDetailsResponse(pastPurchases: [purchase]),
+          );
+
+          final service = buildService(android: true);
+          final result = await service.restorePurchases();
+
+          expect(result.success, isFalse);
+          expect(result.message, 'Could not finalize purchase. Try again.');
+          expect(service.currentState.isProUnlocked, isFalse);
+          expect(
+            await settings.getBool(SettingKeys.monetizationProUnlocked),
+            isFalse,
+          );
+        },
+      );
+
       test(
         'restorePurchases uses active Google Play subscriptions on Android',
         () async {
@@ -1883,6 +2112,7 @@ GooglePlayPurchaseDetails _androidPastPurchase({
 
 GooglePlayPurchaseDetails _androidPastLifetimePurchase({
   required int purchaseTimeMillis,
+  PurchaseStateWrapper purchaseState = PurchaseStateWrapper.purchased,
 }) => GooglePlayPurchaseDetails(
   purchaseID: 'lifetime-$purchaseTimeMillis',
   productID: MonetizationProductIds.androidProLifetime,
@@ -1902,7 +2132,7 @@ GooglePlayPurchaseDetails _androidPastLifetimePurchase({
     isAutoRenewing: false,
     originalJson: '{}',
     isAcknowledged: true,
-    purchaseState: PurchaseStateWrapper.purchased,
+    purchaseState: purchaseState,
   ),
   status: PurchaseStatus.restored,
 );

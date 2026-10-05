@@ -596,6 +596,33 @@ void main() {
       });
     }
 
+    testWidgets('font size dialog accepts a size saved by chat zoom', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      await _pumpSettingsScreen(tester, db: db);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SettingsScreen)),
+      );
+      // Native chat pinch zoom commits up to 32 pt through the same notifier.
+      await container.read(fontSizeNotifierProvider.notifier).setFontSize(28);
+      await tester.scrollUntilVisible(
+        find.text('Font size'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Font size'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      final slider = tester.widget<Slider>(find.byType(Slider));
+      expect(slider.value, 28);
+      expect(slider.max, 32);
+      expect(find.text('28 pt'), findsWidgets);
+    });
+
     testWidgets('displays font family option', (tester) async {
       final semantics = tester.ensureSemantics();
       final db = AppDatabase.forTesting(NativeDatabase.memory());

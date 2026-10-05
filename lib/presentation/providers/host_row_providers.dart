@@ -96,18 +96,29 @@ final class HostRowData {
 
 /// Active connections in display order, independent of preview refreshes.
 final connectionIdsProvider = NotifierProvider.autoDispose(
-  _ConnectionIdsNotifier.new,
+  () => _ConnectionIdsNotifier(null),
 );
 
+/// One host's connections, oldest first, independent of preview refreshes.
+final _hostConnectionIdsProvider = NotifierProvider.autoDispose
+    .family<_ConnectionIdsNotifier, List<int>, int>(_ConnectionIdsNotifier.new);
+
 class _ConnectionIdsNotifier extends Notifier<List<int>> {
+  _ConnectionIdsNotifier(this._hostId);
+
+  final int? _hostId;
+
   @override
   List<int> build() {
     ref.watch(activeSessionsProvider);
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    final hostId = _hostId;
     return List.unmodifiable(
-      ref
-          .read(activeSessionsProvider.notifier)
-          .getActiveConnections()
-          .map((connection) => connection.connectionId),
+      hostId == null
+          ? sessions.getActiveConnections().map(
+              (connection) => connection.connectionId,
+            )
+          : sessions.getConnectionsForHost(hostId),
     );
   }
 
@@ -130,10 +141,29 @@ final connectionPreviewProvider = Provider.autoDispose
       ref,
       args,
     ) {
-      final states = ref.watch(activeSessionsProvider);
-      final connection = ref
-          .read(activeSessionsProvider.notifier)
-          .getActiveConnection(args.connectionId);
+      // Preview refreshes republish the whole sessions map; select this
+      // connection's inputs so unrelated ticks skip rebuilding the entry.
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final source = ref.watch(
+        activeSessionsProvider.select((states) {
+          final connection = sessions.getActiveConnection(args.connectionId);
+          return (
+            state: states[args.connectionId] ?? SshConnectionState.connected,
+            preview: connection?.preview,
+            previewSnapshot: connection?.previewSnapshot,
+            nativeAcpPreviewSnapshot: connection?.nativeAcpPreviewSnapshot,
+            terminalTheme: connection?.terminalTheme,
+            sessionTitle: connection?.sessionTitle,
+            windowTitle: connection?.windowTitle,
+            iconName: connection?.iconName,
+            workingDirectory: connection?.workingDirectory,
+            shellStatus: connection?.shellStatus,
+            lastExitCode: connection?.lastExitCode,
+            lightThemeId: connection?.terminalThemeLightId,
+            darkThemeId: connection?.terminalThemeDarkId,
+          );
+        }),
+      );
       final monetizationState =
           ref.watch(monetizationStateProvider).asData?.value ??
           ref.read(monetizationServiceProvider).currentState;
@@ -142,56 +172,52 @@ final connectionPreviewProvider = Provider.autoDispose
       );
       return buildConnectionPreviewStackEntry(
         connectionId: args.connectionId,
-        state: states[args.connectionId] ?? SshConnectionState.connected,
+        state: source.state,
         brightness: args.isDark ? Brightness.dark : Brightness.light,
         themeSettings: ref.watch(terminalThemeSettingsProvider),
         availableThemes:
             ref.watch(allTerminalThemesProvider).asData?.value ??
             TerminalThemes.all,
-        preview: connection?.preview,
-        previewSnapshot: connection?.previewSnapshot,
-        nativeAcpPreviewSnapshot: connection?.nativeAcpPreviewSnapshot,
-        activeTerminalTheme: connection?.terminalTheme,
-        sessionTitle: connection?.sessionTitle,
-        windowTitle: connection?.windowTitle,
-        iconName: connection?.iconName,
-        workingDirectory: connection?.workingDirectory,
-        shellStatus: connection?.shellStatus,
-        lastExitCode: connection?.lastExitCode,
+        preview: source.preview,
+        previewSnapshot: source.previewSnapshot,
+        nativeAcpPreviewSnapshot: source.nativeAcpPreviewSnapshot,
+        activeTerminalTheme: source.terminalTheme,
+        sessionTitle: source.sessionTitle,
+        windowTitle: source.windowTitle,
+        iconName: source.iconName,
+        workingDirectory: source.workingDirectory,
+        shellStatus: source.shellStatus,
+        lastExitCode: source.lastExitCode,
         hostLightThemeId: hasHostThemeAccess ? args.lightThemeId : null,
         hostDarkThemeId: hasHostThemeAccess ? args.darkThemeId : null,
-        connectionLightThemeId: connection?.terminalThemeLightId,
-        connectionDarkThemeId: connection?.terminalThemeDarkId,
+        connectionLightThemeId: source.lightThemeId,
+        connectionDarkThemeId: source.darkThemeId,
       );
     });
 
 /// Value-equal reactive data for one host row.
 final hostRowDataProvider = Provider.autoDispose
     .family<HostRowData, HostRowProviderArgs>((ref, args) {
-      final allStates = ref.watch(activeSessionsProvider);
-      final notifier = ref.read(activeSessionsProvider.notifier);
-
-      final connectionIds = notifier.getConnectionsForHost(args.hostId);
-      final attempt = notifier.getConnectionAttempt(args.hostId);
-
-      final hostStates = connectionIds
-          .map((id) => allStates[id])
-          .whereType<SshConnectionState>()
-          .toList(growable: false);
-
-      final isConnected = hostStates.any(
-        (s) => s == SshConnectionState.connected,
+      final connectionIds = ref.watch(_hostConnectionIdsProvider(args.hostId));
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final status = ref.watch(
+        activeSessionsProvider.select((states) {
+          final attempt = sessions.getConnectionAttempt(args.hostId);
+          final attemptInProgress = attempt?.isInProgress ?? false;
+          final hostStates = connectionIds.map((id) => states[id]);
+          return (
+            isConnected: hostStates.contains(SshConnectionState.connected),
+            isConnectionStarting:
+                attemptInProgress ||
+                hostStates.any(
+                  (s) =>
+                      s == SshConnectionState.connecting ||
+                      s == SshConnectionState.authenticating,
+                ),
+            message: attemptInProgress ? attempt!.latestMessage : null,
+          );
+        }),
       );
-      final isConnecting = hostStates.any(
-        (s) =>
-            s == SshConnectionState.connecting ||
-            s == SshConnectionState.authenticating,
-      );
-      final isConnectionStarting =
-          isConnecting || (attempt?.isInProgress ?? false);
-      final connectionAttemptMessage = (attempt?.isInProgress ?? false)
-          ? attempt!.latestMessage
-          : null;
 
       // Monetization: whether per-host theme overrides are unlocked.
       final monetizationState =
@@ -223,9 +249,9 @@ final hostRowDataProvider = Provider.autoDispose
 
       return HostRowData(
         connectionIds: connectionIds,
-        isConnected: isConnected,
-        isConnectionStarting: isConnectionStarting,
-        connectionAttemptMessage: connectionAttemptMessage,
+        isConnected: status.isConnected,
+        isConnectionStarting: status.isConnectionStarting,
+        connectionAttemptMessage: status.message,
         previewEntries: previewEntries,
         isPinnedToHomeScreen: isPinnedToHomeScreen,
         hasHostThemeAccess: hasHostThemeAccess,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -371,6 +372,21 @@ void main() {
       resolveSftpTextEditBlockMessage(
         byteCount: 5,
         loadedBytes: Uint8List.fromList('hello'.codeUnits),
+      ),
+      isNull,
+    );
+    // Latin-1 "café": saving replacement-decoded text would corrupt the é.
+    expect(
+      resolveSftpTextEditBlockMessage(
+        byteCount: 4,
+        loadedBytes: Uint8List.fromList([0x63, 0x61, 0x66, 0xe9]),
+      ),
+      'Only UTF-8 text files can be edited here',
+    );
+    expect(
+      resolveSftpTextEditBlockMessage(
+        byteCount: 5,
+        loadedBytes: Uint8List.fromList(utf8.encode('café')),
       ),
       isNull,
     );

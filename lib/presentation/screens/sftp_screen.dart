@@ -1757,15 +1757,21 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
   }
 
-  Future<void> _downloadFile(SftpName file) async {
-    if (_sftp == null) {
+  /// Downloads [file] from the current directory, or from an explicit
+  /// [target] captured earlier so later navigation cannot redirect it.
+  Future<void> _downloadFile(
+    SftpName file, {
+    ({SftpClient sftp, String remotePath})? target,
+  }) async {
+    final sftp = target?.sftp ?? _sftp;
+    if (sftp == null) {
       return;
     }
 
     final telemetryService = ref.read(telemetryServiceProvider);
     final remoteFileService = ref.read(remoteFileServiceProvider);
-    final sftp = _sftp!;
-    final remotePath = joinRemotePath(_currentPath, file.filename);
+    final remotePath =
+        target?.remotePath ?? joinRemotePath(_currentPath, file.filename);
     Directory? stagingDirectory;
     var keepStagedFile = false;
     final startedAt = DateTime.now();
@@ -2059,10 +2065,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     final remotePath = joinRemotePath(_currentPath, file.filename);
+    final downloadTarget = (sftp: sftp, remotePath: remotePath);
     final knownSize = file.attr.size;
     if (!isRemoteVideoPreviewSizeAllowed(knownSize)) {
       _showVideoPreviewFallbackSnackBar(
         file,
+        downloadTarget,
         remoteVideoPreviewTooLargeMessage(sizeBytes: knownSize),
       );
       return;
@@ -2133,6 +2141,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (cacheResult == null) {
       _showVideoPreviewFallbackSnackBar(
         file,
+        downloadTarget,
         'Video preview failed: ${_describePreviewError(dialogResult.error)}',
       );
       return;
@@ -2168,7 +2177,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
   }
 
-  void _showVideoPreviewFallbackSnackBar(SftpName file, String message) {
+  void _showVideoPreviewFallbackSnackBar(
+    SftpName file,
+    ({SftpClient sftp, String remotePath}) target,
+    String message,
+  ) {
     if (!mounted) {
       return;
     }
@@ -2177,7 +2190,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         content: Text(message),
         action: SnackBarAction(
           label: 'Download',
-          onPressed: () => unawaited(_downloadFile(file)),
+          onPressed: () => unawaited(_downloadFile(file, target: target)),
         ),
       ),
     );
@@ -2296,7 +2309,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         return;
       }
 
-      final decodedText = utf8.decode(bytes, allowMalformed: true);
+      final decodedText = utf8.decode(bytes);
       final detectedLanguage = detectLanguageFromFilename(file.filename);
       final useHighlighting =
           detectedLanguage != null && bytes.length <= syntaxHighlightSizeLimit;

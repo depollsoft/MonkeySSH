@@ -571,6 +571,48 @@ void main() {
     });
   }
 
+  testWidgets('styled previews fit wide characters by terminal columns', (
+    tester,
+  ) async {
+    final terminal = Terminal(maxLines: 100)
+      ..resize(100, 24)
+      // Forty CJK characters fill eighty terminal cells.
+      ..write('\u6f22' * 40);
+    final preview = SshSession.buildTerminalPreviewSnapshot(terminal)!;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            child: ConnectionPreviewStack(
+              entries: [
+                ConnectionPreviewStackEntry(
+                  title: 'Connection #1',
+                  body: preview.plainText,
+                  previewSnapshot: preview,
+                  terminalTheme: TerminalThemes.defaultDarkTheme,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    final finder = find.byWidgetPredicate(
+      (widget) =>
+          widget is CustomPaint &&
+          widget.painter.runtimeType.toString().contains(
+            '_TerminalPreviewPainter',
+          ),
+    );
+    // ignore: avoid_dynamic_calls, the preview painter class is private.
+    final dynamic previewPainter = tester.widget<CustomPaint>(finder).painter;
+    // ignore: avoid_dynamic_calls
+    final cellWidth = previewPainter.painter.cellSize.width as double;
+
+    expect(cellWidth * 80, lessThanOrEqualTo(tester.getSize(finder).width));
+  });
+
   testWidgets('sizes long non-wrapping previews to terminal rows', (
     tester,
   ) async {
