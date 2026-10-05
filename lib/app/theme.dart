@@ -570,7 +570,7 @@ abstract final class FluttyTheme {
     // fallback below so we still pick a vivid accent.
     final cursorHsl = HSLColor.fromColor(theme.cursor);
     if (cursorHsl.saturation >= 0.45 &&
-        _contrastRatio(theme.cursor, theme.background) >= 2.5) {
+        contrastRatio(theme.cursor, theme.background) >= 2.5) {
       return theme.cursor;
     }
 
@@ -593,7 +593,7 @@ abstract final class FluttyTheme {
       final hsl = HSLColor.fromColor(candidate);
       final balance = 1 - (hsl.lightness - 0.5).abs();
       final score =
-          _contrastRatio(candidate, theme.background) +
+          contrastRatio(candidate, theme.background) +
           (hsl.saturation * 2) +
           balance;
       if (score > bestScore) {
@@ -606,18 +606,10 @@ abstract final class FluttyTheme {
   }
 
   static Color _readableTextColor(Color background) =>
-      _contrastRatio(Colors.white, background) >
-          _contrastRatio(Colors.black, background)
+      contrastRatio(Colors.white, background) >
+          contrastRatio(Colors.black, background)
       ? Colors.white
       : Colors.black;
-
-  static double _contrastRatio(Color a, Color b) {
-    final luminanceA = a.computeLuminance();
-    final luminanceB = b.computeLuminance();
-    final lighter = luminanceA > luminanceB ? luminanceA : luminanceB;
-    final darker = luminanceA > luminanceB ? luminanceB : luminanceA;
-    return (lighter + 0.05) / (darker + 0.05);
-  }
 
   /// Monospace text style for terminal/code content.
   static TextStyle get monoStyle =>

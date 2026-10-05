@@ -81,14 +81,6 @@ const _backgroundAlphaCandidates = <int>[
   0xCC,
 ];
 
-double _contrastRatio(Color a, Color b) {
-  final luminanceA = a.computeLuminance();
-  final luminanceB = b.computeLuminance();
-  final brightest = math.max(luminanceA, luminanceB);
-  final darkest = math.min(luminanceA, luminanceB);
-  return (brightest + 0.05) / (darkest + 0.05);
-}
-
 bool _terminalThemesEqual(TerminalTheme a, TerminalTheme b) =>
     a.cursor == b.cursor &&
     a.selection == b.selection &&
@@ -130,11 +122,11 @@ Color resolveMonkeyTerminalFaintForegroundColor({
       Color.alphaBlend(foreground.withAlpha((alpha * 255).round()), background);
 
   final defaultFaint = blendWithAlpha(0.5);
-  if (_contrastRatio(defaultFaint, background) >= minimumContrast) {
+  if (contrastRatio(defaultFaint, background) >= minimumContrast) {
     return defaultFaint;
   }
 
-  if (_contrastRatio(foreground, background) < minimumContrast) {
+  if (contrastRatio(foreground, background) < minimumContrast) {
     return foreground;
   }
 
@@ -143,7 +135,7 @@ Color resolveMonkeyTerminalFaintForegroundColor({
   for (var iteration = 0; iteration < 12; iteration += 1) {
     final mid = (low + high) / 2;
     final candidate = blendWithAlpha(mid);
-    if (_contrastRatio(candidate, background) >= minimumContrast) {
+    if (contrastRatio(candidate, background) >= minimumContrast) {
       high = mid;
     } else {
       low = mid;
@@ -151,7 +143,7 @@ Color resolveMonkeyTerminalFaintForegroundColor({
   }
 
   final readableFaint = blendWithAlpha(high);
-  return _contrastRatio(readableFaint, background) >= minimumContrast
+  return contrastRatio(readableFaint, background) >= minimumContrast
       ? readableFaint
       : foreground;
 }
@@ -180,7 +172,7 @@ Color resolveMonkeyTerminalCursorForegroundColor({
   ];
 
   for (final candidate in preferredCandidates) {
-    if (_contrastRatio(candidate, cursorBackground) >= minimumContrast) {
+    if (contrastRatio(candidate, cursorBackground) >= minimumContrast) {
       return candidate;
     }
   }
@@ -190,8 +182,8 @@ Color resolveMonkeyTerminalCursorForegroundColor({
   final fallbackCandidates = <Color>[...preferredCandidates, black, white];
 
   return fallbackCandidates.reduce((best, candidate) {
-    final bestContrast = _contrastRatio(best, cursorBackground);
-    final candidateContrast = _contrastRatio(candidate, cursorBackground);
+    final bestContrast = contrastRatio(best, cursorBackground);
+    final candidateContrast = contrastRatio(candidate, cursorBackground);
     return candidateContrast > bestContrast ? candidate : best;
   });
 }
@@ -210,8 +202,8 @@ Color resolveMonkeyTerminalReadableBackgroundColor({
 }) {
   final effectiveForeground = Color.alphaBlend(foreground, terminalBackground);
   final effectiveBackground = Color.alphaBlend(background, terminalBackground);
-  final textContrast = _contrastRatio(effectiveForeground, effectiveBackground);
-  final backgroundContrast = _contrastRatio(
+  final textContrast = contrastRatio(effectiveForeground, effectiveBackground);
+  final backgroundContrast = contrastRatio(
     effectiveBackground,
     terminalBackground,
   );
@@ -243,7 +235,7 @@ Color resolveMonkeyTerminalReadableBackgroundColor({
     return background;
   }
 
-  if (_contrastRatio(effectiveForeground, terminalBackground) <
+  if (contrastRatio(effectiveForeground, terminalBackground) <
       minimumTextContrast) {
     return background;
   }
@@ -253,8 +245,8 @@ Color resolveMonkeyTerminalReadableBackgroundColor({
       background.withAlpha(alpha),
       terminalBackground,
     );
-    if (_contrastRatio(effectiveForeground, candidate) >= minimumTextContrast &&
-        _contrastRatio(candidate, terminalBackground) >=
+    if (contrastRatio(effectiveForeground, candidate) >= minimumTextContrast &&
+        contrastRatio(candidate, terminalBackground) >=
             minimumBackgroundContrast) {
       return candidate;
     }
@@ -274,7 +266,7 @@ Color? _resolveNeutralTerminalBackgroundColor({
       background.withAlpha(alpha),
       terminalBackground,
     );
-    final contrast = _contrastRatio(candidate, terminalBackground);
+    final contrast = contrastRatio(candidate, terminalBackground);
     if (contrast >= minimumBackgroundContrast &&
         contrast <= maximumBackgroundContrast) {
       return candidate;
@@ -302,17 +294,17 @@ Color resolveMonkeyTerminalReadableForegroundColor({
   required Color terminalBackground,
   double minimumContrast = _minimumCellTextContrast,
 }) {
-  if (_contrastRatio(foreground, background) >= minimumContrast) {
+  if (contrastRatio(foreground, background) >= minimumContrast) {
     return foreground;
   }
 
-  if (_contrastRatio(terminalForeground, background) >= minimumContrast) {
+  if (contrastRatio(terminalForeground, background) >= minimumContrast) {
     var low = 0.0;
     var high = 1.0;
     for (var iteration = 0; iteration < 12; iteration += 1) {
       final mid = (low + high) / 2;
       final candidate = Color.lerp(foreground, terminalForeground, mid)!;
-      if (_contrastRatio(candidate, background) >= minimumContrast) {
+      if (contrastRatio(candidate, background) >= minimumContrast) {
         high = mid;
       } else {
         low = mid;
@@ -324,7 +316,7 @@ Color resolveMonkeyTerminalReadableForegroundColor({
       terminalForeground,
       high,
     )!;
-    return _contrastRatio(readableForeground, background) >= minimumContrast
+    return contrastRatio(readableForeground, background) >= minimumContrast
         ? readableForeground
         : terminalForeground;
   }
@@ -337,8 +329,8 @@ Color resolveMonkeyTerminalReadableForegroundColor({
   ];
 
   return candidates.reduce((best, candidate) {
-    final bestContrast = _contrastRatio(best, background);
-    final candidateContrast = _contrastRatio(candidate, background);
+    final bestContrast = contrastRatio(best, background);
+    final candidateContrast = contrastRatio(candidate, background);
     return candidateContrast > bestContrast ? candidate : best;
   });
 }
@@ -3202,6 +3194,10 @@ class MonkeyRenderTerminal extends RenderBox
   /// this together with [terminalChangeCount] to tell a frozen frame (the
   /// terminal changed but no paint followed) apart from a stalled write path.
   int get paintCount => _paintCount;
+
+  /// See [MonkeyTerminalPainter.runParagraphCacheLength].
+  @visibleForTesting
+  int get runParagraphCacheLength => _painter.runParagraphCacheLength;
 
   int _terminalChangeCount = 0;
 

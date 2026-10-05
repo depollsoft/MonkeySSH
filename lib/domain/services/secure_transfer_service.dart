@@ -1482,9 +1482,10 @@ const _saltBytes = 16;
 const _nonceBytes = 12;
 const _pbkdf2Iterations = 120000;
 const _maxPbkdf2Iterations = 1000000;
-const _argon2idIterations = 3;
-const _argon2idMemoryKiB = 32768;
-const _argon2idLanes = 1;
+
+/// Import fallbacks for envelopes that omit a work factor; the same values the
+/// exporter writes by default.
+const _defaultArgon2id = TransferArgon2idProfile();
 
 Future<String> _encryptTransferPayload(
   (TransferPayload, String, TransferArgon2idProfile) request,
@@ -1634,9 +1635,10 @@ Future<SecretKey> _deriveEnvelopeKey({
     return _derivePbkdf2Key(transferPassphrase, salt, iterations: iterations);
   }
 
-  final iterations = _optionalInt(envelope['iter']) ?? _argon2idIterations;
-  final memoryKiB = _optionalInt(envelope['mem']) ?? _argon2idMemoryKiB;
-  final lanes = _optionalInt(envelope['lanes']) ?? _argon2idLanes;
+  final iterations =
+      _optionalInt(envelope['iter']) ?? _defaultArgon2id.iterations;
+  final memoryKiB = _optionalInt(envelope['mem']) ?? _defaultArgon2id.memoryKiB;
+  final lanes = _optionalInt(envelope['lanes']) ?? _defaultArgon2id.parallelism;
   if (iterations <= 0 ||
       iterations > TransferArgon2idProfile.maxIterations ||
       memoryKiB < TransferArgon2idProfile.minMemoryKiB ||

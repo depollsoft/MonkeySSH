@@ -7,10 +7,11 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path;
 
+import '../models/auto_connect_command.dart'
+    show terminalControlCharacterPattern;
 import 'diagnostics_log_service.dart';
 
 final _sftpWindowsDriveRootPattern = RegExp(r'^/?[A-Za-z]:(?:/|$)');
-final _terminalControlCharacterPattern = RegExp(r'[\x00-\x1f\x7f-\x9f]');
 
 /// Display path for files pasted directly into a terminal session.
 const remoteClipboardUploadDirectoryDisplay = '~/.cache/monkeyssh/uploads';
@@ -342,7 +343,7 @@ const _bracketedPasteStart = '\x1b[200~';
 const _bracketedPasteEnd = '\x1b[201~';
 
 bool _isTerminalSafeAttachmentPath(String path) =>
-    !_terminalControlCharacterPattern.hasMatch(path);
+    !terminalControlCharacterPattern.hasMatch(path);
 
 bool _isUnquotedAttachmentPath(String path, {required bool windows}) {
   final safePathPattern = windows

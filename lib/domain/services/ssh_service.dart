@@ -3443,6 +3443,8 @@ typedef RemoteTcpListener = ({String host, int port, bool isShellRelated});
 typedef RemoteTcpListenerKey = ({String host, int port});
 
 final _lsofPidLinePattern = RegExp(r'^p(\d+)$');
+final _listenerEndpointPattern = RegExp(r'(\S+)(?::|\.)(\d+)(?=\s|$)');
+final _ssPidPattern = RegExp(r'pid=(\d+)');
 
 /// Extracts listening TCP ports and reachable loopback targets from remote
 /// `ss`, `netstat`, `lsof`, or PowerShell output.
@@ -3452,8 +3454,6 @@ Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
   final listeners = <RemoteTcpListenerKey, RemoteTcpListener>{};
   final priorities = <RemoteTcpListenerKey, int>{};
   final shellDescendantPids = <int>{};
-  final endpointPattern = RegExp(r'(\S+)(?::|\.)(\d+)(?=\s|$)');
-  final ssPidPattern = RegExp(r'pid=(\d+)');
   int? lsofPid;
   bool? lsofIsIpv6;
   for (final rawLine in const LineSplitter().convert(output)) {
@@ -3497,7 +3497,7 @@ Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
     if (!line.toUpperCase().contains('LISTEN') && !line.startsWith('n')) {
       continue;
     }
-    final endpointMatch = endpointPattern.firstMatch(
+    final endpointMatch = _listenerEndpointPattern.firstMatch(
       line.startsWith('n') ? line.substring(1) : line,
     );
     if (endpointMatch == null) {
@@ -3514,7 +3514,7 @@ Map<RemoteTcpListenerKey, RemoteTcpListener> parseRemoteListeningTcpListeners(
     }
     final listenerPids = {
       if (line.startsWith('n')) ?lsofPid,
-      ...ssPidPattern
+      ..._ssPidPattern
           .allMatches(line)
           .map((match) => int.tryParse(match.group(1)!))
           .whereType<int>(),
@@ -4025,7 +4025,7 @@ class SshSession {
     final effectiveTheme = theme == null
         ? null
         : _terminalColorOverrides.applyTo(theme);
-    if (_sameTerminalTheme(_terminalTheme, effectiveTheme)) {
+    if (_terminalTheme == effectiveTheme) {
       _terminalTheme = effectiveTheme;
       return false;
     }
@@ -4837,16 +4837,6 @@ class SshSession {
   static String? _sanitizeWindowTitle(String text) {
     final sanitized = text.replaceAll(_windowTitleSanitizerPattern, '').trim();
     return sanitized.isEmpty ? null : sanitized;
-  }
-
-  static bool _sameTerminalTheme(
-    TerminalThemeData? previous,
-    TerminalThemeData? next,
-  ) {
-    if (previous == null || next == null) {
-      return previous == next;
-    }
-    return terminalThemesMatchForColors(previous, next);
   }
 
   void _notifyPreviewChanged() {
