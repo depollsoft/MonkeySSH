@@ -120,14 +120,26 @@ void main() {
           );
           expect(window.copyWith(), window);
           expect(window.copyWith().hashCode, window.hashCode);
-          final supported = window.copyWith(agentTool: AgentLaunchTool.codex);
-          expect(supported.hasUnsupportedAgentTool, isFalse);
-          expect(supported, isNot(window));
-          final old = window.copyWith(
-            hasUnsupportedAgentTool: false,
-            activeAgentSessionId: 'old-session',
-            agentSessionTitle: 'Old title',
+          final old = TmuxWindow.fromTmuxFormat(
+            [
+              '0',
+              'Codex',
+              '1',
+              command,
+              '/tmp/project',
+              '',
+              'Claude Code',
+              '',
+              'gemini --resume old-session',
+              '',
+              '@1',
+              '123',
+              'old-session',
+              'Old title',
+              'high',
+            ].join(tmuxWindowFieldSeparator),
           );
+          expect(old.hasUnsupportedAgentTool, isFalse);
           for (final event in [
             TmuxWindowSnapshotEvent(window),
             TmuxWindowListEvent([window]),
@@ -964,7 +976,20 @@ void main() {
           (snapshot.copyWith(activeAgentSessionId: 'session-2'), null, null),
           (snapshot.copyWith(panePid: 43), null, null),
           (snapshot.copyWith(currentCommand: 'claude'), null, null),
-          (snapshot.copyWith(hasUnsupportedAgentTool: true), null, null),
+          (
+            const TmuxWindow(
+              index: 1,
+              id: '@7',
+              panePid: 42,
+              name: 'codex',
+              isActive: true,
+              currentCommand: 'codex',
+              activeAgentSessionId: 'session-1',
+              hasUnsupportedAgentTool: true,
+            ),
+            null,
+            null,
+          ),
         ]) {
           final updated = applyTmuxWindowChangeEvent(
             [existing],
