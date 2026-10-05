@@ -645,6 +645,11 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 // the window closes as usual.
 const agentWindowHoldThresholdSeconds = 12
 
+// launchedWindowOutlivesProgram reports whether a window the app launched a
+// program in can stay open once the program ends: an agent that fails right
+// after launch falls back to an interactive shell (holdAgentWindowCommand).
+const launchedWindowOutlivesProgram = true
+
 // holdAgentWindowCommand wraps an agent launch command so the window survives a
 // fast, abnormal exit. If the agent exits non-zero within
 // agentWindowHoldThresholdSeconds, the terminal is restored to a sane state and

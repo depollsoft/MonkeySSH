@@ -109,10 +109,10 @@ func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
 	}
 }
 
-// The restore state does not carry a Hermes or OpenClaw window's --profile, so
-// a restore must not relaunch them. The window comes back as a plain shell and
-// stays one, even when a snapshot from a helper that did not know the agent
-// still names the window after it.
+// Without the command line a Hermes or OpenClaw window was started with, which
+// carries flags such as --profile, a restore must not relaunch them. The window
+// comes back as a plain shell and stays one, even when a snapshot from a helper
+// that did not know the agent still names the window after it.
 func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 	history := base64.StdEncoding.EncodeToString([]byte("agent screen"))
 	for _, tool := range []string{"hermes", "openclaw"} {
@@ -147,5 +147,20 @@ func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Where a launched window closes with its program, an open one still runs
+// it, even when the process table names only the shell or a runtime; where it
+// can outlive the program, a shell in the foreground means the agent is gone.
+func TestLaunchedWindowWithShellForeground(t *testing.T) {
+	state := restoreWindowState{
+		CurrentCommand: "pwsh", AgentTool: "openclaw", AgentToolConfirmed: true,
+		LaunchCommand: "openclaw tui",
+	}
+	options := createWindowOptionsForRestore(state, true)
+	if relaunched := options.command != ""; relaunched == launchedWindowOutlivesProgram {
+		t.Fatalf("relaunched %v (%q) where a launched window outlives its program: %v",
+			relaunched, options.command, launchedWindowOutlivesProgram)
 	}
 }
