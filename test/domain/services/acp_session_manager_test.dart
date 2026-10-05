@@ -1000,6 +1000,22 @@ void main() {
       expect(manager.state.byKeyValue(first.value), isNull);
       expect(manager.liveSessionKeyValues, hasLength(1));
     });
+
+    test('a failed replace stop becomes a launch failure', () async {
+      final first = await startCopilot();
+      connector.stopError = Exception('SSH unavailable');
+
+      final result = await manager.startNewSession(
+        hostId: 2,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        cwd: '/repo',
+        replace: [first],
+      );
+
+      expect(result, isA<AcpSessionLaunchFailed>());
+      expect(manager.state.byKeyValue(first.value)?.isLive, isTrue);
+      expect(manager.liveSessionKeyValues, hasLength(1));
+    });
   });
 
   group('streaming normalization', () {
@@ -1044,7 +1060,7 @@ void main() {
       final timeline = updated.byKeyValue(key.value)!.timeline;
       expect(timeline.entries, hasLength(2));
       final message = timeline.entries.whereType<AcpMessageEntry>().single;
-      expect(message.content, hasLength(2));
+      expect((message.content.single as AcpTextContent).text, 'Hello');
       final tool = timeline.entries.whereType<AcpToolCallEntry>().single;
       expect(tool.status, isNotNull);
       expect(tool.status!.value, 'completed');

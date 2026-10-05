@@ -427,11 +427,6 @@ class FakeAcpSessionManager extends AcpSessionManager {
     AcpAuthMethod method,
   ) => terminalLaunch;
 
-  @override
-  void markSessionSignedIn(AcpSessionKey key) {
-    signedInSessions.add(key.value);
-  }
-
   /// Keys passed to [stopUnusedBridge], in call order.
   final List<String> stoppedUnusedBridges = <String>[];
 
