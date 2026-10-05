@@ -258,7 +258,7 @@ void main() {
       if (length > 0) {
         expect(metadata.summary, 'x' * (length > 200 ? 200 : length));
       } else {
-        expect(metadata.summary, isNotEmpty);
+        expect(metadata.summary, isNull);
       }
     });
   }
@@ -429,8 +429,9 @@ void main() {
         environment: {'XDG_DATA_HOME': temp.path},
       );
       expect(result.exitCode, 0, reason: '${result.stderr}');
+      // Listing lines are `<epoch seconds>\t<path>`.
       expect(
-        (result.stdout as String).trim().replaceAll(r'\', '/'),
+        (result.stdout as String).trim().split('\t').last.replaceAll(r'\', '/'),
         rootLog.path.replaceAll(r'\', '/'),
       );
     },
