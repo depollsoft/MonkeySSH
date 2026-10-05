@@ -9,7 +9,7 @@ void main() {
 
       terminal.write('\x1b[=9u');
       expect(terminal.kittyKeyboardFlags, 9);
-      expect(terminal.kittyMode, isTrue);
+      expect(terminal.kittyKeyboardMode, isTrue);
 
       terminal.write('\x1b[?u');
       expect(output, ['\x1b[?9u']);
@@ -34,7 +34,7 @@ void main() {
 
       terminal.write('\x1b[<u');
       expect(terminal.kittyKeyboardFlags, 0);
-      expect(terminal.kittyMode, isFalse);
+      expect(terminal.kittyKeyboardMode, isFalse);
     });
 
     test('maintains separate main and alternate screen flag stacks', () {

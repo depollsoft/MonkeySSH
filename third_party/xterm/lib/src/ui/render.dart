@@ -445,12 +445,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       }
     }
 
-    _paintHighlights(
-      canvas,
-      _controller.highlights,
-      effectFirstLine,
-      effectLastLine,
-    );
+    _paintHighlights(canvas, effectFirstLine, effectLastLine);
 
     if (_controller.selection != null) {
       _paintSelection(
@@ -515,12 +510,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     }
   }
 
-  void _paintHighlights(
-    Canvas canvas,
-    List<TerminalHighlight> highlights,
-    int firstLine,
-    int lastLine,
-  ) {
+  void _paintHighlights(Canvas canvas, int firstLine, int lastLine) {
     for (var highlight in _controller.highlights) {
       final range = highlight.range?.normalized;
 

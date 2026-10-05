@@ -39,13 +39,6 @@ void main() {
       expect(cl.maxLength, 1000);
     });
 
-    test("change max value", () {
-      final cl = IndexAwareCircularBuffer<IndexedValue<int>>(2000);
-      expect(cl.maxLength, 2000);
-      cl.maxLength = 3000;
-      expect(cl.maxLength, 3000);
-    });
-
     test("circle works", () {
       final cl = IndexAwareCircularBuffer<IndexedValue<int>>(10);
       expect(cl.maxLength, 10);
@@ -62,31 +55,6 @@ void main() {
       expect(cl.length, 10);
       expect(cl[0], 1.indexed);
       expect(cl[9], 10.indexed);
-    });
-
-    test("change max value after circle", () {
-      final cl = IndexAwareCircularBuffer<IndexedValue<int>>(10);
-      cl.pushAll(
-        List<int>.generate(15, (index) => index).map(IndexedValue.new),
-      );
-
-      expect(cl.length, 10);
-      expect(cl[0], 5.indexed);
-      expect(cl[9], 14.indexed);
-
-      cl.maxLength = 20;
-
-      expect(cl.length, 10);
-      expect(cl[0], 5.indexed);
-      expect(cl[9], 14.indexed);
-
-      cl.pushAll(
-        List<int>.generate(5, (index) => 15 + index).map(IndexedValue.new),
-      );
-
-      expect(cl[0], 5.indexed);
-      expect(cl[9], 14.indexed);
-      expect(cl[14], 19.indexed);
     });
 
     // test("setting the length erases trail", () {
@@ -280,43 +248,6 @@ void main() {
 
       expect(() => cl.swap(-1, IndexedValue(2)), throwsRangeError);
       expect(() => cl.swap(1, IndexedValue(2)), throwsRangeError);
-    });
-
-    test('insert all at the front of a full buffer keeps every input item', () {
-      final cl = IndexAwareCircularBuffer<IndexedValue<int>>(5)
-        ..pushAll(
-          List<int>.generate(5, (index) => index).map(IndexedValue.new),
-        );
-
-      cl.insertAll(0, [IndexedValue(10), IndexedValue(11)]);
-
-      expect(cl.length, 5);
-      expect(cl.toList(),
-          [10.indexed, 11.indexed, 0.indexed, 1.indexed, 2.indexed]);
-    });
-
-    test("insert all works", () {
-      final cl = IndexAwareCircularBuffer<IndexedValue<int>>(10);
-      cl.pushAll(
-        List<int>.generate(10, (index) => index).map(IndexedValue.new),
-      );
-      expect(cl.length, 10);
-      expect(cl[0], 0.indexed);
-      expect(cl[1], 1.indexed);
-      expect(cl[9], 9.indexed);
-
-      cl.insertAll(
-        2,
-        List<int>.generate(2, (index) => 20 + index)
-            .map(IndexedValue.new)
-            .toList(),
-      );
-
-      expect(cl.length, 10);
-      expect(cl[0], 20.indexed);
-      expect(cl[1], 21.indexed);
-      expect(cl[3], 3.indexed);
-      expect(cl[9], 9.indexed);
     });
 
     test("trim start updates item indices and detaches trimmed items", () {

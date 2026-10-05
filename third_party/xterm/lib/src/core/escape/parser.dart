@@ -20,12 +20,6 @@ class EscapeParser {
 
   final _queue = ByteConsumer();
 
-  /// Start of sequence or character being processed. Useful for debugging.
-  var tokenBegin = 0;
-
-  /// End of sequence or character being processed. Useful for debugging.
-  int get tokenEnd => _queue.totalConsumed;
-
   void write(String chunk) {
     _queue.unrefConsumedBlocks();
     _queue.add(chunk);
@@ -34,13 +28,13 @@ class EscapeParser {
 
   void _process() {
     while (_queue.isNotEmpty) {
-      tokenBegin = _queue.totalConsumed;
+      final tokenBegin = _queue.totalConsumed;
       final char = _queue.consume();
 
       if (char == Ascii.ESC) {
         final processed = _processEscape();
         if (!processed) {
-          _queue.rollback(tokenEnd - tokenBegin);
+          _queue.rollback(_queue.totalConsumed - tokenBegin);
           return;
         }
       } else {

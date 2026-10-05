@@ -1609,14 +1609,6 @@ class GraphicsManager {
     }
   }
 
-  /// Stores [image] and returns its new id, or `0` when it exceeds the memory
-  /// budget.
-  int storeImage(ui.Image image, {int sourceSignature = 0}) =>
-      storeDecodedImage(
-        DecodedTerminalImage.single(image),
-        sourceSignature: sourceSignature,
-      );
-
   /// Stores a decoded static or animated [image] and returns its new id.
   ///
   /// Returns `0` and disposes [image] when its decoded frames exceed
@@ -2140,12 +2132,6 @@ class GraphicsManager {
     return placeholder;
   }
 
-  /// Drops placements whose anchor cell has been evicted from the buffer.
-  ///
-  /// Returns true if any placement was removed.
-  bool pruneDetachedPlacements() =>
-      _removePlacementsWhere((placement) => !placement.attached).isNotEmpty;
-
   /// Drops placeholder cells whose anchors have been evicted.
   bool pruneDetachedPlaceholders() {
     final detached = <TerminalImagePlaceholder>[
@@ -2172,28 +2158,6 @@ class GraphicsManager {
       (placement) =>
           !placement.attached ||
           _placementIntersectsRows(placement, firstRow, lastRow),
-    );
-    if (removed.isNotEmpty) {
-      _generation++;
-    }
-    pruneDetachedPlaceholders();
-    _dropUnreferencedImages();
-  }
-
-  /// Removes placements intersecting the rectangular cell region whose rows and
-  /// columns are inclusive. Used by partial erases (`CSI J/K/X`) so an image
-  /// does not remain painted over cells the terminal just cleared.
-  void removePlacementsInRegion(
-    int firstRow,
-    int lastRow,
-    int firstCol,
-    int lastCol,
-  ) {
-    final removed = _removePlacementsWhere(
-      (placement) =>
-          !placement.attached ||
-          (_placementIntersectsRows(placement, firstRow, lastRow) &&
-              _placementIntersectsCols(placement, firstCol, lastCol)),
     );
     if (removed.isNotEmpty) {
       _generation++;
