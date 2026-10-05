@@ -663,14 +663,15 @@ class RemoteFileService {
 
   /// Replaces the contents of [remotePath] without truncating it first.
   ///
-  /// The bytes go to a private, uniquely named sibling file that is closed,
-  /// given the original owner and mode, and renamed over the destination. A
-  /// failure before the rename leaves the original untouched. A final symlink
-  /// is resolved so the link keeps pointing at the edited file. Without
-  /// `posix-rename`, servers refuse to rename over a file, so the original is
-  /// first moved aside and restored if the second rename fails. When the
-  /// directory denies new files or the copy's mode or owner cannot be set,
-  /// this falls back to writing in place, as editors do.
+  /// The bytes go to a copy in a private scratch directory beside the
+  /// destination; the copy is closed, given the original owner and mode, and
+  /// renamed over the destination. A failure before the rename leaves the
+  /// original untouched. A final symlink is resolved so the link keeps
+  /// pointing at the edited file. Without `posix-rename`, servers refuse to
+  /// rename over a file, so the original is first moved aside and restored if
+  /// the second rename fails. When the directory denies new entries, the
+  /// scratch directory cannot be made private, or the original owner cannot
+  /// be reproduced, this falls back to writing in place, as editors do.
   Future<void> replaceFileBytes({
     required SftpClient sftp,
     required String remotePath,
@@ -696,41 +697,40 @@ class RemoteFileService {
       applyPrivateMode: false,
     );
 
-    // A short name of its own: a suffix on a long basename could exceed the
-    // server's name limit, and the `.orig` aside path below adds to it.
-    final temporaryPath =
+    // The copy is made inside a fresh 0700 directory, so no other user can
+    // open it whatever mode the server gives new files. Short names of its
+    // own keep long basenames within the server's name limit.
+    final scratch =
         '${target.substring(0, target.lastIndexOf('/') + 1)}.monkeyssh-save-'
         '${Random.secure().nextInt(1 << 32).toRadixString(16)}';
-    final SftpFile temporaryFile;
+    final private = SftpFileAttrs(mode: remoteUploadDirectoryMode);
     try {
-      temporaryFile = await sftp.open(
+      await sftp.mkdir(scratch, private);
+    } on SftpStatusError catch (error) {
+      if (error.code != SftpStatusCode.permissionDenied &&
+          error.code != SftpStatusCode.opUnsupported) {
+        rethrow;
+      }
+      return writeInPlace();
+    }
+    final temporaryPath = '$scratch/new';
+    var temporaryExists = false;
+    try {
+      try {
+        // A server may ignore mkdir's mode. The directory is still empty, so
+        // making it private now leaves nothing to race.
+        await sftp.setStat(scratch, private);
+      } on SftpStatusError {
+        return await writeInPlace();
+      }
+      final temporaryFile = await sftp.open(
         temporaryPath,
         mode:
             SftpFileOpenMode.write |
             SftpFileOpenMode.create |
             SftpFileOpenMode.exclusive,
       );
-    } on SftpStatusError catch (error) {
-      if (error.code != SftpStatusCode.permissionDenied) rethrow;
-      return writeInPlace();
-    }
-    var renamed = false;
-    try {
-      if (original?.mode != null) {
-        // The server creates the copy with its default mode, often readable by
-        // others. Make it private before any byte lands; the original mode is
-        // restored below, before the rename. A server that refuses gets the
-        // in-place write rather than an exposed copy.
-        try {
-          await sftp.setStat(
-            temporaryPath,
-            SftpFileAttrs(mode: remoteUploadFileMode),
-          );
-        } on SftpStatusError {
-          await temporaryFile.close();
-          return await writeInPlace();
-        }
-      }
+      temporaryExists = true;
       await _writeAndClose(temporaryFile, Stream.value(bytes), null);
       if (original != null) {
         try {
@@ -754,7 +754,7 @@ class RemoteFileService {
         await sftp.rename(temporaryPath, target);
       } on SftpStatusError catch (error) {
         if (original == null || error.code != SftpStatusCode.failure) rethrow;
-        final asidePath = '$temporaryPath.orig';
+        final asidePath = '$scratch/orig';
         await sftp.rename(target, asidePath);
         try {
           await sftp.rename(temporaryPath, target);
@@ -762,17 +762,20 @@ class RemoteFileService {
           await sftp.rename(asidePath, target);
           rethrow;
         }
-        await _removeQuietly(sftp, asidePath);
+        await _cleanUpQuietly(sftp.remove(asidePath));
       }
-      renamed = true;
+      temporaryExists = false;
     } finally {
-      if (!renamed) await _removeQuietly(sftp, temporaryPath);
+      if (temporaryExists) await _cleanUpQuietly(sftp.remove(temporaryPath));
+      // Fails, keeping the original, if restoring it after a failed rename
+      // also failed.
+      await _cleanUpQuietly(sftp.rmdir(scratch));
     }
   }
 
-  Future<void> _removeQuietly(SftpClient sftp, String remotePath) async {
+  Future<void> _cleanUpQuietly(Future<void> removal) async {
     try {
-      await sftp.remove(remotePath);
+      await removal;
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       DiagnosticsLogService.instance.warning(
