@@ -164,6 +164,46 @@ void registerTmuxWindowLoaderTests() {
       state.loader.dispose();
     });
 
+    test('a window snapshot keeps a failed structural reload retrying', () {
+      // @2 closed; the reload fails while a snapshot for @1 arrives. Only a
+      // structural reload can drop @2, so the retry must still run.
+      fakeAsync((async) {
+        var calls = 0;
+        final state =
+            _LoaderState(() {
+                calls++;
+                return calls == 1
+                    ? Future<List<TmuxWindow>>.error(Exception('transient'))
+                    : Future.value(const [
+                        TmuxWindow(
+                          index: 1,
+                          name: 'one',
+                          isActive: true,
+                          id: '@1',
+                        ),
+                      ]);
+              })
+              ..windows = const [
+                TmuxWindow(index: 1, name: 'one', isActive: true, id: '@1'),
+                TmuxWindow(index: 2, name: 'two', isActive: false, id: '@2'),
+              ];
+        unawaited(state.loader.load());
+        state.loader.recordSnapshot(
+          const TmuxWindowSnapshotEvent(
+            TmuxWindow(index: 1, name: 'renamed', isActive: true, id: '@1'),
+          ),
+        );
+        async.flushMicrotasks();
+        expect(calls, 1);
+        expect(state.error, isNotNull);
+        async.elapse(const Duration(seconds: 2));
+        expect(calls, 2, reason: 'the snapshot must not cancel the retry');
+        expect(state.error, isNull);
+        expect(state.windows!.map((w) => w.id), ['@1']);
+        state.loader.dispose();
+      });
+    });
+
     test('recovers from a transient empty window reload', () {
       fakeAsync((async) {
         var calls = 0;

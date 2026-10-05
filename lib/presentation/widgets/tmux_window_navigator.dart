@@ -104,8 +104,10 @@ class TmuxWindowLoader {
   /// than an in-flight query's, but it cannot remove a closed window, so the
   /// query still decides membership and the snapshot is replayed onto it.
   void recordSnapshot(TmuxWindowSnapshotEvent event) {
+    // Recovery is left alone: a snapshot cannot repair a failed or empty
+    // structural list, so the scheduled reload that can remove closed
+    // windows must still run.
     _snapshotsDuringFetch?.add(event);
-    _resetRecovery();
   }
 
   /// Cancels retries and prevents queued or future queries from starting.
@@ -135,12 +137,12 @@ class TmuxWindowLoader {
       }
       _snapshotsDuringFetch = null;
       if (_disposed || generation != _generation) return;
-      if (snapshots.isNotEmpty) {
-        // The snapshots already show the window is alive; a late failure is
-        // stale.
-        if (error != null) return;
+      if (snapshots.isNotEmpty && windows != null) {
+        // The query decides membership; the snapshots carry newer fields for
+        // the windows it kept. A failed query still goes through recovery
+        // below, because only a structural reload can drop closed windows.
         windows = snapshots.fold<List<TmuxWindow>>(
-          windows!,
+          windows,
           applyTmuxWindowChangeEvent,
         );
       }
