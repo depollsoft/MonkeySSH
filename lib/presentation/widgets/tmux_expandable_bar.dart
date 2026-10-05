@@ -574,7 +574,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       _windowLoader.load();
       return;
     }
-    _resetWindowReloadRecovery();
+    _windowLoader.recordSnapshot(event as TmuxWindowSnapshotEvent);
+    _windowReloadRecoveryRequested = false;
     final windows = applyTmuxWindowChangeEvent(currentWindows, event);
     final shouldNotifyWindowStateChanged =
         shouldRefreshTmuxThemeAfterWindowChange(currentWindows, windows);

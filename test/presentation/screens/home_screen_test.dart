@@ -136,6 +136,36 @@ void main() {
       );
       expect(calls, 2);
     });
+    test('a window snapshot does not discard a structural reload', () async {
+      when(() => mux.listWindows(session, 'work', extraFlags: '-L test'))
+          .thenAnswer(
+            (_) async => const [
+              TmuxWindow(index: 1, name: 'one', isActive: true, id: '@1'),
+              TmuxWindow(index: 2, name: 'two', isActive: false, id: '@2'),
+            ],
+          );
+      await controller.queryTmux();
+      expect(controller.windows, hasLength(2));
+
+      // @2 closes; the reload is in flight when a snapshot for @1 arrives.
+      final reload = Completer<List<TmuxWindow>>();
+      when(() => mux.listWindows(session, 'work', extraFlags: '-L test'))
+          .thenAnswer((_) => reload.future);
+      events
+        ..add(const TmuxWindowReloadEvent())
+        ..add(
+          const TmuxWindowSnapshotEvent(
+            TmuxWindow(index: 1, name: 'renamed', isActive: true, id: '@1'),
+          ),
+        );
+      reload.complete(const [
+        TmuxWindow(index: 1, name: 'one', isActive: true, id: '@1'),
+      ]);
+      await pumpEventQueue();
+
+      expect(controller.windows!.map((w) => w.name), ['renamed']);
+      expect(published.last, controller.windows);
+    });
     test(
       'negative answers back off, settle, and pause in background',
       () async {

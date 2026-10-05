@@ -85,6 +85,7 @@ class MuxBadgeController extends ChangeNotifier {
   bool _pendingWindowReload = false;
   bool _muxSessionEnding = false;
   int _windowReloadGeneration = 0;
+  List<TmuxWindowSnapshotEvent>? _snapshotsDuringReload;
   int _windowEventGeneration = 0;
   int _tmuxQueryGeneration = 0;
   int _retryAttempt = 0;
@@ -249,7 +250,9 @@ class MuxBadgeController extends ChangeNotifier {
       );
       return;
     }
-    _windowReloadGeneration += 1;
+    // A per-window snapshot cannot remove a closed window, so an in-flight
+    // reload still decides membership; the snapshot is replayed onto it.
+    _snapshotsDuringReload?.add(event as TmuxWindowSnapshotEvent);
     _tmuxRetryTimer?.cancel();
     _tmuxRetryTimer = null;
     final nextWindows = applyTmuxWindowChangeEvent(currentWindows, event);
@@ -282,9 +285,10 @@ class MuxBadgeController extends ChangeNotifier {
     }
     loadingWindows = true;
     final reloadGeneration = ++_windowReloadGeneration;
+    final snapshots = _snapshotsDuringReload = <TmuxWindowSnapshotEvent>[];
     try {
       final mux = serviceForBackend(muxBackend);
-      final windows = await mux.listWindows(
+      final listed = await mux.listWindows(
         session,
         sessionName,
         extraFlags: muxBackend == RemoteMuxBackend.tmux ? extraFlags() : null,
@@ -293,6 +297,7 @@ class MuxBadgeController extends ChangeNotifier {
         return;
       }
       if (reloadGeneration < _windowReloadGeneration) return;
+      final windows = snapshots.fold(listed, applyTmuxWindowChangeEvent);
       if (windows.isEmpty && muxBackend == RemoteMuxBackend.monkeyMux) {
         _tmuxRetryTimer?.cancel();
         _tmuxRetryTimer = null;
@@ -335,6 +340,9 @@ class MuxBadgeController extends ChangeNotifier {
       });
     } finally {
       loadingWindows = false;
+      if (identical(_snapshotsDuringReload, snapshots)) {
+        _snapshotsDuringReload = null;
+      }
       if (_pendingWindowReload && mounted) {
         _pendingWindowReload = false;
         unawaited(
