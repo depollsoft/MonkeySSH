@@ -983,6 +983,21 @@ _LoggedEditingState _loggedTerminalClientState(TextEditingValue value) {
 }
 
 void main() {
+  for (final key in [TerminalKey.enter, TerminalKey.numpadEnter]) {
+    test('${key.name} collapses LNM CRLF and maps Alt to ESC CR', () async {
+      final driver = _ImeDriver(platform: TargetPlatform.android);
+      addTearDown(driver.dispose);
+      final harness = await _createImeHarness(driver);
+      harness.terminal.write('\x1b[20h');
+      harness.terminalOutput.clear();
+      await driver.hardwareKey(key);
+      expect(harness.terminalOutput.join(), '\r');
+      harness.terminalOutput.clear();
+      await driver.hardwareKey(key, alt: true);
+      expect(harness.terminalOutput.join(), '\x1b\r');
+    });
+  }
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     for (final hardwareEnter in [false, true]) {
       test(

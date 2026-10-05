@@ -419,7 +419,8 @@ class TerminalImeEngine {
     required bool hasShortcutModifier,
     TerminalKeyEventType type = TerminalKeyEventType.press,
   }) {
-    final handled = key == TerminalKey.enter
+    final isEnter = key == TerminalKey.enter || key == TerminalKey.numpadEnter;
+    final handled = isEnter
         ? sendTerminalEnterInput(
             terminal,
             shiftActive: shift,
@@ -448,7 +449,7 @@ class TerminalImeEngine {
       _hardwareEnterSubmittedText = null;
       // Shortcut chords can reach here mid-composition; the IME still owns
       // that uncommitted text, so leave its buffer alone.
-      if ((key == TerminalKey.enter || key == TerminalKey.numpadEnter) &&
+      if (isEnter &&
           type == TerminalKeyEventType.press &&
           _currentEditingState.composing.isCollapsed) {
         _resetAfterHardwareEnter(
