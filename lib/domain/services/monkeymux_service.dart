@@ -2808,7 +2808,7 @@ bool? _privateModeValue(Map<String, bool> privateModes, String mode) =>
 Set<int> _monkeyMuxAgentPanePids(Iterable<TmuxWindow> windows) => windows
     .where(
       (window) =>
-          window.foregroundAgentTool != null &&
+          agentSessionMetadataProbeTools.contains(window.foregroundAgentTool) &&
           window.panePid != null &&
           window.activeAgentSessionConfidence != AgentSessionConfidence.high,
     )

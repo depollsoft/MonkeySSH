@@ -866,6 +866,20 @@ void main() {
         ]),
         isFalse,
       );
+      // The probe cannot identify a Pi session, so a Pi pane alone must not
+      // keep it running.
+      expect(
+        shouldRefreshMonkeyMuxAgentMetadataForTesting(const [
+          TmuxWindow(
+            index: 2,
+            name: 'Pi',
+            isActive: true,
+            currentCommand: 'pi',
+            panePid: 44,
+          ),
+        ]),
+        isFalse,
+      );
     });
 
     test('applies all-agent metadata with confidence to matching panes', () {
