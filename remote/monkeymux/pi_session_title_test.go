@@ -160,10 +160,10 @@ func TestNativePiSessionPathSearchesAConfiguredSessionDir(t *testing.T) {
 	}
 }
 
-func newPiTitleTestServer(window *muxWindow) (*muxServer, *recordingConn) {
+func newPiTitleTestServer(window *muxWindow) (*muxServer, *controlRecorder) {
 	server := newMuxServer("test")
 	server.windows = []*muxWindow{window}
-	control := &recordingConn{}
+	control := newControlRecorder(server)
 	server.controls[newControlClient(control)] = struct{}{}
 	return server, control
 }
