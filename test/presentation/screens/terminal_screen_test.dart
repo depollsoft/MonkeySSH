@@ -4926,6 +4926,9 @@ void main() {
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
+      // The abandoned login shell gets a bounded graceful close; let its
+      // grace timer expire so no timer outlives the test.
+      await tester.pump(abandonedSshExecCloseGrace);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets('MonkeyMux attaches on Windows remotes via the ConPTY helper', (
@@ -8433,6 +8436,9 @@ void main() {
               trackedSession.openCalls,
               completion.startsWith('close') ? 1 : 2,
             );
+            // A completed close hands the old shell to the bounded graceful
+            // close; let its grace timer expire so no timer outlives the test.
+            await tester.pump(abandonedSshExecCloseGrace);
             return;
           }
           await tester.runAsync(() async {
@@ -8462,6 +8468,9 @@ void main() {
             shellWrites.map(utf8.decode).join(),
             contains(tmuxSessionName),
           );
+          // The abandoned login shell gets a bounded graceful close; let its
+          // grace timer expire so no timer outlives the test.
+          await tester.pump(abandonedSshExecCloseGrace);
         },
         variant: const TargetPlatformVariant({
           TargetPlatform.android,
