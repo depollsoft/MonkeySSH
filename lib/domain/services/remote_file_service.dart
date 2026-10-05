@@ -663,14 +663,14 @@ class RemoteFileService {
 
   /// Replaces the contents of [remotePath] without truncating it first.
   ///
-  /// The bytes go to a unique sibling file that is closed, given the original
-  /// owner and mode, and renamed over the destination. A failure before the
-  /// rename leaves the original untouched. A final symlink is resolved so the
-  /// link keeps pointing at the edited file. Without `posix-rename`, servers
-  /// refuse to rename over a file, so the original is first moved aside and
-  /// restored if the second rename fails. When the directory denies new files
-  /// or the original owner cannot be reproduced, this falls back to writing
-  /// in place, as editors do.
+  /// The bytes go to a private, uniquely named sibling file that is closed,
+  /// given the original owner and mode, and renamed over the destination. A
+  /// failure before the rename leaves the original untouched. A final symlink
+  /// is resolved so the link keeps pointing at the edited file. Without
+  /// `posix-rename`, servers refuse to rename over a file, so the original is
+  /// first moved aside and restored if the second rename fails. When the
+  /// directory denies new files or the copy's mode or owner cannot be set,
+  /// this falls back to writing in place, as editors do.
   Future<void> replaceFileBytes({
     required SftpClient sftp,
     required String remotePath,
@@ -696,11 +696,11 @@ class RemoteFileService {
       applyPrivateMode: false,
     );
 
-    final suffix = Random.secure().nextInt(1 << 32).toRadixString(16);
-    final nameStart = target.lastIndexOf('/') + 1;
+    // A short name of its own: a suffix on a long basename could exceed the
+    // server's name limit, and the `.orig` aside path below adds to it.
     final temporaryPath =
-        '${target.substring(0, nameStart)}.'
-        '${target.substring(nameStart)}.$suffix.monkeyssh-save';
+        '${target.substring(0, target.lastIndexOf('/') + 1)}.monkeyssh-save-'
+        '${Random.secure().nextInt(1 << 32).toRadixString(16)}';
     final SftpFile temporaryFile;
     try {
       temporaryFile = await sftp.open(
@@ -716,6 +716,21 @@ class RemoteFileService {
     }
     var renamed = false;
     try {
+      if (original?.mode != null) {
+        // The server creates the copy with its default mode, often readable by
+        // others. Make it private before any byte lands; the original mode is
+        // restored below, before the rename. A server that refuses gets the
+        // in-place write rather than an exposed copy.
+        try {
+          await sftp.setStat(
+            temporaryPath,
+            SftpFileAttrs(mode: remoteUploadFileMode),
+          );
+        } on SftpStatusError {
+          await temporaryFile.close();
+          return await writeInPlace();
+        }
+      }
       await _writeAndClose(temporaryFile, Stream.value(bytes), null);
       if (original != null) {
         try {
