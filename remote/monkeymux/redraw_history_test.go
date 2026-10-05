@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTerminalOutputReplacesScreen(t *testing.T) {
@@ -698,5 +700,47 @@ func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
 	}
 	if !strings.Contains(got, "repainted") {
 		t.Fatal("the repaint the replay belongs with was lost")
+	}
+}
+
+func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
+	for _, test := range []struct{ mode, app string }{
+		{"1047", "alternate app"},
+		{"1049", "alternate app"},
+		// DECSTR resets the cursor 1049 saved, so the exit goes home.
+		{"1049", "alternate app\x1b[!p"},
+	} {
+		mode := test.mode
+		t.Run(mode, func(t *testing.T) {
+			server := newMuxServer("test")
+			window := &muxWindow{id: "@1", screenWidth: 20, screenHeight: 4, lastActivity: time.Now()}
+			server.windows = []*muxWindow{window}
+			server.activeID = "@1"
+			var output strings.Builder
+			for i := 1; i <= 6; i++ {
+				fmt.Fprintf(&output, "shell line %d\r\n", i)
+			}
+			output.WriteString("\x1b[1m$ \x1b7\x1b[0mless notes\x1b[?" + mode + "h\x1b[H" + test.app)
+			window.observeTerminalModesLocked([]byte(output.String()))
+			window.appendHistoryLocked([]byte(output.String()))
+
+			client := newTerminalScreen(20, 4)
+			client.Write(server.activeReplayLocked())
+			// The application exits after the reattach: the client must
+			// return to the main screen the model kept, cursor included.
+			exit := []byte("\x1b[?" + mode + "l\x1b8X")
+			model := window.screenLocked().Clone()
+			model.Write(exit)
+			client.Write(exit)
+			if got, want := client.TextRows(), model.TextRows(); !slices.Equal(got, want) {
+				t.Fatalf("main screen after exit = %q, want %q", got, want)
+			}
+			if got, want := vtScrollbackTexts(client), vtScrollbackTexts(model); !slices.Equal(got, want) {
+				t.Fatalf("scrollback after exit = %q, want %q", got, want)
+			}
+			if got, want := client.attrs, model.attrs; got != want {
+				t.Fatalf("rendition after exit = %+v, want %+v", got, want)
+			}
+		})
 	}
 }

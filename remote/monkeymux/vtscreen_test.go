@@ -18,6 +18,24 @@ func vtScrollbackText(line []byte) string {
 	return s.TextRows()[0]
 }
 
+// vtScrollbackLines returns the retained scrollback lines, oldest first.
+func vtScrollbackLines(s *terminalScreen) [][]byte {
+	lines := make([][]byte, s.scrollback.len())
+	for i := range lines {
+		lines[i] = s.scrollback.at(i).text
+	}
+	return lines
+}
+
+// vtScrollbackWrapped returns each retained line's continuation flag.
+func vtScrollbackWrapped(s *terminalScreen) []bool {
+	wrapped := make([]bool, s.scrollback.len())
+	for i := range wrapped {
+		wrapped[i] = s.scrollback.at(i).wrapped
+	}
+	return wrapped
+}
+
 func vtText(t *testing.T, s *terminalScreen) string {
 	t.Helper()
 	return strings.Join(s.TextRows(), "\n")
@@ -76,7 +94,7 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) *terminalScreen {
 	// A first row has no row above it to wrap from unless the frame emits
 	// scrollback before it.
 	firstRow := 1
-	if !s.AlternateScreenActive() && len(s.scrollback) > 0 {
+	if !s.AlternateScreenActive() && s.scrollback.len() > 0 {
 		firstRow = 0
 	}
 	if want, got := s.grid().wrapped[firstRow:], replica.grid().wrapped[firstRow:]; !slices.Equal(want, got) {
@@ -111,17 +129,17 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) *terminalScreen {
 		t.Fatalf("round trip changed the SCO cursor: %+v vs %+v", a, b)
 	}
 	if !s.AlternateScreenActive() {
-		if len(s.scrollback) != len(replica.scrollback) {
-			t.Fatalf("round trip changed scrollback length: want %d got %d", len(s.scrollback), len(replica.scrollback))
+		if s.scrollback.len() != replica.scrollback.len() {
+			t.Fatalf("round trip changed scrollback length: want %d got %d", s.scrollback.len(), replica.scrollback.len())
 		}
-		for i := range s.scrollback {
-			if !bytes.Equal(s.scrollback[i], replica.scrollback[i]) {
-				t.Fatalf("scrollback line %d differs: %q vs %q", i, s.scrollback[i], replica.scrollback[i])
+		for i := range s.scrollback.len() {
+			if !bytes.Equal(s.scrollback.at(i).text, replica.scrollback.at(i).text) {
+				t.Fatalf("scrollback line %d differs: %q vs %q", i, s.scrollback.at(i).text, replica.scrollback.at(i).text)
 			}
 		}
-		if !slices.Equal(s.scrollbackWrapped, replica.scrollbackWrapped) {
+		if !slices.Equal(vtScrollbackWrapped(s), vtScrollbackWrapped(replica)) {
 			t.Fatalf("round trip changed the scrollback's soft wraps: want %v got %v",
-				s.scrollbackWrapped, replica.scrollbackWrapped)
+				vtScrollbackWrapped(s), vtScrollbackWrapped(replica))
 		}
 	}
 	return replica
@@ -255,7 +273,7 @@ func TestVTScreenScrollRegionAndOriginMode(t *testing.T) {
 	if got[0] != "line1" || got[1] != "line4" || got[2] != "" || got[3] != "" || got[4] != "line5" || got[5] != "line6" {
 		t.Fatalf("region scroll: %q", got)
 	}
-	if len(s.scrollback) != 0 {
+	if s.scrollback.len() != 0 {
 		t.Fatal("lines scrolled out of a partial region must not enter scrollback")
 	}
 	s.Write([]byte("\x1b[1;1HTOP"))
@@ -293,11 +311,11 @@ func TestVTScreenTopAnchoredPartialRegionFeedsScrollback(t *testing.T) {
 			t.Fatalf("inline viewport rows: %q", got)
 		}
 	}
-	if len(s.scrollback) != 5 {
-		t.Fatalf("scrollback: %d lines, want 5", len(s.scrollback))
+	if s.scrollback.len() != 5 {
+		t.Fatalf("scrollback: %d lines, want 5", s.scrollback.len())
 	}
 	for i, want := range []string{"", "", "", "T0", "T1"} {
-		if got := vtScrollbackText(s.scrollback[i]); got != want {
+		if got := vtScrollbackText(s.scrollback.at(i).text); got != want {
 			t.Fatalf("scrollback[%d] = %q, want %q", i, got, want)
 		}
 	}
@@ -309,8 +327,8 @@ func TestVTScreenTopAnchoredPartialRegionFeedsScrollback(t *testing.T) {
 	// CSI S inside the same region saves lines too; a region that starts
 	// below the first row never does.
 	s.Write([]byte("\x1b[1;3r\x1b[S\x1b[2;3r\x1b[S\x1b[r"))
-	if len(s.scrollback) != 6 || vtScrollbackText(s.scrollback[5]) != "T2" {
-		t.Fatalf("scrollback after SU: %d lines", len(s.scrollback))
+	if s.scrollback.len() != 6 || vtScrollbackText(s.scrollback.at(5).text) != "T2" {
+		t.Fatalf("scrollback after SU: %d lines", s.scrollback.len())
 	}
 	if got := s.TextRows(); got[0] != "T3" || got[1] != "" || got[2] != "" || got[3] != "V0" {
 		t.Fatalf("rows after SU: %q", got)
@@ -322,19 +340,19 @@ func TestVTScreenScrollbackAndClear(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		s.Write([]byte(fmt.Sprintf("row %d\r\n", i)))
 	}
-	if len(s.scrollback) != 3 || vtScrollbackText(s.scrollback[0]) != "row 1" || vtScrollbackText(s.scrollback[2]) != "row 3" {
-		t.Fatalf("scrollback: %d lines", len(s.scrollback))
+	if s.scrollback.len() != 3 || vtScrollbackText(s.scrollback.at(0).text) != "row 1" || vtScrollbackText(s.scrollback.at(2).text) != "row 3" {
+		t.Fatalf("scrollback: %d lines", s.scrollback.len())
 	}
 	if got := s.TextRows(); got[0] != "row 4" || got[1] != "row 5" || got[2] != "" {
 		t.Fatalf("screen after scroll: %q", got)
 	}
 	vtRoundTrip(t, s)
 	s.Write([]byte("\x1b[3J"))
-	if len(s.scrollback) != 0 {
+	if s.scrollback.len() != 0 {
 		t.Fatal("ED 3 must clear the scrollback")
 	}
 	s.Write([]byte("\x1b[?1049h\x1b[Halt\r\n\r\n\r\n\r\n"))
-	if len(s.scrollback) != 0 {
+	if s.scrollback.len() != 0 {
 		t.Fatal("alternate screen must not scroll into the scrollback")
 	}
 	if got := s.TextRows(); got[0] != "" {
@@ -351,11 +369,31 @@ func TestVTScreenScrollbackBounded(t *testing.T) {
 	for i := 0; i < vtScrollbackLimit+50; i++ {
 		s.Write([]byte(fmt.Sprintf("%d\r\n", i)))
 	}
-	if len(s.scrollback) != vtScrollbackLimit {
-		t.Fatalf("scrollback length %d", len(s.scrollback))
+	if s.scrollback.len() != vtScrollbackLimit {
+		t.Fatalf("scrollback length %d", s.scrollback.len())
 	}
-	if vtScrollbackText(s.scrollback[0]) != "49" {
-		t.Fatalf("oldest retained line %q", vtScrollbackText(s.scrollback[0]))
+	if vtScrollbackText(s.scrollback.at(0).text) != "49" {
+		t.Fatalf("oldest retained line %q", vtScrollbackText(s.scrollback.at(0).text))
+	}
+	// A full history evicts by advancing the ring, never by growing or
+	// shifting its storage.
+	storage := len(s.scrollback.lines)
+	for i := 0; i < 3*vtScrollbackLimit; i++ {
+		s.Write([]byte(fmt.Sprintf("%d\r\n", i)))
+	}
+	if len(s.scrollback.lines) != storage || s.scrollback.len() != vtScrollbackLimit ||
+		vtScrollbackText(s.scrollback.at(0).text) != fmt.Sprint(2*vtScrollbackLimit-1) {
+		t.Fatalf("ring storage %d -> %d, %d lines, oldest %q", storage, len(s.scrollback.lines),
+			s.scrollback.len(), vtScrollbackText(s.scrollback.at(0).text))
+	}
+	// The oldest line left cannot continue a line that was evicted.
+	s = newTerminalScreen(4, 2)
+	s.Write([]byte("abcdefgh\r\n"))
+	for i := 0; i < vtScrollbackLimit; i++ {
+		s.Write([]byte("i\r\n"))
+	}
+	if oldest := s.scrollback.at(0); vtScrollbackText(oldest.text) != "efgh" || oldest.wrapped {
+		t.Fatalf("oldest retained line %q wrapped=%v", vtScrollbackText(oldest.text), oldest.wrapped)
 	}
 }
 
@@ -372,7 +410,7 @@ func TestVTScreenTabs(t *testing.T) {
 	// With no stops left a tab leaves the cursor past the edge with a wrap
 	// pending, as in the client, so D starts the next line.
 	s.Write([]byte("\x1b[3g\x1b[1;1H\tD"))
-	if got := s.TextRows()[0]; got != "D" || len(s.scrollback) != 1 || vtScrollbackText(s.scrollback[0]) != "        A  C" {
+	if got := s.TextRows()[0]; got != "D" || s.scrollback.len() != 1 || vtScrollbackText(s.scrollback.at(0).text) != "        A  C" {
 		t.Fatalf("TBC 3 leaves no stops: %q", got)
 	}
 }
@@ -484,9 +522,9 @@ func TestVTScreenResize(t *testing.T) {
 	if r, c := s.CursorPosition(); r != 1 || c != 1 {
 		t.Fatalf("cursor after shrink: (%d,%d)", r, c)
 	}
-	if len(s.scrollback) != 4 || vtScrollbackText(s.scrollback[1]) != "two" ||
-		vtScrollbackText(s.scrollback[3]) != "ee" || !s.scrollbackWrapped[3] {
-		t.Fatalf("rows leaving the top enter the scrollback: %d", len(s.scrollback))
+	if s.scrollback.len() != 4 || vtScrollbackText(s.scrollback.at(1).text) != "two" ||
+		vtScrollbackText(s.scrollback.at(3).text) != "ee" || !s.scrollback.at(3).wrapped {
+		t.Fatalf("rows leaving the top enter the scrollback: %d", s.scrollback.len())
 	}
 	s.Resize(8, 5)
 	// Growth brings the scrolled-off rows back above the content, adds blank
@@ -498,8 +536,8 @@ func TestVTScreenResize(t *testing.T) {
 	if r, c := s.CursorPosition(); r != 3 || c != 4 {
 		t.Fatalf("cursor after grow: (%d,%d)", r, c)
 	}
-	if len(s.scrollback) != 0 || s.scrollbackBytes != 0 {
-		t.Fatalf("restored rows must leave the scrollback: %d lines, %d bytes", len(s.scrollback), s.scrollbackBytes)
+	if s.scrollback.len() != 0 || s.scrollback.bytes != 0 {
+		t.Fatalf("restored rows must leave the scrollback: %d lines, %d bytes", s.scrollback.len(), s.scrollback.bytes)
 	}
 	if s.bottom != 4 {
 		t.Fatal("resize must reset the scroll region")
@@ -509,7 +547,7 @@ func TestVTScreenResize(t *testing.T) {
 	if got := s.TextRows(); got[0] != "ALT" {
 		t.Fatalf("alternate grid resize: %q", got)
 	}
-	for _, line := range s.scrollback {
+	for _, line := range vtScrollbackLines(s) {
 		if vtScrollbackText(line) == "ALT" {
 			t.Fatal("alternate grid rows must not enter the scrollback")
 		}
@@ -524,7 +562,7 @@ func TestVTScreenResetAndClone(t *testing.T) {
 	if s.HasVisibleContent() || s.attrs != (vtAttrs{}) || s.originMode || s.bottom != 1 {
 		t.Fatal("RIS must clear the grid and modes")
 	}
-	if len(s.scrollback) != 1 {
+	if s.scrollback.len() != 1 {
 		t.Fatal("RIS keeps the scrollback")
 	}
 	if !clone.HasVisibleContent() || clone.attrs.fg.kind != vtColorIndexed || !clone.originMode {
@@ -692,7 +730,7 @@ func TestVTScreenDumpFile(t *testing.T) {
 	s := newTerminalScreen(cols, rows)
 	s.Write(data)
 	r, c := s.CursorPosition()
-	fmt.Printf("size=%dx%d bytes=%d cursor=(%d,%d) alt=%v scrollback=%d\n", cols, rows, len(data), r, c, s.AlternateScreenActive(), len(s.scrollback))
+	fmt.Printf("size=%dx%d bytes=%d cursor=(%d,%d) alt=%v scrollback=%d\n", cols, rows, len(data), r, c, s.AlternateScreenActive(), s.scrollback.len())
 	for i, row := range s.TextRows() {
 		fmt.Printf("%3d|%s\n", i, row)
 	}
@@ -723,6 +761,33 @@ func TestVTScreenSavedCursorSurvivesFrame(t *testing.T) {
 	replica.Write([]byte("\x1b8Z"))
 	if got := replica.TextRows(); got[2] != "    Z" || got[0] != "hi" {
 		t.Fatalf("DECRC after the frame landed elsewhere: %q", got)
+	}
+}
+
+func TestVTScreenSavedCursorKeepsPendingWrap(t *testing.T) {
+	// The client keeps a cursor saved with a wrap pending at viewWidth and
+	// DECRC restores it (terminal_state_regression_test.dart).
+	s := newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\r\x1b8Z"))
+	if got := s.TextRows(); got[0] != "ABCDE" || got[1] != "Z" {
+		t.Fatalf("DECRC dropped the deferred wrap: %q", got)
+	}
+	s = newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\x1b[s\r\x1b[2;2H"))
+	replica := newTerminalScreen(5, 3)
+	replica.Write([]byte("\x1b[?6l\x1b[r\x1b[0m"))
+	replica.Write(s.RenderFrame())
+	replica.Write([]byte("\x1b8Z\x1b[uY"))
+	if got := replica.TextRows(); got[0] != "ABCDE" || got[1] != "Y" {
+		t.Fatalf("saved deferred wraps did not survive the frame: %q", got)
+	}
+	// A resize ends it, keeping the column past the old edge.
+	s = newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\r"))
+	s.Resize(7, 3)
+	s.Write([]byte("\x1b8Z"))
+	if got := s.TextRows(); got[0] != "ABCDEZ" {
+		t.Fatalf("DECRC after widening: %q", got)
 	}
 }
 
@@ -798,10 +863,10 @@ func TestVTScreenASCIIFastPathMatchesSlowPath(t *testing.T) {
 func TestVTScreenScrollbackRowsAreTrimmed(t *testing.T) {
 	s := newTerminalScreen(200, 2)
 	s.Write([]byte("hi\r\n\x1b[31mred\x1b[0m\r\n\r\n"))
-	if got := string(s.scrollback[0]); got != "hi" {
+	if got := string(s.scrollback.at(0).text); got != "hi" {
 		t.Fatalf("scrollback line retained %q, want the used prefix", got)
 	}
-	if got := string(s.scrollback[1]); got != "\x1b[0;31mred" {
+	if got := string(s.scrollback.at(1).text); got != "\x1b[0;31mred" {
 		t.Fatalf("scrollback line lost its rendition: %q", got)
 	}
 	vtRoundTrip(t, s)
@@ -975,18 +1040,18 @@ func TestVTScreenScrollbackByteBudget(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		s.Write([]byte(line.String() + "\x1b[0m\r\n"))
 	}
-	if s.scrollbackBytes > vtScrollbackByteLimit || len(s.scrollback) == 0 {
-		t.Fatalf("scrollback holds %d bytes in %d lines", s.scrollbackBytes, len(s.scrollback))
+	if s.scrollback.bytes > vtScrollbackByteLimit || s.scrollback.len() == 0 {
+		t.Fatalf("scrollback holds %d bytes in %d lines", s.scrollback.bytes, s.scrollback.len())
 	}
 	total := 0
-	for _, kept := range s.scrollback {
+	for _, kept := range vtScrollbackLines(s) {
 		total += len(kept)
 	}
-	if total != s.scrollbackBytes {
-		t.Fatalf("byte accounting drifted: %d vs %d", total, s.scrollbackBytes)
+	if total != s.scrollback.bytes {
+		t.Fatalf("byte accounting drifted: %d vs %d", total, s.scrollback.bytes)
 	}
 	s.Write([]byte("\x1b[3J"))
-	if s.scrollbackBytes != 0 {
+	if s.scrollback.bytes != 0 {
 		t.Fatal("ED 3 must reset the byte accounting")
 	}
 }

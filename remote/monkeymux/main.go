@@ -10471,6 +10471,15 @@ func buildWindowReplay(
 		keyboardModes = window.keyboardModeReplayLocked()
 	}
 	title := terminalTitleReplaySequence(window)
+	// The prefix cleared both screens. Behind an alternate-screen application
+	// the main screen is repainted before the alternate screen is entered
+	// again: the redraw or frame that follows paints only the alternate
+	// screen, and the application's exit would otherwise return to a blank
+	// main screen and lose the shell output and scrollback the model kept.
+	var mainScreen []byte
+	if window.alternateScreenModeActiveLocked() {
+		mainScreen = window.screenLocked().RenderMainScreen()
+	}
 	preModes := terminalModePreReplaySequence(window)
 	preHistoryClear := terminalPreHistoryClearSequence(window)
 	postModes := terminalModePostReplaySequence(window)
@@ -10480,13 +10489,14 @@ func buildWindowReplay(
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(preModes)+
-			len(preHistoryClear)+len(history)+
+		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
 	replay = append(replay, activeWindowReplayPrefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
+	replay = append(replay, mainScreen...)
 	replay = append(replay, preModes...)
 	replay = append(replay, preHistoryClear...)
 	replay = append(replay, history...)
@@ -15798,8 +15808,7 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		switch data[escapeIndex+1] {
 		case '[':
 		case 'c':
-			// RIS resets the terminal, keyboard encoding included.
-			w.resetKeyboardModesLocked()
+			w.resetTerminalModesLocked(true)
 			data = data[escapeIndex+2:]
 			continue
 		case '=':
@@ -15828,6 +15837,10 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
 		case 'm':
 			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+		case 'p':
+			if string(data[escapeIndex+2:end]) == "!" {
+				w.resetTerminalModesLocked(false)
+			}
 		}
 		if final == 'h' || final == 'l' {
 			params := string(data[escapeIndex+2 : end])
@@ -15847,6 +15860,30 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		data = data[end+1:]
 	}
+}
+
+// resetTerminalModesLocked applies RIS (full) or DECSTR to the modes a replay
+// restores, as the screen model and the client apply them to their own state,
+// so the next replay does not re-enable what the terminal already reset.
+// DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
+// and focus reporting to their power-up values; RIS also leaves the alternate
+// screen and resets mouse reporting and the keyboard encodings. Neither
+// touches colour-scheme updates (2031), which the client keeps outside its
+// terminal state, or ConPTY's win32-input-mode.
+func (w *muxWindow) resetTerminalModesLocked(full bool) {
+	modes := []string{"1", "6", "7", "1004", "2004"}
+	if full {
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		w.resetKeyboardModesLocked()
+	}
+	for _, mode := range modes {
+		if _, ok := w.privateModes[mode]; ok {
+			w.setPrivateModeLocked(mode, mode == "7")
+		}
+	}
+	w.setPrivateModeLocked("25", true)
+	w.insertModeEnabled, w.insertModeKnown = false, true
+	w.applicationKeypadEnabled, w.applicationKeypadKnown = false, true
 }
 
 func (w *muxWindow) storePartialCsiLocked(data []byte) {

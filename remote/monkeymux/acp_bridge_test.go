@@ -1592,6 +1592,9 @@ func TestReadProviderOutputFailsMalformedAndOversizedFrames(t *testing.T) {
 	}{
 		{name: "malformed", output: "not-json\n"},
 		{name: "oversized", output: strings.Repeat("x", acpMaxFrameBytes+1) + "\n"},
+		// Within the input limit, but escaping each < to < takes the
+		// wrapped event past the wire limit every client would fail on.
+		{name: "oversized once encoded", output: `"` + strings.Repeat("<", acpMaxFrameBytes/4) + "\"\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bridge := &acpBridge{

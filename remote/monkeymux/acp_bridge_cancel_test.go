@@ -383,3 +383,37 @@ func readTestAcpFrame(
 	}
 	return message
 }
+
+func TestAcpCancellationFloodWithoutReadsFailsProvider(t *testing.T) {
+	bridge := newTestAcpBridge()
+	// The provider never reads its input, so the first answer blocks the
+	// writer and the rest queue behind it.
+	providerInput, providerPeer := net.Pipe()
+	defer providerPeer.Close()
+	bridge.stdin = providerInput
+	var output bytes.Buffer
+	for id := 0; id < acpProviderInputMaxFrames+2; id++ {
+		fmt.Fprintf(&output, `{"jsonrpc":"2.0","id":%d,"method":"session/request_permission","params":{}}`+"\n", id)
+		output.WriteString(cancelFrame(fmt.Sprint(id)) + "\n")
+	}
+	queued := make(chan error, 1)
+	bridge.readProviderOutput(&output)
+	bridge.mu.Lock()
+	state, pending := bridge.state, len(bridge.providerInput)
+	bridge.mu.Unlock()
+	if state != "protocol_error" {
+		t.Fatalf("state = %q, want protocol_error once the input queue is exhausted", state)
+	}
+	if pending != 0 {
+		t.Fatalf("%d answers still queued after the provider failed", pending)
+	}
+	go func() { queued <- bridge.writeProvider(json.RawMessage(`{}`)) }()
+	select {
+	case err := <-queued:
+		if err == nil {
+			t.Fatal("write to a failed provider succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("write to a failed provider blocked")
+	}
+}
