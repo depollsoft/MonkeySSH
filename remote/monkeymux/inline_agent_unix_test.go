@@ -76,6 +76,8 @@ func TestRestoreRecordsCommandLinesOfAgentsWithoutLaunchEntry(t *testing.T) {
 		12: {"claude", "--resume", "abc"},
 		// OpenClaw renamed its process; its arguments are gone.
 		13: {"openclaw", "", "", ""},
+		// An editor open on a file named after the agent is not the agent.
+		14: {"vim", "hermes"},
 	}
 	processCommandLineForRestore = func(pid int) []string { return processes[pid] }
 	restore := &serverRestore{Windows: []restoreWindowState{
@@ -85,6 +87,7 @@ func TestRestoreRecordsCommandLinesOfAgentsWithoutLaunchEntry(t *testing.T) {
 		// Claude restarts from its launch entry and session id instead.
 		{ID: "@3", AgentTool: "claude", AgentToolConfirmed: true, CurrentCommand: "claude", PanePid: 12},
 		{ID: "@4", AgentTool: "openclaw", AgentToolConfirmed: true, CurrentCommand: "openclaw", PanePid: 13},
+		{ID: "@5", AgentTool: "hermes", AgentToolConfirmed: true, CurrentCommand: "hermes", PanePid: 14},
 	}}
 	enrichRestoreWithAgentCommandLines(restore)
 	if got := restore.Windows[0].CommandLine; len(got) != 4 || got[3] != "alfred" {
@@ -99,8 +102,31 @@ func TestRestoreRecordsCommandLinesOfAgentsWithoutLaunchEntry(t *testing.T) {
 	if got := restore.Windows[3].CommandLine; got != nil {
 		t.Fatalf("recorded a process title as a command line: %q", got)
 	}
+	if got := restore.Windows[4].CommandLine; got != nil {
+		t.Fatalf("recorded an editor as the agent: %q", got)
+	}
 	if options := createWindowOptionsForRestore(restore.Windows[3], true); options.command != "" {
 		t.Fatalf("relaunched openclaw from its process title: %q", options.command)
+	}
+}
+
+func TestCommandLineRunsAgent(t *testing.T) {
+	for _, tc := range []struct {
+		argv []string
+		runs bool
+	}{
+		{[]string{"hermes", "-p", "alfred"}, true},
+		{[]string{"/home/demo/.local/bin/hermes"}, true},
+		{[]string{"/venv/bin/python3", "/home/demo/.local/bin/hermes", "-p", "x"}, true},
+		{[]string{"/usr/bin/python3.12", "-u", "/home/demo/.local/bin/hermes"}, true},
+		{[]string{"vim", "hermes"}, false},
+		{[]string{"less", "/home/demo/.local/bin/hermes"}, false},
+		{[]string{"python3", "/srv/other.py", "hermes"}, false},
+		{nil, false},
+	} {
+		if got := commandLineRunsAgent(tc.argv, "hermes"); got != tc.runs {
+			t.Errorf("commandLineRunsAgent(%q) = %v, want %v", tc.argv, got, tc.runs)
+		}
 	}
 }
 

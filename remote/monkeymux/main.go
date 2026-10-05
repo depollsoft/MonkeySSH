@@ -3070,12 +3070,34 @@ func enrichRestoreWithAgentCommandLines(restore *serverRestore) {
 			continue
 		}
 		// The window's foreground process must still be that agent.
-		name := commandNameFromProcessFields(filepath.Base(argv[0]), strings.Join(argv, " "))
-		if agentToolFromCommandName(name) != tool || commandLineRelaunchCommand(tool, argv) == "" {
+		if !commandLineRunsAgent(argv, tool) || commandLineRelaunchCommand(tool, argv) == "" {
 			continue
 		}
 		window.CommandLine = argv
 	}
+}
+
+// commandLineRunsAgent reports whether argv starts the agent tool itself: as
+// its executable, or as the script a runtime runs, as in `python3 .../hermes`.
+// An argument that only names the agent, as in `vim hermes`, does not count.
+func commandLineRunsAgent(argv []string, tool string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	if agentToolFromCommandName(filepath.Base(argv[0])) == tool {
+		return true
+	}
+	// A versioned interpreter, such as python3.12, is still that runtime.
+	runtime := strings.TrimRight(cleanProcessCommandName(argv[0]), "0123456789.")
+	if !isGenericRuntimeCommandName(runtime) {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if !strings.HasPrefix(arg, "-") {
+			return agentToolFromCommandName(filepath.Base(arg)) == tool
+		}
+	}
+	return false
 }
 
 // processTitleOnly reports whether argv holds no arguments to restart a
