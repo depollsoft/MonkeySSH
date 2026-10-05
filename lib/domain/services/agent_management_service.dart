@@ -331,7 +331,6 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     packageName: '@opencode/cli',
     homebrewFormula: 'opencode-v2',
     sharesCliInstallation: true,
-    legacyInstallation: _openCodeLegacyInstallation,
   ),
   AgentRuntimeDefinition(
     id: 'acp:cursor',
@@ -342,12 +341,6 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://cursor.com/install',
     windowsInstallerUrl: 'https://cursor.com/install?win32=true',
     sharesCliInstallation: true,
-    officialVersionLookup: _cursorVersionLookup,
-    updateEnvironment: {
-      'AGENT_CLI_CREDENTIAL_STORE': 'memory',
-      'NO_COLOR': '1',
-    },
-    posixVersionFallback: _posixCursorVersionFallback,
   ),
   AgentRuntimeDefinition(
     id: 'acp:antigravity',
@@ -376,7 +369,6 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
     sharesCliInstallation: true,
-    officialVersionLookup: _hermesVersionLookup,
   ),
   AgentRuntimeDefinition(
     id: 'acp:openclaw',
@@ -397,7 +389,6 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     posixInstallerUrl: 'https://x.ai/cli/install.sh',
     windowsInstallerUrl: 'https://x.ai/cli/install.ps1',
     sharesCliInstallation: true,
-    officialVersionLookup: _grokVersionLookup,
   ),
   AgentRuntimeDefinition(
     id: 'acp:muse',
