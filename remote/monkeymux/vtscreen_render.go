@@ -24,18 +24,75 @@ func (s *terminalScreen) RenderFrame() []byte {
 	if s == nil {
 		return nil
 	}
-	out := make([]byte, 0, 4096)
-	// Insert mode is restored at the end; painting under it would shift
-	// cells instead of replacing them, such as the glyphs a soft wrap prints
-	// and the row then paints over.
+	g := s.grid()
+	out := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
+	if sco := s.scoCursor; sco.valid {
+		// SCOSC state for a later CSI u.
+		out = appendVTCursor(out, g.rows[sco.row], sco.row, sco.col, sco.pendingWrap)
+		out = append(out, "\x1b[s"...)
+	}
+	out = s.appendSavedCursor(out, g, *s.saved())
+	if s.insertMode {
+		out = append(out, "\x1b[4h"...)
+	}
+	if s.top != 0 || s.bottom != s.height-1 {
+		out = appendVTRegion(out, s.top, s.bottom)
+	}
+	if s.originMode {
+		out = append(out, "\x1b[?6h"...)
+	}
+	row := g.cursorRow
+	if s.originMode {
+		row -= s.top
+		if row < 0 {
+			row = 0
+		}
+	}
+	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap)
+	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
+	out = appendVTSGR(out, s.attrs)
+	return out
+}
+
+// RenderMainScreen paints the main screen an alternate-screen application
+// hides, with its scrollback and saved cursor, for a client that was reset
+// onto its main screen. A window replay sends it before re-entering the
+// alternate screen, so the application's exit finds the main screen the model
+// kept rather than a cleared one. The cursor is left where that exit puts it:
+// on the cursor mode 1049 saved on entry (home with the default rendition
+// once a DECSTR reset it), which the replayed 1049 entry saves again, or on
+// the main cursor for 47 and 1047. It is nil while the main screen shows;
+// RenderFrame paints it then.
+func (s *terminalScreen) RenderMainScreen() []byte {
+	if s == nil || !s.altActive {
+		return nil
+	}
+	g := &s.main
+	out := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	if saved := s.savedMain; s.altSavedCursor {
+		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap)
+		out = appendVTSGR(out, saved.attrs)
+		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
+	}
+	out = s.appendSavedCursor(out, g, s.savedMain)
+	return appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap)
+}
+
+// appendGridFrame paints g onto a reset client, after the main screen's
+// retained scrollback when withScrollback is set, and leaves the rendition
+// reset. Scroll region, origin mode and insert mode are left off.
+func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback bool) []byte {
+	// Insert mode stays off until RenderFrame restores it; painting under it
+	// would shift cells instead of replacing them, such as the glyphs a soft
+	// wrap prints and the row then paints over.
 	out = append(out, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l"...)
 	out = s.appendTabStops(out)
-	g := s.grid()
-	softWraps := s.renderedSoftWraps()
+	withScrollback = withScrollback && len(s.scrollback) > 0
+	softWraps := s.renderedSoftWraps(g, withScrollback)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}
-	if !s.altActive && len(s.scrollback) > 0 {
+	if withScrollback {
 		out = append(out, "\x1b[H"...)
 		// Stored lines are decoded only around a soft wrap; prev keeps the
 		// last line's cells when its own wrap needed them.
@@ -99,83 +156,64 @@ func (s *terminalScreen) RenderFrame() []byte {
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7l"...)
 	}
-	out = append(out, "\x1b[0m"...)
-	if sco := s.scoCursor; sco.valid {
-		// SCOSC state for a later CSI u.
-		out = appendVTCursorPosition(out, sco.row, sco.col)
-		out = append(out, "\x1b[s"...)
-	}
-	if saved := *s.saved(); saved.valid {
-		// DECSC state: live output may DECRC into it after the frame. DECSC
-		// captures position, rendition, origin mode and charsets, so stage
-		// all of them, save, then undo the staging.
-		if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {
-			out = appendVTRegion(out, s.top, s.bottom)
-		}
-		if saved.originMode {
-			out = append(out, "\x1b[?6h"...)
-			out = appendVTCursorPosition(out, saved.row-s.top, saved.col)
-		} else {
-			out = appendVTCursorPosition(out, saved.row, saved.col)
-		}
-		out = appendVTSGR(out, saved.attrs)
-		out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
-		out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
-		out = appendVTCharsets(out, false, false, false)
-	}
-	if s.insertMode {
-		out = append(out, "\x1b[4h"...)
-	}
-	if s.top != 0 || s.bottom != s.height-1 {
-		out = appendVTRegion(out, s.top, s.bottom)
-	}
-	if s.originMode {
-		out = append(out, "\x1b[?6h"...)
-	}
-	row := g.cursorRow
-	if s.originMode {
-		row -= s.top
-		if row < 0 {
-			row = 0
-		}
-	}
-	if g.pendingWrap && s.width > 0 {
-		// A deferred wrap cannot be addressed directly: re-print the glyph in
-		// the last column so the client defers the wrap exactly as the model.
-		// A last column with nothing in it, which a tab with no stop left
-		// reaches, is reached by that tab again rather than by printing a
-		// space into it.
-		cells := g.rows[g.cursorRow]
-		if vtSoftWrapEdgePrintable(cells) {
-			col := s.width - 1
-			if cells[col].width == 0 && col > 0 {
-				col--
-			}
-			out = appendVTCursorPosition(out, row, col)
-			out = renderVTGlyphs(out, cells[col:])
-		} else {
-			out = appendVTCursorPosition(out, row, s.width-1)
-			out = append(out, '\t')
-		}
-	} else {
-		out = appendVTCursorPosition(out, row, g.cursorCol)
-	}
-	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
-	out = appendVTSGR(out, s.attrs)
-	return out
+	return append(out, "\x1b[0m"...)
 }
 
-// renderedSoftWraps reports whether a frame has to reproduce a soft wrap: in
-// the scrollback it emits, or on the screen below its first row, or into the
-// first row from the scrollback.
-func (s *terminalScreen) renderedSoftWraps() bool {
-	g := s.grid()
+// appendSavedCursor reproduces the DECSC state saved on g's screen, which
+// live output may DECRC into after the frame. DECSC captures position,
+// deferred wrap, rendition, origin mode and charsets, so all of them are
+// staged, saved, and the staging undone.
+func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedCursor) []byte {
+	if !saved.valid {
+		return out
+	}
+	if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {
+		out = appendVTRegion(out, s.top, s.bottom)
+	}
+	row := saved.row
+	if saved.originMode {
+		out = append(out, "\x1b[?6h"...)
+		row -= s.top
+	}
+	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap)
+	out = appendVTSGR(out, saved.attrs)
+	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
+	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
+	return appendVTCharsets(out, false, false, false)
+}
+
+// appendVTCursor moves the client cursor to row, col of a row holding cells.
+// A deferred wrap cannot be addressed directly, so the glyph in the last
+// column is printed again and the client defers the wrap exactly as the
+// model. A last column with nothing in it, which a tab with no stop left
+// reaches, is reached by that tab again rather than by printing a space into
+// it. The rendition is left at the reprinted glyph's.
+func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool) []byte {
+	if !pendingWrap || len(cells) == 0 {
+		return appendVTCursorPosition(out, row, col)
+	}
+	last := len(cells) - 1
+	if !vtSoftWrapEdgePrintable(cells) {
+		out = appendVTCursorPosition(out, row, last)
+		return append(out, '\t')
+	}
+	if cells[last].width == 0 && last > 0 {
+		last--
+	}
+	out = appendVTCursorPosition(out, row, last)
+	return renderVTGlyphs(out, cells[last:])
+}
+
+// renderedSoftWraps reports whether painting g has to reproduce a soft wrap:
+// in the scrollback emitted with it, or below its first row, or into the first
+// row from that scrollback.
+func (s *terminalScreen) renderedSoftWraps(g *vtGrid, withScrollback bool) bool {
 	for r, wrapped := range g.wrapped {
-		if wrapped && (r > 0 || (!s.altActive && len(s.scrollback) > 0)) {
+		if wrapped && (r > 0 || withScrollback) {
 			return true
 		}
 	}
-	if s.altActive {
+	if !withScrollback {
 		return false
 	}
 	for _, wrapped := range s.scrollbackWrapped[min(1, len(s.scrollbackWrapped)):] {

@@ -725,6 +725,33 @@ func TestVTScreenSavedCursorSurvivesFrame(t *testing.T) {
 	}
 }
 
+func TestVTScreenSavedCursorKeepsPendingWrap(t *testing.T) {
+	// The client keeps a cursor saved with a wrap pending at viewWidth and
+	// DECRC restores it (terminal_state_regression_test.dart).
+	s := newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\r\x1b8Z"))
+	if got := s.TextRows(); got[0] != "ABCDE" || got[1] != "Z" {
+		t.Fatalf("DECRC dropped the deferred wrap: %q", got)
+	}
+	s = newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\x1b[s\r\x1b[2;2H"))
+	replica := newTerminalScreen(5, 3)
+	replica.Write([]byte("\x1b[?6l\x1b[r\x1b[0m"))
+	replica.Write(s.RenderFrame())
+	replica.Write([]byte("\x1b8Z\x1b[uY"))
+	if got := replica.TextRows(); got[0] != "ABCDE" || got[1] != "Y" {
+		t.Fatalf("saved deferred wraps did not survive the frame: %q", got)
+	}
+	// A resize ends it, keeping the column past the old edge.
+	s = newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b7\r"))
+	s.Resize(7, 3)
+	s.Write([]byte("\x1b8Z"))
+	if got := s.TextRows(); got[0] != "ABCDEZ" {
+		t.Fatalf("DECRC after widening: %q", got)
+	}
+}
+
 func TestVTScreenRepeatSoftResetAndAlignment(t *testing.T) {
 	s := newTerminalScreen(10, 3)
 	s.Write([]byte("\x1b(0q\x1b[4b\x1b(B"))

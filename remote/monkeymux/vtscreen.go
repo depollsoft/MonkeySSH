@@ -23,6 +23,9 @@ type terminalScreen struct {
 	main      vtGrid
 	alt       vtGrid
 	altActive bool
+	// altSavedCursor records that the alternate screen was entered with mode
+	// 1049, which saved the main cursor into savedMain for its exit to restore.
+	altSavedCursor bool
 	// scratchRows holds the rows leaving a scroll region while they are
 	// recycled as the rows entering it, so scrolling allocates nothing.
 	scratchRows [][]vtCell
@@ -154,14 +157,17 @@ type vtGrid struct {
 }
 
 type vtSavedCursor struct {
-	valid      bool
-	row        int
-	col        int
-	attrs      vtAttrs
-	originMode bool
-	g0Graphics bool
-	g1Graphics bool
-	shiftOut   bool
+	valid bool
+	row   int
+	col   int
+	// pendingWrap is a cursor saved past the last glyph of a full row: the
+	// client keeps it at viewWidth and DECRC restores the deferred wrap.
+	pendingWrap bool
+	attrs       vtAttrs
+	originMode  bool
+	g0Graphics  bool
+	g1Graphics  bool
+	shiftOut    bool
 }
 
 // vtCell holds one grid cell. r == 0 means blank. width is 1 or 2 for a cell
@@ -370,11 +376,18 @@ func (s *terminalScreen) Resize(width, height int) {
 		}
 		s.tabs = tabs
 	}
+	oldWidth := s.width
 	s.width = width
 	s.height = height
 	s.top = 0
 	s.bottom = height - 1
 	for _, saved := range []*vtSavedCursor{&s.savedMain, &s.savedAlt, &s.scoCursor} {
+		// The client keeps a deferred wrap as the column past the old edge
+		// and clamps it like any other saved column, so a resize ends it.
+		if saved.pendingWrap {
+			saved.col = oldWidth
+			saved.pendingWrap = false
+		}
 		if saved.row >= height {
 			saved.row = height - 1
 		}
@@ -1195,14 +1208,15 @@ func (s *terminalScreen) saved() *vtSavedCursor {
 func (s *terminalScreen) saveCursor() {
 	g := s.grid()
 	*s.saved() = vtSavedCursor{
-		valid:      true,
-		row:        g.cursorRow,
-		col:        g.cursorCol,
-		attrs:      s.attrs,
-		originMode: s.originMode,
-		g0Graphics: s.g0Graphics,
-		g1Graphics: s.g1Graphics,
-		shiftOut:   s.shiftOut,
+		valid:       true,
+		row:         g.cursorRow,
+		col:         g.cursorCol,
+		pendingWrap: g.pendingWrap,
+		attrs:       s.attrs,
+		originMode:  s.originMode,
+		g0Graphics:  s.g0Graphics,
+		g1Graphics:  s.g1Graphics,
+		shiftOut:    s.shiftOut,
 	}
 }
 
@@ -1233,14 +1247,20 @@ func (s *terminalScreen) restoreCursor() {
 		g.pendingWrap = false
 		return
 	}
-	g.cursorRow = clampInt(saved.row, 0, s.height-1)
-	g.cursorCol = clampInt(saved.col, 0, s.width-1)
+	s.restoreSavedPosition(g, saved)
 	s.attrs = saved.attrs
 	s.originMode = saved.originMode
 	s.g0Graphics = saved.g0Graphics
 	s.g1Graphics = saved.g1Graphics
 	s.shiftOut = saved.shiftOut
-	g.pendingWrap = false
+}
+
+// restoreSavedPosition puts the cursor back where saved left it, deferred
+// wrap included, as the client's Buffer.restoreCursor does.
+func (s *terminalScreen) restoreSavedPosition(g *vtGrid, saved vtSavedCursor) {
+	g.cursorRow = clampInt(saved.row, 0, s.height-1)
+	g.cursorCol = clampInt(saved.col, 0, s.width-1)
+	g.pendingWrap = saved.pendingWrap && g.cursorCol == s.width-1
 }
 
 func clampInt(v, lo, hi int) int {
@@ -1725,13 +1745,11 @@ func (s *terminalScreen) csiDispatch(final byte) {
 			}
 		}
 	case 's':
-		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol}
+		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol, pendingWrap: g.pendingWrap}
 	case 'u':
 		if s.scoCursor.valid {
 			defer s.noteCursorRow(g.cursorRow)
-			g.cursorRow = clampInt(s.scoCursor.row, 0, s.height-1)
-			g.cursorCol = clampInt(s.scoCursor.col, 0, s.width-1)
-			g.pendingWrap = false
+			s.restoreSavedPosition(g, s.scoCursor)
 		}
 	}
 }
@@ -1787,7 +1805,10 @@ func (s *terminalScreen) softReset() {
 	s.g0Graphics = false
 	s.g1Graphics = false
 	s.shiftOut = false
-	*s.saved() = vtSavedCursor{}
+	// DECSTR resets the terminal, not the visible screen: both screens'
+	// saved cursors go, as in the client's softReset.
+	s.savedMain = vtSavedCursor{}
+	s.savedAlt = vtSavedCursor{}
 	s.grid().pendingWrap = false
 }
 
@@ -1817,6 +1838,7 @@ func (s *terminalScreen) switchScreen(toAlt bool, saveCursor bool, clear bool) {
 			s.saveCursor()
 		}
 		s.altActive = true
+		s.altSavedCursor = saveCursor
 		if clear {
 			s.alt = newVTGrid(s.width, s.height)
 		}
@@ -1852,9 +1874,13 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 			g.wrapped[r] = false
 		}
 	case 3:
-		s.scrollback = nil
-		s.scrollbackWrapped = nil
-		s.scrollbackBytes = 0
+		// Only the main screen has a scrollback; on the alternate screen
+		// this erases nothing, as in the client's Buffer.clearScrollback.
+		if !s.altActive {
+			s.scrollback = nil
+			s.scrollbackWrapped = nil
+			s.scrollbackBytes = 0
+		}
 	}
 	g.pendingWrap = false
 }

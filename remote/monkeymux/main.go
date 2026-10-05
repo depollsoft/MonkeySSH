@@ -10471,6 +10471,15 @@ func buildWindowReplay(
 		keyboardModes = window.keyboardModeReplayLocked()
 	}
 	title := terminalTitleReplaySequence(window)
+	// The prefix cleared both screens. Behind an alternate-screen application
+	// the main screen is repainted before the alternate screen is entered
+	// again: the redraw or frame that follows paints only the alternate
+	// screen, and the application's exit would otherwise return to a blank
+	// main screen and lose the shell output and scrollback the model kept.
+	var mainScreen []byte
+	if window.alternateScreenModeActiveLocked() {
+		mainScreen = window.screenLocked().RenderMainScreen()
+	}
 	preModes := terminalModePreReplaySequence(window)
 	preHistoryClear := terminalPreHistoryClearSequence(window)
 	postModes := terminalModePostReplaySequence(window)
@@ -10480,13 +10489,14 @@ func buildWindowReplay(
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(preModes)+
-			len(preHistoryClear)+len(history)+
+		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
 	replay = append(replay, activeWindowReplayPrefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
+	replay = append(replay, mainScreen...)
 	replay = append(replay, preModes...)
 	replay = append(replay, preHistoryClear...)
 	replay = append(replay, history...)
