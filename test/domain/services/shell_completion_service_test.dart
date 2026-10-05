@@ -8,6 +8,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/presentation/screens/terminal/terminal_screen_policy.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
@@ -304,6 +305,77 @@ void main() {
     });
   }
 
+  group('interactive zsh probe', () {
+    ShellCompletionInvocation argument(String token, {String? shell}) =>
+        ShellCompletionInvocation(
+          commandLine: 'cat $token',
+          cursorOffset: 4 + token.length,
+          token: token,
+          tokenStart: 4,
+          mode: ShellCompletionMode.argument,
+          commandName: 'cat',
+          shellCommand: shell,
+          words: ['cat', token],
+          wordIndex: 1,
+          workingDirectory: '/repo',
+        );
+
+    Future<int> countProbes(List<ShellCompletionInvocation> invocations) async {
+      final client = MockSshClient();
+      final session = _buildShellCompletionSession(
+        client,
+        connectionId: 105,
+        hostId: 105,
+      );
+      var probes = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((call) async {
+            final isProbe = call.namedArguments[#pty] != null;
+            if (isProbe) probes++;
+            final exec = _MockSshExecSession();
+            when(() => exec.stdout).thenAnswer((_) => const Stream.empty());
+            when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+            when(() => exec.done).thenAnswer((_) => Future<void>.value());
+            final input = _MockByteSink();
+            when(input.close).thenAnswer((_) async {});
+            when(() => exec.stdin).thenReturn(input);
+            when(() => exec.exitCode).thenReturn(isProbe ? 78 : 0);
+            return exec;
+          });
+      final service = ShellCompletionService();
+      for (final invocation in invocations) {
+        await service.complete(session, invocation);
+      }
+      return probes;
+    }
+
+    test('is skipped when the invocation names a non-zsh shell', () async {
+      expect(
+        await countProbes([
+          argument('a', shell: '/bin/bash'),
+          argument('b', shell: 'fish'),
+        ]),
+        0,
+      );
+    });
+
+    test(
+      'runs once per connection and shell after reporting unsupported',
+      () async {
+        expect(
+          await countProbes([
+            argument('a'),
+            argument('ab'),
+            // A newly detected shell is probed again.
+            argument('abc', shell: '-zsh'),
+            argument('abcd', shell: '-zsh'),
+          ]),
+          2,
+        );
+      },
+    );
+  });
+
   group('buildShellCompletionInvocation', () {
     test('uses a captured prompt prefix to isolate the command text', () {
       const prompt = 'depoll@mac-mini ~ % ';
@@ -432,6 +504,129 @@ void main() {
       expect(invocation.mode, ShellCompletionMode.argument);
       expect(invocation.words, ['tmux']);
       expect(invocation.wordIndex, 1);
+    });
+
+    test('keeps Windows backslashes as path separators', () {
+      const prompt = r'PS C:\Users> ';
+      ShellCompletionInvocation? build(String command, {bool windows = true}) =>
+          buildShellCompletionInvocation(
+            terminalText: '$prompt$command',
+            terminalCursorOffset: '$prompt$command'.length,
+            promptPrefix: prompt,
+            windows: windows,
+          );
+
+      final invocation = build(r'cd C:\Users\de')!;
+      expect(invocation.token, r'C:\Users\de');
+      expect(invocation.tokenStart, 3);
+      expect(invocation.mode, ShellCompletionMode.directory);
+      expect(invocation.windows, isTrue);
+      expect(build(r'cd C:\')?.token, r'C:\');
+      // POSIX shells still treat the backslash as an escape.
+      expect(build(r'cd C:\Users\de', windows: false)?.token, 'C:Usersde');
+      expect(build(r'cd C:\', windows: false), isNull);
+
+      final suggestion = parseShellCompletionOutput(
+        'shell\tpowershell\ndirectory\tC:\\Users\\demo\n',
+        invocation,
+        windows: true,
+      ).single;
+      expect(suggestion.replacement, r'C:\Users\demo/');
+      expect(suggestion.replacementStart, 3);
+      expect(
+        shouldAcceptShellCompletionSuggestion(
+          originalInvocation: invocation,
+          currentInvocation: invocation,
+          suggestion: suggestion,
+        ),
+        isTrue,
+      );
+    });
+
+    test('Windows path fallback splits on either separator', () {
+      final script = buildWindowsShellCompletionScript(
+        const ShellCompletionInvocation(
+          commandLine: r'cd C:\Users\de',
+          cursorOffset: 14,
+          token: r'C:\Users\de',
+          tokenStart: 3,
+          mode: ShellCompletionMode.directory,
+          commandName: 'cd',
+          workingDirectory: null,
+          windows: true,
+        ),
+      );
+      expect(script, contains(r"$__flToken='C:\Users\de'"));
+      expect(
+        script,
+        contains(r"$__flPrefix=($__flToken -replace '[^/\\]*$','')"),
+      );
+      expect(script, contains(r"$__flBase=($__flToken -replace '.*[/\\]','')"));
+    });
+  });
+
+  group('Windows completion quoting', () {
+    const invocation = ShellCompletionInvocation(
+      commandLine: 'Get-Content rep',
+      cursorOffset: 15,
+      token: 'rep',
+      tokenStart: 12,
+      mode: ShellCompletionMode.argument,
+      commandName: 'Get-Content',
+      words: ['Get-Content', 'rep'],
+      wordIndex: 1,
+      workingDirectory: null,
+      windows: true,
+    );
+
+    List<String> replacements(String output) => parseShellCompletionOutput(
+      output,
+      invocation,
+      windows: true,
+    ).map((suggestion) => suggestion.replacement).toList();
+
+    test('PowerShell literals are single-quoted, cmd.exe double-quoted', () {
+      expect(
+        replacements(
+          'shell\tpowershell\nfile\treport\$draft.txt\n'
+          "file\treport \$(calc) it's.txt\nfile\treport.txt\n",
+        ),
+        [r"'report $(calc) it''s.txt'", r"'report$draft.txt'", 'report.txt'],
+      );
+      expect(
+        replacements(
+          'shell\tcmd\nfile\treport\$draft.txt\nfile\tmy report.txt\n',
+        ),
+        ['"my report.txt"', r'report$draft.txt'],
+      );
+      expect(
+        escapePowerShellCompletionToken('\u2019quote'),
+        "'\u2019\u2019quote'",
+      );
+    });
+
+    test('keeps TabExpansion2 insertion text verbatim', () {
+      expect(
+        replacements(
+          'shell\tpwsh\n'
+          'argument\t\$env:PATH\t\$env:PATH\n'
+          "file\t./report\$draft.txt\t'.\\report\$draft.txt'\n",
+        ),
+        [r'$env:PATH', r"'.\report$draft.txt'"],
+      );
+    });
+
+    test('the helper reports its resolved shell first', () {
+      final script = buildWindowsShellCompletionScript(invocation);
+      final shellLine = script.indexOf(
+        r"[void]$__flOut.Append('shell');[void]$__flOut.Append([char]9);"
+        r'[void]$__flOut.Append($__flShell)',
+      );
+      expect(
+        shellLine,
+        greaterThan(script.indexOf(r'$__flShell=__flResolveShellName')),
+      );
+      expect(script, contains(r'__flEmit $__flKind $__flText $__flNative'));
     });
   });
 
@@ -972,6 +1167,12 @@ void main() {
       escapeShellCompletionToken('Project Files/(draft)'),
       r'Project\ Files/\(draft\)',
     );
+  });
+
+  test('escapeShellCompletionToken keeps surrogate pairs intact', () {
+    final escaped = escapeShellCompletionToken('\u{1F600} notes.txt');
+    expect(escaped, '\\\u{1F600}\\ notes.txt');
+    expect(utf8.decode(utf8.encode(escaped)), escaped);
   });
 
   test('remote command sources startup files through the user shell', () {

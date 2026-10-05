@@ -162,6 +162,29 @@ void main() {
       expect(tracker.trackedHyperlinkCount, 0);
     });
 
+    test('drops link membership from cells an unlinked write replaces', () {
+      const url = 'https://example.com/hidden';
+      terminal.write('\x1b]8;;$url\x07label\x1b]8;;\x07\rplain');
+
+      for (var x = 0; x < 5; x++) {
+        expect(tracker.resolveLinkAt(CellOffset(x, 0)), isNull);
+      }
+      expect(tracker.resolveLinkOnRow(0), isNull);
+      expect(tracker.hasLinkInRowRange(0, 0, 4), isFalse);
+    });
+
+    test('a partial overwrite leaves only the surviving linked cells', () {
+      const url = 'https://example.com/partial';
+      terminal.write('\x1b]8;;$url\x07label\x1b]8;;\x07\rXY');
+
+      expect(tracker.resolveLinkAt(const CellOffset(1, 0)), isNull);
+      expect(tracker.resolveLinkAt(const CellOffset(2, 0)), url);
+      expect(tracker.resolveLinkAt(const CellOffset(4, 0)), url);
+      expect(tracker.hasLinkInRowRange(0, 0, 1), isFalse);
+      expect(tracker.hasLinkInRowRange(0, 0, 2), isTrue);
+      expect(tracker.resolveLinkOnRow(0), url);
+    });
+
     test('tracks an OSC 8 link delivered across separate writes', () {
       terminal
         ..write('\u001b]8;;https://example.com/chunked\u0007')

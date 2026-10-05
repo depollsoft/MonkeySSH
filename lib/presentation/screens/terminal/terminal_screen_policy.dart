@@ -518,8 +518,10 @@ bool shouldAcceptShellCompletionSuggestion({
       );
       return currentInvocation.commandName == originalInvocation.commandName &&
           currentPatternPrefix == originalPatternPrefix &&
-          normalizeShellCompletionToken(suggestion.replacement)
-              .startsWith(currentInvocation.token);
+          shellCompletionReplacementLiteral(
+            suggestion.replacement,
+            windows: originalInvocation.windows,
+          ).startsWith(currentInvocation.token);
     }
     if (currentInvocation.cursorOffset < suggestion.replacementStart) {
       return false;
@@ -553,8 +555,40 @@ bool shouldAcceptShellCompletionSuggestion({
     return false;
   }
 
-  return normalizeShellCompletionToken(suggestion.replacement)
-      .startsWith(currentInvocation.token);
+  return shellCompletionReplacementLiteral(
+    suggestion.replacement,
+    windows: originalInvocation.windows,
+  ).startsWith(currentInvocation.token);
+}
+
+/// Number of Backspaces that erase the text an accepted [suggestion]
+/// replaces, or null when that range no longer exists.
+///
+/// Offsets are UTF-16 indexes, but the shell deletes one character per
+/// Backspace, so the count is the Unicode scalars in the replaced text.
+int? shellCompletionBackspaceCount({
+  required ShellCompletionInvocation originalInvocation,
+  required ShellCompletionInvocation? currentInvocation,
+  required ShellCompletionSuggestion suggestion,
+}) {
+  var line = originalInvocation.commandLine;
+  var start = suggestion.replacementStart;
+  var end = originalInvocation.cursorOffset;
+  if (currentInvocation != null &&
+      suggestion.kind == ShellCompletionSuggestionKind.history) {
+    line = currentInvocation.commandLine;
+    start = start == 0 ? 0 : currentInvocation.tokenStart;
+    end = currentInvocation.cursorOffset;
+  } else if (currentInvocation != null &&
+      currentInvocation.mode == originalInvocation.mode &&
+      currentInvocation.tokenStart == originalInvocation.tokenStart) {
+    line = currentInvocation.commandLine;
+    end = currentInvocation.cursorOffset;
+  }
+  if (start < 0 || end < start || end > line.length) {
+    return null;
+  }
+  return line.substring(start, end).runes.length;
 }
 
 /// Filters visible shell completion suggestions against the current command.

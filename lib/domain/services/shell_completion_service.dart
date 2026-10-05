@@ -58,6 +58,7 @@ class ShellCompletionInvocation {
     this.words = const <String>[],
     this.wordIndex = 0,
     this.maxSuggestions = 24,
+    this.windows = false,
   });
 
   /// Current command text without the prompt.
@@ -92,6 +93,10 @@ class ShellCompletionInvocation {
 
   /// Maximum number of suggestions to keep.
   final int maxSuggestions;
+
+  /// Whether the remote shell is cmd.exe or PowerShell, where `\` separates
+  /// path components instead of escaping the next character.
+  final bool windows;
 }
 
 /// A completion candidate that can be applied to the terminal line.
@@ -167,6 +172,8 @@ class ShellCompletionService {
       <String, _ShellHistoryCacheEntry>{};
   final Map<String, Future<List<_PreparedShellHistoryCommand>>>
   _historyInFlight = <String, Future<List<_PreparedShellHistoryCommand>>>{};
+  // Connection/shell pairs whose interactive zsh probe exited as unsupported.
+  final Set<String> _interactiveZshUnsupported = <String>{};
 
   /// Runs a completion query for [invocation].
   Future<List<ShellCompletionSuggestion>> complete(
@@ -337,7 +344,7 @@ class ShellCompletionService {
       return cached.commands;
     }
 
-    final inFlightKey = _shellHistoryInFlightKey(session, invocation);
+    final inFlightKey = _connectionShellKey(session, invocation);
     final pending = _historyInFlight[inFlightKey];
     if (pending != null) {
       return pending;
@@ -443,8 +450,10 @@ class ShellCompletionService {
     SshSession session,
     ShellCompletionInvocation invocation,
   ) async {
+    final zshProbeKey = _connectionShellKey(session, invocation);
     if (!session.remoteIsWindows &&
-        _shouldTryInteractiveZshCompletion(invocation)) {
+        _shouldTryInteractiveZshCompletion(invocation) &&
+        !_interactiveZshUnsupported.contains(zshProbeKey)) {
       try {
         final result = await _runInteractiveZshCompletionCommand(
           session,
@@ -452,6 +461,12 @@ class ShellCompletionService {
         );
         if (result.didComplete) {
           return result.output;
+        }
+        if (result.unsupported) {
+          if (_interactiveZshUnsupported.length >= 64) {
+            _interactiveZshUnsupported.clear();
+          }
+          _interactiveZshUnsupported.add(zshProbeKey);
         }
       } on Object catch (error) {
         DiagnosticsLogService.instance.debug(
@@ -512,6 +527,7 @@ class ShellCompletionService {
     return _InteractiveCompletionResult(
       output: output,
       didComplete: _containsInteractiveZshCompletionDoneMarker(output),
+      unsupported: exec.exitCode == _interactiveZshUnsupportedExitCode,
     );
   }
 
@@ -562,10 +578,12 @@ class _InteractiveCompletionResult {
   const _InteractiveCompletionResult({
     required this.output,
     required this.didComplete,
+    required this.unsupported,
   });
 
   final String output;
   final bool didComplete;
+  final bool unsupported;
 }
 
 class _ShellHistoryCacheEntry {
@@ -612,7 +630,7 @@ String _shellHistoryCacheKey(
   ShellCompletionInvocation invocation,
 ) => [session.hostId, invocation.shellCommand ?? ''].join('\u001f');
 
-String _shellHistoryInFlightKey(
+String _connectionShellKey(
   SshSession session,
   ShellCompletionInvocation invocation,
 ) => [session.connectionId, invocation.shellCommand ?? ''].join('\u001f');
@@ -630,6 +648,7 @@ ShellCompletionInvocation? buildShellCompletionInvocation({
   String? workingDirectory,
   String? shellCommand,
   int maxSuggestions = 24,
+  bool windows = false,
 }) {
   final commandSnapshot = resolveShellCompletionCommandLine(
     terminalText: terminalText,
@@ -641,6 +660,7 @@ ShellCompletionInvocation? buildShellCompletionInvocation({
     workingDirectory: workingDirectory,
     shellCommand: shellCommand,
     maxSuggestions: maxSuggestions,
+    windows: windows,
   );
   if (promptPrefix == null ||
       commandSnapshot == null ||
@@ -663,6 +683,7 @@ ShellCompletionInvocation? buildShellCompletionInvocation({
     workingDirectory: workingDirectory,
     shellCommand: shellCommand,
     maxSuggestions: maxSuggestions,
+    windows: windows,
   );
   return fallbackInvocation ?? invocation;
 }
@@ -672,6 +693,7 @@ ShellCompletionInvocation? _buildShellCompletionInvocationFromCommandSnapshot({
   required String? workingDirectory,
   required String? shellCommand,
   required int maxSuggestions,
+  required bool windows,
 }) {
   if (commandSnapshot == null) {
     return null;
@@ -686,28 +708,35 @@ ShellCompletionInvocation? _buildShellCompletionInvocationFromCommandSnapshot({
     return null;
   }
 
-  final tokenState = parseShellCompletionToken(commandLine, cursorOffset);
+  final tokenState = parseShellCompletionToken(
+    commandLine,
+    cursorOffset,
+    windows: windows,
+  );
   if (tokenState == null || _containsShellQuote(tokenState.token)) {
     return null;
   }
 
+  // Windows shells keep backslashes: they are path separators there.
+  String normalize(String token) =>
+      windows ? token : normalizeShellCompletionToken(token);
   final commandName = tokenState.words.isEmpty
       ? null
-      : normalizeShellCompletionToken(tokenState.words.first);
+      : normalize(tokenState.words.first);
   final mode = tokenState.wordIndex == 0
       ? ShellCompletionMode.command
       : _shellCompletionArgumentMode(
           commandName: commandName,
           wordIndex: tokenState.wordIndex,
         );
-  final normalizedToken = normalizeShellCompletionToken(tokenState.token);
+  final normalizedToken = normalize(tokenState.token);
 
   if (mode == ShellCompletionMode.command && normalizedToken.length < 2) {
     return null;
   }
 
   final normalizedWords = tokenState.words
-      .map(normalizeShellCompletionToken)
+      .map(normalize)
       .toList(growable: false);
 
   return ShellCompletionInvocation(
@@ -722,6 +751,7 @@ ShellCompletionInvocation? _buildShellCompletionInvocationFromCommandSnapshot({
     wordIndex: tokenState.wordIndex,
     workingDirectory: workingDirectory,
     maxSuggestions: maxSuggestions,
+    windows: windows,
   );
 }
 
@@ -1116,11 +1146,14 @@ class ShellCompletionTokenState {
 }
 
 /// Parses the token being edited at [cursorOffset].
+///
+/// With [windows], a backslash is an ordinary path character, not an escape.
 @visibleForTesting
 ShellCompletionTokenState? parseShellCompletionToken(
   String commandLine,
-  int cursorOffset,
-) {
+  int cursorOffset, {
+  bool windows = false,
+}) {
   if (cursorOffset < 0 || cursorOffset > commandLine.length) {
     return null;
   }
@@ -1144,7 +1177,7 @@ ShellCompletionTokenState? parseShellCompletionToken(
       }
       continue;
     }
-    if (char == r'\') {
+    if (char == r'\' && !windows) {
       if (!inWord) {
         inWord = true;
         tokenStart = index;
@@ -1432,8 +1465,10 @@ String normalizeShellCompletionToken(String token) {
 
 /// Parses side-channel completion helper output.
 ///
-/// When [windows] is true, replacement text is quoted for cmd.exe/PowerShell
-/// (double quotes) rather than POSIX backslash escaping.
+/// When [windows] is true, replacement text is quoted for the Windows shell the
+/// helper resolved (its leading `shell` line): PowerShell gets single-quoted
+/// literals, cmd.exe double quotes. A third field carries PowerShell's own
+/// insertion text, which is used verbatim.
 @visibleForTesting
 List<ShellCompletionSuggestion> parseShellCompletionOutput(
   String output,
@@ -1443,6 +1478,12 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
   final suggestions = <ShellCompletionSuggestion>[];
   final seen = <String>{};
   var scannedLineCount = 0;
+  var escape = escapeShellCompletionToken;
+  if (windows) {
+    escape = _windowsCompletionEscape(
+      _normalizeShellCompletionCommandName(invocation.shellCommand),
+    );
+  }
 
   for (final rawLine in const LineSplitter().convert(output)) {
     scannedLineCount += 1;
@@ -1455,8 +1496,22 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
     }
 
     final rawKind = rawLine.substring(0, separatorIndex);
-    final value = rawLine.substring(separatorIndex + 1).trimRight();
-    if (!_isSafeCompletionValue(value)) {
+    var value = rawLine.substring(separatorIndex + 1).trimRight();
+    var nativeReplacement = '';
+    if (windows) {
+      if (rawKind == 'shell') {
+        escape = _windowsCompletionEscape(value);
+        continue;
+      }
+      final nativeIndex = value.indexOf('\t');
+      if (nativeIndex >= 0) {
+        nativeReplacement = value.substring(nativeIndex + 1);
+        value = value.substring(0, nativeIndex);
+      }
+    }
+    if (!_isSafeCompletionValue(value) ||
+        (nativeReplacement.isNotEmpty &&
+            !_isSafeCompletionValue(nativeReplacement))) {
       continue;
     }
 
@@ -1464,7 +1519,7 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       rawKind: rawKind,
       value: value,
       invocation: invocation,
-      windows: windows,
+      escape: nativeReplacement.isEmpty ? escape : (_) => nativeReplacement,
     );
     if (suggestion == null) {
       continue;
@@ -1484,11 +1539,16 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       : suggestions.sublist(0, invocation.maxSuggestions);
 }
 
+String Function(String) _windowsCompletionEscape(String? shell) =>
+    shell == 'powershell' || shell == 'pwsh'
+    ? escapePowerShellCompletionToken
+    : escapeWindowsCompletionToken;
+
 ShellCompletionSuggestion? _suggestionFromRemoteValue({
   required String rawKind,
   required String value,
   required ShellCompletionInvocation invocation,
-  required bool windows,
+  required String Function(String) escape,
 }) {
   final kind = switch (rawKind) {
     'command' => ShellCompletionSuggestionKind.command,
@@ -1501,9 +1561,6 @@ ShellCompletionSuggestion? _suggestionFromRemoteValue({
     return null;
   }
 
-  final escape = windows
-      ? escapeWindowsCompletionToken
-      : escapeShellCompletionToken;
   final escapedValue = escape(value);
   final directoryValue = _formatDirectoryCompletion(value);
   final escapedDirectoryValue = escape(directoryValue);
@@ -1617,30 +1674,26 @@ String _formatDirectoryCompletionLabel(String value) {
 @visibleForTesting
 String escapeShellCompletionToken(String value) {
   final builder = StringBuffer();
-  for (var index = 0; index < value.length; index++) {
-    final char = value[index];
-    if (_isUnescapedShellTokenChar(char)) {
-      builder.write(char);
-    } else {
-      builder
-        ..write(r'\')
-        ..write(char);
+  // Escape whole Unicode scalars: a backslash between the halves of a
+  // surrogate pair would corrupt the character.
+  for (final rune in value.runes) {
+    if (!_isUnescapedShellTokenRune(rune)) {
+      builder.write(r'\');
     }
+    builder.writeCharCode(rune);
   }
   return builder.toString();
 }
 
-bool _isUnescapedShellTokenChar(String char) {
-  final codeUnit = char.codeUnitAt(0);
-  return (codeUnit >= 0x30 && codeUnit <= 0x39) ||
-      (codeUnit >= 0x41 && codeUnit <= 0x5A) ||
-      (codeUnit >= 0x61 && codeUnit <= 0x7A) ||
-      char == '_' ||
-      char == '-' ||
-      char == '.' ||
-      char == '/' ||
-      char == '~';
-}
+bool _isUnescapedShellTokenRune(int rune) =>
+    (rune >= 0x30 && rune <= 0x39) ||
+    (rune >= 0x41 && rune <= 0x5A) ||
+    (rune >= 0x61 && rune <= 0x7A) ||
+    rune == 0x5F || // _
+    rune == 0x2D || // -
+    rune == 0x2E || // .
+    rune == 0x2F || // /
+    rune == 0x7E; // ~
 
 final _windowsCompletionQuotePattern = RegExp(r'[ \t&|<>^()";,%!]');
 
@@ -1663,11 +1716,55 @@ String escapeWindowsCompletionToken(String value) {
   return '"${value.replaceAll('"', '')}"';
 }
 
+// Whitespace, PowerShell metacharacters, and the Unicode dash and quote
+// variants its tokenizer treats like `-`, `'` and `"`.
+final _powerShellCompletionQuotePattern = RegExp(
+  r'''[\s`'"$&|;,(){}<>@#\u2013-\u201e]''',
+);
+
+/// Quotes a literal completion [value] for PowerShell.
+///
+/// Double quotes still expand `$name` and `$(...)`, so values that need
+/// quoting become single-quoted literals with embedded quotes doubled.
+@visibleForTesting
+String escapePowerShellCompletionToken(String value) =>
+    value.isEmpty || value.contains(_powerShellCompletionQuotePattern)
+    ? powerShellSingleQuote(value)
+    : value;
+
+/// The literal text a completion [replacement] inserts, without the quoting
+/// or escaping the shell dialect added.
+String shellCompletionReplacementLiteral(
+  String replacement, {
+  required bool windows,
+}) {
+  if (!windows) {
+    return normalizeShellCompletionToken(replacement);
+  }
+  if (replacement.length >= 2) {
+    final quote = replacement[0];
+    if ((quote == "'" || quote == '"') && replacement.endsWith(quote)) {
+      final inner = replacement.substring(1, replacement.length - 1);
+      return quote == "'" ? inner.replaceAll("''", "'") : inner;
+    }
+  }
+  return replacement;
+}
+
 const _interactiveZshCompletionDoneMarker = '__FLUTTY_ZSH_NATIVE_DONE__';
 const _shellHistoryDoneMarker = '__FLUTTY_HISTORY_DONE__';
 
-bool _shouldTryInteractiveZshCompletion(ShellCompletionInvocation invocation) =>
-    invocation.mode != ShellCompletionMode.command;
+/// Exit status of [buildInteractiveZshCompletionRemoteCommand] when the
+/// foreground shell is not zsh or zsh cannot be started.
+const _interactiveZshUnsupportedExitCode = 78;
+
+bool _shouldTryInteractiveZshCompletion(ShellCompletionInvocation invocation) {
+  if (invocation.mode == ShellCompletionMode.command) {
+    return false;
+  }
+  final shell = _normalizeShellCompletionCommandName(invocation.shellCommand);
+  return shell == null || shell == 'zsh';
+}
 
 bool _containsInteractiveZshCompletionDoneMarker(String output) {
   for (final rawLine in const LineSplitter().convert(output)) {
@@ -2172,17 +2269,22 @@ return 'cmd'
 
 /// Static PowerShell logic for [buildWindowsShellCompletionScript]. Reads the
 /// `$__flMode`/`$__flToken`/`$__flCwd`/`$__flLimit` parameters assigned by the
-/// caller and appends `<kind>\t<value>` lines to `$__flOut`, matching
-/// [parseShellCompletionOutput]. Paths use forward slashes and are relative to
-/// the token, like the POSIX completion fallback.
+/// caller and appends `<kind>\t<value>[\t<native>]` lines to `$__flOut` after a
+/// `shell\t<name>` line, matching [parseShellCompletionOutput]. Values are
+/// relative to the token, like the POSIX completion fallback; the token's own
+/// `\` or `/` separators are kept, and TabExpansion2 values use forward slashes
+/// with PowerShell's insertion text as `<native>`.
 const _windowsCompletionLogic = r'''
 $__flShell=__flResolveShellName
+[void]$__flOut.Append('shell');[void]$__flOut.Append([char]9);[void]$__flOut.Append($__flShell);[void]$__flOut.Append([char]10)
 if($__flCwd){Set-Location -LiteralPath $__flCwd -ErrorAction SilentlyContinue}
-function __flEmit([string]$kind,[string]$value){
+function __flEmit([string]$kind,[string]$value,[string]$native=''){
 if(!$value -or $__flEmitCount -ge $__flLimit){return $false}
-if($value.IndexOf([char]9) -ge 0 -or $value.IndexOf([char]10) -ge 0 -or $value.IndexOf([char]13) -ge 0){return $true}
+if("$value$native" -match '[\t\r\n]'){return $true}
 $script:__flEmitCount++
-[void]$__flOut.Append($kind);[void]$__flOut.Append([char]9);[void]$__flOut.Append($value);[void]$__flOut.Append([char]10)
+[void]$__flOut.Append($kind);[void]$__flOut.Append([char]9);[void]$__flOut.Append($value)
+if($native){[void]$__flOut.Append([char]9);[void]$__flOut.Append($native)}
+[void]$__flOut.Append([char]10)
 return ($__flEmitCount -lt $__flLimit)
 }
 function __flNormalizeCompletionText([string]$value){
@@ -2206,7 +2308,8 @@ if(!$__flCompletion -or !$__flCompletion.CompletionMatches){return $false}
 $__flAny=$false
 foreach($__m in $__flCompletion.CompletionMatches){
 if($__flEmitCount -ge $__flLimit){break}
-$__flText=__flNormalizeCompletionText ([string]$__m.CompletionText)
+$__flNative=([string]$__m.CompletionText).TrimEnd()
+$__flText=__flNormalizeCompletionText $__flNative
 if(!$__flText){$__flText=__flNormalizeCompletionText ([string]$__m.ListItemText)}
 if(!$__flText){continue}
 $__flType=[string]$__m.ResultType
@@ -2217,7 +2320,7 @@ elseif($__flType -eq 'ProviderItem'){$__flKind='file'}
 if($__flMode -eq 'argument' -and $__flKind -eq 'command'){continue}
 if($__flMode -eq 'directory' -and $__flKind -ne 'directory'){continue}
 $__flAny=$true
-if(!(__flEmit $__flKind $__flText)){break}
+if(!(__flEmit $__flKind $__flText $__flNative)){break}
 }
 return $__flAny
 }
@@ -2233,9 +2336,9 @@ if($__n){if(!(__flEmit 'command' $__n)){break}}
 $__flUsePathFallback=$true
 if($__flMode -eq 'argument' -and (__flTryTabExpansion)){$__flUsePathFallback=$false}
 if($__flUsePathFallback){
-$__flPrefix=($__flToken -replace '[^/]*$','')
-$__flBase=($__flToken -replace '.*/','')
-if($__flPrefix){$__flDir=($__flPrefix -replace '/$','');if($__flDir -match '^[A-Za-z]:$'){$__flDir="$__flDir/"}}
+$__flPrefix=($__flToken -replace '[^/\\]*$','')
+$__flBase=($__flToken -replace '.*[/\\]','')
+if($__flPrefix){$__flDir=($__flPrefix -replace '[/\\]$','');if(!$__flDir){$__flDir=$__flPrefix}elseif($__flDir -match '^[A-Za-z]:$'){$__flDir="$__flDir/"}}
 else{$__flDir='.'}
 $__flPat=[System.Management.Automation.WildcardPattern]::Escape($__flBase)+'*'
 $__flItems=@(Get-ChildItem -LiteralPath $__flDir -ErrorAction SilentlyContinue|Where-Object {$_.Name -like $__flPat}|Select-Object -First $__flLimit)
