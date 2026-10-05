@@ -803,10 +803,6 @@ class LocalNotificationService {
     );
   }
 
-  /// Clears a previously shown tmux alert notification.
-  Future<void> clearTmuxAlert(int notificationId) =>
-      _clearNotification(notificationId);
-
   /// Shows a terminal desktop notification emitted by the remote shell.
   ///
   /// [subtitle] carries the host and window context the tap navigates to;

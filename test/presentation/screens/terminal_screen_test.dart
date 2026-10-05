@@ -672,7 +672,7 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
   }
 
   @override
-  Future<void> clearTmuxAlert(int notificationId) async {
+  Future<void> clearTerminalNotification(int notificationId) async {
     clearedNotificationIds.add(notificationId);
   }
 }
@@ -7336,8 +7336,6 @@ void main() {
             windows,
             events: refreshFails ? fixture.windowEvents.stream : null,
           );
-          when(() => tmuxService.hasSessionOrThrow(session, sessionName))
-              .thenAnswer((_) async => true);
           when(() => tmuxService.foregroundSessionNameOrThrow(session))
               .thenAnswer((_) async => sessionName);
           when(() => tmuxService.detectInstalledAgentTools(session))
@@ -7526,8 +7524,6 @@ void main() {
           tmuxSessionName: tmuxSessionName,
           remoteMuxBackend: RemoteMuxBackend.tmux,
         );
-        when(() => tmuxService.hasSessionOrThrow(session, tmuxSessionName))
-            .thenAnswer((_) async => true);
         when(() => tmuxService.foregroundSessionNameOrThrow(session))
             .thenAnswer((_) async => tmuxSessionName);
         when(() => tmuxService.listWindows(session, tmuxSessionName))
@@ -8238,13 +8234,6 @@ void main() {
                 extraFlags: tmuxExtraFlags,
               );
           when(foregroundSession).thenAnswer((_) async => tmuxSessionName);
-          when(
-            () => tmuxService.hasSessionOrThrow(
-              session,
-              tmuxSessionName,
-              extraFlags: tmuxExtraFlags,
-            ),
-          ).thenAnswer((_) async => true);
           Future<void> selectTarget() => tmuxService.selectWindow(
             session,
             tmuxSessionName,

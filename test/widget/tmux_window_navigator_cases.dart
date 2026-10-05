@@ -906,7 +906,16 @@ void registerTmuxWindowNavigatorTests() {
                   await tester.pumpWidget(const SizedBox.shrink());
                 case 'stable identity':
                   events.add(
-                    TmuxWindowListEvent([shell, alert.copyWith(id: '@9')]),
+                    const TmuxWindowListEvent([
+                      shell,
+                      TmuxWindow(
+                        index: 1,
+                        id: '@9',
+                        name: 'agent',
+                        isActive: false,
+                        flags: '!',
+                      ),
+                    ]),
                   );
               }
               await tester.pump();
