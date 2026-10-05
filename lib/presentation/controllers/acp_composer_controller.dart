@@ -217,7 +217,10 @@ class AcpComposerController extends ChangeNotifier {
 
   // A rejected prompt's draft, held while a newer send is still preparing so
   // that send's clear cannot wipe the restored text and attachments.
-  ({String text, List<AcpComposerAttachment> attachments})? _pendingRestore;
+  /// Rejected drafts waiting for the in-flight send to clear the field,
+  /// oldest first; every one of them is merged back once it does.
+  final List<({String text, List<AcpComposerAttachment> attachments})>
+  _pendingRestores = [];
 
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
@@ -606,10 +609,10 @@ class AcpComposerController extends ChangeNotifier {
       if (_sendState != _SendState.idle) {
         // A newer send is still preparing and will clear the draft when it
         // finishes; restore after that so the rejected draft survives.
-        _pendingRestore = (
+        _pendingRestores.add((
           text: snapshotText,
           attachments: snapshotAttachments,
-        );
+        ));
         return;
       }
       _error = null;
@@ -645,12 +648,16 @@ class AcpComposerController extends ChangeNotifier {
   }
 
   void _applyPendingRestore() {
-    final restore = _pendingRestore;
-    if (restore == null) {
+    if (_pendingRestores.isEmpty) {
       return;
     }
-    _pendingRestore = null;
-    _restoreSnapshot(restore.text, restore.attachments);
+    // _restoreSnapshot prepends, so merging newest first keeps the drafts in
+    // the order they were sent.
+    final restores = _pendingRestores.reversed.toList();
+    _pendingRestores.clear();
+    for (final restore in restores) {
+      _restoreSnapshot(restore.text, restore.attachments);
+    }
   }
 
   /// Cancels the in-flight preparation or streaming turn.

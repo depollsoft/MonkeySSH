@@ -1504,7 +1504,12 @@ func (b *acpBridge) handleAttach(
 		// published from here on reach the client through send, after it.
 		client.replay = replay
 		client.replayAfter = hello.LastAck
-		b.replayReaders++
+		if replay != nil {
+			// writeClientReplay releases the hold only for a non-nil
+			// snapshot; an attach before any provider output has nothing
+			// to drain and must not pin the replay for the bridge lifetime.
+			b.replayReaders++
+		}
 	}
 	if b.beforeClientVisible != nil {
 		b.beforeClientVisible()

@@ -1854,6 +1854,39 @@ func TestAcpWaitSurvivesTransientStatusTimeout(t *testing.T) {
 	}
 }
 
+func TestAcpAttachWithoutReplayTakesNoReaderHold(t *testing.T) {
+	// An attach before any provider output has no snapshot to drain, so it
+	// must not leave replayReaders raised for the bridge's lifetime.
+	bridge := newTestAcpBridge()
+	server, peer := net.Pipe()
+	attachDone := make(chan struct{})
+	go func() {
+		defer close(attachDone)
+		bridge.handleAttach(
+			server,
+			bufio.NewReader(server),
+			acpWireMessage{Version: acpBridgeProtocolVersion, Type: "hello"},
+		)
+	}()
+	defer func() {
+		_ = peer.Close()
+		select {
+		case <-attachDone:
+		case <-time.After(time.Second):
+			t.Error("attach did not stop")
+		}
+	}()
+	if hello := readTestAcpFrame(t, bufio.NewReader(peer), peer); hello.Type != "hello" {
+		t.Fatalf("first attach frame = %#v, want hello", hello)
+	}
+	bridge.mu.Lock()
+	readers := bridge.replayReaders
+	bridge.mu.Unlock()
+	if readers != 0 {
+		t.Fatalf("replayReaders = %d after an attach with no replay, want 0", readers)
+	}
+}
+
 func TestAcpTrimReplayLeavesSnapshotIntactWhileAttachDrains(t *testing.T) {
 	// An attach writer reads its replay snapshot without the lock, so a trim
 	// that runs meanwhile must neither zero evicted slots nor compact into

@@ -304,6 +304,54 @@ void main() {
     },
   );
 
+  test(
+    'restores every rejected draft parked behind a preparing send',
+    () async {
+      final manager = RecordingAcpSessionManager();
+      final promptGate = Completer<void>();
+      final uploadGate = Completer<void>();
+      manager
+        ..promptGate = promptGate
+        ..throwOnPrompt = StateError('rejected');
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+        ),
+        uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+        session: _session(embeddedContext: true),
+      )..setText('first');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      controller.setText('second');
+      expect(await controller.send(), isTrue);
+      controller
+        ..setText('third')
+        ..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'big.txt',
+            bytes: Uint8List.fromList('hello world'.codeUnits),
+            mimeType: 'text/plain',
+          ),
+        )
+        ..enableRemoteUploadFallback();
+      final third = controller.send();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.activity, AcpComposerActivity.preparing);
+
+      // Both queued prompts are rejected while the third is still uploading.
+      promptGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      uploadGate.complete();
+      expect(await third, isTrue);
+
+      expect(controller.text, 'first\n\nsecond');
+      expect(controller.attachments, isEmpty);
+      expect(controller.error?.kind, AcpComposerErrorKind.send);
+    },
+  );
+
   test('session snapshots notify only when composer-visible state changes', () {
     final manager = RecordingAcpSessionManager();
     final controller = _controller(manager);
