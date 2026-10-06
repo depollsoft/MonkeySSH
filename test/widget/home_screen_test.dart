@@ -156,8 +156,11 @@ class _MutableActiveSessionsNotifier extends ActiveSessionsNotifier {
       .toList(growable: false);
 
   @override
-  ActiveConnection? getActiveConnection(int connectionId) =>
-      _connections[connectionId];
+  ActiveConnection? getActiveConnection(int connectionId) {
+    // Production reads notifier state here, which Riverpod forbids in selectors.
+    if (!state.containsKey(connectionId)) return null;
+    return _connections[connectionId];
+  }
 
   @override
   SshSession? getSession(int connectionId) => _sessions[connectionId];

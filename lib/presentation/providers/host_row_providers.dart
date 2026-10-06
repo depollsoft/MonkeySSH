@@ -135,20 +135,25 @@ typedef ConnectionPreviewProviderArgs = ({
   bool isDark,
 });
 
+/// Connection metadata read outside Riverpod selector callbacks.
+final activeConnectionProvider = Provider.autoDispose
+    .family<ActiveConnection?, int>((ref, connectionId) {
+      ref.watch(activeSessionsProvider);
+      return ref
+          .read(activeSessionsProvider.notifier)
+          .getActiveConnection(connectionId);
+    });
+
 /// Value-equal preview shared by host and connection rows.
 final connectionPreviewProvider = Provider.autoDispose
     .family<ConnectionPreviewStackEntry, ConnectionPreviewProviderArgs>((
       ref,
       args,
     ) {
-      // Preview refreshes republish the whole sessions map; select this
-      // connection's inputs so unrelated ticks skip rebuilding the entry.
-      final sessions = ref.read(activeSessionsProvider.notifier);
       final source = ref.watch(
-        activeSessionsProvider.select((states) {
-          final connection = sessions.getActiveConnection(args.connectionId);
-          return (
-            state: states[args.connectionId] ?? SshConnectionState.connected,
+        activeConnectionProvider(args.connectionId).select(
+          (connection) => (
+            state: connection?.state ?? SshConnectionState.connected,
             preview: connection?.preview,
             previewSnapshot: connection?.previewSnapshot,
             nativeAcpPreviewSnapshot: connection?.nativeAcpPreviewSnapshot,
@@ -161,8 +166,8 @@ final connectionPreviewProvider = Provider.autoDispose
             lastExitCode: connection?.lastExitCode,
             lightThemeId: connection?.terminalThemeLightId,
             darkThemeId: connection?.terminalThemeDarkId,
-          );
-        }),
+          ),
+        ),
       );
       final monetizationState =
           ref.watch(monetizationStateProvider).asData?.value ??

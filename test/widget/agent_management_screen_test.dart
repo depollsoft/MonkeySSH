@@ -726,6 +726,33 @@ void main() {
     );
   });
 
+  testWidgets('reduced motion permits usage and detail layout changes', (
+    tester,
+  ) async {
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    final pending = Completer<Map<String, AgentUsage>>();
+    when(() => service.readUsage(session, any()))
+        .thenAnswer((_) => pending.future);
+    await pumpScreen(tester);
+    pending.complete({
+      'cli:claude': const AgentUsage(
+        status: AgentUsageStatus.available,
+        windows: [
+          AgentUsageWindow(label: 'Weekly', usedPercent: 25),
+          AgentUsageWindow(label: 'Session', usedPercent: 10),
+        ],
+      ),
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('Weekly · 75% remaining'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-details-cli:claude')));
+    await tester.pumpAndSettle();
+    expect(find.text('/opt/homebrew/bin/claude'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('opens on the cached state and refreshes it in place', (
     tester,
   ) async {
