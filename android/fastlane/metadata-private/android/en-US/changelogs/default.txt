@@ -1,4 +1,6 @@
-Terminal fixes in this beta
+Reliability fixes in this beta
 
-- Copied terminal text now preserves spaces between words and columns.
-- Wide characters wrap correctly when they reach the right edge of the terminal.
+- Fix terminal redraws, wrapping, and cursor placement when resizing or switching windows.
+- Preserve Hermes and OpenClaw sessions across MonkeyMux upgrades.
+- Keep chat drafts when switching sessions and improve long-conversation performance.
+- Fix remote file saves, port forwarding, and purchase restoration.
