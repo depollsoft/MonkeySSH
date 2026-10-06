@@ -280,10 +280,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       ),
       // Always present so the bar can ease in and out; the empty state only
       // holds the bottom inset the body gives up to a bottom bar.
-      bottomNavigationBar: AnimatedSize(
-        duration: _layoutMotion(context),
-        curve: Curves.easeOutCubic,
-        alignment: Alignment.topCenter,
+      bottomNavigationBar: _LayoutSize(
         child: updates.isNotEmpty || _model.updatingAll
             ? _UpdateBar(
                 label: _model.updatingAll
@@ -326,10 +323,7 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
                   else
                     Padding(
                       padding: const EdgeInsets.only(bottom: 20),
-                      child: AnimatedSize(
-                        duration: _layoutMotion(context),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.topCenter,
+                      child: _LayoutSize(
                         child: Semantics(
                           key: const ValueKey('agent-usage-announcement'),
                           liveRegion: true,
@@ -704,6 +698,24 @@ Duration _layoutMotion(BuildContext context) =>
     ? Duration.zero
     : const Duration(milliseconds: 200);
 
+/// Avoids a zero-duration size animation mutating its own layout.
+class _LayoutSize extends StatelessWidget {
+  const _LayoutSize({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+    return AnimatedSize(
+      duration: _layoutMotion(context),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: child,
+    );
+  }
+}
+
 /// Swaps [child] by growing the new content in from the top while the old
 /// content fades and folds away, so neighbours slide instead of jump.
 class _Reveal extends StatelessWidget {
@@ -943,10 +955,7 @@ class _RuntimeRowState extends State<_RuntimeRow> {
       padding: const EdgeInsets.all(12),
       // Usage, status, and details arrive after the row; ease each height
       // change so rows below slide instead of jump.
-      child: AnimatedSize(
-        duration: _layoutMotion(context),
-        curve: Curves.easeOutCubic,
-        alignment: Alignment.topCenter,
+      child: _LayoutSize(
         child: LayoutBuilder(
           builder: (context, constraints) {
             final stacked =
