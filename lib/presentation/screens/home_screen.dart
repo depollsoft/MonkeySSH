@@ -1795,16 +1795,13 @@ class _ConnectionRow extends ConsumerWidget {
       )),
     );
     ref.watch(
-      activeSessionsProvider.select((states) {
-        final connection = ref
-            .read(activeSessionsProvider.notifier)
-            .getActiveConnection(connectionId);
-        return (
-          states[connectionId],
+      activeConnectionProvider(connectionId).select(
+        (connection) => (
+          connection?.state,
           connection?.remoteMuxSessionName,
           connection?.remoteMuxBackend,
-        );
-      }),
+        ),
+      ),
     );
     final connection = ref
         .read(activeSessionsProvider.notifier)
@@ -3112,12 +3109,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
       activeSessionsProvider.select((state) => state[widget.connectionId]),
     );
     final hostId = ref.watch(
-      activeSessionsProvider.select(
-        (_) => ref
-            .read(activeSessionsProvider.notifier)
-            .getActiveConnection(widget.connectionId)
-            ?.hostId,
-      ),
+      activeConnectionProvider(widget.connectionId)
+          .select((connection) => connection?.hostId),
     );
     final preferences = hostId == null
         ? null
