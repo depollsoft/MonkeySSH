@@ -378,6 +378,7 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     executableNames: ['hermes', 'hermes-agent'],
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
+    packageExtras: ['acp'],
     sharesCliInstallation: true,
   ),
   AgentRuntimeDefinition(

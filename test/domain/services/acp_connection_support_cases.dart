@@ -228,61 +228,62 @@ void registerAcpConnectionSupportTests() {
     }
 
     for (final windows in [false, true]) {
-      for (final (verdict, choice) in [
-        ('0', 'Copy command'),
-        ('0', 'Use terminal CLI'),
-        ('ready', null),
+      for (final (verdict, choice, installExit) in [
+        ('missing', 'Install and start', 0),
+        ('missing', 'Install and start', 1),
+        ('missing', 'Cancel', null),
+        ('ready', null, null),
       ]) {
         testWidgets('Hermes launch checks ACP support: windows=$windows '
-            'verdict=$verdict choice=$choice', (tester) async {
+            'verdict=$verdict choice=$choice installExit=$installExit', (
+          tester,
+        ) async {
           final client = MockSshClient();
           when(() => client.remoteVersion).thenReturn(
             windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.6',
           );
           final prefix = windows ? 'C:/tools' : '/opt/tools';
           var checks = 0;
+          var installs = 0;
           when(() => client.execute(any(), pty: any(named: 'pty')))
               .thenAnswer((invocation) async {
                 final command = decodeEncodedPowerShell(
                   invocation.positionalArguments.single as String,
                 );
-                final String output;
+                var stdout = '';
+                var stderr = '';
+                var exitCode = 0;
                 if (command.contains('__monkeyssh_acp_support__')) {
                   checks++;
-                  output = '__monkeyssh_acp_support__=$verdict\n';
+                  stdout = '__monkeyssh_acp_support__=$verdict\n';
+                } else if (command.contains('pyvenv.cfg')) {
+                  installs++;
+                  exitCode = installExit!;
+                  if (exitCode == 0) {
+                    stdout = 'Hermes ACP check OK\n';
+                  } else {
+                    stderr = 'Neither pip nor uv can install into /x/python\n';
+                  }
                 } else if (command.contains('hermes-agent')) {
-                  output = 'hermes\u001f$prefix/hermes\n';
-                } else {
-                  // Profile discovery: no profiles, so no picker.
-                  output = '';
+                  stdout = 'hermes\u001f$prefix/hermes\n';
                 }
+                // Anything else is profile discovery: no profiles, no picker.
                 final channel = MockSSHSession();
                 when(() => channel.stdout).thenAnswer(
                   (_) => Stream<Uint8List>.value(
-                    Uint8List.fromList(utf8.encode(output)),
+                    Uint8List.fromList(utf8.encode(stdout)),
                   ),
                 );
-                when(() => channel.stderr)
-                    .thenAnswer((_) => const Stream<Uint8List>.empty());
+                when(() => channel.stderr).thenAnswer(
+                  (_) => Stream<Uint8List>.value(
+                    Uint8List.fromList(utf8.encode(stderr)),
+                  ),
+                );
                 when(() => channel.done).thenAnswer((_) async {});
-                when(() => channel.exitCode).thenReturn(0);
+                when(() => channel.exitCode).thenReturn(exitCode);
                 when(channel.close).thenReturn(null);
                 return channel;
               });
-          String? copied;
-          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            SystemChannels.platform,
-            (call) async {
-              if (call.method == 'Clipboard.setData') {
-                copied = (call.arguments as Map)['text'] as String?;
-              }
-              return null;
-            },
-          );
-          addTearDown(
-            () => tester.binding.defaultBinaryMessenger
-                .setMockMethodCallHandler(SystemChannels.platform, null),
-          );
           final session = SshSession(
             connectionId: 94,
             hostId: 3,
@@ -316,35 +317,44 @@ void registerAcpConnectionSupportTests() {
           await tester.tap(find.text('Launch'));
           await tester.pumpAndSettle();
 
+          final launched = ['$prefix/hermes', '--profile', 'default', 'acp'];
           if (choice == null) {
             expect(find.text('Hermes needs ACP support'), findsNothing);
-            expect(results.single!.override!.argv, [
-              '$prefix/hermes',
-              '--profile',
-              'default',
-              'acp',
-            ]);
-            // A passing check is remembered for the session.
-            await tester.tap(find.text('Launch'));
-            await tester.pumpAndSettle();
-            expect(results, hasLength(2));
-            expect(checks, 1);
-            return;
-          }
-          expect(find.text('Hermes needs ACP support'), findsOneWidget);
-          expect(
-            find.text("pipx install --force 'hermes-agent[acp]'"),
-            findsOneWidget,
-          );
-          await tester.tap(find.text(choice));
-          await tester.pumpAndSettle();
-          if (choice == 'Copy command') {
-            expect(copied, "pipx install --force 'hermes-agent[acp]'");
-            expect(results.single, isNull);
+            expect(results.single!.override!.argv, launched);
           } else {
-            expect(copied, isNull);
-            expect(results.single, (override: null, terminal: true));
+            expect(find.text('Hermes needs ACP support'), findsOneWidget);
+            expect(find.text('Use terminal CLI'), findsNothing);
+            await tester.tap(find.text(choice));
+            await tester.pumpAndSettle();
+            if (choice == 'Cancel') {
+              expect(installs, 0);
+              expect(results.single, isNull);
+              return;
+            }
+            expect(installs, 1);
+            if (installExit != 0) {
+              expect(
+                find.text('Could not install Hermes ACP support'),
+                findsOneWidget,
+              );
+              expect(
+                find.text('Neither pip nor uv can install into /x/python'),
+                findsOneWidget,
+              );
+              await tester.tap(find.text('Close'));
+              await tester.pumpAndSettle();
+              expect(results.single, isNull);
+              return;
+            }
+            expect(results.single!.override!.argv, launched);
           }
+          // A passing check or install is remembered for the session.
+          await tester.tap(find.text('Launch'));
+          await tester.pumpAndSettle();
+          expect(results, hasLength(2));
+          expect(results.last!.override!.argv, launched);
+          expect(checks, 1);
+          expect(installs, choice == null ? 0 : 1);
         });
       }
     }

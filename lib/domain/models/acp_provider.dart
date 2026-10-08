@@ -260,48 +260,19 @@ bool isValidAcpLaunchProfileName(String name) =>
     name.length <= 128 &&
     !name.contains(RegExp(r'[\x00-\x1f\x7f/\\]'));
 
-/// A command that adds ACP support to one kind of provider installation.
-@immutable
-class AcpSupportFix {
-  /// Creates an immutable fix.
-  const AcpSupportFix({required this.command, this.linkTargetPattern});
-
-  /// Shell `case` pattern matched against the resolved executable path and
-  /// its symlink target, or `null` to match every installation.
-  final String? linkTargetPattern;
-
-  /// Command the user runs on the host.
-  final String command;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AcpSupportFix &&
-          linkTargetPattern == other.linkTargetPattern &&
-          command == other.command;
-
-  @override
-  int get hashCode => Object.hash(linkTargetPattern, command);
-}
-
 /// Confirms that an installed CLI can start its ACP server before a native
-/// launch, for CLIs that ship that server as an optional install.
+/// launch, for CLIs that ship that server as an optional Python extra, and
+/// describes how MonkeySSH installs that extra.
 @immutable
 class AcpSupportCheck {
   /// Creates an immutable support check.
-  ///
-  /// [fixes] are tried in order and must end with one that matches every
-  /// installation, so a failed check always has a fix to show.
-  AcpSupportCheck({
-    required List<String> arguments,
+  const AcpSupportCheck({
+    required this.arguments,
     required this.missingMessage,
-    required List<AcpSupportFix> fixes,
-  }) : assert(
-         fixes.isNotEmpty && fixes.last.linkTargetPattern == null,
-         'The last fix must match every installation.',
-       ),
-       arguments = List.unmodifiable(arguments),
-       fixes = List.unmodifiable(fixes);
+    required this.distribution,
+    required this.extra,
+    this.selfInstallArguments = const [],
+  });
 
   /// Arguments passed to the resolved executable. Exit status 1 means the
   /// installation cannot serve ACP. Any other result lets the launch proceed,
@@ -311,8 +282,15 @@ class AcpSupportCheck {
   /// Explains what the installation is missing.
   final String missingMessage;
 
-  /// Fixes in priority order, ending with one for every installation.
-  final List<AcpSupportFix> fixes;
+  /// Python distribution that declares [extra].
+  final String distribution;
+
+  /// Optional extra whose requirements provide the ACP server.
+  final String extra;
+
+  /// Arguments for the CLI's own installer, used when the executable does not
+  /// run from a Python environment MonkeySSH can find.
+  final List<String> selfInstallArguments;
 
   @override
   bool operator ==(Object other) =>
@@ -320,13 +298,20 @@ class AcpSupportCheck {
       other is AcpSupportCheck &&
           _listEquality.equals(arguments, other.arguments) &&
           missingMessage == other.missingMessage &&
-          const ListEquality<AcpSupportFix>().equals(fixes, other.fixes);
+          distribution == other.distribution &&
+          extra == other.extra &&
+          _listEquality.equals(
+            selfInstallArguments,
+            other.selfInstallArguments,
+          );
 
   @override
   int get hashCode => Object.hash(
     _listEquality.hash(arguments),
     missingMessage,
-    const ListEquality<AcpSupportFix>().hash(fixes),
+    distribution,
+    extra,
+    _listEquality.hash(selfInstallArguments),
   );
 }
 
@@ -645,24 +630,14 @@ final acpHermesProvider = AcpBuiltinProvider(
   ),
   // `hermes acp` needs the optional `acp` extra, which a plain pip, pipx or
   // uv install of hermes-agent leaves out; Hermes's own installer includes it.
-  supportCheck: AcpSupportCheck(
-    arguments: const ['acp', '--check'],
+  supportCheck: const AcpSupportCheck(
+    arguments: ['acp', '--check'],
     missingMessage:
         'Hermes on this host was installed without its ACP packages, so '
         'native chat cannot start.',
-    fixes: const [
-      AcpSupportFix(
-        linkTargetPattern: '*/pipx/venvs/*',
-        command: "pipx install --force 'hermes-agent[acp]'",
-      ),
-      AcpSupportFix(
-        linkTargetPattern: '*/uv/tools/*',
-        command: "uv tool install --force 'hermes-agent[acp]'",
-      ),
-      AcpSupportFix(
-        command: "python3 -m pip install --user 'hermes-agent[acp]'",
-      ),
-    ],
+    distribution: 'hermes-agent',
+    extra: 'acp',
+    selfInstallArguments: ['pm', 'install', '--extra', 'acp'],
   ),
 );
 
