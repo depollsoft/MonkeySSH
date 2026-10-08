@@ -819,6 +819,144 @@ void main() {
     );
   });
 
+  group('ACP support check', () {
+    final check = acpHermesProvider.supportCheck!;
+
+    // sshd runs the command with the login shell, as for the adapter probe.
+    Future<({bool supported, AcpSupportFix? fix})> runCheck(
+      Directory home,
+      String executable,
+    ) async {
+      ({bool supported, AcpSupportFix? fix})? verdict;
+      for (final shell in [
+        '/bin/bash',
+        if (File('/bin/zsh').existsSync()) '/bin/zsh',
+      ]) {
+        final result = await Process.run(
+          shell,
+          [
+            '-c',
+            buildAcpSupportCheckCommand(check, executable, isWindows: false),
+          ],
+          environment: {
+            'HOME': home.path,
+            'SHELL': shell,
+            'PATH': '/usr/bin:/bin',
+          },
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '$shell: ${result.stderr}');
+        final parsed = parseAcpSupportCheckOutput(
+          result.stdout as String,
+          check,
+        );
+        expect(parsed, verdict ?? parsed, reason: shell);
+        verdict = parsed;
+      }
+      return verdict!;
+    }
+
+    // A fake Hermes that records its argv and exits with [status].
+    Future<String> fakeHermes(Directory home, String path, int status) async {
+      final file = File('${home.path}/$path');
+      await file.parent.create(recursive: true);
+      await file.writeAsString(
+        '#!/bin/sh\nprintf "%s " "\$@" > "\$HOME/argv"\nexit $status\n',
+      );
+      await Process.run('chmod', ['+x', file.path]);
+      return file.path;
+    }
+
+    Future<String> linkIntoLocalBin(Directory home, String target) async {
+      final link = Link('${home.path}/.local/bin/hermes');
+      await link.parent.create(recursive: true);
+      await link.create(target);
+      return link.path;
+    }
+
+    late Directory home;
+    setUp(() async {
+      home = await Directory.systemTemp.createTemp('acp-support-home');
+    });
+    tearDown(() => home.delete(recursive: true));
+
+    test('passes an installation whose check succeeds', () async {
+      final hermes = await fakeHermes(home, 'venv/bin/hermes', 0);
+      expect(await runCheck(home, hermes), (supported: true, fix: null));
+      expect(File('${home.path}/argv').readAsStringSync(), 'acp --check ');
+    }, testOn: 'mac-os || linux');
+
+    test('passes a Hermes too old to know the check', () async {
+      final hermes = await fakeHermes(home, 'venv/bin/hermes', 2);
+      expect(await runCheck(home, hermes), (supported: true, fix: null));
+    }, testOn: 'mac-os || linux');
+
+    for (final (name, target, command) in [
+      (
+        'pipx',
+        '.local/share/pipx/venvs/hermes-agent/bin/hermes',
+        "pipx install --force 'hermes-agent[acp]'",
+      ),
+      (
+        'uv tool',
+        '.local/share/uv/tools/hermes-agent/bin/hermes',
+        "uv tool install --force 'hermes-agent[acp]'",
+      ),
+      (
+        'pip',
+        'venv/bin/hermes',
+        "python3 -m pip install --user 'hermes-agent[acp]'",
+      ),
+    ]) {
+      test('names the fix for a $name install without ACP', () async {
+        final hermes = await linkIntoLocalBin(
+          home,
+          await fakeHermes(home, target, 1),
+        );
+        final result = await runCheck(home, hermes);
+        expect(result.supported, isFalse);
+        expect(result.fix?.command, command);
+      }, testOn: 'mac-os || linux');
+    }
+
+    test('treats output without a verdict as unknown', () {
+      expect(parseAcpSupportCheckOutput('profile chatter\n', check), (
+        supported: false,
+        fix: null,
+      ));
+      expect(
+        parseAcpSupportCheckOutput('__monkeyssh_acp_support__=9\n', check),
+        (supported: false, fix: null),
+      );
+    });
+
+    test('Windows runs the check through the profile PATH', () {
+      final script = decodeEncodedPowerShell(
+        buildAcpSupportCheckCommand(
+          check,
+          r'C:\Users\demo\.local\bin\hermes.exe',
+          isWindows: true,
+        ),
+      );
+      expect(script, contains(powerShellProfilePathPreamble));
+      expect(
+        script,
+        contains(r"$__flExe='C:/Users/demo/.local/bin/hermes.exe';"),
+      );
+      expect(script, contains(r"& $__flExe 'acp' '--check' *> $null;"));
+      expect(
+        script,
+        contains(
+          [
+            r"if($__flExe -like '*/pipx/venvs/*'){$__flFix=0}",
+            r"elseif($__flExe -like '*/uv/tools/*'){$__flFix=1}",
+            r'else{$__flFix=2}',
+          ].join(),
+        ),
+      );
+    });
+  });
+
   test('only dependency paths can use a different executable basename', () {
     const output =
         'muse\u001f/tools/custom-muse\n'

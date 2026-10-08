@@ -260,6 +260,76 @@ bool isValidAcpLaunchProfileName(String name) =>
     name.length <= 128 &&
     !name.contains(RegExp(r'[\x00-\x1f\x7f/\\]'));
 
+/// A command that adds ACP support to one kind of provider installation.
+@immutable
+class AcpSupportFix {
+  /// Creates an immutable fix.
+  const AcpSupportFix({required this.command, this.linkTargetPattern});
+
+  /// Shell `case` pattern matched against the resolved executable path and
+  /// its symlink target, or `null` to match every installation.
+  final String? linkTargetPattern;
+
+  /// Command the user runs on the host.
+  final String command;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AcpSupportFix &&
+          linkTargetPattern == other.linkTargetPattern &&
+          command == other.command;
+
+  @override
+  int get hashCode => Object.hash(linkTargetPattern, command);
+}
+
+/// Confirms that an installed CLI can start its ACP server before a native
+/// launch, for CLIs that ship that server as an optional install.
+@immutable
+class AcpSupportCheck {
+  /// Creates an immutable support check.
+  ///
+  /// [fixes] are tried in order and must end with one that matches every
+  /// installation, so a failed check always has a fix to show.
+  AcpSupportCheck({
+    required List<String> arguments,
+    required this.missingMessage,
+    required List<AcpSupportFix> fixes,
+  }) : assert(
+         fixes.isNotEmpty && fixes.last.linkTargetPattern == null,
+         'The last fix must match every installation.',
+       ),
+       arguments = List.unmodifiable(arguments),
+       fixes = List.unmodifiable(fixes);
+
+  /// Arguments passed to the resolved executable. Exit status 1 means the
+  /// installation cannot serve ACP. Any other result lets the launch proceed,
+  /// so a CLI too old to know these arguments still launches.
+  final List<String> arguments;
+
+  /// Explains what the installation is missing.
+  final String missingMessage;
+
+  /// Fixes in priority order, ending with one for every installation.
+  final List<AcpSupportFix> fixes;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AcpSupportCheck &&
+          _listEquality.equals(arguments, other.arguments) &&
+          missingMessage == other.missingMessage &&
+          const ListEquality<AcpSupportFix>().equals(fixes, other.fixes);
+
+  @override
+  int get hashCode => Object.hash(
+    _listEquality.hash(arguments),
+    missingMessage,
+    const ListEquality<AcpSupportFix>().hash(fixes),
+  );
+}
+
 /// Immutable, app-bundled definition of an ACP-compatible coding-agent
 /// provider.
 @immutable
@@ -276,6 +346,7 @@ class AcpBuiltinProvider implements AcpProvider {
     this.adapterFallbackCommand,
     this.launchProfileSupport,
     this.windowsLaunchPreamble,
+    this.supportCheck,
   });
 
   /// Stable identifier for this provider.
@@ -319,6 +390,10 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Windows host.
   final String? windowsLaunchPreamble;
 
+  /// Optional check, run before a native launch, that the installed CLI
+  /// includes its ACP server.
+  final AcpSupportCheck? supportCheck;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -332,7 +407,8 @@ class AcpBuiltinProvider implements AcpProvider {
           terminalAuthCommand == other.terminalAuthCommand &&
           adapterFallbackCommand == other.adapterFallbackCommand &&
           launchProfileSupport == other.launchProfileSupport &&
-          windowsLaunchPreamble == other.windowsLaunchPreamble;
+          windowsLaunchPreamble == other.windowsLaunchPreamble &&
+          supportCheck == other.supportCheck;
 
   @override
   int get hashCode => Object.hash(
@@ -346,6 +422,7 @@ class AcpBuiltinProvider implements AcpProvider {
     adapterFallbackCommand,
     launchProfileSupport,
     windowsLaunchPreamble,
+    supportCheck,
   );
 
   @override
@@ -565,6 +642,27 @@ final acpHermesProvider = AcpBuiltinProvider(
     nestedProfilesDirectory: 'profiles',
     activeProfileFile: 'active_profile',
     defaultProfileArgument: 'default',
+  ),
+  // `hermes acp` needs the optional `acp` extra, which a plain pip, pipx or
+  // uv install of hermes-agent leaves out; Hermes's own installer includes it.
+  supportCheck: AcpSupportCheck(
+    arguments: const ['acp', '--check'],
+    missingMessage:
+        'Hermes on this host was installed without its ACP packages, so '
+        'native chat cannot start.',
+    fixes: const [
+      AcpSupportFix(
+        linkTargetPattern: '*/pipx/venvs/*',
+        command: "pipx install --force 'hermes-agent[acp]'",
+      ),
+      AcpSupportFix(
+        linkTargetPattern: '*/uv/tools/*',
+        command: "uv tool install --force 'hermes-agent[acp]'",
+      ),
+      AcpSupportFix(
+        command: "python3 -m pip install --user 'hermes-agent[acp]'",
+      ),
+    ],
   ),
 );
 

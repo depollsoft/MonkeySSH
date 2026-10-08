@@ -2095,18 +2095,38 @@ exit "$result"
       final definition = agentCliRuntimeDefinitions.firstWhere(
         (runtime) => runtime.label == 'Hermes',
       );
-      expect(
-        buildAgentInstallCommand(definition, windows: false, update: false),
-        contains('pipx install'),
-      );
-      final windows = buildAgentInstallCommand(
+      // Native chat runs `hermes acp`, so installs carry the `acp` extra;
+      // pipx upgrade and reinstall take the installed package name.
+      final install = buildAgentInstallCommand(
         definition,
-        windows: true,
-        update: true,
+        windows: false,
+        update: false,
+      );
+      expect(install, contains("pipx install 'hermes-agent[acp]'"));
+      expect(
+        install,
+        contains("python3 -m pip install --user 'hermes-agent[acp]'"),
       );
       expect(
-        decodeEncodedPowerShell(windows!),
-        contains("& py -m pip install --user --upgrade 'hermes-agent'"),
+        buildAgentInstallCommand(definition, windows: false, update: true),
+        allOf(
+          contains("pipx upgrade 'hermes-agent' ||"),
+          contains("pip install --user --upgrade 'hermes-agent[acp]'"),
+        ),
+      );
+      final windows = decodeEncodedPowerShell(
+        buildAgentInstallCommand(definition, windows: true, update: true)!,
+      );
+      expect(windows, contains("& pipx upgrade 'hermes-agent';"));
+      expect(
+        windows,
+        contains("& py -m pip install --user --upgrade 'hermes-agent[acp]'"),
+      );
+      expect(
+        decodeEncodedPowerShell(
+          buildAgentInstallCommand(definition, windows: true, update: false)!,
+        ),
+        contains("& pipx install 'hermes-agent[acp]';"),
       );
     });
 

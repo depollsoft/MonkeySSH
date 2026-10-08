@@ -1,9 +1,9 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -13,6 +13,7 @@ import 'package:monkeyssh/presentation/widgets/acp_connection_support.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
+import '../../helpers/powershell_test_helpers.dart';
 
 class _MockExecChannel extends MockSessionWithChannel {}
 
@@ -222,6 +223,128 @@ void registerAcpConnectionSupportTests() {
             },
           );
         }
+      }
+    }
+
+    for (final windows in [false, true]) {
+      for (final (verdict, choice) in [
+        ('0', 'Copy command'),
+        ('0', 'Use terminal CLI'),
+        ('ready', null),
+      ]) {
+        testWidgets('Hermes launch checks ACP support: windows=$windows '
+            'verdict=$verdict choice=$choice', (tester) async {
+          final client = MockSshClient();
+          when(() => client.remoteVersion).thenReturn(
+            windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.6',
+          );
+          final prefix = windows ? 'C:/tools' : '/opt/tools';
+          var checks = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                final command = decodeEncodedPowerShell(
+                  invocation.positionalArguments.single as String,
+                );
+                final String output;
+                if (command.contains('__monkeyssh_acp_support__')) {
+                  checks++;
+                  output = '__monkeyssh_acp_support__=$verdict\n';
+                } else if (command.contains('hermes-agent')) {
+                  output = 'hermes\u001f$prefix/hermes\n';
+                } else {
+                  // Profile discovery: no profiles, so no picker.
+                  output = '';
+                }
+                final channel = MockSSHSession();
+                when(() => channel.stdout).thenAnswer(
+                  (_) => Stream<Uint8List>.value(
+                    Uint8List.fromList(utf8.encode(output)),
+                  ),
+                );
+                when(() => channel.stderr)
+                    .thenAnswer((_) => const Stream<Uint8List>.empty());
+                when(() => channel.done).thenAnswer((_) async {});
+                when(() => channel.exitCode).thenReturn(0);
+                when(channel.close).thenReturn(null);
+                return channel;
+              });
+          String? copied;
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'Clipboard.setData') {
+                copied = (call.arguments as Map)['text'] as String?;
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
+          final session = SshSession(
+            connectionId: 94,
+            hostId: 3,
+            client: client,
+            config: const SshConnectionConfig(
+              hostname: 'example.test',
+              port: 22,
+              username: 'dev',
+            ),
+          );
+          final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () async => results.add(
+                      await resolveAcpRemoteProviderLaunch(
+                        context: context,
+                        session: session,
+                        provider: acpHermesProvider,
+                        canUseTerminalCli: true,
+                      ),
+                    ),
+                    child: const Text('Launch'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Launch'));
+          await tester.pumpAndSettle();
+
+          if (choice == null) {
+            expect(find.text('Hermes needs ACP support'), findsNothing);
+            expect(results.single!.override!.argv, [
+              '$prefix/hermes',
+              '--profile',
+              'default',
+              'acp',
+            ]);
+            // A passing check is remembered for the session.
+            await tester.tap(find.text('Launch'));
+            await tester.pumpAndSettle();
+            expect(results, hasLength(2));
+            expect(checks, 1);
+            return;
+          }
+          expect(find.text('Hermes needs ACP support'), findsOneWidget);
+          expect(
+            find.text("pipx install --force 'hermes-agent[acp]'"),
+            findsOneWidget,
+          );
+          await tester.tap(find.text(choice));
+          await tester.pumpAndSettle();
+          if (choice == 'Copy command') {
+            expect(copied, "pipx install --force 'hermes-agent[acp]'");
+            expect(results.single, isNull);
+          } else {
+            expect(copied, isNull);
+            expect(results.single, (override: null, terminal: true));
+          }
+        });
       }
     }
 

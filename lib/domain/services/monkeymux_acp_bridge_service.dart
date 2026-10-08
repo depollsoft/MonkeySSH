@@ -269,6 +269,82 @@ Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
   return Map.unmodifiable(resolved);
 }
 
+const _acpSupportMarker = '__monkeyssh_acp_support__=';
+final _acpSupportFixPattern = RegExp(r'^[A-Za-z0-9*/._-]+$');
+
+/// Builds a remote command that runs [check] against the absolute
+/// [executable] with the same profile and `PATH` as a provider launch.
+///
+/// It prints one marker line: `ready` unless the check exits 1, otherwise the
+/// index of the first matching [AcpSupportCheck.fixes] entry. Windows matches
+/// patterns against the executable path only, since it does not resolve links.
+String buildAcpSupportCheckCommand(
+  AcpSupportCheck check,
+  String executable, {
+  required bool isWindows,
+}) {
+  if (executable.contains('\u0000')) {
+    throw ArgumentError.value(executable, 'executable');
+  }
+  final patterns = [for (final fix in check.fixes) ?fix.linkTargetPattern];
+  if (patterns.any((pattern) => !_acpSupportFixPattern.hasMatch(pattern))) {
+    throw ArgumentError.value(patterns, 'check');
+  }
+  final catchAll = check.fixes.length - 1;
+  if (isWindows) {
+    final selectFix = [
+      for (final (index, fix) in check.fixes.indexed)
+        if (fix.linkTargetPattern case final pattern?)
+          'if(\$__flExe -like ${powerShellSingleQuote(pattern)}){\$__flFix=$index}else',
+    ].join();
+    return buildWindowsPowerShellCommand(
+      powerShellUtf8OutputScript(
+        [
+          powerShellProfilePathPreamble,
+          '\$__flExe=${powerShellSingleQuote(executable.replaceAll(r'\', '/'))};',
+          '& \$__flExe ${check.arguments.map(powerShellSingleQuote).join(' ')} *> \$null;',
+          'if(\$LASTEXITCODE -ne 1){[void]\$__flOut.Append(${powerShellSingleQuote('${_acpSupportMarker}ready')})}',
+          'else{$selectFix{\$__flFix=$catchAll};',
+          '[void]\$__flOut.Append(${powerShellSingleQuote(_acpSupportMarker)}).Append(\$__flFix)};',
+        ].join(),
+      ),
+    );
+  }
+  final cases = [
+    for (final (index, fix) in check.fixes.indexed)
+      if (fix.linkTargetPattern case final pattern?) '$pattern) i=$index;; ',
+  ].join();
+  return '$_profileSourcingPrefix'
+      'e=${shellEscapePosix(executable)}; '
+      '"\$e" ${check.arguments.map(shellEscapePosix).join(' ')} '
+      '</dev/null >/dev/null 2>&1; '
+      'if [ \$? -ne 1 ]; then printf "%s\\n" ${shellEscapePosix('${_acpSupportMarker}ready')}; '
+      r'else t="$e $(readlink "$e" 2>/dev/null)"; '
+      'case "\$t" in $cases*) i=$catchAll;; esac; '
+      'printf "%s%s\\n" ${shellEscapePosix(_acpSupportMarker)} "\$i"; fi';
+}
+
+/// Parses [buildAcpSupportCheckCommand] output.
+///
+/// [supported] is true only for an explicit `ready`; [fix] is set only when
+/// the check failed. Neither means the check could not tell.
+({bool supported, AcpSupportFix? fix}) parseAcpSupportCheckOutput(
+  String output,
+  AcpSupportCheck check,
+) {
+  for (final line in output.split(RegExp(r'[\r\n]+'))) {
+    final trimmed = line.trim();
+    if (!trimmed.startsWith(_acpSupportMarker)) continue;
+    final value = trimmed.substring(_acpSupportMarker.length);
+    if (value == 'ready') return (supported: true, fix: null);
+    final index = int.tryParse(value);
+    if (index != null && index >= 0 && index < check.fixes.length) {
+      return (supported: false, fix: check.fixes[index]);
+    }
+  }
+  return (supported: false, fix: null);
+}
+
 Map<String, String> _validatedExecutableOverrides(
   List<String> names,
   Map<String, String> overrideVariables,

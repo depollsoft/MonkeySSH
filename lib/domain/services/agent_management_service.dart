@@ -251,6 +251,8 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     executableNames: ['hermes', 'hermes-agent'],
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
+    // Native chat runs `hermes acp`, which needs the optional `acp` extra.
+    packageExtras: ['acp'],
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
   ),
@@ -602,8 +604,12 @@ String? buildAgentInstallCommand(
   }
   final package = definition.packageName;
   if (package == null) return null;
+  // pipx upgrade and reinstall take the installed name; install commands take
+  // the spec so a package's extras come with it.
+  final spec = definition.installPackageSpec!;
   if (windows) {
     final quotedPackage = powerShellSingleQuote(package);
+    final quotedSpec = powerShellSingleQuote(spec);
     final quotedLatest = powerShellSingleQuote('$package@latest');
     final script = switch (definition.registry) {
       AgentPackageRegistry.npm => [
@@ -623,14 +629,14 @@ String? buildAgentInstallCommand(
         else if (update)
           '& pipx upgrade $quotedPackage;'
         else
-          '& pipx install $quotedPackage;',
+          '& pipx install $quotedSpec;',
         r'if($LASTEXITCODE -eq 0){exit 0}};',
         if (repair)
-          '& py -m pip install --user --upgrade --force-reinstall $quotedPackage;'
+          '& py -m pip install --user --upgrade --force-reinstall $quotedSpec;'
         else if (update)
-          '& py -m pip install --user --upgrade $quotedPackage;'
+          '& py -m pip install --user --upgrade $quotedSpec;'
         else
-          '& py -m pip install --user $quotedPackage;',
+          '& py -m pip install --user $quotedSpec;',
         r'exit $LASTEXITCODE',
       ].join(),
       null => null,
@@ -646,10 +652,10 @@ String? buildAgentInstallCommand(
           : '$_profilePrefix npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest',
     AgentPackageRegistry.pipx =>
       repair
-          ? '$_profilePrefix pipx reinstall ${_shellQuote(package)} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(package)}'
+          ? '$_profilePrefix pipx reinstall ${_shellQuote(package)} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
           : update
-          ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(package)}'
-          : '$_profilePrefix pipx install ${_shellQuote(package)} || python3 -m pip install --user ${_shellQuote(package)}',
+          ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(spec)}'
+          : '$_profilePrefix pipx install ${_shellQuote(spec)} || python3 -m pip install --user ${_shellQuote(spec)}',
     null => null,
   };
 }

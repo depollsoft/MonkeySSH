@@ -282,6 +282,18 @@ resolveAcpRemoteProviderLaunch({
   for (final candidate in provider.executableProbe.candidateExecutableNames) {
     final executable = found[candidate];
     if (executable != null) {
+      final fix = await _checkAcpSupport(session, provider, executable);
+      if (fix != null) {
+        if (!context.mounted) return null;
+        final useTerminal = await _showAcpSupportMissingDialog(
+          context: context,
+          provider: provider,
+          fix: fix,
+          canUseTerminalCli: canUseTerminalCli,
+        );
+        return useTerminal ? (override: null, terminal: true) : null;
+      }
+      if (!context.mounted) return null;
       final resolved = AcpLaunchCommand(
         executable: executable,
         arguments: provider.launchCommand.arguments,
@@ -354,6 +366,127 @@ resolveAcpRemoteProviderLaunch({
     'terminal' => (override: null, terminal: true),
     _ => null,
   };
+}
+
+const _acpSupportCheckTimeout = Duration(seconds: 30);
+final _acpSupportedExecutables = Expando<Set<String>>('acp-supported');
+
+/// Runs [provider]'s support check against [executable] and returns the fix
+/// to show when the installation cannot serve ACP.
+///
+/// A passing check is remembered for the SSH session. A check that fails to
+/// run, times out, or cannot tell never blocks the launch.
+Future<AcpSupportFix?> _checkAcpSupport(
+  SshSession session,
+  AcpBuiltinProvider provider,
+  String executable,
+) async {
+  final check = provider.supportCheck;
+  if (check == null) return null;
+  final supported = _acpSupportedExecutables[session] ??= <String>{};
+  if (supported.contains(executable)) return null;
+  final startedAt = DateTime.now();
+  try {
+    final output = await session.runQueuedExec(() async {
+      SSHSession? shell;
+      try {
+        shell = await session.execute(
+          buildAcpSupportCheckCommand(
+            check,
+            executable,
+            isWindows: session.remoteIsWindows,
+          ),
+        );
+        shell.stderr.drain<void>().ignore();
+        // Time out inside the queued exec so a hung check closes its channel.
+        final stdout = await utf8
+            .decodeStream(shell.stdout)
+            .timeout(_acpSupportCheckTimeout);
+        await shell.done.timeout(_acpSupportCheckTimeout);
+        return stdout;
+      } finally {
+        shell?.close();
+      }
+    });
+    final result = parseAcpSupportCheckOutput(output, check);
+    if (result.supported) supported.add(executable);
+    DiagnosticsLogService.instance.info(
+      'acp.launch',
+      'support_check_complete',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
+        'supported': result.supported,
+        'missing': result.fix != null,
+      },
+    );
+    return result.fix;
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.warning(
+      'acp.launch',
+      'support_check_failed',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'errorType': error.runtimeType,
+      },
+    );
+    return null;
+  }
+}
+
+/// Explains that [provider] cannot serve ACP on this host and offers [fix].
+///
+/// Returns whether the user chose the terminal CLI instead.
+Future<bool> _showAcpSupportMissingDialog({
+  required BuildContext context,
+  required AcpBuiltinProvider provider,
+  required AcpSupportFix fix,
+  required bool canUseTerminalCli,
+}) async {
+  final message = provider.supportCheck!.missingMessage;
+  final choice = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('${provider.label} needs ACP support'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$message Run this on the host, then try again:'),
+          const SizedBox(height: 12),
+          SelectableText(
+            fix.command,
+            style: const TextStyle(fontFamily: 'monospace'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, 'cancel'),
+          child: const Text('Cancel'),
+        ),
+        if (canUseTerminalCli)
+          OutlinedButton(
+            onPressed: () => Navigator.pop(context, 'terminal'),
+            child: const Text('Use terminal CLI'),
+          ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, 'copy'),
+          child: const Text('Copy command'),
+        ),
+      ],
+    ),
+  );
+  if (choice == 'copy') {
+    await Clipboard.setData(ClipboardData(text: fix.command));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Command copied.')));
+    }
+  }
+  return choice == 'terminal';
 }
 
 /// Applies global terminal-agent settings before a provider's ACP entrypoint.
