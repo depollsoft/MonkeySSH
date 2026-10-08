@@ -371,8 +371,9 @@ const _acpSupportCheckTimeout = Duration(seconds: 30);
 const _acpSupportInstallTimeout = Duration(minutes: 10);
 final _acpSupportedExecutables = Expando<Set<String>>('acp-supported');
 
-/// Runs [command] in the exec queue, bounded by [timeout] from opening the
-/// channel to its exit, and returns stdout, all output, and the exit status.
+/// Runs [command] in the exec queue, bounded by one [timeout] from opening
+/// the channel to its exit, and returns stdout, all output, and the exit
+/// status.
 Future<({String stdout, String output, int? exitCode})> _runAcpSupportCommand(
   SshSession session,
   String command,
@@ -380,6 +381,7 @@ Future<({String stdout, String output, int? exitCode})> _runAcpSupportCommand(
 ) => session.runQueuedExec(() async {
   // Opening is bounded too: a stalled connection must not hold the launch,
   // and a channel that opens after the deadline is destroyed.
+  final deadline = DateTime.now().add(timeout);
   final shell = await openSshExec(session.execute(command), timeout);
   var finished = false;
   try {
@@ -397,7 +399,7 @@ Future<({String stdout, String output, int? exitCode})> _runAcpSupportCommand(
           .transform(utf8.decoder)
           .forEach(output.write),
       shell.done,
-    ]).timeout(timeout);
+    ]).timeout(deadline.difference(DateTime.now()));
     finished = true;
     return (
       stdout: stdout.toString(),
@@ -508,26 +510,26 @@ Future<bool> _installAcpSupport(
   String executable,
 ) async {
   final navigator = Navigator.of(context);
-  unawaited(
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          content: Row(
-            children: [
-              const CircularProgressIndicator(),
-              const SizedBox(width: 20),
-              Expanded(
-                child: Text('Installing ${provider.label} ACP support…'),
-              ),
-            ],
-          ),
+  // Track the route itself: the install can finish before the dialog builds,
+  // and an app lock can remove the dialog while the install runs.
+  final progress = DialogRoute<void>(
+    context: context,
+    barrierDismissible: false,
+    themes: InheritedTheme.capture(from: context, to: navigator.context),
+    builder: (context) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 20),
+            Expanded(child: Text('Installing ${provider.label} ACP support…')),
+          ],
         ),
       ),
     ),
   );
+  unawaited(navigator.push(progress));
   final startedAt = DateTime.now();
   String? failure;
   try {
@@ -575,7 +577,8 @@ Future<bool> _installAcpSupport(
         ? 'The install did not finish in time.'
         : 'The install could not run on this host.';
   } finally {
-    navigator.pop();
+    // Popping blindly could remove whatever replaced the dialog.
+    if (progress.isActive) navigator.removeRoute(progress);
   }
   if (failure == null) return true;
   if (!context.mounted) return false;

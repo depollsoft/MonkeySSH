@@ -911,6 +911,9 @@ touch "$HOME/installed"
     }
 
     test('reads exit status 1 as missing and anything else as ready', () async {
+      // Even when a startup file turns on errexit.
+      await File('${home.path}/.bashrc').writeAsString('set -e\n');
+      await File('${home.path}/.zshrc').writeAsString('set -e\n');
       final hermes = await fakeHermes('venv/bin/hermes');
       expect(await runCheck(hermes), AcpSupportStatus.missing);
       expect(File('${home.path}/calls').readAsLinesSync().first, 'acp --check');
@@ -1024,6 +1027,10 @@ esac
             'Provides-Extra: acp\n'
             'Requires-Dist: httpx>=0.27\n'
             'Requires-Dist: agent-client-protocol==0.9.0; extra == "acp"\n'
+            'Requires-Dist: anyio==4.0; python_version >= "3.11" and '
+            'extra == "acp"\n'
+            "Requires-Dist: anyio==3.0; extra == 'acp' and "
+            "python_version < '3.11'\n"
             "Requires-Dist: mcp==1.0; extra == 'mcp'\n",
           );
       // Without pip in the venv the installer hands the requirements to uv.
@@ -1043,7 +1050,10 @@ touch "$HOME/installed"
         expect(result.exitCode, 0, reason: '$shell: ${result.stderr}');
         expect(
           File('${home.path}/uv-args').readAsStringSync(),
-          'pip install --python $venv/bin/python agent-client-protocol==0.9.0\n',
+          // Other markers stay for the installer to evaluate.
+          'pip install --python $venv/bin/python agent-client-protocol==0.9.0 '
+          'anyio==4.0; python_version >= "3.11" '
+          "anyio==3.0; python_version < '3.11'\n",
         );
       }
     }, testOn: 'mac-os || linux');

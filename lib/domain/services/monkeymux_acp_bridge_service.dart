@@ -305,6 +305,9 @@ String buildAcpSupportCheckCommand(
     );
   }
   return '$_profileSourcingPrefix'
+      // A startup file can turn on errexit, which would end the shell at
+      // exit status 1 before the verdict is printed.
+      'set +e; '
       '${shellEscapePosix(executable)} '
       '${check.arguments.map(shellEscapePosix).join(' ')} '
       '</dev/null >/dev/null 2>&1; '
@@ -327,14 +330,23 @@ AcpSupportStatus parseAcpSupportCheckOutput(String output) {
 
 // Installs the requirements an extra declares into the running environment,
 // leaving the distribution itself alone so an editable checkout stays one.
+// Each keeps its other markers (Python version, platform) for pip or uv to
+// evaluate; only the extra clause is dropped.
 // Outside a venv the distribution can only be a user install (on PEP 668
 // systems it was installed past the same guard), so the extra goes beside it.
 // No double quotes: Windows PowerShell 5.1 mangles them in native arguments.
 const _acpExtraInstallScript = r'''
 import importlib.metadata as m, importlib.util, os, re, shutil, site, subprocess, sys
 dist, extra = sys.argv[1:3]
-marker = re.compile(r'extra\s*==\s*[\x27\x22]' + re.escape(extra) + r'[\x27\x22]')
-reqs = [r.split(';')[0].strip() for r in m.requires(dist) or [] if marker.search(r)]
+tag = r'extra\s*==\s*[\x27\x22]' + re.escape(extra) + r'[\x27\x22]'
+reqs = []
+for text in m.requires(dist) or []:
+    req, _, marker = text.partition(';')
+    if not re.search(tag, marker):
+        continue
+    # Keep the other conditions for the installer to evaluate.
+    rest = re.sub(r'\s*\band\s+' + tag + '|' + tag + r'\s*\band\s*|' + tag, '', marker).strip()
+    reqs.append(req.strip() + ('; ' + rest if rest and 'extra' not in rest else ''))
 if not reqs:
     sys.exit(f'{dist} {m.version(dist)} declares no {extra} extra.')
 flags, env = [], dict(os.environ)
@@ -399,7 +411,7 @@ String buildAcpSupportRepairCommand(
   }
   final selfInstallArguments = selfInstall.map(shellEscapePosix).join(' ');
   return '$_profileSourcingPrefix'
-      'e=${shellEscapePosix(executable)}; p=\$e; '
+      'set +e; e=${shellEscapePosix(executable)}; p=\$e; '
       // Follow the launcher's links to the script that pip, pipx or uv wrote.
       r'while [ -L "$p" ]; do l=$(readlink "$p"); '
       r'case $l in /*) p=$l;; *) p=${p%/*}/$l;; esac; done; '

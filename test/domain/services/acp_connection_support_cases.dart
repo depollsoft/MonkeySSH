@@ -359,6 +359,92 @@ void registerAcpConnectionSupportTests() {
       }
     }
 
+    testWidgets('an app lock during the install leaves other routes alone', (
+      tester,
+    ) async {
+      final client = MockSshClient();
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+      final install = Completer<void>();
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        final command = invocation.positionalArguments.single as String;
+        final channel = _MockExecChannel();
+        var stdout = '';
+        var done = Future<void>.value();
+        if (command.contains('__monkeyssh_acp_support__')) {
+          stdout = '__monkeyssh_acp_support__=missing\n';
+        } else if (command.contains('pyvenv.cfg')) {
+          stdout = 'Hermes ACP check OK\n';
+          done = install.future;
+        } else if (command.contains('hermes-agent')) {
+          stdout = 'hermes\u001f/opt/tools/hermes\n';
+        }
+        when(() => channel.stdout).thenAnswer(
+          (_) =>
+              Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(stdout))),
+        );
+        when(() => channel.stderr)
+            .thenAnswer((_) => const Stream<Uint8List>.empty());
+        when(() => channel.done).thenAnswer((_) => done);
+        when(() => channel.exitCode).thenReturn(0);
+        when(channel.close).thenReturn(null);
+        return channel;
+      });
+      final session = SshSession(
+        connectionId: 96,
+        hostId: 3,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.test',
+          port: 22,
+          username: 'dev',
+        ),
+      );
+      final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+      final navigatorKey = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigatorKey,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async => results.add(
+                  await resolveAcpRemoteProviderLaunch(
+                    context: context,
+                    session: session,
+                    provider: acpHermesProvider,
+                    canUseTerminalCli: true,
+                  ),
+                ),
+                child: const Text('Launch'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Launch'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Install and start'));
+      await tester.pump();
+      expect(find.text('Installing Hermes ACP support…'), findsOneWidget);
+
+      // Locking replaces the route stack, taking the dialog with it.
+      unawaited(
+        navigatorKey.currentState!.pushAndRemoveUntil(
+          MaterialPageRoute<void>(builder: (_) => const Text('Locked')),
+          (_) => false,
+        ),
+      );
+      await tester.pumpAndSettle();
+      install.complete();
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Locked'), findsOneWidget);
+      expect(results, hasLength(1));
+    });
+
     testWidgets('a hung Hermes ACP check frees its channel and launches', (
       tester,
     ) async {
