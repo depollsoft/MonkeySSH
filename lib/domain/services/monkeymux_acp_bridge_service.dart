@@ -292,11 +292,16 @@ String buildAcpSupportCheckCommand(
   }
   final catchAll = check.fixes.length - 1;
   if (isWindows) {
-    final selectFix = [
+    final branches = [
       for (final (index, fix) in check.fixes.indexed)
         if (fix.linkTargetPattern case final pattern?)
-          'if(\$__flExe -like ${powerShellSingleQuote(pattern)}){\$__flFix=$index}else',
-    ].join();
+          'if(\$__flExe -like ${powerShellSingleQuote(pattern)}){\$__flFix=$index}',
+    ];
+    // A bare `{...}` is a script block literal, not a statement block, so the
+    // catch-all is a plain assignment when no pattern precedes it.
+    final selectFix = branches.isEmpty
+        ? '\$__flFix=$catchAll'
+        : '${branches.join('else')}else{\$__flFix=$catchAll}';
     return buildWindowsPowerShellCommand(
       powerShellUtf8OutputScript(
         [
@@ -304,7 +309,7 @@ String buildAcpSupportCheckCommand(
           '\$__flExe=${powerShellSingleQuote(executable.replaceAll(r'\', '/'))};',
           '& \$__flExe ${check.arguments.map(powerShellSingleQuote).join(' ')} *> \$null;',
           'if(\$LASTEXITCODE -ne 1){[void]\$__flOut.Append(${powerShellSingleQuote('${_acpSupportMarker}ready')})}',
-          'else{$selectFix{\$__flFix=$catchAll};',
+          'else{$selectFix;',
           '[void]\$__flOut.Append(${powerShellSingleQuote(_acpSupportMarker)}).Append(\$__flFix)};',
         ].join(),
       ),

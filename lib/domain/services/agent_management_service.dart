@@ -607,6 +607,10 @@ String? buildAgentInstallCommand(
   // pipx upgrade and reinstall take the installed name; install commands take
   // the spec so a package's extras come with it.
   final spec = definition.installPackageSpec!;
+  // pipx reinstall keeps the spec an installation was made with, so it cannot
+  // add extras an older install left out. Repair those by reinstalling from
+  // the spec instead.
+  final pipxRepairsFromSpec = definition.packageExtras.isNotEmpty;
   if (windows) {
     final quotedPackage = powerShellSingleQuote(package);
     final quotedSpec = powerShellSingleQuote(spec);
@@ -624,7 +628,9 @@ String? buildAgentInstallCommand(
       AgentPackageRegistry.pipx => [
         powerShellProfilePathPreamble,
         'if(Get-Command pipx -ErrorAction SilentlyContinue){',
-        if (repair)
+        if (repair && pipxRepairsFromSpec)
+          '& pipx install --force $quotedSpec;'
+        else if (repair)
           '& pipx reinstall $quotedPackage;'
         else if (update)
           '& pipx upgrade $quotedPackage;'
@@ -652,7 +658,7 @@ String? buildAgentInstallCommand(
           : '$_profilePrefix npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest',
     AgentPackageRegistry.pipx =>
       repair
-          ? '$_profilePrefix pipx reinstall ${_shellQuote(package)} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
+          ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${_shellQuote(spec)}' : 'pipx reinstall ${_shellQuote(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
           : update
           ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(spec)}'
           : '$_profilePrefix pipx install ${_shellQuote(spec)} || python3 -m pip install --user ${_shellQuote(spec)}',

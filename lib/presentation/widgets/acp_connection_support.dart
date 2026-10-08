@@ -388,24 +388,37 @@ Future<AcpSupportFix?> _checkAcpSupport(
   final startedAt = DateTime.now();
   try {
     final output = await session.runQueuedExec(() async {
-      SSHSession? shell;
-      try {
-        shell = await session.execute(
+      // Opening is bounded too: a stalled connection must not hold the launch,
+      // and a channel that opens after the deadline is destroyed.
+      final shell = await openSshExec(
+        session.execute(
           buildAcpSupportCheckCommand(
             check,
             executable,
             isWindows: session.remoteIsWindows,
           ),
-        );
+        ),
+        _acpSupportCheckTimeout,
+      );
+      var finished = false;
+      try {
         shell.stderr.drain<void>().ignore();
-        // Time out inside the queued exec so a hung check closes its channel.
-        final stdout = await utf8
-            .decodeStream(shell.stdout)
-            .timeout(_acpSupportCheckTimeout);
-        await shell.done.timeout(_acpSupportCheckTimeout);
+        // Time out inside the queued exec so a hung check frees its channel
+        // before the queue slot is released.
+        final stdout = await () async {
+          final text = await utf8.decodeStream(shell.stdout);
+          await shell.done;
+          return text;
+        }().timeout(_acpSupportCheckTimeout);
+        finished = true;
         return stdout;
       } finally {
-        shell?.close();
+        if (finished) {
+          shell.close();
+        } else {
+          // close() only sends EOF, which a hung check can ignore.
+          await closeAbandonedSshExec(shell);
+        }
       }
     });
     final result = parseAcpSupportCheckOutput(output, check);

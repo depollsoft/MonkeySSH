@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -347,6 +348,90 @@ void registerAcpConnectionSupportTests() {
         });
       }
     }
+
+    testWidgets('a hung Hermes ACP check frees its channel and launches', (
+      tester,
+    ) async {
+      final client = MockSshClient();
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+      final hungStdout = StreamController<Uint8List>();
+      addTearDown(hungStdout.close);
+      final hungDone = Completer<void>();
+      _MockExecChannel? checkChannel;
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            final channel = _MockExecChannel();
+            if (command.contains('__monkeyssh_acp_support__')) {
+              checkChannel = channel;
+              when(() => channel.stdout).thenAnswer((_) => hungStdout.stream);
+              when(() => channel.done).thenAnswer((_) => hungDone.future);
+            } else {
+              final output = command.contains('hermes-agent')
+                  ? 'hermes\u001f/opt/tools/hermes\n'
+                  : '';
+              when(() => channel.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.value(
+                  Uint8List.fromList(utf8.encode(output)),
+                ),
+              );
+              when(() => channel.done).thenAnswer((_) async {});
+            }
+            when(() => channel.stderr)
+                .thenAnswer((_) => const Stream<Uint8List>.empty());
+            when(() => channel.exitCode).thenReturn(0);
+            when(channel.close).thenReturn(null);
+            return channel;
+          });
+      final session = SshSession(
+        connectionId: 95,
+        hostId: 3,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.test',
+          port: 22,
+          username: 'dev',
+        ),
+      );
+      final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async => results.add(
+                  await resolveAcpRemoteProviderLaunch(
+                    context: context,
+                    session: session,
+                    provider: acpHermesProvider,
+                    canUseTerminalCli: true,
+                  ),
+                ),
+                child: const Text('Launch'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Launch'));
+      await tester.pump();
+      expect(checkChannel, isNotNull);
+      expect(results, isEmpty);
+
+      // The check times out, then the channel ignores EOF past the grace.
+      await tester.pump(const Duration(seconds: 31));
+      await tester.pump(abandonedSshExecCloseGrace);
+      await tester.pumpAndSettle();
+
+      verify(checkChannel!.channel.destroy).called(1);
+      expect(find.text('Hermes needs ACP support'), findsNothing);
+      expect(results.single!.override!.argv, [
+        '/opt/tools/hermes',
+        '--profile',
+        'default',
+        'acp',
+      ]);
+    });
 
     test('ACP executable prewarm is reused during the launch window', () async {
       final client = MockSshClient();

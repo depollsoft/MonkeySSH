@@ -955,6 +955,23 @@ void main() {
         ),
       );
     });
+
+    test('Windows assigns a lone catch-all fix as a statement', () {
+      final script = decodeEncodedPowerShell(
+        buildAcpSupportCheckCommand(
+          AcpSupportCheck(
+            arguments: const ['--check'],
+            missingMessage: 'Missing.',
+            fixes: const [AcpSupportFix(command: 'fix')],
+          ),
+          r'C:\tools\agent.exe',
+          isWindows: true,
+        ),
+      );
+      // `{$__flFix=0}` would be a script block literal that never runs.
+      expect(script, contains(r'else{$__flFix=0;[void]$__flOut'));
+      expect(script, isNot(contains('{{')));
+    });
   });
 
   test('only dependency paths can use a different executable basename', () {

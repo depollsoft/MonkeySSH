@@ -1943,6 +1943,8 @@ esac
       final hermes = agentCliRuntimeDefinitions.firstWhere(
         (definition) => definition.id == 'cli:hermes',
       );
+      // pipx reinstall keeps an older install's spec, so repair reinstalls
+      // from the spec to add the `acp` extra.
       expect(
         buildAgentInstallCommand(
           hermes,
@@ -1950,7 +1952,21 @@ esac
           update: false,
           repair: true,
         ),
-        contains("pipx reinstall 'hermes-agent'"),
+        allOf(
+          contains("pipx install --force 'hermes-agent[acp]' ||"),
+          isNot(contains('pipx reinstall')),
+        ),
+      );
+      expect(
+        decodeEncodedPowerShell(
+          buildAgentInstallCommand(
+            hermes,
+            windows: true,
+            update: false,
+            repair: true,
+          )!,
+        ),
+        contains("& pipx install --force 'hermes-agent[acp]';"),
       );
     });
 
