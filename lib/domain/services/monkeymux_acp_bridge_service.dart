@@ -269,6 +269,175 @@ Map<String, String> parseMonkeyMuxAcpExecutableProbeOutput(
   return Map.unmodifiable(resolved);
 }
 
+const _acpSupportMarker = '__monkeyssh_acp_support__=';
+
+/// What an ACP support check found.
+enum AcpSupportStatus {
+  /// The CLI can start its ACP server.
+  supported,
+
+  /// The CLI lacks its ACP server.
+  missing,
+
+  /// The check did not report a verdict.
+  unknown,
+}
+
+/// Builds a remote command that runs [check] against the absolute
+/// [executable] with the same profile and `PATH` as a provider launch, and
+/// prints whether the installation can serve ACP.
+String buildAcpSupportCheckCommand(
+  AcpSupportCheck check,
+  String executable, {
+  required bool isWindows,
+}) {
+  _validateAcpSupportExecutable(executable);
+  if (isWindows) {
+    return buildWindowsPowerShellCommand(
+      powerShellUtf8OutputScript(
+        [
+          powerShellProfilePathPreamble,
+          '& ${_powerShellExecutable(executable)} ${check.arguments.map(powerShellSingleQuote).join(' ')} *> \$null;',
+          '[void]\$__flOut.Append(${powerShellSingleQuote(_acpSupportMarker)});',
+          r"if($LASTEXITCODE -eq 1){[void]$__flOut.Append('missing')}else{[void]$__flOut.Append('ready')};",
+        ].join(),
+      ),
+    );
+  }
+  return '$_profileSourcingPrefix'
+      // A startup file can turn on errexit, which would end the shell at
+      // exit status 1 before the verdict is printed.
+      'set +e; '
+      '${shellEscapePosix(executable)} '
+      '${check.arguments.map(shellEscapePosix).join(' ')} '
+      '</dev/null >/dev/null 2>&1; '
+      r'if [ $? -eq 1 ]; then v=missing; else v=ready; fi; '
+      'printf "%s%s\\n" ${shellEscapePosix(_acpSupportMarker)} "\$v"';
+}
+
+/// Parses [buildAcpSupportCheckCommand] output.
+AcpSupportStatus parseAcpSupportCheckOutput(String output) {
+  for (final line in output.split(RegExp(r'[\r\n]+'))) {
+    switch (line.trim()) {
+      case '${_acpSupportMarker}ready':
+        return AcpSupportStatus.supported;
+      case '${_acpSupportMarker}missing':
+        return AcpSupportStatus.missing;
+    }
+  }
+  return AcpSupportStatus.unknown;
+}
+
+// Installs the requirements an extra declares into the running environment,
+// leaving the distribution itself alone so an editable checkout stays one.
+// Each keeps its other markers (Python version, platform) for pip or uv to
+// evaluate; only the extra clause is dropped.
+// Outside a venv the distribution can only be a user install (on PEP 668
+// systems it was installed past the same guard), so the extra goes beside it.
+// No double quotes: Windows PowerShell 5.1 mangles them in native arguments.
+const _acpExtraInstallScript = r'''
+import importlib.metadata as m, importlib.util, os, re, shutil, site, subprocess, sys
+dist, extra = sys.argv[1:3]
+tag = r'extra\s*==\s*[\x27\x22]' + re.escape(extra) + r'[\x27\x22]'
+reqs = []
+for text in m.requires(dist) or []:
+    req, _, marker = text.partition(';')
+    if not re.search(tag, marker):
+        continue
+    # Keep the other conditions for the installer to evaluate.
+    rest = re.sub(r'\s*\band\s+' + tag + '|' + tag + r'\s*\band\s*|' + tag, '', marker).strip()
+    reqs.append(req.strip() + ('; ' + rest if rest and 'extra' not in rest else ''))
+if not reqs:
+    sys.exit(f'{dist} {m.version(dist)} declares no {extra} extra.')
+flags, env = [], dict(os.environ)
+if sys.prefix == sys.base_prefix:
+    if not str(m.distribution(dist).locate_file('')).startswith(site.getusersitepackages()):
+        sys.exit(f'{dist} is installed system-wide; reinstall it with pipx.')
+    flags, env['PIP_BREAK_SYSTEM_PACKAGES'] = ['--user'], '1'
+if importlib.util.find_spec('pip'):
+    command = [sys.executable, '-m', 'pip', 'install', *flags, *reqs]
+elif not flags and shutil.which('uv'):
+    command = ['uv', 'pip', 'install', '--python', sys.executable, *reqs]
+else:
+    sys.exit('Neither pip nor uv can install into ' + sys.executable)
+print('+ ' + ' '.join(command), flush=True)
+sys.exit(subprocess.call(command, env=env))
+''';
+
+/// Builds a remote command that installs [check]'s extra for the absolute
+/// [executable], then reruns the check; it exits 0 only when the check passes.
+///
+/// The extra goes into the Python environment the executable runs from: the
+/// venv its launcher resolves into (pip, pipx and uv installs), or the user
+/// site of the interpreter in its shebang. Any other launcher, such as the
+/// wrapper Hermes's installer writes, gets the CLI's own installer.
+String buildAcpSupportRepairCommand(
+  AcpSupportCheck check,
+  String executable, {
+  required bool isWindows,
+}) {
+  _validateAcpSupportExecutable(executable);
+  final extraArguments = [
+    check.distribution,
+    check.extra,
+  ].map(isWindows ? powerShellSingleQuote : shellEscapePosix).join(' ');
+  final selfInstall = check.selfInstallArguments;
+  if (isWindows) {
+    final exe = _powerShellExecutable(executable);
+    final selfInstallArguments = selfInstall
+        .map(powerShellSingleQuote)
+        .join(' ');
+    return buildCompactWindowsPowerShellCommand(
+      [
+        powerShellProfilePathPreamble,
+        '\$__flExe=$exe;',
+        r'$__flDir=Split-Path -Parent $__flExe;',
+        r'$__flPy=$null;',
+        r"if(Test-Path -LiteralPath (Join-Path (Split-Path -Parent $__flDir) 'pyvenv.cfg')){",
+        r"$__flPy=Join-Path $__flDir 'python.exe'}",
+        if (selfInstall.isNotEmpty) ...[
+          "else{& \$__flExe $selfInstallArguments '--help' *> \$null;",
+          'if(\$LASTEXITCODE -eq 0){& \$__flExe $selfInstallArguments}',
+          "else{'Cannot find the Python environment that runs this program.';exit 1}};",
+        ] else
+          "else{'Cannot find the Python environment that runs this program.';exit 1};",
+        'if(\$__flPy){& \$__flPy -c ${powerShellSingleQuote(_acpExtraInstallScript)} $extraArguments;',
+        r'if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}};',
+        '& \$__flExe ${check.arguments.map(powerShellSingleQuote).join(' ')};',
+        r'exit $LASTEXITCODE',
+      ].join(),
+      plainTextOutput: true,
+    );
+  }
+  final selfInstallArguments = selfInstall.map(shellEscapePosix).join(' ');
+  return '$_profileSourcingPrefix'
+      'set +e; e=${shellEscapePosix(executable)}; p=\$e; '
+      // Follow the launcher's links to the script that pip, pipx or uv wrote.
+      r'while [ -L "$p" ]; do l=$(readlink "$p"); '
+      r'case $l in /*) p=$l;; *) p=${p%/*}/$l;; esac; done; '
+      r'd=${p%/*}; py=; '
+      r'if [ -f "$d/../pyvenv.cfg" ]; then py=$d/python; '
+      '${selfInstall.isEmpty ? '' : 'elif "\$e" $selfInstallArguments --help >/dev/null 2>&1; then "\$e" $selfInstallArguments; '}'
+      r"else py=$(sed -n '1s/^#![[:space:]]*//p' "
+      r'"$p"); '
+      r'py=${py##*/env }; py=${py%% *}; '
+      r'case $py in *python*) ;; '
+      r'*) echo "Cannot find the Python environment that runs $e."; exit 1;; esac; '
+      'fi; '
+      'if [ -n "\$py" ]; then "\$py" -c ${shellEscapePosix(_acpExtraInstallScript)} '
+      '$extraArguments || exit 1; fi; '
+      '"\$e" ${check.arguments.map(shellEscapePosix).join(' ')}';
+}
+
+void _validateAcpSupportExecutable(String executable) {
+  if (executable.isEmpty || executable.contains('\u0000')) {
+    throw ArgumentError.value(executable, 'executable');
+  }
+}
+
+String _powerShellExecutable(String executable) =>
+    powerShellSingleQuote(executable.replaceAll(r'\', '/'));
+
 Map<String, String> _validatedExecutableOverrides(
   List<String> names,
   Map<String, String> overrideVariables,

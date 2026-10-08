@@ -1,9 +1,10 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -13,6 +14,7 @@ import 'package:monkeyssh/presentation/widgets/acp_connection_support.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
+import '../../helpers/powershell_test_helpers.dart';
 
 class _MockExecChannel extends MockSessionWithChannel {}
 
@@ -224,6 +226,308 @@ void registerAcpConnectionSupportTests() {
         }
       }
     }
+
+    for (final windows in [false, true]) {
+      for (final (verdict, choice, installExit) in [
+        ('missing', 'Install and start', 0),
+        ('missing', 'Install and start', 1),
+        ('missing', 'Cancel', null),
+        ('ready', null, null),
+      ]) {
+        testWidgets('Hermes launch checks ACP support: windows=$windows '
+            'verdict=$verdict choice=$choice installExit=$installExit', (
+          tester,
+        ) async {
+          final client = MockSshClient();
+          when(() => client.remoteVersion).thenReturn(
+            windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.6',
+          );
+          final prefix = windows ? 'C:/tools' : '/opt/tools';
+          var checks = 0;
+          var installs = 0;
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                final command = decodeEncodedPowerShell(
+                  invocation.positionalArguments.single as String,
+                );
+                var stdout = '';
+                var stderr = '';
+                var exitCode = 0;
+                if (command.contains('__monkeyssh_acp_support__')) {
+                  checks++;
+                  stdout = '__monkeyssh_acp_support__=$verdict\n';
+                } else if (command.contains('pyvenv.cfg')) {
+                  installs++;
+                  exitCode = installExit!;
+                  if (exitCode == 0) {
+                    stdout = 'Hermes ACP check OK\n';
+                  } else {
+                    stderr = 'Neither pip nor uv can install into /x/python\n';
+                  }
+                } else if (command.contains('hermes-agent')) {
+                  stdout = 'hermes\u001f$prefix/hermes\n';
+                }
+                // Anything else is profile discovery: no profiles, no picker.
+                final channel = MockSSHSession();
+                when(() => channel.stdout).thenAnswer(
+                  (_) => Stream<Uint8List>.value(
+                    Uint8List.fromList(utf8.encode(stdout)),
+                  ),
+                );
+                when(() => channel.stderr).thenAnswer(
+                  (_) => Stream<Uint8List>.value(
+                    Uint8List.fromList(utf8.encode(stderr)),
+                  ),
+                );
+                when(() => channel.done).thenAnswer((_) async {});
+                when(() => channel.exitCode).thenReturn(exitCode);
+                when(channel.close).thenReturn(null);
+                return channel;
+              });
+          final session = SshSession(
+            connectionId: 94,
+            hostId: 3,
+            client: client,
+            config: const SshConnectionConfig(
+              hostname: 'example.test',
+              port: 22,
+              username: 'dev',
+            ),
+          );
+          final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () async => results.add(
+                      await resolveAcpRemoteProviderLaunch(
+                        context: context,
+                        session: session,
+                        provider: acpHermesProvider,
+                        canUseTerminalCli: true,
+                      ),
+                    ),
+                    child: const Text('Launch'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Launch'));
+          await tester.pumpAndSettle();
+
+          final launched = ['$prefix/hermes', '--profile', 'default', 'acp'];
+          if (choice == null) {
+            expect(find.text('Hermes needs ACP support'), findsNothing);
+            expect(results.single!.override!.argv, launched);
+          } else {
+            expect(find.text('Hermes needs ACP support'), findsOneWidget);
+            expect(find.text('Use terminal CLI'), findsNothing);
+            await tester.tap(find.text(choice));
+            await tester.pumpAndSettle();
+            if (choice == 'Cancel') {
+              expect(installs, 0);
+              expect(results.single, isNull);
+              return;
+            }
+            expect(installs, 1);
+            if (installExit != 0) {
+              expect(
+                find.text('Could not install Hermes ACP support'),
+                findsOneWidget,
+              );
+              expect(
+                find.text('Neither pip nor uv can install into /x/python'),
+                findsOneWidget,
+              );
+              await tester.tap(find.text('Close'));
+              await tester.pumpAndSettle();
+              expect(results.single, isNull);
+              return;
+            }
+            expect(results.single!.override!.argv, launched);
+          }
+          // A passing check or install is remembered for the session.
+          await tester.tap(find.text('Launch'));
+          await tester.pumpAndSettle();
+          expect(results, hasLength(2));
+          expect(results.last!.override!.argv, launched);
+          expect(checks, 1);
+          expect(installs, choice == null ? 0 : 1);
+        });
+      }
+    }
+
+    testWidgets('an app lock during the install leaves other routes alone', (
+      tester,
+    ) async {
+      final client = MockSshClient();
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+      final install = Completer<void>();
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+        invocation,
+      ) async {
+        final command = invocation.positionalArguments.single as String;
+        final channel = _MockExecChannel();
+        var stdout = '';
+        var done = Future<void>.value();
+        if (command.contains('__monkeyssh_acp_support__')) {
+          stdout = '__monkeyssh_acp_support__=missing\n';
+        } else if (command.contains('pyvenv.cfg')) {
+          stdout = 'Hermes ACP check OK\n';
+          done = install.future;
+        } else if (command.contains('hermes-agent')) {
+          stdout = 'hermes\u001f/opt/tools/hermes\n';
+        }
+        when(() => channel.stdout).thenAnswer(
+          (_) =>
+              Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(stdout))),
+        );
+        when(() => channel.stderr)
+            .thenAnswer((_) => const Stream<Uint8List>.empty());
+        when(() => channel.done).thenAnswer((_) => done);
+        when(() => channel.exitCode).thenReturn(0);
+        when(channel.close).thenReturn(null);
+        return channel;
+      });
+      final session = SshSession(
+        connectionId: 96,
+        hostId: 3,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.test',
+          port: 22,
+          username: 'dev',
+        ),
+      );
+      final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+      final navigatorKey = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigatorKey,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async => results.add(
+                  await resolveAcpRemoteProviderLaunch(
+                    context: context,
+                    session: session,
+                    provider: acpHermesProvider,
+                    canUseTerminalCli: true,
+                  ),
+                ),
+                child: const Text('Launch'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Launch'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Install and start'));
+      await tester.pump();
+      expect(find.text('Installing Hermes ACP support…'), findsOneWidget);
+
+      // Locking replaces the route stack, taking the dialog with it.
+      unawaited(
+        navigatorKey.currentState!.pushAndRemoveUntil(
+          MaterialPageRoute<void>(builder: (_) => const Text('Locked')),
+          (_) => false,
+        ),
+      );
+      await tester.pumpAndSettle();
+      install.complete();
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Locked'), findsOneWidget);
+      expect(results, hasLength(1));
+    });
+
+    testWidgets('a hung Hermes ACP check frees its channel and launches', (
+      tester,
+    ) async {
+      final client = MockSshClient();
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+      final hungStdout = StreamController<Uint8List>();
+      addTearDown(hungStdout.close);
+      final hungDone = Completer<void>();
+      _MockExecChannel? checkChannel;
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final command = invocation.positionalArguments.single as String;
+            final channel = _MockExecChannel();
+            if (command.contains('__monkeyssh_acp_support__')) {
+              checkChannel = channel;
+              when(() => channel.stdout).thenAnswer((_) => hungStdout.stream);
+              when(() => channel.done).thenAnswer((_) => hungDone.future);
+            } else {
+              final output = command.contains('hermes-agent')
+                  ? 'hermes\u001f/opt/tools/hermes\n'
+                  : '';
+              when(() => channel.stdout).thenAnswer(
+                (_) => Stream<Uint8List>.value(
+                  Uint8List.fromList(utf8.encode(output)),
+                ),
+              );
+              when(() => channel.done).thenAnswer((_) async {});
+            }
+            when(() => channel.stderr)
+                .thenAnswer((_) => const Stream<Uint8List>.empty());
+            when(() => channel.exitCode).thenReturn(0);
+            when(channel.close).thenReturn(null);
+            return channel;
+          });
+      final session = SshSession(
+        connectionId: 95,
+        hostId: 3,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.test',
+          port: 22,
+          username: 'dev',
+        ),
+      );
+      final results = <({AcpLaunchCommand? override, bool terminal})?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async => results.add(
+                  await resolveAcpRemoteProviderLaunch(
+                    context: context,
+                    session: session,
+                    provider: acpHermesProvider,
+                    canUseTerminalCli: true,
+                  ),
+                ),
+                child: const Text('Launch'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Launch'));
+      await tester.pump();
+      expect(checkChannel, isNotNull);
+      expect(results, isEmpty);
+
+      // The check times out, then the channel ignores EOF past the grace.
+      await tester.pump(const Duration(seconds: 31));
+      await tester.pump(abandonedSshExecCloseGrace);
+      await tester.pumpAndSettle();
+
+      verify(checkChannel!.channel.destroy).called(1);
+      expect(find.text('Hermes needs ACP support'), findsNothing);
+      expect(results.single!.override!.argv, [
+        '/opt/tools/hermes',
+        '--profile',
+        'default',
+        'acp',
+      ]);
+    });
 
     test('ACP executable prewarm is reused during the launch window', () async {
       final client = MockSshClient();

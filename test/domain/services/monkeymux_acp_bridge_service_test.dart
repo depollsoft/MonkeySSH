@@ -819,6 +819,282 @@ void main() {
     );
   });
 
+  group('ACP support check', () {
+    final check = acpHermesProvider.supportCheck!;
+    final shells = ['/bin/bash', if (File('/bin/zsh').existsSync()) '/bin/zsh'];
+
+    late Directory home;
+    setUp(() async {
+      // Resolved, so paths match what an interpreter reports on macOS.
+      home = Directory(
+        (await Directory.systemTemp.createTemp('acp-support-home'))
+            .resolveSymbolicLinksSync(),
+      );
+    });
+    tearDown(() => home.delete(recursive: true));
+
+    // sshd runs the command with the login shell, as for the adapter probe.
+    Future<ProcessResult> runIn(String shell, String command) => Process.run(
+      shell,
+      ['-c', command],
+      environment: {
+        'HOME': home.path,
+        'SHELL': shell,
+        'PATH': '${home.path}/fakebin:/usr/bin:/bin',
+      },
+      includeParentEnvironment: false,
+    );
+
+    Future<String> script(String path, String body) async {
+      final file = File('${home.path}/$path');
+      await file.parent.create(recursive: true);
+      await file.writeAsString(body);
+      await Process.run('chmod', ['+x', file.path]);
+      return file.path;
+    }
+
+    // A fake Hermes: `acp --check` passes once something installed the
+    // extra, and Hermes's own installer exists only when [selfInstall].
+    Future<String> fakeHermes(String path, {bool selfInstall = false}) =>
+        script(path, '''
+#!/bin/sh
+echo "\$*" >> "\$HOME/calls"
+case "\$*" in
+  "acp --check") [ -f "\$HOME/installed" ];;
+  "pm install --extra acp --help") exit ${selfInstall ? 0 : 2};;
+  "pm install --extra acp") touch "\$HOME/installed";;
+  *) exit 2;;
+esac
+''');
+
+    // A fake interpreter that records how the extra installer was called.
+    const fakePython = r'''
+#!/bin/sh
+printf '%s|%s|%s\n' "$1" "$3" "$4" > "$HOME/python-args"
+touch "$HOME/installed"
+''';
+
+    Future<AcpSupportStatus> runCheck(String executable) async {
+      AcpSupportStatus? verdict;
+      for (final shell in shells) {
+        final result = await runIn(
+          shell,
+          buildAcpSupportCheckCommand(check, executable, isWindows: false),
+        );
+        expect(result.exitCode, 0, reason: '$shell: ${result.stderr}');
+        final parsed = parseAcpSupportCheckOutput(result.stdout as String);
+        expect(parsed, verdict ?? parsed, reason: shell);
+        verdict = parsed;
+      }
+      return verdict!;
+    }
+
+    // Runs the repair from a missing state in every shell.
+    Future<void> expectRepair(String executable) async {
+      for (final shell in shells) {
+        for (final name in ['installed', 'python-args', 'calls']) {
+          final file = File('${home.path}/$name');
+          if (file.existsSync()) file.deleteSync();
+        }
+        expect(await runCheck(executable), AcpSupportStatus.missing);
+        final result = await runIn(
+          shell,
+          buildAcpSupportRepairCommand(check, executable, isWindows: false),
+        );
+        expect(
+          result.exitCode,
+          0,
+          reason: '$shell: ${result.stdout}${result.stderr}',
+        );
+        expect(await runCheck(executable), AcpSupportStatus.supported);
+      }
+    }
+
+    test('reads exit status 1 as missing and anything else as ready', () async {
+      // Even when a startup file turns on errexit.
+      await File('${home.path}/.bashrc').writeAsString('set -e\n');
+      await File('${home.path}/.zshrc').writeAsString('set -e\n');
+      final hermes = await fakeHermes('venv/bin/hermes');
+      expect(await runCheck(hermes), AcpSupportStatus.missing);
+      expect(File('${home.path}/calls').readAsLinesSync().first, 'acp --check');
+      await File('${home.path}/installed').create();
+      expect(await runCheck(hermes), AcpSupportStatus.supported);
+      // A Hermes too old to know the check exits 2 and still launches.
+      final old = await script('old/hermes', '#!/bin/sh\nexit 2\n');
+      expect(await runCheck(old), AcpSupportStatus.supported);
+    }, testOn: 'mac-os || linux');
+
+    test('treats output without a verdict as unknown', () {
+      expect(
+        parseAcpSupportCheckOutput('profile chatter\n'),
+        AcpSupportStatus.unknown,
+      );
+    });
+
+    test('installs into the venv a chain of links resolves into', () async {
+      await File('${home.path}/venv/pyvenv.cfg').create(recursive: true);
+      await script('venv/bin/python', fakePython);
+      await fakeHermes('venv/bin/hermes');
+      final local = Link('${home.path}/.local/bin/hermes');
+      await local.create('../../venv/bin/hermes', recursive: true);
+      final entry = Link('${home.path}/bin/hermes');
+      await entry.create(local.path, recursive: true);
+
+      await expectRepair(entry.path);
+      expect(
+        File('${home.path}/python-args').readAsStringSync(),
+        '-c|hermes-agent|acp\n',
+      );
+    }, testOn: 'mac-os || linux');
+
+    test('uses the shebang interpreter outside a venv', () async {
+      // `hermes` runs through the fake interpreter, which records -c calls.
+      final python = await script('fakebin/python3', r'''
+#!/bin/sh
+if [ "$1" = -c ]; then
+  printf '%s|%s|%s\n' "$1" "$3" "$4" > "$HOME/python-args"
+  touch "$HOME/installed"; exit 0
+fi
+shift
+case "$*" in
+  "acp --check") [ -f "$HOME/installed" ];;
+  *) exit 2;;
+esac
+''');
+      // Through env: macOS cannot use a script as a shebang interpreter.
+      final hermes = await script(
+        'userbin/hermes',
+        '#!/usr/bin/env $python\nraise SystemExit(1)\n',
+      );
+      await expectRepair(hermes);
+      expect(
+        File('${home.path}/python-args').readAsStringSync(),
+        '-c|hermes-agent|acp\n',
+      );
+    }, testOn: 'mac-os || linux');
+
+    test('falls back to the CLI installer for a wrapper launcher', () async {
+      final hermes = await fakeHermes('bin/hermes', selfInstall: true);
+      await expectRepair(hermes);
+      expect(
+        File('${home.path}/calls').readAsLinesSync(),
+        contains('pm install --extra acp'),
+      );
+    }, testOn: 'mac-os || linux');
+
+    test('fails when no Python environment can be found', () async {
+      final hermes = await fakeHermes('other/hermes');
+      final result = await runIn(
+        shells.first,
+        buildAcpSupportRepairCommand(check, hermes, isWindows: false),
+      );
+      expect(result.exitCode, isNot(0));
+      expect(
+        result.stdout,
+        contains('Cannot find the Python environment that runs'),
+      );
+    }, testOn: 'mac-os || linux');
+
+    test('installs the extra requirements with a real interpreter', () async {
+      final python = (await Process.run('/bin/sh', [
+        '-c',
+        'command -v python3',
+      ])).stdout.toString().trim();
+      if (python.isEmpty) {
+        markTestSkipped('python3 is not installed');
+        return;
+      }
+      final venv = '${home.path}/venv';
+      final created = await Process.run(python, [
+        '-m',
+        'venv',
+        '--without-pip',
+        venv,
+      ]);
+      if (created.exitCode != 0) {
+        markTestSkipped('python3 cannot create a venv: ${created.stderr}');
+        return;
+      }
+      final sitePackages = (await Process.run('$venv/bin/python', [
+        '-c',
+        'import sysconfig; print(sysconfig.get_path("purelib"))',
+      ])).stdout.toString().trim();
+      await File('$sitePackages/hermes_agent-1.0.dist-info/METADATA')
+          .create(recursive: true);
+      await File('$sitePackages/hermes_agent-1.0.dist-info/METADATA')
+          .writeAsString(
+            'Metadata-Version: 2.1\nName: hermes-agent\nVersion: 1.0\n'
+            'Provides-Extra: acp\n'
+            'Requires-Dist: httpx>=0.27\n'
+            'Requires-Dist: agent-client-protocol==0.9.0; extra == "acp"\n'
+            'Requires-Dist: anyio==4.0; python_version >= "3.11" and '
+            'extra == "acp"\n'
+            "Requires-Dist: anyio==3.0; extra == 'acp' and "
+            "python_version < '3.11'\n"
+            "Requires-Dist: mcp==1.0; extra == 'mcp'\n",
+          );
+      // Without pip in the venv the installer hands the requirements to uv.
+      await script('fakebin/uv', r'''
+#!/bin/sh
+printf '%s\n' "$*" > "$HOME/uv-args"
+touch "$HOME/installed"
+''');
+      final hermes = await fakeHermes('venv/bin/hermes');
+      for (final shell in shells) {
+        await File('${home.path}/installed').create();
+        await File('${home.path}/installed').delete();
+        final result = await runIn(
+          shell,
+          buildAcpSupportRepairCommand(check, hermes, isWindows: false),
+        );
+        expect(result.exitCode, 0, reason: '$shell: ${result.stderr}');
+        expect(
+          File('${home.path}/uv-args').readAsStringSync(),
+          // Other markers stay for the installer to evaluate.
+          'pip install --python $venv/bin/python agent-client-protocol==0.9.0 '
+          'anyio==4.0; python_version >= "3.11" '
+          "anyio==3.0; python_version < '3.11'\n",
+        );
+      }
+    }, testOn: 'mac-os || linux');
+
+    test('Windows runs the check and repair through the profile PATH', () {
+      const exe = r'C:\Users\demo\.local\bin\hermes.exe';
+      final checkScript = decodeEncodedPowerShell(
+        buildAcpSupportCheckCommand(check, exe, isWindows: true),
+      );
+      expect(checkScript, contains(powerShellProfilePathPreamble));
+      expect(
+        checkScript,
+        contains(
+          r"& 'C:/Users/demo/.local/bin/hermes.exe' 'acp' '--check' *> $null;",
+        ),
+      );
+      expect(checkScript, contains(r'if($LASTEXITCODE -eq 1)'));
+
+      final repair = decodeEncodedPowerShell(
+        buildAcpSupportRepairCommand(check, exe, isWindows: true),
+      );
+      expect(repair, contains(powerShellProfilePathPreamble));
+      expect(repair, contains("'pyvenv.cfg'"));
+      expect(
+        repair,
+        contains(r"& $__flExe 'pm' 'install' '--extra' 'acp' '--help'"),
+      );
+      final python = RegExp(
+        r"& \$__flPy -c '(.*)' 'hermes-agent' 'acp';",
+        dotAll: true,
+      ).firstMatch(repair);
+      expect(python, isNotNull);
+      // Windows PowerShell 5.1 mangles double quotes in native arguments.
+      expect(python![1], isNot(contains('"')));
+      expect(
+        repair,
+        endsWith(r"& $__flExe 'acp' '--check';exit $LASTEXITCODE"),
+      );
+    });
+  });
+
   test('only dependency paths can use a different executable basename', () {
     const output =
         'muse\u001f/tools/custom-muse\n'
