@@ -13,6 +13,7 @@ import '../domain/services/app_link_service.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/host_cli_launch_preferences_service.dart';
 import '../domain/services/monetization_service.dart';
+import '../domain/services/ssh_service.dart';
 import '../presentation/widgets/app_link_preset_sheet.dart';
 import '../presentation/widgets/connection_attempt_dialog.dart';
 import 'app_link_handler.dart';
@@ -172,6 +173,11 @@ class _AppLinkNavigationBridgeState
   Future<bool> launchPreset(Host host) async {
     final context = _navigatorContext;
     if (!_canNavigate() || context == null) return false;
+    // The review sheet showed only the agent command, so open-port detection
+    // waits for the terminal's Start action like any link-opened connection.
+    ref
+        .read(activeSessionsProvider.notifier)
+        .holdAutomaticForwardingUntilStarted(host.id);
     final result = await connectToHostWithProgressDialog(context, ref, host);
     final connectionId = result.connectionId;
     if (!result.success || connectionId == null || !_canNavigate()) {

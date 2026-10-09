@@ -1168,6 +1168,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? workingDirectory,
   })?
   _pendingPresetAgentWindow;
+  bool _linkPortForwardsReleased = false;
+  bool _linkPortForwardOfferShown = false;
   bool _restoreKeyboardAfterAppResume = false;
   final GlobalKey _terminalOverflowMenuButtonKey = GlobalKey();
   double? _terminalOverflowMenuAnchorTopCache;
@@ -4625,6 +4627,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref.read(monetizationServiceProvider).currentState;
 
     if (!mounted) return;
+    if (_holdsLinkPortForwards) {
+      _sessionsNotifier!.holdAutomaticForwardingUntilStarted(widget.hostId);
+    }
     final result = showProgressDialog && _host != null
         ? await connectToHostWithProgressDialog(
             context,
@@ -4844,6 +4849,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         await _runAutoConnectCommand(session);
         if (!stillOwnsSession()) return;
       }
+      unawaited(_offerLinkPortForwards(session));
 
       // Detect tmux after the auto-connect command has had time to start.
       // A small delay ensures tmux has initialized if the auto-connect
@@ -6187,29 +6193,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final autoStartForwards = forwards.where((f) => f.autoStart).toList();
     if (autoStartForwards.isEmpty) return;
-    // A link never opens tunnels on its own; offer them instead.
-    if (widget.openedFromLink && !confirmed) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'A link opened this connection, so its '
-            '${autoStartForwards.length} auto-start port forward(s) '
-            'are off.',
-          ),
-          action: SnackBarAction(
-            label: 'Start',
-            onPressed: () {
-              if (mounted) {
-                unawaited(_startPortForwards(session, confirmed: true));
-              }
-            },
-          ),
-          duration: const Duration(seconds: 8),
-        ),
-      );
-      return;
-    }
+    // A link never opens tunnels on its own; _offerLinkPortForwards asks.
+    if (_holdsLinkPortForwards && !confirmed) return;
 
     var startedCount = 0;
     final failedNames = <String>[];
@@ -6251,6 +6236,54 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
       }
     }
+  }
+
+  /// Whether a link or a link's preset review opened this terminal and the
+  /// user has not started its port forwarding yet.
+  bool get _holdsLinkPortForwards =>
+      (widget.openedFromLink || widget.startPresetAgent) &&
+      !_linkPortForwardsReleased;
+
+  /// Offers, once per screen and after any command review, the port
+  /// forwarding a link held back: auto-start forwards and open-port
+  /// detection.
+  Future<void> _offerLinkPortForwards(SshSession session) async {
+    if (!_holdsLinkPortForwards || _linkPortForwardOfferShown) return;
+    final forwards = await ref
+        .read(portForwardRepositoryProvider)
+        .getByHostId(widget.hostId);
+    if (!mounted) return;
+    final heldDetection = ref
+        .read(activeSessionsProvider.notifier)
+        .isAutomaticForwardingHeld(widget.hostId);
+    if (!heldDetection && !forwards.any((forward) => forward.autoStart)) {
+      return;
+    }
+    _linkPortForwardOfferShown = true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          'A link opened this connection, so port forwarding is off until '
+          'you start it.',
+        ),
+        action: SnackBarAction(
+          label: 'Start',
+          onPressed: () {
+            if (!mounted) return;
+            _linkPortForwardsReleased = true;
+            unawaited(
+              ref
+                  .read(activeSessionsProvider.notifier)
+                  .releaseAutomaticForwardingHold(widget.hostId),
+            );
+            unawaited(_startPortForwards(session, confirmed: true));
+          },
+        ),
+        persist: false,
+        showCloseIcon: true,
+        duration: const Duration(seconds: 12),
+      ),
+    );
   }
 
   Future<({_PreparedRemoteMuxCommand? command, bool handled})>
@@ -7312,6 +7345,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       },
     );
     late String attachCommand;
+    var agentInNewWindow = false;
     try {
       MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
       MonkeyMuxInstallation? deferredInstallation;
@@ -7346,23 +7380,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         preferredUpdatePolicy: requestedUpdatePolicy,
       );
       // A running workspace ignores the attach-time command, so a confirmed
-      // preset launch opens its agent in a new window once attached.
+      // preset launch attaches to it with --existing and no command, then
+      // opens its agent in a new window. If the workspace stops before the
+      // attach, the attach fails rather than starting the agent twice.
       if (launchesAgent && widget.startPresetAgent) {
         final running = await _monkeyMuxService.runningServerStatus(
           session,
           installation,
           sessionName,
         );
-        _pendingPresetAgentWindow = running == null
-            ? null
-            : (
+        agentInNewWindow = running != null;
+        _pendingPresetAgentWindow = agentInNewWindow
+            ? (
                 connectionId: session.connectionId,
                 sessionName: sessionName,
                 command: launchCommand,
                 name: preset.tool.label,
                 workingDirectory: preset.workingDirectory,
-              );
+              )
+            : null;
       }
+      final attachStartsAgent = launchesAgent && !agentInNewWindow;
       final terminalThemeReports = buildTerminalThemeHintReports(
         session.terminalTheme ?? _resolveEffectiveTerminalTheme(),
       );
@@ -7375,11 +7413,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         terminalColumns: viewportCellSize.columns,
         terminalRows: viewportCellSize.rows,
         workingDirectory: preset.workingDirectory,
-        windowName: launchesAgent ? preset.tool.label : null,
-        launchCommand: launchesAgent ? launchCommand : null,
+        windowName: attachStartsAgent ? preset.tool.label : null,
+        launchCommand: attachStartsAgent ? launchCommand : null,
         // A link never creates a workspace, which would then ignore the
         // preset's agent on every later connect.
-        existingOnly: !launchesAgent,
+        existingOnly: !attachStartsAgent,
         terminalThemeReports: terminalThemeReports,
         terminalCapabilityReports: buildTerminalCapabilityHintReports(),
         serverUpdatePolicy: updatePolicy,
@@ -7415,11 +7453,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return null;
     }
     // An attach without the agent is not the imported command, so it must
-    // neither ask about nor clear the host's imported-command review.
+    // neither ask about nor clear the host's imported-command review. A
+    // confirmed preset's agent window was reviewed in the link's sheet.
+    final attachStartsAgent = launchesAgent && !agentInNewWindow;
     final review = assessAutoConnectCommandExecution(
       attachCommand,
       importedNeedsReview:
-          launchesAgent && host.autoConnectRequiresConfirmation,
+          attachStartsAgent && host.autoConnectRequiresConfirmation,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -7430,7 +7470,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       backend: RemoteMuxBackend.monkeyMux,
       command: attachCommand,
       sessionName: sessionName,
-      tool: launchesAgent ? preset.tool : null,
+      tool: attachStartsAgent ? preset.tool : null,
     );
   }
 

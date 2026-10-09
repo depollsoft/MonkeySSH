@@ -42,6 +42,10 @@ class _TestAuth extends AuthStateNotifier {
 /// Connects instantly, as a stand-in for the SSH session layer.
 class _InstantSessions extends ActiveSessionsNotifier {
   final connects = <({int hostId, bool forceNew})>[];
+  final holds = <int>[];
+
+  @override
+  void holdAutomaticForwardingUntilStarted(int hostId) => holds.add(hostId);
 
   @override
   Map<int, SshConnectionState> build() => {};
@@ -298,6 +302,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(sessions.connects, [(hostId: 7, forceNew: true)]);
+    // The review showed only the agent, so open-port detection waits.
+    expect(sessions.holds, [7]);
     expect(
       find.text('terminal /terminal/7?connectionId=42&presetRun=1'),
       findsOneWidget,

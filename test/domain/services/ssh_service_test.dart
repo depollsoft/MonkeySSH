@@ -5172,6 +5172,88 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
     });
 
+    test('a link hold keeps automatic forwarding off until released', () async {
+      final session = _RecordingAutomaticForwardSession(
+        connectionId: 1,
+        hostId: 42,
+        client: _MockSshClient(),
+        config: const SshConnectionConfig(
+          hostname: 'dev.example.com',
+          port: 22,
+          username: 'tester',
+        ),
+        name: 'link',
+        configurationLog: <String>[],
+      );
+      final hostRepository = _MockHostRepository();
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      final sessions = <SshSession>[];
+      final connectionStates = <int, SshConnectionState>{};
+      final localContainer = ProviderContainer(
+        overrides: [
+          hostRepositoryProvider.overrideWithValue(hostRepository),
+          portForwardRepositoryProvider.overrideWithValue(
+            _emptyPortForwardRepository(),
+          ),
+          activeSessionsProvider.overrideWith(
+            () => _OwnershipActiveSessionsNotifier(
+              sessions: sessions,
+              connectionStates: connectionStates,
+            ),
+          ),
+        ],
+      );
+      addTearDown(localContainer.dispose);
+      final notifier = localContainer.read(activeSessionsProvider.notifier)
+        // A link is about to open the host's first connection.
+        ..holdAutomaticForwardingUntilStarted(42);
+      sessions.add(session);
+      connectionStates[session.connectionId] = SshConnectionState.connected;
+
+      await notifier.reconfigureAutomaticPortForwardingForHost(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+      expect(session.automaticConfigurations.last.enabled, isFalse);
+
+      await notifier.releaseAutomaticForwardingHold(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+      expect(session.automaticConfigurations.last.enabled, isTrue);
+    });
+
+    test('a link never holds a host that already has a connection', () async {
+      final session = _RecordingAutomaticForwardSession(
+        connectionId: 1,
+        hostId: 42,
+        client: _MockSshClient(),
+        config: const SshConnectionConfig(
+          hostname: 'dev.example.com',
+          port: 22,
+          username: 'tester',
+        ),
+        name: 'existing',
+        configurationLog: <String>[],
+      );
+      final localContainer = ProviderContainer(
+        overrides: [
+          activeSessionsProvider.overrideWith(
+            () => _OwnershipActiveSessionsNotifier(
+              sessions: [session],
+              connectionStates: {
+                session.connectionId: SshConnectionState.connected,
+              },
+            ),
+          ),
+        ],
+      );
+      addTearDown(localContainer.dispose);
+      final notifier = localContainer.read(activeSessionsProvider.notifier)
+        ..holdAutomaticForwardingUntilStarted(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+    });
+
     test('keeps ownership on a connected sibling during reconnect', () async {
       final configurationLog = <String>[];
       final older = _RecordingAutomaticForwardSession(

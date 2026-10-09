@@ -763,7 +763,22 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   final Completer<void>? connectCompleter;
   final disconnectedConnectionIds = <int>[];
   final connectForceNewValues = <bool>[];
+  final automaticForwardHolds = <int>[];
+  final automaticForwardReleases = <int>[];
   ConnectionAttemptStatus? _connectionAttempt;
+
+  @override
+  void holdAutomaticForwardingUntilStarted(int hostId) =>
+      automaticForwardHolds.add(hostId);
+
+  @override
+  bool isAutomaticForwardingHeld(int hostId) =>
+      automaticForwardHolds.contains(hostId) &&
+      !automaticForwardReleases.contains(hostId);
+
+  @override
+  Future<void> releaseAutomaticForwardingHold(int hostId) async =>
+      automaticForwardReleases.add(hostId);
 
   Iterable<SshSession> get _sessions sync* {
     yield session;
@@ -10995,9 +11010,14 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
     }
 
-    for (final workspaceRunning in [true, false]) {
-      testWidgets('a confirmed preset starts its agent, workspace running: '
-          '$workspaceRunning', (tester) async {
+    for (final (workspaceRunning, attachFindsWorkspace) in [
+      (true, true),
+      // The workspace stopped between the status probe and the attach.
+      (true, false),
+      (false, true),
+    ]) {
+      testWidgets('a confirmed preset starts its agent once, running: '
+          '$workspaceRunning, attached: $attachFindsWorkspace', (tester) async {
         final settingsService = SettingsService(db);
         final presetService = AgentLaunchPresetService(settingsService);
         final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
@@ -11047,7 +11067,7 @@ void main() {
             'agents',
             extraFlags: any(named: 'extraFlags'),
           ),
-        ).thenAnswer((_) async => true);
+        ).thenAnswer((_) async => attachFindsWorkspace);
         when(
           () => monkeyMuxService.listWindows(
             session,
@@ -11123,10 +11143,17 @@ void main() {
         final attachCommand = executedCommands.singleWhere(
           (command) => command.contains(' attach'),
         );
-        // A new workspace starts the agent itself; a running one ignores
-        // the attach command, so the agent opens in a new window instead.
-        expect(attachCommand, contains('--command'));
+        // A new workspace starts the agent itself. A running one ignores the
+        // attach command, so the attach carries none and must find the
+        // workspace, and the agent opens in a new window instead.
         if (workspaceRunning) {
+          expect(attachCommand, isNot(contains('--command')));
+          expect(attachCommand, contains('--existing'));
+        } else {
+          expect(attachCommand, contains('--command'));
+          expect(attachCommand, isNot(contains('--existing')));
+        }
+        if (workspaceRunning && attachFindsWorkspace) {
           verify(
             () => monkeyMuxService.createWindow(
               session,
@@ -11141,6 +11168,11 @@ void main() {
           verifyNever(createAgentWindow);
         }
 
+        // Let a failed detection's retries run out before teardown.
+        for (var second = 0; second < 60; second++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        verifyNever(createAgentWindow);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
@@ -11523,8 +11555,10 @@ void main() {
         config: session.config,
       );
 
+      final activeSessions = _TestActiveSessionsNotifier(session);
       await tester.pumpWidget(
         buildScreen(
+          activeSessions: activeSessions,
           overrides: [
             portForwardRepositoryProvider.overrideWithValue(portForwards),
           ],
@@ -11541,7 +11575,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(find.textContaining('auto-start port forward'), findsOneWidget);
+      expect(find.textContaining('port forwarding is off'), findsOneWidget);
       expect(session.isPortForwardActive(41), isFalse);
       expect(session.isPortForwardStarting(41), isFalse);
 
@@ -11553,11 +11587,47 @@ void main() {
         session.isPortForwardStarting(41) || session.isPortForwardActive(41),
         isTrue,
       );
+      expect(activeSessions.automaticForwardReleases, [host.id]);
       // Let the test's unbound listener time out.
       await tester.pump(const Duration(seconds: 11));
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    for (final openedFromLink in [true, false]) {
+      testWidgets('a link holds open-port detection on its new connection, '
+          'link: $openedFromLink', (tester) async {
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        final activeSessions = _TestActiveSessionsNotifier(session);
+
+        await pumpScreen(
+          tester,
+          activeSessions: activeSessions,
+          resolveConnection: true,
+          openedFromLink: openedFromLink,
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final offer = find.textContaining('port forwarding is off');
+        if (!openedFromLink) {
+          expect(activeSessions.automaticForwardHolds, isEmpty);
+          expect(offer, findsNothing);
+        } else {
+          expect(activeSessions.automaticForwardHolds, [host.id]);
+          expect(offer, findsOneWidget);
+          await tester.tap(find.widgetWithText(SnackBarAction, 'Start'));
+          await tester.pump();
+          expect(activeSessions.automaticForwardReleases, [host.id]);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
 
     for (final disposeWhileSaving in [false, true]) {
       testWidgets(

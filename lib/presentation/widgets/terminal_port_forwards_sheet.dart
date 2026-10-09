@@ -276,7 +276,9 @@ class _TerminalPortForwardsSheetState
         }
         return;
       }
-      await sessions.reconfigureAutomaticPortForwardingForHost(widget.hostId);
+      // Toggling here is an explicit choice, so it also ends any hold a
+      // link-opened connection placed on automatic forwarding.
+      await sessions.releaseAutomaticForwardingHold(widget.hostId);
       if (mounted) {
         _showMessage(
           enabled
