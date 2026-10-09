@@ -28,9 +28,15 @@ DateTime Function() acpChatPresenceClock = DateTime.now;
 typedef AcpSeenSnapshot = ({
   d.AcpTimeline timeline,
   int? upToOrder,
-  bool hadSessionError,
+  int? sessionErrorFingerprint,
   Set<String> pendingRequestIds,
 });
+
+/// A content-free fingerprint of [session]'s error, or `null` when there is
+/// none. Session errors hash by kind, message and retryable, so the same
+/// error matches and a replacement does not; only the hash is kept.
+int? acpSessionErrorFingerprint(AcpSessionState session) =>
+    session.error?.hashCode;
 
 /// Identifies each request waiting for an answer in [session], so a request
 /// answered while the user was away and a new one in its place still count
@@ -78,7 +84,7 @@ AcpSeenSnapshot? acpSeenSnapshot(
   return (
     timeline: session.timeline,
     upToOrder: upToOrder,
-    hadSessionError: session.error != null,
+    sessionErrorFingerprint: acpSessionErrorFingerprint(session),
     pendingRequestIds: acpPendingRequestIds(session),
   );
 }
@@ -118,13 +124,13 @@ class AcpLastSeenRegistry {
     AcpSessionKey key,
     d.AcpTimeline timeline, {
     int? upToOrder,
-    bool hadSessionError = false,
+    int? sessionErrorFingerprint,
     Set<String> pendingRequestIds = const <String>{},
   }) {
     final marker = AcpLastSeenMarker.of(
       timeline,
       upToOrder: upToOrder,
-      hadSessionError: hadSessionError,
+      sessionErrorFingerprint: sessionErrorFingerprint,
       pendingRequestIds: pendingRequestIds,
     );
     if (marker == null) return;
@@ -163,7 +169,7 @@ class AcpUnreadVisit {
   Object? _memoTimeline;
   Object? _memoEntries;
   Set<String>? _memoPending;
-  bool? _memoError;
+  int? _memoError;
 
   /// Whether the user hid the digest for this visit.
   bool get digestDismissed => _digestDismissed;
@@ -201,7 +207,7 @@ class AcpUnreadVisit {
     if (!left || departure == null || current == null) return;
     final atDeparture = AcpLastSeenMarker.of(
       departure.timeline,
-      hadSessionError: departure.hadSessionError,
+      sessionErrorFingerprint: departure.sessionErrorFingerprint,
       pendingRequestIds: departure.pendingRequestIds,
     );
     if (atDeparture == null ||
@@ -209,7 +215,7 @@ class AcpUnreadVisit {
           atDeparture,
           current.timeline,
           pendingRequestIds: current.pendingRequestIds,
-          hasSessionError: current.hadSessionError,
+          sessionErrorFingerprint: current.sessionErrorFingerprint,
         )) {
       return;
     }
@@ -228,7 +234,7 @@ class AcpUnreadVisit {
     key,
     seen.timeline,
     upToOrder: seen.upToOrder,
-    hadSessionError: seen.hadSessionError,
+    sessionErrorFingerprint: seen.sessionErrorFingerprint,
     pendingRequestIds: seen.pendingRequestIds,
   );
 
@@ -257,23 +263,23 @@ class AcpUnreadVisit {
       return _memo = null;
     }
     final pending = acpPendingRequestIds(session);
-    final hasError = session.error != null;
+    final error = acpSessionErrorFingerprint(session);
     if (identical(_memoTimeline, session.timeline) &&
         identical(_memoEntries, entries) &&
         setEquals(_memoPending, pending) &&
-        _memoError == hasError) {
+        _memoError == error) {
       return _memo;
     }
     _memoTimeline = session.timeline;
     _memoEntries = entries;
     _memoPending = pending;
-    _memoError = hasError;
+    _memoError = error;
     return _memo = computeAcpUnreadState(
       marker: marker,
       timeline: session.timeline,
       entries: entries,
       pendingRequestIds: pending,
-      hasSessionError: hasError,
+      sessionErrorFingerprint: error,
     );
   }
 }

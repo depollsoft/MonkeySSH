@@ -63,7 +63,7 @@ AcpUnreadState? _unread(
   timeline: timeline,
   entries: mapAcpSessionTimeline(fakeAcpSession(timeline: timeline)),
   pendingRequestIds: pending,
-  hasSessionError: error,
+  sessionErrorFingerprint: error ? 1 : null,
 );
 
 void registerAcpUnreadTests() {
@@ -250,11 +250,54 @@ void registerAcpUnreadTests() {
     test('an error already showing when the user left is not news', () {
       final marker = AcpLastSeenMarker.of(
         _timeline(seen, source: source),
-        hadSessionError: true,
+        sessionErrorFingerprint: 1,
       );
       final timeline = _timeline([...seen, _agent(2, 'More')], source: source);
       expect(_unread(marker, timeline, error: true)!.digest!.errors, 0);
     });
+
+    test(
+      'an error that replaced the one showing when the user left is news',
+      () {
+        AcpSessionState failing(String message) =>
+            fakeAcpSession(timeline: _timeline(seen, source: source)).copyWith(
+              error: AcpSessionError(
+                kind: AcpSessionErrorKind.unknown,
+                message: message,
+              ),
+            );
+        final before = failing('first');
+        final marker = AcpLastSeenMarker.of(
+          before.timeline,
+          sessionErrorFingerprint: acpSessionErrorFingerprint(before),
+        )!;
+        final same = acpSessionErrorFingerprint(failing('first'));
+        final replaced = acpSessionErrorFingerprint(failing('second'));
+        expect(
+          acpChangedSince(
+            marker,
+            before.timeline,
+            sessionErrorFingerprint: same,
+          ),
+          isFalse,
+        );
+        expect(
+          acpChangedSince(
+            marker,
+            before.timeline,
+            sessionErrorFingerprint: replaced,
+          ),
+          isTrue,
+        );
+        final state = computeAcpUnreadState(
+          marker: marker,
+          timeline: before.timeline,
+          entries: mapAcpSessionTimeline(before),
+          sessionErrorFingerprint: replaced,
+        );
+        expect(state?.digest?.errors, 1);
+      },
+    );
 
     test('a failed edit is not a reported file change', () {
       final marker = AcpLastSeenMarker.of(_timeline(seen, source: source));

@@ -37,7 +37,7 @@ final class AcpLastSeenMarker {
     required this.newestOrder,
     required this.source,
     required this.ordinal,
-    required this.hadSessionError,
+    required this.sessionErrorFingerprint,
     required Set<String> pendingRequestIds,
     required Set<String> runningToolIds,
     required Map<int, int> messageSizes,
@@ -54,13 +54,13 @@ final class AcpLastSeenMarker {
   /// is loaded.
   ///
   /// That is the newest entry, or the newest at or before [upToOrder] when
-  /// the user had not scrolled to the end. [hadSessionError] and
+  /// the user had not scrolled to the end. [sessionErrorFingerprint] and
   /// [pendingRequestIds] record the session error and requests already
   /// showing, so they are not reported as news.
   static AcpLastSeenMarker? of(
     d.AcpTimeline timeline, {
     int? upToOrder,
-    bool hadSessionError = false,
+    int? sessionErrorFingerprint,
     Set<String> pendingRequestIds = const <String>{},
   }) {
     final entries = timeline.entries;
@@ -110,7 +110,7 @@ final class AcpLastSeenMarker {
           newestOrder: newestOrder,
           source: timeline.source,
           ordinal: ordinal,
-          hadSessionError: hadSessionError,
+          sessionErrorFingerprint: sessionErrorFingerprint,
           pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
           messageSizes: messageSizes,
@@ -122,7 +122,7 @@ final class AcpLastSeenMarker {
           newestOrder: newestOrder,
           source: timeline.source,
           ordinal: ordinal,
-          hadSessionError: hadSessionError,
+          sessionErrorFingerprint: sessionErrorFingerprint,
           pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
           messageSizes: messageSizes,
@@ -154,8 +154,9 @@ final class AcpLastSeenMarker {
   /// candidates in a rebuilt timeline.
   final int ordinal;
 
-  /// Whether a session error was already showing when the user left.
-  final bool hadSessionError;
+  /// A content-free fingerprint of the session error showing when the user
+  /// left, or `null` when there was none. A different error since is news.
+  final int? sessionErrorFingerprint;
 
   /// Requests that were already waiting for an answer when the user left, by
   /// identity, so one answered while away and a new one in its place still
@@ -270,11 +271,11 @@ bool acpChangedSince(
   AcpLastSeenMarker marker,
   d.AcpTimeline timeline, {
   Set<String> pendingRequestIds = const <String>{},
-  bool hasSessionError = false,
+  int? sessionErrorFingerprint,
 }) {
   if (!identical(marker.source, timeline.source)) return true;
   if (_hasNewRequest(marker, pendingRequestIds)) return true;
-  if (hasSessionError && !marker.hadSessionError) return true;
+  if (_isNewError(marker, sessionErrorFingerprint)) return true;
   return timeline.entries.any(
     (entry) =>
         entry.order > marker.newestOrder ||
@@ -459,10 +460,10 @@ AcpUnreadState? computeAcpUnreadState({
   required d.AcpTimeline timeline,
   required List<AcpTimelineEntry> entries,
   Set<String> pendingRequestIds = const <String>{},
-  bool hasSessionError = false,
+  int? sessionErrorFingerprint,
 }) {
   if (marker == null) return null;
-  final newError = hasSessionError && !marker.hadSessionError;
+  final newError = _isNewError(marker, sessionErrorFingerprint);
   // Requests and errors can arrive with no timeline row to mark; they are
   // still worth a digest.
   final stateOnly = _hasNewRequest(marker, pendingRequestIds) || newError
@@ -542,6 +543,10 @@ AcpUnreadState? computeAcpUnreadState({
 
 bool _hasNewRequest(AcpLastSeenMarker marker, Set<String> pendingRequestIds) =>
     pendingRequestIds.any((id) => !marker.pendingRequestIds.contains(id));
+
+bool _isNewError(AcpLastSeenMarker marker, int? sessionErrorFingerprint) =>
+    sessionErrorFingerprint != null &&
+    sessionErrorFingerprint != marker.sessionErrorFingerprint;
 
 final class _DigestCounter {
   _DigestCounter({required this.newIds, required this.finishedIds});
