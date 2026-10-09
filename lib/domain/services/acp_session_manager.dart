@@ -28,6 +28,7 @@ import 'acp_client_capability_service.dart';
 import 'acp_concurrency_policy.dart';
 import 'acp_json_rpc_connection.dart';
 import 'acp_mcp_server_service.dart';
+import 'acp_provider_service.dart';
 import 'acp_recent_sessions_service.dart';
 import 'acp_telemetry.dart';
 import 'acp_telemetry_adapter.dart';
@@ -161,6 +162,7 @@ class AcpSessionManager {
     required AcpRecentSessionsService recentSessions,
     required bool Function() isProUnlocked,
     AcpMcpServerService? mcpServerService,
+    AcpCustomProviderLookup? customProviders,
     AcpConcurrencyPolicy concurrencyPolicy = const AcpConcurrencyPolicy(),
     DiagnosticsLogger? diagnostics,
     AcpTelemetrySink telemetry = const NoopAcpTelemetrySink(),
@@ -170,6 +172,7 @@ class AcpSessionManager {
        _recentSessions = recentSessions,
        _isProUnlocked = isProUnlocked,
        _mcpServerService = mcpServerService,
+       _customProviders = customProviders,
        _policy = concurrencyPolicy,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
        _telemetry = telemetry,
@@ -180,6 +183,7 @@ class AcpSessionManager {
   final AcpRecentSessionsService _recentSessions;
   final bool Function() _isProUnlocked;
   final AcpMcpServerService? _mcpServerService;
+  final AcpCustomProviderLookup? _customProviders;
   final AcpConcurrencyPolicy _policy;
   final DiagnosticsLogger _diagnostics;
   final AcpTelemetrySink _telemetry;
@@ -309,7 +313,10 @@ class AcpSessionManager {
       launch as _ResolvedLaunch,
       providerLabelOverride,
     );
-    final workingDirectory = await _resolveWorkingDirectory(hostId, cwd);
+    final workingDirectory = await _resolveWorkingDirectory(
+      hostId,
+      resolved.startsInHomeDirectory ? '~' : cwd,
+    );
     if (workingDirectory.error case final error?) {
       return AcpSessionLaunchFailed(null, error);
     }
@@ -1316,6 +1323,7 @@ class AcpSessionManager {
       providerId: launch.providerId,
       label: label,
       argv: launch.argv,
+      startsInHomeDirectory: launch.startsInHomeDirectory,
     );
   }
 
@@ -1485,11 +1493,33 @@ class AcpSessionManager {
         argv: (launchCommandOverride ?? builtin.launchCommand).argv,
       );
     }
-    return const _LaunchError(
-      AcpSessionError(
-        kind: AcpSessionErrorKind.unknown,
-        message: 'Unknown ACP provider.',
-      ),
+    final custom = await _customProviders?.getCustomProvider(providerId);
+    if (custom == null) {
+      return const _LaunchError(
+        AcpSessionError(
+          kind: AcpSessionErrorKind.unknown,
+          message: 'Unknown ACP provider.',
+        ),
+      );
+    }
+    // A custom agent runs only the exact launch the user approved: never an
+    // override, and never after its definition changed without review.
+    if (launchCommandOverride != null || !custom.isCommandApproved) {
+      return const _LaunchError(
+        AcpSessionError(
+          kind: AcpSessionErrorKind.commandNotApproved,
+          message:
+              'Review and approve this agent’s command in Settings › Custom '
+              'agents before starting it.',
+        ),
+      );
+    }
+    return _ResolvedLaunch(
+      providerId: custom.id,
+      label: custom.label,
+      argv: custom.launchCommand.argv,
+      startsInHomeDirectory:
+          custom.cwdPolicy == AcpCustomProviderCwdPolicy.homeDirectory,
     );
   }
 
@@ -3746,11 +3776,16 @@ final class _ResolvedLaunch extends _LaunchOutcome {
     required this.providerId,
     required this.label,
     required this.argv,
+    this.startsInHomeDirectory = false,
   });
 
   final String providerId;
   final String label;
   final List<String> argv;
+
+  /// Whether new sessions start in the host home folder whatever directory
+  /// was requested (a custom agent's working-directory policy).
+  final bool startsInHomeDirectory;
 }
 
 final class _LaunchError extends _LaunchOutcome {
@@ -3807,6 +3842,7 @@ final acpSessionManagerProvider = Provider<AcpSessionManager>((ref) {
     connector: ref.watch(acpBridgeConnectorProvider),
     recentSessions: ref.watch(acpRecentSessionsServiceProvider),
     mcpServerService: ref.watch(acpMcpServerServiceProvider),
+    customProviders: ref.watch(acpCustomProviderServiceProvider),
     isProUnlocked: () =>
         ref.read(monetizationServiceProvider).currentState.isProUnlocked,
     telemetry: AcpTelemetryAdapter(ref.watch(telemetryServiceProvider)),

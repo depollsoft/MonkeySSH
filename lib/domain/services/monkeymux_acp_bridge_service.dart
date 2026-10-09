@@ -145,11 +145,26 @@ String buildAcpTerminalAuthCommand(
     workingDirectory: launch.workingDirectory,
   );
   if (isWindows) return providerCommand;
+  return buildMonkeyMuxAcpPosixShellCommand(
+    providerCommand,
+    scriptName: 'monkeyssh-sign-in',
+  );
+}
+
+/// Runs a POSIX [providerCommand] from [buildMonkeyMuxAcpProviderCommand]
+/// over an SSH exec channel under the same shell MonkeyMux uses for the
+/// provider: the user's `$SHELL` when it is a POSIX shell, otherwise
+/// `/bin/sh`. This keeps a login shell such as fish from parsing the profile
+/// prefix.
+String buildMonkeyMuxAcpPosixShellCommand(
+  String providerCommand, {
+  required String scriptName,
+}) {
   const dispatcher =
       r'case "${SHELL##*/}" in sh|bash|zsh|ksh|dash) exec "$SHELL" -c "$1";; '
       r'esac; exec /bin/sh -c "$1"';
-  return '/bin/sh -c ${shellEscapePosix(dispatcher)} monkeyssh-sign-in '
-      '${shellEscapePosix(providerCommand)}';
+  return '/bin/sh -c ${shellEscapePosix(dispatcher)} '
+      '${shellEscapePosix(scriptName)} ${shellEscapePosix(providerCommand)}';
 }
 
 // Shells started by MonkeyMux over SSH usually have no TERM_PROGRAM. Some
