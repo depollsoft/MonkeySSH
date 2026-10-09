@@ -69,7 +69,8 @@ func newCodexLockedResumeRetry(policy codexLockedResumePolicy, started time.Time
 }
 
 // step reports whether to press R now and whether watching is over. lockHeld
-// is probed only while the prompt is up. A foreground of 0 is unknown.
+// is probed only while the prompt is up. A foreground of 0 is unknown. A
+// press counts toward the bounds only once pressed records it as sent.
 func (r *codexLockedResumeRetry) step(
 	now time.Time,
 	prompt bool,
@@ -102,13 +103,14 @@ func (r *codexLockedResumeRetry) step(
 		r.held = true
 		return false, false
 	}
-	if !r.held || now.Before(r.nextPress) {
-		return false, false
-	}
+	return r.held && !now.Before(r.nextPress), false
+}
+
+// pressed records an R press that reached the window.
+func (r *codexLockedResumeRetry) pressed(now time.Time) {
 	r.presses++
 	r.nextPress = now.Add(r.backoff)
 	r.backoff *= 2
-	return true, false
 }
 
 // watchRestoredCodexResume starts the locked-thread retry for a window that
@@ -171,9 +173,10 @@ func (s *muxServer) watchCodexLockedResume(
 		windowPty := window.pty
 		s.mu.Unlock()
 		foreground := ptyForegroundProcessGroup(windowPty)
-		press, done := retry.step(time.Now(), prompt, foreground, lockHeld)
-		if press {
-			s.pressCodexLockedRetry(window, foreground)
+		now := time.Now()
+		press, done := retry.step(now, prompt, foreground, lockHeld)
+		if press && s.pressCodexLockedRetry(window, foreground, lockHeld) {
+			retry.pressed(now)
 		}
 		if done {
 			return
@@ -181,11 +184,12 @@ func (s *muxServer) watchCodexLockedResume(
 	}
 }
 
-// pressCodexLockedRetry writes R only if the prompt is still on screen with
-// the same foreground group once this window's input is serialized. A paste
-// can hold that lock while the child is blocked, and the program in front can
-// change during the wait.
-func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int) {
+// pressCodexLockedRetry writes R only if, once this window's input is
+// serialized, the prompt is still on screen with the same foreground group
+// and the lock is still free. A paste can hold the input lock while the child
+// is blocked, and the program in front or the lock holder can change during
+// the wait. It reports whether R was written.
+func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int, lockHeld func() bool) bool {
 	window.inputMu.Lock()
 	var scheduleFlush func()
 	defer func() {
@@ -196,16 +200,20 @@ func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int) {
 	}()
 	// Replies the output reader queued before this write go first.
 	if err := s.writeQueuedWindowRepliesLocked(window); err != nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	current := !s.closed && !window.closed && s.windowByIDLocked(window.id) == window &&
 		window.screen != nil && codexLockedPromptShown(window.screen.TextRows()) &&
 		ptyForegroundProcessGroup(window.pty) == foreground
 	s.mu.Unlock()
-	if current {
-		scheduleFlush, _ = s.writeWindowDataLocked(window, []byte("r"), false, false)
+	// The probe is file I/O, so it runs outside s.mu.
+	if !current || lockHeld() {
+		return false
 	}
+	var err error
+	scheduleFlush, err = s.writeWindowDataLocked(window, []byte("r"), false, false)
+	return err == nil
 }
 
 // ptyForegroundProcessGroup reads the pane's foreground group from the pty

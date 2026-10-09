@@ -82,6 +82,7 @@ func runCodexLockedResumeRetry(
 				return current.held
 			})
 		if press {
+			retry.pressed(start.Add(elapsed))
 			presses = append(presses, elapsed)
 		}
 		if done {
@@ -411,6 +412,64 @@ func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
 	if got := pty.String(); got != "" {
 		t.Fatalf("pressed %q into the next program", got)
 	}
+}
+
+// Another client can take the lock while the press waits for window input.
+// The press must not be sent then, and an unsent press must not use up the
+// retry budget.
+func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-reacquired")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes atomic.Int32
+	released := make(chan struct{})
+	var once sync.Once
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		once.Do(func() { close(released) })
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 1})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		server.mu.Lock()
+		window.closed = true
+		server.mu.Unlock()
+		<-done
+	})
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+
+	window.inputMu.Lock()
+	held.Store(false)
+	<-released // step has decided to press.
+	held.Store(true)
+	probes := heldProbes.Load()
+	window.inputMu.Unlock()
+	waitForCodexLockedResume(t, "probes after reacquisition", func() bool {
+		return heldProbes.Load() >= probes+3 || pty.String() != ""
+	})
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q while another client held the lock", got)
+	}
+
+	// With a budget of one press, the unsent press must still leave it.
+	held.Store(false)
+	waitForCodexLockedResume(t, "R press", func() bool { return pty.String() == "r" })
 }
 
 func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
