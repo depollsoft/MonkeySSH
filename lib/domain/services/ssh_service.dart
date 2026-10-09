@@ -7716,6 +7716,27 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     bool forceNew = false,
     bool useHostThemeOverrides = true,
   }) async {
+    try {
+      return await _connectHost(
+        hostId,
+        forceNew: forceNew,
+        useHostThemeOverrides: useHostThemeOverrides,
+      );
+    } finally {
+      // A link's forwarding hold belongs to the connection it opens. When
+      // the attempt fails or is cancelled, no session takes it, so nothing
+      // else would end it and a later normal connect would inherit it.
+      if (getConnectionsForHost(hostId).isEmpty) {
+        _automaticForwardHeldHostIds.remove(hostId);
+      }
+    }
+  }
+
+  Future<SshConnectionResult> _connectHost(
+    int hostId, {
+    required bool forceNew,
+    required bool useHostThemeOverrides,
+  }) async {
     final cancellationToken = SshConnectionCancellationToken();
     _connectionCancellationTokens
         .putIfAbsent(hostId, () => <SshConnectionCancellationToken>{})

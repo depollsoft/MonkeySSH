@@ -4455,6 +4455,61 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test(
+      'a failed link connection does not leave its forwarding hold',
+      () async {
+        final sshService = _MockSshService();
+        final telemetry = _MockTelemetryService();
+        when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
+        when(
+          () => sshService.connectToHost(
+            any(),
+            onProgress: any(named: 'onProgress'),
+            useHostThemeOverrides: any(named: 'useHostThemeOverrides'),
+            cancellationToken: any(named: 'cancellationToken'),
+          ),
+        ).thenAnswer(
+          (_) async =>
+              const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        when(
+          () => telemetry.logConnectionAttempted(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => telemetry.logConnectionFailed(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+            duration: any(named: 'duration'),
+            failureCategory: any(named: 'failureCategory'),
+          ),
+        ).thenAnswer((_) async {});
+        final failureContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(sshService),
+            telemetryServiceProvider.overrideWithValue(telemetry),
+            hostRepositoryProvider.overrideWithValue(
+              container.read(hostRepositoryProvider),
+            ),
+          ],
+        );
+        addTearDown(failureContainer.dispose);
+        final notifier = failureContainer.read(activeSessionsProvider.notifier)
+          ..holdAutomaticForwardingUntilStarted(42);
+        expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+
+        final result = await notifier.connect(42);
+
+        expect(result.success, isFalse);
+        // No session took the hold, so a later normal connect must not inherit
+        // it with no Start action to release it.
+        expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+      },
+    );
+
     for (final laterChange in [false, true]) {
       testWidgets(
         laterChange
