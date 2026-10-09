@@ -259,6 +259,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   bool _sessionEndedNotified = false;
   late LocalNotificationService _localNotifications;
 
+  final _keyboardListKey = GlobalKey<KeyboardListNavigationState>();
+
   late final _windowLoader = TmuxWindowLoader(
     fetch: () => _mux.listWindows(
       widget.session,
@@ -1176,6 +1178,140 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     _isSidebarDragActive = false;
   }
 
+  // -- Hardware keyboard shortcuts (#931) --
+
+  /// Switcher rows in display order: server windows, then native sessions
+  /// that have no server window.
+  List<({TmuxWindow? window, AcpSessionState? session})> get _keyboardTargets =>
+      [
+        for (final window in _displayedWindows ?? const <TmuxWindow>[])
+          (window: window, session: null),
+        for (final session in _nativeAcpEntries)
+          (window: null, session: session),
+      ];
+
+  bool _isKeyboardTargetActive(
+    ({TmuxWindow? window, AcpSessionState? session}) target,
+  ) {
+    final window = target.window;
+    final activeNativeKey = widget.activeNativeAcpSessionKey;
+    if (window == null) {
+      return target.session?.key == activeNativeKey;
+    }
+    final pending = _pendingSelectedWindowIndex;
+    if (pending != null) {
+      return window.index == pending;
+    }
+    return window.isNativeAcp
+        ? activeNativeKey?.bridgeId == window.nativeAcpBridgeId
+        : window.isActive && activeNativeKey == null;
+  }
+
+  ({TmuxWindow? window, AcpSessionState? session})? get _activeKeyboardTarget =>
+      _keyboardTargets.where(_isKeyboardTargetActive).firstOrNull;
+
+  Future<void> _activateKeyboardTarget(
+    ({TmuxWindow? window, AcpSessionState? session}) target,
+  ) async {
+    if (_isKeyboardTargetActive(target)) {
+      return;
+    }
+    final window = target.window;
+    if (window == null) {
+      await widget.onAction(TmuxOpenAcpSessionAction(target.session!.key));
+      return;
+    }
+    setState(() => _pendingSelectedWindowIndex = window.index);
+    _startPendingSelectionTimer(window.index);
+    await widget.onAction(
+      window.isNativeAcp
+          ? _openNativeWindowAction(window)
+          : TmuxSwitchWindowAction(window.index, windowId: window.id),
+    );
+  }
+
+  /// Switches [delta] rows from the active window, wrapping at the ends.
+  /// Returns null when there is no window to switch to.
+  Future<void>? selectAdjacentWindowFromKeyboard(int delta) {
+    final targets = _keyboardTargets;
+    final active = targets.indexWhere(_isKeyboardTargetActive);
+    final index = resolveAppShortcutAdjacentWindow(
+      activeIndex: active < 0 ? null : active,
+      delta: delta,
+      count: targets.length,
+    );
+    if (index == null) {
+      return null;
+    }
+    return _activateKeyboardTarget(targets[index]);
+  }
+
+  /// Switches to numbered [slot] (1 to 8 by position, 9 for the last row).
+  /// Returns null when the slot is empty.
+  Future<void>? selectWindowSlotFromKeyboard(int slot) {
+    final targets = _keyboardTargets;
+    final index = resolveAppShortcutWindowSlot(slot, targets.length);
+    if (index == null) {
+      return null;
+    }
+    return _activateKeyboardTarget(targets[index]);
+  }
+
+  /// Opens the new-window picker, as the list's "New window" row does.
+  Future<void> showNewWindowPickerFromKeyboard() {
+    collapseIfExpanded();
+    return _showNewWindowPicker();
+  }
+
+  /// Closes the active window after the confirm-before-close prompt, when
+  /// that setting is on.
+  Future<void> closeActiveWindowFromKeyboard() async {
+    final target = _activeKeyboardTarget;
+    if (target == null) {
+      return;
+    }
+    final window = target.window;
+    if (window != null) {
+      await _confirmCloseWindow(window);
+      return;
+    }
+    final session = target.session!;
+    await _confirmCloseNativeAcpSession(
+      session.key,
+      acpSessionDisplayTitle(session),
+    );
+  }
+
+  /// Opens the switcher with keyboard focus on the active row, or closes it.
+  void toggleFromKeyboard() {
+    if (collapseIfExpanded()) {
+      return;
+    }
+    _toggleExpanded();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_expanded) {
+        return;
+      }
+      final list = _keyboardListKey.currentState;
+      if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
+        list.focusFirstRow();
+      }
+    });
+  }
+
+  static bool _isActiveRowNode(FocusNode node) =>
+      node.context
+          ?.findAncestorWidgetOfExactType<MuxWindowRow>()
+          ?.presentation
+          .isActive ??
+      false;
+
+  Widget _withKeyboardNavigation(Widget list) => KeyboardListNavigation(
+    key: _keyboardListKey,
+    onEscape: collapseIfExpanded,
+    child: list,
+  );
+
   @override
   Widget build(BuildContext context) {
     _projection = MuxWindowProjection(
@@ -1243,7 +1379,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                   child: ClipRect(
                     child: Offstage(
                       offstage: contentHeight <= 0,
-                      child: _buildWindowList(theme),
+                      child: _withKeyboardNavigation(_buildWindowList(theme)),
                     ),
                   ),
                 ),
@@ -1281,7 +1417,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                 // An IndexedStack also lays out hidden rows at the rail's
                 // collapsed width, which is too narrow for expanded ListTiles.
                 child: _showsExpandedSidebarContent
-                    ? _buildWindowList(theme)
+                    ? _withKeyboardNavigation(_buildWindowList(theme))
                     : _buildCollapsedSidebarWindowRail(theme),
               ),
             ],

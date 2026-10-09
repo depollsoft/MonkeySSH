@@ -63,6 +63,7 @@ import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_co
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
+import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
@@ -1700,6 +1701,7 @@ void main() {
       Future<bool> Function()? loadSharedClipboard,
       MonetizationState monetizationState = _proMonetizationState,
       List<Override> overrides = const [],
+      bool appShortcuts = false,
     }) => ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
@@ -1719,6 +1721,9 @@ void main() {
       child:
           child ??
           MaterialApp(
+            builder: appShortcuts
+                ? (context, child) => AppShortcutsHost(child: child!)
+                : null,
             home: TerminalScreen(
               hostId: host.id,
               connectionId: session.connectionId,
@@ -4375,6 +4380,7 @@ void main() {
       bool simulateAttachedTuiSignals = false,
       RemoteFileService? remoteFileServiceOverride,
       Stream<TmuxWindowChangeEvent>? windowEvents,
+      bool appShortcuts = false,
     }) async {
       const tmuxSessionName = 'work';
       const windows = <TmuxWindow>[
@@ -4460,6 +4466,7 @@ void main() {
               ),
           ],
           initialTmuxSessionName: tmuxSessionName,
+          appShortcuts: appShortcuts,
         ),
       );
 
@@ -10616,6 +10623,191 @@ void main() {
 
       expect(tester.getSize(handleFinder).width, tmuxSidebarCollapsedWidth);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    group('hardware keyboard shortcuts (#931)', () {
+      Future<void> pressChord(
+        WidgetTester tester,
+        List<LogicalKeyboardKey> modifiers,
+        LogicalKeyboardKey key,
+      ) async {
+        for (final modifier in modifiers) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyDownEvent(key);
+        await tester.sendKeyUpEvent(key);
+        for (final modifier in modifiers.reversed) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pump();
+      }
+
+      bool focusShows(String text) {
+        final context = FocusManager.instance.primaryFocus?.context;
+        if (context == null) {
+          return false;
+        }
+        return find
+            .descendant(
+              of: find.byElementPredicate(
+                (element) => identical(element, context),
+              ),
+              matching: find.text(text),
+            )
+            .evaluate()
+            .isNotEmpty;
+      }
+
+      FocusNode terminalFocus(WidgetTester tester) => tester
+          .widget<TerminalTextInputHandler>(
+            find.byType(TerminalTextInputHandler),
+          )
+          .focusNode;
+
+      void stubSelect(_MockTmuxService tmuxService, int index) => when(
+        () => tmuxService.selectWindow(
+          session,
+          'work',
+          index,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+        ),
+      ).thenAnswer((_) async {});
+
+      void verifySelected(_MockTmuxService tmuxService, int index) => verify(
+        () => tmuxService.selectWindow(
+          session,
+          'work',
+          index,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+        ),
+      ).called(1);
+
+      testWidgets('⌘ chords switch windows without typing into the shell', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        stubSelect(tmuxService, 0);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        verifySelected(tmuxService, 1);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.bracketLeft);
+        verifySelected(tmuxService, 0);
+
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets(
+        '⌃⌘S opens the switcher on the active row; arrows and Return switch',
+        (tester) async {
+          final tmuxService = _MockTmuxService();
+          await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+          shellWrites.clear();
+
+          await pressChord(tester, [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyS);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+
+          expect(find.text('agent'), findsOneWidget);
+          expect(focusShows('shell'), isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+          expect(focusShows('agent'), isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          verifySelected(tmuxService, 1);
+
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(find.text('agent'), findsNothing);
+          expect(terminalFocus(tester).hasFocus, isTrue);
+          expect(shellWrites.map(utf8.decode).join(), isEmpty);
+          await tester.pump(const Duration(seconds: 3));
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+
+      testWidgets('Esc closes the switcher and returns focus to the terminal', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyS);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('agent'), findsOneWidget);
+        expect(focusShows('shell'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('agent'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('⌘W asks before closing and Return confirms', (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        when(
+          () => tmuxService.killWindow(
+            session,
+            'work',
+            0,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async {});
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Close window?'), findsOneWidget);
+        expect(focusShows('Close window'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        verify(
+          () => tmuxService.killWindow(
+            session,
+            'work',
+            0,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).called(1);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    });
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,
