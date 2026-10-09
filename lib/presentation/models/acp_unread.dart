@@ -34,27 +34,28 @@ final class AcpLastSeenMarker {
     required this.source,
     required this.ordinal,
     required this.hadSessionError,
-    required this.pendingRequests,
+    required Set<String> pendingRequestIds,
     required Set<String> runningToolIds,
     this.toolCallId,
     this.role,
     this.messageId,
     this.textPrefix = '',
     this.textIsWhole = false,
-  }) : runningToolIds = Set<String>.unmodifiable(runningToolIds);
+  }) : pendingRequestIds = Set<String>.unmodifiable(pendingRequestIds),
+       runningToolIds = Set<String>.unmodifiable(runningToolIds);
 
   /// The entry of [timeline] the user had seen up to, or `null` when nothing
   /// is loaded.
   ///
   /// That is the newest entry, or the newest at or before [upToOrder] when
   /// the user had not scrolled to the end. [hadSessionError] and
-  /// [pendingRequests] record the session error and requests already showing,
-  /// so they are not reported as news.
+  /// [pendingRequestIds] record the session error and requests already
+  /// showing, so they are not reported as news.
   static AcpLastSeenMarker? of(
     d.AcpTimeline timeline, {
     int? upToOrder,
     bool hadSessionError = false,
-    int pendingRequests = 0,
+    Set<String> pendingRequestIds = const <String>{},
   }) {
     final entries = timeline.entries;
     var index = entries.length - 1;
@@ -92,7 +93,7 @@ final class AcpLastSeenMarker {
           source: timeline.source,
           ordinal: ordinal,
           hadSessionError: hadSessionError,
-          pendingRequests: pendingRequests,
+          pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
           toolCallId: toolCallId,
         ),
@@ -103,7 +104,7 @@ final class AcpLastSeenMarker {
           source: timeline.source,
           ordinal: ordinal,
           hadSessionError: hadSessionError,
-          pendingRequests: pendingRequests,
+          pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
           role: role,
           // A user prompt carries a local identifier until the agent echoes
@@ -136,8 +137,10 @@ final class AcpLastSeenMarker {
   /// Whether a session error was already showing when the user left.
   final bool hadSessionError;
 
-  /// Requests that were already waiting for an answer when the user left.
-  final int pendingRequests;
+  /// Requests that were already waiting for an answer when the user left, by
+  /// identity, so one answered while away and a new one in its place still
+  /// counts as new.
+  final Set<String> pendingRequestIds;
 
   /// Tool calls that were still running when the user left.
   final Set<String> runningToolIds;
@@ -241,11 +244,11 @@ bool acpPromptSentSince(AcpLastSeenMarker marker, d.AcpTimeline timeline) {
 bool acpChangedSince(
   AcpLastSeenMarker marker,
   d.AcpTimeline timeline, {
-  int pendingRequests = 0,
+  Set<String> pendingRequestIds = const <String>{},
   bool hasSessionError = false,
 }) {
   if (!identical(marker.source, timeline.source)) return true;
-  if (pendingRequests > marker.pendingRequests) return true;
+  if (_hasNewRequest(marker, pendingRequestIds)) return true;
   if (hasSessionError && !marker.hadSessionError) return true;
   return timeline.entries.any(
     (entry) =>
@@ -402,17 +405,35 @@ final class AcpUnreadState {
 /// Tool calls that were running when the user left and have since finished
 /// or failed count too, even though they sit above the divider.
 ///
-/// Returns `null` when there is no marker, nothing is loaded, or nothing
-/// changed. [entries] is the presentation mapping of [timeline].
+/// A new request or session error gets a digest even with no timeline row
+/// to mark, including while the timeline is empty, such as during a reload.
+///
+/// Returns `null` when there is no marker or nothing changed. [entries] is
+/// the presentation mapping of [timeline]; [pendingRequestIds] identifies the
+/// requests waiting now.
 AcpUnreadState? computeAcpUnreadState({
   required AcpLastSeenMarker? marker,
   required d.AcpTimeline timeline,
   required List<AcpTimelineEntry> entries,
-  int pendingRequests = 0,
+  Set<String> pendingRequestIds = const <String>{},
   bool hasSessionError = false,
 }) {
+  if (marker == null) return null;
+  final newError = hasSessionError && !marker.hadSessionError;
+  // Requests and errors can arrive with no timeline row to mark; they are
+  // still worth a digest.
+  final stateOnly = _hasNewRequest(marker, pendingRequestIds) || newError
+      ? AcpUnreadState(
+          dividerEntryIndex: null,
+          earlierHistoryUnavailable: false,
+          digest: AcpUnreadDigest(
+            pendingRequests: pendingRequestIds.length,
+            errors: newError ? 1 : 0,
+          ),
+        )
+      : null;
   final domainEntries = timeline.entries;
-  if (marker == null || domainEntries.isEmpty || entries.isEmpty) return null;
+  if (domainEntries.isEmpty || entries.isEmpty) return stateOnly;
 
   int? anchor;
   var trimmed = false;
@@ -442,20 +463,7 @@ AcpUnreadState? computeAcpUnreadState({
       finishedIds.add(acpPresentationEntryId(entry));
     }
   }
-  final newError = hasSessionError && !marker.hadSessionError;
-  if (newIds.isEmpty && finishedIds.isEmpty) {
-    // Requests and errors can arrive with no timeline row to mark; they are
-    // still worth a digest.
-    if (pendingRequests <= marker.pendingRequests && !newError) return null;
-    return AcpUnreadState(
-      dividerEntryIndex: null,
-      earlierHistoryUnavailable: false,
-      digest: AcpUnreadDigest(
-        pendingRequests: pendingRequests,
-        errors: newError ? 1 : 0,
-      ),
-    );
-  }
+  if (newIds.isEmpty && finishedIds.isEmpty) return stateOnly;
 
   final counter = _DigestCounter(newIds: newIds, finishedIds: finishedIds);
   int? firstNew;
@@ -466,7 +474,7 @@ AcpUnreadState? computeAcpUnreadState({
     if (isFinished) firstFinished ??= index;
   }
   final dividerIndex = firstNew ?? firstFinished;
-  if (dividerIndex == null) return null;
+  if (dividerIndex == null) return stateOnly;
   return AcpUnreadState(
     dividerEntryIndex: dividerIndex,
     earlierHistoryUnavailable: trimmed,
@@ -474,12 +482,15 @@ AcpUnreadState? computeAcpUnreadState({
       replies: counter.replies,
       toolCalls: Map<AcpToolKind, int>.unmodifiable(counter.toolCalls),
       reportedFileChanges: counter.changedPaths.length,
-      pendingRequests: pendingRequests,
+      pendingRequests: pendingRequestIds.length,
       errors: counter.failedTools + (newError ? 1 : 0),
       partial: trimmed,
     ),
   );
 }
+
+bool _hasNewRequest(AcpLastSeenMarker marker, Set<String> pendingRequestIds) =>
+    pendingRequestIds.any((id) => !marker.pendingRequestIds.contains(id));
 
 final class _DigestCounter {
   _DigestCounter({required this.newIds, required this.finishedIds});

@@ -4,6 +4,7 @@ library;
 import 'dart:collection';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -28,14 +29,21 @@ typedef AcpSeenSnapshot = ({
   d.AcpTimeline timeline,
   int? upToOrder,
   bool hadSessionError,
-  int pendingRequests,
+  Set<String> pendingRequestIds,
 });
 
-/// Requests waiting for an answer in [session].
-int acpPendingRequestCount(AcpSessionState session) =>
-    session.pendingPermissions.length +
-    session.pendingWrites.length +
-    session.pendingElicitations.length;
+/// Identifies each request waiting for an answer in [session], so a request
+/// answered while the user was away and a new one in its place still count
+/// as new. The request time guards against an agent reusing a request id
+/// after it restarts.
+Set<String> acpPendingRequestIds(AcpSessionState session) => {
+  for (final request in session.pendingPermissions)
+    'permission:${request.requestKey}@${request.requestedAt.microsecondsSinceEpoch}',
+  for (final request in session.pendingWrites)
+    'write:${request.requestKey}@${request.requestedAt.microsecondsSinceEpoch}',
+  for (final request in session.pendingElicitations)
+    'input:${request.requestKey}@${request.requestedAt.microsecondsSinceEpoch}',
+};
 
 /// What the user has seen of [session], mapped as [entries].
 ///
@@ -71,7 +79,7 @@ AcpSeenSnapshot? acpSeenSnapshot(
     timeline: session.timeline,
     upToOrder: upToOrder,
     hadSessionError: session.error != null,
-    pendingRequests: acpPendingRequestCount(session),
+    pendingRequestIds: acpPendingRequestIds(session),
   );
 }
 
@@ -111,13 +119,13 @@ class AcpLastSeenRegistry {
     d.AcpTimeline timeline, {
     int? upToOrder,
     bool hadSessionError = false,
-    int pendingRequests = 0,
+    Set<String> pendingRequestIds = const <String>{},
   }) {
     final marker = AcpLastSeenMarker.of(
       timeline,
       upToOrder: upToOrder,
       hadSessionError: hadSessionError,
-      pendingRequests: pendingRequests,
+      pendingRequestIds: pendingRequestIds,
     );
     if (marker == null) return;
     final id = _id(key);
@@ -154,7 +162,7 @@ class AcpUnreadVisit {
   AcpUnreadState? _memo;
   Object? _memoTimeline;
   Object? _memoEntries;
-  int? _memoPending;
+  Set<String>? _memoPending;
   bool? _memoError;
 
   /// Whether the user hid the digest for this visit.
@@ -194,13 +202,13 @@ class AcpUnreadVisit {
     final atDeparture = AcpLastSeenMarker.of(
       departure.timeline,
       hadSessionError: departure.hadSessionError,
-      pendingRequests: departure.pendingRequests,
+      pendingRequestIds: departure.pendingRequestIds,
     );
     if (atDeparture == null ||
         !acpChangedSince(
           atDeparture,
           current.timeline,
-          pendingRequests: current.pendingRequests,
+          pendingRequestIds: current.pendingRequestIds,
           hasSessionError: current.hadSessionError,
         )) {
       return;
@@ -221,7 +229,7 @@ class AcpUnreadVisit {
     seen.timeline,
     upToOrder: seen.upToOrder,
     hadSessionError: seen.hadSessionError,
-    pendingRequests: seen.pendingRequests,
+    pendingRequestIds: seen.pendingRequestIds,
   );
 
   /// Asks the transcript to scroll to the divider and hides the digest.
@@ -248,11 +256,11 @@ class AcpUnreadVisit {
       _caughtUp = true;
       return _memo = null;
     }
-    final pending = acpPendingRequestCount(session);
+    final pending = acpPendingRequestIds(session);
     final hasError = session.error != null;
     if (identical(_memoTimeline, session.timeline) &&
         identical(_memoEntries, entries) &&
-        _memoPending == pending &&
+        setEquals(_memoPending, pending) &&
         _memoError == hasError) {
       return _memo;
     }
@@ -264,7 +272,7 @@ class AcpUnreadVisit {
       marker: marker,
       timeline: session.timeline,
       entries: entries,
-      pendingRequests: pending,
+      pendingRequestIds: pending,
       hasSessionError: hasError,
     );
   }

@@ -56,13 +56,13 @@ d.AcpTimeline _timeline(
 AcpUnreadState? _unread(
   AcpLastSeenMarker? marker,
   d.AcpTimeline timeline, {
-  int pending = 0,
+  Set<String> pending = const <String>{},
   bool error = false,
 }) => computeAcpUnreadState(
   marker: marker,
   timeline: timeline,
   entries: mapAcpSessionTimeline(fakeAcpSession(timeline: timeline)),
-  pendingRequests: pending,
+  pendingRequestIds: pending,
   hasSessionError: error,
 );
 
@@ -99,7 +99,7 @@ void registerAcpUnreadTests() {
         ),
         _agent(5, 'Done, but tests fail.'),
       ], source: source);
-      final state = _unread(marker, timeline, pending: 1, error: true)!;
+      final state = _unread(marker, timeline, pending: {'r1'}, error: true)!;
       expect(state.dividerEntryIndex, 2);
       expect(state.earlierHistoryUnavailable, isFalse);
       final digest = state.digest!;
@@ -242,7 +242,7 @@ void registerAcpUnreadTests() {
         overflowed: true,
       );
       expect(
-        _unread(marker, timeline, pending: 1)!.digest!.summary,
+        _unread(marker, timeline, pending: {'r1'})!.digest!.summary,
         '1 request waiting · at least 1 reply',
       );
     });
@@ -525,6 +525,47 @@ void registerAcpUnreadTests() {
       );
     });
 
+    test('a request swapped for another while away starts a new visit', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final timeline = _timeline([_user(0, 'Go')], source: Object());
+      AcpSessionState waitingOn(String requestKey) =>
+          fakeAcpSession(timeline: timeline).copyWith(
+            pendingPermissions: [
+              AcpPendingPermission(
+                requestKey: requestKey,
+                sessionId: 's',
+                toolCallId: 't-$requestKey',
+                options: const [],
+                requestedAt: DateTime.utc(2026),
+              ),
+            ],
+          );
+      final before = waitingOn('1');
+      final after = waitingOn('2');
+      registry.record(
+        key,
+        timeline,
+        pendingRequestIds: acpPendingRequestIds(before),
+      );
+      final visit = AcpUnreadVisit(registry)..begin(key);
+      expect(visit.evaluate(before, mapAcpSessionTimeline(before)), isNull);
+
+      // The first request was answered elsewhere and a second one arrived:
+      // the count is unchanged, but it is news.
+      visit
+        ..depart(acpSeenSnapshot(before, null, followingTail: true))
+        ..arrive(
+          key,
+          left: true,
+          current: acpSeenSnapshot(after, null, followingTail: true),
+        );
+      expect(
+        visit.evaluate(after, mapAcpSessionTimeline(after))?.digest?.summary,
+        '1 request waiting',
+      );
+    });
+
     test('ending while away keeps what was seen at departure', () {
       final registry = AcpLastSeenRegistry();
       final key = fakeAcpKey();
@@ -656,13 +697,47 @@ void registerAcpUnreadTests() {
         _agent(1, 'Ok'),
       ], source: source);
       final marker = AcpLastSeenMarker.of(timeline);
-      final state = _unread(marker, timeline, pending: 1)!;
+      final state = _unread(marker, timeline, pending: {'r1'})!;
       expect(state.dividerEntryIndex, isNull);
       expect(state.digest!.summary, '1 request waiting');
       expect(_unread(marker, timeline, error: true)!.digest!.errors, 1);
       // Requests already waiting when the user left are not news.
-      final waiting = AcpLastSeenMarker.of(timeline, pendingRequests: 1);
-      expect(_unread(waiting, timeline, pending: 1), isNull);
+      final waiting = AcpLastSeenMarker.of(timeline, pendingRequestIds: {'r1'});
+      expect(_unread(waiting, timeline, pending: {'r1'}), isNull);
+    });
+
+    test('a request answered while away and a new one in its place is '
+        'news', () {
+      final source = Object();
+      final timeline = _timeline([
+        _user(0, 'Go'),
+        _agent(1, 'Ok'),
+      ], source: source);
+      final marker = AcpLastSeenMarker.of(timeline, pendingRequestIds: {'r1'})!;
+      expect(
+        acpChangedSince(marker, timeline, pendingRequestIds: {'r2'}),
+        isTrue,
+      );
+      expect(
+        _unread(marker, timeline, pending: {'r2'})?.digest?.summary,
+        '1 request waiting',
+      );
+      // Answering a request without a new one is not news.
+      expect(acpChangedSince(marker, timeline), isFalse);
+      expect(_unread(marker, timeline), isNull);
+    });
+
+    test('a request or error still gets a digest while the timeline is '
+        'empty', () {
+      final marker = AcpLastSeenMarker.of(
+        _timeline([_user(0, 'Go'), _agent(1, 'Ok')], source: Object()),
+      );
+      // A reload that has not replayed anything yet.
+      final empty = _timeline(const [], source: Object());
+      final state = _unread(marker, empty, pending: {'r1'}, error: true)!;
+      expect(state.dividerEntryIndex, isNull);
+      expect(state.digest!.summary, '1 request waiting · 1 error');
+      expect(_unread(marker, empty), isNull);
     });
 
     test('a tool cancelled while away counts as finished', () {
