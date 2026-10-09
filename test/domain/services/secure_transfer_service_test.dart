@@ -2115,6 +2115,32 @@ void main() {
         );
       },
     );
+
+    test('unsent chat drafts never leave or enter through migration', () async {
+      final settings = SettingsService(db);
+      const draftKey = '${SettingKeys.acpComposerDraftPrefix}[1,"p","s"]';
+      await settings.setString(draftKey, '{"text":"private draft"}');
+      await settings.setString(SettingKeys.themeMode, 'dark');
+
+      final data = await transferService.createMigrationData();
+      final exported = data['settings'] as Map<String, dynamic>;
+      expect(exported, contains(SettingKeys.themeMode));
+      expect(exported.keys.where(SettingKeys.isAcpComposerDraft), isEmpty);
+
+      const importedKey = '${SettingKeys.acpComposerDraftPrefix}[2,"p","s"]';
+      await transferService.importMigrationData(
+        data: {
+          'settings': {
+            importedKey: '{"text":"foreign draft"}',
+            SettingKeys.themeMode: 'light',
+          },
+        },
+        mode: MigrationImportMode.merge,
+      );
+      expect(await settings.getString(importedKey), isNull);
+      expect(await settings.getString(draftKey), '{"text":"private draft"}');
+      expect(await settings.getString(SettingKeys.themeMode), 'light');
+    });
   });
 }
 

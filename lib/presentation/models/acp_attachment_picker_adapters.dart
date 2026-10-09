@@ -18,6 +18,7 @@ Future<AcpAttachmentCandidate> acpAttachmentCandidateFromPlatformFile(
       name: name,
       sizeBytes: await file.length(),
       openRead: () => File(localPath).openRead(),
+      localPath: localPath,
     );
   }
   try {
@@ -53,6 +54,7 @@ Future<AcpAttachmentCandidate> acpAttachmentCandidateFromXFile(
     sizeBytes: sizeBytes,
     mimeType: file.mimeType,
     openRead: file.openRead,
+    localPath: file.path.isEmpty ? null : file.path,
   );
 }
 

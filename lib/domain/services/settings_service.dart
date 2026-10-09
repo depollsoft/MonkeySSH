@@ -1,6 +1,7 @@
 import 'dart:convert';
 
-import 'package:drift/drift.dart' show BooleanExpressionOperators, Value;
+import 'package:drift/drift.dart'
+    show BooleanExpressionOperators, ComparableExpr, Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -109,6 +110,17 @@ abstract final class SettingKeys {
 
   /// Canonical key of the last selected ACP session (JSON string).
   static const acpLastSelectedSession = 'acp_last_selected_session';
+
+  /// Key prefix for unsent native chat composer drafts, one row per session.
+  ///
+  /// The rest of the key is the session's draft identity. These rows hold
+  /// user content, stay on this device, and are left out of migration
+  /// exports.
+  static const acpComposerDraftPrefix = 'acp_composer_draft:';
+
+  /// Whether [key] holds an unsent native chat composer draft.
+  static bool isAcpComposerDraft(String key) =>
+      key.startsWith(acpComposerDraftPrefix);
 
   /// Saved user-defined MCP servers for native agent sessions (JSON array).
   ///
@@ -233,6 +245,29 @@ class SettingsService {
       await setJson(key, value);
     }
   });
+
+  /// Returns every setting whose key starts with [prefix], keyed by full key.
+  Future<Map<String, String>> getStringsWithPrefix(String prefix) async {
+    if (prefix.isEmpty) {
+      throw ArgumentError.value(prefix, 'prefix', 'must not be empty');
+    }
+    // Keys compare as binary text, so the prefix range is [prefix, next) where
+    // next bumps the prefix's last code unit.
+    final last = prefix.codeUnitAt(prefix.length - 1);
+    final upperBound =
+        prefix.substring(0, prefix.length - 1) + String.fromCharCode(last + 1);
+    final rows =
+        await (_db.select(_db.settings)..where(
+              (s) =>
+                  s.key.isBiggerOrEqualValue(prefix) &
+                  s.key.isSmallerThanValue(upperBound),
+            ))
+            .get();
+    return <String, String>{
+      for (final row in rows)
+        if (row.key.startsWith(prefix)) row.key: row.value,
+    };
+  }
 
   /// Delete a setting.
   Future<void> delete(String key) async {

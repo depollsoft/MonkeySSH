@@ -357,8 +357,12 @@ class SecureTransferService {
       );
     }
     final knownHosts = await _db.select(_db.knownHosts).get();
+    // Unsent chat drafts are device-local user content tied to this
+    // device's sessions and files, so they never travel in a migration.
     final rawSettings = <String, String>{
-      for (final setting in settings) setting.key: setting.value,
+      for (final setting in settings)
+        if (!SettingKeys.isAcpComposerDraft(setting.key))
+          setting.key: setting.value,
     };
 
     return {
@@ -1151,6 +1155,7 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
+      if (SettingKeys.isAcpComposerDraft(entry.key)) continue;
       if (!_hostScopedSettingsKeys.contains(entry.key)) {
         preparedSettings[entry.key] = entry.value;
         continue;
