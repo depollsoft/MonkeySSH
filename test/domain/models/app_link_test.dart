@@ -325,6 +325,10 @@ void main() {
         _parse('ssh://root;fingerprint=ssh-ed25519-abc@example.com'),
         _rejected(AppLinkRejection.invalidParameter),
       );
+      expect(
+        _parse('ssh://root%3Bfingerprint=ssh-ed25519-abc@example.com'),
+        _rejected(AppLinkRejection.invalidParameter),
+      );
     });
 
     test('rejects a missing host', () {
@@ -398,6 +402,22 @@ void main() {
     test('rejects over-long links without parsing them', () {
       final link = 'monkeyssh://open?host=1&pad=${'x' * maxAppLinkLength}';
       expect(_parse(link), _rejected(AppLinkRejection.tooLong));
+    });
+
+    test('rejects URLs whose components fail to decode later', () {
+      for (final link in [
+        'monkeyssh:%FF?host=1',
+        'monkeyssh://open?host=1&x=%FF',
+        'ssh://example.com:999999999999999999999999',
+        'ssh://%FF@example.com',
+      ]) {
+        expect(_parse(link), isA<RejectedAppLink>(), reason: link);
+        expect(
+          () => parseAppLink(Uri.parse(link)),
+          returnsNormally,
+          reason: link,
+        );
+      }
     });
 
     test('trims surrounding whitespace', () {

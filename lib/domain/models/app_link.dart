@@ -242,14 +242,20 @@ AppLink parseAppLinkString(String raw) {
 /// and hold a well-formed value. Parameters MonkeySSH does not use, such as
 /// a `prompt`, are ignored, so a link can never inject text into a session.
 AppLink parseAppLink(Uri uri) {
-  if (uri.toString().length > maxAppLinkLength) {
-    return const RejectedAppLink(AppLinkRejection.tooLong);
+  // Uri decodes some components lazily, so a URL that parsed can still throw
+  // when its path, port or query is read.
+  try {
+    if (uri.toString().length > maxAppLinkLength) {
+      return const RejectedAppLink(AppLinkRejection.tooLong);
+    }
+    return switch (uri.scheme.toLowerCase()) {
+      monkeySshLinkScheme => _parseMonkeySshLink(uri),
+      sshLinkScheme => _parseSshLink(uri),
+      _ => const RejectedAppLink(AppLinkRejection.unsupportedScheme),
+    };
+  } on FormatException {
+    return const RejectedAppLink(AppLinkRejection.malformed);
   }
-  return switch (uri.scheme.toLowerCase()) {
-    monkeySshLinkScheme => _parseMonkeySshLink(uri),
-    sshLinkScheme => _parseSshLink(uri),
-    _ => const RejectedAppLink(AppLinkRejection.unsupportedScheme),
-  };
 }
 
 AppLink _parseMonkeySshLink(Uri uri) {
@@ -349,6 +355,7 @@ AppLink _parseSshLink(Uri uri) {
         username.length > _maxUsernameLength ||
         _whitespaceOrControl.hasMatch(username) ||
         username.contains(':') ||
+        username.contains(';') ||
         username.contains('@')) {
       return const RejectedAppLink(AppLinkRejection.invalidParameter);
     }
