@@ -166,11 +166,13 @@ class HostSetupChecklist {
   /// Whether the host row should show the checklist.
   bool get isVisible => hasConnected && !dismissed && nextStep != null;
 
-  /// Whether a connection probe could fill in unknown steps.
+  /// Whether a connection probe could change a step: MonkeyMux or the agent
+  /// check isn't done yet. A "missing" result is re-checked on each new
+  /// connection, since the user may have fixed it meanwhile.
   bool get needsProbe =>
       !dismissed &&
-      (statusOf(HostSetupStep.monkeyMux) == HostSetupStepStatus.unknown ||
-          statusOf(HostSetupStep.agents) == HostSetupStepStatus.unknown);
+      (statusOf(HostSetupStep.monkeyMux) != HostSetupStepStatus.done ||
+          statusOf(HostSetupStep.agents) != HostSetupStepStatus.done);
 
   @override
   bool operator ==(Object other) =>

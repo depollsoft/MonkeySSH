@@ -180,7 +180,9 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
           ),
         ),
       );
-      if (navigator.canPop()) navigator.pop();
+      // The user may have left while a large import ran; don't pop the
+      // route underneath.
+      if (mounted && navigator.canPop()) navigator.pop();
     } on SshConfigImportBlockedException catch (error) {
       messenger.showSnackBar(SnackBar(content: Text(error.reason)));
     } on Exception {

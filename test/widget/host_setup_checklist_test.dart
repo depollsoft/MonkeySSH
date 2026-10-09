@@ -1,6 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'package:collection/collection.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +10,7 @@ import 'package:monkeyssh/domain/services/host_setup_checklist_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
+import 'package:monkeyssh/presentation/providers/host_setup_checklist_providers.dart';
 import 'package:monkeyssh/presentation/widgets/host_setup_checklist.dart';
 
 import '../helpers/mocks.dart';
@@ -18,7 +18,13 @@ import '../helpers/mocks.dart';
 class _Sessions extends ActiveSessionsNotifier {
   _Sessions(this.connected);
 
-  final Map<int, int> connected;
+  Map<int, int> connected;
+
+  /// Replaces every connection with [connectionId] for [hostId].
+  void reconnect(int connectionId, int hostId) {
+    connected = {connectionId: hostId};
+    state = {connectionId: SshConnectionState.connected};
+  }
 
   @override
   Map<int, SshConnectionState> build() => {
@@ -36,13 +42,27 @@ class _Sessions extends ActiveSessionsNotifier {
   ConnectionAttemptStatus? getConnectionAttempt(int hostId) => null;
 }
 
-class _FakeSshService extends SshService {
-  _FakeSshService(this.session);
+class _SeededProbes extends HostSetupProbeResultsNotifier {
+  _SeededProbes(this.seed);
 
-  final SshSession session;
+  final Map<int, HostSetupProbeResult> seed;
 
   @override
-  SshSession? getSession(int connectionId) => session;
+  Map<int, HostSetupProbeResult> build() => seed;
+}
+
+class _FakeSshService extends SshService {
+  _FakeSshService(this.hostId);
+
+  final int hostId;
+
+  @override
+  SshSession? getSession(int connectionId) {
+    final session = MockSshSession();
+    when(() => session.connectionId).thenReturn(connectionId);
+    when(() => session.hostId).thenReturn(hostId);
+    return session;
+  }
 }
 
 Host _host({int? keyId, String? password = 'secret'}) => Host(
@@ -74,19 +94,20 @@ void main() {
     required Widget child,
     Map<int, int> connected = const {},
     HostSetupProber? prober,
+    Map<int, HostSetupProbeResult>? probes,
   }) async {
-    final session = MockSshSession();
-    when(() => session.connectionId)
-        .thenReturn(connected.keys.firstOrNull ?? 1);
-    when(() => session.hostId).thenReturn(host.id);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           databaseProvider.overrideWithValue(db),
           allHostsProvider.overrideWith((ref) => Stream.value([host])),
           activeSessionsProvider.overrideWith(() => _Sessions(connected)),
-          sshServiceProvider.overrideWithValue(_FakeSshService(session)),
+          sshServiceProvider.overrideWithValue(_FakeSshService(host.id)),
           if (prober != null) hostSetupProberProvider.overrideWithValue(prober),
+          if (probes != null)
+            hostSetupProbeResultsProvider.overrideWith(
+              () => _SeededProbes(probes),
+            ),
         ],
         child: MaterialApp(
           home: Scaffold(body: Center(child: child)),
@@ -186,6 +207,56 @@ void main() {
     await tester.pump();
     await tester.pumpAndSettle();
     expect(probes, 1);
+  });
+
+  testWidgets('a reconnect probes again after a negative result', (
+    tester,
+  ) async {
+    final probedConnections = <int>[];
+    final host = _host(keyId: 1, password: null);
+    final prober = HostSetupProber(
+      probeMonkeyMux: (session) async {
+        probedConnections.add(session.connectionId);
+        return false;
+      },
+      probeAgents: (_) async => true,
+    );
+    await pump(
+      tester,
+      host: host,
+      connected: {7: host.id},
+      prober: prober,
+      child: HostSetupChecklistLine(host: host),
+    );
+    expect(probedConnections, [7]);
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(HostSetupChecklistLine)),
+    );
+    (container.read(activeSessionsProvider.notifier) as _Sessions).reconnect(
+      8,
+      host.id,
+    );
+    await tester.pumpAndSettle();
+    expect(probedConnections, [7, 8]);
+  });
+
+  testWidgets('the card numbers the next step by its position', (tester) async {
+    final host = _host(keyId: 1, password: null);
+    await pump(
+      tester,
+      host: host,
+      probes: {
+        host.id: const HostSetupProbeResult(
+          connectionId: 7,
+          monkeyMuxInstalled: false,
+          agentsDetected: true,
+        ),
+      },
+      child: const HostSetupEmptyStateCard(),
+    );
+    // Agents are detected but MonkeyMux is missing: MonkeyMux is step 2.
+    expect(find.text('Next: install MonkeyMux (step 2 of 4).'), findsOneWidget);
   });
 
   testWidgets('the empty-state card points at the next step', (tester) async {

@@ -244,7 +244,7 @@ class _EmptyStateCard extends StatelessWidget {
                 const SizedBox(height: FluttyTheme.spacingXs),
                 Text(
                   'Next: ${hostSetupStepShortLabel(next)} (step '
-                  '${checklist.doneCount + 1} of '
+                  '${HostSetupStep.values.indexOf(next) + 1} of '
                   '${HostSetupStep.values.length}).',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,

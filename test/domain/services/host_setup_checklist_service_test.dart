@@ -114,6 +114,19 @@ void main() {
       expect(needsSignIn.doneCount, 3);
     });
 
+    test('a negative probe still wants a probe on the next connection', () {
+      final checklist = _checklist(
+        host: _host(keyId: 1),
+        probe: const HostSetupProbeResult(
+          connectionId: 1,
+          monkeyMuxInstalled: false,
+          agentsDetected: true,
+        ),
+      );
+      expect(checklist.nextStep, HostSetupStep.monkeyMux);
+      expect(checklist.needsProbe, isTrue);
+    });
+
     test('persisted steps stay done without a probe', () {
       final checklist = _checklist(
         host: _host(keyId: 1),
