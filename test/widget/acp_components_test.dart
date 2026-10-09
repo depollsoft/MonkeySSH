@@ -22,6 +22,7 @@ import 'acp_native_starting_view_cases.dart';
 import 'acp_permission_surface_cases.dart';
 import 'acp_slash_command_picker_cases.dart';
 import 'acp_transcript_tools_cases.dart';
+import 'acp_turn_recovery_cases.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
@@ -881,4 +882,5 @@ void main() {}
   registerAcpPermissionSurfaceTests();
   registerAcpSlashCommandPickerTests();
   registerAcpTranscriptToolsTests();
+  registerAcpTurnRecoveryTests();
 }

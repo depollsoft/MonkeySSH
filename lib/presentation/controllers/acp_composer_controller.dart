@@ -16,6 +16,7 @@ import '../../domain/models/acp_updates.dart';
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../models/acp_slash_command.dart';
+import 'acp_turn_recovery.dart';
 
 /// Minimum insertion size promoted to a compact pasted-text chip.
 const int kAcpLargePasteThresholdChars = 2000;
@@ -178,6 +179,9 @@ class AcpComposerAttachment {
 /// them with [AcpSessionManager.prompt]. Once queued, the submitted draft clears
 /// immediately so the user can type steering or follow-up text while the active
 /// turn continues. Failed submissions are restored without dropping newer text.
+/// A prompt whose answer was lost, or whose turn the user stopped, is offered
+/// back through [turnRecovery] instead, since the agent may already have run
+/// it.
 class AcpComposerController extends ChangeNotifier {
   /// Creates a composer controller for [sessionKey].
   AcpComposerController({
@@ -225,6 +229,10 @@ class AcpComposerController extends ChangeNotifier {
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
 
+  var _submissions = 0;
+  var _retryableFailure = false;
+  AcpTurnRecovery? _turnRecovery;
+
   var _disposed = false;
 
   /// The current multiline composer text.
@@ -239,6 +247,15 @@ class AcpComposerController extends ChangeNotifier {
 
   /// The latest content-free error, if any.
   AcpComposerError? get error => _error;
+
+  /// Prompts that can be put back in the draft after the agent's answer was
+  /// lost or the user stopped the last turn.
+  AcpTurnRecovery? get turnRecovery => _turnRecovery;
+
+  /// Whether the draft restored after a confirmed send failure can be sent
+  /// again as is. A lost answer never qualifies: the agent may have run it.
+  bool get canRetryFailedPrompt =>
+      _retryableFailure && _error?.kind == AcpComposerErrorKind.send && canSend;
 
   /// The ranked slash-command matches for the active query.
   List<AcpAvailableCommand> get slashCommands => _slashCommands;
@@ -520,6 +537,7 @@ class AcpComposerController extends ChangeNotifier {
     final cancellation = AcpAttachmentCancellationToken();
     _cancellation = cancellation;
     _error = null;
+    _retryableFailure = false;
     _sendState = _SendState.preparing;
     _markAttachments(AcpComposerAttachmentStatus.ready, clearError: true);
     notifyListeners();
@@ -586,11 +604,17 @@ class AcpComposerController extends ChangeNotifier {
     _caret = 0;
     _attachments.clear();
     _error = null;
+    _turnRecovery = null;
     _applyPendingRestore();
     _recomputeSlash();
     notifyListeners();
     unawaited(
-      _observePromptResult(promptFuture, snapshotText, snapshotAttachments),
+      _observePromptResult(
+        promptFuture,
+        snapshotText,
+        snapshotAttachments,
+        ++_submissions,
+      ),
     );
     return true;
   }
@@ -599,13 +623,39 @@ class AcpComposerController extends ChangeNotifier {
     Future<AcpPromptResult> promptFuture,
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
+    int submission,
   ) async {
     try {
-      await promptFuture;
-    } on Object {
+      final result = await promptFuture;
+      if (!_disposed &&
+          result.stopReason == AcpStopReason.cancelled &&
+          submission == _submissions) {
+        _turnRecovery = AcpTurnRecovery(
+          kind: AcpTurnRecoveryKind.cancelled,
+          drafts: [(text: snapshotText, attachments: snapshotAttachments)],
+        );
+        notifyListeners();
+      }
+    } on Object catch (error) {
       if (_disposed) {
         return;
       }
+      if (!isConfirmedAcpPromptFailure(error)) {
+        // The answer was lost, not refused: keep the prompt out of the draft
+        // so it is not resent by reflex, and offer it back explicitly.
+        final previous = _turnRecovery;
+        _turnRecovery = AcpTurnRecovery(
+          kind: AcpTurnRecoveryKind.unconfirmed,
+          drafts: [
+            if (previous?.kind == AcpTurnRecoveryKind.unconfirmed)
+              ...previous!.drafts,
+            (text: snapshotText, attachments: snapshotAttachments),
+          ],
+        );
+        notifyListeners();
+        return;
+      }
+      _retryableFailure = true;
       if (_sendState != _SendState.idle) {
         // A newer send is still preparing and will clear the draft when it
         // finishes; restore after that so the rejected draft survives.
@@ -627,9 +677,45 @@ class AcpComposerController extends ChangeNotifier {
     'Your message could not be sent. Try again.',
   );
 
+  /// Resends the draft restored after a confirmed failure.
+  Future<bool> retryFailedPrompt() async =>
+      canRetryFailedPrompt && await send();
+
+  /// Puts the prompts offered by [turnRecovery] back into the draft, ahead of
+  /// anything typed since.
+  void editLastPrompt() {
+    final recovery = _turnRecovery;
+    if (recovery == null || !isEditable) {
+      return;
+    }
+    _turnRecovery = null;
+    for (final draft in recovery.drafts.reversed) {
+      _mergeDraft(draft.text, draft.attachments);
+    }
+    _recomputeSlash();
+    notifyListeners();
+  }
+
+  /// Dismisses the offer to restore [turnRecovery].
+  void dismissTurnRecovery() {
+    if (_turnRecovery == null) {
+      return;
+    }
+    _turnRecovery = null;
+    notifyListeners();
+  }
+
   /// Merges a rejected prompt back into the draft. A failure the current send
   /// already reported stays visible; otherwise the send error is shown.
   void _restoreSnapshot(
+    String snapshotText,
+    List<AcpComposerAttachment> snapshotAttachments,
+  ) {
+    _mergeDraft(snapshotText, snapshotAttachments);
+    _error ??= _sendFailedError;
+  }
+
+  void _mergeDraft(
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
   ) {
@@ -644,7 +730,6 @@ class AcpComposerController extends ChangeNotifier {
         (attachment) => !currentIds.contains(attachment.id),
       ),
     );
-    _error ??= _sendFailedError;
   }
 
   void _applyPendingRestore() {

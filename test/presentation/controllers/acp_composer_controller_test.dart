@@ -11,7 +11,10 @@ import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
+import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
+import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_controller.dart';
+import 'package:monkeyssh/presentation/controllers/acp_turn_recovery.dart';
 
 import '../../support/fake_acp_session_manager.dart';
 
@@ -71,6 +74,25 @@ class _GatedUploader implements AcpAttachmentUploader {
       sizeBytes: totalBytes ?? 0,
       mimeType: mimeType,
     );
+  }
+}
+
+/// The agent answered `session/prompt` with an error: a confirmed failure.
+const _agentError = AcpRemoteException(code: -32603, message: 'Internal error');
+
+/// Completes every prompt with [stopReason] instead of `end_turn`.
+class _StoppingAcpSessionManager extends RecordingAcpSessionManager {
+  _StoppingAcpSessionManager(this.stopReason);
+
+  AcpStopReason stopReason;
+
+  @override
+  Future<AcpPromptResult> prompt(
+    AcpSessionKey key,
+    List<AcpContentBlock> content,
+  ) async {
+    await super.prompt(key, content);
+    return AcpPromptResult(stopReason: stopReason);
   }
 }
 
@@ -245,8 +267,7 @@ void main() {
   test(
     'restores queued input and surfaces a send error when submission fails',
     () async {
-      final manager = RecordingAcpSessionManager()
-        ..throwOnPrompt = StateError('boom');
+      final manager = RecordingAcpSessionManager()..throwOnPrompt = _agentError;
       final controller = _controller(manager)..setText('keep me');
       addTearDown(controller.dispose);
 
@@ -266,7 +287,7 @@ void main() {
       final uploadGate = Completer<void>();
       manager
         ..promptGate = promptGate
-        ..throwOnPrompt = StateError('rejected');
+        ..throwOnPrompt = _agentError;
       final controller = _controller(
         manager,
         preparation: const AcpAttachmentPreparationService(
@@ -312,7 +333,7 @@ void main() {
       final uploadGate = Completer<void>();
       manager
         ..promptGate = promptGate
-        ..throwOnPrompt = StateError('rejected');
+        ..throwOnPrompt = _agentError;
       final controller = _controller(
         manager,
         preparation: const AcpAttachmentPreparationService(
@@ -603,5 +624,161 @@ void main() {
     // (which would throw on a disposed ChangeNotifier) or clear state.
     expect(await future, isTrue);
     expect(notifications, countBeforeDispose);
+  });
+
+  group('failed and stopped turns', () {
+    test('a confirmed failure restores the draft and offers a retry', () async {
+      final manager = RecordingAcpSessionManager()..throwOnPrompt = _agentError;
+      final controller = _controller(manager)..setText('run the tests');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'run the tests');
+      expect(controller.canRetryFailedPrompt, isTrue);
+      expect(controller.turnRecovery, isNull);
+
+      manager.throwOnPrompt = null;
+      expect(await controller.retryFailedPrompt(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(manager.prompts, hasLength(2));
+      expect(
+        (manager.prompts.last.single as AcpTextContent).text,
+        'run the tests',
+      );
+      expect(controller.text, isEmpty);
+      expect(controller.canRetryFailedPrompt, isFalse);
+      expect(controller.error, isNull);
+    });
+
+    test('a full local queue counts as a confirmed failure', () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpPromptQueueFullException();
+      final controller = _controller(manager)..setText('later');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'later');
+      expect(controller.canRetryFailedPrompt, isTrue);
+    });
+
+    for (final (name, error) in <(String, Object)>[
+      ('a closed connection', const AcpConnectionClosedException()),
+      (
+        'a timeout',
+        AcpRequestTimeoutException(1, 'session/prompt', Duration.zero),
+      ),
+      ('an unknown error', StateError('lost')),
+    ]) {
+      test(
+        '$name keeps the prompt out of the draft and offers no retry',
+        () async {
+          final manager = RecordingAcpSessionManager()..throwOnPrompt = error;
+          final controller = _controller(manager)..setText('deploy');
+          addTearDown(controller.dispose);
+
+          expect(await controller.send(), isTrue);
+          await Future<void>.delayed(Duration.zero);
+          expect(controller.text, isEmpty);
+          expect(controller.error, isNull);
+          expect(controller.canRetryFailedPrompt, isFalse);
+          expect(
+            controller.turnRecovery?.kind,
+            AcpTurnRecoveryKind.unconfirmed,
+          );
+
+          controller.editLastPrompt();
+          expect(controller.text, 'deploy');
+          expect(controller.turnRecovery, isNull);
+          expect(manager.prompts, hasLength(1));
+        },
+      );
+    }
+
+    test(
+      'every prompt whose answer was lost can be edited, oldest first',
+      () async {
+        final manager = RecordingAcpSessionManager();
+        final gate = Completer<void>();
+        manager
+          ..promptGate = gate
+          ..throwOnPrompt = const AcpConnectionClosedException();
+        final controller = _controller(manager)..setText('first');
+        addTearDown(controller.dispose);
+
+        expect(await controller.send(), isTrue);
+        controller.setText('second');
+        expect(await controller.send(), isTrue);
+        controller.setText('typed since');
+        gate.complete();
+        await Future<void>.delayed(Duration.zero);
+
+        expect(controller.turnRecovery?.drafts, hasLength(2));
+        controller.editLastPrompt();
+        expect(controller.text, 'first\n\nsecond\n\ntyped since');
+      },
+    );
+
+    test('a stopped last turn offers its prompt back for editing', () async {
+      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      final controller = _controller(
+        manager,
+        session: _session(embeddedContext: true),
+      )..setText('refactor it');
+      addTearDown(controller.dispose);
+      controller.addAttachment(
+        AcpAttachmentCandidate.memory(
+          name: 'notes.txt',
+          bytes: Uint8List.fromList('notes'.codeUnits),
+        ),
+      );
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, isEmpty);
+      expect(controller.turnRecovery?.kind, AcpTurnRecoveryKind.cancelled);
+      expect(controller.canRetryFailedPrompt, isFalse);
+
+      controller.editLastPrompt();
+      expect(controller.text, 'refactor it');
+      expect(controller.attachments.single.name, 'notes.txt');
+      expect(controller.turnRecovery, isNull);
+    });
+
+    test('only the latest submission offers a stopped prompt', () async {
+      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      final gate = Completer<void>();
+      manager.promptGate = gate;
+      final controller = _controller(manager)..setText('first');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      controller.setText('second');
+      expect(await controller.send(), isTrue);
+      manager.stopReason = AcpStopReason.endTurn;
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.turnRecovery, isNull);
+    });
+
+    test('sending a new prompt or dismissing clears the offer', () async {
+      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      final controller = _controller(manager)..setText('one');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.turnRecovery, isNotNull);
+      controller.dismissTurnRecovery();
+      expect(controller.turnRecovery, isNull);
+
+      manager.stopReason = AcpStopReason.endTurn;
+      controller.setText('two');
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.turnRecovery, isNull);
+    });
   });
 }
