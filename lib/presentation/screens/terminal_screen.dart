@@ -696,6 +696,7 @@ class TerminalScreen extends ConsumerStatefulWidget {
     this.initialTmuxWindowIndex,
     this.initialTmuxWindowId,
     this.initialTmuxWindowRequiresVisibleSession = false,
+    this.openedFromLink = false,
     this.initiallyExpandTmuxWindows = false,
     this.initiallyShowKeyboard = false,
     this.pasteDemoImage = false,
@@ -723,6 +724,14 @@ class TerminalScreen extends ConsumerStatefulWidget {
   /// Whether focusing the initial tmux window must also make tmux visible.
   final bool initialTmuxWindowRequiresVisibleSession;
 
+  /// Whether a `monkeyssh://` or `ssh://` link opened this terminal.
+  ///
+  /// A link never starts anything on its own: a new connection shows the
+  /// host's auto-connect command for review before running it, a MonkeyMux
+  /// launch preset attaches to its workspace without starting the agent, and
+  /// a target window that no longer exists is reported, not ignored.
+  final bool openedFromLink;
+
   /// Whether the tmux window selector should start expanded.
   final bool initiallyExpandTmuxWindows;
 
@@ -742,12 +751,15 @@ class _InitialTmuxWindowTarget {
     required this.windowIndex,
     required this.requiresVisibleSession,
     this.windowId,
+    this.reportMissing = false,
   });
 
-  final String sessionName;
+  /// Session the window belongs to, or `null` for whichever session attaches.
+  final String? sessionName;
   final int windowIndex;
   final String? windowId;
   final bool requiresVisibleSession;
+  final bool reportMissing;
 }
 
 class _TmuxTerminalThemeRefreshRequest {
@@ -1869,19 +1881,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = widget.initialTmuxSessionName?.trim();
     final windowIndex = widget.initialTmuxWindowIndex;
     final windowId = widget.initialTmuxWindowId?.trim();
-    if (sessionName == null ||
-        sessionName.isEmpty ||
-        windowIndex == null ||
-        windowIndex < 0) {
+    if (windowIndex == null || windowIndex < 0) {
       return null;
     }
     return _InitialTmuxWindowTarget(
-      sessionName: sessionName,
+      // A link names only the window, which then applies to the session
+      // the terminal attaches to.
+      sessionName: sessionName == null || sessionName.isEmpty
+          ? null
+          : sessionName,
       windowIndex: windowIndex,
       windowId: windowId != null && isValidTmuxWindowId(windowId)
           ? windowId
           : null,
       requiresVisibleSession: widget.initialTmuxWindowRequiresVisibleSession,
+      reportMissing: widget.openedFromLink,
     );
   }
 
@@ -6407,6 +6421,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final review = assessAutoConnectCommandExecution(
       command,
       importedNeedsReview: host.autoConnectRequiresConfirmation,
+      openedFromLink: widget.openedFromLink,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -7228,6 +7243,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (sessionName == null || sessionName.isEmpty) {
       return null;
     }
+    // A link attaches to the preset's workspace but never starts its agent.
+    final launchesAgent = !widget.openedFromLink;
 
     final executable =
         session.remoteIsWindows && preset.tool.needsExecutableProbe
@@ -7295,8 +7312,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         terminalColumns: viewportCellSize.columns,
         terminalRows: viewportCellSize.rows,
         workingDirectory: preset.workingDirectory,
-        windowName: preset.tool.label,
-        launchCommand: launchCommand,
+        windowName: launchesAgent ? preset.tool.label : null,
+        launchCommand: launchesAgent ? launchCommand : null,
         terminalThemeReports: terminalThemeReports,
         terminalCapabilityReports: buildTerminalCapabilityHintReports(),
         serverUpdatePolicy: updatePolicy,
@@ -7344,7 +7361,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       backend: RemoteMuxBackend.monkeyMux,
       command: attachCommand,
       sessionName: sessionName,
-      tool: preset.tool,
+      tool: launchesAgent ? preset.tool : null,
     );
   }
 
@@ -8214,7 +8231,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     final target = _pendingInitialTmuxWindowTarget;
-    if (target == null || target.sessionName != sessionName) {
+    if (target == null ||
+        (target.sessionName != null && target.sessionName != sessionName)) {
       return;
     }
     final targetWindow = target.windowId == null
@@ -8223,6 +8241,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               .firstOrNull
         : windows.where((window) => window.id == target.windowId).firstOrNull;
     if (targetWindow == null) {
+      if (target.reportMissing) {
+        _pendingInitialTmuxWindowTarget = null;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Window ${target.windowIndex} isn't open anymore."),
+          ),
+        );
+      }
       return;
     }
     _pendingInitialTmuxWindowTarget = null;
@@ -16218,14 +16244,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     TerminalCommandReview review,
     Host host,
   ) async {
+    // Trusting an imported host is persistent; a link review is one-off.
+    final imported = review.reasons.contains(
+      TerminalCommandReviewReason.importedAutoConnect,
+    );
     final decision = await showDialog<_AutoConnectReviewDecision>(
       context: context,
       requestFocus: terminalOverlayRouteRequestFocus(context),
       builder: (context) => AlertDialog(
-        title: const Text('Review imported auto-connect command'),
+        title: Text(
+          imported
+              ? 'Review imported auto-connect command'
+              : 'Review auto-connect command',
+        ),
         content: _buildCommandReviewContent(
           review: review,
-          message: 'Imported auto-connect commands never run silently. Review this one before letting it execute.',
+          message: imported
+              ? 'Imported auto-connect commands never run silently. Review this one before letting it execute.'
+              : 'Links never run commands on their own. Review this one before letting it execute.',
         ),
         actions: [
           TextButton(
@@ -16238,11 +16274,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
             child: const Text('Run once'),
           ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(context, _AutoConnectReviewDecision.trustAndRun),
-            child: const Text('Always run'),
-          ),
+          if (imported)
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                _AutoConnectReviewDecision.trustAndRun,
+              ),
+              child: const Text('Always run'),
+            ),
         ],
       ),
     );

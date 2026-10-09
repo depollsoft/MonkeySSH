@@ -346,5 +346,32 @@ void main() {
         contains(TerminalCommandReviewReason.controlCharacters),
       );
     });
+
+    test('requires review when a link opened the terminal', () {
+      final review = assessAutoConnectCommandExecution(
+        'claude --dangerously-skip-permissions && echo done',
+        importedNeedsReview: false,
+        openedFromLink: true,
+      );
+
+      expect(review.requiresReview, isTrue);
+      expect(review.reasons, [
+        TerminalCommandReviewReason.openedFromLink,
+        TerminalCommandReviewReason.shellChaining,
+      ]);
+      expect(
+        describeTerminalCommandReview(review).first,
+        contains('A link opened this terminal'),
+      );
+    });
+
+    test('runs trusted commands without review when no link opened it', () {
+      final review = assessAutoConnectCommandExecution(
+        'claude && echo done',
+        importedNeedsReview: false,
+      );
+
+      expect(review.requiresReview, isFalse);
+    });
   });
 }
