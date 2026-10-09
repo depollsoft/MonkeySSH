@@ -4,6 +4,8 @@ import 'package:collection/collection.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/acp_provider.dart';
+import '../models/monkeymux_acp_bridge.dart';
+import 'monkeymux_acp_bridge_service.dart';
 import 'settings_json_list.dart';
 import 'settings_service.dart';
 
@@ -101,15 +103,17 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
         );
       }
       created = _validated(
-        () => AcpCustomProviderDefinition.create(
-          id: suggestAcpCustomProviderId(label, {
-            for (final definition in definitions) definition.id,
-          }),
-          label: label,
-          launchCommand: launchCommand,
-          environmentVariableNames: environmentVariableNames,
-          cwdPolicy: cwdPolicy,
-          now: _clock(),
+        () => _launchable(
+          AcpCustomProviderDefinition.create(
+            id: suggestAcpCustomProviderId(label, {
+              for (final definition in definitions) definition.id,
+            }),
+            label: label,
+            launchCommand: launchCommand,
+            environmentVariableNames: environmentVariableNames,
+            cwdPolicy: cwdPolicy,
+            now: _clock(),
+          ),
         ),
       );
       return [...definitions, created];
@@ -134,12 +138,14 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
       final index = definitions.indexWhere((candidate) => candidate.id == id);
       if (index < 0) throw const AcpCustomProviderException(_missingMessage);
       updated = _validated(
-        () => definitions[index].edit(
-          label: label,
-          launchCommand: launchCommand,
-          environmentVariableNames: environmentVariableNames,
-          cwdPolicy: cwdPolicy,
-          now: _clock(),
+        () => _launchable(
+          definitions[index].edit(
+            label: label,
+            launchCommand: launchCommand,
+            environmentVariableNames: environmentVariableNames,
+            cwdPolicy: cwdPolicy,
+            now: _clock(),
+          ),
         ),
       );
       return [...definitions]..[index] = updated;
@@ -200,7 +206,10 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
   /// or when the import would exceed the definition limit.
   Future<AcpCustomProviderImportResult> import(String text) async {
     final imported = _validated(
-      () => decodeAcpCustomProviderImport(text, now: _clock()),
+      () => decodeAcpCustomProviderImport(
+        text,
+        now: _clock(),
+      ).map(_launchable).toList(growable: false),
     );
     late AcpCustomProviderImportResult result;
     await _mutate((definitions) {
@@ -255,6 +264,28 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
     );
   });
 
+  /// Throws a [FormatException] when [definition] would be refused by the
+  /// bridge once its command is quoted for a POSIX or Windows host.
+  static AcpCustomProviderDefinition _launchable(
+    AcpCustomProviderDefinition definition,
+  ) {
+    for (final isWindows in const [false, true]) {
+      try {
+        buildMonkeyMuxAcpProviderCommand(
+          definition.launchCommand.argv,
+          isWindows: isWindows,
+          providerId: definition.id,
+        );
+      } on MonkeyMuxAcpBridgeException {
+        throw const FormatException(
+          'This command is too long to launch once quoted for the host. '
+          'Shorten the command or its arguments.',
+        );
+      }
+    }
+    return definition;
+  }
+
   static T _validated<T>(T Function() build) {
     try {
       return build();
@@ -278,7 +309,12 @@ String suggestAcpCustomProviderId(String label, Set<String> takenIds) {
   }
   if (base.isEmpty) base = 'agent';
   var candidate = base;
-  for (var suffix = 2; takenIds.contains(candidate); suffix++) {
+  for (
+    var suffix = 2;
+    takenIds.contains(candidate) ||
+        acpReservedCustomProviderIds.contains(candidate);
+    suffix++
+  ) {
     candidate = '$base-$suffix';
   }
   return candidate;
@@ -287,6 +323,12 @@ String suggestAcpCustomProviderId(String label, Set<String> takenIds) {
 /// Provider for [AcpCustomProviderService].
 final acpCustomProviderServiceProvider = Provider<AcpCustomProviderService>(
   (ref) => AcpCustomProviderService(ref.watch(settingsServiceProvider)),
+);
+
+/// Looks up the stored custom agent definitions, for code that must act on
+/// the current definition rather than a cached copy.
+final acpCustomProviderLookupProvider = Provider<AcpCustomProviderLookup>(
+  (ref) => ref.watch(acpCustomProviderServiceProvider),
 );
 
 /// Streams every stored custom agent definition, approved or not.

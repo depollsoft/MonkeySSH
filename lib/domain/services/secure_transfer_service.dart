@@ -1113,6 +1113,14 @@ class SecureTransferService {
       imported: decodeStoredAcpCustomProviders(decodeJsonList(importedValue)),
       keepUnmatchedLocal: keepUnmatchedLocal,
     );
+    if (merged.length > acpCustomProviderMaxCount) {
+      // Failing the transaction keeps every agent instead of dropping some.
+      throw const FormatException(
+        'This import would leave more than $acpCustomProviderMaxCount custom '
+        'agents. Delete some first, or replace existing data instead of '
+        'merging.',
+      );
+    }
     return jsonEncode([for (final definition in merged) definition.toJson()]);
   }
 

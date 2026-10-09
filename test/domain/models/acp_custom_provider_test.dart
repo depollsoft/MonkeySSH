@@ -35,6 +35,10 @@ void main() {
         '-goose',
         'goose\u0000',
         'a' * (acpCustomProviderIdMaxLength + 1),
+        // MonkeyMux reads these as built-in agents once `builtin:` is gone.
+        'pi-acp',
+        'opencode',
+        'copilot-cli',
       ]) {
         expect(
           () => validateAcpCustomProviderId(invalid),
@@ -52,6 +56,51 @@ void main() {
         () => validateAcpProviderLabel('a' * (acpProviderLabelMaxLength + 1)),
         throwsFormatException,
       );
+    });
+
+    test('labels fit the bridge limit of 128 UTF-8 bytes', () {
+      // 43 characters, but 129 bytes: the bridge would refuse it.
+      expect(() => validateAcpProviderLabel('日' * 43), throwsFormatException);
+      expect(validateAcpProviderLabel('日' * 42), '日' * 42);
+    });
+
+    test('labels and argv reject invisible and reordering characters', () {
+      for (final hidden in [
+        '\u202E', // right-to-left override
+        '\u2066', // left-to-right isolate
+        '\u200B', // zero-width space
+        '\u2028', // line separator
+        '\u0085', // C1 next line
+        '\uFEFF', // zero-width no-break space
+      ]) {
+        expect(
+          () => validateAcpProviderLabel('Goose${hidden}x'),
+          throwsFormatException,
+        );
+        expect(
+          () => validateAcpLaunchCommand(_command(['acp${hidden}x'])),
+          throwsFormatException,
+        );
+        expect(
+          () => validateAcpLaunchCommand(
+            AcpLaunchCommand(executable: 'goose${hidden}x'),
+          ),
+          throwsFormatException,
+        );
+      }
+      // Ordinary punctuation and non-Latin text stay allowed.
+      expect(validateAcpProviderLabel(r"Goose's \agent! 日本"), isNotEmpty);
+    });
+
+    test('Windows hosts refuse arguments they would not pass exactly', () {
+      expect(acpWindowsLaunchArgumentProblem(_command()), isNull);
+      for (final argument in ['', 'say "hi"', '50%', 'a&b', 'a|b', 'a^b']) {
+        expect(
+          acpWindowsLaunchArgumentProblem(_command(['acp', argument])),
+          isNotNull,
+          reason: argument,
+        );
+      }
     });
 
     test('launch commands reject blanks, controls and oversized argv', () {
@@ -109,7 +158,8 @@ void main() {
       expect(_goose().fingerprint, matches(RegExp(r'^[0-9a-f]{64}$')));
     });
 
-    test('changes with argv, environment names and cwd policy only', () {
+    test('changes with the label, argv, environment names and cwd '
+        'policy', () {
       final base = _goose();
       expect(_goose().fingerprint, base.fingerprint);
       expect(
@@ -128,7 +178,7 @@ void main() {
         _goose(cwdPolicy: AcpCustomProviderCwdPolicy.homeDirectory).fingerprint,
         isNot(base.fingerprint),
       );
-      expect(base.edit(label: 'Renamed').fingerprint, base.fingerprint);
+      expect(base.edit(label: 'Renamed').fingerprint, isNot(base.fingerprint));
     });
   });
 
@@ -143,7 +193,7 @@ void main() {
       expect(approved.approval!.approvedAt, DateTime.utc(2026, 2));
     });
 
-    test('changing what runs withdraws approval; renaming does not', () {
+    test('any change, including a rename, withdraws approval', () {
       final approved = _goose().approve();
       expect(
         approved
@@ -161,7 +211,8 @@ void main() {
             .isCommandApproved,
         isFalse,
       );
-      expect(approved.edit(label: 'Goose CLI').isCommandApproved, isTrue);
+      expect(approved.edit(label: 'Goose CLI').isCommandApproved, isFalse);
+      expect(approved.edit().isCommandApproved, isTrue);
     });
 
     test('a stored approval for another fingerprint does not authorize', () {
@@ -321,15 +372,49 @@ void main() {
 
     test('keeps approval only for an identical, locally approved launch', () {
       final sameImport = decodeAcpCustomProviderImport(
-        encodeAcpCustomProviderExport([approvedLocal.edit(label: 'Renamed')]),
+        encodeAcpCustomProviderExport([approvedLocal]),
       );
       final merged = mergeImportedAcpCustomProviders(
         local: [approvedLocal],
         imported: sameImport,
         keepUnmatchedLocal: true,
       );
-      expect(merged.single.label, 'Renamed');
       expect(merged.single.isCommandApproved, isTrue);
+    });
+
+    test('a relabelled import of an approved agent goes back to review', () {
+      // Same id and argv as the approved agent, with a hostile label.
+      final relabelled = decodeAcpCustomProviderImport(
+        encodeAcpCustomProviderExport([
+          approvedLocal.edit(label: r"Goose\'; touch /tmp/pwned; #"),
+        ]),
+      );
+      final merged = mergeImportedAcpCustomProviders(
+        local: [approvedLocal],
+        imported: relabelled,
+        keepUnmatchedLocal: true,
+      );
+      expect(merged.single.label, r"Goose\'; touch /tmp/pwned; #");
+      expect(merged.single.isCommandApproved, isFalse);
+    });
+
+    test('never drops agents past the limit; callers reject the count', () {
+      final many = [
+        for (var i = 0; i <= acpCustomProviderMaxCount; i++)
+          AcpCustomProviderDefinition.create(
+            id: 'agent-$i',
+            label: 'Agent $i',
+            launchCommand: AcpLaunchCommand(executable: 'agent'),
+          ),
+      ];
+      expect(
+        mergeImportedAcpCustomProviders(
+          local: const [],
+          imported: many,
+          keepUnmatchedLocal: false,
+        ),
+        hasLength(acpCustomProviderMaxCount + 1),
+      );
     });
 
     test('a changed import replaces the local one unapproved', () {

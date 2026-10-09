@@ -3,10 +3,13 @@ part of 'acp_provider.dart';
 /// Maximum length of a custom ACP provider ID.
 const acpCustomProviderIdMaxLength = 64;
 
-/// Maximum length of a custom ACP provider label.
-///
-/// MonkeyMux accepts provider labels up to 128 characters.
+/// Maximum length of a custom ACP provider label, in characters.
 const acpProviderLabelMaxLength = 120;
+
+/// Maximum length of a custom ACP provider label once UTF-8 encoded.
+///
+/// MonkeyMux rejects provider labels above 128 bytes.
+const acpProviderLabelMaxBytes = 128;
 
 /// Maximum length of an ACP launch command executable.
 const acpLaunchCommandExecutableMaxLength = 1024;
@@ -39,7 +42,25 @@ const acpCustomProviderExportFormat = 'monkeyssh.acp-agents';
 /// Schema version of an exported custom agent document.
 const acpCustomProviderExportVersion = 1;
 
-final _controlCharacterPattern = RegExp(r'[\x00-\x1F\x7F]');
+// C0 and C1 controls, line and paragraph separators, and invisible format
+// characters (bidi overrides and isolates, zero-width characters). These
+// could make the review sheet show something other than what runs.
+final _unsafeTextPattern = RegExp(
+  r'[\x00-\x1F\x7F-\x9F\u2028\u2029]|\p{Cf}',
+  unicode: true,
+);
+
+/// Custom IDs MonkeyMux would read as a built-in agent once it strips the
+/// `builtin:` prefix, so native window titles could pick the wrong agent.
+final Set<String> acpReservedCustomProviderIds = Set.unmodifiable({
+  for (final provider in acpBuiltinProviders)
+    provider.id.substring(acpBuiltinProviderIdPrefix.length),
+});
+
+// Characters cmd.exe re-parses when Windows runs an npm `.cmd` shim, plus the
+// double quote that Windows PowerShell 5.1 does not escape for native
+// commands.
+final _windowsUnsafeArgumentPattern = RegExp('["%^&|<>]');
 final _customProviderIdPattern = RegExp(r'^[a-z0-9][a-z0-9._-]*$');
 final _environmentVariableNamePattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
 
@@ -67,25 +88,31 @@ String validateAcpCustomProviderId(String id) {
       'Agent ID may only use lowercase letters, digits, ".", "_" and "-".',
     );
   }
+  if (acpReservedCustomProviderIds.contains(trimmed)) {
+    throw FormatException(
+      'Agent ID "$trimmed" is reserved for a built-in agent.',
+    );
+  }
   return trimmed;
 }
 
 /// Validates and normalizes an ACP provider label.
 ///
-/// Throws a [FormatException] when [label] is blank, too long, or contains
-/// control characters.
+/// Throws a [FormatException] when [label] is blank, too long in characters
+/// or UTF-8 bytes, or contains control or invisible formatting characters.
 String validateAcpProviderLabel(String label) {
   final trimmed = label.trim();
   if (trimmed.isEmpty) {
     throw const FormatException('Name must not be blank.');
   }
-  if (trimmed.length > acpProviderLabelMaxLength) {
-    throw const FormatException(
-      'Name must be $acpProviderLabelMaxLength characters or fewer.',
-    );
+  if (trimmed.length > acpProviderLabelMaxLength ||
+      utf8.encode(trimmed).length > acpProviderLabelMaxBytes) {
+    throw const FormatException('Name is too long.');
   }
-  if (_controlCharacterPattern.hasMatch(trimmed)) {
-    throw const FormatException('Name must not contain control characters.');
+  if (_unsafeTextPattern.hasMatch(trimmed)) {
+    throw const FormatException(
+      'Name must not contain control or invisible formatting characters.',
+    );
   }
   return trimmed;
 }
@@ -112,8 +139,10 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
       'fewer.',
     );
   }
-  if (_controlCharacterPattern.hasMatch(executable)) {
-    throw const FormatException('Command must not contain control characters.');
+  if (_unsafeTextPattern.hasMatch(executable)) {
+    throw const FormatException(
+      'Command must not contain control or invisible formatting characters.',
+    );
   }
   if (command.arguments.length > acpLaunchCommandMaxArgumentCount) {
     throw const FormatException(
@@ -127,9 +156,10 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
         'or fewer.',
       );
     }
-    if (_controlCharacterPattern.hasMatch(argument)) {
+    if (_unsafeTextPattern.hasMatch(argument)) {
       throw const FormatException(
-        'Arguments must not contain control characters.',
+        'Arguments must not contain control or invisible formatting '
+        'characters.',
       );
     }
   }
@@ -143,6 +173,23 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
       '$acpLaunchCommandMaxTotalLength characters or fewer.',
     );
   }
+}
+
+/// Explains why [command] cannot run exactly as approved on a Windows host,
+/// or returns `null` when it can.
+///
+/// Windows PowerShell 5.1 drops empty arguments and does not escape embedded
+/// double quotes for native commands, and an npm `.cmd` shim makes cmd.exe
+/// parse the arguments again.
+String? acpWindowsLaunchArgumentProblem(AcpLaunchCommand command) {
+  if (command.arguments.any(
+    (argument) =>
+        argument.isEmpty || _windowsUnsafeArgumentPattern.hasMatch(argument),
+  )) {
+    return 'On Windows hosts, arguments cannot be empty or contain '
+        '" % ^ & | < or >, because Windows would not pass them exactly.';
+  }
+  return null;
 }
 
 /// Validates and normalizes the names of host environment variables a custom
@@ -194,21 +241,24 @@ enum AcpCustomProviderCwdPolicy {
       );
 }
 
-/// Computes the approval fingerprint for everything that decides what a
-/// custom provider runs and where: the exact argv, the required environment
-/// variable names, and the working-directory policy.
+/// Computes the approval fingerprint of everything the user reviews: the
+/// label, the exact argv, the required environment variable names and the
+/// working-directory policy.
 ///
 /// The result is a lowercase hex SHA-256 digest. It changes whenever any of
 /// those inputs change, so an approval recorded against an older fingerprint
-/// no longer authorizes the launch.
+/// no longer authorizes the launch. The label is included because it also
+/// travels to the host, and so a renamed import goes back to review.
 String computeAcpCustomProviderFingerprint({
+  required String label,
   required AcpLaunchCommand command,
   List<String> environmentVariableNames = const <String>[],
   AcpCustomProviderCwdPolicy cwdPolicy =
       AcpCustomProviderCwdPolicy.chosenDirectory,
 }) {
   final canonical = jsonEncode(<String, Object?>{
-    'v': 1,
+    'v': 2,
+    'label': label,
     'argv': command.argv,
     'env': [...environmentVariableNames]..sort(),
     'cwd': cwdPolicy.storageValue,
@@ -284,8 +334,8 @@ class AcpCommandApproval {
 ///
 /// A definition runs arbitrary commands on the host, so it is executable
 /// configuration. It launches only while [isCommandApproved]: the user has
-/// reviewed and approved the current [fingerprint]. Any change to the argv,
-/// the required environment variable names or the working-directory policy
+/// reviewed and approved the current [fingerprint]. Any change to the label,
+/// argv, required environment variable names or working-directory policy
 /// changes the fingerprint and withdraws the approval until the user reviews
 /// it again. Environment variables are referenced by name only; their values
 /// come from the host and are never stored.
@@ -436,6 +486,7 @@ final class AcpCustomProviderDefinition implements AcpProvider {
 
   /// Fingerprint of what this definition currently runs.
   String get fingerprint => computeAcpCustomProviderFingerprint(
+    label: label,
     command: launchCommand,
     environmentVariableNames: environmentVariableNames,
     cwdPolicy: cwdPolicy,
@@ -446,9 +497,9 @@ final class AcpCustomProviderDefinition implements AcpProvider {
 
   /// Returns an edited copy. Fields left `null` keep their value.
   ///
-  /// The stored approval is kept, so an edit that changes what runs leaves
-  /// the definition unapproved until it is reviewed again, while a rename
-  /// stays approved. Throws a [FormatException] for invalid fields.
+  /// The stored approval is kept, so any edit that changes the fingerprint,
+  /// including a rename, leaves the definition unapproved until it is
+  /// reviewed again. Throws a [FormatException] for invalid fields.
   AcpCustomProviderDefinition edit({
     String? label,
     AcpLaunchCommand? launchCommand,
@@ -754,5 +805,7 @@ List<AcpCustomProviderDefinition> mergeImportedAcpCustomProviders({
     }
     merged.add(accept(definition));
   }
-  return merged.take(acpCustomProviderMaxCount).toList(growable: false);
+  // Callers check [acpCustomProviderMaxCount]; dropping agents here would
+  // lose them silently.
+  return List<AcpCustomProviderDefinition>.unmodifiable(merged);
 }

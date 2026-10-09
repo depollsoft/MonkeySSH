@@ -50,6 +50,9 @@ void main() {
     expect(suggestAcpCustomProviderId('Gemini CLI!', {}), 'gemini-cli');
     expect(suggestAcpCustomProviderId('🙈', {}), 'agent');
     expect(suggestAcpCustomProviderId('agent', {'agent'}), 'agent-2');
+    // Never an ID MonkeyMux would read as a built-in agent.
+    expect(suggestAcpCustomProviderId('Pi ACP', {}), 'pi-acp-2');
+    expect(suggestAcpCustomProviderId('OpenCode', {}), 'opencode-2');
   });
 
   test('approve requires the reviewed fingerprint to still match', () async {
@@ -66,7 +69,7 @@ void main() {
     );
   });
 
-  test('changing the command of an approved definition requires '
+  test('changing the command or the name of an approved definition requires '
       're-approval', () async {
     final created = await addGoose();
     await service.approve(created.id, reviewedFingerprint: created.fingerprint);
@@ -78,7 +81,8 @@ void main() {
       environmentVariableNames: created.environmentVariableNames,
       cwdPolicy: created.cwdPolicy,
     );
-    expect(renamed.isCommandApproved, isTrue);
+    expect(renamed.isCommandApproved, isFalse);
+    await service.approve(created.id, reviewedFingerprint: renamed.fingerprint);
 
     final changed = await service.update(
       created.id,
@@ -114,6 +118,43 @@ void main() {
       throwsA(isA<AcpCustomProviderException>()),
     );
     expect(await service.listCustomProviders(), isEmpty);
+  });
+
+  test('rejects a command the bridge would refuse once quoted', () async {
+    // 4,000 apostrophes pass the raw length limit but quote to about 16 KiB.
+    await expectLater(
+      service.create(
+        label: 'Quotes',
+        launchCommand: AcpLaunchCommand(
+          executable: 'agent',
+          arguments: ["'" * 4000],
+        ),
+      ),
+      throwsA(
+        isA<AcpCustomProviderException>().having(
+          (error) => error.message,
+          'message',
+          contains('too long to launch'),
+        ),
+      ),
+    );
+    expect(await service.listCustomProviders(), isEmpty);
+  });
+
+  test('a relabelled import of an approved agent needs approval', () async {
+    final created = await addGoose();
+    await service.approve(created.id, reviewedFingerprint: created.fingerprint);
+    final document = jsonDecode(await service.export()) as Map<String, Object?>;
+    ((document['agents']! as List).single as Map)['label'] =
+        r"Goose\'; touch /tmp/pwned; #";
+
+    final result = await service.import(jsonEncode(document));
+
+    expect(result.replaced, 1);
+    expect(result.needsApproval, 1);
+    final stored = (await service.getCustomProvider(created.id))!;
+    expect(stored.label, r"Goose\'; touch /tmp/pwned; #");
+    expect(stored.isCommandApproved, isFalse);
   });
 
   test('stores environment variable names only', () async {

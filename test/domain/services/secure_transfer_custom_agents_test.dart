@@ -50,6 +50,42 @@ void main() {
         },
       };
 
+  test('a merge that would pass the agent limit fails and keeps every '
+      'agent', () async {
+    for (var i = 0; i < acpCustomProviderMaxCount; i++) {
+      await customProviders.create(
+        label: 'Local $i',
+        launchCommand: AcpLaunchCommand(executable: 'agent'),
+      );
+    }
+    final incoming = AcpCustomProviderDefinition.create(
+      id: 'incoming',
+      label: 'Incoming',
+      launchCommand: AcpLaunchCommand(executable: 'incoming'),
+    );
+
+    await expectLater(
+      transfer.importMigrationData(
+        data: migrationWith([incoming]),
+        mode: MigrationImportMode.merge,
+      ),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('more than $acpCustomProviderMaxCount custom agents'),
+        ),
+      ),
+    );
+
+    final stored = await customProviders.listCustomProviders();
+    expect(stored, hasLength(acpCustomProviderMaxCount));
+    expect(
+      stored.map((definition) => definition.id),
+      isNot(contains('incoming')),
+    );
+  });
+
   for (final mode in MigrationImportMode.values) {
     test(
       'a migration import never carries approvals in (${mode.name})',
