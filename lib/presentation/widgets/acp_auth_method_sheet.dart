@@ -15,9 +15,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/theme.dart';
 import '../../domain/models/acp_authentication.dart';
 import '../../domain/models/acp_protocol.dart';
+import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/services/acp_json_rpc_connection.dart';
+import '../../domain/services/acp_provider_service.dart';
 import '../../domain/services/monkeymux_acp_bridge_service.dart';
 import '../../domain/services/ssh_service.dart';
 import 'acp_sign_in_terminal.dart';
@@ -100,9 +102,31 @@ AcpAuthenticationChooser acpAuthenticationChooser(
 Future<bool> runAcpTerminalSignIn(
   BuildContext context,
   WidgetRef ref,
-  AcpTerminalAuthLaunch launch,
+  AcpTerminalAuthLaunch requested,
 ) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
+  var launch = requested;
+  if (!launch.providerId.startsWith(acpBuiltinProviderIdPrefix)) {
+    // A custom agent signs in with the command approved now, never the one
+    // captured when its session started.
+    final current = await currentAcpTerminalSignInLaunch(
+      ref.read(acpCustomProviderLookupProvider),
+      launch,
+    );
+    if (!context.mounted) return false;
+    if (current == null) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Approve this agent in Settings › Custom agents before signing '
+            'in.',
+          ),
+        ),
+      );
+      return false;
+    }
+    launch = current;
+  }
   final session = ref
       .read(sshServiceProvider)
       .getSessionsForHost(launch.hostId)

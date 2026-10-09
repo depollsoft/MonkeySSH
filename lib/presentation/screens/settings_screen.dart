@@ -27,6 +27,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
+import 'acp_custom_providers_screen.dart';
 import 'acp_mcp_servers_screen.dart';
 import 'settings_labels.dart';
 import 'transfer_screen.dart';
@@ -643,6 +644,7 @@ class _AgentsSection extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       _SectionHeader(title: 'agents', subtitle: 'Native agent chat sessions'),
+      AcpCustomProvidersSettingsTile(),
       AcpMcpServersSettingsTile(),
     ],
   );

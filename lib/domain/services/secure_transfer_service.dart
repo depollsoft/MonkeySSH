@@ -12,6 +12,7 @@ import 'package:pointycastle/export.dart'
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
+import '../models/acp_provider.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
 import 'diagnostics_log_service.dart';
@@ -19,6 +20,7 @@ import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
 import 'key_service.dart';
 import 'port_forward_browser_service.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
 import 'ssh_wire.dart';
@@ -1072,12 +1074,22 @@ class SecureTransferService {
       _sortedStringMap(settings),
       hostMapping: hostMapping,
     );
+    // Read before a replace clears it: only this device's own approvals may
+    // carry over to imported custom agents.
+    final localCustomProviders = await _settingsService.getString(
+      SettingKeys.acpCustomProviders,
+    );
     if (clearExisting) {
       await _db.customStatement('DELETE FROM settings');
     }
     for (final entry in preparedSettings.entries) {
-      final value =
-          !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
+      final value = entry.key == SettingKeys.acpCustomProviders
+          ? _mergeImportedCustomProviders(
+              localCustomProviders,
+              entry.value,
+              keepUnmatchedLocal: !clearExisting,
+            )
+          : !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
           ? await _mergeHostScopedSettingValue(entry.key, entry.value)
           : entry.value;
       await _db
@@ -1086,6 +1098,35 @@ class SecureTransferService {
             SettingsCompanion.insert(key: entry.key, value: value),
           );
     }
+  }
+
+  /// Imported custom agents run commands on remote hosts, so an approval
+  /// recorded elsewhere is never trusted: each arrives unapproved unless
+  /// this device already approved its exact fingerprint.
+  String _mergeImportedCustomProviders(
+    String? localValue,
+    String importedValue, {
+    required bool keepUnmatchedLocal,
+  }) {
+    final merged = mergeImportedAcpCustomProviders(
+      local: decodeStoredAcpCustomProviders(decodeJsonList(localValue)),
+      // Decode every imported agent, so an oversized list is rejected below
+      // rather than cut to the limit.
+      imported: decodeStoredAcpCustomProviders(
+        decodeJsonList(importedValue),
+        limit: null,
+      ),
+      keepUnmatchedLocal: keepUnmatchedLocal,
+    );
+    if (merged.length > acpCustomProviderMaxCount) {
+      // Failing the transaction keeps every agent instead of dropping some.
+      throw const FormatException(
+        'This import would leave more than $acpCustomProviderMaxCount custom '
+        'agents. Delete some first, or replace existing data instead of '
+        'merging.',
+      );
+    }
+    return jsonEncode([for (final definition in merged) definition.toJson()]);
   }
 
   List<Map<String, dynamic>> _listFromData(

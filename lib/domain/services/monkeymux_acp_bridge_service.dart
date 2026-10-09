@@ -126,6 +126,40 @@ String buildMonkeyMuxAcpProviderCommand(
   return command;
 }
 
+/// Explains why a custom agent's [label] and [argv] cannot launch exactly on
+/// a Windows host, or returns `null` when they can.
+///
+/// Besides the argument and label rules, the provider command must stay in
+/// the encoded form: a long one switches to a compact `-Command "…"` form
+/// whose double quotes Windows PowerShell 5.1 would split when it passes the
+/// command to the MonkeyMux helper.
+String? acpWindowsCustomLaunchProblem({
+  required String label,
+  required List<String> argv,
+  String? providerId,
+}) {
+  if (argv.isEmpty) return null;
+  final argumentProblem = acpWindowsLaunchArgumentProblem(
+    AcpLaunchCommand(executable: argv.first, arguments: argv.sublist(1)),
+  );
+  if (argumentProblem != null) return argumentProblem;
+  final labelProblem = acpWindowsLabelProblem(label);
+  if (labelProblem != null) return labelProblem;
+  try {
+    if (buildMonkeyMuxAcpProviderCommand(
+      argv,
+      isWindows: true,
+      providerId: providerId,
+    ).contains('"')) {
+      return 'This command is too long to launch on a Windows host. Shorten '
+          'the command or its arguments.';
+    }
+  } on MonkeyMuxAcpBridgeException {
+    return 'This command is too long to launch on a Windows host.';
+  }
+  return null;
+}
+
 /// Builds the interactive login command for an ACP `terminal` auth method.
 ///
 /// Reuses the exact bridge launch construction (profile/PATH prefix, literal
@@ -145,11 +179,116 @@ String buildAcpTerminalAuthCommand(
     workingDirectory: launch.workingDirectory,
   );
   if (isWindows) return providerCommand;
+  return buildMonkeyMuxAcpPosixShellCommand(
+    providerCommand,
+    scriptName: 'monkeyssh-sign-in',
+  );
+}
+
+/// Runs a POSIX [providerCommand] from [buildMonkeyMuxAcpProviderCommand]
+/// over an SSH exec channel under the same shell MonkeyMux uses for the
+/// provider: the user's `$SHELL` when it is a POSIX shell, otherwise
+/// `/bin/sh`. The command line is built with
+/// [buildMonkeyMuxLoginShellSafeCommand], so a login shell such as fish or
+/// tcsh never parses the provider command.
+String buildMonkeyMuxAcpPosixShellCommand(
+  String providerCommand, {
+  required String scriptName,
+}) {
   const dispatcher =
       r'case "${SHELL##*/}" in sh|bash|zsh|ksh|dash) exec "$SHELL" -c "$1";; '
       r'esac; exec /bin/sh -c "$1"';
-  return '/bin/sh -c ${shellEscapePosix(dispatcher)} monkeyssh-sign-in '
-      '${shellEscapePosix(providerCommand)}';
+  return buildMonkeyMuxLoginShellSafeCommand([
+    '/bin/sh',
+    '-c',
+    dispatcher,
+    scriptName,
+    providerCommand,
+  ]);
+}
+
+// Text every common login shell (POSIX sh, bash, zsh, fish, csh/tcsh, rc)
+// keeps unchanged inside single quotes.
+final _loginShellPlainArgument = RegExp(r'^[A-Za-z0-9 _@%+=:,./-]+$');
+
+// Decodes each argument marked with a leading `#` from octal escapes, then
+// runs the decoded argv. It holds no quote, backslash or `!`, so every login
+// shell passes it through unchanged inside single quotes.
+const _loginShellDecoderScript =
+    r'for a do shift; case $a in "#"*) a=$(printf "${a#?}."); a=${a%.};; '
+    r'esac; set -- "$@" "$a"; done; exec "$@"';
+
+/// Builds an SSH exec command line that runs [argv] exactly, whatever shell
+/// the user logs in with.
+///
+/// sshd hands an exec command to the login shell, and not every login shell
+/// follows POSIX quoting: fish treats `\'` and `\\` as escapes inside
+/// single quotes, and csh-family shells expand `!` even there. Plain
+/// arguments are passed single-quoted as before. Any other argument travels
+/// as `#` followed by octal escapes, and a fixed `/bin/sh` script decodes it,
+/// so the login shell only ever sees plain text, that script, and a
+/// backslash followed by a digit.
+String buildMonkeyMuxLoginShellSafeCommand(List<String> argv) {
+  if (argv.isEmpty || argv.any((value) => value.contains('\u0000'))) {
+    throw ArgumentError.value(argv, 'argv');
+  }
+  if (argv.every(_loginShellPlainArgument.hasMatch)) {
+    return argv.map(shellEscapePosix).join(' ');
+  }
+  final encoded = argv.map(
+    (value) => _loginShellPlainArgument.hasMatch(value)
+        ? value
+        : '#${utf8.encode(value).map((byte) => '\\${byte.toRadixString(8).padLeft(3, '0')}').join()}',
+  );
+  return "/bin/sh -c '$_loginShellDecoderScript' monkeyssh "
+      "${encoded.map((value) => "'$value'").join(' ')}";
+}
+
+/// Reverses [buildMonkeyMuxLoginShellSafeCommand] for tests.
+@visibleForTesting
+List<String> decodeMonkeyMuxLoginShellSafeCommand(String command) {
+  const prefix = "/bin/sh -c '$_loginShellDecoderScript' monkeyssh ";
+  final encoded = command.startsWith(prefix);
+  final body = encoded ? command.substring(prefix.length) : command;
+  final tokens = <String>[];
+  final current = StringBuffer();
+  var inQuote = false;
+  var started = false;
+  for (var index = 0; index < body.length; index++) {
+    final char = body[index];
+    if (inQuote) {
+      if (char == "'") {
+        inQuote = false;
+      } else {
+        current.write(char);
+      }
+    } else if (char == "'") {
+      inQuote = true;
+      started = true;
+    } else if (char == r'\' && index + 1 < body.length) {
+      current.write(body[++index]);
+      started = true;
+    } else if (char == ' ') {
+      if (started) tokens.add(current.toString());
+      current.clear();
+      started = false;
+    } else {
+      current.write(char);
+      started = true;
+    }
+  }
+  if (started) tokens.add(current.toString());
+  if (!encoded) return tokens;
+  return [
+    for (final token in tokens)
+      if (token.startsWith('#'))
+        utf8.decode([
+          for (final match in RegExp(r'\\([0-7]{3})').allMatches(token))
+            int.parse(match.group(1)!, radix: 8),
+        ])
+      else
+        token,
+  ];
 }
 
 // Shells started by MonkeyMux over SSH usually have no TERM_PROGRAM. Some
@@ -489,6 +628,21 @@ final class MonkeyMuxAcpBridgeService {
       priority: SshExecPriority.normal,
       confirmInstall: confirmInstall,
     );
+    // Custom agents carry an arbitrary label and argv, which Windows cannot
+    // always pass exactly. Built-in labels and argv are fixed and safe.
+    if (installation.isWindows &&
+        !providerId.startsWith(acpBuiltinProviderIdPrefix) &&
+        acpWindowsCustomLaunchProblem(
+              label: providerLabel,
+              argv: launchArgv,
+              providerId: providerId,
+            ) !=
+            null) {
+      throw const MonkeyMuxAcpBridgeException(
+        MonkeyMuxAcpBridgeErrorKind.invalidLaunch,
+        'These agent arguments cannot be passed exactly on Windows.',
+      );
+    }
     final providerCommand = buildMonkeyMuxAcpProviderCommand(
       launchArgv,
       isWindows: installation.isWindows,
@@ -1909,10 +2063,10 @@ String _buildHelperCommand(
   List<String> arguments,
 ) {
   if (!installation.isWindows) {
-    return [
+    return buildMonkeyMuxLoginShellSafeCommand([
       installation.executablePath,
       ...arguments,
-    ].map(shellEscapePosix).join(' ');
+    ]);
   }
   const helperVariable = r'$__flAcpHelper';
   const argumentsVariable = r'$__flAcpArgs';

@@ -406,15 +406,14 @@ void main() {
       );
       // Same profile prefix as the bridge launch, then cwd, env, exact argv.
       expect(command, startsWith('/bin/sh -c '));
-      expect(command, contains('. ~/.zprofile'));
-      expect(command, contains(r"cd -- '\''/repo dir'\''"));
-      expect(command, contains(r"export ACP_LOGIN='\''it'\''\'\'''\''s 1'\''"));
-      expect(
-        command,
-        contains(
-          r"exec '\''/opt/bin/copilot'\'' '\''--acp'\'' '\''--login'\''",
-        ),
-      );
+      final argv = decodeMonkeyMuxLoginShellSafeCommand(command);
+      expect(argv.take(2), ['/bin/sh', '-c']);
+      expect(argv[3], 'monkeyssh-sign-in');
+      final script = argv[4];
+      expect(script, contains('. ~/.zprofile'));
+      expect(script, contains("cd -- '/repo dir'"));
+      expect(script, contains(r"export ACP_LOGIN='it'\''s 1'"));
+      expect(script, contains("exec '/opt/bin/copilot' '--acp' '--login'"));
     });
 
     test('applies env as PowerShell literals on Windows', () {
@@ -1185,8 +1184,96 @@ touch "$HOME/installed"
     expect(bridges.single.cwd, '/home/demo/project with spaces');
     expect(status.state, MonkeyMuxAcpProviderState.running);
     expect(commands, hasLength(4));
-    expect(commands.first, contains(r"'Copilot'\''s CLI'"));
+    // The label and command travel encoded, so no login shell parses them.
+    final startArgv = decodeMonkeyMuxLoginShellSafeCommand(commands.first);
+    expect(startArgv[startArgv.indexOf('--provider') + 1], "Copilot's CLI");
+    expect(commands.first, isNot(contains("Copilot's")));
     expect(commands.first, contains("'/home/demo/project with spaces'"));
+  });
+
+  test(
+    'refuses custom agent arguments Windows would not pass exactly',
+    () async {
+      final client = _MockSshClient();
+      final service = MonkeyMuxAcpBridgeService(
+        installer: _FakeInstaller(
+          const MonkeyMuxInstallation(
+            executablePath: r'C:\Users\demo\.monkeyssh\monkeymux.exe',
+            platform: 'windows-amd64',
+            version: 'test',
+          ),
+        ),
+      );
+      for (final argument in ['', '--config={"a":1}', 'a&calc']) {
+        await expectLater(
+          service.start(
+            session: _sshSession(client, windows: true),
+            providerId: 'goose',
+            providerLabel: 'Goose',
+            launchArgv: ['goose', 'acp', argument],
+            cwd: r'C:\Users\demo',
+          ),
+          throwsA(
+            isA<MonkeyMuxAcpBridgeException>().having(
+              (error) => error.kind,
+              'kind',
+              MonkeyMuxAcpBridgeErrorKind.invalidLaunch,
+            ),
+          ),
+        );
+      }
+      await expectLater(
+        service.start(
+          session: _sshSession(client, windows: true),
+          providerId: 'goose',
+          providerLabel: 'Goose "dev"',
+          launchArgv: const ['goose', 'acp'],
+          cwd: r'C:\Users\demo',
+        ),
+        throwsA(isA<MonkeyMuxAcpBridgeException>()),
+      );
+      verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
+    },
+  );
+
+  test('a custom agent must keep the encoded Windows command form', () {
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: const ['goose', 'acp'],
+        providerId: 'goose',
+      ),
+      isNull,
+    );
+    // Long enough to switch to `-Command "..."`, whose quotes PowerShell 5.1
+    // would split on the way to the helper.
+    final long = ['goose', 'acp', 'x' * 1700];
+    expect(
+      buildMonkeyMuxAcpProviderCommand(long, isWindows: true),
+      contains('"'),
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: long,
+        providerId: 'goose',
+      ),
+      contains('too long'),
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: r'Goose dev\',
+        argv: const ['goose'],
+      ),
+      isNotNull,
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: const ['goose', r'C:\My Dir\'],
+      ),
+      isNotNull,
+    );
   });
 
   test(
