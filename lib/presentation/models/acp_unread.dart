@@ -10,42 +10,96 @@ import 'package:flutter/foundation.dart';
 
 import '../../domain/models/acp_content.dart';
 import '../../domain/models/acp_timeline.dart' as d;
+import '../../domain/models/acp_updates.dart' as d;
 import 'acp_timeline.dart';
 import 'acp_timeline_mapper.dart';
 
 /// Characters of the last seen message kept to recognise it after a rebuild.
 const int _markerTextPrefixChars = 48;
 
+/// A shorter remembered prefix is only trusted when exactly one message of
+/// the same role carries it, since "Let me" starts many replies.
+const int _unambiguousPrefixChars = 16;
+
+/// Most still-running tool calls a marker remembers, to report the ones that
+/// finished or failed while the user was away.
+const int _maxRunningTools = 64;
+
 /// How far the user had got in a session's timeline when they left.
 @immutable
 final class AcpLastSeenMarker {
-  const AcpLastSeenMarker._({
+  AcpLastSeenMarker._({
     required this.order,
     required this.source,
+    required this.ordinal,
+    required this.hadSessionError,
+    required Set<String> runningToolIds,
     this.toolCallId,
     this.role,
     this.messageId,
     this.textPrefix = '',
-  });
+  }) : runningToolIds = Set<String>.unmodifiable(runningToolIds);
 
-  /// The newest entry of [timeline], or `null` when nothing is loaded.
-  static AcpLastSeenMarker? of(d.AcpTimeline timeline) {
-    final last = timeline.entries.lastOrNull;
-    if (last == null) return null;
-    return switch (last) {
+  /// The entry of [timeline] the user had seen up to, or `null` when nothing
+  /// is loaded.
+  ///
+  /// That is the newest entry, or the newest at or before [upToOrder] when
+  /// the user had not scrolled to the end. [hadSessionError] records whether
+  /// a session error was already showing, so it is not reported as news.
+  static AcpLastSeenMarker? of(
+    d.AcpTimeline timeline, {
+    int? upToOrder,
+    bool hadSessionError = false,
+  }) {
+    final entries = timeline.entries;
+    var index = entries.length - 1;
+    if (upToOrder != null) {
+      while (index >= 0 && entries[index].order > upToOrder) {
+        index--;
+      }
+    }
+    if (index < 0) return null;
+    final seen = entries[index];
+    final kind = _kindOf(seen);
+    var ordinal = 0;
+    final running = <String>[];
+    for (var i = 0; i < index; i++) {
+      final entry = entries[i];
+      if (_kindOf(entry) == kind) ordinal++;
+      if (entry case d.AcpToolCallEntry(:final toolCallId, :final status)
+          when !_isTerminal(status)) {
+        running.add(toolCallId);
+      }
+    }
+    if (seen case d.AcpToolCallEntry(:final toolCallId, :final status)
+        when !_isTerminal(status)) {
+      running.add(toolCallId);
+    }
+    final tracked = running.length <= _maxRunningTools
+        ? running
+        : running.sublist(running.length - _maxRunningTools);
+    return switch (seen) {
       d.AcpToolCallEntry(:final order, :final toolCallId) =>
         AcpLastSeenMarker._(
           order: order,
           source: timeline.source,
+          ordinal: ordinal,
+          hadSessionError: hadSessionError,
+          runningToolIds: tracked.toSet(),
           toolCallId: toolCallId,
         ),
       d.AcpMessageEntry(:final order, :final role, :final messageId) =>
         AcpLastSeenMarker._(
           order: order,
           source: timeline.source,
+          ordinal: ordinal,
+          hadSessionError: hadSessionError,
+          runningToolIds: tracked.toSet(),
           role: role,
-          messageId: messageId,
-          textPrefix: _leadingText(last, _markerTextPrefixChars),
+          // A user prompt carries a local identifier until the agent echoes
+          // it, so only agent and reasoning identifiers identify a message.
+          messageId: role == d.AcpMessageRole.user ? null : messageId,
+          textPrefix: _leadingText(seen, _markerTextPrefixChars),
         ),
     };
   }
@@ -56,33 +110,93 @@ final class AcpLastSeenMarker {
   /// The builder of that timeline; orders only compare within one source.
   final Object? source;
 
+  /// How many entries of the same kind (tool call, or message of the same
+  /// role) came before the last seen one. Picks the nearest of several
+  /// candidates in a rebuilt timeline.
+  final int ordinal;
+
+  /// Whether a session error was already showing when the user left.
+  final bool hadSessionError;
+
+  /// Tool calls that were still running when the user left.
+  final Set<String> runningToolIds;
+
   /// The last seen tool call, when the last entry was one.
   final String? toolCallId;
 
   /// The last seen message's role, when the last entry was a message.
   final d.AcpMessageRole? role;
 
-  /// The last seen message's identifier, when the agent sent one.
+  /// The last seen agent or reasoning message's identifier, when sent.
   final String? messageId;
 
   /// The start of the last seen message's text.
   final String textPrefix;
 
-  /// Whether [entry] is the entry this marker was taken from, possibly grown
-  /// by streaming since, as far as a rebuilt timeline can tell.
-  bool matches(d.AcpTimelineEntry entry) => switch (entry) {
-    d.AcpToolCallEntry(:final toolCallId) => this.toolCallId == toolCallId,
-    d.AcpMessageEntry(:final role, :final messageId) =>
-      toolCallId == null &&
-          this.role == role &&
-          // User prompts carry a local identifier until the agent echoes
-          // them, so only agent and reasoning identifiers are compared.
-          (role == d.AcpMessageRole.user ||
-              this.messageId == null ||
-              messageId == null ||
-              this.messageId == messageId) &&
-          _leadingText(entry, textPrefix.length) == textPrefix,
-  };
+  /// Where the last seen entry is in a rebuilt [entries], or `null` when it
+  /// cannot be told apart from other entries.
+  ///
+  /// A tool call or an agent message with an identifier is found by that
+  /// identifier. Otherwise a message is found by role and the start of its
+  /// text: an empty start never matches, and a short one only when a single
+  /// message carries it. Of several matches, the one nearest the remembered
+  /// position wins, and the earlier on a tie, which errs towards showing more
+  /// as unread rather than hiding it.
+  int? relocateIn(List<d.AcpTimelineEntry> entries) {
+    final kind = toolCallId != null ? _toolKind : role!.name;
+    final byId = <(int, int)>[];
+    final byPrefix = <(int, int)>[];
+    final ordinals = <String, int>{};
+    for (final entry in entries) {
+      final entryKind = _kindOf(entry);
+      final entryOrdinal = ordinals[entryKind] ?? 0;
+      ordinals[entryKind] = entryOrdinal + 1;
+      if (entryKind != kind) continue;
+      switch (entry) {
+        case d.AcpToolCallEntry(:final toolCallId):
+          if (toolCallId == this.toolCallId) {
+            byId.add((entry.order, entryOrdinal));
+          }
+        case d.AcpMessageEntry(:final messageId):
+          final ownId = this.messageId;
+          if (ownId != null && messageId != null) {
+            if (ownId == messageId) byId.add((entry.order, entryOrdinal));
+            continue;
+          }
+          if (textPrefix.isNotEmpty &&
+              _leadingText(entry, textPrefix.length) == textPrefix) {
+            byPrefix.add((entry.order, entryOrdinal));
+          }
+      }
+    }
+    final candidates = byId.isNotEmpty ? byId : byPrefix;
+    if (candidates.isEmpty) return null;
+    if (identical(candidates, byPrefix) &&
+        candidates.length > 1 &&
+        textPrefix.length < _unambiguousPrefixChars) {
+      return null;
+    }
+    var best = candidates.first;
+    for (final candidate in candidates.skip(1)) {
+      if ((candidate.$2 - ordinal).abs() < (best.$2 - ordinal).abs()) {
+        best = candidate;
+      }
+    }
+    return best.$1;
+  }
+}
+
+/// Whether a prompt was sent from this device since [marker] was taken from
+/// a timeline: after it in the same timeline, or anywhere in a rebuilt one,
+/// where every local prompt is newer than the rebuild.
+bool acpPromptSentSince(AcpLastSeenMarker marker, d.AcpTimeline timeline) {
+  final sameSource = identical(marker.source, timeline.source);
+  return timeline.entries.any(
+    (entry) =>
+        entry is d.AcpMessageEntry &&
+        entry.isLocalPrompt &&
+        (!sameSource || entry.order > marker.order),
+  );
 }
 
 /// What arrived since the user left, counted from structured data only.
@@ -98,43 +212,52 @@ final class AcpUnreadDigest {
     this.partial = false,
   });
 
-  /// Agent replies.
+  /// Agent turns that replied: one per run of agent replies between user
+  /// prompts. Nested subagent messages are not counted.
   final int replies;
 
-  /// Tool calls by kind.
+  /// Tool calls by kind, including ones that finished while the user was
+  /// away.
   final Map<AcpToolKind, int> toolCalls;
 
-  /// Distinct file paths that tool calls reported diffs for. Agents report
-  /// changes voluntarily, so this is never a complete inventory.
+  /// Distinct file paths that completed tool calls reported diffs for.
+  /// Agents report changes voluntarily, so this is never a complete
+  /// inventory.
   final int reportedFileChanges;
 
   /// Permission, write and input requests waiting for an answer now.
   final int pendingRequests;
 
-  /// Failed tool calls, plus a current session error.
+  /// Failed tool calls, plus a session error that appeared while away.
   final int errors;
 
-  /// Whether earlier unread entries may be missing, so counts are minimums.
+  /// Whether earlier unread entries may be missing, so the timeline counts
+  /// are minimums.
   final bool partial;
 
   /// Total tool calls.
   int get toolCallCount => toolCalls.values.fold(0, (sum, n) => sum + n);
 
-  /// One line such as `1 error · 2 replies · 5 tool calls (3 edit, 2 run) ·
-  /// 3 reported file changes`. What needs the user comes first, so it
-  /// survives truncation.
+  /// One line such as `1 request waiting · 1 error · 2 replies · 5 tool calls
+  /// (3 edit, 2 run) · 3 reported file changes`. What needs the user comes
+  /// first, so it survives truncation. "at least" qualifies only the counts
+  /// taken from the timeline.
   String get summary {
-    final parts = <String>[
-      if (pendingRequests > 0) '${_count(pendingRequests, 'request')} waiting',
+    final fromTimeline = <String>[
       if (errors > 0) _count(errors, 'error'),
       if (replies > 0) _count(replies, 'reply', 'replies'),
       if (toolCallCount > 0) _toolSummary(),
       if (reportedFileChanges > 0)
         _count(reportedFileChanges, 'reported file change'),
+    ].join(' · ');
+    final parts = <String>[
+      if (pendingRequests > 0) '${_count(pendingRequests, 'request')} waiting',
+      if (fromTimeline.isNotEmpty && partial)
+        'at least $fromTimeline'
+      else if (fromTimeline.isNotEmpty)
+        fromTimeline,
     ];
-    if (parts.isEmpty) return 'new activity';
-    final line = parts.join(' · ');
-    return partial ? 'at least $line' : line;
+    return parts.isEmpty ? 'new activity' : parts.join(' · ');
   }
 
   String _toolSummary() {
@@ -209,17 +332,19 @@ final class AcpUnreadState {
 /// Compares [timeline] with where the user left it.
 ///
 /// - Same timeline as the marker: everything after the last seen entry is
-///   unread. If that entry has since been trimmed away, everything loaded is
-///   unread, the divider says earlier history is not available, and the
-///   digest counts are minimums.
+///   unread. If entries after it have since been trimmed away, everything
+///   loaded is unread, the divider says earlier history is not available,
+///   and the timeline counts are minimums.
 /// - Rebuilt timeline (a reload replayed it afresh): the last seen entry is
-///   looked up by tool call identifier, or by role and the start of its text.
-///   If it is not there, the divider falls back to "earlier history not
-///   available" at the top with no digest, because what changed is unknown.
+///   looked up with [AcpLastSeenMarker.relocateIn]. If it cannot be found,
+///   the divider falls back to "earlier history not available" at the top
+///   with no digest, because what changed is unknown.
 ///
-/// Returns `null` when there is no marker, nothing is loaded, nothing new
-/// arrived, or the user has sent a prompt since returning. [entries] is the
-/// presentation mapping of [timeline].
+/// Tool calls that were running when the user left and have since finished
+/// or failed count too, even though they sit above the divider.
+///
+/// Returns `null` when there is no marker, nothing is loaded, or nothing
+/// changed. [entries] is the presentation mapping of [timeline].
 AcpUnreadState? computeAcpUnreadState({
   required AcpLastSeenMarker? marker,
   required d.AcpTimeline timeline,
@@ -234,14 +359,10 @@ AcpUnreadState? computeAcpUnreadState({
   var trimmed = false;
   if (identical(marker.source, timeline.source)) {
     anchor = marker.order;
-    trimmed = domainEntries.first.order > marker.order;
+    // Losing only the last seen entry itself loses nothing unread.
+    trimmed = domainEntries.first.order > marker.order + 1;
   } else {
-    for (var index = domainEntries.length - 1; index >= 0; index--) {
-      if (marker.matches(domainEntries[index])) {
-        anchor = domainEntries[index].order;
-        break;
-      }
-    }
+    anchor = marker.relocateIn(domainEntries);
   }
   if (anchor == null) {
     return const AcpUnreadState(
@@ -251,27 +372,28 @@ AcpUnreadState? computeAcpUnreadState({
     );
   }
 
-  final unread = [
-    for (final entry in domainEntries)
-      if (entry.order > anchor) entry,
-  ];
-  // A prompt sent from this device after the marker means the user is back
-  // and working: what follows is their own turn, not news.
-  if (unread.isEmpty ||
-      unread.any(
-        (entry) => entry is d.AcpMessageEntry && entry.isLocalPrompt,
-      )) {
-    return null;
-  }
-  final unreadIds = {for (final entry in unread) acpPresentationEntryId(entry)};
-
-  int? dividerIndex;
-  final counter = _DigestCounter(unreadIds);
-  for (var index = 0; index < entries.length; index++) {
-    if (counter.visit(entries[index]) && dividerIndex == null) {
-      dividerIndex = index;
+  final newIds = <String>{};
+  final finishedIds = <String>{};
+  for (final entry in domainEntries) {
+    if (entry.order > anchor) {
+      newIds.add(acpPresentationEntryId(entry));
+    } else if (entry case d.AcpToolCallEntry(:final toolCallId, :final status)
+        when _isTerminal(status) &&
+            marker.runningToolIds.contains(toolCallId)) {
+      finishedIds.add(acpPresentationEntryId(entry));
     }
   }
+  if (newIds.isEmpty && finishedIds.isEmpty) return null;
+
+  final counter = _DigestCounter(newIds: newIds, finishedIds: finishedIds);
+  int? firstNew;
+  int? firstFinished;
+  for (var index = 0; index < entries.length; index++) {
+    final (isNew, isFinished) = counter.visitTopLevel(entries[index]);
+    if (isNew) firstNew ??= index;
+    if (isFinished) firstFinished ??= index;
+  }
+  final dividerIndex = firstNew ?? firstFinished;
   if (dividerIndex == null) return null;
   return AcpUnreadState(
     dividerEntryIndex: dividerIndex,
@@ -281,51 +403,93 @@ AcpUnreadState? computeAcpUnreadState({
       toolCalls: Map<AcpToolKind, int>.unmodifiable(counter.toolCalls),
       reportedFileChanges: counter.changedPaths.length,
       pendingRequests: pendingRequests,
-      errors: counter.failedTools + (hasSessionError ? 1 : 0),
+      errors:
+          counter.failedTools +
+          (hasSessionError && !marker.hadSessionError ? 1 : 0),
       partial: trimmed,
     ),
   );
 }
 
 final class _DigestCounter {
-  _DigestCounter(this.unreadIds);
+  _DigestCounter({required this.newIds, required this.finishedIds});
 
-  final Set<String> unreadIds;
+  final Set<String> newIds;
+  final Set<String> finishedIds;
   int replies = 0;
   final Map<AcpToolKind, int> toolCalls = <AcpToolKind, int>{};
   final Set<String> changedPaths = <String>{};
   int failedTools = 0;
+  var _repliedThisTurn = false;
 
-  /// Counts [entry] and its nested entries; returns whether any is unread.
-  bool visit(AcpTimelineEntry entry) {
-    if (entry case AcpSubagentTranscriptEntry(:final entries)) {
-      var any = false;
-      for (final child in entries) {
-        any = visit(child) || any;
-      }
-      return any;
-    }
-    if (!unreadIds.contains(entry.id)) return false;
+  /// Counts top-level [entry]; returns whether it, or anything nested in it,
+  /// is new or a tool call that finished while the user was away.
+  (bool, bool) visitTopLevel(AcpTimelineEntry entry) {
     switch (entry) {
+      case AcpUserPromptEntry():
+        _repliedThisTurn = false;
+        return (newIds.contains(entry.id), false);
       case AcpAssistantMessageEntry(:final markdown, :final audio):
-        if (markdown.trim().isNotEmpty || audio.isNotEmpty) replies++;
-      case AcpToolCallEntry(:final toolCall):
-        toolCalls.update(toolCall.kind, (n) => n + 1, ifAbsent: () => 1);
-        for (final diff in toolCall.diffs) {
-          changedPaths.add(diff.path);
+        final isNew = newIds.contains(entry.id);
+        if (isNew &&
+            !_repliedThisTurn &&
+            (markdown.trim().isNotEmpty || audio.isNotEmpty)) {
+          replies++;
+          _repliedThisTurn = true;
         }
-        if (toolCall.status == AcpToolStatus.failed) failedTools++;
-      case AcpUserPromptEntry() ||
+        return (isNew, false);
+      case AcpSubagentTranscriptEntry(:final entries):
+        var anyNew = false;
+        var anyFinished = false;
+        for (final child in entries) {
+          final (isNew, isFinished) = _visitNested(child);
+          anyNew = anyNew || isNew;
+          anyFinished = anyFinished || isFinished;
+        }
+        return (anyNew, anyFinished);
+      case AcpToolCallEntry() ||
           AcpThoughtEntry() ||
           AcpPlanEntry() ||
           AcpUsageEntry() ||
-          AcpStatusEntry() ||
-          AcpSubagentTranscriptEntry():
-        break;
+          AcpStatusEntry():
+        return _visitNested(entry);
     }
-    return true;
+  }
+
+  /// Counts a tool call or reasoning entry, top-level or nested in a
+  /// subagent transcript; nested messages are not turns.
+  (bool, bool) _visitNested(AcpTimelineEntry entry) {
+    if (entry case AcpSubagentTranscriptEntry()) return visitTopLevel(entry);
+    final isNew = newIds.contains(entry.id);
+    final isFinished = finishedIds.contains(entry.id);
+    if (entry case AcpToolCallEntry(:final toolCall) when isNew || isFinished) {
+      toolCalls.update(toolCall.kind, (n) => n + 1, ifAbsent: () => 1);
+      switch (toolCall.status) {
+        case AcpToolStatus.failed:
+          failedTools++;
+        case AcpToolStatus.completed:
+          for (final diff in toolCall.diffs) {
+            changedPaths.add(diff.path);
+          }
+        case AcpToolStatus.pending ||
+            AcpToolStatus.running ||
+            AcpToolStatus.cancelled:
+          break;
+      }
+    }
+    return (isNew, isFinished);
   }
 }
+
+const String _toolKind = 'tool';
+
+String _kindOf(d.AcpTimelineEntry entry) => switch (entry) {
+  d.AcpToolCallEntry() => _toolKind,
+  d.AcpMessageEntry(:final role) => role.name,
+};
+
+bool _isTerminal(d.AcpToolStatus? status) =>
+    status == d.AcpToolStatus.completed || status == d.AcpToolStatus.failed;
 
 String _leadingText(d.AcpTimelineEntry entry, int maxChars) {
   if (entry is! d.AcpMessageEntry || maxChars <= 0) return '';

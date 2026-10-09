@@ -1,11 +1,14 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart' as d;
 import 'package:monkeyssh/domain/models/acp_updates.dart' as d;
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
@@ -245,7 +248,7 @@ void registerAcpUnreadWidgetTests() {
       expect(digest, findsOneWidget);
       expect(
         tester.widget<Text>(digest).data,
-        'Since you left: 19 replies · 1 tool call (1 edit) · '
+        'Since you left: 1 reply · 1 tool call (1 edit) · '
         '1 reported file change',
       );
       expect(find.text('unread since you left'), findsNothing);
@@ -255,11 +258,14 @@ void registerAcpUnreadWidgetTests() {
       expect(find.byType(AcpUnreadDigestBar), findsNothing);
       final divider = find.text('unread since you left');
       expect(divider, findsOneWidget);
-      final dividerTop = tester.getTopLeft(divider).dy;
-      final transcriptTop = tester.getTopLeft(find.byType(AcpMessageThread)).dy;
-      expect(dividerTop, greaterThanOrEqualTo(transcriptTop));
-      expect(dividerTop, lessThan(transcriptTop + 140));
-      expect(find.text('Edit main.dart'), findsOneWidget);
+      final transcript = tester.getRect(find.byType(AcpMessageThread));
+      final dividerRect = tester.getRect(divider);
+      final firstUnread = tester.getRect(find.text('Edit main.dart'));
+      // The divider and the first unread row sit on screen, below the
+      // pinned prompt summary (44 pt) at the top of the transcript.
+      expect(dividerRect.top, greaterThanOrEqualTo(transcript.top + 44));
+      expect(firstUnread.top, greaterThan(dividerRect.top));
+      expect(firstUnread.bottom, lessThan(transcript.top + 200));
     });
 
     testWidgets('dismissing hides the digest but keeps the divider', (
@@ -293,6 +299,286 @@ void registerAcpUnreadWidgetTests() {
       await tester.pumpAndSettle();
       expect(find.byType(AcpUnreadDigestBar), findsNothing);
       expect(find.text('unread since you left'), findsOneWidget);
+    });
+
+    testWidgets('a divider that comes back does not replay an old Jump', (
+      tester,
+    ) async {
+      final entries = <AcpTimelineEntry>[
+        for (var i = 0; i < 40; i++)
+          AcpAssistantMessageEntry(
+            id: 'agent-$i',
+            markdown: 'Reply $i\n\nfiller paragraph',
+          ),
+      ];
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      Widget thread(AcpThreadUnreadDivider? divider) => _app(
+        AcpMessageThread(
+          entries: entries,
+          controller: controller,
+          unreadDivider: divider,
+        ),
+      );
+      const jumped = AcpThreadUnreadDivider(
+        entryIndex: 5,
+        earlierHistoryUnavailable: false,
+        jumpSerial: 1,
+      );
+      await tester.pumpWidget(thread(null));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(thread(jumped));
+      await tester.pumpAndSettle();
+      // The divider goes away (the user sent a prompt), they scroll to the
+      // end, and a later visit brings a divider back.
+      await tester.pumpWidget(thread(null));
+      await tester.pumpAndSettle();
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      final bottom = controller.offset;
+      await tester.pumpWidget(thread(jumped));
+      await tester.pumpAndSettle();
+      expect(controller.offset, bottom);
+    });
+
+    testWidgets('the divider arriving keeps an expanded tool card open', (
+      tester,
+    ) async {
+      final entries = <AcpTimelineEntry>[
+        AcpToolCallEntry(
+          id: 'tool',
+          toolCall: AcpToolCall(
+            id: 'tool',
+            title: 'Run build',
+            status: AcpToolStatus.completed,
+            rawOutput: 'build output line',
+          ),
+        ),
+      ];
+      Widget thread(AcpThreadUnreadDivider? divider) =>
+          _app(AcpMessageThread(entries: entries, unreadDivider: divider));
+      await tester.pumpWidget(thread(null));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run build'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('build output line', findRichText: true),
+        findsWidgets,
+      );
+      await tester.pumpWidget(
+        thread(
+          const AcpThreadUnreadDivider(
+            entryIndex: 0,
+            earlierHistoryUnavailable: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('unread since you left'), findsOneWidget);
+      expect(
+        find.textContaining('build output line', findRichText: true),
+        findsWidgets,
+      );
+    });
+
+    testWidgets('the thread reports the last entry on screen', (tester) async {
+      final entries = <AcpTimelineEntry>[
+        for (var i = 0; i < 40; i++)
+          AcpAssistantMessageEntry(
+            id: 'agent-$i',
+            markdown: 'Reply $i\n\nfiller paragraph',
+          ),
+      ];
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      int? lastVisible;
+      await tester.pumpWidget(
+        _app(
+          AcpMessageThread(
+            entries: entries,
+            controller: controller,
+            onLastVisibleEntryChanged: (index) => lastVisible = index,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      controller.jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(lastVisible, isNotNull);
+      expect(lastVisible, lessThan(20));
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(lastVisible, 39);
+    });
+
+    group('presence', () {
+      var now = DateTime(2026, 10, 9, 12);
+      setUp(() {
+        now = DateTime(2026, 10, 9, 12);
+        acpChatPresenceClock = () => now;
+      });
+      tearDown(() => acpChatPresenceClock = DateTime.now);
+
+      Future<List<String>> pumpPresence(WidgetTester tester) async {
+        final events = <String>[];
+        final navigatorKey = GlobalKey<NavigatorState>();
+        await tester.pumpWidget(
+          MaterialApp(
+            navigatorKey: navigatorKey,
+            home: AcpChatPresence(
+              onAway: () => events.add('away'),
+              onBack: ({required left}) => events.add(left ? 'left' : 'back'),
+              child: const Text('chat'),
+            ),
+          ),
+        );
+        return events;
+      }
+
+      testWidgets('a page pushed over the chat for long enough is leaving', (
+        tester,
+      ) async {
+        final events = await pumpPresence(tester);
+        final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+        unawaited(
+          navigator.push(
+            MaterialPageRoute<void>(builder: (_) => const Text('files')),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(events, ['away']);
+        now = now.add(kAcpChatMinimumAbsence);
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(events, ['away', 'left']);
+      });
+
+      testWidgets('a quick menu or sheet over the chat is not leaving', (
+        tester,
+      ) async {
+        final events = await pumpPresence(tester);
+        final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+        unawaited(
+          navigator.push(
+            MaterialPageRoute<void>(builder: (_) => const Text('menu')),
+          ),
+        );
+        await tester.pumpAndSettle();
+        now = now.add(const Duration(seconds: 3));
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(events, ['away', 'back']);
+      });
+
+      testWidgets('hiding the app counts once it lasts long enough', (
+        tester,
+      ) async {
+        final events = await pumpPresence(tester);
+        void lifecycle(List<AppLifecycleState> states) {
+          for (final state in states) {
+            tester.binding.handleAppLifecycleStateChanged(state);
+          }
+        }
+
+        lifecycle([AppLifecycleState.inactive, AppLifecycleState.hidden]);
+        // A system file picker returns within seconds.
+        now = now.add(const Duration(seconds: 8));
+        lifecycle([AppLifecycleState.inactive, AppLifecycleState.resumed]);
+        expect(events, ['away', 'back']);
+
+        lifecycle([
+          AppLifecycleState.inactive,
+          AppLifecycleState.hidden,
+          AppLifecycleState.paused,
+        ]);
+        now = now.add(const Duration(minutes: 5));
+        lifecycle([
+          AppLifecycleState.hidden,
+          AppLifecycleState.inactive,
+          AppLifecycleState.resumed,
+        ]);
+        expect(events, ['away', 'back', 'away', 'left']);
+      });
+    });
+
+    testWidgets('sending a prompt from the chat clears the divider', (
+      tester,
+    ) async {
+      final registry = AcpLastSeenRegistry();
+      final builder = d.AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('Go')]);
+      final before = fakeAcpSession(timeline: builder.snapshot());
+      registry.record(fakeAcpKey(), before.timeline);
+      builder.apply(
+        const d.AcpContentChunkUpdate(
+          kind: 'agent_message_chunk',
+          content: AcpTextContent('Went'),
+        ),
+      );
+      final manager = FakeAcpSessionManager(
+        sessions: [before.copyWith(timeline: builder.snapshot())],
+      );
+      await tester.pumpWidget(_chat(manager, registry));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsOneWidget);
+
+      builder.appendLocalUserPrompt(const [AcpTextContent('And now?')]);
+      manager.emit(
+        AcpSessionManagerState(
+          sessions: [before.copyWith(timeline: builder.snapshot())],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsNothing);
+      expect(find.text('unread since you left'), findsNothing);
+    });
+
+    testWidgets('coming back to the app after a while shows what arrived', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 10, 9, 12);
+      acpChatPresenceClock = () => now;
+      addTearDown(() => acpChatPresenceClock = DateTime.now);
+      final source = Object();
+      AcpSessionState session(int replies) => fakeAcpSession(
+        timeline: d.AcpTimeline(
+          source: source,
+          entries: [
+            _message(d.AcpMessageRole.user, 0, 'Go'),
+            for (var i = 1; i <= replies; i++)
+              _message(d.AcpMessageRole.agent, i, 'Reply $i'),
+          ],
+        ),
+      );
+      final manager = FakeAcpSessionManager(sessions: [session(1)]);
+      await tester.pumpWidget(_chat(manager, AcpLastSeenRegistry()));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsNothing);
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      manager.emit(AcpSessionManagerState(sessions: [session(3)]));
+      await tester.pump();
+      now = now.add(const Duration(minutes: 2));
+      for (final state in [
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('acp-unread-digest-text')))
+            .data,
+        'Since you left: 1 reply',
+      );
     });
   });
 }

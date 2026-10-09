@@ -115,15 +115,160 @@ void registerAcpUnreadTests() {
       );
     });
 
-    test('a prompt sent since returning means the user is caught up', () {
+    test('tells when a prompt was sent from this device since the marker', () {
       final builder = d.AcpTimelineBuilder()
         ..appendLocalUserPrompt(const [AcpTextContent('first')]);
-      final marker = AcpLastSeenMarker.of(builder.snapshot());
+      final marker = AcpLastSeenMarker.of(builder.snapshot())!;
+      expect(acpPromptSentSince(marker, builder.snapshot()), isFalse);
       builder.appendLocalUserPrompt(const [AcpTextContent('and now this')]);
-      final timeline = builder.snapshot();
-      expect(timeline.entries.last, isA<d.AcpMessageEntry>());
-      expect((timeline.entries.last as d.AcpMessageEntry).isLocalPrompt, true);
-      expect(_unread(marker, timeline), isNull);
+      expect(acpPromptSentSince(marker, builder.snapshot()), isTrue);
+      // In a rebuilt timeline every local prompt is newer than the marker.
+      final rebuilt = d.AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('after reload')]);
+      expect(acpPromptSentSince(marker, rebuilt.snapshot()), isTrue);
+    });
+
+    test('losing only the last seen entry to trimming loses nothing', () {
+      final marker = AcpLastSeenMarker.of(_timeline(seen, source: source));
+      final timeline = _timeline([_agent(2, 'Next')], source: source);
+      final state = _unread(marker, timeline)!;
+      expect(state.earlierHistoryUnavailable, isFalse);
+      expect(state.digest!.partial, isFalse);
+    });
+
+    test('a short or empty remembered prefix never guesses', () {
+      final rebuilt = _timeline([
+        _user(0, 'Run the tests'),
+        _agent(1, 'Let me check.'),
+        _tool(2, 'a'),
+        _agent(3, 'Let me fix that.'),
+        _tool(4, 'b'),
+        _agent(5, 'Let me run them again.'),
+      ], source: Object());
+      final short = AcpLastSeenMarker.of(
+        _timeline([_user(0, 'Run'), _agent(1, 'Let me')], source: source),
+      );
+      final state = _unread(short, rebuilt)!;
+      expect(state.earlierHistoryUnavailable, isTrue);
+      expect(state.digest, isNull);
+
+      final empty = AcpLastSeenMarker.of(
+        _timeline([
+          _user(0, 'Run'),
+          d.AcpMessageEntry(role: d.AcpMessageRole.user, order: 1),
+        ], source: source),
+      );
+      expect(_unread(empty, rebuilt)!.digest, isNull);
+    });
+
+    test('of several long matches the nearest to the old position wins', () {
+      const repeated = 'Running the full test suite again now.';
+      final marker = AcpLastSeenMarker.of(
+        _timeline([
+          _agent(0, repeated),
+          _tool(1, 'x'),
+          _agent(2, repeated),
+        ], source: source),
+      );
+      final rebuilt = _timeline([
+        _agent(0, repeated),
+        _tool(1, 'x'),
+        _agent(2, repeated),
+        _tool(3, 'y'),
+        _agent(4, repeated),
+      ], source: Object());
+      final state = _unread(marker, rebuilt)!;
+      // Remembered as the second such reply, so entries after it are new.
+      expect(state.dividerEntryIndex, 3);
+    });
+
+    test('reports tools that finished or failed while the user was away', () {
+      final marker = AcpLastSeenMarker.of(
+        _timeline([
+          ...seen,
+          _tool(
+            2,
+            'build',
+            kind: d.AcpToolKind.execute,
+            status: d.AcpToolStatus.inProgress,
+          ),
+          _tool(
+            3,
+            'edit',
+            kind: d.AcpToolKind.edit,
+            status: d.AcpToolStatus.pending,
+          ),
+        ], source: source),
+      );
+      final timeline = _timeline([
+        ...seen,
+        _tool(
+          2,
+          'build',
+          kind: d.AcpToolKind.execute,
+          status: d.AcpToolStatus.failed,
+        ),
+        _tool(3, 'edit', kind: d.AcpToolKind.edit, diffPaths: ['lib/a.dart']),
+      ], source: source);
+      final state = _unread(marker, timeline)!;
+      expect(state.dividerEntryIndex, 2);
+      expect(state.digest!.errors, 1);
+      expect(state.digest!.reportedFileChanges, 1);
+      expect(state.digest!.toolCallCount, 2);
+    });
+
+    test('counts reply turns, not message pieces or subagent chatter', () {
+      final marker = AcpLastSeenMarker.of(_timeline(seen, source: source));
+      final timeline = _timeline([
+        ...seen,
+        _agent(2, 'Starting.'),
+        _tool(3, 'read'),
+        _agent(4, 'Found it.'),
+        _tool(5, 'helper', kind: d.AcpToolKind.other, subagent: true),
+        _agent(6, 'sub one', parent: 'helper'),
+        _agent(7, 'sub two', parent: 'helper'),
+        _agent(8, 'Done.'),
+        _user(9, 'Thanks, one more'),
+        _agent(10, 'Sure.'),
+      ], source: source);
+      expect(_unread(marker, timeline)!.digest!.replies, 2);
+    });
+
+    test('says "at least" only for counts taken from the timeline', () {
+      final marker = AcpLastSeenMarker.of(_timeline(seen, source: source));
+      final timeline = _timeline(
+        [_agent(7, 'Later reply')],
+        source: source,
+        overflowed: true,
+      );
+      expect(
+        _unread(marker, timeline, pending: 1)!.digest!.summary,
+        '1 request waiting · at least 1 reply',
+      );
+    });
+
+    test('an error already showing when the user left is not news', () {
+      final marker = AcpLastSeenMarker.of(
+        _timeline(seen, source: source),
+        hadSessionError: true,
+      );
+      final timeline = _timeline([...seen, _agent(2, 'More')], source: source);
+      expect(_unread(marker, timeline, error: true)!.digest!.errors, 0);
+    });
+
+    test('a failed edit is not a reported file change', () {
+      final marker = AcpLastSeenMarker.of(_timeline(seen, source: source));
+      final timeline = _timeline([
+        ...seen,
+        _tool(
+          2,
+          'edit',
+          kind: d.AcpToolKind.edit,
+          status: d.AcpToolStatus.failed,
+          diffPaths: ['lib/a.dart'],
+        ),
+      ], source: source);
+      expect(_unread(marker, timeline)!.digest!.reportedFileChanges, 0);
     });
 
     test(
@@ -207,7 +352,8 @@ void registerAcpUnreadTests() {
         entries[state.dividerEntryIndex],
         isA<AcpSubagentTranscriptEntry>(),
       );
-      expect(state.digest!.replies, 1);
+      // Subagent messages are not reply turns; its tool call still counts.
+      expect(state.digest!.replies, 0);
       expect(state.digest!.toolCallCount, 1);
     });
 
@@ -276,7 +422,7 @@ void registerAcpUnreadTests() {
       );
       AcpUnreadVisit(registry)
         ..begin(key)
-        ..end(key, before);
+        ..end(key, acpSeenSnapshot(before, null, followingTail: true));
 
       final after = before.copyWith(
         timeline: _timeline([
@@ -293,6 +439,10 @@ void registerAcpUnreadTests() {
       visit.jumpToDivider();
       expect(visit.jumpSerial, 1);
       expect(visit.digestDismissed, isTrue);
+      // A new visit never resets the serial, so it is never replayed.
+      visit.begin(key);
+      expect(visit.jumpSerial, 1);
+      expect(visit.digestDismissed, isFalse);
 
       final pending = after.copyWith(
         error: const AcpSessionError(
@@ -301,6 +451,107 @@ void registerAcpUnreadTests() {
         ),
       );
       expect(visit.evaluate(pending, entries)?.digest?.errors, 1);
+    });
+
+    test(
+      'stays caught up after a prompt even once it is trimmed or replayed',
+      () {
+        final registry = AcpLastSeenRegistry();
+        final key = fakeAcpKey();
+        final builder = d.AcpTimelineBuilder()
+          ..appendLocalUserPrompt(const [AcpTextContent('first')]);
+        final leaving = fakeAcpSession(timeline: builder.snapshot());
+        registry.record(key, leaving.timeline);
+        final visit = AcpUnreadVisit(registry)..begin(key);
+
+        builder.appendLocalUserPrompt(const [AcpTextContent('my follow-up')]);
+        final sent = leaving.copyWith(timeline: builder.snapshot());
+        expect(visit.evaluate(sent, mapAcpSessionTimeline(sent)), isNull);
+
+        // The follow-up is gone (trimmed, or replayed without its local id),
+        // and replies to it arrive: they are not news.
+        final rebuilt = leaving.copyWith(
+          timeline: _timeline([
+            _user(0, 'first'),
+            _user(1, 'my follow-up'),
+            _agent(2, 'Reply to the follow-up'),
+          ], source: Object()),
+        );
+        expect(visit.evaluate(rebuilt, mapAcpSessionTimeline(rebuilt)), isNull);
+      },
+    );
+
+    test('a short absence keeps the visit; a long one starts a new one', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final source = Object();
+      AcpSessionState session(int replies) => fakeAcpSession(
+        timeline: _timeline([
+          _user(0, 'Go'),
+          for (var i = 1; i <= replies; i++) _agent(i, 'Reply $i'),
+        ], source: source),
+      );
+      registry.record(key, session(0).timeline);
+      final visit = AcpUnreadVisit(registry)..begin(key);
+      final one = session(1);
+      expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNotNull);
+
+      visit
+        ..depart(acpSeenSnapshot(one, null, followingTail: true))
+        ..arrive(key, left: false);
+      expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNotNull);
+
+      visit
+        ..depart(acpSeenSnapshot(one, null, followingTail: true))
+        ..arrive(key, left: true);
+      expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNull);
+      final two = session(2);
+      expect(
+        visit.evaluate(two, mapAcpSessionTimeline(two))?.dividerEntryIndex,
+        2,
+      );
+    });
+
+    test('ending while away keeps what was seen at departure', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final source = Object();
+      final seenSession = fakeAcpSession(
+        timeline: _timeline([_user(0, 'Go')], source: source),
+      );
+      final later = fakeAcpSession(
+        timeline: _timeline([
+          _user(0, 'Go'),
+          _agent(1, 'Arrived while covered'),
+        ], source: source),
+      );
+      AcpUnreadVisit(registry)
+        ..begin(key)
+        ..depart(acpSeenSnapshot(seenSession, null, followingTail: true))
+        ..end(key, acpSeenSnapshot(later, null, followingTail: true));
+      expect(registry.markerFor(key)!.order, 0);
+    });
+
+    test('a chat scrolled up has seen only what was on screen', () {
+      final source = Object();
+      final session = fakeAcpSession(
+        timeline: _timeline([
+          _user(0, 'Go'),
+          _agent(1, 'One'),
+          _agent(2, 'Two'),
+          _agent(3, 'Three'),
+        ], source: source),
+      );
+      final entries = mapAcpSessionTimeline(session);
+      final following = acpSeenSnapshot(session, entries, followingTail: true);
+      expect(following!.upToOrder, isNull);
+      final scrolledUp = acpSeenSnapshot(
+        session,
+        entries,
+        followingTail: false,
+        lastVisibleEntryIndex: 1,
+      );
+      expect(scrolledUp!.upToOrder, 1);
     });
   });
 }

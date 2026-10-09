@@ -79,6 +79,7 @@ class AcpMessageThread extends StatefulWidget {
     this.onOpenLocation,
     this.followTail = false,
     this.unreadDivider,
+    this.onLastVisibleEntryChanged,
   });
 
   /// The ordered timeline entries to render.
@@ -133,6 +134,10 @@ class AcpMessageThread extends StatefulWidget {
   /// The "unread since you left" divider, when there is unread history.
   final AcpThreadUnreadDivider? unreadDivider;
 
+  /// Reports the index of the last top-level entry at least partly on
+  /// screen, as the user scrolls.
+  final ValueChanged<int>? onLastVisibleEntryChanged;
+
   @override
   State<AcpMessageThread> createState() => _AcpMessageThreadState();
 }
@@ -160,6 +165,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _tailAnchorAttempts = 0;
   int _tailAnchorStableFrames = 0;
   double? _lastTailMaxExtent;
+  int _handledUnreadJumpSerial = 0;
+  int? _reportedLastVisibleEntry;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -171,6 +178,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _controller.addListener(_scheduleStickyUpdate);
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
+    // A divider mounted with an earlier visit's Jump does not jump again.
+    _handledUnreadJumpSerial = widget.unreadDivider?.jumpSerial ?? 0;
   }
 
   @override
@@ -188,16 +197,18 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
-    _jumpToUnreadDividerIfAsked(oldWidget.unreadDivider);
+    _jumpToUnreadDividerIfAsked();
   }
 
-  void _jumpToUnreadDividerIfAsked(AcpThreadUnreadDivider? previous) {
+  /// Jumps for a Jump request not handled yet. Requests are remembered here,
+  /// not compared with the previous widget, so a divider that disappears and
+  /// comes back never replays one.
+  void _jumpToUnreadDividerIfAsked() {
     final divider = widget.unreadDivider;
-    if (divider == null ||
-        divider.jumpSerial == 0 ||
-        divider.jumpSerial == previous?.jumpSerial) {
+    if (divider == null || divider.jumpSerial == _handledUnreadJumpSerial) {
       return;
     }
+    _handledUnreadJumpSerial = divider.jumpSerial;
     // Jumping is the user moving through the transcript, so it suspends
     // live-follow like a drag does.
     _userOwnsScrollPosition = true;
@@ -217,6 +228,16 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         position.maxScrollExtent,
       );
       if ((target - position.pixels).abs() >= 1) _controller.jumpTo(target);
+      if (!mounted || !MediaQuery.supportsAnnounceOf(context)) return;
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          View.of(context),
+          divider.earlierHistoryUnavailable
+              ? 'Showing the oldest loaded message'
+              : 'Showing the first unread message',
+          Directionality.of(context),
+        ),
+      );
     });
   }
 
@@ -380,6 +401,36 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           _controller.position.pixels >
           _controller.position.minScrollExtent + 1,
     );
+    _reportLastVisibleEntry(renderObject);
+  }
+
+  /// Tells the owner which top-level entry is the last one on screen.
+  void _reportLastVisibleEntry(RenderSliverMultiBoxAdaptor sliver) {
+    final report = widget.onLastVisibleEntryChanged;
+    if (report == null) return;
+    final viewportBottom =
+        sliver.constraints.scrollOffset +
+        sliver.constraints.remainingPaintExtent;
+    int? lastVisible;
+    for (
+      var child = sliver.firstChild;
+      child != null;
+      child = sliver.childAfter(child)
+    ) {
+      final top = sliver.childScrollOffset(child) ?? 0;
+      if (top >= viewportBottom) break;
+      final index = sliver.indexOf(child);
+      final absolute =
+          index - _leadingWindowChildCount + _renderStartChildIndex;
+      if (absolute >= 0 && absolute < _threadChildren.length) {
+        lastVisible = _threadChildren[absolute].entryIndex;
+      }
+    }
+    if (lastVisible == null || lastVisible == _reportedLastVisibleEntry) {
+      return;
+    }
+    _reportedLastVisibleEntry = lastVisible;
+    report(lastVisible);
   }
 
   void _setViewportContext({
@@ -888,20 +939,22 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     );
   }
 
-  /// Puts the unread divider above the first row of its entry.
+  /// Puts the unread divider above the first row of its entry. Every row
+  /// keeps the same wrapper, so the divider coming or going never resets a
+  /// row's state, such as an expanded tool call.
   Widget _withUnreadDivider(int absoluteIndex, Widget child) {
     final divider = widget.unreadDivider;
-    if (divider == null ||
-        _firstChildIndexByEntry[divider.entryIndex] != absoluteIndex) {
-      return child;
-    }
+    final here =
+        divider != null &&
+        _firstChildIndexByEntry[divider.entryIndex] == absoluteIndex;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        _UnreadDivider(
-          earlierHistoryUnavailable: divider.earlierHistoryUnavailable,
-        ),
+        if (here)
+          _UnreadDivider(
+            earlierHistoryUnavailable: divider.earlierHistoryUnavailable,
+          ),
         child,
       ],
     );

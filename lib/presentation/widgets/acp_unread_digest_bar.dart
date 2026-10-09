@@ -49,8 +49,14 @@ class AcpUnreadDigestBar extends StatelessWidget {
         FluttyTheme.spacingSm,
         0,
       ),
+      // A live region announces the bar when it appears. Its label stays the
+      // same while counts grow, so streaming output is not re-announced.
       child: Semantics(
         container: true,
+        liveRegion: true,
+        label: known
+            ? 'Unread since you left'
+            : 'Earlier history not available',
         child: DecoratedBox(
           key: const ValueKey('acp-unread-digest'),
           decoration: BoxDecoration(

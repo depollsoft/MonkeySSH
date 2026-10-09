@@ -225,8 +225,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   List<String>? _piEnabledModelPatterns;
   var _piModelScopeLoading = false;
   late final AcpUnreadVisit _unread;
-  late final AppLifecycleListener _lifecycle;
   AcpSessionState? _lastSession;
+  List<ui.AcpTimelineEntry>? _lastEntries;
+  int? _lastVisibleEntryIndex;
 
   @override
   void initState() {
@@ -254,22 +255,26 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     _scroll.addListener(_onScroll);
     _unread = AcpUnreadVisit(ref.read(acpLastSeenRegistryProvider))
       ..begin(_key);
-    _lifecycle = AppLifecycleListener(
-      onHide: _markChatSeen,
-      onShow: () => setState(() => _unread.begin(_key)),
-    );
     if (widget.connectOnMount) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _ensureConnected());
     }
   }
 
-  /// Everything loaded now counts as seen; the next visit compares with it.
-  void _markChatSeen() => _unread.end(_key, _lastSession);
+  /// What the user has seen: everything when following the newest output,
+  /// otherwise up to the last entry on screen.
+  AcpSeenSnapshot? _seenSnapshot() => acpSeenSnapshot(
+    _lastSession,
+    _lastEntries,
+    followingTail: _autoScroll,
+    lastVisibleEntryIndex: _lastVisibleEntryIndex,
+  );
+
+  /// What the user has seen counts as seen; the next visit compares with it.
+  void _markChatSeen() => _unread.end(_key, _seenSnapshot());
 
   @override
   void dispose() {
     _markChatSeen();
-    _lifecycle.dispose();
     _previewPublishTimer?.cancel();
     _initialScrollSettleTimer?.cancel();
     _publishScrollState();
@@ -1044,7 +1049,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontSize: fontSize,
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
-      child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
+      child: AcpChatPresence(
+        onAway: () => _unread.depart(_seenSnapshot()),
+        onBack: ({required left}) =>
+            setState(() => _unread.arrive(_key, left: left)),
+        child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
+      ),
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
@@ -1192,7 +1202,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
     _ensurePiModelScope(session);
     _lastSession = session;
-    final entries = _timelineMapperCache.map(session);
+    final entries = _lastEntries = _timelineMapperCache.map(session);
     final unread = _unread.evaluate(session, entries);
     final activity = acpSessionActivityDisplay(session);
     _queuePreviewPublish(session, entries, activity);
@@ -1371,6 +1381,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               onCopyCode: (code) => _copyToClipboard(code, 'Code'),
               onOpenLocation: (location) =>
                   unawaited(_openRemotePath(location.path)),
+              onLastVisibleEntryChanged: (index) =>
+                  _lastVisibleEntryIndex = index,
               unreadDivider: unread == null
                   ? null
                   : AcpThreadUnreadDivider(
