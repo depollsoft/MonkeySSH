@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/remote_file_edit_session.dart';
+import 'package:monkeyssh/domain/services/remote_file_service.dart';
 
 import '../../helpers/in_memory_sftp.dart';
 
@@ -226,7 +226,7 @@ void main() {
 
         await expectLater(
           session.saveCopy(server, _bytes('phone version\n')),
-          throwsA(isA<FileSystemException>()),
+          throwsA(isA<RemoteFileRefusedException>()),
         );
         expect(server.files, hasLength(101));
       });
@@ -330,7 +330,7 @@ void main() {
       expect(await session.checkForChanges(server), RemoteFileChange.notAFile);
       await expectLater(
         session.save(server, _bytes('phone\n'), force: true),
-        throwsA(isA<FileSystemException>()),
+        throwsA(isA<RemoteFileRefusedException>()),
       );
       expect(server.directories, contains(_path));
       expect(server.files.keys, contains('$_path/inner.txt'));
@@ -366,6 +366,120 @@ void main() {
         expect(_text(server, _path), 'phone\n');
       },
     );
+  });
+
+  group('review round 2 regressions', () {
+    const copy = '/home/demo/notes (copy).txt';
+    late InMemorySftpClient server;
+
+    setUp(() {
+      server = InMemorySftpClient()
+        ..writeFile(_path, _bytes('host version\n'), mode: 0x180);
+    });
+
+    test('a placeholder swapped for a link is refused, not followed', () async {
+      final session = await _openSession(server);
+      server.afterClose = (path) {
+        if (path != copy) return;
+        server
+          ..afterClose = null
+          ..deleteFile(copy)
+          ..links[copy] = _path;
+      };
+
+      await expectLater(
+        session.saveCopy(server, _bytes('phone\n')),
+        throwsA(isA<RemoteFileRefusedException>()),
+      );
+      expect(_text(server, _path), 'host version\n');
+      expect(server.links[copy], _path);
+      expect(
+        server.directories.where((d) => d.contains('.monkeyssh-save-')),
+        isEmpty,
+      );
+    });
+
+    test('the copy keeps its mode when stat leaves permissions out', () async {
+      final session = await _openSession(server);
+      server.omitMode = true;
+
+      final saved = await session.saveCopy(server, _bytes('phone\n'));
+
+      expect(server.modes[saved], 0x180);
+      expect(server.modeAtFirstWrite.values, everyElement(0x180));
+    });
+
+    test('a host that refuses folders refuses the copy too', () async {
+      final session = await _openSession(server);
+      server.mkdirFailure = SftpStatusError(
+        SftpStatusCode.permissionDenied,
+        'no mkdir',
+      );
+
+      await expectLater(
+        session.saveCopy(server, _bytes('phone\n')),
+        throwsA(isA<SftpStatusError>()),
+      );
+      expect(server.writes, isNot(contains(copy)));
+      expect(server.files.keys, [_path]);
+    });
+
+    test('a recreated file is restricted before content lands', () async {
+      final session = await _openSession(server);
+      server
+        ..deleteFile(_path)
+        ..mkdirFailure = SftpStatusError(
+          SftpStatusCode.permissionDenied,
+          'no mkdir',
+        );
+
+      await session.recreate(server, _bytes('phone\n'));
+
+      expect(server.modeAtFirstWrite[_path], 0x180);
+      expect(server.modes[_path], 0x180);
+      expect(_text(server, _path), 'phone\n');
+    });
+
+    test(
+      'a copy made after the path became a folder uses the loaded mode',
+      () async {
+        final session = await _openSession(server);
+        server
+          ..deleteFile(_path)
+          ..directories.add(_path);
+
+        final saved = await session.saveCopy(server, _bytes('phone\n'));
+
+        expect(server.modes[saved], 0x180);
+      },
+    );
+
+    test('recreate never replaces a file that came back', () async {
+      final session = await _openSession(server);
+      server.deleteFile(_path);
+      expect(await session.checkForChanges(server), RemoteFileChange.deleted);
+      server.writeFile(_path, _bytes('agent recreated\n'));
+
+      await expectLater(
+        session.recreate(server, _bytes('phone\n')),
+        throwsA(isA<RemoteFileChangedDuringSaveException>()),
+      );
+      expect(_text(server, _path), 'agent recreated\n');
+
+      // Coming back during the write is caught too.
+      server.deleteFile(_path);
+      server.afterWrite = (path) {
+        if (path == _path) return;
+        server
+          ..afterWrite = null
+          ..writeFile(_path, _bytes('agent again\n'));
+      };
+      await expectLater(
+        session.recreate(server, _bytes('phone\n')),
+        throwsA(isA<RemoteFileChangedDuringSaveException>()),
+      );
+      expect(_text(server, _path), 'agent again\n');
+    });
   });
 
   group('remoteFileCopyPath', () {

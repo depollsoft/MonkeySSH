@@ -43,6 +43,18 @@ class InMemorySftpClient extends Fake implements SftpClient {
   /// Whether stat replies leave out size and modified time.
   bool omitMetadata = false;
 
+  /// Whether stat replies leave out permissions, as some servers do.
+  bool omitMode = false;
+
+  /// Thrown by [mkdir] when set, as by servers that refuse new folders.
+  Object? mkdirFailure;
+
+  /// Runs after an open handle is closed.
+  void Function(String path)? afterClose;
+
+  /// Permission bits each file had when content was first written to it.
+  final modeAtFirstWrite = <String, int>{};
+
   /// Whether open file handles reject fstat.
   bool rejectFstat = false;
 
@@ -92,7 +104,9 @@ class InMemorySftpClient extends Fake implements SftpClient {
     if (files[path] case final bytes?) {
       return SftpFileAttrs(
         size: omitMetadata ? null : bytes.length,
-        mode: SftpFileMode.value(_regularFileType | (modes[path] ?? 0x1A4)),
+        mode: omitMode
+            ? null
+            : SftpFileMode.value(_regularFileType | (modes[path] ?? 0x1A4)),
         accessTime: omitMetadata ? null : modifyTimes[path],
         modifyTime: omitMetadata ? null : modifyTimes[path],
         userID: 1000,
@@ -187,6 +201,8 @@ class InMemorySftpClient extends Fake implements SftpClient {
 
   @override
   Future<void> mkdir(String path, [SftpFileAttrs? attrs]) async {
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (mkdirFailure case final failure?) throw failure;
     if (directories.contains(path) || files.containsKey(path)) {
       // ignore: only_throw_errors, dartssh2 models protocol errors this way.
       throw SftpStatusError(SftpStatusCode.failure, 'Failure');
@@ -308,6 +324,12 @@ class InMemorySftpFile extends Fake implements SftpFile {
           )
           ..setAll(0, current)
           ..setAll(offset, data);
+    if (data.isNotEmpty) {
+      _server.modeAtFirstWrite.putIfAbsent(
+        _path,
+        () => _server.modes[_path] ?? 0x1A4,
+      );
+    }
     _server
       ..files[_path] = next
       ..modifyTimes[_path] = _server.now
@@ -316,5 +338,5 @@ class InMemorySftpFile extends Fake implements SftpFile {
   }
 
   @override
-  Future<void> close() async {}
+  Future<void> close() async => _server.afterClose?.call(_path);
 }

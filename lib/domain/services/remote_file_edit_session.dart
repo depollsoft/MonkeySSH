@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
@@ -140,9 +140,13 @@ class RemoteFileSnapshot {
 /// whether something else changed the file in the meantime.
 ///
 /// SFTP has no conditional write. [save] re-checks size and modified time
-/// immediately before its final rename, so a change is only missed when it
-/// lands in the single round trip between that stat and the rename, or when
-/// it keeps both size and modified time on a file too large to re-read.
+/// immediately before its final rename. A change is still missed when it
+/// lands in the single round trip between that stat and the rename, when it
+/// keeps both size and modified time on a file too large to re-read, or when
+/// it keeps the size and lands within the same second as the file's
+/// previous write: SFTP v3 modified times have one-second resolution, so
+/// the final stat cannot tell such a write from the version that was
+/// checked.
 class RemoteFileEditSession {
   /// Creates a session for [remotePath].
   RemoteFileEditSession({
@@ -302,25 +306,66 @@ class RemoteFileEditSession {
     _checkedAttrs = null;
   }
 
+  /// Recreates a file that was deleted on the host, with the permission bits
+  /// it loaded with (owner-only when unknown).
+  ///
+  /// Unlike a forced [save], this never replaces a file: if something
+  /// recreated the path in the meantime, it throws
+  /// [RemoteFileChangedDuringSaveException] so the editor checks again.
+  Future<void> recreate(SftpClient sftp, Uint8List bytes) async {
+    final loadedMode = _baseline?.mode;
+    Future<void> ensureStillMissing() async {
+      try {
+        await sftp.stat(remotePath, followLink: false);
+      } on SftpStatusError catch (error) {
+        if (error.code == SftpStatusCode.noSuchFile) return;
+        rethrow;
+      }
+      throw const RemoteFileChangedDuringSaveException();
+    }
+
+    await ensureStillMissing();
+    await service.replaceFileBytes(
+      sftp: sftp,
+      remotePath: remotePath,
+      bytes: bytes,
+      newFileMode: loadedMode == null
+          ? remoteUploadFileMode
+          : SftpFileMode.value(loadedMode),
+      beforeReplace: ensureStillMissing,
+    );
+    _baseline = RemoteFileVersion(
+      size: bytes.length,
+      modifyTime: null,
+      length: bytes.length,
+      digest: crypto.sha256.convert(bytes),
+      mode: loadedMode,
+    );
+    _checkedAttrs = null;
+  }
+
   /// Writes [bytes] to a new file beside [remotePath] and returns its path.
   ///
-  /// The original is never opened for writing. A name is reserved with an
-  /// empty, exclusively created placeholder that is restricted to the
-  /// original's permission bits (or owner-only access when the original is
-  /// gone) on its open handle. The content is then written through
-  /// [RemoteFileService.replaceFileBytes], which stages it in a private
-  /// scratch folder and renames it over the placeholder, so a reader who
-  /// opened the placeholder early only ever sees an empty file and an
-  /// existing file is never replaced.
+  /// The original is never opened for writing and an existing file is never
+  /// replaced. A name is reserved with an empty, exclusively created
+  /// placeholder. The content is written to a file in a private (0700)
+  /// scratch folder, restricted on its open handle to the original's
+  /// permission bits (the loaded ones when the path is no longer a file, or
+  /// owner-only), and renamed over the placeholder only while the
+  /// placeholder is still that empty file. Renames act on names, so a
+  /// placeholder swapped for a link is refused rather than followed. There
+  /// is no in-place fallback: a host that refuses the scratch folder refuses
+  /// the copy.
   Future<String> saveCopy(SftpClient sftp, Uint8List bytes) async {
-    int? originalMode;
+    int? currentMode;
     try {
-      originalMode = _permissionsOf(await sftp.stat(remotePath));
+      final attrs = await sftp.stat(remotePath);
+      if (attrs.isFile) currentMode = _permissionsOf(attrs);
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
     final mode = SftpFileMode.value(
-      originalMode ?? _baseline?.mode ?? remoteUploadFileMode.value,
+      currentMode ?? _baseline?.mode ?? remoteUploadFileMode.value,
     );
     for (var attempt = 1; attempt <= _maxCopyAttempts; attempt++) {
       final candidate = remoteFileCopyPath(remotePath, attempt);
@@ -348,19 +393,90 @@ class RemoteFileEditSession {
         } finally {
           await placeholder.close();
         }
-        await service.replaceFileBytes(
-          sftp: sftp,
-          remotePath: candidate,
-          bytes: bytes,
-          newFileMode: mode,
-        );
+        await _installCopy(sftp, candidate, bytes, mode);
       } on Object {
         await _removePlaceholderQuietly(sftp, candidate);
         rethrow;
       }
       return candidate;
     }
-    throw FileSystemException('No free name for a copy', remotePath);
+    throw const RemoteFileRefusedException(
+      'There is no free name for a copy beside the file.',
+    );
+  }
+
+  Future<void> _installCopy(
+    SftpClient sftp,
+    String candidate,
+    Uint8List bytes,
+    SftpFileMode mode,
+  ) async {
+    final scratch =
+        '${candidate.substring(0, candidate.lastIndexOf('/') + 1)}'
+        '.monkeyssh-save-${Random.secure().nextInt(1 << 32).toRadixString(16)}';
+    final private = SftpFileAttrs(mode: remoteUploadDirectoryMode);
+    await sftp.mkdir(scratch, private);
+    final staged = '$scratch/new';
+    try {
+      // A server may ignore mkdir's mode; the folder is still empty.
+      await sftp.setStat(scratch, private);
+      final file = await sftp.open(
+        staged,
+        mode:
+            SftpFileOpenMode.write |
+            SftpFileOpenMode.create |
+            SftpFileOpenMode.exclusive,
+      );
+      try {
+        await file.setStat(SftpFileAttrs(mode: mode));
+        await file.writeBytes(bytes);
+      } finally {
+        await file.close();
+      }
+      final reserved = await sftp.stat(candidate, followLink: false);
+      if (reserved.isSymbolicLink ||
+          reserved.isDirectory ||
+          (reserved.size ?? 0) != 0) {
+        throw const RemoteFileRefusedException(
+          'Another program took the name chosen for the copy.',
+        );
+      }
+      try {
+        await sftp.rename(staged, candidate);
+      } on SftpStatusError catch (error) {
+        if (error.code != SftpStatusCode.failure) rethrow;
+        // Without posix-rename the placeholder name must be free first.
+        final aside = '$scratch/placeholder';
+        await sftp.rename(candidate, aside);
+        try {
+          await sftp.rename(staged, candidate);
+        } on Object {
+          await _quietly(sftp.rename(aside, candidate));
+          rethrow;
+        }
+        await _quietly(sftp.remove(aside));
+      }
+    } finally {
+      await _quietly(_removeIfPresent(sftp, staged));
+      await _quietly(sftp.rmdir(scratch));
+    }
+  }
+
+  Future<void> _removeIfPresent(SftpClient sftp, String path) async {
+    if (await _exists(sftp, path)) await sftp.remove(path);
+  }
+
+  Future<void> _quietly(Future<void> cleanup) async {
+    try {
+      await cleanup;
+    } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
+      DiagnosticsLogService.instance.warning(
+        'sftp.editor',
+        'copy_cleanup_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
   }
 
   Future<bool> _exists(SftpClient sftp, String path) async {
