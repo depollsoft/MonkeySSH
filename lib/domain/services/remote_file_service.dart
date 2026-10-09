@@ -672,10 +672,18 @@ class RemoteFileService {
   /// the second rename fails. When the directory denies new entries, the
   /// scratch directory cannot be made private, or the original owner cannot
   /// be reproduced, this falls back to writing in place, as editors do.
+  ///
+  /// When [remotePath] does not exist, the new file gets [newFileMode] (the
+  /// server default when null) before it is renamed into place. A folder at
+  /// [remotePath] is refused. [beforeReplace] runs just before the rename or
+  /// in-place write and may throw to abandon the save with the original
+  /// untouched.
   Future<void> replaceFileBytes({
     required SftpClient sftp,
     required String remotePath,
     required Uint8List bytes,
+    SftpFileMode? newFileMode,
+    Future<void> Function()? beforeReplace,
   }) async {
     var target = remotePath;
     SftpFileAttrs? original;
@@ -690,12 +698,22 @@ class RemoteFileService {
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
-    Future<void> writeInPlace() => uploadBytes(
-      sftp: sftp,
-      remotePath: target,
-      bytes: bytes,
-      applyPrivateMode: false,
-    );
+    if (original?.isDirectory ?? false) {
+      throw FileSystemException('Cannot replace a directory', remotePath);
+    }
+    final isNewFile = original == null;
+    Future<void> writeInPlace() async {
+      await beforeReplace?.call();
+      await uploadBytes(
+        sftp: sftp,
+        remotePath: target,
+        bytes: bytes,
+        applyPrivateMode: false,
+      );
+      if (isNewFile && newFileMode != null) {
+        await sftp.setStat(target, SftpFileAttrs(mode: newFileMode));
+      }
+    }
 
     // The copy is made inside a fresh 0700 directory, so no other user can
     // open it whatever mode the server gives new files. Short names of its
@@ -749,7 +767,14 @@ class RemoteFileService {
         } on SftpStatusError {
           return await writeInPlace();
         }
+      } else if (newFileMode != null) {
+        try {
+          await sftp.setStat(temporaryPath, SftpFileAttrs(mode: newFileMode));
+        } on SftpStatusError {
+          return await writeInPlace();
+        }
       }
+      await beforeReplace?.call();
       try {
         await sftp.rename(temporaryPath, target);
       } on SftpStatusError catch (error) {

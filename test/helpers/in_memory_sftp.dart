@@ -52,6 +52,19 @@ class InMemorySftpClient extends Fake implements SftpClient {
   /// Thrown by file writes when set.
   Object? writeFailure;
 
+  /// Runs after an open handle's fstat replies, before its content is read,
+  /// so a test can change the file in between.
+  void Function(String path)? afterFstat;
+
+  /// Runs after each write through an open handle.
+  void Function(String path)? afterWrite;
+
+  /// Number of fstat requests answered.
+  int fstatCount = 0;
+
+  /// Every path written through an open handle, in order.
+  final writes = <String>[];
+
   /// Current server time in seconds since the epoch.
   int now = 1700000000;
 
@@ -133,14 +146,22 @@ class InMemorySftpClient extends Fake implements SftpClient {
     String path, {
     SftpFileOpenMode mode = SftpFileOpenMode.read,
   }) async {
-    final target = _resolve(path);
     bool has(SftpFileOpenMode flag) => mode.flag & flag.flag != 0;
-    final exists = files.containsKey(target);
-    if (exists && has(SftpFileOpenMode.exclusive)) {
+    // O_EXCL fails on any existing name, a dangling symlink included.
+    if (has(SftpFileOpenMode.exclusive) &&
+        (files.containsKey(path) ||
+            links.containsKey(path) ||
+            directories.contains(path))) {
       // SFTP v3 has no "already exists" status code.
       // ignore: only_throw_errors, dartssh2 models protocol errors this way.
       throw SftpStatusError(SftpStatusCode.failure, 'Failure');
     }
+    final target = _resolve(path);
+    if (directories.contains(target)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'Is a directory');
+    }
+    final exists = files.containsKey(target);
     if (!exists) {
       if (!has(SftpFileOpenMode.create)) _missing(target);
       if (!directories.contains(target.substring(0, target.lastIndexOf('/')))) {
@@ -185,6 +206,27 @@ class InMemorySftpClient extends Fake implements SftpClient {
 
   @override
   Future<void> rename(String oldPath, String newPath) async {
+    if (directories.contains(newPath)) {
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'Is a directory');
+    }
+    if (directories.contains(oldPath)) {
+      // A folder moves with everything inside it.
+      String moved(String path) => newPath + path.substring(oldPath.length);
+      bool inside(String path) =>
+          path == oldPath || path.startsWith('$oldPath/');
+      for (final path in directories.where(inside).toList()) {
+        directories
+          ..remove(path)
+          ..add(moved(path));
+      }
+      for (final path in files.keys.where(inside).toList()) {
+        files[moved(path)] = files.remove(path)!;
+        modes[moved(path)] = modes.remove(path) ?? 0x1A4;
+        modifyTimes[moved(path)] = modifyTimes.remove(path) ?? now;
+      }
+      return;
+    }
     final bytes = files.remove(oldPath) ?? _missing(oldPath);
     files[newPath] = bytes;
     modes[newPath] = modes.remove(oldPath) ?? 0x1A4;
@@ -214,7 +256,18 @@ class InMemorySftpFile extends Fake implements SftpFile {
       // ignore: only_throw_errors, dartssh2 models protocol errors this way.
       throw SftpStatusError(SftpStatusCode.opUnsupported, 'Unsupported');
     }
-    return _server._attrsFor(_path);
+    _server.fstatCount++;
+    final attrs = _server._attrsFor(_path);
+    _server.afterFstat?.call(_path);
+    return attrs;
+  }
+
+  @override
+  Future<void> setStat(SftpFileAttrs attrs) async {
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (_server.setStatFailure case final failure?) throw failure;
+    _server.setStats.add(_path);
+    if (attrs.mode case final mode?) _server.modes[_path] = mode.value & 0xFFF;
   }
 
   @override
@@ -257,7 +310,9 @@ class InMemorySftpFile extends Fake implements SftpFile {
           ..setAll(offset, data);
     _server
       ..files[_path] = next
-      ..modifyTimes[_path] = _server.now;
+      ..modifyTimes[_path] = _server.now
+      ..writes.add(_path)
+      ..afterWrite?.call(_path);
   }
 
   @override

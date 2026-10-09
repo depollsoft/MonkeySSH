@@ -16,25 +16,41 @@ import 'ssh_error_policy.dart';
 /// SFTP v3 reports modified times in whole seconds, so a same-size edit made
 /// within the second the file loaded only shows in its content. Re-reading is
 /// a second download, so larger files rely on size and modified time alone.
+/// A changed modified time always triggers a re-read, whatever the size.
 const remoteEditRehashMaxBytes = 256 * 1024;
 
 const _maxCopyAttempts = 100;
 const _maxNameBytes = 255;
+const _permissionBits = 0x1FF;
 
 /// How the host's file differs from the version an editor loaded.
 enum RemoteFileChange {
-  /// Size, modified time and, where it was checked, content all match.
+  /// The content matches, or size and modified time match where the content
+  /// was not re-read.
   unchanged,
 
-  /// The file exists but no longer matches the loaded version.
+  /// The file exists but its content no longer matches the loaded version.
   modified,
 
   /// Nothing exists at the path any more.
   deleted,
+
+  /// The path now names a folder or another entry that is not a file.
+  notAFile,
 }
 
-/// One version of a remote file: the server's size and modified time, plus a
-/// SHA-256 of the bytes that were read.
+/// The host's file changed between the save check and the write, so the
+/// write was abandoned with the file untouched.
+class RemoteFileChangedDuringSaveException implements Exception {
+  /// Creates the exception.
+  const RemoteFileChangedDuringSaveException();
+
+  @override
+  String toString() => 'The file changed on the host while saving';
+}
+
+/// One version of a remote file: the server's size, modified time and
+/// permission bits, plus a SHA-256 of the bytes that were read.
 @immutable
 class RemoteFileVersion {
   /// Creates a version record.
@@ -43,6 +59,7 @@ class RemoteFileVersion {
     required this.modifyTime,
     required this.length,
     required this.digest,
+    this.mode,
   });
 
   /// Records [bytes] as read, with the server's [attrs] when they are known.
@@ -52,6 +69,7 @@ class RemoteFileVersion {
         modifyTime: attrs?.modifyTime,
         length: bytes.length,
         digest: crypto.sha256.convert(bytes),
+        mode: _permissionsOf(attrs),
       );
 
   /// Size the server reported, or the byte count read when it reported none.
@@ -66,15 +84,44 @@ class RemoteFileVersion {
   /// SHA-256 of the bytes that were read.
   final crypto.Digest digest;
 
-  /// Whether [attrs] reports a different size or modified time.
-  ///
-  /// A field either side leaves out is not compared.
-  bool metadataDiffers(SftpFileAttrs attrs) =>
-      (size != null && attrs.size != null && size != attrs.size) ||
-      (modifyTime != null &&
-          attrs.modifyTime != null &&
-          modifyTime != attrs.modifyTime);
+  /// Permission bits (`0777` range), when the server reported them.
+  final int? mode;
+
+  /// Whether [attrs] reports a different size. Content of a different size
+  /// cannot match, so this is decisive.
+  bool sizeDiffers(SftpFileAttrs attrs) =>
+      size != null && attrs.size != null && size != attrs.size;
+
+  /// Whether [attrs] reports a different modified time, or either side left
+  /// it out. Rewrites with identical bytes also change it, so this only says
+  /// the content needs comparing.
+  bool modifyTimeUncertain(SftpFileAttrs attrs) =>
+      modifyTime == null ||
+      attrs.modifyTime == null ||
+      modifyTime != attrs.modifyTime;
+
+  /// This version with the size, time and mode of [attrs], for content that
+  /// was found to be the same.
+  RemoteFileVersion withAttributes(SftpFileAttrs attrs) => RemoteFileVersion(
+    size: attrs.size ?? size,
+    modifyTime: attrs.modifyTime,
+    length: length,
+    digest: digest,
+    mode: _permissionsOf(attrs) ?? mode,
+  );
 }
+
+int? _permissionsOf(SftpFileAttrs? attrs) {
+  final value = attrs?.mode?.value;
+  return value == null ? null : value & _permissionBits;
+}
+
+bool _isNotAFile(SftpFileAttrs attrs) =>
+    attrs.isDirectory ||
+    attrs.isBlockDevice ||
+    attrs.isCharacterDevice ||
+    attrs.isPipe ||
+    attrs.isSocket;
 
 /// Bytes read from a remote file and the version they came from.
 @immutable
@@ -92,9 +139,10 @@ class RemoteFileSnapshot {
 /// Tracks the version of a remote file open in an editor so a save can tell
 /// whether something else changed the file in the meantime.
 ///
-/// SFTP has no conditional write: [checkForChanges] and [save] are separate
-/// requests, so a change that lands between them is still overwritten. The
-/// window is a few round trips, not the whole editing session.
+/// SFTP has no conditional write. [save] re-checks size and modified time
+/// immediately before its final rename, so a change is only missed when it
+/// lands in the single round trip between that stat and the rename, or when
+/// it keeps both size and modified time on a file too large to re-read.
 class RemoteFileEditSession {
   /// Creates a session for [remotePath].
   RemoteFileEditSession({
@@ -109,6 +157,7 @@ class RemoteFileEditSession {
   final RemoteFileService service;
 
   RemoteFileVersion? _baseline;
+  SftpFileAttrs? _checkedAttrs;
 
   /// The version the editor's text is based on, once one was accepted.
   RemoteFileVersion? get baseline => _baseline;
@@ -119,17 +168,23 @@ class RemoteFileEditSession {
   /// The handle's attributes are read before its content, so a change between
   /// the two shows as a changed file at save time rather than going
   /// unnoticed. The result only becomes the baseline through [accept].
-  Future<RemoteFileSnapshot> read(
+  Future<RemoteFileSnapshot> read(SftpClient sftp, {required int maxBytes}) =>
+      _read(sftp, maxBytes: maxBytes, withAttributes: true);
+
+  Future<RemoteFileSnapshot> _read(
     SftpClient sftp, {
     required int maxBytes,
+    required bool withAttributes,
   }) async {
     final file = await sftp.open(remotePath);
     try {
       SftpFileAttrs? attrs;
-      try {
-        attrs = await file.stat();
-      } on SftpStatusError {
-        // Without fstat the content hash alone identifies the version.
+      if (withAttributes) {
+        try {
+          attrs = await file.stat();
+        } on SftpStatusError {
+          // Without fstat the content hash alone identifies the version.
+        }
       }
       final bytes = await file.readBytes(length: maxBytes);
       return RemoteFileSnapshot(bytes, RemoteFileVersion.of(bytes, attrs));
@@ -139,18 +194,25 @@ class RemoteFileEditSession {
   }
 
   /// Makes [snapshot] the version later saves are checked against.
-  void accept(RemoteFileSnapshot snapshot) => _baseline = snapshot.version;
+  void accept(RemoteFileSnapshot snapshot) {
+    _baseline = snapshot.version;
+    _checkedAttrs = null;
+  }
 
   /// Compares the host's file with the accepted baseline.
   ///
-  /// A size or modified-time difference is decisive. When both match and the
-  /// baseline is at most [remoteEditRehashMaxBytes], or the server gives no
-  /// modified time, the file is re-read and its hash compared.
+  /// A different size is decisive. A different (or unknown) modified time
+  /// means the file is re-read and its hash compared, so rewrites with the
+  /// same bytes (`sed -i`, `git stash pop`) do not count as changes; the
+  /// baseline then takes the new attributes. With both unchanged, files up to
+  /// [remoteEditRehashMaxBytes] are still re-read to catch a same-second
+  /// edit.
   Future<RemoteFileChange> checkForChanges(SftpClient sftp) async {
     final baseline = _baseline;
     if (baseline == null) {
       throw StateError('No baseline version was accepted');
     }
+    _checkedAttrs = null;
     final SftpFileAttrs attrs;
     try {
       attrs = await sftp.stat(remotePath);
@@ -160,81 +222,112 @@ class RemoteFileEditSession {
       }
       rethrow;
     }
-    if (attrs.isDirectory || baseline.metadataDiffers(attrs)) {
-      return RemoteFileChange.modified;
-    }
-    final hasModifyTimes =
-        baseline.modifyTime != null && attrs.modifyTime != null;
-    if (hasModifyTimes && baseline.length > remoteEditRehashMaxBytes) {
-      return RemoteFileChange.unchanged;
-    }
-    final RemoteFileSnapshot current;
-    try {
-      // One byte past the baseline shows a file that grew.
-      current = await read(sftp, maxBytes: baseline.length + 1);
-    } on SftpStatusError catch (error) {
-      if (error.code == SftpStatusCode.noSuchFile) {
-        return RemoteFileChange.deleted;
+    if (_isNotAFile(attrs)) return RemoteFileChange.notAFile;
+    if (baseline.sizeDiffers(attrs)) return RemoteFileChange.modified;
+    final needsRead =
+        baseline.modifyTimeUncertain(attrs) ||
+        baseline.length <= remoteEditRehashMaxBytes;
+    if (needsRead) {
+      final RemoteFileSnapshot current;
+      try {
+        // One byte past the baseline shows a file that grew.
+        current = await _read(
+          sftp,
+          maxBytes: baseline.length + 1,
+          withAttributes: false,
+        );
+      } on SftpStatusError catch (error) {
+        if (error.code == SftpStatusCode.noSuchFile) {
+          return RemoteFileChange.deleted;
+        }
+        rethrow;
       }
-      rethrow;
+      if (current.version.digest != baseline.digest) {
+        return RemoteFileChange.modified;
+      }
+      _baseline = baseline.withAttributes(attrs);
     }
-    return current.version.digest == baseline.digest
-        ? RemoteFileChange.unchanged
-        : RemoteFileChange.modified;
+    _checkedAttrs = attrs;
+    return RemoteFileChange.unchanged;
   }
 
   /// Replaces the file with [bytes] and makes them the new baseline.
   ///
   /// Keeps [RemoteFileService.replaceFileBytes]'s safe replacement and
-  /// symlink handling. When the attributes cannot be read back afterwards,
-  /// the next check falls back to comparing content.
-  Future<void> save(SftpClient sftp, Uint8List bytes) async {
+  /// symlink handling. After an unchanged [checkForChanges], the size and
+  /// modified time are compared again just before the final rename and a
+  /// difference throws [RemoteFileChangedDuringSaveException] with the file
+  /// untouched. [force] skips that comparison, for an overwrite the user
+  /// chose. A file that no longer exists is recreated with the permission
+  /// bits it had when loaded, or owner-only access when they are unknown.
+  Future<void> save(
+    SftpClient sftp,
+    Uint8List bytes, {
+    bool force = false,
+  }) async {
+    final checked = force ? null : _checkedAttrs;
+    final loadedMode = _baseline?.mode;
     await service.replaceFileBytes(
       sftp: sftp,
       remotePath: remotePath,
       bytes: bytes,
+      newFileMode: loadedMode == null
+          ? remoteUploadFileMode
+          : SftpFileMode.value(loadedMode),
+      beforeReplace: checked == null
+          ? null
+          : () async {
+              final SftpFileAttrs current;
+              try {
+                current = await sftp.stat(remotePath);
+              } on SftpStatusError catch (error) {
+                if (error.code != SftpStatusCode.noSuchFile) rethrow;
+                throw const RemoteFileChangedDuringSaveException();
+              }
+              if (current.size != checked.size ||
+                  current.modifyTime != checked.modifyTime) {
+                throw const RemoteFileChangedDuringSaveException();
+              }
+            },
     );
-    SftpFileAttrs? attrs;
-    try {
-      attrs = await sftp.stat(remotePath);
-    } on Object catch (error) {
-      if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
-      DiagnosticsLogService.instance.warning(
-        'sftp.editor',
-        'post_save_stat_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-    }
+    // The modified time is left unknown so a later check compares content,
+    // whatever another writer did after the rename.
     _baseline = RemoteFileVersion(
-      size: attrs?.size,
-      modifyTime: attrs?.modifyTime,
+      size: bytes.length,
+      modifyTime: null,
       length: bytes.length,
       digest: crypto.sha256.convert(bytes),
+      mode: loadedMode,
     );
+    _checkedAttrs = null;
   }
 
   /// Writes [bytes] to a new file beside [remotePath] and returns its path.
   ///
-  /// The original is never opened for writing. The copy is created
-  /// exclusively, so an existing file is never replaced, and is given the
+  /// The original is never opened for writing. A name is reserved with an
+  /// empty, exclusively created placeholder that is restricted to the
   /// original's permission bits (or owner-only access when the original is
-  /// gone) before any content is written to it.
+  /// gone) on its open handle. The content is then written through
+  /// [RemoteFileService.replaceFileBytes], which stages it in a private
+  /// scratch folder and renames it over the placeholder, so a reader who
+  /// opened the placeholder early only ever sees an empty file and an
+  /// existing file is never replaced.
   Future<String> saveCopy(SftpClient sftp, Uint8List bytes) async {
-    SftpFileMode? originalMode;
+    int? originalMode;
     try {
-      originalMode = (await sftp.stat(remotePath)).mode;
+      originalMode = _permissionsOf(await sftp.stat(remotePath));
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
-    final mode = originalMode == null
-        ? remoteUploadFileMode
-        : SftpFileMode.value(originalMode.value & 0x1FF);
+    final mode = SftpFileMode.value(
+      originalMode ?? _baseline?.mode ?? remoteUploadFileMode.value,
+    );
     for (var attempt = 1; attempt <= _maxCopyAttempts; attempt++) {
       final candidate = remoteFileCopyPath(remotePath, attempt);
       if (await _exists(sftp, candidate)) continue;
-      final SftpFile file;
+      final SftpFile placeholder;
       try {
-        file = await sftp.open(
+        placeholder = await sftp.open(
           candidate,
           mode:
               SftpFileOpenMode.write |
@@ -251,13 +344,18 @@ class RemoteFileEditSession {
       }
       try {
         try {
-          await sftp.setStat(candidate, SftpFileAttrs(mode: mode));
-          await file.writeBytes(bytes);
+          await placeholder.setStat(SftpFileAttrs(mode: mode));
         } finally {
-          await file.close();
+          await placeholder.close();
         }
+        await service.replaceFileBytes(
+          sftp: sftp,
+          remotePath: candidate,
+          bytes: bytes,
+          newFileMode: mode,
+        );
       } on Object {
-        await _removeQuietly(sftp, candidate);
+        await _removePlaceholderQuietly(sftp, candidate);
         rethrow;
       }
       return candidate;
@@ -275,9 +373,12 @@ class RemoteFileEditSession {
     }
   }
 
-  Future<void> _removeQuietly(SftpClient sftp, String path) async {
+  /// Removes a reserved copy name only while it is still an empty file, so a
+  /// copy that did land is never deleted.
+  Future<void> _removePlaceholderQuietly(SftpClient sftp, String path) async {
     try {
-      await sftp.remove(path);
+      final attrs = await sftp.stat(path, followLink: false);
+      if (attrs.isFile && attrs.size == 0) await sftp.remove(path);
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       DiagnosticsLogService.instance.warning(
@@ -293,22 +394,29 @@ class RemoteFileEditSession {
 ///
 /// `notes.txt` becomes `notes (copy).txt`, then `notes (copy 2).txt`. A
 /// leading dot does not start an extension, so `.env` becomes `.env (copy)`.
-/// The stem is shortened when the name would pass the usual 255-byte limit.
+/// Names are kept within the usual 255-byte limit: the stem is shortened
+/// first, and an extension too long to keep is treated as part of the stem.
 String remoteFileCopyPath(String remotePath, int attempt) {
   final slash = remotePath.lastIndexOf('/');
   final directory = remotePath.substring(0, slash + 1);
   final name = remotePath.substring(slash + 1);
-  final dot = name.lastIndexOf('.');
-  final hasExtension = dot > 0 && dot < name.length - 1;
-  var stem = hasExtension ? name.substring(0, dot) : name;
-  final extension = hasExtension ? name.substring(dot) : '';
   final suffix = attempt <= 1 ? ' (copy)' : ' (copy $attempt)';
-  final tail = '$suffix$extension';
-  final tailBytes = utf8.encode(tail).length;
+  final dot = name.lastIndexOf('.');
+  var stem = name;
+  var extension = '';
+  if (dot > 0 && dot < name.length - 1) {
+    final candidateExtension = name.substring(dot);
+    // Keep at least a little of the stem beside the extension.
+    if (utf8.encode('$suffix$candidateExtension').length < _maxNameBytes - 8) {
+      stem = name.substring(0, dot);
+      extension = candidateExtension;
+    }
+  }
+  final tailBytes = utf8.encode('$suffix$extension').length;
   while (stem.isNotEmpty &&
       utf8.encode(stem).length + tailBytes > _maxNameBytes) {
     final runes = stem.runes.toList()..removeLast();
     stem = String.fromCharCodes(runes);
   }
-  return '$directory$stem$tail';
+  return '$directory$stem$suffix$extension';
 }
