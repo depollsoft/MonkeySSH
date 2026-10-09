@@ -11,6 +11,7 @@ import 'package:xterm/src/ui/input_map.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../domain/services/diagnostics_log_service.dart';
+import '../shortcuts/app_shortcuts.dart';
 import 'terminal_ime_engine.dart';
 
 export 'terminal_ime_engine.dart';
@@ -447,6 +448,13 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   })?
   _hardwareRepeatInput;
   bool _isInputConnectionShown = false;
+  final _appShortcutKeyFilter = AppShortcutKeyFilter();
+
+  /// Physical keys whose press this terminal received while focused. A
+  /// repeat or release of any other key belongs to whatever had focus at the
+  /// press (a switcher row, a dialog), not to the program.
+  final Set<PhysicalKeyboardKey> _keysPressedWhileFocused =
+      <PhysicalKeyboardKey>{};
 
   @override
   void initState() {
@@ -531,7 +539,31 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   }
 
   bool _handleGlobalKeyEvent(KeyEvent event) {
-    if (!widget.focusNode.hasFocus) {
+    final focused = widget.focusNode.hasFocus;
+    final physicalKey = event.physicalKey;
+    switch (event) {
+      case KeyDownEvent():
+        if (focused) {
+          _keysPressedWhileFocused.add(physicalKey);
+        } else {
+          _keysPressedWhileFocused.remove(physicalKey);
+        }
+      case KeyRepeatEvent():
+        if (!focused || !_keysPressedWhileFocused.contains(physicalKey)) {
+          return false;
+        }
+      case KeyUpEvent():
+        if (!_keysPressedWhileFocused.remove(physicalKey)) {
+          return false;
+        }
+        if (!focused) {
+          // The program saw the press; let it see the release too, so a
+          // kitty-protocol program is not left with a key held down.
+          _onKeyEvent(widget.focusNode, event);
+          return false;
+        }
+    }
+    if (!focused) {
       return false;
     }
     final result = _onKeyEvent(widget.focusNode, event);
@@ -862,6 +894,11 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   // -- Hardware key event handling --
 
   KeyEventResult _onKeyEvent(FocusNode focusNode, KeyEvent event) {
+    // Reserved app shortcut chords (see app_shortcuts.dart) never reach the
+    // program. Leaving them unhandled lets the app's Shortcuts run them.
+    if (_appShortcutKeyFilter.withhold(event)) {
+      return KeyEventResult.ignored;
+    }
     if (widget.readOnly) {
       _stopHardwareKeyRepeat();
       return KeyEventResult.ignored;

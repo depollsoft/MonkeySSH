@@ -47,6 +47,8 @@ import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
+import '../shortcuts/app_shortcut_scope.dart';
+import '../shortcuts/app_shortcuts.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
@@ -212,6 +214,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
   final AcpSftpClientCache _sftpCache = AcpSftpClientCache();
+  // Standalone chats own a focus controller for the focus-composer shortcut.
+  final _ownComposerFocusController = AcpComposerFocusController();
   Timer? _previewPublishTimer;
   AcpSessionState? _pendingPreviewSession;
   List<ui.AcpTimelineEntry>? _pendingPreviewEntries;
@@ -996,6 +1000,21 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final screen = _buildScreen(context);
+    // Embedded chats use the terminal screen's shortcuts.
+    if (widget.embedded) {
+      return screen;
+    }
+    return AppShortcutScope(
+      handlers: {
+        AppShortcutAction.focusComposer: (_) =>
+            _ownComposerFocusController.requestFocus(),
+      },
+      child: screen,
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     final sessionProvider = acpSessionManagerStateProvider.select(
       (state) => state.asData?.value.byKeyValue(_key.value),
     );
@@ -1203,7 +1222,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                     AcpComposer(
                       controller: _composer,
                       attachmentActions: _attachmentActions(session),
-                      focusController: widget.composerFocusController,
+                      focusController:
+                          widget.composerFocusController ??
+                          _ownComposerFocusController,
                       controls: _buildQuickConfigControls(session),
                       useBottomSafeArea: !widget.embedded,
                     ),

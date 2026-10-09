@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -1044,6 +1045,88 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(openedRoutes, ['/terminal/1?connectionId=7']);
+    });
+
+    testWidgets('arrows and Return open a connection from the keyboard', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final openedRoutes = <String>[];
+      final sessionsNotifier = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          _buildActiveConnection(
+            connectionId: 7,
+            hostId: 1,
+            state: SshConnectionState.connecting,
+          ),
+          _buildActiveConnection(
+            connectionId: 8,
+            hostId: 1,
+            state: SshConnectionState.connecting,
+          ),
+        ],
+      );
+      final router = GoRouter(
+        initialLocation: '/',
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) =>
+                const HomeScreen(initialTab: HomeScreenTab.connections),
+          ),
+          GoRoute(
+            path: '/terminal/:hostId',
+            builder: (context, state) => _RecordingTerminalPage(
+              route: state.uri.toString(),
+              openedRoutes: openedRoutes,
+            ),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessionsNotifier),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+              ]),
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // The list holds focus on open: Up starts at the last connection.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(openedRoutes, ['/terminal/1?connectionId=8']);
+
+      router.pop();
+      await tester.pumpAndSettle();
+      // Back home, Up as far as it goes reaches the first connection.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(openedRoutes, [
+        '/terminal/1?connectionId=8',
+        '/terminal/1?connectionId=7',
+      ]);
     });
 
     testWidgets(
