@@ -25,6 +25,10 @@ const int _unambiguousPrefixChars = 16;
 /// finished or failed while the user was away.
 const int _maxRunningTools = 64;
 
+/// Most agent and reasoning messages a marker remembers the size of, to
+/// report replies that kept streaming while the user was away.
+const int _maxTrackedMessages = 64;
+
 /// How far the user had got in a session's timeline when they left.
 @immutable
 final class AcpLastSeenMarker {
@@ -36,13 +40,15 @@ final class AcpLastSeenMarker {
     required this.hadSessionError,
     required Set<String> pendingRequestIds,
     required Set<String> runningToolIds,
+    required Map<int, int> messageSizes,
     this.toolCallId,
     this.role,
     this.messageId,
     this.textPrefix = '',
     this.textIsWhole = false,
   }) : pendingRequestIds = Set<String>.unmodifiable(pendingRequestIds),
-       runningToolIds = Set<String>.unmodifiable(runningToolIds);
+       runningToolIds = Set<String>.unmodifiable(runningToolIds),
+       messageSizes = Map<int, int>.unmodifiable(messageSizes);
 
   /// The entry of [timeline] the user had seen up to, or `null` when nothing
   /// is loaded.
@@ -84,6 +90,18 @@ final class AcpLastSeenMarker {
     final tracked = running.length <= _maxRunningTools
         ? running
         : running.sublist(running.length - _maxRunningTools);
+    // Streamed chunks grow a message in place, at the same order.
+    final messageSizes = <int, int>{};
+    for (
+      var i = index;
+      i >= 0 && messageSizes.length < _maxTrackedMessages;
+      i--
+    ) {
+      final entry = entries[i];
+      if (entry is d.AcpMessageEntry && entry.role != d.AcpMessageRole.user) {
+        messageSizes[entry.order] = _contentSize(entry);
+      }
+    }
     final newestOrder = entries.last.order;
     return switch (seen) {
       d.AcpToolCallEntry(:final order, :final toolCallId) =>
@@ -95,6 +113,7 @@ final class AcpLastSeenMarker {
           hadSessionError: hadSessionError,
           pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
+          messageSizes: messageSizes,
           toolCallId: toolCallId,
         ),
       d.AcpMessageEntry(:final order, :final role, :final messageId) =>
@@ -106,6 +125,7 @@ final class AcpLastSeenMarker {
           hadSessionError: hadSessionError,
           pendingRequestIds: pendingRequestIds,
           runningToolIds: tracked.toSet(),
+          messageSizes: messageSizes,
           role: role,
           // A user prompt carries a local identifier until the agent echoes
           // it, so only agent and reasoning identifiers identify a message.
@@ -144,6 +164,11 @@ final class AcpLastSeenMarker {
 
   /// Tool calls that were still running when the user left.
   final Set<String> runningToolIds;
+
+  /// Content size of the newest agent and reasoning messages up to the last
+  /// seen entry, by order, to notice one that kept streaming while the user
+  /// was away. Only sizes are kept, never the text.
+  final Map<int, int> messageSizes;
 
   /// The last seen tool call, when the last entry was one.
   final String? toolCallId;
@@ -255,8 +280,26 @@ bool acpChangedSince(
         entry.order > marker.newestOrder ||
         (entry is d.AcpToolCallEntry &&
             _isTerminal(entry.status) &&
-            marker.runningToolIds.contains(entry.toolCallId)),
+            marker.runningToolIds.contains(entry.toolCallId)) ||
+        _grewSince(marker.messageSizes[entry.order], entry),
   );
+}
+
+/// Whether [entry] is a message larger than [seenSize], the size it had
+/// when the user left.
+bool _grewSince(int? seenSize, d.AcpTimelineEntry entry) =>
+    seenSize != null &&
+    entry is d.AcpMessageEntry &&
+    entry.role != d.AcpMessageRole.user &&
+    _contentSize(entry) > seenSize;
+
+/// Text length of [entry], plus one for each other content block.
+int _contentSize(d.AcpMessageEntry entry) {
+  var size = 0;
+  for (final block in entry.content) {
+    size += block is AcpTextContent ? block.text.length : 1;
+  }
+  return size;
 }
 
 /// What arrived since the user left, counted from structured data only.
@@ -437,7 +480,8 @@ AcpUnreadState? computeAcpUnreadState({
 
   int? anchor;
   var trimmed = false;
-  if (identical(marker.source, timeline.source)) {
+  final sameSource = identical(marker.source, timeline.source);
+  if (sameSource) {
     anchor = marker.order;
     // Losing only the last seen entry itself loses nothing unread.
     trimmed = domainEntries.first.order > marker.order + 1;
@@ -445,17 +489,24 @@ AcpUnreadState? computeAcpUnreadState({
     anchor = marker.relocateIn(domainEntries);
   }
   if (anchor == null) {
-    return const AcpUnreadState(
+    // What changed in the timeline is unknown, but a request or error known
+    // from the session state still deserves its digest.
+    return AcpUnreadState(
       dividerEntryIndex: 0,
       earlierHistoryUnavailable: true,
-      digest: null,
+      digest: stateOnly?.digest,
     );
   }
 
   final newIds = <String>{};
   final finishedIds = <String>{};
   for (final entry in domainEntries) {
-    if (entry.order > anchor) {
+    // A message that kept streaming is unread from its start. In a rebuilt
+    // timeline only the relocated last seen entry can be compared.
+    final seenSize = sameSource
+        ? marker.messageSizes[entry.order]
+        : (entry.order == anchor ? marker.messageSizes[marker.order] : null);
+    if (entry.order > anchor || _grewSince(seenSize, entry)) {
       newIds.add(acpPresentationEntryId(entry));
     } else if (entry case d.AcpToolCallEntry(:final toolCallId, :final status)
         when _isTerminal(status) &&

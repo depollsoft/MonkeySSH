@@ -1288,29 +1288,39 @@ class _UnreadDivider extends StatelessWidget {
       child: ExcludeSemantics(
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: FluttyTheme.spacingSm),
-          child: Row(
-            children: [
-              rule,
-              const SizedBox(width: FluttyTheme.spacingSm),
-              Icon(
-                earlierHistoryUnavailable
-                    ? Icons.history_toggle_off
-                    : Icons.mark_chat_unread_outlined,
-                size: 14,
-                color: color,
-              ),
-              const SizedBox(width: FluttyTheme.spacingXs),
-              Text(
-                label,
-                style: FluttyTheme.monoStyle.copyWith(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
+          // The label may take most of the row and wraps beyond that, so a
+          // large text size does not overflow; the rules take what is left.
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: [
+                rule,
+                const SizedBox(width: FluttyTheme.spacingSm),
+                Icon(
+                  earlierHistoryUnavailable
+                      ? Icons.history_toggle_off
+                      : Icons.mark_chat_unread_outlined,
+                  size: 14,
                   color: color,
                 ),
-              ),
-              const SizedBox(width: FluttyTheme.spacingSm),
-              rule,
-            ],
+                const SizedBox(width: FluttyTheme.spacingXs),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth * 0.7,
+                  ),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: FluttyTheme.monoStyle.copyWith(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: FluttyTheme.spacingSm),
+                rule,
+              ],
+            ),
           ),
         ),
       ),

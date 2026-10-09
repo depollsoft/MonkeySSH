@@ -316,8 +316,11 @@ void registerAcpUnreadTests() {
         _tool(2, 'later'),
       ], source: Object());
       final state = _unread(marker, rebuilt)!;
-      expect(state.dividerEntryIndex, 2);
+      // The message kept streaming after the user left, so it is unread too.
+      expect(state.dividerEntryIndex, 1);
       expect(state.earlierHistoryUnavailable, isFalse);
+      expect(state.digest!.replies, 1);
+      expect(state.digest!.toolCallCount, 1);
     });
 
     test('falls back when a rebuilt timeline lacks the last seen entry', () {
@@ -331,6 +334,29 @@ void registerAcpUnreadTests() {
       expect(state.dividerEntryIndex, 0);
       expect(state.earlierHistoryUnavailable, isTrue);
       expect(state.digest, isNull);
+      // A request or error known from the session state still shows.
+      final waiting = _unread(marker, rebuilt, pending: {'r1'}, error: true)!;
+      expect(waiting.dividerEntryIndex, 0);
+      expect(waiting.earlierHistoryUnavailable, isTrue);
+      expect(waiting.digest!.summary, '1 request waiting · 1 error');
+    });
+
+    test('a reply that kept streaming while away is unread', () {
+      final marker = AcpLastSeenMarker.of(
+        _timeline([...seen, _agent(2, 'Still')], source: source),
+      )!;
+      final grown = _timeline([
+        ...seen,
+        _agent(2, 'Still writing, and now done.'),
+      ], source: source);
+      expect(acpChangedSince(marker, grown), isTrue);
+      final state = _unread(marker, grown)!;
+      expect(state.dividerEntryIndex, 2);
+      expect(state.digest!.replies, 1);
+      // The same text is not news.
+      final same = _timeline([...seen, _agent(2, 'Still')], source: source);
+      expect(acpChangedSince(marker, same), isFalse);
+      expect(_unread(marker, same), isNull);
     });
 
     test('counts nested subagent work and marks its block', () {

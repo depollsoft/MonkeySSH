@@ -150,7 +150,40 @@ void registerAcpUnreadWidgetTests() {
       expect(find.text('earlier history not available'), findsOneWidget);
     });
 
-    testWidgets('the digest bar reads out the digest with 44 pt targets', (
+    testWidgets('the divider label wraps at large text sizes', (tester) async {
+      tester.view
+        ..physicalSize = const Size(320, 640)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: FluttyTheme.dark,
+          home: const MediaQuery(
+            data: MediaQueryData(
+              size: Size(320, 640),
+              textScaler: TextScaler.linear(3),
+              disableAnimations: true,
+            ),
+            child: Scaffold(
+              body: AcpMessageThread(
+                entries: [AcpAssistantMessageEntry(id: 'a', markdown: 'x')],
+                unreadDivider: AcpThreadUnreadDivider(
+                  entryIndex: 0,
+                  earlierHistoryUnavailable: true,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      final label = find.text('earlier history not available');
+      expect(label, findsOneWidget);
+      expect(tester.getSize(label).width, lessThanOrEqualTo(320 * 0.7));
+    });
+
+    testWidgets('the digest bar reads out the digest with 48 pt targets', (
       tester,
     ) async {
       var jumped = false;
