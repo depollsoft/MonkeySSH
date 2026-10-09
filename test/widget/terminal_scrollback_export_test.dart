@@ -31,11 +31,29 @@ void main() {
     );
   });
 
+  test('macOS may open the save dialog the export uses', () {
+    // file_picker refuses to show the save panel in a sandboxed app without
+    // this entitlement.
+    for (final path in [
+      'macos/Runner/Release.entitlements',
+      'macos/Runner/DebugProfile.entitlements',
+    ]) {
+      expect(
+        File(path).readAsStringSync(),
+        contains('com.apple.security.files.user-selected.read-write'),
+        reason: path,
+      );
+    }
+  });
+
   test('cleans up exports left from an earlier run', () async {
     final temp = Directory.systemTemp.createTempSync('scrollback-cleanup-');
     addTearDown(() => temp.deleteSync(recursive: true));
     final old = DateTime.now().subtract(const Duration(hours: 1));
-    final stale = Directory('${temp.path}/scrollback-old')..createSync();
+    final stale = Directory('${temp.path}/monkeyssh-scrollback-old')
+      ..createSync();
+    // Another program's entry in a shared temporary directory.
+    final foreign = Directory('${temp.path}/scrollback-other')..createSync();
     File('${stale.path}/terminal-scrollback-1.txt').writeAsStringSync('x');
     final sharePlus = Directory('${temp.path}/share_plus')..createSync();
     final staleCopy = File('${sharePlus.path}/terminal-scrollback-2.txt')
@@ -48,12 +66,26 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
     final now = DateTime.now();
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    final fresh = Directory('${temp.path}/scrollback-new')..createSync();
+    final fresh = Directory('${temp.path}/monkeyssh-scrollback-new')
+      ..createSync();
+
+    // Linux and Windows share their temporary directory: nothing is touched.
+    expect(
+      await cleanUpTerminalScrollbackExports(
+        temporaryDirectory: temp,
+        maxAge: Duration.zero,
+        now: now,
+        platform: TargetPlatform.linux,
+      ),
+      0,
+    );
+    expect(stale.existsSync(), isTrue);
 
     final deleted = await cleanUpTerminalScrollbackExports(
       temporaryDirectory: temp,
       maxAge: Duration.zero,
       now: now,
+      platform: TargetPlatform.android,
     );
 
     expect(deleted, 2);
@@ -61,6 +93,7 @@ void main() {
     expect(staleCopy.existsSync(), isFalse);
     expect(fresh.existsSync(), isTrue);
     expect(otherShare.existsSync(), isTrue);
+    expect(foreign.existsSync(), isTrue);
   });
 
   group('exportTerminalScrollback', () {

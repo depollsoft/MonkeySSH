@@ -40,16 +40,29 @@ bool terminalScrollbackExportUsesShareSheet(
 /// [cleanUpTerminalScrollbackExports] removes it.
 const kTerminalScrollbackExportMaxAge = Duration(minutes: 10);
 
+/// Prefix of the temporary directories exports are written to.
+const kTerminalScrollbackExportDirectoryPrefix = 'monkeyssh-scrollback-';
+
 /// Deletes scrollback exports left in [temporaryDirectory] (the app's
-/// temporary directory when null): our own `scrollback-*` directories, and
-/// the copy share_plus keeps in `share_plus/` on Android until its next
-/// share. Only files older than [maxAge] go, so a share still in progress
-/// keeps its file. Returns how many entries were deleted.
+/// temporary directory when null): our own export directories, and the copy
+/// share_plus keeps in `share_plus/` on Android until its next share. Only
+/// entries older than [maxAge] go, so a share still in progress keeps its
+/// file. Returns how many entries were deleted.
+///
+/// Runs only where exports use the share sheet (iOS and Android), whose
+/// temporary directories are private to the app. On Linux and Windows that
+/// directory is the shared system one, and exports never write there.
 Future<int> cleanUpTerminalScrollbackExports({
   Directory? temporaryDirectory,
   Duration maxAge = kTerminalScrollbackExportMaxAge,
   DateTime? now,
+  TargetPlatform? platform,
 }) async {
+  if (!terminalScrollbackExportUsesShareSheet(
+    platform ?? defaultTargetPlatform,
+  )) {
+    return 0;
+  }
   final base = temporaryDirectory ?? await getTemporaryDirectory();
   final cutoff = (now ?? DateTime.now()).subtract(maxAge);
   var deleted = 0;
@@ -78,7 +91,10 @@ Future<int> cleanUpTerminalScrollbackExports({
   }
 
   try {
-    await sweep(base, (name) => name.startsWith('scrollback-'));
+    await sweep(
+      base,
+      (name) => name.startsWith(kTerminalScrollbackExportDirectoryPrefix),
+    );
     await sweep(
       Directory(p.join(base.path, 'share_plus')),
       (name) =>
@@ -174,7 +190,7 @@ Future<void> exportTerminalScrollback({
   Directory? directory;
   try {
     final base = await (temporaryDirectory ?? getTemporaryDirectory)();
-    directory = await base.createTemp('scrollback-');
+    directory = await base.createTemp(kTerminalScrollbackExportDirectoryPrefix);
     final file = File(p.join(directory.path, fileName));
     await file.writeAsBytes(bytes, flush: true);
     await share(
