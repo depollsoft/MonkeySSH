@@ -11796,12 +11796,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     showsKeyboardToolbar
                         ? removeSystemBottomInset(MediaQuery.of(bodyContext))
                         : MediaQuery.of(bodyContext),
+                    reservedBottom: _terminalViewportReservedBottomPadding,
                   );
             final terminalArea = TerminalScrollbackSearchOverlay(
               search: showsNativeAgent ? null : _scrollbackSearch,
               scrollController: _terminalScrollController,
               lineHeight: () => _terminalLineHeight,
               onClose: _closeScrollbackSearch,
+              reservedBottom: _terminalViewportReservedBottomPadding,
               child: _buildTerminalWithTmuxBar(
                 terminalTheme,
                 isMobile,

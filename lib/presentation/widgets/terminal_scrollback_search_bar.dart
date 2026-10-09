@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -62,10 +63,17 @@ String? describeTerminalSearchStatusForSemantics(
   }
 }
 
-/// Height the find bar covers at the bottom of the terminal area whose
-/// media query is [data]: the bar plus the bottom safe-area padding it adds.
-double terminalSearchBarObscuredHeight(MediaQueryData data) =>
-    TerminalScrollbackSearchBar.height + data.padding.bottom;
+/// Height the find bar covers of the terminal view at the bottom of a
+/// terminal area whose media query is [data]: the bar plus the bottom
+/// safe-area padding it adds, less [reservedBottom], space at the bottom of
+/// the area the terminal view already leaves free (the tmux bar's handle).
+double terminalSearchBarObscuredHeight(
+  MediaQueryData data, {
+  double reservedBottom = 0,
+}) => math.max(
+  0,
+  TerminalScrollbackSearchBar.height + data.padding.bottom - reservedBottom,
+);
 
 /// Lays the find bar for [search] over the bottom edge of [child], the
 /// terminal area, and scrolls the terminal to each match it reveals. Shows
@@ -78,8 +86,13 @@ class TerminalScrollbackSearchOverlay extends StatelessWidget {
     required this.lineHeight,
     required this.onClose,
     required this.child,
+    this.reservedBottom = 0,
     super.key,
   });
+
+  /// Space at the bottom of the area the terminal view already leaves free,
+  /// such as the tmux bar's handle; see [terminalSearchBarObscuredHeight].
+  final double reservedBottom;
 
   /// The open search, or null when find is closed.
   final TerminalScrollbackSearchController? search;
@@ -108,7 +121,10 @@ class TerminalScrollbackSearchOverlay extends StatelessWidget {
       currentOffset: position.pixels,
       minScrollExtent: position.minScrollExtent,
       maxScrollExtent: position.maxScrollExtent,
-      obscuredBottom: terminalSearchBarObscuredHeight(MediaQuery.of(context)),
+      obscuredBottom: terminalSearchBarObscuredHeight(
+        MediaQuery.of(context),
+        reservedBottom: reservedBottom,
+      ),
     );
     if (target == null) {
       return;
@@ -205,8 +221,12 @@ class _TerminalScrollbackSearchBarState
     widget.controller.addListener(_handleSearchChanged);
     // Autofocus does nothing while the terminal holds focus, and the menu
     // that opened the bar hands focus back to the terminal first. Without
-    // this the query, and Enter, would go to the remote shell.
-    _focusFieldAfterFrame();
+    // this the query, and Enter, would go to the remote shell. Only when find
+    // opens: a bar rebuilt after a native chat leaves focus where it is.
+    if (!widget.controller.initialFocusDone) {
+      widget.controller.initialFocusDone = true;
+      _focusFieldAfterFrame();
+    }
   }
 
   void _focusFieldAfterFrame() {

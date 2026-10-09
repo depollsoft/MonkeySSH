@@ -965,6 +965,10 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
 
     _syncGraphicsAnimationTicker();
     _scheduleGraphicsAnimationSync();
+    if (transportChanged && widget.bottomScrollClearance > 0 && mounted) {
+      // Scroll physics depend on the screen while a clearance is set.
+      setState(() {});
+    }
     final currentViewWidth = widget.terminal.viewWidth;
     if (currentViewWidth == _lastTerminalViewWidth) {
       return;
@@ -1179,7 +1183,13 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     Widget child = Scrollable(
       key: _scrollableKey,
       controller: _scrollController,
-      physics: widget.touchScrollToTerminal
+      // The bottom clearance gives the alternate screen a little scroll room
+      // for revealing rows. User scrolling must still reach the full-screen
+      // program, so the view itself does not scroll there.
+      physics:
+          widget.touchScrollToTerminal ||
+              (widget.bottomScrollClearance > 0 &&
+                  widget.terminal.isUsingAltBuffer)
           ? const NeverScrollableScrollPhysics()
           : null,
       viewportBuilder: (context, offset) {

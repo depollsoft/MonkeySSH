@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -196,6 +197,51 @@ void main() {
       expect(other.hasFocus, isFalse);
     });
 
+    testWidgets('takes focus only when find opens, not when shown again', (
+      tester,
+    ) async {
+      final other = FocusNode();
+      addTearDown(other.dispose);
+      var shown = true;
+      late StateSetter setOuterState;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: FluttyTheme.dark,
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                setOuterState = setState;
+                return Column(
+                  children: [
+                    Expanded(child: TextField(focusNode: other)),
+                    if (shown)
+                      TerminalScrollbackSearchBar(
+                        controller: search,
+                        onClose: () {},
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(other.hasFocus, isFalse);
+
+      // Hidden behind a native chat, then shown again with the terminal
+      // (here the other field) focused.
+      setOuterState(() => shown = false);
+      await tester.pump();
+      other.requestFocus();
+      await tester.pump();
+      setOuterState(() => shown = true);
+      await tester.pump();
+      await tester.pump();
+
+      expect(other.hasFocus, isTrue);
+    });
+
     testWidgets('the keyboard Search key steps and keeps the keyboard up', (
       tester,
     ) async {
@@ -318,6 +364,59 @@ void main() {
       expect(render.paintCount, greaterThan(paints));
       expect(tester.takeException(), isNull);
     });
+  });
+
+  group('find bar clearance', () {
+    test('leaves out space the terminal view already keeps free', () {
+      const media = MediaQueryData(padding: EdgeInsets.only(bottom: 34));
+      expect(terminalSearchBarObscuredHeight(media), 94);
+      expect(terminalSearchBarObscuredHeight(media, reservedBottom: 44), 50);
+      expect(terminalSearchBarObscuredHeight(media, reservedBottom: 200), 0);
+    });
+
+    testWidgets(
+      'wheel scrolling on the alternate screen still reaches the program',
+      (tester) async {
+        final out = <String>[];
+        final terminal = Terminal()..onOutput = out.add;
+        final controller = ScrollController();
+        addTearDown(controller.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 400,
+                height: 300,
+                child: MonkeyTerminalView(
+                  terminal,
+                  scrollController: controller,
+                  hardwareKeyboardOnly: true,
+                  bottomScrollClearance: 60,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        terminal.write('\x1b[?1049h');
+        for (var row = 0; row < 40; row++) {
+          terminal.write('tui row $row\r\n');
+        }
+        await tester.pump();
+        await tester.pump();
+        final before = controller.offset;
+        final pointer = TestPointer(1, PointerDeviceKind.mouse);
+        final center = tester.getCenter(find.byType(MonkeyTerminalView));
+        await tester.sendEventToBinding(pointer.hover(center));
+        await tester.sendEventToBinding(pointer.scroll(const Offset(0, -40)));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(controller.offset, before);
+        expect(out, isNotEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
   });
 
   group('TerminalScrollbackSearchOverlay', () {
