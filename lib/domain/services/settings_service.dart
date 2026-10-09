@@ -289,6 +289,21 @@ class SettingsService {
     };
   }
 
+  /// Returns the keys of every setting that starts with [prefix], without
+  /// reading any values.
+  Future<List<String>> getKeysWithPrefix(String prefix) async {
+    final settings = _db.settings;
+    final query = _db.selectOnly(settings)
+      ..addColumns([settings.key])
+      ..where(settingKeyStartsWith(settings.key, prefix));
+    final rows = await query.get();
+    return [
+      for (final row in rows)
+        if (row.read(settings.key) case final key? when key.startsWith(prefix))
+          key,
+    ];
+  }
+
   /// Writes several settings in one transaction; a `null` value deletes.
   Future<void> setStrings(Map<String, String?> values) =>
       _db.transaction(() async {

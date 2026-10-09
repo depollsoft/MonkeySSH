@@ -103,6 +103,10 @@ class AcpComposerDraftStore {
   final Set<String> _unreadable = <String>{};
   final Map<String, Future<AcpOpenedComposerDraft>> _loads = {};
   final Map<String, List<AcpAttachmentCandidate>> _savedChips = {};
+  final Map<String, int> _generations = <String, int>{};
+  final Map<String, List<({AcpComposerDraftSnapshot typed, int? max})>>
+  _pendingAppends = {};
+  final Set<int> _forgottenHosts = <int>{};
   final Expando<DateTime> _addedAt = Expando<DateTime>('addedAt');
   final Expando<AcpDraftFileStamp> _fileStamps = Expando<AcpDraftFileStamp>(
     'fileStamp',
@@ -131,9 +135,16 @@ class AcpComposerDraftStore {
     final key = identity.value;
     // The callback must not return the removed future: whenComplete would
     // then wait for itself.
-    return _loads[key] ??= _load(identity).whenComplete(() {
-      _loads.remove(key);
-    });
+    return _loads[key] ??= _load(identity)
+        .catchError((Object error) {
+          // Unexpected: treat like a failed read, never as "no draft".
+          _log('load_failed', error);
+          _unreadable.add(key);
+          return peek(identity)!;
+        })
+        .whenComplete(() {
+          _loads.remove(key);
+        });
   }
 
   /// Records [draft] as this run's latest draft for [identity], in memory.
@@ -147,7 +158,11 @@ class AcpComposerDraftStore {
       ..remove(key)
       ..[key] = draft;
     while (_remembered.length > maxRememberedDrafts) {
-      _remembered.remove(_remembered.keys.first);
+      final evicted = _remembered.keys.first;
+      _remembered.remove(evicted);
+      // Drop the chips record with the snapshot, so evicted pastes are not
+      // kept alive; the next save of that session rewrites its chips row.
+      _savedChips.remove(evicted);
     }
   }
 
@@ -167,7 +182,10 @@ class AcpComposerDraftStore {
   ) {
     remember(identity, draft);
     if (draft.isEmpty) _pendingNotices.remove(identity.value);
-    if (_unreadable.contains(identity.value)) return Future<void>.value();
+    if (_unreadable.contains(identity.value) ||
+        _forgottenHosts.contains(identity.hostId)) {
+      return Future<void>.value();
+    }
     final savedAt = _clock().toUtc();
     for (final attachment in draft.attachments) {
       _addedAt[attachment.candidate] ??= savedAt;
@@ -178,11 +196,103 @@ class AcpComposerDraftStore {
   }
 
   /// Forgets and deletes [identity]'s draft, for example when its session is
-  /// deleted.
+  /// deleted. A read still in flight for it is abandoned, so it cannot write
+  /// the draft back.
   Future<void> clear(AcpComposerDraftIdentity identity) {
-    _unreadable.remove(identity.value);
+    final key = identity.value;
+    _invalidate(key);
+    _unreadable.remove(key);
     return save(identity, AcpComposerDraftSnapshot(text: ''));
   }
+
+  /// Moves this run's draft state from [from] to [to], for a session that
+  /// came back under a new ACP session id. The caller saves the draft under
+  /// [to] next.
+  ///
+  /// When [from]'s saved draft could not be read, its rows are left alone
+  /// and [to] is not written either, so the unread draft survives.
+  Future<void> move(
+    AcpComposerDraftIdentity from,
+    AcpComposerDraftIdentity to,
+  ) {
+    final fromKey = from.value;
+    final toKey = to.value;
+    if (fromKey == toKey) return Future<void>.value();
+    final notice = _pendingNotices.remove(fromKey);
+    if (notice != null) _pendingNotices[toKey] = notice;
+    if (_unreadable.contains(fromKey)) {
+      _unreadable.add(toKey);
+      _remembered.remove(fromKey);
+      return Future<void>.value();
+    }
+    return clear(from);
+  }
+
+  /// Adds [typed], from a composer that closed before [identity]'s saved
+  /// draft was read, after that draft, and saves the result.
+  ///
+  /// When the read is still in flight, the text is merged before the read
+  /// completes, so every composer waiting on it gets the merged draft.
+  void appendWhenOpened(
+    AcpComposerDraftIdentity identity,
+    AcpComposerDraftSnapshot typed, {
+    int? maxAttachments,
+  }) {
+    if (typed.isEmpty) return;
+    final key = identity.value;
+    if (peek(identity) == null) unawaited(open(identity));
+    if (_loads.containsKey(key)) {
+      (_pendingAppends[key] ??= []).add((typed: typed, max: maxAttachments));
+      return;
+    }
+    final base = peek(identity)?.draft ?? _empty;
+    unawaited(
+      save(identity, base.followedBy(typed, maxAttachments: maxAttachments)),
+    );
+  }
+
+  /// Forgets every draft of deleted host [hostId] and deletes its rows.
+  ///
+  /// The deletion is queued behind writes already in flight, and later
+  /// saves for the host are dropped for the rest of the run.
+  Future<void> forgetHost(int hostId) {
+    _forgottenHosts.add(hostId);
+    final prefix = '[$hostId,';
+    final keys = <String>{
+      ..._remembered.keys,
+      ..._pendingNotices.keys,
+      ..._unreadable,
+      ..._loads.keys,
+      ..._savedChips.keys,
+      ..._pendingAppends.keys,
+    }.where((key) => key.startsWith(prefix));
+    for (final key in keys.toList()) {
+      _invalidate(key);
+      _remembered.remove(key);
+      _pendingNotices.remove(key);
+      _unreadable.remove(key);
+    }
+    return _run('delete_failed', () async {
+      final doomed = <String, String?>{};
+      for (final rowPrefix in SettingKeys.acpComposerDraftHostPrefixes(
+        hostId,
+      )) {
+        for (final key in await _settings.getKeysWithPrefix(rowPrefix)) {
+          doomed[key] = null;
+        }
+      }
+      if (doomed.isNotEmpty) await _settings.setStrings(doomed);
+    });
+  }
+
+  /// Abandons any read in flight for [key] and drops its queued appends.
+  void _invalidate(String key) {
+    _generations[key] = (_generations[key] ?? 0) + 1;
+    _pendingAppends.remove(key);
+    _savedChips.remove(key);
+  }
+
+  int _generation(String key) => _generations[key] ?? 0;
 
   /// Deletes expired, unreadable and surplus drafts. Runs once per process;
   /// later calls return the first run's future. Drafts opened or saved in
@@ -193,6 +303,7 @@ class AcpComposerDraftStore {
     AcpComposerDraftIdentity identity,
   ) async {
     final key = identity.value;
+    final generation = _generation(key);
     final draftKey = _draftKey(identity);
     final chipsKey = _chipsKey(identity);
     String? raw;
@@ -204,17 +315,21 @@ class AcpComposerDraftStore {
       });
     } on Object catch (error) {
       _log('load_failed', error);
+      if (_generation(key) != generation) return _abandoned(identity);
       _unreadable.add(key);
+      // Keep anything typed meanwhile in memory; it is never written.
+      final typed = _takeAppends(key, _empty);
+      if (!typed.isEmpty) remember(identity, typed);
       return peek(identity)!;
     }
+    if (_generation(key) != generation) return _abandoned(identity);
     final announce = !_seen.contains(key);
     final encoded = raw;
-    if (encoded == null) return _opened(identity, _empty);
-    final saved = _decode(encoded);
+    final saved = encoded == null ? null : _decode(encoded);
     final now = _clock().toUtc();
     if (saved == null || now.difference(saved.savedAt) > draftLifetime) {
-      unawaited(_run('delete_failed', () => _deleteRows(identity)));
-      return _opened(identity, _empty);
+      if (encoded != null) _queueCleanup(identity, generation, _empty);
+      return _finishLoad(identity, generation, _empty);
     }
     final chips = rawChips == null
         ? const <String>[]
@@ -234,35 +349,89 @@ class AcpComposerDraftStore {
       }
       attachments.add(restored);
     }
+    // A clear() during the file checks wins: write and remember nothing.
+    if (_generation(key) != generation) return _abandoned(identity);
     final draft = AcpComposerDraftSnapshot(
       text: saved.text,
       caret: saved.caret,
       attachments: attachments,
     );
-    if (unavailable > 0) {
-      // Drop what could not be restored now, so the next launch does not
-      // report the same loss again. Keep the original save time.
-      unawaited(
-        _run(
-          'save_failed',
-          () => draft.isEmpty
-              ? _deleteRows(identity)
-              : _write(
-                  identity,
-                  draft,
-                  savedAt: saved.savedAt,
-                  rewriteChips: true,
-                ),
-        ),
-      );
+    if (unavailable > 0 || saved.isLegacy) {
+      // Rewrite without what was lost, in the current format, so the next
+      // launch does not report the same loss again. Keep the save time.
+      _queueCleanup(identity, generation, draft, savedAt: saved.savedAt);
     } else {
       _savedChips[key] = restoredChips;
     }
-    if (announce && (!draft.isEmpty || unavailable > 0)) {
+    // A draft from an earlier run is announced. A draft from this run that
+    // comes back from disk (its memory copy was evicted) is announced only
+    // if something was lost, such as a pasted image.
+    if (announce ? (!draft.isEmpty || unavailable > 0) : unavailable > 0) {
       _pendingNotices[key] = unavailable;
     }
-    return _opened(identity, draft);
+    return _finishLoad(identity, generation, draft);
   }
+
+  /// Folds in text from composers that closed during the read, saves the
+  /// merged draft if there was any, and records the result.
+  AcpOpenedComposerDraft _finishLoad(
+    AcpComposerDraftIdentity identity,
+    int generation,
+    AcpComposerDraftSnapshot loaded,
+  ) {
+    final merged = _takeAppends(identity.value, loaded);
+    if (!identical(merged, loaded)) {
+      _queueCleanup(identity, generation, merged, savedAt: _clock().toUtc());
+    }
+    return _opened(identity, merged);
+  }
+
+  AcpComposerDraftSnapshot _takeAppends(
+    String key,
+    AcpComposerDraftSnapshot base,
+  ) {
+    final appends = _pendingAppends.remove(key);
+    if (appends == null) return base;
+    var merged = base;
+    for (final append in appends) {
+      merged = merged.followedBy(append.typed, maxAttachments: append.max);
+    }
+    return merged;
+  }
+
+  /// Queues a write of [draft] (or a delete when it is empty) that is
+  /// skipped if [identity] was cleared after [generation] was taken.
+  void _queueCleanup(
+    AcpComposerDraftIdentity identity,
+    int generation,
+    AcpComposerDraftSnapshot draft, {
+    DateTime? savedAt,
+  }) {
+    final key = identity.value;
+    unawaited(
+      _run('save_failed', () async {
+        if (_generation(key) != generation ||
+            _forgottenHosts.contains(identity.hostId)) {
+          return;
+        }
+        if (draft.isEmpty) {
+          await _deleteRows(identity);
+        } else {
+          await _write(
+            identity,
+            draft,
+            savedAt: savedAt ?? _clock().toUtc(),
+            rewriteChips: true,
+          );
+        }
+      }),
+    );
+  }
+
+  /// The result for a read whose session was cleared meanwhile.
+  AcpOpenedComposerDraft _abandoned(AcpComposerDraftIdentity identity) =>
+      peek(identity) ??
+      AcpOpenedComposerDraft(draft: _empty, notice: _noticeFor(identity.value));
 
   AcpOpenedComposerDraft _opened(
     AcpComposerDraftIdentity identity,
@@ -292,9 +461,9 @@ class AcpComposerDraftStore {
       return null;
     }
     switch (attachment) {
-      case AcpSavedPastedText(:final name, :final chip):
-        if (chip >= chips.length) return null;
-        final text = chips[chip];
+      case AcpSavedPastedText(:final name):
+        final text = attachment.textFrom(chips);
+        if (text == null) return null;
         final candidate = AcpAttachmentCandidate.memory(
           name: name,
           bytes: Uint8List.fromList(utf8.encode(text)),
@@ -506,11 +675,10 @@ class AcpComposerDraftStore {
     final room = (maxSavedDrafts - active).clamp(0, kept.length);
     doomed.addAll(kept.skip(room).map((entry) => entry.suffix));
     // Chips rows whose draft row is gone are left over from a failed write.
-    final chips = await _settings.getStringsWithPrefix(
+    final chipKeys = await _settings.getKeysWithPrefix(
       SettingKeys.acpComposerDraftChipsPrefix,
-      valueLength: 0,
     );
-    for (final key in chips.keys) {
+    for (final key in chipKeys) {
       final suffix = key.substring(
         SettingKeys.acpComposerDraftChipsPrefix.length,
       );
@@ -544,7 +712,8 @@ class AcpComposerDraftStore {
   static AcpSavedComposerDraft? _decode(String encoded) {
     try {
       return AcpSavedComposerDraft.tryFromJson(jsonDecode(encoded));
-    } on FormatException {
+    } on Object {
+      // Malformed JSON, or values out of range: the row is corrupt.
       return null;
     }
   }

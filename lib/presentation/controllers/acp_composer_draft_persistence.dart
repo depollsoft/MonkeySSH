@@ -151,7 +151,7 @@ class AcpComposerDraftPersistence {
     if (identity != _identity) {
       // A resumed session may come back under a new ACP session id; move the
       // draft with it.
-      unawaited(_store.clear(_identity));
+      unawaited(_store.move(_identity, identity));
       _identity = identity;
       _lastText = null;
       shouldSave = true;
@@ -242,25 +242,16 @@ class AcpComposerDraftPersistence {
     if (_ready) {
       unawaited(flush());
     } else if (_started && _controller.hasContent) {
-      unawaited(_saveAfterOpen(_controller.draftSnapshot));
+      // The saved draft has not been read yet: hand what was typed to the
+      // store, which merges it after the saved draft for every composer
+      // waiting on that read.
+      _store.appendWhenOpened(
+        _identity,
+        _controller.draftSnapshot,
+        maxAttachments: _controller.limits.maxCount,
+      );
     }
     _stop();
-  }
-
-  /// Merges [typed], captured before the saved draft was read, after that
-  /// draft once the read finishes, and saves the result.
-  Future<void> _saveAfterOpen(AcpComposerDraftSnapshot typed) async {
-    final identity = _identity;
-    final maxAttachments = _controller.limits.maxCount;
-    final opened = await _store.open(identity);
-    if (!opened.writable) {
-      return;
-    }
-    final saved = _store.peek(identity)?.draft ?? opened.draft;
-    await _store.save(
-      identity,
-      saved.followedBy(typed, maxAttachments: maxAttachments),
-    );
   }
 
   void _stop() {

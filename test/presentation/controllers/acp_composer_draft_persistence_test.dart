@@ -521,6 +521,65 @@ void main() {
     });
   });
 
+  group('review round 2', () {
+    testWidgets('text typed in a composer that closes during a shared read '
+        'shows up in the composer that replaced it', (tester) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(
+        settings,
+        AcpComposerDraftSnapshot(text: 'Saved earlier'),
+      );
+      final gate = settings.readGate = Completer<void>();
+      final store = _store(settings);
+
+      final provisional = _Harness(settings, store: store)..start();
+      final rekeyed = _Harness(
+        settings,
+        store: store,
+        key: AcpSessionKey.of(
+          hostId: 1,
+          providerId: 'copilot',
+          bridgeId: 'new-bridge',
+          acpSessionId: 'session',
+        ),
+      )..start();
+      addTearDown(rekeyed.dispose);
+      provisional.controller.setText('typed in A');
+      provisional.dispose();
+      gate.complete();
+      await tester.pump();
+
+      expect(rekeyed.controller.text, 'Saved earlier\n\ntyped in A');
+      rekeyed.controller.setText('Saved earlier\n\ntyped in A, then B');
+      await tester.pump(kAcpComposerDraftSaveDelay);
+      expect(_savedText(settings), 'Saved earlier\n\ntyped in A, then B');
+    });
+
+    testWidgets('a session rebind after a failed read leaves the unread '
+        'draft on disk', (tester) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(
+        settings,
+        AcpComposerDraftSnapshot(text: 'precious'),
+      );
+      settings.readError = StateError('disk busy');
+
+      final harness = _Harness(settings)..start();
+      addTearDown(harness.dispose);
+      await tester.pump();
+      harness.controller.setText('new words');
+      final resumed = _key(acpSessionId: 'resumed');
+      harness.controller.rebindSession(resumed, session: null);
+      await tester.pump(kAcpComposerDraftSaveDelay);
+
+      expect(_savedText(settings), 'precious');
+      expect(
+        _savedText(settings, AcpComposerDraftIdentity.of(resumed)),
+        isNull,
+      );
+    });
+  });
+
   group('controller', () {
     test('restoreDraft puts saved text before newer text and never sends', () {
       final manager = RecordingAcpSessionManager();

@@ -9,7 +9,11 @@ import 'acp_attachment.dart';
 import 'acp_session_keys.dart';
 
 /// Format version written into every saved draft.
-const int kAcpSavedComposerDraftVersion = 1;
+///
+/// Version 1 came from this feature's first preview builds: pasted text was
+/// inline, attachments had no `addedAt`, and local files no modification
+/// time. It is still read; see [AcpSavedComposerDraft.tryFromJson].
+const int kAcpSavedComposerDraftVersion = 2;
 
 /// The session a composer draft belongs to.
 ///
@@ -178,12 +182,21 @@ sealed class AcpSavedDraftAttachment {
   };
 
   /// Parses a reference written by [toJson], or returns `null`.
-  static AcpSavedDraftAttachment? tryFromJson(Object? json) {
+  ///
+  /// [legacyAddedAt] stands in for `addedAt` in a version 1 row, which did
+  /// not record it.
+  static AcpSavedDraftAttachment? tryFromJson(
+    Object? json, {
+    DateTime? legacyAddedAt,
+  }) {
     if (json is! Map) return null;
     final name = json['name'];
     final addedAtMs = json['addedAt'];
-    if (name is! String || name.isEmpty || addedAtMs is! int) return null;
-    final addedAt = DateTime.fromMillisecondsSinceEpoch(addedAtMs, isUtc: true);
+    if (name is! String || name.isEmpty) return null;
+    final addedAt = addedAtMs is int
+        ? _utcFromMillis(addedAtMs)
+        : legacyAddedAt;
+    if (addedAt == null) return null;
     final fallback = json['fallback'] == AcpAttachmentFallback.remoteUpload.name
         ? AcpAttachmentFallback.remoteUpload
         : AcpAttachmentFallback.reject;
@@ -194,8 +207,19 @@ sealed class AcpSavedDraftAttachment {
     switch (json['kind']) {
       case AcpSavedPastedText.kind:
         final chip = json['chip'];
-        if (chip is! int || chip < 0) return null;
-        return AcpSavedPastedText(name: name, chip: chip, addedAt: addedAt);
+        if (chip is int && chip >= 0) {
+          return AcpSavedPastedText(name: name, chip: chip, addedAt: addedAt);
+        }
+        // Version 1 kept the pasted text inline.
+        final text = json['text'];
+        if (legacyAddedAt == null || text is! String || text.isEmpty) {
+          return null;
+        }
+        return AcpSavedPastedText.legacy(
+          name: name,
+          text: text,
+          addedAt: addedAt,
+        );
       case AcpSavedLocalFile.kind:
         final path = json['path'];
         final modified = json['modified'];
@@ -231,15 +255,35 @@ final class AcpSavedPastedText extends AcpSavedDraftAttachment {
   /// Creates a saved pasted-text chip.
   const AcpSavedPastedText({
     required super.name,
-    required this.chip,
+    required int this.chip,
     required super.addedAt,
-  }) : super(fallback: AcpAttachmentFallback.reject);
+  }) : legacyText = null,
+       super(fallback: AcpAttachmentFallback.reject);
+
+  /// A chip read from a version 1 row, which kept its text inline.
+  const AcpSavedPastedText.legacy({
+    required super.name,
+    required String text,
+    required super.addedAt,
+  }) : chip = null,
+       legacyText = text,
+       super(fallback: AcpAttachmentFallback.reject);
 
   /// Storage tag.
   static const kind = 'pastedText';
 
   /// Index of the text in the draft's chips row.
-  final int chip;
+  final int? chip;
+
+  /// The text of a chip from a version 1 row.
+  final String? legacyText;
+
+  /// The chip's text, given the draft's chips row.
+  String? textFrom(List<String> chips) {
+    final index = chip;
+    if (index == null) return legacyText;
+    return index < chips.length ? chips[index] : null;
+  }
 
   @override
   Map<String, Object?> toJson() => {..._common(kind), 'chip': chip};
@@ -329,6 +373,7 @@ final class AcpSavedComposerDraft {
     Iterable<AcpSavedDraftAttachment> attachments =
         const <AcpSavedDraftAttachment>[],
     this.unsavedAttachmentCount = 0,
+    this.version = kAcpSavedComposerDraftVersion,
   }) : attachments = List<AcpSavedDraftAttachment>.unmodifiable(attachments);
 
   /// Composer text.
@@ -347,6 +392,13 @@ final class AcpSavedComposerDraft {
   /// beyond the size budget, or files that were already gone).
   final int unsavedAttachmentCount;
 
+  /// Format version this draft was read from.
+  final int version;
+
+  /// Whether this draft was read from an older format and should be
+  /// rewritten in the current one.
+  bool get isLegacy => version < kAcpSavedComposerDraftVersion;
+
   /// JSON form. `savedAt` comes first so pruning can read it from a prefix.
   Map<String, Object?> toJson() => <String, Object?>{
     'savedAt': savedAt.millisecondsSinceEpoch,
@@ -359,34 +411,46 @@ final class AcpSavedComposerDraft {
 
   /// Parses a draft written by [toJson], or returns `null` when [json] is
   /// malformed or from an unknown format version.
+  ///
+  /// Version 1 rows are read too. Their text and pasted-text chips are kept
+  /// and their remote files dated by the save time. Their local files are
+  /// counted as unavailable, since version 1 did not record the modification
+  /// time the file check needs.
   static AcpSavedComposerDraft? tryFromJson(Object? json) {
     if (json is! Map) return null;
-    if (json['v'] != kAcpSavedComposerDraftVersion) return null;
-    final savedAt = json['savedAt'];
+    final version = json['v'];
+    if (version is! int || version < 1 || version > 2) return null;
+    final savedAtMs = json['savedAt'];
     final text = json['text'];
-    if (savedAt is! int || text is! String) return null;
+    final rawAttachments = json['attachments'];
+    if (savedAtMs is! int || text is! String || rawAttachments is! List) {
+      return null;
+    }
+    final savedAt = _utcFromMillis(savedAtMs);
+    if (savedAt == null) return null;
     final caret = json['caret'];
     final unsaved = json['unsaved'];
-    final rawAttachments = json['attachments'];
     final attachments = <AcpSavedDraftAttachment>[];
     var unreadable = 0;
-    if (rawAttachments is List) {
-      for (final item in rawAttachments) {
-        final attachment = AcpSavedDraftAttachment.tryFromJson(item);
-        if (attachment == null) {
-          unreadable++;
-        } else {
-          attachments.add(attachment);
-        }
+    for (final item in rawAttachments) {
+      final attachment = AcpSavedDraftAttachment.tryFromJson(
+        item,
+        legacyAddedAt: version == 1 ? savedAt : null,
+      );
+      if (attachment == null) {
+        unreadable++;
+      } else {
+        attachments.add(attachment);
       }
     }
     return AcpSavedComposerDraft(
       text: text,
       caret: caret is int ? caret.clamp(0, text.length) : text.length,
-      savedAt: DateTime.fromMillisecondsSinceEpoch(savedAt, isUtc: true),
+      savedAt: savedAt,
       attachments: attachments,
       unsavedAttachmentCount:
           (unsaved is int && unsaved > 0 ? unsaved : 0) + unreadable,
+      version: version,
     );
   }
 
@@ -395,9 +459,7 @@ final class AcpSavedComposerDraft {
   static DateTime? peekSavedAt(String encoded) {
     final match = _savedAtPrefix.matchAsPrefix(encoded);
     final millis = match == null ? null : int.tryParse(match.group(1)!);
-    return millis == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(millis, isUtc: true);
+    return millis == null ? null : _utcFromMillis(millis);
   }
 
   /// Characters of an encoded draft that [peekSavedAt] needs.
@@ -424,3 +486,9 @@ final class AcpSavedComposerDraft {
     }
   }
 }
+
+/// The UTC time [millis] after the epoch, or `null` when it is outside the
+/// range `DateTime` can represent.
+DateTime? _utcFromMillis(int millis) => millis.abs() <= 8640000000000000
+    ? DateTime.fromMillisecondsSinceEpoch(millis, isUtc: true)
+    : null;

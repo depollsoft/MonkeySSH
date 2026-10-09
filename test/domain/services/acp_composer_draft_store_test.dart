@@ -128,13 +128,16 @@ void main() {
     SettingsService? using,
     RecordingDiagnosticsLogger? diagnostics,
     int maxSavedDrafts = 50,
+    int maxRememberedDrafts = 12,
     int pastedTextBudget = 1024 * 1024,
+    AcpDraftLocalFileProbe? probe,
   }) => AcpComposerDraftStore(
     using ?? settings,
     diagnostics: diagnostics ?? RecordingDiagnosticsLogger(),
     clock: () => now,
-    probeLocalFile: (path) async => files[path],
+    probeLocalFile: probe ?? (path) async => files[path],
     maxSavedDrafts: maxSavedDrafts,
+    maxRememberedDrafts: maxRememberedDrafts,
     pastedTextBudget: pastedTextBudget,
   );
 
@@ -592,6 +595,237 @@ void main() {
       expect(event.category, 'acp.composer_draft');
       expect(event.searchableText, isNot(contains('secret prompt text')));
     }
+  });
+
+  group('review round 2', () {
+    test('clearing a session while its draft is being checked never writes '
+        'it back', () async {
+      await store().save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'deleted', attachments: [_localFile()]),
+      );
+      final probeGate = Completer<void>();
+      final draftStore = store(
+        probe: (path) async {
+          await probeGate.future;
+          return null; // the file is gone, which triggers a rewrite
+        },
+      );
+
+      final opening = draftStore.open(_identity);
+      await pumpEventQueue();
+      await draftStore.clear(_identity);
+      probeGate.complete();
+      final opened = await opening;
+      await draftStore.pruneExpired(); // drains the write queue
+
+      expect(opened.draft.isEmpty, isTrue);
+      expect(draftStore.peek(_identity)!.draft.isEmpty, isTrue);
+      expect(await draftKeys(), isEmpty);
+    });
+
+    test('evicting a draft from memory also drops its chips record', () async {
+      final draftStore = store(maxRememberedDrafts: 1);
+      final paste = _pastedText('big paste');
+      await draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'a', attachments: [paste]),
+      );
+      await draftStore.save(
+        _otherIdentity,
+        AcpComposerDraftSnapshot(text: 'b'),
+      );
+      expect(draftStore.peek(_identity), isNull);
+
+      await draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'a2', attachments: [paste]),
+      );
+
+      // Without the record the chips row is written again, so the row and
+      // the draft can never disagree.
+      expect(settings.written.where((key) => key == _chipsKey), hasLength(2));
+      final reopened = await store().open(_identity);
+      expect(reopened.draft.attachments.single.candidate.isPastedText, isTrue);
+    });
+
+    test('a draft from the first preview format keeps its text and pastes, '
+        'and is rewritten in the current one', () async {
+      await settings.setString(
+        _draftKey,
+        jsonEncode({
+          'savedAt': now.millisecondsSinceEpoch,
+          'v': 1,
+          'text': 'from preview',
+          'caret': 4,
+          'attachments': [
+            {'kind': 'pastedText', 'name': 'Pasted text', 'text': 'old paste'},
+            {
+              'kind': 'localFile',
+              'name': 'photo.jpg',
+              'path': _photoPath,
+              'size': 42,
+              'mime': 'image/jpeg',
+              'fallback': 'reject',
+            },
+            {
+              'kind': 'remoteFile',
+              'name': 'notes.md',
+              'remotePath': '/home/dev/notes.md',
+              'size': 7,
+              'fallback': 'reject',
+            },
+          ],
+        }),
+      );
+
+      final relaunched = store();
+      final opened = await relaunched.open(_identity);
+      expect(opened.draft.text, 'from preview');
+      expect(opened.draft.caret, 4);
+      expect(
+        [
+          for (final attachment in opened.draft.attachments)
+            attachment.candidate.sourceKind,
+        ],
+        [AcpAttachmentSourceKind.memory, AcpAttachmentSourceKind.remoteFile],
+      );
+      final paste =
+          opened.draft.attachments.first.candidate
+              as AcpMemoryAttachmentCandidate;
+      expect(utf8.decode(paste.bytes), 'old paste');
+      // The local file has no modification time to check against.
+      expect(opened.notice?.unavailableAttachmentCount, 1);
+
+      await relaunched.pruneExpired(); // drains the rewrite
+      final row = jsonDecode(
+        (await settings.getString(_draftKey))!,
+      ) as Map<String, dynamic>;
+      expect(row['v'], kAcpSavedComposerDraftVersion);
+      final next = await store().open(_identity);
+      expect(next.draft.attachments, hasLength(2));
+      expect(next.notice, const AcpRestoredDraftNotice());
+    });
+
+    test('text from a composer that closed during the read reaches every '
+        'composer waiting on it', () async {
+      await store().save(_identity, AcpComposerDraftSnapshot(text: 'saved'));
+      final gate = settings.readGate = Completer<void>();
+
+      final draftStore = store();
+      final first = draftStore.open(_identity);
+      final second = draftStore.open(_identity);
+      draftStore.appendWhenOpened(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'typed in A'),
+      );
+      gate.complete();
+
+      expect((await first).draft.text, 'saved\n\ntyped in A');
+      expect((await second).draft.text, 'saved\n\ntyped in A');
+      await draftStore.pruneExpired();
+      expect((await store().open(_identity)).draft.text, 'saved\n\ntyped in A');
+    });
+
+    test('moving an unreadable draft to a new session id leaves its rows '
+        'alone and keeps typed text in memory', () async {
+      await store().save(_identity, AcpComposerDraftSnapshot(text: 'precious'));
+      settings.readError = StateError('disk busy');
+      final draftStore = store();
+      expect((await draftStore.open(_identity)).writable, isFalse);
+      draftStore.appendWhenOpened(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'typed'),
+      );
+      expect(draftStore.peek(_identity)!.draft.text, 'typed');
+
+      await draftStore.move(_identity, _otherIdentity);
+      await draftStore.save(
+        _otherIdentity,
+        AcpComposerDraftSnapshot(text: 'typed'),
+      );
+      await draftStore.pruneExpired();
+
+      settings.readError = null;
+      expect((await store().open(_identity)).draft.text, 'precious');
+      expect((await store().open(_otherIdentity)).draft.isEmpty, isTrue);
+    });
+
+    test('forgetting a host drops its drafts from memory and storage, even '
+        'a save already queued', () async {
+      final draftStore = store();
+      final paste = _pastedText('host paste');
+      unawaited(
+        draftStore.save(
+          _identity,
+          AcpComposerDraftSnapshot(text: 'gone', attachments: [paste]),
+        ),
+      );
+      await draftStore.save(
+        _otherIdentity,
+        AcpComposerDraftSnapshot(text: 'kept'),
+      );
+
+      await draftStore.forgetHost(_identity.hostId);
+
+      expect(draftStore.peek(_identity), isNull);
+      expect(await draftKeys(), [
+        '${SettingKeys.acpComposerDraftPrefix}${_otherIdentity.value}',
+      ]);
+      await draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'typed after', attachments: [paste]),
+      );
+      expect(await draftKeys(), hasLength(1));
+    });
+
+    test('a draft whose pasted image was evicted from memory reports the '
+        'loss when reopened in the same run', () async {
+      final draftStore = store(maxRememberedDrafts: 1);
+      await draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'look', attachments: [_pastedImage()]),
+      );
+      await draftStore.save(
+        _otherIdentity,
+        AcpComposerDraftSnapshot(text: 'b'),
+      );
+
+      final reopened = await draftStore.open(_identity);
+      expect(reopened.draft.text, 'look');
+      expect(reopened.notice?.unavailableAttachmentCount, 1);
+    });
+
+    for (final (name, savedAt, attachments) in [
+      ('attachments that are not a list', 1791532800000, 'nope'),
+      ('a save time out of range', 9000000000000000, <Object>[]),
+    ]) {
+      test('a row with $name is treated as corrupt', () async {
+        await settings.setString(
+          _draftKey,
+          jsonEncode({
+            'savedAt': savedAt,
+            'v': kAcpSavedComposerDraftVersion,
+            'text': 'x',
+            'attachments': attachments,
+          }),
+        );
+
+        final relaunched = store();
+        final opened = await relaunched.open(_identity);
+        expect(opened.writable, isTrue);
+        expect(opened.draft.isEmpty, isTrue);
+        await relaunched.pruneExpired();
+        expect(await settings.getString(_draftKey), isNull);
+      });
+    }
+
+    test('key-only prefix reads return just the keys', () async {
+      const prefix = SettingKeys.acpComposerDraftChipsPrefix;
+      await settings.setString('${prefix}a', 'x');
+      await settings.setString('acp_composer_draft_chipsx', 'y');
+      expect(await settings.getKeysWithPrefix(prefix), ['${prefix}a']);
+    });
   });
 
   test(

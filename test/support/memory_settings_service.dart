@@ -66,6 +66,15 @@ class MemorySettingsService extends SettingsService {
   }
 
   @override
+  Future<List<String>> getKeysWithPrefix(String prefix) async {
+    await _read();
+    return [
+      for (final key in values.keys)
+        if (key.startsWith(prefix)) key,
+    ];
+  }
+
+  @override
   Future<Map<String, String>> getStringsWithPrefix(
     String prefix, {
     int? valueLength,
