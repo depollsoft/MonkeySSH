@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -313,5 +314,279 @@ func TestSanitizeAcpDeviceLabel(t *testing.T) {
 		if got := sanitizeAcpDeviceLabel(tc.in); got != tc.want {
 			t.Errorf("sanitizeAcpDeviceLabel(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// writerClient returns the client currently holding the lease.
+func writerClient(t *testing.T, bridge *acpBridge) *acpBridgeClient {
+	t.Helper()
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	client := bridge.clients[bridge.writerClientID]
+	if client == nil {
+		t.Fatal("no writer is attached")
+	}
+	return client
+}
+
+func TestAcpWriterLeaseClosesDisplacedWriterThatStoppedReading(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	bridge.leaseLinger = 50 * time.Millisecond
+
+	attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	ipad := writerClient(t, bridge)
+	// The iPad is asleep: its socket is full, so the bridge's write blocks.
+	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"unread"}`)
+	attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+
+	select {
+	case <-ipad.done:
+	case <-time.After(time.Second):
+		t.Fatal("displaced writer that stopped reading was never closed")
+	}
+}
+
+func TestAcpWriterLeaseNoticePreemptsQueuedOutput(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+
+	ipad, ipadReader, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	for index := 0; index < 3; index++ {
+		publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"queued"}`)
+	}
+	attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+
+	// At most the frame already being written gets through before the notice.
+	for {
+		message := readTestAcpFrame(t, ipadReader, ipad)
+		if message.Type == "lease" {
+			assertLeaseLost(t, message, "iPhone")
+			return
+		}
+		if message.Sequence > 1 {
+			t.Fatalf("displaced writer still received output %#v", message)
+		}
+	}
+}
+
+func TestAcpWriterLeaseNoticeCountsAcceptedInputs(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+
+	ipad, ipadReader, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	sendTestClientInput(t, ipad, `{"jsonrpc":"2.0","method":"one"}`)
+	sendTestClientInput(t, ipad, `{"jsonrpc":"2.0","method":"two"}`)
+	_ = nextProviderLine(t, lines)
+	_ = nextProviderLine(t, lines)
+	attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+
+	notice := readTestAcpFrame(t, ipadReader, ipad)
+	assertLeaseLost(t, notice, "iPhone")
+	// The client compares this with the frames it wrote: anything after the
+	// second never reached the provider.
+	if notice.AcceptedInputs != 2 {
+		t.Fatalf("accepted inputs = %d, want 2", notice.AcceptedInputs)
+	}
+}
+
+func TestAcpAnsweredRequestIsNeitherReplayedNorAnsweredTwice(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	publishTestProviderFrame(t, bridge, testPermissionRequest)
+
+	// The iPad's answer has been claimed but its write to the provider has
+	// not finished when the iPhone takes over.
+	if !bridge.claimClientResponse(parseAcpEnvelope(json.RawMessage(testAllowAnswer))) {
+		t.Fatal("first answer was not forwarded")
+	}
+	iphone, iphoneReader, hello := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+	if hello.Bridge == nil || hello.Bridge.PendingRequest != 0 {
+		t.Fatalf("takeover hello = %#v, want no pending requests", hello.Bridge)
+	}
+	if next := readTestAcpFrame(t, iphoneReader, iphone); next.Type != "replay_end" {
+		t.Fatalf("takeover replayed %#v, want only replay_end", next)
+	}
+	// A second answer to the same request must never reach the provider.
+	sendTestClientInput(t, iphone, `{"jsonrpc":"2.0","id":"permission-1","result":{"outcome":{"outcome":"selected","optionId":"deny"}}}`)
+	expectNoProviderLine(t, lines)
+}
+
+func TestAcpWriterLeaseKeepsLegacyWriterUntilAskedToTakeOver(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	clock := newTestLeaseClock(bridge)
+
+	legacy, legacyReader := attachTestClient(t, bridge, acpWireMessage{})
+	_ = readTestAcpFrame(t, legacyReader, legacy)
+	// An older app sends nothing while its user reads, so silence does not
+	// mean it is gone.
+	clock.Advance(acpWriterStaleAfter + time.Minute)
+	_, _, probe := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, false)
+	if probe.CanSend || probe.Writer == nil {
+		t.Fatalf("attach over a quiet legacy writer = %#v, want a probe", probe)
+	}
+	_, _, hello := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+	if !hello.CanSend {
+		t.Fatalf("explicit takeover = %#v, want writer", hello)
+	}
+}
+
+func TestAcpWriterLeaseHeartbeatKeepsLeasePastStaleBound(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	clock := newTestLeaseClock(bridge)
+
+	ipad, ipadReader, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	for elapsed := time.Duration(0); elapsed < 2*acpWriterStaleAfter; elapsed += 30 * time.Second {
+		clock.Advance(30 * time.Second)
+		if err := writeAcpWireFrame(ipad, acpWireMessage{
+			Version: acpBridgeProtocolVersion,
+			Type:    "ack",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A status round trip proves the bridge read every heartbeat.
+	if err := writeAcpWireFrame(ipad, acpWireMessage{
+		Version: acpBridgeProtocolVersion,
+		Type:    "status",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status := readTestAcpFrame(t, ipadReader, ipad); status.Type != "status" {
+		t.Fatalf("status reply = %#v", status)
+	}
+	_, _, probe := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, false)
+	if probe.CanSend {
+		t.Fatalf("attach over a heartbeating writer = %#v, want a probe", probe)
+	}
+}
+
+func TestAcpWriterLeaseResumeAfterAnotherWriterIsAProbe(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
+
+	attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	iphone, _, _ := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+	// The iPhone leaves, so the lease is free when the iPad wakes up and
+	// resumes from its old position.
+	_ = iphone.Close()
+	waitForNoWriter(t, bridge)
+
+	ipad, ipadReader := attachTestClient(t, bridge, acpWireMessage{
+		Capabilities: []string{acpWriterLeaseCapability},
+		DeviceLabel:  "iPad",
+		ClientToken:  testTokenIPad,
+		LastAck:      1,
+	})
+	probe := readTestAcpFrame(t, ipadReader, ipad)
+	// Replaying from there would hand it requests the iPhone already
+	// answered, so it must take the chat back with a fresh attach instead.
+	if probe.CanSend || probe.Writer == nil || probe.Writer.Label != "iPhone" {
+		t.Fatalf("resume after another writer = %#v (writer %#v), want a probe",
+			probe, probe.Writer)
+	}
+}
+
+func TestAcpWriterLeaseSameProcessResumesNormally(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
+
+	first, _, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	_ = first.Close()
+	waitForNoWriter(t, bridge)
+
+	ipad, ipadReader := attachTestClient(t, bridge, acpWireMessage{
+		Capabilities: []string{acpWriterLeaseCapability},
+		DeviceLabel:  "iPad",
+		ClientToken:  testTokenIPad,
+		LastAck:      1,
+	})
+	if hello := readTestAcpFrame(t, ipadReader, ipad); !hello.CanSend {
+		t.Fatalf("same-process resume = %#v, want writer", hello)
+	}
+}
+
+func TestAcpWriterLeaseStatusReportsTheWriter(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	clock := newTestLeaseClock(bridge)
+
+	attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	clock.Advance(time.Minute)
+	info := bridge.snapshot()
+	if info.Writer == nil || info.Writer.Label != "iPad" ||
+		info.Writer.IdleSeconds != 60 || info.Writer.Stale {
+		t.Fatalf("status writer = %#v", info.Writer)
+	}
+	clock.Advance(acpWriterStaleAfter)
+	if info := bridge.snapshot(); info.Writer == nil || !info.Writer.Stale {
+		t.Fatalf("silent writer = %#v, want stale", info.Writer)
+	}
+}
+
+func TestAcpWriterLeaseConcurrentTakeoversLeaveOneWriter(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	bridge.leaseLinger = 50 * time.Millisecond
+
+	const clients = 6
+	var wait sync.WaitGroup
+	for index := 0; index < clients; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			server, peer := net.Pipe()
+			go func() {
+				reader := bufio.NewReader(peer)
+				for {
+					if _, err := readAcpWireFrame(reader); err != nil {
+						return
+					}
+				}
+			}()
+			t.Cleanup(func() { _ = peer.Close() })
+			go bridge.handleAttach(server, bufio.NewReader(server), acpWireMessage{
+				Version:      acpBridgeProtocolVersion,
+				Type:         "hello",
+				Capabilities: []string{acpWriterLeaseCapability},
+				DeviceLabel:  "device",
+				ClientToken:  strings.Repeat(string(rune('a'+index)), 20),
+				Takeover:     true,
+			})
+		}()
+	}
+	wait.Wait()
+	deadline := time.Now().Add(time.Second)
+	for {
+		bridge.mu.Lock()
+		count := len(bridge.clients)
+		writer := bridge.clients[bridge.writerClientID]
+		bridge.mu.Unlock()
+		if count == 1 && writer != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("clients = %d, writer = %v, want exactly the writer", count, writer)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	expectNoProviderLine(t, lines)
+}
+
+func waitForNoWriter(t *testing.T, bridge *acpBridge) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		bridge.mu.Lock()
+		free := bridge.clients[bridge.writerClientID] == nil
+		bridge.mu.Unlock()
+		if free {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the writer never detached")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

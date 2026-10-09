@@ -117,17 +117,29 @@ lists the same capability in its own hello may also send a short `deviceLabel`
 `clientToken`. When such a client cannot write, the bridge answers with a hello
 carrying `canSend:false` and `writer:{"label":...,"idleSeconds":N}`, where
 `idleSeconds` counts from the writer's last input, and then sends nothing else;
-the client closes the connection. Attaching with `"takeover":true` moves the
-lease to the new client. The lease also moves without asking when the
-attaching client presents the writer's own `clientToken` (the same app process
-reconnecting while its old connection is half-open), or when the writer has
-sent no frame for 90 seconds. Lease-aware clients send an `ack` heartbeat well
-inside that bound. The displaced writer stops receiving output at once; a
-lease-aware one receives `{"type":"lease","writer":{"label":...}}` and is
-disconnected shortly after, and any other client is disconnected so it
-reattaches as a reader. Pending provider requests and in-flight turns belong to
-the bridge, so they carry over to the new writer, which receives them through
-the normal attach replay.
+the client closes the connection. `list` and `status` report the same `writer`
+for an attached writer, with `stale:true` once it has gone quiet. Attaching
+with `"takeover":true` moves the lease to the new client. The lease also moves
+without asking when the attaching client presents the writer's own
+`clientToken` (the same app process reconnecting while its old connection is
+half-open), or when a lease-aware writer has sent no frame for 90 seconds;
+those writers send an `ack` heartbeat well inside that bound. An older client
+sends nothing while its user reads, so it keeps the lease until another client
+takes it over explicitly. A lease-aware client resuming from a `lastAck` after
+a different client held the lease gets the same `canSend:false` answer even if
+the lease is free, because the replay from that position may contain requests
+the other client already answered; it continues with a fresh attach.
+
+The displaced writer stops receiving output at once. A lease-aware one is sent
+`{"type":"lease","writer":{"label":...},"acceptedInputs":N}` ahead of any
+queued output, where `acceptedInputs` counts the input frames the bridge took
+from that connection before the lease moved (later ones were dropped), and is
+disconnected 10 seconds later even if it never reads it. Any other client is
+disconnected so it reattaches as a reader. Pending provider requests and
+in-flight turns belong to the bridge, so they carry over to the new writer,
+which receives them through the normal attach replay. Only one answer to a
+provider request reaches the provider; a second answer from another client is
+dropped.
 
 The replay buffer is memory-only. Bridge metadata exposed by `list` and
 `status` contains bounded provider/session IDs, working directory, state,

@@ -38,6 +38,9 @@ var acpClientTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 type acpWriterInfo struct {
 	Label       string `json:"label,omitempty"`
 	IdleSeconds int64  `json:"idleSeconds"`
+	// Stale marks a writer silent long enough that the next attach takes
+	// its lease without asking.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // acpLeaseRequest is the lease part of an attach hello, already sanitized.
@@ -89,9 +92,33 @@ func (b *acpBridge) clock() time.Time {
 	return time.Now()
 }
 
-func (b *acpBridge) setWriterLocked(clientID string, now time.Time) {
-	b.writerClientID = clientID
+func (b *acpBridge) leaseLingerDuration() time.Duration {
+	if b.leaseLinger > 0 {
+		return b.leaseLinger
+	}
+	return acpLeaseLinger
+}
+
+func (b *acpBridge) setWriterLocked(client *acpBridgeClient, now time.Time) {
+	b.writerClientID = client.id
 	b.writerLastInput = now
+	b.lastWriterLabel = client.label
+	b.lastWriterToken = client.token
+	b.leaseEverHeld = true
+}
+
+// resumeNeedsFreshAttachLocked reports whether a lease-aware client resuming
+// from an earlier position must not continue from it, because another client
+// held the lease since. That client may have answered provider requests the
+// replay still contains, so the resuming one could act on them again. It is
+// told who held the lease instead, and takes the chat back with a fresh
+// attach that replays only requests still pending.
+func (b *acpBridge) resumeNeedsFreshAttachLocked(
+	hello acpWireMessage,
+	request acpLeaseRequest,
+) bool {
+	return request.aware && hello.LastAck > 0 && b.leaseEverHeld &&
+		request.token != b.lastWriterToken
 }
 
 // claimWriterOnAttachLocked decides whether an attaching client takes the
@@ -109,34 +136,55 @@ func (b *acpBridge) claimWriterOnAttachLocked(
 	case current == nil:
 	case request.takeover:
 	case request.token != "" && request.token == current.token:
-	case now.Sub(current.lastSeen) >= acpWriterStaleAfter:
+	case b.writerStaleLocked(current, now):
 	default:
 		return nil
 	}
-	b.setWriterLocked(client.id, now)
+	b.setWriterLocked(client, now)
 	return current
 }
 
+// writerStaleLocked reports whether writer has been silent long enough that
+// the next attach may take its lease without asking. Only lease-aware writers
+// send heartbeats; an older app is quiet while its user reads, so it keeps
+// the lease until someone takes it over explicitly.
+func (b *acpBridge) writerStaleLocked(writer *acpBridgeClient, now time.Time) bool {
+	return writer.leaseAware && now.Sub(writer.lastSeen) >= acpWriterStaleAfter
+}
+
 // displaceWriterLocked detaches old, which just lost the lease to writer. It
-// stops receiving output at once. A lease-aware client is then told who holds
-// the lease; any other client is returned for the caller to disconnect after
-// releasing b.mu, so it reattaches and learns the lease is held elsewhere.
-// Pending provider requests and in-flight turns are bridge state, not client
-// state, so they carry over to the new writer untouched.
+// stops receiving output at once: its writer goroutine sends the lease notice
+// next, ahead of any queued output or replay, and the connection closes after
+// acpLeaseLinger even if a sleeping device never reads it. Any other client is
+// returned for the caller to disconnect after releasing b.mu, so it reattaches
+// and learns the lease is held elsewhere. Pending provider requests and
+// in-flight turns are bridge state, not client state, so they carry over to
+// the new writer untouched.
 func (b *acpBridge) displaceWriterLocked(
 	old *acpBridgeClient,
 	writer *acpBridgeClient,
 ) *acpBridgeClient {
 	delete(b.clients, old.id)
-	if old.leaseAware && tryEnqueueAcpClient(old, acpWireMessage{
-		Version:  acpBridgeProtocolVersion,
-		Type:     "lease",
-		BridgeID: b.id,
-		Writer:   &acpWriterInfo{Label: writer.label},
-	}) {
-		return nil
+	if !old.leaseAware || old.displaced == nil {
+		return old
 	}
-	return old
+	old.leaseNotice = &acpWireMessage{
+		Version:        acpBridgeProtocolVersion,
+		Type:           "lease",
+		BridgeID:       b.id,
+		Writer:         &acpWriterInfo{Label: writer.label},
+		AcceptedInputs: old.acceptedInputs,
+	}
+	close(old.displaced)
+	time.AfterFunc(b.leaseLingerDuration(), old.cancel)
+	return nil
+}
+
+// writeLeaseNotice sends a displaced client its lease notice, once.
+func writeLeaseNotice(client *acpBridgeClient) {
+	if client.leaseNotice != nil {
+		_ = writeAcpWireFrame(client.conn, *client.leaseNotice)
+	}
 }
 
 // writerInfoLocked describes the attached writer, or nil when there is none.
@@ -145,11 +193,31 @@ func (b *acpBridge) writerInfoLocked(now time.Time) *acpWriterInfo {
 	if writer == nil {
 		return nil
 	}
+	return &acpWriterInfo{
+		Label:       writer.label,
+		IdleSeconds: b.writerIdleSecondsLocked(now),
+		Stale:       b.writerStaleLocked(writer, now),
+	}
+}
+
+// lastWriterInfoLocked describes the attached writer, or the last one when the
+// lease is free.
+func (b *acpBridge) lastWriterInfoLocked(now time.Time) *acpWriterInfo {
+	if info := b.writerInfoLocked(now); info != nil {
+		return info
+	}
+	return &acpWriterInfo{
+		Label:       b.lastWriterLabel,
+		IdleSeconds: b.writerIdleSecondsLocked(now),
+	}
+}
+
+func (b *acpBridge) writerIdleSecondsLocked(now time.Time) int64 {
 	idle := now.Sub(b.writerLastInput)
 	if idle < 0 {
 		idle = 0
 	}
-	return &acpWriterInfo{Label: writer.label, IdleSeconds: int64(idle / time.Second)}
+	return int64(idle / time.Second)
 }
 
 // touchClient records that clientID is still alive, which keeps its lease
@@ -167,8 +235,13 @@ func (b *acpBridge) touchClient(clientID string) {
 // lease, then waits for it to close. It is never registered as a reader: it
 // reattaches with takeover to continue, and that attach replays any pending
 // provider requests to it.
-func answerLeaseProbe(conn net.Conn, reader *bufio.Reader, hello acpWireMessage) {
-	_ = conn.SetDeadline(time.Now().Add(acpLeaseLinger))
+func answerLeaseProbe(
+	conn net.Conn,
+	reader *bufio.Reader,
+	hello acpWireMessage,
+	linger time.Duration,
+) {
+	_ = conn.SetDeadline(time.Now().Add(linger))
 	if writeAcpWireFrame(conn, hello) != nil {
 		return
 	}
