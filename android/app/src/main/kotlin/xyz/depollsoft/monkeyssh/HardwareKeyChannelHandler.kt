@@ -117,6 +117,9 @@ object HardwareKeyChannelHandler {
         var signature: Signature? = null
         var allowDeviceCredential = false
         var prompt: BiometricPrompt? = null
+
+        /** The activity showing [prompt]. */
+        var host: WeakReference<FragmentActivity>? = null
     }
 
     private val activityCallbacks = object : Application.ActivityLifecycleCallbacks {
@@ -141,7 +144,17 @@ object HardwareKeyChannelHandler {
 
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
-        override fun onActivityDestroyed(activity: Activity) = Unit
+        override fun onActivityDestroyed(activity: Activity) {
+            // androidx drops a prompt's result when its activity is destroyed
+            // (e.g. swiped out of Recents while the SSH service keeps the
+            // process alive). End it here, or every later prompt waits.
+            val active = activePrompt
+            if (active != null && active.host?.get() === activity) {
+                active.cancelled = true
+                promptEnded(active)
+                finish(active, error = "cancelled")
+            }
+        }
     }
 
     fun attachToEngine(flutterEngine: FlutterEngine, applicationContext: Context) {
@@ -591,6 +604,7 @@ object HardwareKeyChannelHandler {
             }
             .build()
         request.prompt = prompt
+        request.host = WeakReference(activity)
         activePrompt = request
         try {
             prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(signature))
@@ -606,8 +620,18 @@ object HardwareKeyChannelHandler {
         val request = signRequests[requestId] ?: return
         request.cancelled = true
         when {
-            // The prompt's error callback replies.
-            activePrompt === request -> request.prompt?.cancelAuthentication()
+            activePrompt === request -> {
+                try {
+                    request.prompt?.cancelAuthentication()
+                } catch (error: Exception) {
+                    Log.w(TAG, "Hardware key prompt cancel failed: ${error.javaClass.simpleName}")
+                }
+                // Finish now rather than wait for the error callback, which
+                // never comes if the prompt's activity is gone; a late
+                // callback finds the request already finished.
+                promptEnded(request)
+                finish(request, error = "cancelled")
+            }
             promptQueue.remove(request) -> finish(request, error = "cancelled")
             // Still preparing: prepare() sees the flag before queueing.
             else -> Unit
