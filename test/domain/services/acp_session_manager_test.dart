@@ -503,6 +503,7 @@ class _FakeConnector implements AcpBridgeConnector {
   final Map<String, int> lastDeliveredSequences = <String, int>{};
   final Map<String, List<int>> connectionAcknowledgements =
       <String, List<int>>{};
+  final List<bool> connectTakeOvers = <bool>[];
 
   @override
   Future<MonkeyMuxAcpBridgeStartResult> startBridge({
@@ -598,7 +599,9 @@ class _FakeConnector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
+    connectTakeOvers.add(takeOver);
     connectionAcknowledgements
         .putIfAbsent(bridgeId, () => <int>[])
         .add(lastAcknowledgedSequence);

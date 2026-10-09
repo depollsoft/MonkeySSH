@@ -446,6 +446,14 @@ final class AcpSessionState {
         AcpConnectionStatus.closed => false,
       };
 
+  /// The device holding this session's input while this view is read-only,
+  /// or null when this device can send.
+  MonkeyMuxAcpRemoteWriter? get remoteWriter =>
+      !attached &&
+          transportState?.status == MonkeyMuxAcpTransportStatus.heldElsewhere
+      ? transportState?.writer
+      : null;
+
   /// Whether this tracked session still represents an open persistent mux
   /// window, even when its local ACP transport is parked.
   ///

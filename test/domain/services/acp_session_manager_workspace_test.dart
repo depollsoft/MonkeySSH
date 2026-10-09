@@ -226,6 +226,7 @@ class _Connector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     final agent = _RecordingAgent(
       http: http,

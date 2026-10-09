@@ -220,6 +220,7 @@ class _FakeConnector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     final server = serverFactory?.call(hostId, bridgeId) ?? _FakeAcpServer();
     servers[bridgeId] = server;

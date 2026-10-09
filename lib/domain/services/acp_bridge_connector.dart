@@ -118,11 +118,15 @@ abstract interface class AcpBridgeConnector {
 
   /// Attaches to an existing bridge, returning a live ACP client bound to a
   /// reconnecting transport.
+  ///
+  /// With [takeOver], the attach takes the input lease from another device
+  /// that holds it.
   AcpBridgeSession connect({
     required int hostId,
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   });
 
   /// Resolves the same-host filesystem/terminal binding used to answer ACP
@@ -242,6 +246,7 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     // A replacement local attachment continues the same logical replay cursor.
     final transport = _bridgeService.connect(
@@ -249,6 +254,7 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
       bridgeId: bridgeId,
       providerId: providerId,
       lastAcknowledgedSequence: lastAcknowledgedSequence,
+      takeOver: takeOver,
     );
     final connection = AcpJsonRpcConnection(
       transport: transport,

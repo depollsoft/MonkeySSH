@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
@@ -15,6 +16,7 @@ import '../models/acp_provider.dart';
 import '../models/command_names.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import '../models/remote_multiplexer.dart';
+import 'acp_device_label.dart';
 import 'acp_transport.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_installer_service.dart';
@@ -462,17 +464,30 @@ List<String> _validatedExecutableProbeNames(Iterable<String> executables) {
 /// Installs and controls persistent MonkeyMux ACP bridges over SSH.
 final class MonkeyMuxAcpBridgeService {
   /// Creates a bridge service.
+  ///
+  /// [deviceLabel] tells other clients which device holds a chat's input; it
+  /// defaults to [currentAcpDeviceLabel]. [clientToken] identifies this app
+  /// process to the bridge so a reconnect reclaims its own lease; it defaults
+  /// to a random value.
   MonkeyMuxAcpBridgeService({
     required MonkeyMuxInstallerService installer,
     MonkeyMuxService? monkeyMuxService,
     DiagnosticsLogger? diagnostics,
+    String? deviceLabel,
+    String? clientToken,
   }) : _installer = installer,
        _monkeyMuxService = monkeyMuxService,
-       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
+       _deviceLabel = deviceLabel,
+       _clientToken = clientToken ?? _newClientToken();
 
   final MonkeyMuxInstallerService _installer;
   final MonkeyMuxService? _monkeyMuxService;
   final DiagnosticsLogger _diagnostics;
+  String? _deviceLabel;
+  final String _clientToken;
+
+  String get _resolvedDeviceLabel => _deviceLabel ??= currentAcpDeviceLabel();
 
   /// Starts a persistent bridge using the exact approved [launchArgv].
   Future<MonkeyMuxAcpBridgeStartResult> start({
@@ -683,6 +698,10 @@ final class MonkeyMuxAcpBridgeService {
   }
 
   /// Creates a reconnecting ACP byte transport for an existing bridge.
+  ///
+  /// With [takeOver], the first attach takes the input lease from whichever
+  /// client holds it. Without it, a lease held by another live client leaves
+  /// the transport [MonkeyMuxAcpTransportStatus.heldElsewhere].
   MonkeyMuxAcpTransport connect({
     required Future<SshSession> Function() sessionProvider,
     required String bridgeId,
@@ -696,6 +715,9 @@ final class MonkeyMuxAcpBridgeService {
     ],
     Duration handshakeTimeout = const Duration(seconds: 10),
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
+    Duration heartbeatInterval = const Duration(seconds: 30),
+    DateTime Function()? clock,
   }) {
     _validateBridgeId(bridgeId);
     if (lastAcknowledgedSequence < 0) {
@@ -714,6 +736,11 @@ final class MonkeyMuxAcpBridgeService {
       reconnectBackoff: reconnectBackoff,
       handshakeTimeout: handshakeTimeout,
       lastAcknowledgedSequence: lastAcknowledgedSequence,
+      deviceLabel: _resolvedDeviceLabel,
+      clientToken: _clientToken,
+      takeOver: takeOver,
+      heartbeatInterval: heartbeatInterval,
+      clock: clock ?? DateTime.now,
     );
   }
 
@@ -775,6 +802,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     required List<Duration> reconnectBackoff,
     required Duration handshakeTimeout,
     required int lastAcknowledgedSequence,
+    required String deviceLabel,
+    required String clientToken,
+    required bool takeOver,
+    required Duration heartbeatInterval,
+    required DateTime Function() clock,
   }) : _installer = installer,
        _sessionProvider = sessionProvider,
        _bridgeId = bridgeId,
@@ -783,7 +815,12 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
        _reconnectBackoff = List.unmodifiable(reconnectBackoff),
        _handshakeTimeout = handshakeTimeout,
        _lastDeliveredSequence = lastAcknowledgedSequence,
-       _freshBaselineEstablished = lastAcknowledgedSequence > 0 {
+       _freshBaselineEstablished = lastAcknowledgedSequence > 0,
+       _deviceLabel = deviceLabel,
+       _clientToken = clientToken,
+       _takeOverRequested = takeOver,
+       _heartbeatInterval = heartbeatInterval,
+       _clock = clock {
     scheduleMicrotask(() {
       _emitState(MonkeyMuxAcpTransportStatus.connecting);
       unawaited(_openChannel());
@@ -797,6 +834,15 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final DiagnosticsLogger _diagnostics;
   final List<Duration> _reconnectBackoff;
   final Duration _handshakeTimeout;
+  final String _deviceLabel;
+  final String _clientToken;
+  final Duration _heartbeatInterval;
+  final DateTime Function() _clock;
+  // Only the first writer handshake takes the lease over. A later reconnect
+  // must not silently take back a lease another device deliberately took.
+  bool _takeOverRequested;
+  var _heldWriterLease = false;
+  Timer? _heartbeatTimer;
   // Both input views share one single-subscription buffer. Outputs received
   // before subscription must remain available to whichever view is chosen.
   final _incoming = StreamController<AcpDecodedFrame>(sync: true);
@@ -963,6 +1009,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         'bridgeId': _bridgeId,
         'lastAck': _lastDeliveredSequence,
         if (_pendingOnlyHandshakeRequested) 'replayMode': 'adaptive',
+        // Bridges without the writer lease ignore these fields.
+        'capabilities': const [monkeyMuxAcpWriterLeaseCapability],
+        'deviceLabel': _deviceLabel,
+        'clientToken': _clientToken,
+        if (_takeOverRequested) 'takeover': true,
       });
       _diagnostics.debug(
         'acp.transport',
@@ -1200,6 +1251,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
           );
         case 'error':
           _handleBridgeError(message);
+        case 'lease':
+          _handleLease(message);
         default:
           _failTerminal(
             const MonkeyMuxAcpBridgeException(
@@ -1234,7 +1287,12 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       );
       return;
     }
+    final leaseAware = _advertisesWriterLease(message['capabilities']);
     if (message['canSend'] != true) {
+      if (leaseAware) {
+        _enterHeldElsewhere(message['writer'], leaseLost: _heldWriterLease);
+        return;
+      }
       _failTerminal(
         const MonkeyMuxAcpBridgeException(
           MonkeyMuxAcpBridgeErrorKind.nonWriter,
@@ -1247,6 +1305,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _handshakeTimer = null;
     _connected = true;
     _reconnectAttempt = 0;
+    _takeOverRequested = false;
+    _heldWriterLease = true;
+    if (leaseAware) _startHeartbeat();
     if (metadata.nextSequence < _lastDeliveredSequence) {
       _failTerminal(
         const MonkeyMuxAcpBridgeException(
@@ -1586,6 +1647,66 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     );
   }
 
+  void _handleLease(Map<String, Object?> message) {
+    if (!_matchesCurrentBridge(message)) return;
+    // A lease frame only ever reports a lost lease; a grant arrives as a hello.
+    if (message['canSend'] == true) return;
+    _enterHeldElsewhere(message['writer'], leaseLost: true);
+  }
+
+  /// Ends this transport without failure because another client holds the
+  /// input lease. Queued input is dropped unsent, and nothing more is written.
+  void _enterHeldElsewhere(Object? writer, {required bool leaseLost}) {
+    if (_closed || _terminalFailure) return;
+    _terminalFailure = true;
+    _connected = false;
+    _stopHeartbeat();
+    final remoteWriter = _parseRemoteWriter(writer, leaseLost: leaseLost);
+    _emitState(MonkeyMuxAcpTransportStatus.heldElsewhere, writer: remoteWriter);
+    _diagnostics.info(
+      'acp.transport',
+      'writer_held_elsewhere',
+      fields: {
+        'providerHash': _providerHash,
+        'bridgeId': _bridgeId,
+        'leaseLost': leaseLost,
+        'writerLabeled': remoteWriter.label != null,
+        'idleSeconds': _clock().difference(remoteWriter.lastActiveAt).inSeconds,
+      },
+    );
+    scheduleMicrotask(() => unawaited(_releaseResources()));
+  }
+
+  MonkeyMuxAcpRemoteWriter _parseRemoteWriter(
+    Object? value, {
+    required bool leaseLost,
+  }) {
+    final map = value is Map ? value : const <Object?, Object?>{};
+    final label = map['label'];
+    final idle = _readNonNegativeInt(map['idleSeconds']) ?? 0;
+    return MonkeyMuxAcpRemoteWriter(
+      label: label is String ? _boundedDeviceLabel(label) : null,
+      lastActiveAt: _clock().subtract(
+        Duration(seconds: math.min(idle, _maxReportedIdleSeconds)),
+      ),
+      leaseLost: leaseLost,
+    );
+  }
+
+  void _startHeartbeat() {
+    _stopHeartbeat();
+    // The bridge counts a silent writer as gone and lets another device take
+    // its lease, so a live writer keeps proving it is here.
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      if (_connected && _channel != null) _sendAck(_lastDeliveredSequence);
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+  }
+
   void _handleBridgeError(Map<String, Object?> message) {
     final errorText = message['error'];
     if (errorText is! String || errorText.length > 256) {
@@ -1762,6 +1883,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   void _handleChannelLoss(int generation, Object? error) {
     if (generation != _generation || _closed || _terminalFailure) return;
     _connected = false;
+    _stopHeartbeat();
     _discardWireInput();
     _handshakeHighWaterSequence = null;
     _replayWindowRetainedFrom = null;
@@ -1860,6 +1982,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
 
   Future<void> _doReleaseResources() async {
     _generation += 1;
+    _stopHeartbeat();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _handshakeTimer?.cancel();
@@ -1888,6 +2011,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     MonkeyMuxAcpProviderState? providerState,
     int? exitCode,
     int? retainedFrom,
+    MonkeyMuxAcpRemoteWriter? writer,
   }) {
     if (_states.isClosed) return;
     _states.add(
@@ -1899,6 +2023,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         providerState: providerState,
         exitCode: exitCode,
         retainedFrom: retainedFrom,
+        writer: writer,
       ),
     );
   }
@@ -2183,6 +2308,33 @@ Uint8List _encodeWire(Map<String, Object?> message) {
     );
   }
   return bytes;
+}
+
+const _maxDeviceLabelLength = 48;
+// About a year; anything longer is not a meaningful "last active" time.
+const _maxReportedIdleSeconds = 366 * 24 * 60 * 60;
+
+bool _advertisesWriterLease(Object? capabilities) =>
+    capabilities is List &&
+    capabilities.contains(monkeyMuxAcpWriterLeaseCapability);
+
+/// Keeps a short single-line label from the bridge and drops anything else.
+String? _boundedDeviceLabel(String label) {
+  final trimmed = label.trim();
+  if (trimmed.isEmpty ||
+      trimmed.runes.length > _maxDeviceLabelLength ||
+      trimmed.runes.any((rune) => rune < 0x20 || rune == 0x7f)) {
+    return null;
+  }
+  return trimmed;
+}
+
+String _newClientToken() {
+  final random = math.Random.secure();
+  return List<String>.generate(
+    16,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
 }
 
 String _providerHash(String providerId) =>
