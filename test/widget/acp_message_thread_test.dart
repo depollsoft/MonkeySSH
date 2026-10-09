@@ -20,6 +20,7 @@ import 'package:monkeyssh/presentation/widgets/acp_usage.dart';
 import 'package:monkeyssh/presentation/widgets/acp_user_prompt.dart';
 
 import '../helpers/tap_selectable_text.dart';
+import 'acp_unread_cases.dart';
 
 // A tiny valid 1x1 PNG.
 final _pngBytes = Uint8List.fromList([
@@ -48,6 +49,8 @@ Widget wrap(
 );
 
 void main() {
+  registerAcpUnreadWidgetTests();
+
   setUp(() => FluttyTheme.debugUseSystemFonts = true);
   tearDown(() => FluttyTheme.debugUseSystemFonts = false);
 
