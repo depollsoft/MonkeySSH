@@ -5,11 +5,13 @@ import '../data/repositories/host_repository.dart';
 import '../domain/models/acp_recent_session.dart';
 import '../domain/models/agent_launch_preset.dart';
 import '../domain/models/app_link.dart';
+import '../domain/models/monetization.dart';
 import '../domain/services/acp_recent_sessions_service.dart';
 import '../domain/services/agent_launch_preset_service.dart';
 import '../domain/services/diagnostics_log_service.dart';
 import '../domain/services/host_cli_launch_preferences_service.dart';
 import '../domain/services/local_notification_service.dart';
+import '../domain/services/monetization_service.dart';
 import '../presentation/widgets/app_link_preset_sheet.dart';
 
 /// Terminal route query key marking a terminal opened by an app link.
@@ -18,6 +20,10 @@ import '../presentation/widgets/app_link_preset_sheet.dart';
 /// screen. A terminal opened this way shows its host's auto-connect command
 /// for review instead of running it, and reports a missing target window.
 const appLinkTapQueryKey = 'linkTap';
+
+/// Terminal route query key marking a launch preset the user just confirmed,
+/// so its agent starts even in a MonkeyMux workspace that is already running.
+const appLinkPresetRunQueryKey = 'presetRun';
 
 /// User-facing messages for links MonkeySSH cannot act on.
 abstract final class AppLinkMessages {
@@ -39,6 +45,10 @@ abstract final class AppLinkMessages {
   /// The link's launch preset is not saved, or cannot run, on this device.
   static const presetMissing =
       "That launch preset isn't saved on this device anymore.";
+
+  /// The preset would run as auto-connect automation, which needs Pro.
+  static const presetNeedsPro =
+      'Running this launch preset needs MonkeySSH Pro.';
 }
 
 /// How a link was resolved. Names are safe to log.
@@ -61,8 +71,14 @@ enum AppLinkOutcome {
   /// The user cancelled the preset review.
   presetDeclined,
 
+  /// The preset would need Pro to run, so it was refused before review.
+  presetNeedsPro,
+
   /// The user confirmed the preset review and it was launched.
   presetLaunched,
+
+  /// The user confirmed the preset review but the connection did not open.
+  presetNotLaunched,
 
   /// An `ssh://` link opened the reviewed add-host form.
   hostFormOpened,
@@ -83,8 +99,9 @@ abstract interface class AppLinkEffects {
   /// Shows what a preset runs. Resolves to `true` only if the user chose Run.
   Future<bool> confirmPresetLaunch(AppLinkPresetReview review);
 
-  /// Opens a new connection to [host] so its launch preset runs.
-  Future<void> launchPreset(Host host);
+  /// Opens a new connection to [host] so its launch preset runs. Resolves
+  /// to whether the connection opened.
+  Future<bool> launchPreset(Host host);
 }
 
 /// Resolves a parsed [AppLink] against data saved on this device and
@@ -100,6 +117,7 @@ class AppLinkHandler {
     required AcpRecentSessionsService recentSessions,
     required AgentLaunchPresetService presetService,
     required HostCliLaunchPreferencesService cliLaunchPreferences,
+    required MonetizationService monetization,
     required AppLinkEffects effects,
     String Function()? newTapId,
     DiagnosticsLogger? diagnostics,
@@ -107,6 +125,7 @@ class AppLinkHandler {
        _recentSessions = recentSessions,
        _presets = presetService,
        _cliLaunchPreferences = cliLaunchPreferences,
+       _monetization = monetization,
        _effects = effects,
        _newTapId =
            newTapId ?? (() => '${DateTime.now().microsecondsSinceEpoch}'),
@@ -116,6 +135,7 @@ class AppLinkHandler {
   final AcpRecentSessionsService _recentSessions;
   final AgentLaunchPresetService _presets;
   final HostCliLaunchPreferencesService _cliLaunchPreferences;
+  final MonetizationService _monetization;
   final AppLinkEffects _effects;
   final String Function() _newTapId;
   final DiagnosticsLogger _diagnostics;
@@ -197,6 +217,15 @@ class AppLinkHandler {
       _effects.showMessage(AppLinkMessages.presetMissing);
       return AppLinkOutcome.presetMissing;
     }
+    // Outside MonkeyMux the preset runs as Pro auto-connect automation;
+    // refuse before the review rather than after the user taps Run.
+    if (!preset.usesMonkeyMuxSession &&
+        !await _monetization.canUseFeature(
+          MonetizationFeature.autoConnectAutomation,
+        )) {
+      _effects.showMessage(AppLinkMessages.presetNeedsPro);
+      return AppLinkOutcome.presetNeedsPro;
+    }
     final preferences = await _cliLaunchPreferences.getPreferencesForHost(
       host.id,
     );
@@ -220,7 +249,9 @@ class AppLinkHandler {
         hostLabel: host.label,
         tool: preset.tool,
         command: command,
-        yoloMode: startInYoloMode && preset.tool.supportsYoloMode,
+        yoloMode:
+            (startInYoloMode && preset.tool.supportsYoloMode) ||
+            presetArgumentsRequestYolo(preset),
         muxSessionName: muxSessionName,
         muxBackend: muxSessionName == null
             ? null
@@ -230,8 +261,9 @@ class AppLinkHandler {
     if (!confirmed) {
       return AppLinkOutcome.presetDeclined;
     }
-    await _effects.launchPreset(host);
-    return AppLinkOutcome.presetLaunched;
+    return await _effects.launchPreset(host)
+        ? AppLinkOutcome.presetLaunched
+        : AppLinkOutcome.presetNotLaunched;
   }
 
   Future<AppLinkOutcome> _openSshHost(SshHostAppLink link) async {
@@ -256,6 +288,15 @@ class AppLinkHandler {
     _effects.openNewHostForm(link.toSanitizedUrl());
     return AppLinkOutcome.hostFormOpened;
   }
+}
+
+/// Whether [preset]'s own extra arguments switch on its tool's YOLO mode,
+/// whatever the host's YOLO preference says.
+bool presetArgumentsRequestYolo(AgentLaunchPreset preset) {
+  final arguments = preset.additionalArguments?.trim();
+  if (arguments == null || arguments.isEmpty) return false;
+  final tokens = arguments.split(RegExp(r'\s+')).toSet();
+  return preset.tool.yoloArguments.any(tokens.contains);
 }
 
 /// Builds the terminal route for an open-host link.

@@ -12,6 +12,7 @@ import '../domain/services/agent_launch_preset_service.dart';
 import '../domain/services/app_link_service.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/host_cli_launch_preferences_service.dart';
+import '../domain/services/monetization_service.dart';
 import '../presentation/widgets/app_link_preset_sheet.dart';
 import '../presentation/widgets/connection_attempt_dialog.dart';
 import 'app_link_handler.dart';
@@ -128,6 +129,7 @@ class _AppLinkNavigationBridgeState
     recentSessions: ref.read(acpRecentSessionsServiceProvider),
     presetService: ref.read(agentLaunchPresetServiceProvider),
     cliLaunchPreferences: ref.read(hostCliLaunchPreferencesServiceProvider),
+    monetization: ref.read(monetizationServiceProvider),
     effects: this,
   );
 
@@ -167,20 +169,27 @@ class _AppLinkNavigationBridgeState
   }
 
   @override
-  Future<void> launchPreset(Host host) async {
+  Future<bool> launchPreset(Host host) async {
     final context = _navigatorContext;
-    if (!_canNavigate() || context == null) return;
+    if (!_canNavigate() || context == null) return false;
     final result = await connectToHostWithProgressDialog(context, ref, host);
     final connectionId = result.connectionId;
-    if (!result.success || connectionId == null) return;
+    if (!result.success || connectionId == null || !_canNavigate()) {
+      return false;
+    }
     // No link marker: the user just reviewed the preset, so the new
-    // connection's auto-connect runs it without asking again.
+    // connection's auto-connect runs it without asking again, and starts
+    // its agent in a new window if its workspace is already running.
     openTerminal(
       Uri(
         path: '/terminal/${host.id}',
-        queryParameters: <String, String>{'connectionId': '$connectionId'},
+        queryParameters: <String, String>{
+          'connectionId': '$connectionId',
+          appLinkPresetRunQueryKey: '1',
+        },
       ).toString(),
     );
+    return true;
   }
 
   @override

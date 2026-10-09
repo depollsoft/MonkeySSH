@@ -8,6 +8,7 @@ import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/app_link.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
+import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
@@ -31,6 +32,7 @@ class _RecordingEffects implements AppLinkEffects {
   final reviews = <AppLinkPresetReview>[];
   final launched = <Host>[];
   bool confirm = false;
+  bool launchSucceeds = true;
 
   @override
   void openTerminal(String location) => terminals.add(location);
@@ -48,7 +50,10 @@ class _RecordingEffects implements AppLinkEffects {
   }
 
   @override
-  Future<void> launchPreset(Host host) async => launched.add(host);
+  Future<bool> launchPreset(Host host) async {
+    launched.add(host);
+    return launchSucceeds;
+  }
 }
 
 Host _host({
@@ -92,12 +97,19 @@ void main() {
   late _MockRecentSessions recentSessions;
   late _MockPresetService presets;
   late _MockCliPreferences cliPreferences;
+  late MockMonetizationService monetization;
   late _RecordingEffects effects;
   late RecordingDiagnosticsLogger diagnostics;
   late AppLinkHandler handler;
 
+  setUpAll(() {
+    registerFallbackValue(MonetizationFeature.autoConnectAutomation);
+  });
+
   setUp(() {
     hosts = MockHostRepository();
+    monetization = MockMonetizationService();
+    when(() => monetization.canUseFeature(any())).thenAnswer((_) async => true);
     recentSessions = _MockRecentSessions();
     presets = _MockPresetService();
     cliPreferences = _MockCliPreferences();
@@ -108,6 +120,7 @@ void main() {
       recentSessions: recentSessions,
       presetService: presets,
       cliLaunchPreferences: cliPreferences,
+      monetization: monetization,
       effects: effects,
       newTapId: () => 'tap',
       diagnostics: diagnostics,
@@ -276,6 +289,69 @@ void main() {
         buildAgentLaunchCommand(preset, startInYoloMode: true),
       );
       expect(review.yoloSwitches, '--dangerously-skip-permissions');
+    });
+
+    test('report a launch whose connection did not open', () async {
+      stubPreset(preset);
+      effects
+        ..confirm = true
+        ..launchSucceeds = false;
+
+      final outcome = await handler.handle(
+        const LaunchPresetAppLink(presetId: 7),
+      );
+
+      expect(outcome, AppLinkOutcome.presetNotLaunched);
+    });
+
+    test('refuse a Pro-only preset before showing a review', () async {
+      stubPreset(preset);
+      when(
+        () => monetization.canUseFeature(
+          MonetizationFeature.autoConnectAutomation,
+        ),
+      ).thenAnswer((_) async => false);
+      effects.confirm = true;
+
+      final outcome = await handler.handle(
+        const LaunchPresetAppLink(presetId: 7),
+      );
+
+      expect(outcome, AppLinkOutcome.presetNeedsPro);
+      expect(effects.messages, [AppLinkMessages.presetNeedsPro]);
+      expect(effects.reviews, isEmpty);
+      expect(effects.launched, isEmpty);
+    });
+
+    test('review MonkeyMux presets on Free, which run without Pro', () async {
+      stubPreset(
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        ),
+      );
+      when(() => monetization.canUseFeature(any()))
+          .thenAnswer((_) async => false);
+
+      await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+      expect(effects.reviews, hasLength(1));
+    });
+
+    test('flag YOLO switches passed as extra arguments', () async {
+      stubPreset(
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.copilotCli,
+          additionalArguments: '--model gpt-6 --yolo',
+        ),
+      );
+
+      await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+      final review = effects.reviews.single;
+      expect(review.yoloMode, isTrue);
+      expect(review.command, contains('--yolo'));
     });
 
     test('never launch when the review is cancelled', () async {

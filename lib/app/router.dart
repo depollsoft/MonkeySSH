@@ -105,6 +105,8 @@ final routerProvider = Provider<GoRouter>((ref) {
           final pasteDemoImage =
               state.uri.queryParameters['pasteDemoImage'] == '1';
           final linkTap = state.uri.queryParameters[appLinkTapQueryKey];
+          final startPresetAgent =
+              state.uri.queryParameters[appLinkPresetRunQueryKey] == '1';
           if (hostId == null) {
             return _buildTerminalPage(
               state: state,
@@ -146,6 +148,7 @@ final routerProvider = Provider<GoRouter>((ref) {
                   initialNativeAcpSessionKey,
                   state.uri.queryParameters['notificationTap'],
                   linkTap,
+                  startPresetAgent,
                   initiallyExpandTmuxWindows,
                   initiallyShowKeyboard,
                   pasteDemoImage,
@@ -161,6 +164,7 @@ final routerProvider = Provider<GoRouter>((ref) {
                   state.uri.queryParameters['notificationTap'] != null ||
                   linkTap != null,
               openedFromLink: linkTap != null,
+              startPresetAgent: startPresetAgent,
               initiallyExpandTmuxWindows: initiallyExpandTmuxWindows,
               initiallyShowKeyboard: initiallyShowKeyboard,
               pasteDemoImage: pasteDemoImage,

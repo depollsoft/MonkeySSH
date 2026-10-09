@@ -14,11 +14,14 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
+import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/app_link_service.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../helpers/mocks.dart';
 import '../helpers/recording_diagnostics_logger.dart';
@@ -35,6 +38,32 @@ class _TestAuth extends AuthStateNotifier {
 
   set current(AuthState next) => state = next;
 }
+
+/// Connects instantly, as a stand-in for the SSH session layer.
+class _InstantSessions extends ActiveSessionsNotifier {
+  final connects = <({int hostId, bool forceNew})>[];
+
+  @override
+  Map<int, SshConnectionState> build() => {};
+
+  @override
+  Future<SshConnectionResult> connect(
+    int hostId, {
+    bool forceNew = false,
+    bool useHostThemeOverrides = true,
+  }) async {
+    connects.add((hostId: hostId, forceNew: forceNew));
+    return const SshConnectionResult(success: true, connectionId: 42);
+  }
+}
+
+const _proState = MonetizationState(
+  billingAvailability: MonetizationBillingAvailability.available,
+  entitlements: MonetizationEntitlements.pro(),
+  offers: [],
+  debugUnlockAvailable: false,
+  debugUnlocked: false,
+);
 
 class _MockRecentSessions extends Mock implements AcpRecentSessionsService {}
 
@@ -64,6 +93,12 @@ void main() {
   late _MockCliPreferences cliPreferences;
   late AppLinkService links;
   late GoRouter router;
+  late MockMonetizationService monetization;
+  late _InstantSessions sessions;
+
+  setUpAll(() {
+    registerFallbackValue(MonetizationFeature.autoConnectAutomation);
+  });
 
   setUp(() {
     hosts = MockHostRepository();
@@ -74,8 +109,14 @@ void main() {
       channel: const MethodChannel('test/app_links'),
       diagnostics: RecordingDiagnosticsLogger(),
     );
+    monetization = MockMonetizationService();
+    when(() => monetization.canUseFeature(any())).thenAnswer((_) async => true);
+    when(() => monetization.currentState).thenReturn(_proState);
+    sessions = _InstantSessions();
     router = GoRouter(
       navigatorKey: appNavigatorKey,
+      // The production guard: a platform deep link never becomes a route.
+      onEnter: (_, _, next, _) => guardExternalLocation(next.uri, links),
       routes: [
         GoRoute(
           path: '/',
@@ -124,6 +165,11 @@ void main() {
           hostCliLaunchPreferencesServiceProvider.overrideWithValue(
             cliPreferences,
           ),
+          monetizationServiceProvider.overrideWithValue(monetization),
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proState),
+          ),
+          activeSessionsProvider.overrideWith(() => sessions),
         ],
         child: AppLinkNavigationBridge(
           child: MaterialApp.router(
@@ -238,6 +284,65 @@ void main() {
       find.textContaining('terminal /terminal/3?linkTap='),
       findsOneWidget,
     );
+  });
+
+  testWidgets('Run connects anew and opens a terminal that starts the preset', (
+    tester,
+  ) async {
+    stubYoloPreset(7);
+    await pumpBridge(tester);
+
+    links.receive(Uri.parse('monkeyssh://preset?id=7'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Run in YOLO mode'));
+    await tester.pumpAndSettle();
+
+    expect(sessions.connects, [(hostId: 7, forceNew: true)]);
+    expect(
+      find.text('terminal /terminal/7?connectionId=42&presetRun=1'),
+      findsOneWidget,
+    );
+    expect(router.canPop(), isTrue);
+  });
+
+  testWidgets('locking during a preset review runs nothing', (tester) async {
+    stubYoloPreset(7);
+    final auth = await pumpBridge(tester);
+
+    links.receive(Uri.parse('monkeyssh://preset?id=7'));
+    await tester.pumpAndSettle();
+    auth.current = AuthState.locked;
+    await tester.tap(find.text('Run in YOLO mode'));
+    await tester.pumpAndSettle();
+
+    expect(sessions.connects, isEmpty);
+    expect(find.textContaining('terminal'), findsNothing);
+  });
+
+  testWidgets('a platform deep link goes through the router guard', (
+    tester,
+  ) async {
+    when(() => hosts.getById(3)).thenAnswer((_) async => _host(3));
+    await pumpBridge(tester);
+
+    // What iOS sends after the first frame for monkeyssh://open?host=3.
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      SystemChannels.navigation.name,
+      SystemChannels.navigation.codec.encodeMethodCall(
+        const MethodCall('pushRouteInformation', <String, Object?>{
+          'location': 'monkeyssh://open?host=3&window=2',
+          'state': null,
+        }),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('terminal /terminal/3?tmuxWindow=2&linkTap='),
+      findsOneWidget,
+    );
+    expect(find.textContaining('monkeyssh'), findsNothing);
   });
 
   testWidgets('an ssh link with a password is refused', (tester) async {
