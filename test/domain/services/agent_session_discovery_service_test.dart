@@ -1436,6 +1436,22 @@ cwd: /tmp/demo
 
       expect(sessions, isEmpty);
     });
+
+    test('rejects noise and the pieces of a row a line break split', () {
+      final sessions = parseSeparatedSessionRows(
+        'Error: in prepare, no such table: sessions\n'
+        'Last login\x1ffrom\x1fsomewhere\n'
+        'not an id\x1fTitle\x1f/tmp\x1f1783405351\n'
+        'abc\x1fTitle\x1f/tmp\x1fyesterday\n'
+        'abc\x1fTitle\x1f/tmp\x1f1783405351\x1fextra\n'
+        // A title with a line break, as sqlite3 prints it unflattened.
+        '20250305_091523_a1b2c3\x1fFirst line\n'
+        'second line\x1f/Users/depoll/Code/flutty\x1f1783405351\n',
+        toolName: 'Hermes',
+      );
+
+      expect(sessions, isEmpty);
+    });
   });
 
   group('parseCursorSessionMetadata', () {
@@ -3874,7 +3890,124 @@ HEAD b
       expect(query, contains('tui'));
       expect(query, contains('parent_session_id IS NULL'));
       expect(query, contains(r'${HERMES_HOME:-$HOME/.hermes}/state.db'));
+      expect(query, contains(r'if [ -f "$__fl_hermes_db" ]; then'));
     });
+
+    test(
+      'Hermes discovery leaves a host without a state database alone',
+      () async {
+        final home = await Directory.systemTemp.createTemp('hermes-absent-');
+        addTearDown(() => home.delete(recursive: true));
+        // A Hermes home without history, and a sqlite3 that records any call.
+        final hermesHome = Directory('${home.path}/.hermes')..createSync();
+        final calls = File('${home.path}/sqlite3-calls');
+        final fakeSqlite = File('${home.path}/.local/bin/sqlite3')
+          ..createSync(recursive: true)
+          ..writeAsStringSync(
+            '#!/bin/sh\n'
+            'echo "\$@" >> "${calls.path}"\n'
+            r'printf "phantom\037Phantom\037/tmp\0371783405351\n"'
+            '\n',
+          );
+        final chmod = await Process.run('chmod', ['+x', fakeSqlite.path]);
+        expect(chmod.exitCode, 0, reason: '${chmod.stderr}');
+
+        final client = _MockSshClient();
+        _stubDiscoveryExec(client, (command) async {
+          if (!command.contains('state.db')) return _buildExecSession();
+          // Run the query for real; the profile PATH puts $HOME/.local/bin
+          // ahead of the system sqlite3.
+          final result = await Process.run(
+            'bash',
+            ['-c', command],
+            environment: {'HOME': home.path, 'PATH': '/usr/bin:/bin'},
+            includeParentEnvironment: false,
+          );
+          return _buildExecSession(stdout: result.stdout as String);
+        });
+        Future<DiscoveredSessionsResult> discover() =>
+            AgentSessionDiscoveryService()
+                .discoverSessionsStream(
+                  _buildDiscoverySession(client),
+                  toolName: 'Hermes',
+                )
+                .last;
+
+        final result = await discover();
+        expect(result.sessions, isEmpty);
+        expect(result.failedTools, isEmpty);
+        expect(result.attemptedTools, contains('Hermes'));
+        expect(calls.existsSync(), isFalse);
+        expect(hermesHome.listSync(), isEmpty);
+
+        // Once the database exists, the same command queries it.
+        File('${hermesHome.path}/state.db').createSync();
+        final withDatabase = await discover();
+        expect(withDatabase.sessions.single.sessionId, 'phantom');
+        expect(
+          calls.readAsStringSync(),
+          contains('${hermesHome.path}/state.db'),
+        );
+      },
+      skip: Platform.isWindows,
+    );
+
+    test('Hermes discovery keeps a multi-line title on one row', () async {
+      try {
+        Process.runSync('sqlite3', ['-version']);
+      } on ProcessException {
+        markTestSkipped('sqlite3 is required to query a real Hermes database');
+        return;
+      }
+      final home = await Directory.systemTemp.createTemp('hermes-db-');
+      addTearDown(() => home.delete(recursive: true));
+      final hermesHome = Directory('${home.path}/.hermes')..createSync();
+      const fixtureSql =
+          'CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, '
+          'title TEXT, display_name TEXT, cwd TEXT, started_at REAL, '
+          'ended_at REAL, parent_session_id TEXT, archived INTEGER); '
+          "INSERT INTO sessions VALUES ('20250305_091523_a1b2c3', 'cli', "
+          "'Refactor auth' || char(10) || 'and tests', NULL, "
+          "'/Users/depoll/Code/flutty', 1783405351.5, NULL, NULL, 0); "
+          "INSERT INTO sessions VALUES ('gateway', 'telegram', 'Chat', "
+          "NULL, '/Users/depoll/Code/flutty', 1783405352, NULL, NULL, 0);";
+      final schema = await Process.run('sqlite3', [
+        '${hermesHome.path}/state.db',
+        fixtureSql,
+      ]);
+      expect(schema.exitCode, 0, reason: '${schema.stderr}');
+
+      final client = _MockSshClient();
+      _stubDiscoveryExec(client, (command) async {
+        if (!command.contains('state.db')) return _buildExecSession();
+        final result = await Process.run(
+          'bash',
+          ['-c', command],
+          environment: {
+            'HOME': home.path,
+            'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+          },
+          includeParentEnvironment: false,
+        );
+        return _buildExecSession(stdout: result.stdout as String);
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Hermes',
+          )
+          .last;
+
+      final info = result.sessions.single;
+      expect(info.sessionId, '20250305_091523_a1b2c3');
+      expect(info.summary, 'Refactor auth and tests');
+      expect(info.workingDirectory, '/Users/depoll/Code/flutty');
+      expect(
+        info.lastActive,
+        DateTime.fromMillisecondsSinceEpoch(1783405351000),
+      );
+    }, skip: Platform.isWindows);
 
     test('toolName limits discovery to the requested provider', () async {
       final client = _MockSshClient();

@@ -281,6 +281,13 @@ bool shouldSurfaceDiscoveryFailure({
   required int loadedSessionCount,
 }) => hadError && loadedSessionCount == 0;
 
+/// Replaces line breaks and Unit Separators in a text [expression] with spaces,
+/// so each `sqlite3 -separator` row stays one line that
+/// [parseSeparatedSessionRows] can split.
+String _sqlSingleLineText(String expression) =>
+    'REPLACE(REPLACE(REPLACE($expression, '
+    "char(10), ' '), char(13), ' '), char(31), ' ')";
+
 /// Builds the SQL predicate used to scope session directories to the active
 /// project root or its descendants without relying on `LIKE` wildcards.
 String? buildSqlWorkingDirectoryScopeClause(
@@ -966,7 +973,10 @@ String? piEncodedSessionDirectoryName(String? workingDirectory) {
 /// Parses `sqlite3`-separated session rows (Hermes, OpenCode) into metadata.
 ///
 /// Columns are id, title, cwd, and the epoch last-activity time, delimited by
-/// ASCII Unit Separator so titles may contain any printable text.
+/// ASCII Unit Separator so titles may contain any printable text. A line that
+/// does not have exactly those four columns, a single-token id, and an empty
+/// or numeric time is not a row: it is shell or sqlite3 noise, or part of a
+/// row that a line break split.
 @visibleForTesting
 List<ToolSessionInfo> parseSeparatedSessionRows(
   String output, {
@@ -976,13 +986,18 @@ List<ToolSessionInfo> parseSeparatedSessionRows(
   for (final line in output.trim().split('\n')) {
     if (line.trim().isEmpty) continue;
     final parts = line.split('\x1f');
-    if (parts.length < 3) continue;
+    if (parts.length != 4) continue;
 
     final id = parts[0].trim();
-    if (id.isEmpty) continue;
+    if (id.isEmpty || id.contains(RegExp(r'\s'))) continue;
     final title = parts[1].trim();
     final directory = parts[2].trim();
-    final epoch = parts.length < 4 ? null : int.tryParse(parts[3].trim());
+    final rawEpoch = parts[3].trim();
+    final parsedEpoch = num.tryParse(rawEpoch);
+    final epoch = parsedEpoch != null && parsedEpoch.isFinite
+        ? parsedEpoch.toInt()
+        : null;
+    if (rawEpoch.isNotEmpty && epoch == null) continue;
 
     sessions.add(
       ToolSessionInfo(
@@ -3452,8 +3467,9 @@ class AgentSessionDiscoveryService {
     );
     final sql = StringBuffer()
       ..write(
-        "SELECT id, COALESCE(NULLIF(title, ''), display_name, ''), "
-        "COALESCE(cwd, ''), "
+        'SELECT id, '
+        "${_sqlSingleLineText("COALESCE(NULLIF(title, ''), display_name, '')")}, "
+        "${_sqlSingleLineText("COALESCE(cwd, '')")}, "
         'CAST(COALESCE(ended_at, started_at) AS INTEGER) ',
       )
       ..write('FROM sessions ')
@@ -3467,11 +3483,14 @@ class AgentSessionDiscoveryService {
       ..write('ORDER BY COALESCE(ended_at, started_at) DESC ')
       ..write('LIMIT $scanLimit;');
 
+    // sqlite3 creates a missing database file when its directory exists, so
+    // a host without Hermes history must not reach it.
     return _exec(
       session,
-      r'SEP=$(printf "\037"); sqlite3 -separator "$SEP" '
-      r'"${HERMES_HOME:-$HOME/.hermes}/state.db" '
-      '${shellEscapePosix(sql.toString())} 2>/dev/null',
+      r'__fl_hermes_db="${HERMES_HOME:-$HOME/.hermes}/state.db"; '
+      r'if [ -f "$__fl_hermes_db" ]; then SEP=$(printf "\037"); '
+      r'sqlite3 -separator "$SEP" "$__fl_hermes_db" '
+      '${shellEscapePosix(sql.toString())} 2>/dev/null; fi',
     );
   }
 
@@ -3787,7 +3806,10 @@ class AgentSessionDiscoveryService {
       columnName: 'directory',
     );
     final sql = StringBuffer()
-      ..write('SELECT id, title, directory, time_updated ')
+      ..write(
+        'SELECT id, ${_sqlSingleLineText('title')}, '
+        '${_sqlSingleLineText('directory')}, time_updated ',
+      )
       ..write('FROM __OPENCODE_SESSION_TABLE__ ')
       ..write('WHERE parent_id IS NULL ')
       ..write('AND time_archived IS NULL ');
