@@ -42,6 +42,7 @@ import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/snippet_variables.dart';
 import '../../domain/models/terminal_capability_hint.dart';
 import '../../domain/models/terminal_progress.dart';
@@ -104,6 +105,7 @@ import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
+import '../widgets/snippet_key_sender.dart';
 import '../widgets/system_bottom_inset.dart';
 import '../widgets/terminal_key_input.dart';
 import '../widgets/terminal_menu_style.dart';
@@ -824,6 +826,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Terminal? _terminalWithOwnedCallbacks;
   void Function(String)? _terminalOutputHandler;
   TerminalEnterPacer? _terminalEnterPacer;
+  // Snippet key sequences stop when either changes: a newer sequence, or a
+  // mux window switch, create or close.
+  int _snippetSequenceRun = 0;
+  int _muxWindowChangeGeneration = 0;
   void Function(int, int, int, int)? _terminalResizeHandler;
   void Function(int, int)? _terminalHostResizeHandler;
   bool _suppressMonkeyMuxResizeSyncFromTerminalRefresh = false;
@@ -2445,6 +2451,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String sessionName, {
     required bool activeWindowChanged,
   }) {
+    if (activeWindowChanged) {
+      _muxWindowChangeGeneration++;
+    }
     if (_activeMuxBackend == RemoteMuxBackend.monkeyMux) {
       _markMonkeyMuxReconnectEstablished(session, sessionName);
       _syncTerminalModesFromActiveMuxWindow();
@@ -10113,6 +10122,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }) async {
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
+    _muxWindowChangeGeneration++;
 
     // A Return still held back belongs to the window it was typed in.
     final heldInput = _terminalEnterPacer?.idle;
@@ -10433,6 +10443,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? workingDirectory,
     bool clearTerminalProgress = true,
   }) {
+    _muxWindowChangeGeneration++;
     if (clearTerminalProgress) {
       _observedSession?.clearTerminalProgress();
     }
@@ -15982,11 +15993,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _showClipboardMessage('Snippet is no longer available.');
       return;
     }
+    final sequence = parseSnippetKeySequence(snippet.command);
+    if (sequence.needsTerminal) {
+      _showClipboardMessage(
+        'This snippet presses keys, so it only works in a terminal window.',
+      );
+      return;
+    }
     final substitution = await _substituteVariables(context, snippet);
     if (!mounted || substitution == null || substitution.command.isEmpty) {
       return;
     }
-    _nativeComposerFocusController.insertText(substitution.command);
+    _nativeComposerFocusController.insertText(
+      sequence.withVariables(substitution.values).plainText,
+    );
     unawaited(repository.incrementUsage(snippet.id));
   }
 
@@ -16003,15 +16023,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _showClipboardMessage('Snippet is no longer available.');
       return;
     }
+    final parsedSequence = parseSnippetKeySequence(snippet.command);
+    if (parsedSequence.errors.isNotEmpty) {
+      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      _showClipboardMessage(parsedSequence.errors.first);
+      return;
+    }
 
     final substitution = await _substituteVariables(context, snippet);
     _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
     if (substitution == null || substitution.command.isEmpty) {
       return;
     }
+    final sequence = parsedSequence.withVariables(substitution.values);
 
     final shouldInsert = await _confirmTerminalInsertionIfNeeded(
-      insertedText: substitution.command,
+      insertedText: sequence.hasActions
+          ? sequence.reviewText
+          : sequence.plainText,
       buildReview: (commandText) => assessSnippetCommandInsertion(
         commandText,
         hadVariableSubstitution: substitution.hadVariableSubstitution,
@@ -16027,11 +16056,79 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     _handleTerminalUserInput();
-    _terminal.paste(substitution.command);
+    if (sequence.hasActions) {
+      unawaited(snippetRepo.incrementUsage(snippet.id));
+      _terminalController.clearSelection();
+      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      await _sendSnippetKeySequence(sequence);
+      return;
+    }
+    _terminal.paste(sequence.plainText);
     _terminalController.clearSelection();
     _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
     unawaited(snippetRepo.incrementUsage(snippet.id));
   }
+
+  /// Sends a snippet with key tokens, stopping as soon as the connection,
+  /// shell, window or visible view it started in changes, or another
+  /// sequence starts.
+  Future<void> _sendSnippetKeySequence(SnippetKeySequence sequence) async {
+    final run = ++_snippetSequenceRun;
+    final target = _snippetInputTarget;
+    final windowKey = resolveTmuxBarActiveWindowKey(
+      _currentTmuxWindowsSnapshot,
+    );
+    // A drop that recovers between two steps still ends the sequence.
+    var connectionDropped = false;
+    final connectionSubscription = ref
+        .listenManual<Map<int, SshConnectionState>>(activeSessionsProvider, (
+          previous,
+          next,
+        ) {
+          final connectionId = _connectionId;
+          if (connectionId == null ||
+              next[connectionId] != SshConnectionState.connected) {
+            connectionDropped = true;
+          }
+        });
+    try {
+      final outcome = await sendSnippetKeySequence(
+        _terminal,
+        sequence,
+        canContinue: () =>
+            !connectionDropped &&
+            mounted &&
+            run == _snippetSequenceRun &&
+            terminalAttachmentPasteTargetsCurrentMuxWindow(
+              hasPendingWindowSelection:
+                  _tmuxBarKey.currentState?.hasPendingWindowSelection ?? false,
+              pasteWindowKey: windowKey,
+              currentWindowKey: resolveTmuxBarActiveWindowKey(
+                _currentTmuxWindowsSnapshot,
+              ),
+            ) &&
+            _snippetInputTarget == target,
+      );
+      if (outcome == SnippetSendOutcome.stopped &&
+          mounted &&
+          run == _snippetSequenceRun) {
+        _showClipboardMessage(
+          'Snippet stopped: the connection or window changed.',
+        );
+      }
+    } finally {
+      connectionSubscription.close();
+    }
+  }
+
+  Object get _snippetInputTarget => (
+    terminal: _terminal,
+    shell: _shell,
+    connectionId: _connectionId,
+    connected: _readCurrentConnectionState() == SshConnectionState.connected,
+    windowChanges: _muxWindowChangeGeneration,
+    nativeAgent: _activeNativeAcpSessionKey,
+  );
 
   /// Shows snippet picker and inserts selected snippet into terminal.
   Future<void> _showSnippetPicker() async {
@@ -16146,12 +16243,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// Shows dialog for variable substitution if snippet has variables.
-  Future<({String command, bool hadVariableSubstitution})?>
+  Future<
+    ({
+      String command,
+      bool hadVariableSubstitution,
+      Map<String, String> values,
+    })?
+  >
   _substituteVariables(BuildContext context, Snippet snippet) async {
     final variables = extractSnippetVariables(snippet.command);
 
     if (variables.isEmpty) {
-      return (command: snippet.command, hadVariableSubstitution: false);
+      return (
+        command: snippet.command,
+        hadVariableSubstitution: false,
+        values: const <String, String>{},
+      );
     }
 
     final values = <String, String>{};
@@ -16211,6 +16318,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         (match) => values[match.group(1)]!,
       ),
       hadVariableSubstitution: true,
+      values: values,
     );
   }
 

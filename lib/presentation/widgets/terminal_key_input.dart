@@ -3,6 +3,16 @@ import 'dart:collection';
 
 import 'package:xterm/xterm.dart';
 
+/// Whether keys should go through the kitty keyboard encoding: the program
+/// has pushed kitty flags that make keys unambiguous escape codes. Otherwise
+/// the legacy encodings apply.
+bool terminalUsesKittyKeyEncoding(Terminal terminal) =>
+    terminal.kittyKeyboardMode &&
+    (terminal.kittyKeyboardFlags &
+            (KittyKeyboardFlags.disambiguateEscapeCodes |
+                KittyKeyboardFlags.reportAllKeysAsEscapeCodes)) !=
+        0;
+
 /// Sends Enter via [Terminal.keyInput] with the active modifiers.
 ///
 /// Outside Kitty mode, non-press events are ignored (legacy keytabs only emit

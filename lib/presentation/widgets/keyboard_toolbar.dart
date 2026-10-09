@@ -1757,11 +1757,7 @@ class TerminalToolbarDispatcher {
   }
 
   bool _shouldUseKittyKeyboardEncoding() =>
-      terminal.kittyKeyboardMode &&
-      (terminal.kittyKeyboardFlags &
-              (KittyKeyboardFlags.disambiguateEscapeCodes |
-                  KittyKeyboardFlags.reportAllKeysAsEscapeCodes)) !=
-          0;
+      terminalUsesKittyKeyEncoding(terminal);
 
   String _getModifierPrefix() {
     var mod = 1;

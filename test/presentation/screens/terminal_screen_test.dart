@@ -2353,6 +2353,105 @@ void main() {
       );
     }
 
+    Future<void> runSnippetFromSheet(WidgetTester tester, String name) async {
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name));
+      await tester.pumpAndSettle();
+      if (find.text('Insert command').evaluate().isNotEmpty) {
+        await tester.tap(find.text('Insert command'));
+        await tester.pump();
+      }
+    }
+
+    String shellOutput() =>
+        utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+
+    for (final kitty in [false, true]) {
+      testWidgets(
+        'snippet key tokens press keys through the key encoder, kitty=$kitty',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Mode toggle',
+              command: 'ls{key:enter}{key:shift+tab}{key:ctrl+c}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (kitty) {
+            // What an agent such as Claude Code pushes on startup.
+            session.terminal!.write('\x1b[>1u');
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Mode toggle');
+          // The Enter pacer holds Return apart from the text before it.
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(
+            shellOutput(),
+            kitty ? 'ls\r\x1b[9;2u\x1b[99;5u' : 'ls\r\x1b[Z\x03',
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets('a snippet key sequence stops when the connection drops', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      final activeSessions = _TestActiveSessionsNotifier(session);
+      await pumpScreen(tester, activeSessions: activeSessions);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), '\x03');
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('a snippet with an unknown key token sends nothing', (
+      tester,
+    ) async {
+      await SnippetRepository(
+        db,
+      ).insert(SnippetsCompanion.insert(name: 'Typo', command: 'ls{key:entr}'));
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Typo');
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(shellOutput(), isEmpty);
+      expect(find.text('Unknown key: {key:entr}'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     void enablePlainTuiSignals() {
       session.terminal!.write('\x1b[?1004h');
     }
@@ -4467,6 +4566,54 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
     }
+
+    testWidgets('a snippet key sequence stops when the mux window changes', (
+      tester,
+    ) async {
+      final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+      addTearDown(events.close);
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await pumpTmuxScreen(
+        tester,
+        _MockTmuxService(),
+        windowEvents: events.stream,
+      );
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      events.add(
+        const TmuxWindowListEvent([
+          TmuxWindow(index: 0, name: 'shell', isActive: false),
+          TmuxWindow(index: 1, name: 'agent', isActive: true),
+        ]),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     for (final interruption in ['none', 'typing', 'window', 'partial']) {
       testWidgets('clipboard content URI upload handles $interruption', (
