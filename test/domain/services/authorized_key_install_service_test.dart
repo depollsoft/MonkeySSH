@@ -7,12 +7,16 @@ import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/repositories/known_hosts_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/services/authorized_key_install_service.dart';
+import 'package:monkeyssh/domain/services/host_key_prompt_handler_provider.dart';
+import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mocks.dart';
@@ -89,6 +93,20 @@ Future<_ShellResult> _runInstall(
   expect(result.stderr, isEmpty, reason: 'stderr from $shell');
   return _ShellResult(result.stdout, home);
 }
+
+Host _savedHost({String username = 'secret-user'}) => Host(
+  id: 3,
+  label: 'target',
+  hostname: 'secret-host.example.com',
+  port: 2222,
+  username: username,
+  isFavorite: false,
+  createdAt: DateTime(2026),
+  updatedAt: DateTime(2026),
+  autoConnectRequiresConfirmation: false,
+  autoForwardPorts: false,
+  sortOrder: 0,
+);
 
 void main() {
   group('buildAuthorizedKeyLine', () {
@@ -250,6 +268,42 @@ void main() {
       );
     });
 
+    for (final options in [
+      'command="/usr/bin/rrsync -ro /backup",restrict',
+      'from="10.0.0.0/8"',
+      'cert-authority',
+    ]) {
+      test('a copy behind "$options" is reported, not reused', () async {
+        final shell = shells.first;
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        final original = '$options $keyLine\n';
+        final file = File('${ssh.path}/authorized_keys')
+          ..writeAsStringSync(original);
+        final result = await _runInstall(shell, keyLine, home: home);
+        expect(
+          parseAuthorizedKeyInstallOutput(result.output),
+          AuthorizedKeyInstallOutcome.restrictedCopy,
+        );
+        expect(file.readAsStringSync(), original);
+      });
+    }
+
+    test(
+      'an unrestricted copy with another comment counts as present',
+      () async {
+        final shell = shells.first;
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        File(
+          '${ssh.path}/authorized_keys',
+        ).writeAsStringSync('$_otherEd25519 laptop\n  $_ed25519 old-comment\n');
+        final result = await _runInstall(shell, keyLine, home: home);
+        expect(
+          parseAuthorizedKeyInstallOutput(result.output),
+          AuthorizedKeyInstallOutcome.alreadyPresent,
+        );
+      },
+    );
+
     test('a commented-out copy does not count as installed', () async {
       final shell = shells.first;
       final ssh = Directory('${home.path}/.ssh')..createSync();
@@ -288,22 +342,52 @@ void main() {
     });
 
     for (final shell in shells) {
+      Future<void> runManual(String command) async {
+        final result = await Process.run(
+          shell,
+          ['-c', command],
+          environment: {'PATH': '/usr/bin:/bin', 'HOME': home.path},
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+      }
+
       test('$shell runs the manual one-liner idempotently', () async {
         final ssh = Directory('${home.path}/.ssh')..createSync();
         final file = File('${ssh.path}/authorized_keys')
           ..writeAsStringSync('$_otherEd25519 laptop\n');
         final command = buildManualAuthorizedKeyCommand(keyLine);
-        for (var run = 0; run < 2; run++) {
-          final result = await Process.run(
-            shell,
-            ['-c', command],
-            environment: {'PATH': '/usr/bin:/bin', 'HOME': home.path},
-            includeParentEnvironment: false,
-          );
-          expect(result.exitCode, 0, reason: '${result.stderr}');
-        }
-        expect(file.readAsStringSync(), '$_otherEd25519 laptop\n$keyLine\n');
+        await runManual(command);
+        await runManual(command);
+        expect(file.readAsLinesSync().where((line) => line.isNotEmpty), [
+          '$_otherEd25519 laptop',
+          keyLine,
+        ]);
         expect(FileStat.statSync(file.path).mode & 0x1ff, 0x180);
+      });
+
+      test('$shell manual one-liner starts a new line', () async {
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        final file = File('${ssh.path}/authorized_keys')
+          ..writeAsStringSync('$_otherEd25519 laptop');
+        final command = buildManualAuthorizedKeyCommand(keyLine);
+        await runManual(command);
+        await runManual(command);
+        expect(file.readAsLinesSync().where((line) => line.isNotEmpty), [
+          '$_otherEd25519 laptop',
+          keyLine,
+        ]);
+      });
+
+      test('$shell manual one-liner ignores commented-out copies', () async {
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        final file = File('${ssh.path}/authorized_keys')
+          ..writeAsStringSync('# $keyLine\n');
+        await runManual(buildManualAuthorizedKeyCommand(keyLine));
+        expect(file.readAsLinesSync().where((line) => line.isNotEmpty), [
+          '# $keyLine',
+          keyLine,
+        ]);
       });
     }
 
@@ -434,12 +518,21 @@ void main() {
       verifyNever(() => session.execute(any()));
     });
 
-    test('verifies with only the key and no password', () async {
-      nextResult = SshConnectionResult(success: true, client: MockSshClient());
-      when(() => nextResult.client!.close()).thenAnswer((_) async {});
+    MockSshClient connectedClient({required String output}) {
+      final client = MockSshClient();
+      when(client.close).thenAnswer((_) async {});
+      when(() => client.run(any(), stderr: any(named: 'stderr')))
+          .thenAnswer((_) async => Uint8List.fromList(utf8.encode(output)));
+      return client;
+    }
+
+    test('verifies the saved host with only the key and no password', () async {
+      final client = connectedClient(output: '$keyLoginVerifiedMarker\n');
+      nextResult = SshConnectionResult(success: true, client: client);
       final verification = await service.verifyKeyOnlyLogin(
         session,
         _key(passphrase: 'pp'),
+        savedHost: _savedHost(),
       );
       expect(verification.success, isTrue);
       final config = capturedConfig!;
@@ -449,8 +542,16 @@ void main() {
       expect(config.passphrase, 'pp');
       expect(config.hostname, 'secret-host.example.com');
       expect(config.port, 2222);
+      expect(config.username, 'secret-user');
       expect(config.jumpHost!.hostname, 'jump.example.com');
-      verify(() => nextResult.client!.close()).called(1);
+      // A fixed command; nothing user-controlled reaches the login shell.
+      verify(
+        () => client.run(
+          'echo $keyLoginVerifiedMarker',
+          stderr: any(named: 'stderr'),
+        ),
+      ).called(1);
+      verify(client.close).called(1);
       for (final event in diagnostics.events) {
         expect(event.searchableText, isNot(contains('secret')));
         expect(event.searchableText, isNot(contains('PRIVATE')));
@@ -462,9 +563,111 @@ void main() {
         success: false,
         error: 'Authentication failed: All authentication methods failed',
       );
-      final verification = await service.verifyKeyOnlyLogin(session, _key());
+      final verification = await service.verifyKeyOnlyLogin(
+        session,
+        _key(),
+        savedHost: _savedHost(),
+      );
       expect(verification.success, isFalse);
       expect(verification.error, contains('Authentication failed'));
+    });
+
+    test('a forced command or restricted login fails verification', () async {
+      final client = connectedClient(output: 'This key only runs backups.\n');
+      nextResult = SshConnectionResult(success: true, client: client);
+      final verification = await service.verifyKeyOnlyLogin(
+        session,
+        _key(),
+        savedHost: _savedHost(),
+      );
+      expect(verification.success, isFalse);
+      expect(verification.error, contains('normal shell'));
+      verify(client.close).called(1);
+    });
+
+    test(
+      'verifies the account saved now, not the one the session used',
+      () async {
+        final client = connectedClient(output: '$keyLoginVerifiedMarker\n');
+        nextResult = SshConnectionResult(success: true, client: client);
+        await service.verifyKeyOnlyLogin(
+          session,
+          _key(),
+          savedHost: _savedHost(username: 'deploy'),
+        );
+        expect(capturedConfig!.username, 'deploy');
+      },
+    );
+
+    test(
+      'a session only counts when its endpoints match the saved host',
+      () async {
+        final bastionId = await hosts.insert(
+          HostsCompanion.insert(
+            label: 'jump',
+            hostname: 'JUMP.example.com',
+            username: 'jumper',
+          ),
+        );
+        final targetId = await hosts.insert(
+          HostsCompanion.insert(
+            label: 'target',
+            hostname: 'secret-host.example.com',
+            port: const Value(2222),
+            username: 'secret-user',
+            jumpHostId: Value(bastionId),
+          ),
+        );
+        final target = (await hosts.getById(targetId))!;
+        expect(await service.sessionMatchesSavedHost(session, target), isTrue);
+        expect(
+          await service.sessionMatchesSavedHost(
+            session,
+            target.copyWith(username: 'deploy'),
+          ),
+          isFalse,
+        );
+        expect(
+          await service.sessionMatchesSavedHost(
+            session,
+            target.copyWith(jumpHostId: const Value(null)),
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test('reuses only a session that matches the saved host', () async {
+      final targetId = await hosts.insert(
+        HostsCompanion.insert(
+          label: 'target',
+          hostname: 'secret-host.example.com',
+          port: const Value(2222),
+          username: 'deploy',
+        ),
+      );
+      final target = (await hosts.getById(targetId))!;
+      // The open session is logged in as secret-user via a jump host.
+      expect(await service.reusableSessionFor(target, [session]), isNull);
+    });
+
+    test('the verifier never falls back to a password prompt', () async {
+      final container = ProviderContainer(
+        overrides: [
+          knownHostsRepositoryProvider.overrideWithValue(
+            KnownHostsRepository(db),
+          ),
+          hostKeyPromptHandlerProvider.overrideWithValue(null),
+          interactiveAuthPromptHandlerProvider.overrideWithValue(
+            (_) async => ['hunter2'],
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final verifier = container.read(keyOnlyVerifierSshServiceProvider);
+      expect(verifier.interactiveAuthPromptHandler, isNull);
+      expect(verifier.hostRepository, isNull);
+      expect(verifier.keyRepository, isNull);
     });
 
     test('switches the host to the key and removes the password', () async {

@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
+import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
 import '../../domain/services/authorized_key_install_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
@@ -20,7 +21,7 @@ import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/tmux_service.dart';
 import '../providers/connection_actions.dart';
 import '../providers/entity_list_providers.dart';
-import 'acp_connection_support.dart' show ensureAcpHostConnection;
+import 'connection_attempt_dialog.dart';
 import 'public_key_share_sheet.dart';
 
 /// Opens the key-login flow for [host].
@@ -173,25 +174,40 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
       if (!mounted) return;
 
       _setStage(KeyInstallStage.connect, _StageState.active);
-      final connection = await ensureAcpHostConnection(
-        context,
-        ref,
-        hostId,
-        knownHost: widget.host,
-      );
-      final connectionId = connection.connectionId;
-      if (!connection.success || connectionId == null) {
-        _fail(
-          KeyInstallStage.connect,
-          connection.error ?? 'Couldn’t connect with the saved password.',
-        );
+      // Install and verify against the host as it is saved now. An open
+      // session from before the host was edited may be logged in to another
+      // account or through other jump hosts, so only a matching one is
+      // reused.
+      final savedHost = await ref.read(hostRepositoryProvider).getById(hostId);
+      if (savedHost == null) {
+        _fail(KeyInstallStage.connect, 'This saved host no longer exists.');
         return;
       }
-      if (!connection.reusedConnection) openedConnectionId = connectionId;
-      final session = sshService.getSession(connectionId);
+      var session = await service.reusableSessionFor(
+        savedHost,
+        sshService.getSessionsForHost(hostId),
+      );
       if (session == null) {
-        _fail(KeyInstallStage.connect, 'The connection closed.');
-        return;
+        if (!mounted) return;
+        final connection = await connectToHostWithProgressDialog(
+          context,
+          ref,
+          savedHost,
+        );
+        final connectionId = connection.connectionId;
+        if (!connection.success || connectionId == null) {
+          _fail(
+            KeyInstallStage.connect,
+            connection.error ?? 'Couldn’t connect with the saved login.',
+          );
+          return;
+        }
+        openedConnectionId = connectionId;
+        session = sshService.getSession(connectionId);
+        if (session == null) {
+          _fail(KeyInstallStage.connect, 'The connection closed.');
+          return;
+        }
       }
       _setStage(KeyInstallStage.connect, _StageState.done);
 
@@ -221,7 +237,11 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
       _setStage(KeyInstallStage.install, _StageState.done);
 
       _setStage(KeyInstallStage.verify, _StageState.active);
-      final verification = await service.verifyKeyOnlyLogin(session, key);
+      final verification = await service.verifyKeyOnlyLogin(
+        session,
+        key,
+        savedHost: savedHost,
+      );
       if (!verification.success) {
         _fail(
           KeyInstallStage.verify,

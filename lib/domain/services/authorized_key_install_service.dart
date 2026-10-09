@@ -10,6 +10,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
@@ -26,6 +27,15 @@ import 'ssh_service.dart';
 const authorizedKeyInstallMarker = 'MONKEYSSH_KEY_INSTALL';
 
 const _installTimeout = Duration(seconds: 20);
+const _verifyCommandTimeout = Duration(seconds: 15);
+
+/// Printed by the fixed command run after a key-only login, to prove the key
+/// opens a normal shell rather than a forced command.
+const keyLoginVerifiedMarker = 'MONKEYSSH_KEY_LOGIN_OK';
+
+/// Most jump hosts followed when comparing a session with a saved host;
+/// matches what a connection follows.
+const _maxSavedJumpChain = 8;
 
 const _supportedKeyTypes = <String>{
   'ssh-ed25519',
@@ -101,8 +111,12 @@ const authorizedKeyInstallCommand = 'exec /bin/sh -s';
 /// It only appends: an existing file is never rewritten. `~/.ssh` is created
 /// with mode 700 and a new `authorized_keys` with 600 (umask 077); existing
 /// group or world write bits are removed, which `sshd` StrictModes requires.
-/// A line already holding the same key blob (ignoring comment lines) is left
-/// alone. No command in it reads stdin, so `sh -s` keeps reading the script.
+/// A plain line for the same key (type then blob, whatever the comment) is
+/// left alone. A copy behind options (`command=`, `from=`, `restrict`,
+/// `cert-authority` ...) is reported as `restricted` instead, because sshd
+/// would apply those options to MonkeySSH's logins. Comment lines are
+/// ignored. No command in it reads stdin, so `sh -s` keeps reading the
+/// script.
 const authorizedKeyInstallScriptBody =
     'm=$authorizedKeyInstallMarker\n'
     r"""
@@ -113,17 +127,33 @@ f="$d/authorized_keys"
 if [ ! -d "$d" ]; then
   mkdir -p "$d" && chmod 700 "$d" || { echo "$m=mkdir_failed"; exit 0; }
 fi
+t=${key%% *}
 b=${key#* }
 b=${b%% *}
-if [ -f "$f" ] && grep -v '^[[:space:]]*#' "$f" | grep -F -q -e "$b"; then
-  s=present
-else
-  if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then
-    echo >> "$f" || { echo "$m=write_failed"; exit 0; }
-  fi
-  printf '%s\n' "$key" >> "$f" || { echo "$m=write_failed"; exit 0; }
-  s=added
+st=absent
+if [ -f "$f" ]; then
+  st=$(awk -v t="$t" -v b="$b" '
+    /^[[:space:]]*#/ { next }
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i != b) continue
+        if (i == 2 && $1 == t) u = 1; else r = 1
+      }
+    }
+    END { if (r) print "restricted"; else if (u) print "present"; else print "absent" }
+  ' "$f") || { echo "$m=read_failed"; exit 0; }
 fi
+case "$st" in
+  present) s=present ;;
+  restricted) echo "$m=restricted"; exit 0 ;;
+  *)
+    if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then
+      echo >> "$f" || { echo "$m=write_failed"; exit 0; }
+    fi
+    printf '%s\n' "$key" >> "$f" || { echo "$m=write_failed"; exit 0; }
+    s=added
+    ;;
+esac
 chmod go-w "$d" "$f" 2>/dev/null
 if command -v restorecon >/dev/null 2>&1; then
   restorecon -F "$d" "$f" >/dev/null 2>&1
@@ -142,15 +172,17 @@ String buildAuthorizedKeyInstallScript(String keyLine) =>
 /// A short command a person can paste into a terminal on the server to
 /// authorize [keyLine] by hand.
 ///
-/// It sticks to `&&`, `||`, `~` and single quotes so bash, zsh, fish and csh
-/// all run it, and skips the append when the key blob is already present.
+/// It sticks to `&&`, `||`, `~`, single quotes and `printf` so bash, zsh,
+/// fish and csh all run it. It appends only when no line starts with the key
+/// type and blob (comment lines start with `#`, so they don't count), and the
+/// leading newline keeps the key off a last line that lacks one.
 /// [keyLine] must come from [buildAuthorizedKeyLine].
 String buildManualAuthorizedKeyCommand(String keyLine) {
-  final blob = keyLine.split(' ')[1];
+  final parts = keyLine.split(' ');
   return 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && '
       'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && '
-      "grep -qF '$blob' ~/.ssh/authorized_keys || "
-      "echo '$keyLine' >> ~/.ssh/authorized_keys";
+      "grep -q '^${parts[0]} ${parts[1]}' ~/.ssh/authorized_keys || "
+      "printf '\\n%s\\n' '$keyLine' >> ~/.ssh/authorized_keys";
 }
 
 /// What happened to `authorized_keys`.
@@ -160,6 +192,10 @@ enum AuthorizedKeyInstallOutcome {
 
   /// The key was already authorized; nothing was written.
   alreadyPresent,
+
+  /// The key is listed only behind options such as `command=`, `from=`,
+  /// `restrict` or `cert-authority`, so it isn't a plain login key.
+  restrictedCopy,
 
   /// `$HOME` is unset or missing on the server.
   noHomeDirectory,
@@ -186,9 +222,11 @@ AuthorizedKeyInstallOutcome parseAuthorizedKeyInstallOutput(String output) {
   return switch (match?.group(1)) {
     'added' => AuthorizedKeyInstallOutcome.added,
     'present' => AuthorizedKeyInstallOutcome.alreadyPresent,
+    'restricted' => AuthorizedKeyInstallOutcome.restrictedCopy,
     'no_home' => AuthorizedKeyInstallOutcome.noHomeDirectory,
     'mkdir_failed' => AuthorizedKeyInstallOutcome.directoryNotWritable,
-    'write_failed' => AuthorizedKeyInstallOutcome.fileNotWritable,
+    'write_failed' ||
+    'read_failed' => AuthorizedKeyInstallOutcome.fileNotWritable,
     _ => AuthorizedKeyInstallOutcome.unexpectedOutput,
   };
 }
@@ -200,6 +238,10 @@ String describeAuthorizedKeyInstallOutcome(
   AuthorizedKeyInstallOutcome.added => 'Key added to ~/.ssh/authorized_keys.',
   AuthorizedKeyInstallOutcome.alreadyPresent =>
     'The key was already in ~/.ssh/authorized_keys.',
+  AuthorizedKeyInstallOutcome.restrictedCopy =>
+    'This key is already in ~/.ssh/authorized_keys with restrictions (such '
+        'as command=, from= or restrict), so it can’t be used for a normal '
+        'login. Generate a new key for MonkeySSH instead.',
   AuthorizedKeyInstallOutcome.noHomeDirectory =>
     'The server account has no home directory to hold authorized_keys.',
   AuthorizedKeyInstallOutcome.directoryNotWritable =>
@@ -307,17 +349,71 @@ class AuthorizedKeyInstallService {
         },
       );
 
-  /// Opens a new connection to the same endpoint with only [key] and no
-  /// password, then closes it.
+  /// The `user@host:port` endpoints a connection to [host] dials, target
+  /// first, following saved jump hosts the way a connection does. Returns
+  /// null when the chain is longer than a connection follows.
+  Future<List<String>?> savedEndpointChain(Host host) async {
+    final chain = [_endpoint(host.username, host.hostname, host.port)];
+    final visited = {host.id};
+    for (var jumpId = host.jumpHostId; jumpId != null;) {
+      if (visited.contains(jumpId)) {
+        // A saved loop connects through the first jump host only.
+        return chain.take(2).toList();
+      }
+      if (visited.length > _maxSavedJumpChain) return null;
+      final jump = await _hostRepository.getById(jumpId);
+      if (jump == null) break;
+      chain.add(_endpoint(jump.username, jump.hostname, jump.port));
+      visited.add(jumpId);
+      jumpId = jump.jumpHostId;
+    }
+    return chain;
+  }
+
+  /// Whether [session] is connected to the account [host] is saved with now,
+  /// through the same jump hosts. A host edited since the session opened
+  /// doesn't match, so the key is never installed into another account.
+  Future<bool> sessionMatchesSavedHost(SshSession session, Host host) async {
+    final saved = await savedEndpointChain(host);
+    if (saved == null) return false;
+    final live = <String>[];
+    SshConnectionConfig? config = session.config;
+    while (config != null) {
+      live.add(_endpoint(config.username, config.hostname, config.port));
+      config = config.jumpHost;
+    }
+    return listEquals(saved, live);
+  }
+
+  /// The first of [sessions] that [sessionMatchesSavedHost] accepts for
+  /// [savedHost], or null when the flow must open a fresh connection.
+  Future<SshSession?> reusableSessionFor(
+    Host savedHost,
+    Iterable<SshSession> sessions,
+  ) async {
+    for (final session in sessions) {
+      if (await sessionMatchesSavedHost(session, savedHost)) return session;
+    }
+    return null;
+  }
+
+  static String _endpoint(String username, String hostname, int port) =>
+      '$username@${hostname.toLowerCase()}:$port';
+
+  /// Opens a new connection to [savedHost] as it is saved now, with only
+  /// [key] and no password, through [session]'s jump hosts. The login must
+  /// also run a fixed `echo` and print [keyLoginVerifiedMarker], which a key
+  /// limited by `command=` or `restrict` can't do.
   Future<KeyLoginVerification> verifyKeyOnlyLogin(
     SshSession session,
-    SshKey key,
-  ) async {
+    SshKey key, {
+    required Host savedHost,
+  }) async {
     final base = session.config;
     final config = SshConnectionConfig(
-      hostname: base.hostname,
-      port: base.port,
-      username: base.username,
+      hostname: savedHost.hostname,
+      port: savedHost.port,
+      username: savedHost.username,
       privateKey: key.privateKey,
       passphrase: key.passphrase,
       jumpHost: base.jumpHost,
@@ -338,7 +434,25 @@ class AuthorizedKeyInstallService {
         error: 'The key-only connection failed to start.',
       );
     }
-    final success = result.success && result.client != null;
+    final client = result.client;
+    final authenticated = result.success && client != null;
+    var shellWorks = false;
+    if (authenticated) {
+      try {
+        final output = await client
+            .run('echo $keyLoginVerifiedMarker', stderr: false)
+            .timeout(_verifyCommandTimeout);
+        shellWorks = const LineSplitter()
+            .convert(utf8.decode(output, allowMalformed: true))
+            .any((line) => line.trim() == keyLoginVerifiedMarker);
+      } on Object catch (error) {
+        _diagnostics.debug(
+          'onboarding.key',
+          'verify_command_failed',
+          fields: {'errorType': error.runtimeType},
+        );
+      }
+    }
     try {
       await result.closeAll();
     } on Object catch (error) {
@@ -348,18 +462,29 @@ class AuthorizedKeyInstallService {
         fields: {'errorType': error.runtimeType},
       );
     }
+    final success = authenticated && shellWorks;
     _diagnostics.info(
       'onboarding.key',
       'verify_finished',
       fields: {
         'hostId': session.hostId,
+        'authenticated': authenticated,
         'success': success,
         'usesJumpHost': base.jumpHost != null,
       },
     );
+    if (success) return const KeyLoginVerification(success: true);
+    if (authenticated) {
+      return const KeyLoginVerification(
+        success: false,
+        error:
+            'The server accepted the key but didn’t give it a normal shell. '
+            'A forced command or other restriction may apply to it.',
+      );
+    }
     return KeyLoginVerification(
-      success: success,
-      error: success ? null : result.error ?? 'Key login failed.',
+      success: false,
+      error: result.error ?? 'Key login failed.',
     );
   }
 
@@ -390,18 +515,23 @@ class AuthorizedKeyInstallService {
   }
 }
 
-/// Provider for [AuthorizedKeyInstallService].
+/// The [SshService] used for key-only verification.
 ///
-/// Verification uses its own [SshService] with no interactive password
-/// handler, so a rejected key fails instead of asking for the password.
+/// It is built without an interactive password handler, so when the server
+/// rejects the key the connection fails instead of asking for (and
+/// succeeding with) the password.
+final keyOnlyVerifierSshServiceProvider = Provider<SshService>(
+  (ref) => SshService(
+    knownHostsRepository: ref.watch(knownHostsRepositoryProvider),
+    hostKeyPromptHandler: ref.watch(hostKeyPromptHandlerProvider),
+  ),
+);
+
+/// Provider for [AuthorizedKeyInstallService].
 final authorizedKeyInstallServiceProvider =
-    Provider<AuthorizedKeyInstallService>((ref) {
-      final verifier = SshService(
-        knownHostsRepository: ref.watch(knownHostsRepositoryProvider),
-        hostKeyPromptHandler: ref.watch(hostKeyPromptHandlerProvider),
-      );
-      return AuthorizedKeyInstallService(
+    Provider<AuthorizedKeyInstallService>(
+      (ref) => AuthorizedKeyInstallService(
         hostRepository: ref.watch(hostRepositoryProvider),
-        connectKeyOnly: verifier.connect,
-      );
-    });
+        connectKeyOnly: ref.watch(keyOnlyVerifierSshServiceProvider).connect,
+      ),
+    );

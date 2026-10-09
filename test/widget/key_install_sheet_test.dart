@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'package:collection/collection.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -41,11 +43,23 @@ class _FakeInstallService extends AuthorizedKeyInstallService {
     return outcome;
   }
 
+  Host? verifiedHost;
+
   @override
   Future<KeyLoginVerification> verifyKeyOnlyLogin(
     SshSession session,
-    SshKey key,
-  ) async => verification;
+    SshKey key, {
+    required Host savedHost,
+  }) async {
+    verifiedHost = savedHost;
+    return verification;
+  }
+
+  @override
+  Future<SshSession?> reusableSessionFor(
+    Host savedHost,
+    Iterable<SshSession> sessions,
+  ) async => sessions.firstOrNull;
 
   @override
   Future<void> switchHostToKey(
@@ -72,7 +86,7 @@ class _FakeSshService extends SshService {
 }
 
 Host _host() => Host(
-  id: 5,
+  id: 1,
   label: 'build-box',
   hostname: 'build.example.com',
   port: 22,
@@ -89,14 +103,14 @@ Host _host() => Host(
 
 void main() {
   late AppDatabase db;
+  late HostRepository hosts;
   late _FakeInstallService service;
   late MockSshSession session;
 
   setUp(() {
     db = AppDatabase.forTesting(NativeDatabase.memory());
-    service = _FakeInstallService(
-      HostRepository(db, SecretEncryptionService.forTesting()),
-    );
+    hosts = HostRepository(db, SecretEncryptionService.forTesting());
+    service = _FakeInstallService(hosts);
     session = MockSshSession();
     when(() => session.connectionId).thenReturn(1);
     when(() => session.hostId).thenReturn(5);
@@ -105,6 +119,17 @@ void main() {
   tearDown(() => db.close());
 
   Future<void> pumpSheet(WidgetTester tester) async {
+    // The flow re-reads the host as saved now, so it must exist.
+    await tester.runAsync(
+      () => hosts.insert(
+        HostsCompanion.insert(
+          label: 'build-box',
+          hostname: 'build.example.com',
+          username: 'me',
+          password: const Value('hunter2'),
+        ),
+      ),
+    );
     final key = SshKey(
       id: 9,
       name: 'Laptop key',
@@ -117,6 +142,7 @@ void main() {
       ProviderScope(
         overrides: [
           databaseProvider.overrideWithValue(db),
+          hostRepositoryProvider.overrideWithValue(hosts),
           keyRepositoryProvider.overrideWithValue(
             KeyRepository(db, SecretEncryptionService.forTesting()),
           ),
@@ -143,7 +169,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(service.installedKeyIds, [9]);
-    expect(service.switches, [(hostId: 5, keyId: 9, removePassword: false)]);
+    expect(service.verifiedHost?.username, 'me');
+    expect(service.switches, [(hostId: 1, keyId: 9, removePassword: false)]);
     expect(find.text('Remove the saved password?'), findsOneWidget);
     expect(
       find.bySemanticsLabel('Reconnect with only the key, done'),
@@ -153,7 +180,7 @@ void main() {
     await tester.tap(find.text('Remove Password'));
     await tester.pumpAndSettle();
 
-    expect(service.switches.last, (hostId: 5, keyId: 9, removePassword: true));
+    expect(service.switches.last, (hostId: 1, keyId: 9, removePassword: true));
     expect(
       find.text('This host now signs in with Laptop key.'),
       findsOneWidget,
@@ -197,6 +224,18 @@ void main() {
     );
     expect(find.text('Add the Key by Hand'), findsOneWidget);
     expect(find.text('Try Again'), findsOneWidget);
+  });
+
+  testWidgets('a restricted existing copy explains itself and stops', (
+    tester,
+  ) async {
+    service.outcome = AuthorizedKeyInstallOutcome.restrictedCopy;
+    await pumpSheet(tester);
+    await tester.tap(find.text('Install Key'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('with restrictions'), findsOneWidget);
+    expect(service.switches, isEmpty);
   });
 
   testWidgets('a failed install explains why and stops', (tester) async {
