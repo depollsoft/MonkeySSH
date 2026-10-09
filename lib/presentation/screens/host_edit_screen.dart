@@ -4,7 +4,6 @@ import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -19,6 +18,7 @@ import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/app_permission_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -2528,6 +2528,8 @@ class _SkipJumpHostOnWifiSectionState
   Future<void> _addCurrentSsid() async {
     setState(() => _detecting = true);
     final messenger = ScaffoldMessenger.of(context);
+    // Read before any await: the Settings action can outlive this widget.
+    final permissions = ref.read(appPermissionServiceProvider);
     try {
       final wifiService = ref.read(wifiNetworkServiceProvider);
       final permission = await wifiService.requestPermission();
@@ -2542,7 +2544,7 @@ class _SkipJumpHostOnWifiSectionState
             action: permission == WifiPermissionStatus.permanentlyDenied
                 ? SnackBarAction(
                     label: 'Settings',
-                    onPressed: () => unawaited(openAppSettings()),
+                    onPressed: () => unawaited(permissions.openAppSettings()),
                   )
                 : null,
           ),

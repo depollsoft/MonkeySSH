@@ -1,6 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
-import 'package:drift/drift.dart' show InvalidDataException;
+import 'package:drift/drift.dart' show InvalidDataException, Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -11,9 +11,12 @@ import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/port_proxy_name.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/wifi_network_service.dart';
+import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
 import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
@@ -95,6 +98,28 @@ MonetizationService _buildProMonetizationService() {
   // ignore: unnecessary_lambdas
   when(() => service.initialize()).thenAnswer((_) => Future<void>.value());
   return service;
+}
+
+class _FixedWifiNetworkService extends WifiNetworkService {
+  _FixedWifiNetworkService(this.permission);
+
+  final WifiPermissionStatus permission;
+
+  @override
+  Future<WifiPermissionStatus> requestPermission() async => permission;
+
+  @override
+  Future<String?> getCurrentSsid() async => null;
+}
+
+class _RecordingAppPermissionService extends AppPermissionService {
+  int openAppSettingsCalls = 0;
+
+  @override
+  Future<bool> openAppSettings() async {
+    openAppSettingsCalls++;
+    return true;
+  }
 }
 
 class _RejectingHostRepository extends FakeHostRepository {
@@ -1537,5 +1562,72 @@ void main() {
         expect(hostRepository.updatedHost!.terminalFontFamily, isNull);
       },
     );
+
+    for (final (permission, offersSettings) in [
+      (WifiPermissionStatus.permanentlyDenied, true),
+      (WifiPermissionStatus.denied, false),
+    ]) {
+      testWidgets(
+        '${offersSettings ? 'offers' : 'omits'} app settings when Wi-Fi '
+        'location access is ${permission.name}',
+        (tester) async {
+          final jumpHost = _testHost(
+            id: 2,
+            label: 'Bastion',
+            autoConnectRequiresConfirmation: false,
+          );
+          final fixture = HostEditFixture(
+            host: _testHost(
+              id: 1,
+              label: 'Behind Bastion',
+              autoConnectRequiresConfirmation: false,
+            ).copyWith(jumpHostId: const Value(2)),
+          );
+          final permissions = _RecordingAppPermissionService();
+          await fixture.setSurfaceSize(tester);
+          await fixture.pump(
+            tester,
+            overrides: [
+              allHostsProvider.overrideWith(
+                (ref) => Stream.value([fixture.host, jumpHost]),
+              ),
+              wifiNetworkServiceProvider.overrideWithValue(
+                _FixedWifiNetworkService(permission),
+              ),
+              appPermissionServiceProvider.overrideWithValue(permissions),
+            ],
+          );
+
+          final addCurrent = find.byKey(
+            const Key('skip-jump-add-current-ssid'),
+          );
+          await tester.scrollUntilVisible(
+            addCurrent,
+            200,
+            scrollable: find.byType(Scrollable).first,
+          );
+          await tester.tap(addCurrent);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 750));
+
+          expect(
+            find.textContaining('Location permission is required'),
+            findsOneWidget,
+          );
+          final settingsAction = find.widgetWithText(
+            SnackBarAction,
+            'Settings',
+          );
+          if (!offersSettings) {
+            expect(settingsAction, findsNothing);
+            return;
+          }
+          await tester.tap(settingsAction);
+          await tester.pump();
+
+          expect(permissions.openAppSettingsCalls, 1);
+        },
+      );
+    }
   });
 }

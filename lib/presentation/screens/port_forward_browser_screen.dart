@@ -6,13 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 import '../../app/theme.dart';
+import '../../domain/services/app_permission_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/settings_service.dart';
@@ -416,7 +416,8 @@ class _PortForwardBrowserScreenState
     _PortForwardBrowserTabState tab,
     BrowserMediaCaptureType captureType,
   ) async {
-    final cameraStatus = await Permission.camera.request();
+    final permissions = ref.read(appPermissionServiceProvider);
+    final cameraStatus = await permissions.request(AppPermission.camera);
     if (!mounted || !_tabs.contains(tab)) {
       return const [];
     }
@@ -425,7 +426,9 @@ class _PortForwardBrowserScreenState
       return const [];
     }
     if (captureType == BrowserMediaCaptureType.video) {
-      final microphoneStatus = await Permission.microphone.request();
+      final microphoneStatus = await permissions.request(
+        AppPermission.microphone,
+      );
       if (!mounted || !_tabs.contains(tab)) {
         return const [];
       }
@@ -489,13 +492,17 @@ class _PortForwardBrowserScreenState
       return;
     }
 
+    final permissions = ref.read(appPermissionServiceProvider);
     try {
       for (final type in request.types) {
         final status = await switch (type) {
-          WebViewPermissionResourceType.camera => Permission.camera.request(),
-          WebViewPermissionResourceType.microphone =>
-            Permission.microphone.request(),
-          _ => Future.value(PermissionStatus.denied),
+          WebViewPermissionResourceType.camera => permissions.request(
+            AppPermission.camera,
+          ),
+          WebViewPermissionResourceType.microphone => permissions.request(
+            AppPermission.microphone,
+          ),
+          _ => Future.value(AppPermissionStatus.denied),
         };
         if (!mounted || !_tabs.contains(tab)) {
           await request.deny();
@@ -544,7 +551,9 @@ class _PortForwardBrowserScreenState
     }
 
     try {
-      final status = await Permission.locationWhenInUse.request();
+      final status = await ref
+          .read(appPermissionServiceProvider)
+          .request(AppPermission.locationWhenInUse);
       if (!mounted || !_tabs.contains(tab)) {
         return const GeolocationPermissionsResponse(
           allow: false,

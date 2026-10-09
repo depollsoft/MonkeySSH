@@ -23,6 +23,7 @@
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		A2D56B9B41F34E978DB60210 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A2D56B9A41F34E978DB60210 /* PrivacyInfo.xcprivacy */; };
+		B7C41E2A9D5F4A1C8E3B6D70 /* AppPermissionsPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1F0A93C5B7E4C2A9F6E8B14 /* AppPermissionsPlugin.swift */; };
 		DD783BB2BA23C838BCACD3C0 /* AppIcon-private.icon in Resources */ = {isa = PBXBuildFile; fileRef = 47B1DB4833F7FC740D4324B9 /* AppIcon-private.icon */; };
 		F282391CEEDF4515759E057E /* AppIcon-production.icon in Resources */ = {isa = PBXBuildFile; fileRef = 9FEC3F55B80F78C630674143 /* AppIcon-production.icon */; };
 		F8EA8191DE4116532C59A3CE /* ConnectionStatusLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA8C22083AFB91079DC3816C /* ConnectionStatusLiveActivityWidget.swift */; };
@@ -94,6 +95,7 @@
 		A2D56B9A41F34E978DB60210 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		C0B9F2DC4F6E27526B4B2044 /* ConnectionStatusLiveActivityExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ConnectionStatusLiveActivityExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusAttributes.swift; sourceTree = "<group>"; };
+		D1F0A93C5B7E4C2A9F6E8B14 /* AppPermissionsPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPermissionsPlugin.swift; sourceTree = "<group>"; };
 		EA8C22083AFB91079DC3816C /* ConnectionStatusLiveActivityWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityWidget.swift; sourceTree = "<group>"; };
 		EB229B402BD78D4035BBADEA /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityManager.swift; sourceTree = "<group>"; };
@@ -192,6 +194,7 @@
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */,
 				EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */,
+				D1F0A93C5B7E4C2A9F6E8B14 /* AppPermissionsPlugin.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -458,6 +461,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				B7C41E2A9D5F4A1C8E3B6D70 /* AppPermissionsPlugin.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				0BBA2D63F69B026808692429 /* ConnectionStatusAttributes.swift in Sources */,
 				10F236A3A094B53411236F3F /* ConnectionStatusLiveActivityManager.swift in Sources */,
