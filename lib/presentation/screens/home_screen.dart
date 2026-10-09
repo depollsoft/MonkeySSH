@@ -15,6 +15,7 @@ import '../../data/repositories/snippet_repository.dart';
 import '../../domain/commands/duplicate_host_command.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_themes.dart';
@@ -36,10 +37,10 @@ import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/tmux_service.dart';
 import '../../domain/services/transfer_intent_service.dart';
 import '../providers/connection_actions.dart';
+import '../providers/connection_attention_provider.dart';
 import '../providers/entity_list_providers.dart';
 import '../providers/host_row_providers.dart';
 import '../view_models/mux_badge_controller.dart';
-import '../widgets/acp_mux_window_status_badge.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/agent_tool_icon.dart';
@@ -50,6 +51,8 @@ import '../widgets/brand_list_skeleton.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/connection_preview_snippet.dart';
 import '../widgets/connection_status_dot.dart';
+import '../widgets/connection_window_status.dart';
+import '../widgets/connections_waiting_section.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
@@ -58,7 +61,6 @@ import '../widgets/premium_access.dart';
 import '../widgets/reorder_helpers.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/tmux_window_navigator.dart' show confirmMuxWindowClose;
-import '../widgets/tmux_window_status_badge.dart';
 import 'snippet_edit_screen.dart';
 import 'transfer_screen.dart';
 
@@ -1757,9 +1759,10 @@ class _ConnectionsPanel extends ConsumerWidget {
                 )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 4),
-                  itemCount: connectionIds.length,
+                  itemCount: connectionIds.length + 1,
                   itemBuilder: (context, index) {
-                    final connectionId = connectionIds[index];
+                    if (index == 0) return const ConnectionsWaitingSection();
+                    final connectionId = connectionIds[index - 1];
                     final connection = sessionsNotifier.getActiveConnection(
                       connectionId,
                     );
@@ -3168,8 +3171,26 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                 .toList(growable: false);
           }()
         : const <AcpSessionState>[];
-    final nativeAcpEntries = buildAcpMuxWindowEntries(nativeAcpSessions);
-    if (windows.isEmpty && nativeAcpEntries.isEmpty) {
+    final entries = buildConnectionWindowEntries(
+      windows: windows,
+      sessions: nativeAcpSessions,
+      bridges:
+          hostId != null &&
+              _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
+              attentionSurfaceVisible(context)
+          ? ref.watch(connectionBridgeMetadataProvider).forHost(hostId)
+          : const {},
+      lowQuota: watchLowQuotaTools(
+        context,
+        ref,
+        session: activeSession,
+        tools: connectionWindowQuotaIdentities(
+          windows: windows,
+          sessions: nativeAcpSessions,
+        ),
+      ),
+    );
+    if (entries.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -3177,14 +3198,11 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final hasAgentSessionAccess = _allowsAgentSessions(
       ref.watch(monetizationStateProvider),
     );
-    final totalWindowCount = windows.length + nativeAcpEntries.length;
-    final firstNativeWindowIndex =
-        windows.fold<int>(
-          -1,
-          (maximum, window) => window.index > maximum ? window.index : maximum,
-        ) +
-        1;
-    final alertCount = windows.where((w) => w.hasAlert).length;
+    final totalWindowCount = entries.length;
+    // Blocked agents and program-reported alerts; warnings stay in the rows.
+    final alertCount = entries
+        .where((entry) => (entry.reason?.tier ?? attentionQuietTier) <= 1)
+        .length;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(56, 0, 16, 8),
@@ -3242,13 +3260,20 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
           // Expanded window list.
           if (_expanded) ...[
             const SizedBox(height: 4),
-            for (final window in windows) _buildWindowRow(theme, window),
-            for (var index = 0; index < nativeAcpEntries.length; index++)
-              _buildNativeAcpWindowRow(
-                theme,
-                nativeAcpEntries[index],
-                windowIndex: firstNativeWindowIndex + index,
-              ),
+            for (final entry in entries)
+              if (entry.session case final session?)
+                _buildNativeAcpWindowRow(
+                  theme,
+                  AcpSwitcherEntry.session(session),
+                  windowIndex: entry.index,
+                  status: ConnectionWindowStatusChip(entry: entry),
+                )
+              else
+                _buildWindowRow(
+                  theme,
+                  entry.window!,
+                  status: ConnectionWindowStatusChip(entry: entry),
+                ),
 
             const SizedBox(height: 4),
             if (hasAgentSessionAccess) ...[
@@ -3621,6 +3646,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     ThemeData theme,
     AcpSwitcherEntry entry, {
     required int windowIndex,
+    required Widget status,
   }) {
     final session = entry.session!;
     final key = session.key;
@@ -3734,7 +3760,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ),
             Padding(
               padding: const EdgeInsets.only(left: 6, right: 6),
-              child: AcpMuxWindowStatusBadge(session: session),
+              child: status,
             ),
             GestureDetector(
               onTap: () async {
@@ -3763,7 +3789,11 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     );
   }
 
-  Widget _buildWindowRow(ThemeData theme, TmuxWindow window) {
+  Widget _buildWindowRow(
+    ThemeData theme,
+    TmuxWindow window, {
+    required Widget status,
+  }) {
     final title = window.displayTitle;
     final secondaryTitle = window.secondaryTitle;
     final iconColor = agentWindowIdentityColor(
@@ -3854,7 +3884,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ),
             Padding(
               padding: const EdgeInsets.only(left: 6, right: 6),
-              child: TmuxWindowStatusBadge(window: window),
+              child: status,
             ),
             // Close button.
             GestureDetector(
