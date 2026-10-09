@@ -499,10 +499,12 @@ class AcpSessionManager {
         heldElsewhere &&
         !takeOver &&
         holder != null &&
-        !holder.stale) {
+        !holder.stale &&
+        _liveAttachment(key.bridge) == null) {
       // Still held by a live device: keep the frozen view, with its
       // transcript and whether this device lost the chat, and refresh only
-      // who holds it.
+      // who holds it. When a sibling session here already took the input
+      // back, this one reopens on that attachment instead.
       existing.refreshRemoteWriter(holder);
       if (selectOnSuccess) {
         _select(key.value);
@@ -577,7 +579,13 @@ class AcpSessionManager {
   /// held elsewhere, nothing changes.
   Future<void> refreshHeldSession(AcpSessionKey key) async {
     final controller = _controllers[key.value];
-    if (controller == null || !controller.isHeldElsewhere) return;
+    // A sibling session here may already hold the input; reopening this one
+    // joins it, so there is no other holder to report.
+    if (controller == null ||
+        !controller.isHeldElsewhere ||
+        _liveAttachment(key.bridge) != null) {
+      return;
+    }
     final MonkeyMuxAcpBridgeMetadata status;
     try {
       status = await _connector.bridgeStatus(key.hostId, key.bridgeId);

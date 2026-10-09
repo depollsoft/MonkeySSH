@@ -1223,11 +1223,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         writer: writer,
                         busy: _takingOver,
                         onTakeOver: () => unawaited(_takeOver()),
-                        onRefresh: () => unawaited(
-                          ref
-                              .read(acpSessionManagerProvider)
-                              .refreshHeldSession(_key),
-                        ),
+                        onRefresh: () => ref
+                            .read(acpSessionManagerProvider)
+                            .refreshHeldSession(_key),
                       ),
                     AcpComposer(
                       controller: _composer,

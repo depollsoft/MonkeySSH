@@ -427,6 +427,102 @@ void main() {
     },
   );
 
+  test(
+    'a lease notice without a count leaves prompts of unknown fate',
+    () async {
+      final (:transport, :channels) = _open(
+        answer: (channel, _) => channel.send(_hello(canSend: true)),
+      );
+      await _waitUntil(() => transport.isConnected);
+      await transport.write(utf8.encode(prompt(1, 'session')));
+      // A bridge built before the count existed.
+      channels.single.send({
+        'type': 'lease',
+        'bridgeId': _bridgeId,
+        'writer': {'label': 'iPhone', 'idleSeconds': 0},
+      });
+      await _waitUntil(() => channels.single.closed);
+
+      expect(transport.promptDelivery('session'), AcpInputDelivery.unknown);
+    },
+  );
+
+  test('a busy sibling session cannot evict a running prompt', () async {
+    final (:transport, :channels) = _open(
+      answer: (channel, _) => channel.send(_hello(canSend: true)),
+    );
+    await _waitUntil(() => transport.isConnected);
+    await transport.write(utf8.encode(prompt(1, 'long-turn')));
+    for (var id = 2; id < 50; id++) {
+      await transport.write(utf8.encode(prompt(id, 'fork')));
+    }
+    channels.single.send({
+      'type': 'lease',
+      'bridgeId': _bridgeId,
+      'writer': {'label': 'iPhone', 'idleSeconds': 0},
+      'acceptedInputs': 49,
+    });
+    await _waitUntil(() => channels.single.closed);
+
+    expect(transport.promptDelivery('long-turn'), AcpInputDelivery.delivered);
+    expect(transport.promptDelivery('fork'), AcpInputDelivery.delivered);
+  });
+
+  test('a reattach settles prompts from the channel that dropped', () async {
+    var attaches = 0;
+    final (:transport, :channels) = _open(
+      answer: (channel, _) => channel.send(
+        ++attaches == 1 ? _hello(canSend: true) : _hello(canSend: true)
+          ..['previousAcceptedInputs'] = 1,
+      ),
+    );
+    await _waitUntil(() => transport.isConnected);
+    await transport.write(utf8.encode(prompt(1, 'session')));
+    // A network switch: the same process reclaims the lease on a new channel.
+    await channels.single.remoteClose();
+    await _waitUntil(() => channels.length == 2 && transport.isConnected);
+    channels.last.send({
+      'type': 'lease',
+      'bridgeId': _bridgeId,
+      'writer': {'label': 'iPhone', 'idleSeconds': 0},
+      'acceptedInputs': 0,
+    });
+    await _waitUntil(() => channels.last.closed);
+
+    expect(transport.promptDelivery('session'), AcpInputDelivery.delivered);
+  });
+
+  test(
+    'a wake-up probe settles prompts from the channel that dropped',
+    () async {
+      var attaches = 0;
+      final (:transport, :channels) = _open(
+        answer: (channel, _) => channel.send(
+          ++attaches == 1
+                ? _hello(canSend: true)
+                : _hello(
+                    canSend: false,
+                    writer: {'label': 'iPhone', 'idleSeconds': 0},
+                  )
+            ..['previousAcceptedInputs'] = 0,
+        ),
+      );
+      final states = <MonkeyMuxAcpTransportState>[];
+      transport.states.listen(states.add);
+      await _waitUntil(() => transport.isConnected);
+      await transport.write(utf8.encode(prompt(1, 'session')));
+      await channels.single.remoteClose();
+      await _waitUntil(
+        () =>
+            states.isNotEmpty &&
+            states.last.status == MonkeyMuxAcpTransportStatus.heldElsewhere,
+      );
+
+      // The bridge took nothing from the dropped channel.
+      expect(transport.promptDelivery('session'), AcpInputDelivery.notSent);
+    },
+  );
+
   test('an older bridge without the lease keeps the writer error', () async {
     final (:transport, channels: _) = _open(
       answer: (channel, _) =>

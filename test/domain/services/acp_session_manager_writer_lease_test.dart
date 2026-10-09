@@ -324,6 +324,43 @@ void main() {
     },
   );
 
+  test('reopening a sibling chat reuses the input this device took', () async {
+    connector.heldBy = ipad;
+    Future<AcpSessionLaunchResult> openSession(
+      String sessionId, {
+      bool takeOver = false,
+    }) => manager.reconnectSession(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      bridgeId: 'bridge-1',
+      acpSessionId: sessionId,
+      cwd: '/repo',
+      takeOver: takeOver,
+    );
+    final first = (await openSession('session-1')) as AcpSessionLaunchStarted;
+    final sibling = (await openSession('session-2')) as AcpSessionLaunchStarted;
+    expect(stateOf(sibling.key).remoteWriter, isNotNull);
+
+    await openSession('session-1', takeOver: true);
+    expect(stateOf(first.key).status, AcpConnectionStatus.ready);
+    // The bridge now names this device as the holder.
+    connector.heldBy = MonkeyMuxAcpRemoteWriter(
+      label: 'iPhone',
+      lastActiveAt: DateTime(2026, 10, 9, 12),
+      leaseLost: false,
+    );
+    final attaches = connector.agents.length;
+
+    await openSession('session-2');
+
+    final state = stateOf(sibling.key);
+    expect(state.remoteWriter, isNull);
+    expect(state.status, AcpConnectionStatus.ready);
+    // It shares the attachment that holds the lease instead of taking it
+    // from itself.
+    expect(connector.agents, hasLength(attaches));
+  });
+
   test('a device that lost the chat keeps its transcript on return', () async {
     final started = (await manager.startNewSession(
       hostId: 1,

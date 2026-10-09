@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -144,25 +146,72 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Take back'), findsOneWidget);
   });
 
+  Widget pollingBanner(Future<void> Function() onRefresh) => MaterialApp(
+    home: Scaffold(
+      body: AcpWriterLeaseBanner(
+        writer: _writer(),
+        clock: () => _now,
+        onTakeOver: () {},
+        onRefresh: onRefresh,
+      ),
+    ),
+  );
+
   testWidgets('asks who holds the chat about once a minute', (tester) async {
     var refreshes = 0;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: AcpWriterLeaseBanner(
-            writer: _writer(),
-            clock: () => _now,
-            onTakeOver: () {},
-            onRefresh: () => refreshes++,
-          ),
-        ),
-      ),
-    );
+    await tester.pumpWidget(pollingBanner(() async => refreshes++));
 
     await tester.pump(const Duration(seconds: 59));
     expect(refreshes, 0);
     await tester.pump(const Duration(seconds: 2));
     expect(refreshes, 1);
+    await tester.pump(const Duration(minutes: 1));
+    expect(refreshes, 2);
+  });
+
+  testWidgets('does not ask while the app is in the background', (
+    tester,
+  ) async {
+    var refreshes = 0;
+    await tester.pumpWidget(pollingBanner(() async => refreshes++));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    addTearDown(
+      () => tester.binding.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      ),
+    );
+
+    await tester.pump(const Duration(minutes: 3));
+    expect(refreshes, 0);
+  });
+
+  testWidgets('does not ask while another route covers the chat', (
+    tester,
+  ) async {
+    var refreshes = 0;
+    await tester.pumpWidget(
+      TickerMode(enabled: false, child: pollingBanner(() async => refreshes++)),
+    );
+
+    await tester.pump(const Duration(minutes: 3));
+    expect(refreshes, 0);
+  });
+
+  testWidgets('does not start a second ask while one is running', (
+    tester,
+  ) async {
+    var refreshes = 0;
+    final pending = Completer<void>();
+    await tester.pumpWidget(
+      pollingBanner(() {
+        refreshes++;
+        return pending.future;
+      }),
+    );
+
+    await tester.pump(const Duration(minutes: 3));
+    expect(refreshes, 1);
+    pending.complete();
     await tester.pump(const Duration(minutes: 1));
     expect(refreshes, 2);
   });

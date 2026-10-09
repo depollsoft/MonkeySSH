@@ -42,9 +42,10 @@ class AcpWriterLeaseBanner extends StatefulWidget {
   /// Moves the input to this device.
   final VoidCallback onTakeOver;
 
-  /// Asks who holds the chat again, about once a minute while shown, so the
-  /// activity time follows the other device's use.
-  final VoidCallback? onRefresh;
+  /// Asks who holds the chat again, about once a minute while the app is in
+  /// the foreground and the banner is visible, so the activity time follows
+  /// the other device's use. A refresh still running skips the next one.
+  final Future<void> Function()? onRefresh;
 
   /// Whether a take-over is already in progress.
   final bool busy;
@@ -56,30 +57,58 @@ class AcpWriterLeaseBanner extends StatefulWidget {
   State<AcpWriterLeaseBanner> createState() => _AcpWriterLeaseBannerState();
 }
 
-class _AcpWriterLeaseBannerState extends State<AcpWriterLeaseBanner> {
+class _AcpWriterLeaseBannerState extends State<AcpWriterLeaseBanner>
+    with WidgetsBindingObserver {
   // Keeps "active N min ago" current while the banner stays on screen.
   Timer? _ticker;
   var _ticks = 0;
+  var _refreshing = false;
+  // Whether the route showing the banner is current; set during build.
+  var _visible = true;
+  AppLifecycleState? _lifecycle;
 
   @override
   void initState() {
     super.initState();
+    _lifecycle = WidgetsBinding.instance.lifecycleState;
+    WidgetsBinding.instance.addObserver(this);
     _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!mounted) return;
       setState(() {});
       _ticks += 1;
-      if (_ticks.isEven) widget.onRefresh?.call();
+      if (_ticks.isEven) unawaited(_refresh());
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycle = state;
+  }
+
+  Future<void> _refresh() async {
+    final refresh = widget.onRefresh;
+    final foreground =
+        _lifecycle == null || _lifecycle == AppLifecycleState.resumed;
+    if (refresh == null || _refreshing || !foreground || !_visible) return;
+    _refreshing = true;
+    try {
+      await refresh();
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Tickers are muted when another route covers this one.
+    _visible = TickerMode.valuesOf(context).enabled;
     final scheme = Theme.of(context).colorScheme;
     final mono = AcpChatTypography.monoStyleOf(context);
     final device = acpWriterDeviceName(widget.writer);

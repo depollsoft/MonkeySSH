@@ -863,9 +863,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
 
   final _pendingInputFrames = Queue<_InputFrame>();
   var _pendingInputBytes = 0;
-  // Prompts written to a channel, newest last, so a lost lease can tell
-  // which of them the bridge accepted.
-  final _sentPrompts = Queue<_SentPrompt>();
+  // The newest prompt written per session, so a lost lease can tell whether
+  // the bridge accepted it. Each session has at most one prompt in flight.
+  final _sentPrompts = <String, _SentPrompt>{};
+  var _evictedSentPrompts = false;
+  var _lastWriterGeneration = 0;
   var _channelInputCount = 0;
   Map<String, AcpInputDelivery>? _promptDeliveries;
   final _pendingReplayFrames = Queue<AcpDecodedFrame>();
@@ -1297,6 +1299,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       return;
     }
     final leaseAware = _advertisesWriterLease(message['capabilities']);
+    _settleDroppedChannel(
+      _readNonNegativeInt(message['previousAcceptedInputs']),
+    );
     if (message['canSend'] != true) {
       if (leaseAware) {
         _enterHeldElsewhere(message['writer'], leaseLost: _heldWriterLease);
@@ -1316,6 +1321,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _reconnectAttempt = 0;
     _takeOverRequested = false;
     _heldWriterLease = true;
+    _lastWriterGeneration = _generation;
     if (leaseAware) _startHeartbeat();
     if (metadata.nextSequence < _lastDeliveredSequence) {
       _failTerminal(
@@ -1663,7 +1669,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _enterHeldElsewhere(
       message['writer'],
       leaseLost: true,
-      acceptedInputs: _readNonNegativeInt(message['acceptedInputs']) ?? 0,
+      // Missing only from a bridge built before the count existed.
+      acceptedInputs: _readNonNegativeInt(message['acceptedInputs']),
     );
   }
 
@@ -1674,7 +1681,10 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   AcpInputDelivery promptDelivery(String sessionId) {
     final deliveries = _promptDeliveries;
     if (deliveries == null) return AcpInputDelivery.unknown;
-    return deliveries[sessionId] ?? AcpInputDelivery.notSent;
+    return deliveries[sessionId] ??
+        (_evictedSentPrompts
+            ? AcpInputDelivery.unknown
+            : AcpInputDelivery.notSent);
   }
 
   /// Ends this transport without failure because another client holds the
@@ -1725,16 +1735,37 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     );
   }
 
+  /// Settles prompts written on the last writer channel, which dropped, from
+  /// [acceptedInputs]: the bridge's count of input frames it took from that
+  /// connection, reported in the next hello.
+  void _settleDroppedChannel(int? acceptedInputs) {
+    if (acceptedInputs == null) return;
+    for (final sessionId in _sentPrompts.keys.toList(growable: false)) {
+      final sent = _sentPrompts[sessionId]!;
+      if (sent.generation != _lastWriterGeneration || sent.settled != null) {
+        continue;
+      }
+      _sentPrompts[sessionId] = (
+        generation: sent.generation,
+        index: sent.index,
+        settled: sent.index < acceptedInputs
+            ? AcpInputDelivery.delivered
+            : AcpInputDelivery.notSent,
+      );
+    }
+  }
+
   Map<String, AcpInputDelivery> _settlePromptDeliveries(int? acceptedInputs) {
     final deliveries = <String, AcpInputDelivery>{};
-    for (final sent in _sentPrompts) {
-      deliveries[sent.sessionId] =
-          sent.generation == _generation && acceptedInputs != null
-          ? (sent.index < acceptedInputs
-                ? AcpInputDelivery.delivered
-                : AcpInputDelivery.notSent)
-          // Written to a channel that dropped before its fate was known.
-          : AcpInputDelivery.unknown;
+    for (final MapEntry(key: sessionId, value: sent) in _sentPrompts.entries) {
+      deliveries[sessionId] =
+          sent.settled ??
+          (sent.generation == _generation && acceptedInputs != null
+              ? (sent.index < acceptedInputs
+                    ? AcpInputDelivery.delivered
+                    : AcpInputDelivery.notSent)
+              // Written to a channel that dropped before its fate was known.
+              : AcpInputDelivery.unknown);
     }
     for (final frame in _pendingInputFrames) {
       if (frame.promptSessionId case final sessionId?) {
@@ -1918,12 +1949,17 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         return;
       }
       if (frame.promptSessionId case final sessionId?) {
-        _sentPrompts.addLast((
-          sessionId: sessionId,
-          generation: _generation,
-          index: _channelInputCount,
-        ));
-        if (_sentPrompts.length > _maxSentPrompts) _sentPrompts.removeFirst();
+        _sentPrompts
+          ..remove(sessionId)
+          ..[sessionId] = (
+            generation: _generation,
+            index: _channelInputCount,
+            settled: null,
+          );
+        if (_sentPrompts.length > _maxSentPromptSessions) {
+          _sentPrompts.remove(_sentPrompts.keys.first);
+          _evictedSentPrompts = true;
+        }
       }
       _channelInputCount += 1;
     }
@@ -2117,12 +2153,12 @@ String _buildHelperCommand(
 /// One input frame for the bridge, with the session it prompts, if any.
 typedef _InputFrame = ({Uint8List bytes, String? promptSessionId});
 
-/// A prompt written as input frame [index] of channel [generation].
-typedef _SentPrompt = ({String sessionId, int generation, int index});
+/// The newest prompt of a session, written as input frame [index] of channel
+/// [generation], and its fate once a later hello settled it.
+typedef _SentPrompt = ({int generation, int index, AcpInputDelivery? settled});
 
-// Only the newest prompt per session matters, and each session has at most
-// one in flight.
-const _maxSentPrompts = 32;
+// One entry per session on this bridge attachment (the chat and its forks).
+const _maxSentPromptSessions = 256;
 
 typedef _PreparedWireFrame = ({
   Map<String, Object?> message,
