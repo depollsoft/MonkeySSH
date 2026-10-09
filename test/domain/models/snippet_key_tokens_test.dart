@@ -115,7 +115,7 @@ void main() {
       final parsed = parseSnippetKeySequence(
         '{key:ctrl+c}ls{delay:50}{key:enter}{key:shift+enter}',
       );
-      expect(parsed.reviewText, '{key:ctrl+c}ls\n{key:shift+enter}');
+      expect(parsed.reviewText, '{key:ctrl+c}ls\n\n');
     });
 
     test('fills variables in text only', () {
@@ -126,6 +126,114 @@ void main() {
         _key(TerminalKey.enter),
       ]);
     });
+  });
+
+  group('text that only looks like a token', () {
+    test('a token after a dollar sign is shell syntax', () {
+      for (final command in [
+        r'echo ${key:1}',
+        r'echo ${KEY:-x} ${delay:-1}',
+        r'echo $\{key:esc}',
+      ]) {
+        final parsed = parseSnippetKeySequence(command);
+        expect(parsed.hasActions, isFalse, reason: command);
+        expect(parsed.errors, isEmpty, reason: command);
+      }
+      expect(
+        parseSnippetKeySequence(r'echo ${key:1}').plainText,
+        r'echo ${key:1}',
+      );
+    });
+
+    test('token names are lower case only', () {
+      final parsed = parseSnippetKeySequence('{KEY:1} {Delay:500}');
+      expect(parsed.hasActions, isFalse);
+      expect(parsed.plainText, '{KEY:1} {Delay:500}');
+    });
+
+    test('escaping old snippets keeps their text', () {
+      for (final command in [
+        'db.c.createIndex({key:1})',
+        'jq "{key:.}"',
+        'run({delay:500})',
+        r'a\{key:esc} b\\{key:esc} c\\\{delay:9}',
+        r'echo ${key:1} {key:esc}',
+        'plain text',
+        '',
+      ]) {
+        final escaped = escapeSnippetKeyTokens(command);
+        final parsed = parseSnippetKeySequence(escaped);
+        expect(parsed.hasActions, isFalse, reason: command);
+        expect(parsed.errors, isEmpty, reason: command);
+        expect(parsed.plainText, command, reason: command);
+      }
+      expect(escapeSnippetKeyTokens('f({key:1})'), r'f(\{key:1})');
+      expect(escapeSnippetKeyTokens('plain'), 'plain');
+    });
+  });
+
+  group('shifted characters', () {
+    test('capital letters and shifted symbols are Shift plus the key', () {
+      expect(
+        parseSnippetKeyChord('G'),
+        const SnippetKeyChord(TerminalKey.keyG, shift: true, character: 'g'),
+      );
+      expect(
+        parseSnippetKeyChord('ctrl+C'),
+        const SnippetKeyChord(TerminalKey.keyC, ctrl: true, character: 'c'),
+      );
+      expect(
+        parseSnippetKeyChord('?'),
+        const SnippetKeyChord(TerminalKey.slash, shift: true, character: '/'),
+      );
+      expect(
+        parseSnippetKeyChord('ctrl+_'),
+        const SnippetKeyChord(
+          TerminalKey.minus,
+          ctrl: true,
+          shift: true,
+          character: '-',
+        ),
+      );
+      expect(
+        parseSnippetKeyChord('+'),
+        const SnippetKeyChord(TerminalKey.equal, shift: true, character: '='),
+      );
+      expect(
+        parseSnippetKeyChord('alt++'),
+        const SnippetKeyChord(
+          TerminalKey.equal,
+          alt: true,
+          shift: true,
+          character: '=',
+        ),
+      );
+    });
+
+    test('Ctrl chords without a terminal code are errors', () {
+      for (final token in ['{key:ctrl+1}', '{key:ctrl+,}', '{key:ctrl+.}']) {
+        expect(parseSnippetKeySequence(token).errors, [
+          'Ctrl has no terminal code with this key: $token',
+        ]);
+      }
+      for (final token in [
+        '{key:ctrl+@}',
+        '{key:ctrl+[}',
+        '{key:ctrl+space}',
+        '{key:ctrl+?}',
+      ]) {
+        expect(parseSnippetKeySequence(token).errors, isEmpty, reason: token);
+      }
+    });
+  });
+
+  test('review text shows every key that submits a line as a line break', () {
+    expect(
+      parseSnippetKeySequence(
+        'a{key:ctrl+m}b{key:ctrl+j}c{key:shift+enter}d{key:ctrl+c}',
+      ).reviewText,
+      'a\nb\nc\nd{key:ctrl+c}',
+    );
   });
 
   test('snippets with any key token need a terminal', () {

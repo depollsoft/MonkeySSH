@@ -6,11 +6,9 @@ import 'snippet_variables.dart';
 /// Longest pause one `{delay:N}` token may ask for.
 const kSnippetMaxDelay = Duration(milliseconds: 5000);
 
-/// `{key:...}` and `{delay:...}` tokens in a snippet command.
-final _tokenPattern = RegExp(
-  r'\{(key|delay):([^{}\s]+)\}',
-  caseSensitive: false,
-);
+/// `{key:...}` and `{delay:...}` tokens in a snippet command. The `key` and
+/// `delay` names are lower case only, so code such as `{KEY:1}` stays text.
+final _tokenPattern = RegExp(r'\{(key|delay):([^{}\s]+)\}');
 
 /// A key and the modifiers held with it, such as Ctrl+C or Shift+Tab.
 @immutable
@@ -39,6 +37,12 @@ class SnippetKeyChord {
   /// The unshifted character the key types, for letter, digit, space and
   /// punctuation keys; null for named keys such as Esc or Up.
   final String? character;
+
+  /// Whether the chord submits a line in a shell: Enter with any modifiers,
+  /// or Ctrl+M and Ctrl+J, which send the same bytes.
+  bool get submitsLine =>
+      key == TerminalKey.enter ||
+      (ctrl && (character == 'm' || character == 'j'));
 
   /// The token that sends this chord, written the canonical way, such as
   /// `{key:ctrl+c}`.
@@ -162,19 +166,13 @@ class SnippetKeySequence {
   ].join();
 
   /// The snippet as a command line would see it, for review before sending:
-  /// Enter becomes a line break, other keys show as their tokens and pauses
-  /// are left out.
+  /// keys that submit a line (Enter, Ctrl+M, Ctrl+J) become a line break,
+  /// other keys show as their tokens and pauses are left out.
   String get reviewText => [
     for (final step in steps)
       switch (step) {
         SnippetTextStep(:final text) => text,
-        SnippetKeyStep(:final chord) =>
-          chord.key == TerminalKey.enter &&
-                  !chord.ctrl &&
-                  !chord.alt &&
-                  !chord.shift
-              ? '\n'
-              : chord.token,
+        SnippetKeyStep(:final chord) => chord.submitsLine ? '\n' : chord.token,
         SnippetDelayStep() => '',
       },
   ].join();
@@ -208,15 +206,20 @@ class SnippetKeySequence {
 ///   with optional `ctrl`, `alt` (or `option`, `meta`) and `shift` modifiers
 ///   joined by `+`. Keys are named keys (`esc`, `tab`, `enter`, `backspace`,
 ///   `delete`, `insert`, `space`, arrows `up` `down` `left` `right`, `home`,
-///   `end`, `pageup`, `pagedown`, `f1`-`f12`) or a single letter, digit or
-///   punctuation character. Names are case-insensitive.
+///   `end`, `pageup`, `pagedown`, `f1`-`f12`) or a single character. Named
+///   keys ignore case. A shifted symbol such as `?` or `+` means Shift plus
+///   its key on a US layout, and so does a capital letter on its own:
+///   `{key:G}` is Shift+G, while `{key:ctrl+C}` is still Ctrl+C.
 /// - `{delay:100}` or `{delay:100ms}`: a pause of 1 to 5000 milliseconds.
 /// - A backslash before a token types the token as text: `\{key:esc}` types
 ///   `{key:esc}`. Two backslashes type one backslash and keep the token.
+/// - A token right after `$` is shell syntax (`${key:1}`, `${delay:-1}`), not
+///   a key, and stays text.
 ///
-/// A token with an unknown key or an out-of-range delay is reported in
-/// [SnippetKeySequence.errors]. Text that is not a complete token, such as
-/// `{key:` on its own, is left as text.
+/// A token with an unknown key, a Ctrl chord a terminal has no code for, or
+/// an out-of-range delay is reported in [SnippetKeySequence.errors]. Text that
+/// is not a complete token, such as `{key:` on its own or `{key: esc}` with a
+/// space, is left as text.
 SnippetKeySequence parseSnippetKeySequence(String command) {
   final steps = <SnippetStep>[];
   final errors = <String>[];
@@ -232,6 +235,9 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
 
   var cursor = 0;
   for (final match in _tokenPattern.allMatches(command)) {
+    if (_followsDollar(command, match)) {
+      continue;
+    }
     var backslashes = 0;
     while (match.start - backslashes - 1 >= cursor &&
         command.codeUnitAt(match.start - backslashes - 1) == 0x5C) {
@@ -246,7 +252,7 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
       continue;
     }
 
-    final kind = match.group(1)!.toLowerCase();
+    final kind = match.group(1)!;
     final argument = match.group(2)!;
     if (kind == 'delay') {
       final delay = _parseDelay(argument);
@@ -265,6 +271,14 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
         errors.add('Unknown key: ${match.group(0)}');
         continue;
       }
+      if (chord.ctrl &&
+          chord.character != null &&
+          snippetControlCode(chord.character!, shift: chord.shift) == null) {
+        errors.add(
+          'Ctrl has no terminal code with this key: ${match.group(0)}',
+        );
+        continue;
+      }
       flushText();
       steps.add(SnippetKeyStep(chord));
     }
@@ -275,6 +289,38 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
     List.unmodifiable(steps),
     errors: List.unmodifiable(errors),
   );
+}
+
+bool _followsDollar(String command, Match match) =>
+    match.start > 0 && command.codeUnitAt(match.start - 1) == 0x24;
+
+/// Rewrites [command], written before snippets had key tokens, so that it
+/// still reads as the same text: every `{key:...}` or `{delay:...}` that would
+/// now be a token gets a backslash, and the backslashes already in front of
+/// it are doubled.
+///
+/// `parseSnippetKeySequence(escapeSnippetKeyTokens(text)).plainText` is
+/// `text` for any [command].
+String escapeSnippetKeyTokens(String command) {
+  final out = StringBuffer();
+  var cursor = 0;
+  for (final match in _tokenPattern.allMatches(command)) {
+    if (_followsDollar(command, match)) {
+      continue;
+    }
+    var backslashes = 0;
+    while (match.start - backslashes - 1 >= cursor &&
+        command.codeUnitAt(match.start - backslashes - 1) == 0x5C) {
+      backslashes++;
+    }
+    out
+      ..write(command.substring(cursor, match.start - backslashes))
+      ..write(r'\' * (backslashes * 2 + 1))
+      ..write(match.group(0));
+    cursor = match.end;
+  }
+  out.write(command.substring(cursor));
+  return out.toString();
 }
 
 Duration? _parseDelay(String argument) {
@@ -299,7 +345,16 @@ SnippetKeyChord? parseSnippetKeyChord(String chord) {
   if (chord.isEmpty) {
     return null;
   }
-  final parts = chord.split('+');
+  // `+` joins modifiers, so the plus key itself is the last `+`: `{key:+}`
+  // or `{key:ctrl++}`.
+  final List<String> parts;
+  if (chord == '+') {
+    parts = ['+'];
+  } else if (chord.endsWith('++')) {
+    parts = [...chord.substring(0, chord.length - 2).split('+'), '+'];
+  } else {
+    parts = chord.split('+');
+  }
   if (parts.any((part) => part.isEmpty)) {
     return null;
   }
@@ -326,7 +381,18 @@ SnippetKeyChord? parseSnippetKeyChord(String chord) {
   if (name.length != 1) {
     return null;
   }
-  final character = name.toLowerCase();
+  // A shifted symbol is Shift plus the key under it. A capital letter is
+  // Shift only on its own (`{key:G}`): with Ctrl or Alt it is the usual way
+  // to write the chord, so `{key:ctrl+C}` stays Ctrl+C.
+  var character = name;
+  final unshifted = _unshiftedCharacters[character];
+  if (unshifted != null) {
+    character = unshifted;
+    shift = true;
+  } else if (character.toLowerCase() != character) {
+    character = character.toLowerCase();
+    shift = shift || (!ctrl && !alt);
+  }
   final key = _characterKeys[character];
   if (key == null) {
     return null;
@@ -339,6 +405,65 @@ SnippetKeyChord? parseSnippetKeyChord(String chord) {
     character: character,
   );
 }
+
+/// What a US keyboard types for [character] with Shift held: the upper-case
+/// letter or the shifted symbol. Characters without a shifted form are
+/// returned unchanged.
+String snippetShiftedCharacter(String character) =>
+    _shiftedCharacters[character] ?? character.toUpperCase();
+
+/// The control byte a terminal sends for Ctrl plus the key that types
+/// [character], following xterm: letters map to 1-26, and Space and a few
+/// digit and punctuation keys to the remaining C0 codes. Null when there is
+/// none, as for Ctrl+1.
+int? snippetControlCode(String character, {bool shift = false}) {
+  final unit = character.codeUnitAt(0);
+  if (unit >= 0x61 && unit <= 0x7A) {
+    return unit - 0x60;
+  }
+  if (shift && character == '/') {
+    // Ctrl+? is Delete.
+    return 0x7F;
+  }
+  return switch (character) {
+    ' ' || '2' => 0x00,
+    '[' || '3' => 0x1B,
+    r'\' || '4' => 0x1C,
+    ']' || '5' => 0x1D,
+    '6' => 0x1E,
+    '-' || '/' || '7' => 0x1F,
+    '8' => 0x7F,
+    _ => null,
+  };
+}
+
+const _shiftedCharacters = <String, String>{
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': r'$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  r'\': '|',
+  ';': ':',
+  "'": '"',
+  '`': '~',
+  ',': '<',
+  '.': '>',
+  '/': '?',
+};
+
+final _unshiftedCharacters = <String, String>{
+  for (final entry in _shiftedCharacters.entries) entry.value: entry.key,
+};
 
 const _namedKeys = <String, TerminalKey>{
   'esc': TerminalKey.escape,

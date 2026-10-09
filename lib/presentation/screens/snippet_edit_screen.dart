@@ -498,8 +498,14 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
               Text(
                 'Keys: esc, tab, enter, backspace, delete, space, up, down, '
                 'left, right, home, end, pageup, pagedown, f1-f12, or one '
-                'letter, digit or symbol. Add ctrl+, alt+ or shift+ in '
-                r'front. Write \{key:esc} to type the token as text.',
+                'character. Add ctrl+, alt+ or shift+ in front. A shifted '
+                'symbol such as ? or + adds Shift itself, and so does a '
+                'capital letter on its own.',
+              ),
+              SizedBox(height: 8),
+              Text(
+                r'Write \{key:esc} to type a token as text. A token right '
+                r'after $, as in ${key:1}, is always text.',
               ),
               SizedBox(height: 8),
               Text(

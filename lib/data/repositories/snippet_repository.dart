@@ -1,7 +1,12 @@
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../domain/models/snippet_key_tokens.dart';
 import '../database/database.dart';
+
+/// Setting that records that snippets saved before key tokens existed were
+/// escaped, so [SnippetRepository.escapeLegacyKeyTokens] runs only once.
+const snippetKeyTokensEscapedSetting = 'snippet_key_tokens_escaped';
 
 /// Repository for managing snippets.
 class SnippetRepository {
@@ -53,6 +58,41 @@ class SnippetRepository {
   /// Delete a snippet.
   Future<int> delete(int id) =>
       (_db.delete(_db.snippets)..where((s) => s.id.equals(id))).go();
+
+  /// Escapes `{key:...}` and `{delay:...}` in snippets saved before those
+  /// became key tokens, once per database, so a snippet such as
+  /// `db.c.createIndex({key:1})` keeps sending exactly what it did.
+  ///
+  /// Returns how many snippets changed. Later runs do nothing, so snippets
+  /// written with tokens after the upgrade are never touched.
+  Future<int> escapeLegacyKeyTokens() => _db.transaction(() async {
+    final done =
+        await (_db.select(_db.settings)
+              ..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
+            .getSingleOrNull();
+    if (done != null) {
+      return 0;
+    }
+    var changed = 0;
+    for (final snippet in await _db.select(_db.snippets).get()) {
+      final escaped = escapeSnippetKeyTokens(snippet.command);
+      if (escaped == snippet.command) {
+        continue;
+      }
+      await (_db.update(_db.snippets)..where((s) => s.id.equals(snippet.id)))
+          .write(SnippetsCompanion(command: Value(escaped)));
+      changed++;
+    }
+    await _db
+        .into(_db.settings)
+        .insertOnConflictUpdate(
+          SettingsCompanion.insert(
+            key: snippetKeyTokensEscapedSetting,
+            value: 'true',
+          ),
+        );
+    return changed;
+  });
 
   /// Increment usage count.
   Future<bool> incrementUsage(int id) async {
