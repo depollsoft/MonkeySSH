@@ -6,6 +6,7 @@ import '../../data/repositories/port_forward_repository.dart';
 import '../../data/repositories/snippet_repository.dart';
 import '../../domain/commands/save_host_command.dart';
 import '../../domain/models/agent_launch_preset.dart';
+import '../../domain/models/agent_worktree.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/remote_multiplexer.dart';
@@ -128,6 +129,8 @@ typedef HostEditDraft = ({
   String agentTmuxSession,
   String agentTmuxExtraFlags,
   String agentArguments,
+  AgentWorktreeLaunchOptions? agentWorktree,
+  String agentInitialPrompt,
   String portProxyName,
   RemoteMuxBackend selectedAgentMuxBackend,
   int? selectedKeyId,
@@ -170,6 +173,9 @@ enum HostEditValidationTarget {
 
   /// Agent tmux flags field.
   agentTmuxFlags,
+
+  /// Agent worktree settings.
+  agentWorktree,
 
   /// Custom startup command field.
   customCommand,
@@ -397,6 +403,15 @@ class HostEditViewModel extends Notifier<HostEditState> {
           return const HostEditValidationIssue(
             target: HostEditValidationTarget.agentTmuxFlags,
             message: 'Fix agent tmux flags to save this host',
+          );
+        }
+        if (draft.agentWorktree?.validate(
+              workingDirectory: draft.agentWorkingDirectory,
+            )
+            case final problem?) {
+          return HostEditValidationIssue(
+            target: HostEditValidationTarget.agentWorktree,
+            message: problem,
           );
         }
         return null;
@@ -669,6 +684,8 @@ AgentLaunchPreset? buildCurrentAgentLaunchPreset(HostEditDraft draft) {
     tmuxExtraFlags: draft.agentTmuxExtraFlags.trim(),
     tmuxDisableStatusBar: draft.disableAgentTmuxStatusBar,
     additionalArguments: draft.agentArguments.trim(),
+    worktree: draft.agentWorktree,
+    initialPrompt: draft.agentInitialPrompt.trim(),
   );
 }
 

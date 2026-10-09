@@ -8,6 +8,7 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -30,6 +31,9 @@ HostEditDraft _draft({
   bool autoForwardPorts = false,
   RemoteMuxBackend selectedAgentMuxBackend = RemoteMuxBackend.monkeyMux,
   int? snippetId,
+  String agentWorkingDirectory = '',
+  AgentWorktreeLaunchOptions? agentWorktree,
+  String agentInitialPrompt = '',
 }) => (
   label: label,
   hostname: hostname,
@@ -41,10 +45,12 @@ HostEditDraft _draft({
   tmuxSession: tmuxSession,
   tmuxWorkingDirectory: '',
   tmuxExtraFlags: '',
-  agentWorkingDirectory: '',
+  agentWorkingDirectory: agentWorkingDirectory,
   agentTmuxSession: agentTmuxSession,
   agentTmuxExtraFlags: agentTmuxExtraFlags,
   agentArguments: '',
+  agentWorktree: agentWorktree,
+  agentInitialPrompt: agentInitialPrompt,
   portProxyName: portProxyName,
   selectedAgentMuxBackend: selectedAgentMuxBackend,
   selectedKeyId: null,
@@ -355,6 +361,53 @@ void main() {
                 'message',
                 'Choose a startup snippet to save this host',
               ),
+        );
+      });
+
+      test('validates worktree settings and saves them on the preset', () {
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        final viewModel = container.read(
+          hostEditViewModelProvider(null).notifier,
+        );
+
+        expect(
+          viewModel.validateDraft(
+            _draft(
+              startupMode: HostStartupMode.agent,
+              agentWorktree: const AgentWorktreeLaunchOptions(),
+            ),
+          ),
+          isA<HostEditValidationIssue>().having(
+            (issue) => issue.target,
+            'target',
+            HostEditValidationTarget.agentWorktree,
+          ),
+        );
+        final valid = _draft(
+          startupMode: HostStartupMode.agent,
+          agentWorkingDirectory: '~/src/app',
+          agentWorktree: const AgentWorktreeLaunchOptions(
+            branchTemplate: 'wip/{id}',
+          ),
+          agentInitialPrompt: '  Summarise the open tasks.  ',
+        );
+        expect(viewModel.validateDraft(valid), isNull);
+
+        final preset = buildCurrentAgentLaunchPreset(valid)!;
+        expect(preset.worktree?.branchTemplate, 'wip/{id}');
+        expect(preset.initialPrompt, 'Summarise the open tasks.');
+
+        viewModel.markInitialDraft(valid);
+        expect(
+          viewModel.updateDraft(
+            _draft(
+              startupMode: HostStartupMode.agent,
+              agentWorkingDirectory: '~/src/app',
+              agentInitialPrompt: '  Summarise the open tasks.  ',
+            ),
+          ),
+          isTrue,
         );
       });
 

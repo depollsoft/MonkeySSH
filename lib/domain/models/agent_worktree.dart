@@ -194,6 +194,10 @@ final class AgentWorktreeTemplateValues {
   /// The agent's command name, such as `claude` or `codex`.
   final String tool;
 
+  /// These values for another [tool].
+  AgentWorktreeTemplateValues withTool(String tool) =>
+      AgentWorktreeTemplateValues(tool: tool, date: date, time: time, id: id);
+
   /// Launch date as `yyyymmdd`.
   final String date;
 

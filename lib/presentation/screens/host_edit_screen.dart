@@ -29,6 +29,7 @@ import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/wifi_network_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../view_models/host_edit_view_model.dart';
+import '../widgets/agent_preset_workspace_fields.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
@@ -93,6 +94,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   late TextEditingController _agentTmuxExtraFlagsController;
   late TextEditingController _agentArgumentsController;
   late TextEditingController _portProxyNameController;
+  final _agentWorkspaceForm = AgentPresetWorkspaceFormState();
   late FocusNode _labelFocusNode;
   late FocusNode _hostnameFocusNode;
   late FocusNode _portFocusNode;
@@ -175,6 +177,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       _agentTmuxExtraFlagsController,
       _agentArgumentsController,
       _portProxyNameController,
+      ..._agentWorkspaceForm.controllers,
     ]) {
       c.addListener(_updateDirtyState);
     }
@@ -279,6 +282,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         _agentTmuxSessionController.text = preset.tmuxSessionName ?? '';
         _agentTmuxExtraFlagsController.text = preset.tmuxExtraFlags ?? '';
         _agentArgumentsController.text = preset.additionalArguments ?? '';
+        _agentWorkspaceForm.load(preset);
         if (presetCommand != null &&
             (_selectedAutoConnectMode == AutoConnectCommandMode.custom ||
                 host.autoConnectCommand == presetCommand)) {
@@ -312,6 +316,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _agentTmuxExtraFlagsController.dispose();
     _agentArgumentsController.dispose();
     _portProxyNameController.dispose();
+    _agentWorkspaceForm.dispose();
     _labelFocusNode.dispose();
     _hostnameFocusNode.dispose();
     _portFocusNode.dispose();
@@ -351,6 +356,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     agentTmuxSession: _agentTmuxSessionController.text,
     agentTmuxExtraFlags: _agentTmuxExtraFlagsController.text,
     agentArguments: _agentArgumentsController.text,
+    agentWorktree: _agentWorkspaceForm.worktree,
+    agentInitialPrompt: _agentWorkspaceForm.initialPrompt.text,
     portProxyName: _portProxyNameController.text,
     selectedAgentMuxBackend: _selectedAgentMuxBackend,
     selectedKeyId: _selectedKeyId,
@@ -1232,6 +1239,16 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               ? (_) => _handleAgentPresetFieldChanged()
               : null,
         ),
+        AgentPresetWorkspaceFields(
+          state: _agentWorkspaceForm,
+          enabled: hasAgentPresetAccess,
+          tool: _selectedAgentLaunchTool,
+          workingDirectory: _agentWorkingDirectoryController,
+          onChanged: () {
+            setState(() {});
+            _updateDirtyState();
+          },
+        ),
         const SizedBox(height: 12),
         TextFormField(
           key: const Key('host-agent-tmux-session-field'),
@@ -1681,6 +1698,10 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       HostEditValidationTarget.agentTmuxFlags => (
         locationKey: _agentTmuxFlagsFieldLocationKey,
         focusNode: _agentTmuxFlagsFocusNode,
+      ),
+      HostEditValidationTarget.agentWorktree => (
+        locationKey: _agentWorkspaceForm.worktreeLocationKey,
+        focusNode: _agentWorkspaceForm.worktreeFocusNode,
       ),
       HostEditValidationTarget.customCommand => (
         locationKey: _customCommandFieldLocationKey,
