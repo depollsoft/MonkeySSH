@@ -2535,13 +2535,21 @@ class _SkipJumpHostOnWifiSectionState
       final permission = await wifiService.requestPermission();
       if (!mounted) return;
       if (permission != WifiPermissionStatus.granted) {
+        final approximate = permission == WifiPermissionStatus.approximate;
         messenger.showSnackBar(
           SnackBar(
-            content: const Text(
-              'Location permission is required to read the current Wi-Fi '
-              'network name. You can also add the SSID manually.',
+            content: Text(
+              approximate
+                  ? 'Precise location is required to read the current Wi-Fi '
+                        'network name. Turn it on in Settings, or add the '
+                        'SSID manually.'
+                  : 'Location permission is required to read the current '
+                        'Wi-Fi network name. You can also add the SSID '
+                        'manually.',
             ),
-            action: permission == WifiPermissionStatus.permanentlyDenied
+            action:
+                approximate ||
+                    permission == WifiPermissionStatus.permanentlyDenied
                 ? SnackBarAction(
                     label: 'Settings',
                     onPressed: () => unawaited(permissions.openAppSettings()),

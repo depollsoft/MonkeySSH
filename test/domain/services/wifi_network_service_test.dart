@@ -19,6 +19,7 @@ void main() {
     for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
       for (final (status, expected) in [
         (AppPermissionStatus.granted, WifiPermissionStatus.granted),
+        (AppPermissionStatus.approximate, WifiPermissionStatus.approximate),
         (AppPermissionStatus.denied, WifiPermissionStatus.denied),
         (
           AppPermissionStatus.permanentlyDenied,
@@ -65,14 +66,19 @@ void main() {
       );
     });
 
-    test('reads a missing channel handler as denied', () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    test(
+      'surfaces a missing channel handler instead of reading it as denied',
+      () async {
+        // An unregistered channel is a build bug; reporting it as the user's
+        // denial would hide it behind "Location permission is required".
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
 
-      expect(
-        await WifiNetworkService().requestPermission(),
-        WifiPermissionStatus.denied,
-      );
-    });
+        await expectLater(
+          WifiNetworkService().requestPermission(),
+          throwsA(isA<MissingPluginException>()),
+        );
+      },
+    );
   });
 
   group('encodeSkipJumpHostSsids', () {

@@ -1563,9 +1563,14 @@ void main() {
       },
     );
 
-    for (final (permission, offersSettings) in [
-      (WifiPermissionStatus.permanentlyDenied, true),
-      (WifiPermissionStatus.denied, false),
+    for (final (permission, message, offersSettings) in [
+      (
+        WifiPermissionStatus.permanentlyDenied,
+        'Location permission is required',
+        true,
+      ),
+      (WifiPermissionStatus.denied, 'Location permission is required', false),
+      (WifiPermissionStatus.approximate, 'Precise location is required', true),
     ]) {
       testWidgets(
         '${offersSettings ? 'offers' : 'omits'} app settings when Wi-Fi '
@@ -1610,10 +1615,7 @@ void main() {
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 750));
 
-          expect(
-            find.textContaining('Location permission is required'),
-            findsOneWidget,
-          );
+          expect(find.textContaining(message), findsOneWidget);
           final settingsAction = find.widgetWithText(
             SnackBarAction,
             'Settings',

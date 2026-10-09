@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
@@ -54,8 +55,10 @@ class WifiNetworkService {
   /// Result of a permission request, surfaced to the UI so it can guide the
   /// user to Settings when the OS has permanently denied access.
   ///
-  /// A platform failure reads as [WifiPermissionStatus.denied], so callers
-  /// fall back to the jump host instead of failing the connection.
+  /// A [PlatformException] reads as [WifiPermissionStatus.denied], so callers
+  /// fall back to the jump host. A [MissingPluginException] propagates: it
+  /// means the native channel was never registered, which is a build bug that
+  /// would otherwise pass for a user's denial.
   Future<WifiPermissionStatus> requestPermission() async {
     if (!_requiresLocationPermission) {
       return WifiPermissionStatus.granted;
@@ -63,13 +66,16 @@ class WifiNetworkService {
     final AppPermissionStatus status;
     try {
       status = await _permissions.request(AppPermission.locationWhenInUse);
-    } on Exception catch (error) {
+    } on PlatformException catch (error) {
       DiagnosticsLogService.instance.warning(
         'wifi.ssid',
         'permission_request_failed',
         fields: {'errorType': error.runtimeType.toString()},
       );
       return WifiPermissionStatus.denied;
+    }
+    if (status == AppPermissionStatus.approximate) {
+      return WifiPermissionStatus.approximate;
     }
     if (status.isGranted) {
       return WifiPermissionStatus.granted;
@@ -231,4 +237,8 @@ enum WifiPermissionStatus {
 
   /// Permission was permanently denied; user must change it in Settings.
   permanentlyDenied,
+
+  /// Location is allowed only at approximate accuracy, which cannot read the
+  /// SSID; the user must turn on precise location in Settings.
+  approximate,
 }

@@ -25,6 +25,12 @@ enum AppPermissionStatus {
   /// The app holds the permission.
   granted,
 
+  /// [AppPermission.locationWhenInUse] only: the app holds location at
+  /// approximate accuracy (Android "Approximate", iOS Precise Location off).
+  /// That serves a web page asking for location but cannot read the Wi-Fi
+  /// SSID, and only the app's system settings can turn on precise location.
+  approximate,
+
   /// The user declined or dismissed the prompt; asking again can show it.
   denied,
 
@@ -36,8 +42,10 @@ enum AppPermissionStatus {
   /// neither a prompt nor the app's settings can grant it.
   restricted;
 
-  /// Whether the app holds the permission.
-  bool get isGranted => this == AppPermissionStatus.granted;
+  /// Whether the app holds the permission at any accuracy.
+  bool get isGranted =>
+      this == AppPermissionStatus.granted ||
+      this == AppPermissionStatus.approximate;
 
   /// Whether only the app's system settings can grant the permission.
   bool get isPermanentlyDenied => this == AppPermissionStatus.permanentlyDenied;

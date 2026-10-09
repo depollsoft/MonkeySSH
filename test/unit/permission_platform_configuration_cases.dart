@@ -7,6 +7,28 @@ const _androidPlugin =
     'android/app/src/main/kotlin/xyz/depollsoft/monkeyssh/AppPermissionsPlugin.kt';
 const _iosPlugin = 'ios/Runner/AppPermissionsPlugin.swift';
 
+/// Asserts [registration] (built from the registry argument captured by
+/// [generated]) appears in [source] inside the same function as that
+/// GeneratedPluginRegistrant call, so the channel registers on the same engine
+/// at the same time as every other plugin.
+void _expectRegisteredBesideGeneratedPlugins(
+  String source, {
+  required RegExp generated,
+  required String Function(String registry) registration,
+  required String functionKeyword,
+}) {
+  final match = generated.firstMatch(source);
+  expect(match, isNotNull, reason: 'GeneratedPluginRegistrant call not found');
+  final expected = registration(match!.group(1)!);
+  final index = source.indexOf(expected);
+  expect(index, isNot(-1), reason: 'expected `$expected`');
+  expect(
+    source.lastIndexOf(functionKeyword, index),
+    source.lastIndexOf(functionKeyword, match.start),
+    reason: '`$expected` must sit in the function that registers the plugins',
+  );
+}
+
 void registerPermissionPlatformConfigurationTests() {
   group('permission_platform_configuration', () {
     test('both native handlers listen on the Dart channel name', () {
@@ -33,7 +55,12 @@ void registerPermissionPlatformConfigurationTests() {
         'android/app/src/main/kotlin/xyz/depollsoft/monkeyssh/MonkeySshApplication.kt',
       ).readAsStringSync();
 
-      expect(application, contains('plugins.add(AppPermissionsPlugin())'));
+      _expectRegisteredBesideGeneratedPlugins(
+        application,
+        generated: RegExp(r'GeneratedPluginRegistrant\.registerWith\((\w+)\)'),
+        registration: (engine) => '$engine.plugins.add(AppPermissionsPlugin())',
+        functionKeyword: 'fun ',
+      );
     });
 
     test('android declares every permission the plugin requests', () {
@@ -57,7 +84,18 @@ void registerPermissionPlatformConfigurationTests() {
           .readAsStringSync();
 
       expect(project, contains('AppPermissionsPlugin.swift in Sources'));
-      expect(appDelegate, contains('AppPermissionsPlugin.register('));
+      // Under the UIScene lifecycle (#907) the engine, and so a registrar,
+      // exists only from didInitializeImplicitFlutterEngine; registering on the
+      // app delegate at launch would leave the channel unregistered.
+      _expectRegisteredBesideGeneratedPlugins(
+        appDelegate,
+        generated: RegExp(
+          r'GeneratedPluginRegistrant\.register\(with: ([^)]+)\)',
+        ),
+        registration: (registry) =>
+            'AppPermissionsPlugin.register(in: $registry)',
+        functionKeyword: 'func ',
+      );
     });
 
     test('ios declares a purpose string for every prompt', () {

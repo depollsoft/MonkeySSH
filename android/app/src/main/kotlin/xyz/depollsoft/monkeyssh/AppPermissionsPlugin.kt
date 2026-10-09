@@ -21,6 +21,36 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
 
 /**
+ * How to read a denied request, from `shouldShowRequestPermissionRationale`
+ * before and after it and the persisted "denied before" flag.
+ *
+ * The rationale flag is true once the user has denied the dialog and Android
+ * will still show it. It goes back to false both when the denial becomes
+ * permanent and when the user only dismissed the first dialog, so the state
+ * from before the request and the flag separate those cases.
+ */
+internal data class DenialOutcome(
+    val permanentlyDenied: Boolean,
+    /** Whether to persist the "denied before" flag. */
+    val recordDenial: Boolean,
+)
+
+internal fun resolveDenial(
+    rationaleBefore: Boolean,
+    rationaleAfter: Boolean,
+    deniedBefore: Boolean,
+): DenialOutcome =
+    when {
+        // Denied, and Android will show the dialog again next time.
+        rationaleAfter -> DenialOutcome(permanentlyDenied = false, recordDenial = true)
+        // Denied a second time (or "Don't ask again" on Android 10 and older).
+        rationaleBefore -> DenialOutcome(permanentlyDenied = true, recordDenial = true)
+        // Answered without a dialog after an earlier denial, or the user
+        // dismissed the very first dialog without choosing.
+        else -> DenialOutcome(permanentlyDenied = deniedBefore, recordDenial = false)
+    }
+
+/**
  * Camera, microphone and foreground-location permissions for the
  * `xyz.depollsoft.monkeyssh/permissions` channel (`AppPermissionService` in Dart).
  *
@@ -49,6 +79,7 @@ class AppPermissionsPlugin :
             "sp_permission_handler_permission_was_denied_before"
 
         private const val STATUS_GRANTED = "granted"
+        private const val STATUS_APPROXIMATE = "approximate"
         private const val STATUS_DENIED = "denied"
         private const val STATUS_PERMANENTLY_DENIED = "permanentlyDenied"
     }
@@ -56,6 +87,8 @@ class AppPermissionsPlugin :
     private enum class AppPermission(
         val wireName: String,
         val manifestNames: Array<String>,
+        /** Held alone, the other names give [STATUS_APPROXIMATE]. */
+        val preciseName: String? = null,
     ) {
         CAMERA("camera", arrayOf(Manifest.permission.CAMERA)),
         MICROPHONE("microphone", arrayOf(Manifest.permission.RECORD_AUDIO)),
@@ -68,6 +101,7 @@ class AppPermissionsPlugin :
                 Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.ACCESS_FINE_LOCATION,
             ),
+            preciseName = Manifest.permission.ACCESS_FINE_LOCATION,
         ),
         ;
 
@@ -89,6 +123,9 @@ class AppPermissionsPlugin :
     private var applicationContext: Context? = null
     private var activityBinding: ActivityPluginBinding? = null
     private var activeRequest: PermissionRequest? = null
+
+    /** A request answered early because its activity was destroyed under the dialog. */
+    private var orphanedRequest: PermissionRequest? = null
     private val queuedRequests = ArrayDeque<PermissionRequest>()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -120,10 +157,13 @@ class AppPermissionsPlugin :
 
     override fun onDetachedFromActivity() {
         detachActivity()
-        // No activity will deliver a result now. Answer from the current grant
-        // state so the Dart future never hangs.
+        // The activity that asked is gone and may never get the result, so
+        // answer from the current grant state rather than leave the Dart future
+        // waiting. If a recreated activity does receive the result, it still
+        // updates the "denied before" flags.
         activeRequest?.let { request ->
             activeRequest = null
+            orphanedRequest = request
             request.result.success(currentStatus(request.permission))
         }
         startNextRequest()
@@ -169,6 +209,7 @@ class AppPermissionsPlugin :
             request.rationaleBefore = BooleanArray(names.size) {
                 ActivityCompat.shouldShowRequestPermissionRationale(activity, names[it])
             }
+            orphanedRequest = null
             activeRequest = request
             ActivityCompat.requestPermissions(activity, names, REQUEST_CODE)
         }
@@ -182,7 +223,13 @@ class AppPermissionsPlugin :
         if (requestCode != REQUEST_CODE) {
             return false
         }
-        val request = activeRequest ?: return true
+        val request = activeRequest
+        if (request == null) {
+            // Dart already has an answer; record the user's choice for next time.
+            orphanedRequest?.takeIf { permissions.isNotEmpty() }?.let { resolveRequestResult(it) }
+            orphanedRequest = null
+            return true
+        }
         activeRequest = null
         // An interrupted request reports empty arrays. The user made no choice,
         // so it must not count towards a permanent denial.
@@ -197,61 +244,46 @@ class AppPermissionsPlugin :
         return true
     }
 
-    /**
-     * Grant state read back after the dialog. Location counts as granted with
-     * coarse access alone, as permission_handler reported it.
-     */
+    /** Grant state read back after the dialog. */
     private fun resolveRequestResult(request: PermissionRequest): String {
         val activity = activityBinding?.activity
             ?: return currentStatus(request.permission)
         val names = request.permission.manifestNames
-        if (names.any { isGranted(activity, it) }) {
+        grantedStatus(activity, request.permission)?.let { status ->
             names.filter { isGranted(activity, it) }.forEach { clearDeniedBefore(activity, it) }
-            return STATUS_GRANTED
+            return status
         }
         var permanentlyDenied = false
         names.forEachIndexed { index, name ->
-            if (isPermanentlyDenied(activity, name, request.rationaleBefore[index])) {
-                permanentlyDenied = true
+            val outcome = resolveDenial(
+                rationaleBefore = request.rationaleBefore[index],
+                rationaleAfter = ActivityCompat.shouldShowRequestPermissionRationale(activity, name),
+                deniedBefore = wasDeniedBefore(activity, name),
+            )
+            if (outcome.recordDenial) {
+                markDeniedBefore(activity, name)
             }
+            permanentlyDenied = permanentlyDenied || outcome.permanentlyDenied
         }
         return if (permanentlyDenied) STATUS_PERMANENTLY_DENIED else STATUS_DENIED
     }
 
-    /**
-     * Tells "ask again" from "only Settings can grant it" after a denial.
-     * `shouldShowRequestPermissionRationale` is true once the user has denied
-     * the dialog and Android will still show it. It goes back to false both
-     * when the denial becomes permanent and when the user only dismissed the
-     * first dialog, so the rationale state from before the request and a
-     * persisted "denied before" flag separate those cases.
-     */
-    private fun isPermanentlyDenied(
-        activity: Activity,
-        name: String,
-        rationaleBefore: Boolean,
-    ): Boolean {
-        if (ActivityCompat.shouldShowRequestPermissionRationale(activity, name)) {
-            // Denied, and Android will show the dialog again next time.
-            markDeniedBefore(activity, name)
-            return false
-        }
-        if (rationaleBefore) {
-            // Denied a second time (or "Don't ask again" on Android 10 and older).
-            markDeniedBefore(activity, name)
-            return true
-        }
-        // Answered without a dialog after an earlier denial, or the user
-        // dismissed the very first dialog without choosing.
-        return wasDeniedBefore(activity, name)
-    }
-
     private fun currentStatus(permission: AppPermission): String {
         val context = activityBinding?.activity ?: applicationContext ?: return STATUS_DENIED
-        return if (permission.manifestNames.any { isGranted(context, it) }) {
-            STATUS_GRANTED
-        } else {
-            STATUS_DENIED
+        return grantedStatus(context, permission) ?: STATUS_DENIED
+    }
+
+    /**
+     * [STATUS_GRANTED], [STATUS_APPROXIMATE] when only coarse location is
+     * held (reading the Wi-Fi SSID needs fine), or null when nothing is.
+     */
+    private fun grantedStatus(context: Context, permission: AppPermission): String? {
+        val granted = permission.manifestNames.filter { isGranted(context, it) }
+        return when {
+            granted.isEmpty() -> null
+            permission.preciseName != null && permission.preciseName !in granted ->
+                STATUS_APPROXIMATE
+            else -> STATUS_GRANTED
         }
     }
 

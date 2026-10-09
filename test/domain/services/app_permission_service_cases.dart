@@ -35,7 +35,11 @@ void registerAppPermissionServiceTests() {
           final result = await const AppPermissionService().request(permission);
 
           expect(result, status);
-          expect(result.isGranted, status == AppPermissionStatus.granted);
+          expect(
+            result.isGranted,
+            status == AppPermissionStatus.granted ||
+                status == AppPermissionStatus.approximate,
+          );
           expect(
             result.isPermanentlyDenied,
             status == AppPermissionStatus.permanentlyDenied,
