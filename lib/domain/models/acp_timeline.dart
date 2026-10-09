@@ -75,6 +75,10 @@ bool _claudeSubagent(Map<String, Object?> meta) {
   return claude is Map && claude['subagent'] == true;
 }
 
+/// Identifier prefix of prompts this client appends before the agent echoes
+/// them.
+const _localUserMessageIdPrefix = 'monkeyssh-user-';
+
 /// Role of a streamed ACP message in the domain timeline.
 enum AcpMessageRole {
   /// A prompt authored by the user.
@@ -135,6 +139,12 @@ final class AcpMessageEntry extends AcpTimelineEntry {
 
   /// Ordered content blocks accumulated for this message.
   final List<AcpContentBlock> content;
+
+  /// Whether this is a prompt this client sent, as opposed to one the agent
+  /// echoed or replayed.
+  bool get isLocalPrompt =>
+      role == AcpMessageRole.user &&
+      (messageId?.startsWith(_localUserMessageIdPrefix) ?? false);
 
   /// Returns a copy with [block] appended to [content].
   ///
@@ -328,12 +338,14 @@ final class AcpTimeline {
   AcpTimeline({
     List<AcpTimelineEntry> entries = const <AcpTimelineEntry>[],
     this.overflowed = false,
+    this.source,
   }) : entries = List<AcpTimelineEntry>.unmodifiable(entries);
 
   /// Creates the shared empty timeline.
   const AcpTimeline.empty()
     : entries = const <AcpTimelineEntry>[],
-      overflowed = false;
+      overflowed = false,
+      source = null;
 
   /// Ordered timeline entries.
   final List<AcpTimelineEntry> entries;
@@ -342,6 +354,13 @@ final class AcpTimeline {
   /// session. Once set, this stays `true` for the life of the session: the
   /// dropped history can never be safely reconstructed.
   final bool overflowed;
+
+  /// Identifies the builder that produced this snapshot.
+  ///
+  /// Entry orders are only comparable between snapshots that share a source.
+  /// A rebuilt timeline, such as one a reload replays from scratch, numbers
+  /// its entries afresh. Not part of equality.
+  final Object? source;
 
   /// Whether the timeline currently holds no entries.
   bool get isEmpty => entries.isEmpty;
@@ -510,6 +529,7 @@ class AcpTimelineBuilder {
     : _limits = limits;
 
   final AcpTimelineLimits _limits;
+  final Object _source = Object();
   final List<AcpTimelineEntry> _entries = <AcpTimelineEntry>[];
   final Map<String, int> _toolCallIndex = <String, int>{};
   int _nextOrder = 0;
@@ -532,7 +552,7 @@ class AcpTimelineBuilder {
     List<AcpContentBlock> content, {
     bool queued = false,
   }) {
-    final messageId = 'monkeyssh-user-${_nextLocalUserMessageId++}';
+    final messageId = '$_localUserMessageIdPrefix${_nextLocalUserMessageId++}';
     final entry = _boundedMessageEntry(
       AcpMessageEntry(
         role: AcpMessageRole.user,
@@ -633,7 +653,7 @@ class AcpTimelineBuilder {
 
   /// Returns an immutable snapshot of the current timeline.
   AcpTimeline snapshot() =>
-      AcpTimeline(entries: _entries, overflowed: _overflowed);
+      AcpTimeline(entries: _entries, overflowed: _overflowed, source: _source);
 
   void _applyContentChunk(AcpContentChunkUpdate update) {
     final role = _roleFor(update.kind);
