@@ -103,11 +103,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final helperStyle = theme.textTheme.bodySmall?.copyWith(
-      color: colorScheme.onSurfaceVariant,
-    );
+    final helperStyle = Theme.of(context).textTheme.bodySmall;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -183,8 +179,8 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
             hint: defaultAgentWorktreePathTemplate,
             icon: Icons.create_new_folder_outlined,
             helper:
-                '{repo} is the repository folder and only goes first. '
-                '{name} is the branch with / as -; {branch} keeps the /.',
+                'Start with {repo} for the repository folder. {name} is the '
+                'branch with / replaced by -.',
             validator: (value) => _templateError(
               AgentWorktreeLaunchOptions(pathTemplate: value?.trim()),
             ),
@@ -204,8 +200,8 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             'Closing the agent’s window offers to remove a clean worktree. '
-            'Pair the agent with a MonkeyMux session so a reconnect returns '
-            'to the same worktree instead of making another.',
+            'Use a MonkeyMux session so reconnecting returns to the same '
+            'worktree.',
             style: helperStyle,
           ),
         ],

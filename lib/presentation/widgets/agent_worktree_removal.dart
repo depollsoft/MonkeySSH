@@ -162,9 +162,10 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final mono = FluttyTheme.monoStyle.copyWith(color: colorScheme.onSurface);
-    final secondary = theme.textTheme.bodyMedium?.copyWith(
-      color: colorScheme.onSurfaceVariant,
-    );
+    // The theme's body text is the muted secondary colour, so the sentence
+    // that carries the decision is lifted to the primary text colour.
+    final note = theme.textTheme.bodyMedium;
+    final statement = note?.copyWith(color: colorScheme.onSurface);
     final dirty = status.isDirty;
     final changes = status.changedFiles;
     final ignored = status.ignoredEntries;
@@ -172,7 +173,9 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
     return AlertDialog(
       icon: Icon(
         dirty ? Icons.warning_amber_rounded : Icons.account_tree_outlined,
-        color: dirty ? colorScheme.error : colorScheme.onSurfaceVariant,
+        // Uncommitted work is at risk, not failed: Caution Amber, with the
+        // icon and title carrying the state as well as the colour.
+        color: dirty ? colorScheme.tertiary : colorScheme.onSurfaceVariant,
       ),
       title: Text(dirty ? 'Worktree kept' : 'Remove worktree?'),
       content: SingleChildScrollView(
@@ -185,10 +188,7 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
               style: mono.copyWith(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: FluttyTheme.spacingXs),
-            Text(
-              record.path,
-              style: mono.copyWith(color: colorScheme.onSurfaceVariant),
-            ),
+            Text(record.path, style: mono.copyWith(color: note?.color)),
             const SizedBox(height: FluttyTheme.spacingMd),
             if (dirty)
               Text(
@@ -196,26 +196,26 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
                 '${changes == 1 ? 'change' : 'changes'}, so MonkeySSH '
                 'won’t remove it. Commit or discard them, then run '
                 'git worktree remove in a terminal.',
-                style: theme.textTheme.bodyMedium,
+                style: statement,
               )
             else ...[
               Text(
                 'The agent’s window is closed. Removing deletes this folder.',
-                style: theme.textTheme.bodyMedium,
+                style: statement,
               ),
               const SizedBox(height: FluttyTheme.spacingSm),
               Text(
                 status.branchHasNewCommits
                     ? 'The branch keeps its commits.'
                     : 'The branch has no new commits, so it is deleted too.',
-                style: secondary,
+                style: note,
               ),
               if (ignored > 0) ...[
                 const SizedBox(height: FluttyTheme.spacingSm),
                 Text(
                   '$ignored ignored ${ignored == 1 ? 'item' : 'items'}, '
                   'such as build output, will be deleted with it.',
-                  style: secondary,
+                  style: note,
                 ),
               ],
             ],
@@ -227,7 +227,7 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
               TextButton(
                 key: agentWorktreeKeepButtonKey,
                 onPressed: () => Navigator.pop(context, false),
-                child: const Text('OK'),
+                child: const Text('Close'),
               ),
             ]
           : [

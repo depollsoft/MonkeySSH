@@ -29,6 +29,7 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -42,6 +43,9 @@ import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
@@ -917,6 +921,44 @@ class _TestThemeModeNotifier extends ThemeModeNotifier {
   Future<void> setThemeMode(ThemeMode mode) async {
     this.mode = mode;
     state = mode;
+  }
+}
+
+/// Records worktree requests instead of running git on a host.
+class _RecordingWorktreeService extends AgentWorktreeService {
+  _RecordingWorktreeService();
+
+  final created = <AgentWorktreeRecord>[];
+  final removed = <AgentWorktreeRecord>[];
+
+  @override
+  Future<AgentWorktreeRecord> create(
+    AgentWorktreeShell shell, {
+    required int hostId,
+    required String repository,
+    required String baseRef,
+    required AgentWorktreeTarget target,
+    DateTime? now,
+  }) async {
+    final record = AgentWorktreeRecord(
+      hostId: hostId,
+      repository: '/work/project',
+      path: '/work/project.worktrees/agent',
+      branch: target.branch,
+      baseCommit: 'abc',
+      createdAt: DateTime.utc(2026),
+    );
+    created.add(record);
+    return record;
+  }
+
+  @override
+  Future<AgentWorktreeRemoval> remove(
+    AgentWorktreeShell shell,
+    AgentWorktreeRecord record,
+  ) async {
+    removed.add(record);
+    return const AgentWorktreeRemoval(branchDeleted: true);
   }
 }
 
@@ -10787,6 +10829,127 @@ void main() {
         ),
       ).called(1);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    for (final running in [false, true]) {
+      testWidgets(
+        running
+            ? 'a worktree preset attaching to a running session creates nothing'
+            : 'a worktree preset starts its agent in a new worktree',
+        (tester) async {
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final installer = _MockMonkeyMuxInstallerService();
+          final monkeyMuxService = _MockMonkeyMuxService()
+            ..installedHelpersStatus = running
+                ? const MonkeyMuxServerStatus(
+                    version: '0.1.10',
+                    capabilities: {},
+                  )
+                : null;
+          final tmuxService = _MockTmuxService();
+          final worktrees = _RecordingWorktreeService();
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              workingDirectory: '/work/project',
+              tmuxSessionName: 'agents',
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              worktree: AgentWorktreeLaunchOptions(),
+            ),
+          );
+          when(
+            () => installer.ensureInstalled(
+              session,
+              priority: any(named: 'priority'),
+              confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
+            ),
+          ).thenAnswer(
+            (_) async => const MonkeyMuxInstallation(
+              executablePath: '/tmp/monkeymux',
+              platform: 'darwin-arm64',
+              version: '0.1.10',
+            ),
+          );
+          when(
+            () =>
+                monkeyMuxService.hasForegroundClientOrThrow(session, 'agents'),
+          ).thenAnswer((_) async => true);
+          when(() => monkeyMuxService.listWindows(session, 'agents'))
+              .thenAnswer(
+                (_) async => [
+                  TmuxWindow(
+                    index: 0,
+                    name: 'Copilot CLI',
+                    isActive: true,
+                    currentPath: running
+                        ? '/work/project'
+                        : '/work/project.worktrees/agent',
+                  ),
+                ],
+              );
+          when(() => monkeyMuxService.watchWindowChanges(session, 'agents'))
+              .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          final executedCommands = <String>[];
+          when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                executedCommands.add(
+                  invocation.positionalArguments.single as String,
+                );
+                return shellChannel;
+              });
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+                agentWorktreeLauncherProvider.overrideWithValue(
+                  AgentWorktreeLauncher(
+                    service: worktrees,
+                    registry: AgentWorktreeRegistry(settingsService),
+                    wait: (_) async {},
+                  ),
+                ),
+              ],
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          final attach = executedCommands
+              .where((command) => command.contains(' attach'))
+              .single;
+          if (running) {
+            expect(worktrees.created, isEmpty);
+            expect(attach, contains('/work/project'));
+            expect(attach, isNot(contains('.worktrees')));
+          } else {
+            expect(worktrees.created, hasLength(1));
+            expect(attach, contains('/work/project.worktrees/agent'));
+          }
+          expect(worktrees.removed, isEmpty);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
 
     testWidgets(
       'reconnects a lost MonkeyMux session without launching a new agent',
