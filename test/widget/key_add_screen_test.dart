@@ -4,10 +4,15 @@ import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/hardware_key.dart';
+import 'package:monkeyssh/domain/services/hardware_key_service.dart';
 import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/presentation/screens/key_add_screen.dart';
+
+import '../helpers/fake_hardware_key_platform.dart';
 
 class _MockKeyService extends Mock implements KeyService {}
 
@@ -203,4 +208,215 @@ void main() {
       },
     );
   }
+
+  group('hardware-backed generation', () {
+    setUpAll(() => registerFallbackValue(SshKeyType.ed25519));
+
+    Future<_MockKeyService> pumpHardwareTab(
+      WidgetTester tester,
+      HardwareKeyCapabilities capabilities, {
+      GoRouter? router,
+    }) async {
+      // A narrow phone: the three key types must still fit.
+      await tester.binding.setSurfaceSize(const Size(360, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = _MockKeyService();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            keyServiceProvider.overrideWithValue(service),
+            hardwareKeyCapabilitiesProvider.overrideWith(
+              (ref) async => capabilities,
+            ),
+          ],
+          child: router == null
+              ? const MaterialApp(home: KeyAddScreen())
+              : MaterialApp.router(routerConfig: router),
+        ),
+      );
+      await tester.pumpAndSettle();
+      if (router != null) {
+        unawaited(router.push('/add'));
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('Hardware'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      return service;
+    }
+
+    FilledButton generateButton(WidgetTester tester) => tester.widget(
+      find.ancestor(
+        of: find.text('Generate Key'),
+        matching: find.byWidgetPredicate((widget) => widget is FilledButton),
+      ),
+    );
+
+    testWidgets('generates in the Secure Enclave with per-use confirmation', (
+      tester,
+    ) async {
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) =>
+                const Scaffold(body: Text('keys home')),
+          ),
+          GoRoute(
+            path: '/add',
+            builder: (context, state) => const KeyAddScreen(),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      final service = await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.available(
+          backing: HardwareKeyBacking.secureEnclave,
+          userPresenceAvailable: true,
+        ),
+        router: router,
+      );
+      when(
+        () => service.generateHardwareKey(
+          name: 'Phone key',
+          requireUserPresence: true,
+        ),
+      ).thenAnswer((_) async => hardwareSshKeyFixture());
+
+      expect(find.text('Secure Enclave'), findsOneWidget);
+      expect(find.textContaining('never leaves it'), findsOneWidget);
+      expect(
+        find.widgetWithText(TextFormField, 'Passphrase (optional)'),
+        findsNothing,
+      );
+      expect(find.textContaining('background reconnect'), findsNothing);
+
+      await tester.tap(find.text('Confirm each use'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Auto-connect and background reconnect'),
+        findsOneWidget,
+      );
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Key Name'),
+        'Phone key',
+      );
+      final submit = find.text('Generate Key');
+      await tester.ensureVisible(submit);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+
+      verify(
+        () => service.generateHardwareKey(
+          name: 'Phone key',
+          requireUserPresence: true,
+        ),
+      ).called(1);
+      verifyNever(
+        () => service.generateKey(
+          name: any(named: 'name'),
+          keyType: any(named: 'keyType'),
+          passphrase: any(named: 'passphrase'),
+        ),
+      );
+      expect(find.text('keys home'), findsOneWidget);
+      expect(find.text('Key generated in the Secure Enclave'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the simulator explains why it cannot generate', (
+      tester,
+    ) async {
+      final service = await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.unavailable(
+          HardwareKeyUnavailableReason.simulator,
+        ),
+      );
+
+      expect(find.text('secure hardware unavailable'), findsOneWidget);
+      expect(
+        find.textContaining('iOS Simulator has no Secure Enclave'),
+        findsOneWidget,
+      );
+      expect(generateButton(tester).onPressed, isNull);
+      verifyZeroInteractions(service);
+    });
+
+    testWidgets('an emulator labels its simulated TEE', (tester) async {
+      await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.available(
+          backing: HardwareKeyBacking.tee,
+          userPresenceAvailable: false,
+          isEmulator: true,
+        ),
+      );
+
+      expect(find.text('TEE (emulator)'), findsOneWidget);
+      expect(find.textContaining('simulated in software'), findsOneWidget);
+      final toggle = tester.widget<SwitchListTile>(find.byType(SwitchListTile));
+      expect(toggle.onChanged, isNull);
+      expect(find.textContaining('Set up biometrics'), findsOneWidget);
+      expect(generateButton(tester).onPressed, isNotNull);
+    });
+
+    testWidgets('a device without StrongBox says the key uses the TEE', (
+      tester,
+    ) async {
+      await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.available(
+          backing: HardwareKeyBacking.tee,
+          userPresenceAvailable: true,
+        ),
+      );
+
+      expect(find.text('TEE'), findsOneWidget);
+      expect(find.textContaining('no StrongBox'), findsOneWidget);
+    });
+
+    testWidgets('hardware failures surface their message', (tester) async {
+      final service = await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.available(
+          backing: HardwareKeyBacking.strongBox,
+          userPresenceAvailable: true,
+          strongBoxAvailable: true,
+        ),
+      );
+      when(
+        () => service.generateHardwareKey(
+          name: 'Pixel key',
+          requireUserPresence: false,
+        ),
+      ).thenThrow(
+        const HardwareKeyException(HardwareKeyErrorCode.notHardwareBacked),
+      );
+
+      expect(find.textContaining('no StrongBox'), findsNothing);
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Key Name'),
+        'Pixel key',
+      );
+      final submit = find.text('Generate Key');
+      await tester.ensureVisible(submit);
+      await tester.tap(submit);
+      await tester.pump();
+
+      expect(
+        find.text(
+          const HardwareKeyException(HardwareKeyErrorCode.notHardwareBacked)
+              .message,
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(KeyAddScreen), findsOneWidget);
+    });
+  });
 }

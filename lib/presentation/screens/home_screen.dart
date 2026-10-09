@@ -10,7 +10,6 @@ import '../../app/app_metadata.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
-import '../../data/repositories/key_repository.dart';
 import '../../data/repositories/snippet_repository.dart';
 import '../../domain/commands/duplicate_host_command.dart';
 import '../../domain/models/acp_provider.dart';
@@ -22,8 +21,10 @@ import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
 import '../../domain/services/auth_service.dart';
+import '../../domain/services/hardware_key_service.dart';
 import '../../domain/services/home_screen_shortcut_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/key_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_service.dart';
@@ -53,6 +54,7 @@ import '../widgets/connection_status_dot.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
+import '../widgets/hardware_key_widgets.dart';
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/reorder_helpers.dart';
@@ -2101,8 +2103,9 @@ class _KeyRow extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      sshKey.keyType.toUpperCase(),
+                    SshKeyTypeLine(
+                      sshKey: sshKey,
+                      typeLabel: sshKey.keyType.toUpperCase(),
                       style: FluttyTheme.monoStyle.copyWith(
                         fontSize: 10,
                         color: colorScheme.onSurface.withAlpha(160),
@@ -2112,12 +2115,15 @@ class _KeyRow extends ConsumerWidget {
                 ),
               ),
 
-              // Transfer and key actions
-              _SmallIconButton(
-                icon: useShareSheet ? Icons.share : Icons.save_alt,
-                tooltip: useShareSheet ? 'Share encrypted' : 'Export encrypted',
-                onTap: () => unawaited(_exportKeyFile(context, ref)),
-              ),
+              // Transfer and key actions; hardware keys never leave the device.
+              if (!sshKey.isHardwareBacked)
+                _SmallIconButton(
+                  icon: useShareSheet ? Icons.share : Icons.save_alt,
+                  tooltip: useShareSheet
+                      ? 'Share encrypted'
+                      : 'Export encrypted',
+                  onTap: () => unawaited(_exportKeyFile(context, ref)),
+                ),
               _SmallIconButton(
                 icon: Icons.copy,
                 tooltip: 'Copy public key',
@@ -2200,8 +2206,9 @@ class _KeyRow extends ConsumerWidget {
               const SizedBox(height: 20),
               Text(sshKey.name, style: theme.textTheme.titleLarge),
               const SizedBox(height: 4),
-              Text(
-                sshKey.keyType.toUpperCase(),
+              SshKeyTypeLine(
+                sshKey: sshKey,
+                typeLabel: sshKey.keyType.toUpperCase(),
                 style: TextStyle(
                   color: colorScheme.primary,
                   fontWeight: FontWeight.w600,
@@ -2229,6 +2236,10 @@ class _KeyRow extends ConsumerWidget {
                 icon: const Icon(Icons.copy, size: 16),
                 label: const Text('Copy Public Key'),
               ),
+              if (sshKey.isHardwareBacked) ...[
+                const SizedBox(height: 20),
+                HardwareKeyPrivateKeyNotice(sshKey: sshKey),
+              ],
             ],
           ),
         ),
@@ -2240,12 +2251,15 @@ class _KeyRow extends ConsumerWidget {
     final confirmed = await showDeleteConfirmationDialog(
       context,
       title: 'Delete Key',
-      message:
-          'Delete "${sshKey.name}"? You’ll need the private key to reconnect.',
+      message: sshKeyDeleteConfirmationMessage(
+        sshKey,
+        softwareKeyMessage:
+            'Delete "${sshKey.name}"? You’ll need the private key to reconnect.',
+      ),
     );
 
     if (confirmed && context.mounted) {
-      await ref.read(keyRepositoryProvider).delete(sshKey.id);
+      await ref.read(keyServiceProvider).deleteKey(sshKey);
     }
   }
 }

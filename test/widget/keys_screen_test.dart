@@ -5,8 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/hardware_key.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/keys_screen.dart';
+
+import '../helpers/fake_hardware_key_platform.dart';
 
 final _testKey = SshKey(
   id: 1,
@@ -165,5 +168,72 @@ void main() {
         expect(find.text('Copied to clipboard'), findsOneWidget);
       },
     );
+  });
+
+  group('hardware-backed keys', () {
+    testWidgets('list names the real backing and marks it non-exportable', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith(
+              (ref) => Stream.value([
+                hardwareSshKeyFixture(),
+                hardwareSshKeyFixture(
+                  id: 2,
+                  name: 'Pixel key',
+                  backing: HardwareKeyBacking.tee,
+                ),
+              ]),
+            ),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('non-exportable · Secure Enclave'), findsOneWidget);
+      expect(find.text('non-exportable · TEE'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Non-exportable key in Secure Enclave')),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('details never reveal or copy the hardware reference', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(requireUserPresence: true);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('held in Secure Enclave'), findsOneWidget);
+      expect(find.textContaining('at every sign-in'), findsOneWidget);
+      expect(find.text('Reveal Private Key'), findsNothing);
+      expect(find.text('Copy Private Key'), findsNothing);
+      expect(find.text('Copy Public Key'), findsOneWidget);
+      expect(find.textContaining(HardwareKeyReference.prefix), findsNothing);
+    });
   });
 }
