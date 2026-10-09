@@ -10,6 +10,7 @@ class RemoteEditorConflictHandler {
   /// Creates a conflict handler.
   const RemoteEditorConflictHandler({
     required this.checkForChanges,
+    required this.overwrite,
     required this.reload,
     required this.saveCopy,
   });
@@ -17,6 +18,10 @@ class RemoteEditorConflictHandler {
   /// Compares the host's file with the version the editor's text is based
   /// on.
   final Future<RemoteFileChange> Function() checkForChanges;
+
+  /// Writes [text] over the host's file without comparing versions, after
+  /// the user chose to overwrite or recreate it.
+  final Future<void> Function(String text) overwrite;
 
   /// Reads the host's current text and makes it the new base version.
   ///
@@ -120,16 +125,37 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final deleted = change == RemoteFileChange.deleted;
+    // Only a changed file can be reloaded or overwritten; a folder or other
+    // entry at the path can only be left alone.
+    final notAFile = change == RemoteFileChange.notAFile;
     const buttonSize = Size.fromHeight(48);
     void choose(RemoteEditorConflictChoice choice) =>
         Navigator.of(context).pop(choice);
+    final (icon, title, explanation) = switch (change) {
+      RemoteFileChange.deleted => (
+        Icons.delete_outline,
+        'File deleted on the host',
+        ' was deleted or moved on the host after you opened it. Recreate it '
+            'with your edits, or keep them in a new file.',
+      ),
+      RemoteFileChange.notAFile => (
+        Icons.folder_outlined,
+        'No longer a file',
+        ' is now a folder or another kind of entry on the host, so your '
+            'edits cannot be saved over it. Keep them in a new file.',
+      ),
+      _ => (
+        Icons.sync_problem,
+        'File changed on the host',
+        ' changed on the host after you opened it, possibly by an agent or '
+            'another editor. Overwriting replaces those changes with yours.',
+      ),
+    };
 
     return AlertDialog(
-      icon: Icon(deleted ? Icons.delete_outline : Icons.sync_problem),
+      icon: Icon(icon),
       iconColor: colorScheme.onSurfaceVariant,
-      title: Text(
-        deleted ? 'File deleted on the host' : 'File changed on the host',
-      ),
+      title: Text(title),
       scrollable: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -145,15 +171,7 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
                     fontFamily: FluttyTheme.monoStyle.fontFamily,
                   ),
                 ),
-                TextSpan(
-                  text: deleted
-                      ? ' was deleted or moved on the host after you opened '
-                            'it. Recreate it with your edits, or keep them in '
-                            'a new file.'
-                      : ' changed on the host after you opened it, possibly '
-                            'by an agent or another editor. Overwriting '
-                            'replaces those changes with yours.',
-                ),
+                TextSpan(text: explanation),
               ],
             ),
           ),
@@ -165,7 +183,7 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
             onPressed: () => choose(RemoteEditorConflictChoice.saveCopy),
           ),
           const SizedBox(height: 8),
-          if (!deleted) ...[
+          if (!deleted && !notAFile) ...[
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(minimumSize: buttonSize),
               icon: const Icon(Icons.refresh),
@@ -174,16 +192,18 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
             ),
             const SizedBox(height: 8),
           ],
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              minimumSize: buttonSize,
-              foregroundColor: deleted ? null : colorScheme.error,
+          if (!notAFile) ...[
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                minimumSize: buttonSize,
+                foregroundColor: deleted ? null : colorScheme.error,
+              ),
+              icon: Icon(deleted ? Icons.save_outlined : Icons.warning_amber),
+              label: Text(deleted ? 'Recreate file' : 'Overwrite host version'),
+              onPressed: () => choose(RemoteEditorConflictChoice.overwrite),
             ),
-            icon: Icon(deleted ? Icons.save_outlined : Icons.warning_amber),
-            label: Text(deleted ? 'Recreate file' : 'Overwrite host version'),
-            onPressed: () => choose(RemoteEditorConflictChoice.overwrite),
-          ),
-          const SizedBox(height: 8),
+            const SizedBox(height: 8),
+          ],
           TextButton(
             // Neutral, so the filled button stays the dialog's one signal.
             style: TextButton.styleFrom(

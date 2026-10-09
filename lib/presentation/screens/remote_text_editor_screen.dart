@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 
 import '../../domain/models/terminal_theme.dart';
@@ -120,6 +122,23 @@ List<int> computeRemoteEditorLineStartOffsets(String text) {
   );
   final lineStartOffset = lineStartOffsets[lineIndex];
   return (line: lineIndex + 1, column: clampedOffset - lineStartOffset + 1);
+}
+
+/// Snackbar text for a failed write: a lost connection and a refusal by the
+/// host need different fixes.
+@visibleForTesting
+String describeRemoteEditorWriteFailure(
+  Object error, {
+  required String action,
+}) {
+  final connectionLost =
+      error is SSHError ||
+      (error is SftpError && error is! SftpStatusError) ||
+      error is SocketException ||
+      error is TimeoutException;
+  return connectionLost
+      ? 'Could not $action. Check the connection and try again.'
+      : 'Could not $action. Check permissions and try again.';
 }
 
 /// Builds the remote text editor screen for widget and integration tests.
@@ -376,17 +395,11 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
     setState(() => _saving = true);
     try {
       final conflictHandler = widget.conflictHandler;
-      if (conflictHandler != null) {
-        final change = await conflictHandler.checkForChanges();
-        if (!mounted) {
-          return;
-        }
-        if (change != RemoteFileChange.unchanged &&
-            !await _resolveRemoteChange(conflictHandler, change, savedText)) {
-          return;
-        }
+      if (conflictHandler == null) {
+        await widget.onSave(savedText);
+      } else if (!await _saveChecked(conflictHandler, savedText)) {
+        return;
       }
-      await widget.onSave(savedText);
       if (!mounted) {
         return;
       }
@@ -403,14 +416,45 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
       );
       if (mounted) {
         setState(() => _saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not save changes. Check permissions and try again.',
-            ),
-          ),
+        _showSnackBar(
+          describeRemoteEditorWriteFailure(error, action: 'save changes'),
         );
       }
+    }
+  }
+
+  /// Saves over the host's file when the check finds it unchanged and asks
+  /// first otherwise. Returns whether the original file was written.
+  Future<bool> _saveChecked(
+    RemoteEditorConflictHandler handler,
+    String text,
+  ) async {
+    for (var attempt = 1; ; attempt++) {
+      var change = await handler.checkForChanges();
+      if (!mounted) {
+        return false;
+      }
+      if (change == RemoteFileChange.unchanged) {
+        try {
+          await widget.onSave(text);
+          return true;
+        } on RemoteFileChangedDuringSaveException {
+          if (!mounted) {
+            return false;
+          }
+          // The file moved between the check and the write. Check again so
+          // an identical rewrite still saves without a prompt.
+          if (attempt < 3) {
+            continue;
+          }
+          change = RemoteFileChange.modified;
+        }
+      }
+      if (!await _resolveRemoteChange(handler, change, text)) {
+        return false;
+      }
+      await handler.overwrite(text);
+      return true;
     }
   }
 
@@ -484,7 +528,7 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
       if (mounted) {
         setState(() => _saving = false);
         _showSnackBar(
-          'Could not save a copy. Check permissions and try again.',
+          describeRemoteEditorWriteFailure(error, action: 'save a copy'),
         );
       }
     }

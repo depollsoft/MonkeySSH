@@ -162,6 +162,24 @@ void main() {
       },
     );
 
+    testWidgets('a rewrite with identical bytes saves with no prompt', (
+      tester,
+    ) async {
+      final server = await _openNotesInEditor(tester);
+      // `git stash && git stash pop` or `sed -i` rewrites the same bytes.
+      server.writeFile(
+        _notes,
+        utf8.encode('line one\n'),
+        modifyTime: server.now + 30,
+      );
+
+      await _tapSave(tester);
+
+      expect(find.text('File changed on the host'), findsNothing);
+      expect(_text(server, _notes), 'line one\nfrom the phone\n');
+      await _tearDown(tester);
+    });
+
     testWidgets('save as a copy writes beside the original only', (
       tester,
     ) async {

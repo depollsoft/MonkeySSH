@@ -2389,12 +2389,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
             fileName: file.filename,
             filePath: remotePath,
             controller: controller,
-            onSave: (text) => editSession.save(_sftp!, utf8.encode(text)),
+            onSave: (text) =>
+                editSession.save(_requireSftp(), utf8.encode(text)),
             conflictHandler: RemoteEditorConflictHandler(
-              checkForChanges: () => editSession.checkForChanges(_sftp!),
+              checkForChanges: () =>
+                  editSession.checkForChanges(_requireSftp()),
+              overwrite: (text) => editSession.save(
+                _requireSftp(),
+                utf8.encode(text),
+                force: true,
+              ),
               reload: () => _reloadEditedFile(editSession),
               saveCopy: (text) async => path.posix.basename(
-                await editSession.saveCopy(_sftp!, utf8.encode(text)),
+                await editSession.saveCopy(_requireSftp(), utf8.encode(text)),
               ),
             ),
             terminalTheme: editorTheme,
@@ -2426,9 +2433,15 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
   }
 
+  /// The open SFTP client, or a connection error the editor reports as such
+  /// when the browser lost it while the editor was open.
+  SftpClient _requireSftp() =>
+      // ignore: only_throw_errors, dartssh2 models SSH errors as interfaces.
+      _sftp ?? (throw SSHStateError('SFTP session is closed'));
+
   Future<String> _reloadEditedFile(RemoteFileEditSession editSession) async {
     final snapshot = await editSession.read(
-      _sftp!,
+      _requireSftp(),
       maxBytes: maxSftpEditableBytes + 1,
     );
     final blockedMessage = resolveSftpTextEditBlockMessage(

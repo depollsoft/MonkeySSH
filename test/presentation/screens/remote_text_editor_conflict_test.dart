@@ -1,3 +1,4 @@
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/remote_file_edit_session.dart';
@@ -7,19 +8,38 @@ import 'package:monkeyssh/presentation/screens/remote_text_editor_screen.dart';
 /// Records what the editor asked the host to do.
 class _FakeHost {
   RemoteFileChange change = RemoteFileChange.unchanged;
+
+  /// Results for the next checks, before falling back to [change].
+  final queuedChanges = <RemoteFileChange>[];
   String hostText = 'agent version';
-  Exception? checkError;
+  Object? checkError;
   Exception? reloadError;
   Exception? copyError;
+
+  /// How many saves report a change between the check and the write.
+  int changesDuringSave = 0;
   final saved = <String>[];
+  final overwritten = <String>[];
   final copies = <String>[];
   int reloads = 0;
+  int checks = 0;
+
+  Future<void> save(String text) async {
+    if (changesDuringSave > 0) {
+      changesDuringSave--;
+      throw const RemoteFileChangedDuringSaveException();
+    }
+    saved.add(text);
+  }
 
   RemoteEditorConflictHandler get handler => RemoteEditorConflictHandler(
     checkForChanges: () async {
+      checks++;
+      // ignore: only_throw_errors, dartssh2 models SSH errors as interfaces.
       if (checkError case final error?) throw error;
-      return change;
+      return queuedChanges.isEmpty ? change : queuedChanges.removeAt(0);
     },
+    overwrite: (text) async => overwritten.add(text),
     reload: () async {
       reloads++;
       if (reloadError case final error?) throw error;
@@ -52,7 +72,7 @@ class _EditorHarness {
                   builder: (_) => buildRemoteTextEditorScreenForTesting(
                     fileName: 'notes.txt',
                     controller: controller,
-                    onSave: (text) async => host.saved.add(text),
+                    onSave: host.save,
                     conflictHandler: host.handler,
                   ),
                 ),
@@ -155,7 +175,9 @@ void main() {
       await tester.tap(find.text('Overwrite host version'));
       await tester.pumpAndSettle();
 
-      expect(host.saved, ['phone version']);
+      // The chosen overwrite skips the version comparison.
+      expect(host.overwritten, ['phone version']);
+      expect(host.saved, isEmpty);
       expect(harness.result, isTrue);
     });
 
@@ -282,12 +304,59 @@ void main() {
       await tester.tap(find.text('Recreate file'));
       await tester.pumpAndSettle();
 
-      expect(host.saved, ['phone version']);
+      expect(host.overwritten, ['phone version']);
       expect(harness.result, isTrue);
     });
 
+    testWidgets('a folder at the path only offers a copy', (tester) async {
+      final host = _FakeHost()..change = RemoteFileChange.notAFile;
+      await _openEditor(tester, host);
+
+      await _save(tester);
+
+      expect(find.text('No longer a file'), findsOneWidget);
+      expect(find.text('Save as a copy'), findsOneWidget);
+      expect(find.text('Cancel'), findsOneWidget);
+      expect(find.text('Reload host version'), findsNothing);
+      expect(find.text('Overwrite host version'), findsNothing);
+      expect(find.text('Recreate file'), findsNothing);
+    });
+
+    testWidgets('a change caught during the write is checked again', (
+      tester,
+    ) async {
+      final host = _FakeHost()..changesDuringSave = 1;
+      final harness = await _openEditor(tester, host);
+
+      await _save(tester);
+
+      // The second check found identical content, so the save went ahead.
+      expect(host.checks, 2);
+      expect(host.saved, ['phone version']);
+      expect(find.text('File changed on the host'), findsNothing);
+      expect(harness.result, isTrue);
+    });
+
+    testWidgets('a real change caught during the write asks first', (
+      tester,
+    ) async {
+      final host = _FakeHost()
+        ..changesDuringSave = 1
+        ..queuedChanges.addAll([
+          RemoteFileChange.unchanged,
+          RemoteFileChange.modified,
+        ]);
+      await _openEditor(tester, host);
+
+      await _save(tester);
+
+      expect(find.text('File changed on the host'), findsOneWidget);
+      expect(host.saved, isEmpty);
+      expect(host.overwritten, isEmpty);
+    });
+
     testWidgets('a failed check does not write', (tester) async {
-      final host = _FakeHost()..checkError = Exception('connection lost');
+      final host = _FakeHost()..checkError = Exception('refused');
       await _openEditor(tester, host);
 
       await _save(tester);
@@ -298,6 +367,23 @@ void main() {
         findsOneWidget,
       );
       expect(_editorIsEditable(tester), isTrue);
+    });
+
+    testWidgets('a lost connection says so instead of permissions', (
+      tester,
+    ) async {
+      final host = _FakeHost()..checkError = SSHStateError('closed');
+      await _openEditor(tester, host);
+
+      await _save(tester);
+
+      expect(host.saved, isEmpty);
+      expect(
+        find.text(
+          'Could not save changes. Check the connection and try again.',
+        ),
+        findsOneWidget,
+      );
     });
   });
 }
