@@ -7,6 +7,9 @@ import 'agent_usage.dart';
 /// One independently reported allowance, expressed as a percentage remaining.
 typedef AgentUsageRingSegment = ({String label, double remaining});
 
+/// Remaining percentage at or below which an allowance shows as a warning.
+const agentUsageLowRemainingPercent = 15.0;
+
 /// Reported allowances around the current agent icon.
 class AgentUsageRings {
   /// Creates the familiar five-hour/weekly pair or a provider's labeled groups.
@@ -35,6 +38,11 @@ class AgentUsageRings {
   /// Whether at least one numerical allowance is available.
   bool get isAvailable =>
       shortTerm != null || weekly != null || _segments.isNotEmpty;
+
+  /// Whether any reported allowance is at or below the warning level.
+  bool get isLow => segments.any(
+    (segment) => segment.remaining <= agentUsageLowRemainingPercent,
+  );
 }
 
 // Names emitted by the existing Pi multi-provider quota probe.

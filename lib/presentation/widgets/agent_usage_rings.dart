@@ -228,7 +228,7 @@ class _SplitUsageRingPainter extends CustomPainter {
       // A thin neutral capacity track stays visible at zero. Remaining quota
       // is distinguished by both color and a heavier stroke, not color alone.
       paint
-        ..color = remaining <= 15 ? warning : color
+        ..color = remaining <= agentUsageLowRemainingPercent ? warning : color
         ..strokeWidth = 1.8;
       canvas.drawArc(
         rect,
