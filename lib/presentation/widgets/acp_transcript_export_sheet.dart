@@ -3,9 +3,14 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
@@ -14,6 +19,20 @@ import '../models/acp_transcript_markdown.dart';
 /// Characters of the export shown in the preview. The shared document is
 /// always complete; laying out a multi-megabyte text field is not.
 const int kAcpExportPreviewChars = 24 * 1024;
+
+/// Largest export copied to the clipboard on Android, whose clipboard shares
+/// the ~1 MB binder transaction limit; larger exports go through Share.
+const int kAcpExportMaxAndroidCopyBytes = 512 * 1024;
+
+/// Folder under the app's temporary directory that holds shared exports.
+const String kAcpExportFolderName = 'monkeyssh-chat-exports';
+
+/// Whether Share is a Save dialog here: desktop share targets either don't
+/// take files (Linux) or read them from a shared temporary folder.
+bool get acpExportSavesToFile => switch (defaultTargetPlatform) {
+  TargetPlatform.android || TargetPlatform.iOS => false,
+  _ => true,
+};
 
 /// Hands a finished export to another app.
 typedef AcpTranscriptShare = Future<void> Function(
@@ -55,7 +74,8 @@ Future<void> showAcpTranscriptExportSheet(
   );
 }
 
-/// Shares [markdown] as a `.md` file through the platform share sheet.
+/// Shares [markdown] as a `.md` file through the platform share sheet, or
+/// saves it through a Save dialog on desktop.
 ///
 /// A file keeps formatting intact and has no size limit; Copy covers pasting
 /// straight into an issue.
@@ -64,23 +84,55 @@ Future<void> shareAcpTranscriptMarkdown(
   String markdown,
   String fileName,
 ) async {
+  final bytes = Uint8List.fromList(utf8.encode(markdown));
+  if (acpExportSavesToFile) {
+    await FilePicker.saveFile(
+      dialogTitle: 'Save transcript',
+      fileName: fileName,
+      bytes: bytes,
+      mimeType: 'text/markdown',
+    );
+    return;
+  }
   final box = context.findRenderObject() as RenderBox?;
+  final origin = box != null && box.hasSize
+      ? box.localToGlobal(Offset.zero) & box.size
+      : null;
+  final file = await writeAcpTranscriptExportFile(bytes, fileName);
   await SharePlus.instance.share(
     ShareParams(
-      files: [
-        XFile.fromData(
-          Uint8List.fromList(utf8.encode(markdown)),
-          mimeType: 'text/markdown',
-          name: fileName,
-        ),
-      ],
-      fileNameOverrides: [fileName],
+      files: [XFile(file.path, mimeType: 'text/markdown', name: fileName)],
       subject: 'Agent chat transcript',
-      sharePositionOrigin: box != null && box.hasSize
-          ? box.localToGlobal(Offset.zero) & box.size
-          : null,
+      sharePositionOrigin: origin,
     ),
   );
+}
+
+/// Writes [bytes] as [fileName] in a private temporary folder for sharing,
+/// after deleting what earlier exports left there.
+///
+/// A share target may read the file after the sheet closes, so the newest
+/// export stays until the next one replaces it.
+Future<File> writeAcpTranscriptExportFile(
+  List<int> bytes,
+  String fileName, {
+  Directory? temporaryDirectory,
+}) async {
+  final root = temporaryDirectory ?? await getTemporaryDirectory();
+  final folder = Directory(p.join(root.path, kAcpExportFolderName));
+  if (folder.existsSync()) {
+    for (final stale in folder.listSync()) {
+      try {
+        stale.deleteSync(recursive: true);
+      } on FileSystemException {
+        // A target still reading an older export keeps it a little longer.
+      }
+    }
+  }
+  folder.createSync(recursive: true);
+  final file = File(p.join(folder.path, fileName));
+  await file.writeAsBytes(bytes, flush: true);
+  return file;
 }
 
 /// The export preview: what is included, an option for reasoning, a bounded
@@ -147,10 +199,31 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
   }
 
   Future<void> _copy() async {
-    await Clipboard.setData(ClipboardData(text: _export.markdown));
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        _exportBytes > kAcpExportMaxAndroidCopyBytes) {
+      setState(
+        () => _shareError =
+            'This transcript is too large to copy. Use Share instead.',
+      );
+      return;
+    }
+    try {
+      await Clipboard.setData(ClipboardData(text: _export.markdown));
+    } on Object {
+      if (mounted) {
+        setState(
+          () =>
+              _shareError = 'Couldn’t copy the transcript. Use Share instead.',
+        );
+      }
+      return;
+    }
     if (!mounted) return;
     _copiedReset?.cancel();
-    setState(() => _copied = true);
+    setState(() {
+      _copied = true;
+      _shareError = null;
+    });
     _copiedReset = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _copied = false);
     });
@@ -166,8 +239,9 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
     } on Object {
       if (mounted) {
         setState(
-          () => _shareError =
-              'Couldn’t open the share sheet. Copy the Markdown instead.',
+          () => _shareError = acpExportSavesToFile
+              ? 'Couldn’t save the file. Copy the Markdown instead.'
+              : 'Couldn’t open the share sheet. Copy the Markdown instead.',
         );
       }
     } finally {
@@ -187,141 +261,151 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
     final muted = theme.textTheme.bodySmall?.copyWith(
       color: scheme.onSurfaceVariant,
     );
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        FluttyTheme.spacingMd,
-        0,
-        FluttyTheme.spacingMd,
-        FluttyTheme.spacingMd,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'Export transcript',
-            style: FluttyTheme.displayMono(
-              fontSize: 18,
-              color: scheme.onSurface,
-            ),
-          ),
-          const SizedBox(height: FluttyTheme.spacingXs),
-          Text(
-            '${_plural(export.prompts, 'prompt')} · '
-            '${_plural(export.replies, 'reply', 'replies')} · '
-            '${_plural(export.toolCalls, 'tool call')} · '
-            '${_formatSize(_exportBytes)}',
-            key: const ValueKey('acp-export-summary'),
-            style: FluttyTheme.monoStyle.copyWith(
-              fontSize: 12,
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: FluttyTheme.spacingSm),
-          if (export.historyIncomplete)
-            _Notice(
-              key: const ValueKey('acp-export-history-notice'),
-              icon: Icons.history_toggle_off,
-              color: scheme.tertiary,
-              text:
-                  'Earlier history isn’t loaded. The export says so at '
-                  'the top.',
-            ),
-          if (export.omittedAttachments > 0)
-            _Notice(
-              icon: Icons.attach_file,
-              color: scheme.onSurfaceVariant,
-              text:
-                  'Images, audio and attachments are marked where they '
-                  'appeared, not included.',
-            ),
-          if (widget.source.hasReasoning)
-            SwitchListTile(
-              key: const ValueKey('acp-export-include-reasoning'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Include reasoning'),
-              subtitle: Text(
-                'Agent reasoning is left out unless you add it.',
-                style: muted,
-              ),
-              value: _includeReasoning,
-              onChanged: _setIncludeReasoning,
-            ),
-          const SizedBox(height: FluttyTheme.spacingSm),
-          Expanded(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
-                border: Border.all(color: scheme.outlineVariant),
-              ),
-              child: Scrollbar(
-                child: SingleChildScrollView(
-                  key: const ValueKey('acp-export-preview'),
-                  padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SelectableText(
-                        preview,
-                        style: FluttyTheme.monoStyle.copyWith(
-                          fontSize: 12,
-                          color: scheme.onSurface,
-                        ),
-                      ),
-                      if (preview.length < markdown.length) ...[
-                        const SizedBox(height: FluttyTheme.spacingSm),
-                        Text(
-                          'Preview ends here. Copy or Share includes all '
-                          '${_formatSize(_exportBytes)}.',
-                          key: const ValueKey('acp-export-preview-truncated'),
-                          style: muted,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+    // The modal sheet's safe area covers the top and sides only; keep Copy
+    // and Share clear of the system navigation bar.
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          FluttyTheme.spacingMd,
+          0,
+          FluttyTheme.spacingMd,
+          FluttyTheme.spacingMd,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Export transcript',
+              style: FluttyTheme.displayMono(
+                fontSize: 18,
+                color: scheme.onSurface,
               ),
             ),
-          ),
-          if (_shareError != null) ...[
+            const SizedBox(height: FluttyTheme.spacingXs),
+            Text(
+              '${_plural(export.prompts, 'prompt')} · '
+              '${_plural(export.replies, 'reply', 'replies')} · '
+              '${_plural(export.toolCalls, 'tool call')} · '
+              '${_formatSize(_exportBytes)}',
+              key: const ValueKey('acp-export-summary'),
+              style: FluttyTheme.monoStyle.copyWith(
+                fontSize: 12,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
             const SizedBox(height: FluttyTheme.spacingSm),
-            _Notice(
-              icon: Icons.error_outline,
-              color: scheme.error,
-              text: _shareError!,
-            ),
-          ],
-          const SizedBox(height: FluttyTheme.spacingMd),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  key: const ValueKey('acp-export-copy'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(48),
+            if (export.historyIncomplete)
+              _Notice(
+                key: const ValueKey('acp-export-history-notice'),
+                icon: Icons.history_toggle_off,
+                color: scheme.tertiary,
+                text:
+                    'Earlier history isn’t loaded. The export says so at '
+                    'the top.',
+              ),
+            if (export.omittedAttachments > 0)
+              _Notice(
+                icon: Icons.attach_file,
+                color: scheme.onSurfaceVariant,
+                text:
+                    'Images, audio and attachments are marked where they '
+                    'appeared, not included.',
+              ),
+            if (widget.source.hasReasoning)
+              SwitchListTile(
+                key: const ValueKey('acp-export-include-reasoning'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Include reasoning'),
+                subtitle: Text(
+                  'Agent reasoning is left out unless you add it.',
+                  style: muted,
+                ),
+                value: _includeReasoning,
+                onChanged: _setIncludeReasoning,
+              ),
+            const SizedBox(height: FluttyTheme.spacingSm),
+            Expanded(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: Scrollbar(
+                  child: SingleChildScrollView(
+                    key: const ValueKey('acp-export-preview'),
+                    padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SelectableText(
+                          preview,
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 12,
+                            color: scheme.onSurface,
+                          ),
+                        ),
+                        if (preview.length < markdown.length) ...[
+                          const SizedBox(height: FluttyTheme.spacingSm),
+                          Text(
+                            'Preview ends here. Copy or Share includes all '
+                            '${_formatSize(_exportBytes)}.',
+                            key: const ValueKey('acp-export-preview-truncated'),
+                            style: muted,
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                  onPressed: _copy,
-                  icon: Icon(_copied ? Icons.check : Icons.copy, size: 18),
-                  label: Text(_copied ? 'Copied' : 'Copy'),
                 ),
               ),
-              const SizedBox(width: FluttyTheme.spacingSm),
-              Expanded(
-                child: Builder(
-                  builder: (buttonContext) => FilledButton.icon(
-                    key: const ValueKey('acp-export-share'),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                    ),
-                    onPressed: _sharing ? null : () => _share(buttonContext),
-                    icon: Icon(Icons.adaptive.share, size: 18),
-                    label: const Text('Share'),
-                  ),
-                ),
+            ),
+            if (_shareError != null) ...[
+              const SizedBox(height: FluttyTheme.spacingSm),
+              _Notice(
+                icon: Icons.error_outline,
+                color: scheme.error,
+                text: _shareError!,
               ),
             ],
-          ),
-        ],
+            const SizedBox(height: FluttyTheme.spacingMd),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('acp-export-copy'),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                    onPressed: _copy,
+                    icon: Icon(_copied ? Icons.check : Icons.copy, size: 18),
+                    label: Text(_copied ? 'Copied' : 'Copy'),
+                  ),
+                ),
+                const SizedBox(width: FluttyTheme.spacingSm),
+                Expanded(
+                  child: Builder(
+                    builder: (buttonContext) => FilledButton.icon(
+                      key: const ValueKey('acp-export-share'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                      ),
+                      onPressed: _sharing ? null : () => _share(buttonContext),
+                      icon: Icon(
+                        acpExportSavesToFile
+                            ? Icons.save_alt
+                            : Icons.adaptive.share,
+                        size: 18,
+                      ),
+                      label: Text(acpExportSavesToFile ? 'Save' : 'Share'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

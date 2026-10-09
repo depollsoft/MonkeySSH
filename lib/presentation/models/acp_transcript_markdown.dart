@@ -1,8 +1,9 @@
 /// Markdown export of a native agent chat's loaded transcript.
 ///
 /// The export is built on demand from the presentation entries the thread
-/// renders and handed straight to the share sheet or clipboard. It is never
-/// written to logs, diagnostics, telemetry or app storage.
+/// renders. It is never written to logs, diagnostics or telemetry. Sharing
+/// writes it to a temporary file the share sheet can read, which the next
+/// export deletes.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -402,8 +403,12 @@ final class _ExportWriter {
   /// marker, closes any fence a truncated reply left open, and trims.
   String _sanitizeMarkdown(String markdown) {
     var text = markdown.replaceAllMapped(_markdownImage, (match) {
-      final target = match[2] ?? '';
-      if (target.startsWith('https://') || target.startsWith('http://')) {
+      var target = (match[2] ?? '').trim();
+      if (target.startsWith('<') && target.endsWith('>')) {
+        target = target.substring(1, target.length - 1).trim();
+      }
+      final scheme = Uri.tryParse(target)?.scheme.toLowerCase();
+      if ((scheme == 'https' || scheme == 'http') && !target.contains(' ')) {
         return match[0]!;
       }
       omittedAttachments++;
@@ -457,28 +462,39 @@ String _backtickFence(String text) {
   return '`' * (longest >= 3 ? longest + 1 : 3);
 }
 
+/// An inline Markdown image. The destination is either `<...>`, which may
+/// hold spaces, or a run without spaces that may nest one level of balanced
+/// parentheses; an optional title follows.
 final RegExp _markdownImage = RegExp(
-  r'!\[([^\]\n]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"\n]*")?\s*\)',
+  r'!\[([^\]\n]*)\]\(\s*(<[^>\n]*>|(?:[^()\s]|\([^()\s]*\))+)'
+  r'''(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)''',
 );
 
 final RegExp _inlineDataUri = RegExp(
   'data:[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]{64,}',
 );
 
-final RegExp _fenceLine = RegExp('^ {0,3}(`{3,}|~{3,})');
+final RegExp _fenceLine = RegExp(r'^ {0,3}(`{3,}|~{3,})(.*)$');
 
 /// Appends a closing fence when [text] ends inside a fenced code block, so
 /// a reply cut off mid-block cannot swallow the rest of the export.
+///
+/// Follows CommonMark: a backtick fence's info string may not contain a
+/// backtick, so a line such as "```npm test``` runs it" is inline code, not
+/// a fence. A closing fence has only the fence characters.
 String _closeOpenFences(String text) {
   String? open;
   for (final line in text.split('\n')) {
-    final marker = _fenceLine.firstMatch(line)?.group(1);
-    if (marker == null) continue;
+    final match = _fenceLine.firstMatch(line);
+    if (match == null) continue;
+    final marker = match.group(1)!;
+    final rest = match.group(2)!;
     if (open == null) {
+      if (marker.startsWith('`') && rest.contains('`')) continue;
       open = marker;
     } else if (marker[0] == open[0] &&
         marker.length >= open.length &&
-        line.trim() == marker) {
+        rest.trim().isEmpty) {
       open = null;
     }
   }

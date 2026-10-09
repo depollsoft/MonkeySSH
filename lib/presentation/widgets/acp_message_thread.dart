@@ -163,6 +163,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _tailAnchorAttempts = 0;
   int _tailAnchorStableFrames = 0;
   double? _lastTailMaxExtent;
+  int _searchRevealGeneration = 0;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -202,6 +203,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   /// Scrolls to a search match. Search navigation is the user moving through
   /// the transcript, so it suspends live-follow like a drag does.
   void _revealSearchFocus(AcpThreadSearchFocus focus) {
+    final generation = ++_searchRevealGeneration;
     _userOwnsScrollPosition = true;
     _earlierTranscriptAnchorGeneration += 1;
     _earlierTranscriptLoadScheduled = false;
@@ -216,6 +218,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           focus.entryIndex,
           childKey: focus.childKey,
           topInset: _stickyPromptHeight,
+          isCurrent: () => generation == _searchRevealGeneration,
         ),
       );
     });
@@ -638,12 +641,16 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   }
 
   /// Scrolls the first child of [entryIndex], or the child keyed [childKey]
-  /// when given, to the viewport top, leaving [topInset] above it.
+  /// when given, to the viewport top, leaving [topInset] above it. Stops as
+  /// soon as [isCurrent] reports that a newer scroll has superseded it.
   Future<void> _scrollEntryIntoView(
     int entryIndex, {
     String? childKey,
     double topInset = 0,
+    bool Function()? isCurrent,
   }) async {
+    bool superseded() =>
+        !mounted || !_controller.hasClients || !(isCurrent?.call() ?? true);
     if (!_controller.hasClients) return;
     int? resolveTarget() =>
         (childKey == null ? null : _childIndexByKey[childKey]) ??
@@ -663,7 +670,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         _rebuildThreadChildIndexes();
       });
       await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || !_controller.hasClients) return;
+      if (superseded()) return;
       absoluteTargetChildIndex = resolveTarget();
     }
     final absoluteTarget = absoluteTargetChildIndex;
@@ -672,7 +679,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     if (absoluteTarget < _renderStartChildIndex) {
       setState(() => _renderStartChildIndex = absoluteTarget);
       await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || !_controller.hasClients) return;
+      if (superseded()) return;
     }
     final targetChildIndex =
         absoluteTarget - _renderStartChildIndex + _leadingWindowChildCount;
@@ -681,10 +688,11 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     // animate to its exact scroll offset. RenderObject.showOnScreen is not
     // reliable here because a cached off-screen child may be considered
     // revealed without moving the outer CustomScrollView to its beginning.
+    if (!mounted) return;
     final reduceMotion =
         MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     for (var attempt = 0; attempt < 12; attempt++) {
-      if (!mounted || !_controller.hasClients) return;
+      if (superseded()) return;
       final sliver = _sliverListKey.currentContext?.findRenderObject();
       if (sliver is! RenderSliverMultiBoxAdaptor ||
           sliver.firstChild == null ||
@@ -756,8 +764,12 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
   }
 
-  bool _isSearchTarget(AcpTimelineEntry entry) =>
-      widget.searchFocus?.entryId == entry.id;
+  /// The active search focus's serial when [entry] holds the match, so a
+  /// collapsed tool call or reasoning block opens to show it.
+  Object? _searchRevealToken(AcpTimelineEntry entry) {
+    final focus = widget.searchFocus;
+    return focus?.entryId == entry.id ? focus!.serial : null;
+  }
 
   Widget _buildEntry(BuildContext context, AcpTimelineEntry entry) {
     switch (entry) {
@@ -781,7 +793,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       case AcpThoughtEntry():
         return AcpThoughtView(
           entry: entry,
-          initiallyExpanded: _isSearchTarget(entry),
+          revealToken: _searchRevealToken(entry),
           onTapLink: widget.onTapLink,
           imageResolver: widget.imageResolver,
         );
@@ -793,7 +805,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           onCopy: widget.onCopyResource,
           child: AcpToolCallView(
             toolCall: entry.toolCall,
-            initiallyExpanded: _isSearchTarget(entry),
+            revealToken: _searchRevealToken(entry),
             onOpenLocation: widget.onOpenLocation,
             onTapLink: widget.onTapLink,
           ),

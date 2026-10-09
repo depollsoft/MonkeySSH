@@ -1087,11 +1087,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
       child: CallbackShortcuts(
+        // Cmd+F on Apple platforms, where Ctrl+F moves the text cursor.
         bindings: <ShortcutActivator, VoidCallback>{
-          const SingleActivator(LogicalKeyboardKey.keyF, control: true):
-              _openSearch,
-          const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
-              _openSearch,
+          switch (defaultTargetPlatform) {
+            TargetPlatform.iOS || TargetPlatform.macOS => const SingleActivator(
+              LogicalKeyboardKey.keyF,
+              meta: true,
+            ),
+            _ => const SingleActivator(LogicalKeyboardKey.keyF, control: true),
+          }: _openSearch,
         },
         child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
       ),
@@ -1268,18 +1272,18 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
                       _buildPendingPanel(session, prompts, toolTitles),
-                    // Search takes the composer's place so its controls
-                    // stay in thumb reach; the draft lives in the controller.
+                    // Search sits just above the composer, in thumb reach. The
+                    // composer stays mounted so the terminal shell's keyboard,
+                    // extra keys and paste keep reaching it.
                     if (_search.isOpen)
-                      AcpTranscriptSearchBar(controller: _search)
-                    else
-                      AcpComposer(
-                        controller: _composer,
-                        attachmentActions: _attachmentActions(session),
-                        focusController: widget.composerFocusController,
-                        controls: _buildQuickConfigControls(session),
-                        useBottomSafeArea: !widget.embedded,
-                      ),
+                      AcpTranscriptSearchBar(controller: _search),
+                    AcpComposer(
+                      controller: _composer,
+                      attachmentActions: _attachmentActions(session),
+                      focusController: widget.composerFocusController,
+                      controls: _buildQuickConfigControls(session),
+                      useBottomSafeArea: !widget.embedded,
+                    ),
                   ],
                 ),
               ),

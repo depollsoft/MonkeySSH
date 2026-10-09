@@ -1,9 +1,9 @@
 /// Find-in-transcript for a native agent chat.
 ///
-/// Matching runs over the same presentation entries the thread renders, split
-/// into the same virtual segments, so every match names the exact list child
-/// to scroll to. The query and the transcript are user content: nothing here
-/// logs or persists either.
+/// Matching runs over each rendered entry's whole text, so a phrase split by
+/// a virtual segment boundary is still found, and every match names the exact
+/// list child to scroll to. The query and the transcript are user content:
+/// nothing here logs or persists either.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -11,9 +11,8 @@ import 'package:flutter/foundation.dart';
 import '../widgets/acp_thread_projection.dart';
 import 'acp_timeline.dart';
 
-/// Most matches one search reports. Further occurrences are counted as
-/// "more" without being indexed, which keeps a one-letter query on a long
-/// transcript bounded.
+/// Most matches one search reports. When there are more, the newest ones are
+/// kept, since a chat is read from the bottom.
 const int kAcpTranscriptSearchMaxMatches = 999;
 
 /// Characters of context kept before a match in its snippet.
@@ -28,11 +27,7 @@ final RegExp _dataUriPattern = RegExp(r'data:[^,\s)>"]*,[^\s)>"]*');
 
 final RegExp _whitespaceRun = RegExp(r'\s+');
 
-final Expando<Map<int, String>> _searchTextCache = Expando<Map<int, String>>(
-  'ACP transcript search text',
-);
-
-/// Which part of the conversation a match was found in.
+/// Where a transcript search match was found.
 enum AcpTranscriptMatchSource {
   /// A prompt the user sent.
   user,
@@ -76,36 +71,37 @@ final class AcpTranscriptSnippet {
 /// One occurrence of the query in the loaded transcript.
 final class AcpTranscriptMatch {
   AcpTranscriptMatch._({
-    required AcpThreadChild child,
-    required this.source,
+    required this.entryIndex,
+    required _EntryText text,
     required this.start,
     required this.length,
-  }) : _child = child;
+  }) : _text = text,
+       childKey = text.childKeyAt(start);
 
-  final AcpThreadChild _child;
-
-  /// Where the match was found.
-  final AcpTranscriptMatchSource source;
-
-  /// Offset of the match in its segment's searchable text.
-  final int start;
-
-  /// Length of the match in its segment's searchable text.
-  final int length;
+  final _EntryText _text;
 
   /// Index of the top-level timeline entry containing the match.
-  int get entryIndex => _child.entryIndex;
+  final int entryIndex;
 
-  /// Key of the rendered thread child containing the match.
-  String get childKey => _child.keyValue;
+  /// Key of the rendered thread child where the match starts.
+  final String childKey;
+
+  /// Offset of the match in its entry's searchable text.
+  final int start;
+
+  /// Length of the match in its entry's searchable text.
+  final int length;
+
+  /// Where the match was found.
+  AcpTranscriptMatchSource get source => _text.source;
 
   /// Identifier of the entry that renders the match. For a nested subagent
   /// entry this differs from the top-level entry at [entryIndex].
-  String get entryId => _child.entry.id;
+  String get entryId => _text.entryId;
 
   /// Context around the match, built on first use.
   late final AcpTranscriptSnippet snippet = _buildSnippet(
-    _searchableText(_child),
+    _text.text,
     start,
     length,
   );
@@ -126,57 +122,174 @@ final class AcpTranscriptSearchResult {
     capped: false,
   );
 
-  /// Matches in transcript order, at most [kAcpTranscriptSearchMaxMatches].
+  /// Matches in transcript order: the newest [kAcpTranscriptSearchMaxMatches]
+  /// when there are more.
   final List<AcpTranscriptMatch> matches;
 
-  /// Whether more occurrences exist beyond [matches].
+  /// Whether older occurrences exist beyond [matches].
   final bool capped;
 }
 
-/// Finds every case-insensitive occurrence of [query] in [entries].
+/// Searchable text for a transcript, cached per immutable entry.
 ///
-/// User prompts, agent replies, reasoning, tool titles, input, output, diffs
-/// and locations, plan items and status lines are all searched. Inline image
-/// and audio payloads are not. Matches are non-overlapping and ordered as the
-/// thread renders them, including nested subagent transcripts.
+/// Holds lower-cased copies of searched text while it lives; the search
+/// controller drops its index when search closes. Re-searching after new
+/// output streams in only re-reads the entries that changed.
+final class AcpTranscriptSearchIndex {
+  final Expando<List<_EntryText>> _texts = Expando<List<_EntryText>>(
+    'ACP transcript search text',
+  );
+  final Expando<_EntryMatches> _matches = Expando<_EntryMatches>(
+    'ACP transcript search matches',
+  );
+
+  /// Finds every case-insensitive occurrence of [query] in [entries].
+  ///
+  /// User prompts, agent replies, reasoning, tool titles, input, output,
+  /// diffs and locations, plan items and status lines are searched; inline
+  /// image and audio payloads are not. Matches do not overlap and follow the
+  /// thread's order, including nested subagent transcripts.
+  AcpTranscriptSearchResult search(
+    List<AcpTimelineEntry> entries,
+    String query, {
+    int maxMatches = kAcpTranscriptSearchMaxMatches,
+  }) {
+    final needle = query.trim().toLowerCase();
+    if (needle.isEmpty || entries.isEmpty) {
+      return AcpTranscriptSearchResult.empty;
+    }
+    final newestFirst = <AcpTranscriptMatch>[];
+    var capped = false;
+    outer:
+    for (var entryIndex = entries.length - 1; entryIndex >= 0; entryIndex--) {
+      final found = _matchesFor(entries, entryIndex, needle);
+      for (var index = found.length - 1; index >= 0; index--) {
+        if (newestFirst.length >= maxMatches) {
+          capped = true;
+          break outer;
+        }
+        final (text, start) = found[index];
+        newestFirst.add(
+          AcpTranscriptMatch._(
+            entryIndex: entryIndex,
+            text: text,
+            start: start,
+            length: needle.length,
+          ),
+        );
+      }
+    }
+    return AcpTranscriptSearchResult(
+      matches: List<AcpTranscriptMatch>.unmodifiable(newestFirst.reversed),
+      capped: capped,
+    );
+  }
+
+  List<(_EntryText, int)> _matchesFor(
+    List<AcpTimelineEntry> entries,
+    int entryIndex,
+    String needle,
+  ) {
+    final entry = entries[entryIndex];
+    final cached = _matches[entry];
+    if (cached != null && cached.needle == needle) return cached.found;
+    final found = <(_EntryText, int)>[];
+    for (final text in _textsFor(entries, entryIndex)) {
+      var from = 0;
+      while (true) {
+        final index = text.lower.indexOf(needle, from);
+        if (index < 0) break;
+        found.add((text, index));
+        from = index + needle.length;
+      }
+    }
+    _matches[entry] = _EntryMatches(needle, found);
+    return found;
+  }
+
+  List<_EntryText> _textsFor(List<AcpTimelineEntry> entries, int entryIndex) {
+    final entry = entries[entryIndex];
+    return _texts[entry] ??= _buildEntryTexts(
+      buildAcpThreadChildren(
+        entries,
+        startEntryIndex: entryIndex,
+        endEntryIndex: entryIndex + 1,
+      ),
+    );
+  }
+}
+
+/// Finds every case-insensitive occurrence of [query] in [entries] without
+/// keeping a cache; see [AcpTranscriptSearchIndex.search].
 AcpTranscriptSearchResult searchAcpTranscript(
   List<AcpTimelineEntry> entries,
   String query, {
   int maxMatches = kAcpTranscriptSearchMaxMatches,
-}) {
-  final needle = query.trim().toLowerCase();
-  if (needle.isEmpty || entries.isEmpty) return AcpTranscriptSearchResult.empty;
-  final matches = <AcpTranscriptMatch>[];
-  final children = buildAcpThreadChildren(entries, startEntryIndex: 0);
-  for (final child in children) {
-    final source = _sourceOf(child.entry);
-    if (source == null) continue;
-    final haystack = _lowerSearchableText(child);
-    var from = 0;
-    while (true) {
-      final index = haystack.indexOf(needle, from);
-      if (index < 0) break;
-      if (matches.length >= maxMatches) {
-        return AcpTranscriptSearchResult(
-          matches: List<AcpTranscriptMatch>.unmodifiable(matches),
-          capped: true,
-        );
-      }
-      matches.add(
-        AcpTranscriptMatch._(
-          child: child,
-          source: source,
-          start: index,
-          length: needle.length,
-        ),
-      );
-      from = index + needle.length;
+}) => AcpTranscriptSearchIndex().search(entries, query, maxMatches: maxMatches);
+
+final class _EntryMatches {
+  const _EntryMatches(this.needle, this.found);
+
+  final String needle;
+  final List<(_EntryText, int)> found;
+}
+
+/// The whole searchable text of one rendered entry, which the thread may
+/// split across several virtual segments.
+final class _EntryText {
+  _EntryText({
+    required this.entryId,
+    required this.source,
+    required this.text,
+    required this.segmentStarts,
+    required this.segmentKeys,
+  }) : lower = _lowerPreservingOffsets(text);
+
+  final String entryId;
+  final AcpTranscriptMatchSource source;
+  final String text;
+  final String lower;
+  final List<int> segmentStarts;
+  final List<String> segmentKeys;
+
+  /// The key of the segment holding [offset].
+  String childKeyAt(int offset) {
+    var segment = 0;
+    while (segment + 1 < segmentStarts.length &&
+        segmentStarts[segment + 1] <= offset) {
+      segment++;
     }
+    return segmentKeys[segment];
   }
-  return AcpTranscriptSearchResult(
-    matches: List<AcpTranscriptMatch>.unmodifiable(matches),
-    capped: false,
-  );
+}
+
+List<_EntryText> _buildEntryTexts(List<AcpThreadChild> children) {
+  final texts = <_EntryText>[];
+  var index = 0;
+  while (index < children.length) {
+    final entry = children[index].entry;
+    final buffer = StringBuffer();
+    final starts = <int>[];
+    final keys = <String>[];
+    while (index < children.length && identical(children[index].entry, entry)) {
+      starts.add(buffer.length);
+      keys.add(children[index].keyValue);
+      buffer.write(_withoutDataUris(_segmentText(children[index])));
+      index++;
+    }
+    final source = _sourceOf(entry);
+    if (source == null || buffer.isEmpty) continue;
+    texts.add(
+      _EntryText(
+        entryId: entry.id,
+        source: source,
+        text: buffer.toString(),
+        segmentStarts: starts,
+        segmentKeys: keys,
+      ),
+    );
+  }
+  return texts;
 }
 
 AcpTranscriptMatchSource? _sourceOf(AcpTimelineEntry entry) => switch (entry) {
@@ -190,18 +303,6 @@ AcpTranscriptMatchSource? _sourceOf(AcpTimelineEntry entry) => switch (entry) {
   // separate children and are searched individually.
   AcpSubagentTranscriptEntry() || AcpUsageEntry() => null,
 };
-
-int _segmentIndex(AcpThreadChild child) =>
-    child.markdownPartIndex ?? child.userPartIndex ?? 0;
-
-/// Lower-cased searchable text, memoised per immutable entry and segment so
-/// typing a query does not re-lower the whole transcript on every keystroke.
-String _lowerSearchableText(AcpThreadChild child) {
-  final segments = _searchTextCache[child.entry] ??= <int, String>{};
-  return segments[_segmentIndex(child)] ??= _lowerPreservingOffsets(
-    _searchableText(child),
-  );
-}
 
 /// Lower-cases [text] while keeping every offset aligned with the original.
 ///
@@ -219,17 +320,19 @@ String _lowerPreservingOffsets(String text) {
   return buffer.toString();
 }
 
-String _searchableText(AcpThreadChild child) {
+/// The text one rendered segment contributes. Segments of a split entry
+/// concatenate back to the entry's text, so phrases across a split match.
+String _segmentText(AcpThreadChild child) {
   final segment = child.userParts;
   if (segment != null) return _promptText(segment);
   final markdown = child.markdown;
-  if (markdown != null) return _withoutDataUris(markdown);
+  if (markdown != null) return markdown;
   return switch (child.entry) {
     AcpUserPromptEntry(:final parts) => _promptText(parts),
-    AcpAssistantMessageEntry(:final markdown) => _withoutDataUris(markdown),
+    AcpAssistantMessageEntry(:final markdown) => markdown,
     AcpThoughtEntry(:final title, :final markdown) => _joinNonEmpty([
       title,
-      _withoutDataUris(markdown),
+      markdown,
     ]),
     AcpToolCallEntry(:final toolCall) => _toolText(toolCall),
     AcpPlanEntry(:final plan) => _joinNonEmpty([
@@ -243,15 +346,15 @@ String _searchableText(AcpThreadChild child) {
   };
 }
 
-String _promptText(List<AcpPromptPart> parts) => _joinNonEmpty([
+String _promptText(List<AcpPromptPart> parts) => [
   for (final part in parts)
     switch (part) {
       AcpTextPart(:final text) => text,
-      AcpImagePart(:final image) => image.label,
-      AcpAudioPart(:final clip) => clip.label,
-      AcpResourcePart(:final resource) => resource.displayName,
+      AcpImagePart(:final image) => '\n${image.label ?? ''}\n',
+      AcpAudioPart(:final clip) => '\n${clip.label ?? ''}\n',
+      AcpResourcePart(:final resource) => '\n${resource.displayName}\n',
     },
-]);
+].join();
 
 String _toolText(AcpToolCall call) => _joinNonEmpty([
   call.title,

@@ -121,6 +121,8 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
                           focusNode: _focus,
                           onChanged: _search.setQuery,
                           onSubmitted: (_) => _submit(),
+                          // Keep the keyboard up so the next press steps on.
+                          onEditingComplete: () {},
                           textInputAction: TextInputAction.search,
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: scheme.onSurface,
@@ -150,11 +152,14 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
                       if (hasQuery)
                         Semantics(
                           liveRegion: true,
-                          label: count == 0
-                              ? 'No matches'
-                              : 'Match ${(active ?? 0) + 1} of '
-                                    '${result.capped ? 'more than ' : ''}'
-                                    '$count',
+                          label: _announcement(
+                            count: count,
+                            active: active,
+                            capped: result.capped,
+                            match: _search.isSettled
+                                ? _search.activeMatch
+                                : null,
+                          ),
                           child: ExcludeSemantics(
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -205,6 +210,22 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
       },
     );
   }
+}
+
+/// What a screen reader hears when the count or active match changes.
+String _announcement({
+  required int count,
+  required int? active,
+  required bool capped,
+  required AcpTranscriptMatch? match,
+}) {
+  if (count == 0) return 'No matches';
+  final position =
+      'Match ${(active ?? 0) + 1} of ${capped ? 'the newest ' : ''}$count';
+  if (match == null) return position;
+  final snippet = match.snippet;
+  return '$position, in ${_MatchContext._label(match.source)}: '
+      '${snippet.before}${snippet.match}${snippet.after}';
 }
 
 class _BarButton extends StatelessWidget {

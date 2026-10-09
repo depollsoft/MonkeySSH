@@ -146,6 +146,39 @@ void registerAcpTranscriptMarkdownTests() {
       expect(markdown, contains('```dart\nvoid main() {}\n```'));
     });
 
+    test('does not mistake inline code at a line start for a fence', () {
+      final markdown = _export([
+        const AcpAssistantMessageEntry(
+          id: 'a',
+          markdown: '```npm test``` is the command.\n\nThen push.',
+        ),
+        AcpUserPromptEntry(id: 'u', parts: const [AcpTextPart('Thanks')]),
+      ]).markdown;
+      expect('```'.allMatches(markdown), hasLength(2));
+      expect(markdown, contains('Then push.\n\n---\n\n### You'));
+    });
+
+    test(
+      'omits local images with spaces or parentheses in the destination',
+      () {
+        final export = _export([
+          const AcpAssistantMessageEntry(
+            id: 'a',
+            markdown:
+                '![shot](<file:///tmp/ci failure.png>) '
+                '![plot](/tmp/plot(1).png "Plot") '
+                '![remote](<https://example.com/a.png>)',
+          ),
+        ]);
+        expect(export.markdown, isNot(contains('file:///tmp')));
+        expect(export.markdown, isNot(contains('/tmp/plot')));
+        expect(export.markdown, contains('_[image not included: shot]_'));
+        expect(export.markdown, contains('_[image not included: plot]_'));
+        expect(export.markdown, contains('<https://example.com/a.png>'));
+        expect(export.omittedAttachments, 2);
+      },
+    );
+
     test('marks omitted attachments and never embeds image data', () {
       final export = _export(_conversation());
       final markdown = export.markdown;

@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,10 +15,20 @@ import 'package:monkeyssh/presentation/widgets/acp_tool_call.dart';
 import 'package:monkeyssh/presentation/widgets/acp_transcript_export_sheet.dart';
 import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 
-Widget _app(Widget child, {Size size = const Size(400, 800)}) => MaterialApp(
+Widget _app(
+  Widget child, {
+  Size size = const Size(400, 800),
+  bool disableAnimations = true,
+  EdgeInsets padding = EdgeInsets.zero,
+}) => MaterialApp(
   theme: FluttyTheme.dark,
   home: MediaQuery(
-    data: MediaQueryData(size: size, disableAnimations: true),
+    data: MediaQueryData(
+      size: size,
+      disableAnimations: disableAnimations,
+      padding: padding,
+      viewPadding: padding,
+    ),
     child: Scaffold(body: child),
   ),
 );
@@ -153,6 +165,95 @@ void registerAcpTranscriptToolsTests() {
       final needleTop = tester.getTopLeft(find.text('The needle is here.')).dy;
       expect(needleTop, greaterThanOrEqualTo(0));
       expect(needleTop, lessThan(200));
+    });
+
+    testWidgets('a running tool holding the match stays open when it ends', (
+      tester,
+    ) async {
+      AcpToolCallEntry tool(AcpToolStatus status) => AcpToolCallEntry(
+        id: 'tool',
+        toolCall: AcpToolCall(
+          id: 'tool',
+          title: 'Run tests',
+          status: status,
+          rawOutput: 'needle in the output',
+        ),
+      );
+      const focus = AcpThreadSearchFocus(
+        entryIndex: 0,
+        childKey: 'tool',
+        entryId: 'tool',
+        serial: 1,
+      );
+      await tester.pumpWidget(
+        _app(
+          AcpMessageThread(
+            entries: [tool(AcpToolStatus.running)],
+            searchFocus: focus,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _app(
+          AcpMessageThread(
+            entries: [tool(AcpToolStatus.completed)],
+            searchFocus: focus,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('needle in the output', findRichText: true),
+        findsWidgets,
+      );
+    });
+
+    testWidgets('stepping quickly ends on the latest match', (tester) async {
+      final entries = _longTranscript();
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      Widget thread(AcpThreadSearchFocus focus) => _app(
+        AcpMessageThread(
+          entries: entries,
+          controller: controller,
+          searchFocus: focus,
+        ),
+        disableAnimations: false,
+      );
+      await tester.pumpWidget(
+        _app(AcpMessageThread(entries: entries, controller: controller)),
+      );
+      await tester.pumpAndSettle();
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+
+      // A far, older target starts seeking; a nearer one supersedes it.
+      await tester.pumpWidget(
+        thread(
+          const AcpThreadSearchFocus(
+            entryIndex: 3,
+            childKey: 'agent-3',
+            entryId: 'agent-3',
+            serial: 1,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 30));
+      await tester.pumpWidget(
+        thread(
+          const AcpThreadSearchFocus(
+            entryIndex: 55,
+            childKey: 'agent-55',
+            entryId: 'agent-55',
+            serial: 2,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Reply 55'), findsOneWidget);
+      expect(find.text('The needle is here.'), findsNothing);
     });
 
     testWidgets('a focused tool call or reasoning block expands', (
@@ -315,6 +416,109 @@ void registerAcpTranscriptToolsTests() {
       expect(find.text('Copied'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
       expect(find.text('Copy'), findsOneWidget);
+    });
+
+    testWidgets('keeps Copy and Share above the system navigation bar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _app(
+          AcpTranscriptExportSheet(
+            source: _exportSource(),
+            share: (context, markdown, fileName) async {},
+          ),
+          padding: const EdgeInsets.only(bottom: 48),
+        ),
+      );
+      await tester.pump();
+      final share = tester.getRect(
+        find.byKey(const ValueKey('acp-export-share')),
+      );
+      expect(share.bottom, lessThanOrEqualTo(800 - 48));
+    });
+
+    testWidgets('says so when copying fails', (tester) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.setData'
+            ? throw PlatformException(code: 'TransactionTooLarge')
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await pumpSheet(tester, share: (context, markdown, fileName) async {});
+      await tester.tap(find.byKey(const ValueKey('acp-export-copy')));
+      await tester.pump();
+      expect(
+        find.text('Couldn’t copy the transcript. Use Share instead.'),
+        findsOneWidget,
+      );
+      expect(find.text('Copied'), findsNothing);
+    });
+
+    testWidgets(
+      'does not copy an export too large for the Android clipboard',
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+      (tester) async {
+        var copies = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') copies++;
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        await pumpSheet(
+          tester,
+          share: (context, markdown, fileName) async {},
+          source: AcpTranscriptExportSource(
+            title: 'Huge',
+            agentLabel: 'Agent',
+            entries: [
+              AcpAssistantMessageEntry(
+                id: 'big',
+                markdown: 'y' * (kAcpExportMaxAndroidCopyBytes + 1),
+              ),
+            ],
+          ),
+        );
+        await tester.tap(find.byKey(const ValueKey('acp-export-copy')));
+        await tester.pump();
+        expect(copies, 0);
+        expect(
+          find.text('This transcript is too large to copy. Use Share instead.'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    test('a new export file replaces what earlier exports left', () async {
+      final temp = Directory.systemTemp.createTempSync('acp-export-test');
+      addTearDown(() => temp.deleteSync(recursive: true));
+      final first = await writeAcpTranscriptExportFile(
+        [1, 2, 3],
+        'first.md',
+        temporaryDirectory: temp,
+      );
+      expect(first.existsSync(), isTrue);
+      final second = await writeAcpTranscriptExportFile(
+        [4],
+        'second.md',
+        temporaryDirectory: temp,
+      );
+      expect(first.existsSync(), isFalse);
+      expect(second.readAsBytesSync(), [4]);
+      expect(second.parent.path, endsWith(kAcpExportFolderName));
     });
 
     testWidgets('explains a share failure', (tester) async {

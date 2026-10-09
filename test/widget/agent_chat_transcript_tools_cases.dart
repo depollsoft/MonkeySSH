@@ -59,6 +59,7 @@ Widget _chat(
   FakeAcpSessionManager manager, {
   bool embedded = false,
   AcpChatActionsController? chatActions,
+  AcpComposerFocusController? composerFocusController,
 }) {
   final ssh = _MockSshService();
   final launchPreferences = _MockLaunchPreferences();
@@ -87,6 +88,7 @@ Widget _chat(
           embedded: embedded,
           connectOnMount: false,
           chatActions: chatActions,
+          composerFocusController: composerFocusController,
         ),
       ),
     ),
@@ -114,8 +116,12 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.tap(find.byTooltip('Search chat'));
       await tester.pumpAndSettle();
       expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
-      // The bar takes the composer's place at the bottom, in thumb reach.
-      expect(find.byType(AcpComposer), findsNothing);
+      // The bar sits above the composer, which stays usable.
+      expect(find.byType(AcpComposer), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byType(AcpTranscriptSearchBar)).dy,
+        lessThan(tester.getTopLeft(find.byType(AcpComposer)).dy),
+      );
       await tester.enterText(
         find.byKey(const ValueKey('acp-transcript-search-field')),
         'needle',
@@ -178,11 +184,13 @@ void registerAgentChatTranscriptToolsTests() {
 
     testWidgets('an embedding shell opens search and export', (tester) async {
       final actions = AcpChatActionsController();
+      final composerFocus = AcpComposerFocusController();
       await tester.pumpWidget(
         _chat(
           FakeAcpSessionManager(sessions: [_session()]),
           embedded: true,
           chatActions: actions,
+          composerFocusController: composerFocus,
         ),
       );
       await tester.pumpAndSettle();
@@ -192,6 +200,10 @@ void registerAgentChatTranscriptToolsTests() {
       actions.openSearch();
       await tester.pumpAndSettle();
       expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+      // The shell's extra keys and paste still reach the composer.
+      composerFocus.insertText('from the toolbar');
+      await tester.pump();
+      expect(find.text('from the toolbar'), findsOneWidget);
 
       actions.exportTranscript();
       await tester.pumpAndSettle();

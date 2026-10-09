@@ -124,6 +124,45 @@ void registerAcpTranscriptSearchTests() {
       expect(result.capped, isTrue);
     });
 
+    test('finds a phrase split across virtual segments', () {
+      final entries = [
+        AcpUserPromptEntry(
+          id: 'long-prompt',
+          parts: [AcpTextPart('${'x' * 2043} foo bar')],
+        ),
+      ];
+      final match = searchAcpTranscript(entries, 'foo bar').matches.single;
+      expect(match.childKey, 'long-prompt');
+      expect(match.snippet.match, 'foo bar');
+    });
+
+    test('keeps the newest matches when there are too many', () {
+      final entries = [
+        for (var i = 0; i < 1500; i++)
+          AcpAssistantMessageEntry(id: 'reply-$i', markdown: 'error $i'),
+      ];
+      final result = searchAcpTranscript(entries, 'error');
+      expect(result.capped, isTrue);
+      expect(result.matches, hasLength(kAcpTranscriptSearchMaxMatches));
+      expect(result.matches.last.entryId, 'reply-1499');
+      expect(result.matches.first.entryIndex, 1500 - 999);
+    });
+
+    test('skips inline payloads in tool output', () {
+      final entries = [
+        AcpToolCallEntry(
+          id: 'tool',
+          toolCall: AcpToolCall(
+            id: 'tool',
+            title: 'Screenshot',
+            rawOutput: 'saved data:image/png;base64,QUJDREVGR0hJSktMTU5P',
+          ),
+        ),
+      ];
+      expect(searchAcpTranscript(entries, 'hijk').matches, isEmpty);
+      expect(searchAcpTranscript(entries, 'saved').matches, hasLength(1));
+    });
+
     test('ignores blank queries', () {
       expect(searchAcpTranscript(_transcript(), '   ').matches, isEmpty);
     });
@@ -184,6 +223,40 @@ void registerAcpTranscriptSearchTests() {
         async.elapse(const Duration(seconds: 1));
         expect(controller.focus!.childKey, focus.childKey);
         expect(controller.focus!.serial, focus.serial);
+        controller.dispose();
+      });
+    });
+
+    test('Return steps while output streams in', () {
+      fakeAsync((async) {
+        final entries = _transcript();
+        final controller = AcpTranscriptSearchController()
+          ..updateEntries(entries)
+          ..open()
+          ..setQuery('widget');
+        async.elapse(const Duration(milliseconds: 200));
+        final newest = controller.activeIndex!;
+        controller.updateEntries([
+          ...entries,
+          const AcpAssistantMessageEntry(id: 'more', markdown: 'streaming'),
+        ]);
+        expect(controller.isSettled, isTrue);
+        controller.previous();
+        expect(controller.activeIndex, newest - 1);
+        async.elapse(const Duration(seconds: 1));
+        controller.dispose();
+      });
+    });
+
+    test('stepping right after typing lands on the newest match first', () {
+      fakeAsync((async) {
+        final controller = AcpTranscriptSearchController()
+          ..updateEntries(_transcript())
+          ..open()
+          ..setQuery('widget');
+        async.elapse(const Duration(milliseconds: 50));
+        controller.previous();
+        expect(controller.activeIndex, controller.result.matches.length - 1);
         controller.dispose();
       });
     });

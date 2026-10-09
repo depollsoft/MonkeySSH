@@ -35,8 +35,9 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   String? _resultQuery;
   int? _activeIndex;
   var _serial = 0;
-  Timer? _timer;
-  var _timerResetsActive = false;
+  Timer? _queryTimer;
+  Timer? _refreshTimer;
+  var _index = AcpTranscriptSearchIndex();
   var _disposed = false;
 
   /// Whether the search bar is showing.
@@ -49,8 +50,9 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   AcpTranscriptSearchResult get result => _result;
 
   /// Whether [result] reflects the current [query], rather than a search
-  /// still waiting for typing to pause.
-  bool get isSettled => _timer == null && _resultQuery == _query.trim();
+  /// still waiting for typing to pause. Re-searching streamed output does not
+  /// unsettle it.
+  bool get isSettled => _queryTimer == null && _resultQuery == _query.trim();
 
   /// Index of the active match in [result], if any.
   int? get activeIndex => _activeIndex;
@@ -86,8 +88,12 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   /// Hides the search bar and forgets the query and its matches.
   void close() {
     if (!_open && _query.isEmpty) return;
-    _timer?.cancel();
-    _timer = null;
+    _queryTimer?.cancel();
+    _queryTimer = null;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    // Drop the lower-cased copies of the transcript held for searching.
+    _index = AcpTranscriptSearchIndex();
     _open = false;
     _query = '';
     _resultQuery = null;
@@ -100,7 +106,11 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   void setQuery(String value) {
     if (value == _query) return;
     _query = value;
-    _schedule(queryDebounce, resetActive: true);
+    _queryTimer?.cancel();
+    _queryTimer = Timer(queryDebounce, () {
+      _queryTimer = null;
+      _run(resetActive: true);
+    });
     _notify();
   }
 
@@ -110,16 +120,22 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     if (identical(entries, _entries)) return;
     _entries = entries;
     if (!_open || _query.trim().isEmpty) return;
-    if (_timer != null) return;
-    _schedule(refreshInterval, resetActive: false);
+    if (_queryTimer != null || _refreshTimer != null) return;
+    _refreshTimer = Timer(refreshInterval, () {
+      _refreshTimer = null;
+      if (_queryTimer == null) _run(resetActive: false);
+    });
   }
 
-  /// Runs any pending search immediately.
-  void searchNow() {
-    if (_timer == null) return;
-    _timer!.cancel();
-    _timer = null;
-    _run(resetActive: _timerResetsActive);
+  /// Runs a search still waiting for typing to pause. Returns whether there
+  /// was one.
+  bool searchNow() {
+    final pending = _queryTimer;
+    if (pending == null) return false;
+    pending.cancel();
+    _queryTimer = null;
+    _run(resetActive: true);
+    return true;
   }
 
   /// Moves to the next, newer match, wrapping to the oldest.
@@ -129,7 +145,9 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   void previous() => _step(-1);
 
   void _step(int delta) {
-    searchNow();
+    // A search still waiting for typing to pause lands on the newest match
+    // first; stepping past it would skip it.
+    if (searchNow()) return;
     final count = _result.matches.length;
     if (count == 0) return;
     final current = _activeIndex ?? (delta > 0 ? -1 : count);
@@ -138,21 +156,11 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     _notify();
   }
 
-  void _schedule(Duration delay, {required bool resetActive}) {
-    _timer?.cancel();
-    _timerResetsActive = resetActive || _timerResetsActive;
-    _timer = Timer(delay, () {
-      _timer = null;
-      _run(resetActive: _timerResetsActive);
-    });
-  }
-
   void _run({required bool resetActive}) {
-    _timerResetsActive = false;
     if (_disposed) return;
     final trimmed = _query.trim();
     final previous = activeMatch;
-    _result = searchAcpTranscript(_entries, trimmed);
+    _result = _index.search(_entries, trimmed);
     _resultQuery = trimmed;
     final matches = _result.matches;
     if (matches.isEmpty) {
@@ -165,8 +173,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
       // without scrolling, unless it no longer exists.
       final kept = matches.indexWhere(
         (match) =>
-            match.childKey == previous.childKey &&
-            match.start == previous.start,
+            match.entryId == previous.entryId && match.start == previous.start,
       );
       if (kept >= 0) {
         _activeIndex = kept;
@@ -185,7 +192,8 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _timer?.cancel();
+    _queryTimer?.cancel();
+    _refreshTimer?.cancel();
     super.dispose();
   }
 }

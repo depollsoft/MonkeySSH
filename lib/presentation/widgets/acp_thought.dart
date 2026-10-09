@@ -16,6 +16,7 @@ class AcpThoughtView extends StatefulWidget {
     required this.entry,
     super.key,
     this.initiallyExpanded = false,
+    this.revealToken,
     this.onTapLink,
     this.imageResolver,
   });
@@ -24,10 +25,11 @@ class AcpThoughtView extends StatefulWidget {
   final AcpThoughtEntry entry;
 
   /// Whether the thought is expanded initially. Defaults to collapsed.
-  ///
-  /// Turning it on after the view is built expands the thought too, which is
-  /// how transcript search reveals a match inside it.
   final bool initiallyExpanded;
+
+  /// Expands the thought whenever it changes to a new non-null value.
+  /// Transcript search uses it to reveal a match inside the reasoning.
+  final Object? revealToken;
 
   /// Optional custom link handler forwarded to the inner Markdown.
   final void Function(String text, String? href, String title)? onTapLink;
@@ -40,12 +42,13 @@ class AcpThoughtView extends StatefulWidget {
 }
 
 class _AcpThoughtViewState extends State<AcpThoughtView> {
-  late bool _expanded = widget.initiallyExpanded;
+  late bool _expanded = widget.initiallyExpanded || widget.revealToken != null;
 
   @override
   void didUpdateWidget(covariant AcpThoughtView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
+    if (widget.revealToken != null &&
+        widget.revealToken != oldWidget.revealToken) {
       _expanded = true;
     }
   }
