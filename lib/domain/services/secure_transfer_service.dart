@@ -13,8 +13,10 @@ import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
 import '../models/auto_connect_command.dart';
+import '../models/hardware_key.dart';
 import '../models/host_cli_launch_preferences.dart';
 import 'diagnostics_log_service.dart';
+import 'hardware_key_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
 import 'key_service.dart';
@@ -200,6 +202,11 @@ class TransferArgon2idProfile {
       'memoryKiB: $memoryKiB, parallelism: $parallelism)';
 }
 
+/// Shown when a hardware-backed key is exported.
+const hardwareKeyExportBlockedMessage =
+    'Hardware-backed keys can’t be exported. The private key never leaves '
+    'this device’s secure hardware.';
+
 /// Service that encrypts and imports offline transfer payloads.
 class SecureTransferService {
   /// Creates a new [SecureTransferService].
@@ -238,6 +245,10 @@ class SecureTransferService {
     SshKey? referencedKey;
     if (includeReferencedKey && host.keyId != null) {
       referencedKey = await _keyRepository.getById(host.keyId!);
+      // A hardware-backed key cannot leave this device; the host goes alone.
+      if (referencedKey?.isHardwareBacked ?? false) {
+        referencedKey = null;
+      }
     }
     _ensureExportableSecrets(hosts: [host], keys: [?referencedKey]);
     final cliLaunchPreferences = await _hostCliLaunchPreferencesService
@@ -272,6 +283,9 @@ class SecureTransferService {
     required SshKey key,
     required String transferPassphrase,
   }) async {
+    if (key.isHardwareBacked) {
+      throw const FormatException(hardwareKeyExportBlockedMessage);
+    }
     _ensureExportableSecrets(keys: [key]);
     final payload = TransferPayload(
       type: TransferPayloadType.key,
@@ -308,7 +322,16 @@ class SecureTransferService {
   Future<Map<String, dynamic>> createMigrationData() async {
     final settings = await _db.select(_db.settings).get();
     final groups = await _db.select(_db.groups).get();
-    final keys = await _keyRepository.getAll();
+    final allKeys = await _keyRepository.getAll();
+    // Hardware-backed keys are bound to this device and never exported.
+    final keys = [
+      for (final key in allKeys)
+        if (!key.isHardwareBacked) key,
+    ];
+    final hardwareKeyIds = {
+      for (final key in allKeys)
+        if (key.isHardwareBacked) key.id,
+    };
     final hosts = await _hostRepository.getAll();
     _ensureExportableSecrets(hosts: hosts, keys: keys);
     final snippetFolders =
@@ -326,9 +349,14 @@ class SecureTransferService {
     final rawPortForwards = await _db.select(_db.portForwards).get();
     final exportedHostIds = hosts.map((host) => host.id).toSet();
     var removedJumpHostReferenceCount = 0;
+    var removedHardwareKeyReferenceCount = 0;
     final exportedHosts = hosts
         .map((host) {
           final hostData = Map<String, dynamic>.from(host.toJson());
+          if (hardwareKeyIds.contains(host.keyId)) {
+            hostData['keyId'] = null;
+            removedHardwareKeyReferenceCount += 1;
+          }
           final jumpHostId = host.jumpHostId;
           if (jumpHostId != null && !exportedHostIds.contains(jumpHostId)) {
             hostData['jumpHostId'] = null;
@@ -342,6 +370,16 @@ class SecureTransferService {
         'secure_transfer',
         'migration_export_jump_host_references_removed',
         fields: {'removedCount': removedJumpHostReferenceCount},
+      );
+    }
+    if (hardwareKeyIds.isNotEmpty) {
+      _diagnosticsLogger.info(
+        'secure_transfer',
+        'migration_export_hardware_keys_skipped',
+        fields: {
+          'skippedCount': hardwareKeyIds.length,
+          'clearedHostKeyCount': removedHardwareKeyReferenceCount,
+        },
       );
     }
     final portForwards = rawPortForwards
@@ -630,6 +668,14 @@ class SecureTransferService {
     if (privateKey is! String) {
       throw const FormatException('Missing required field: privateKey');
     }
+    // Exports never contain these; one here is malformed or crafted, and it
+    // could point at another key in this device's secure hardware.
+    if (HardwareKeyReference.looksLikeReference(privateKey)) {
+      throw const FormatException(
+        'This transfer contains a hardware-backed key, which only works on '
+        'the device that created it.',
+      );
+    }
     final fingerprint = computeOpenSshPublicKeyFingerprint(publicKey);
     final existingKeys = existingKeysCache ?? await _keyRepository.getAll();
     if (fingerprint.isNotEmpty) {
@@ -673,11 +719,24 @@ class SecureTransferService {
   }
 
   Future<void> _clearMigrationTables() async {
+    // No payload can restore a hardware-backed key, so replacing keeps them.
+    final hardwareKeyIds = [
+      for (final key in await _keyRepository.getAll())
+        if (key.isHardwareBacked) key.id,
+    ];
     await _db.customStatement('DELETE FROM port_forwards');
     await _db.customStatement('DELETE FROM snippets');
     await _db.customStatement('DELETE FROM snippet_folders');
     await _db.customStatement('DELETE FROM hosts');
-    await _db.customStatement('DELETE FROM ssh_keys');
+    if (hardwareKeyIds.isEmpty) {
+      await _db.customStatement('DELETE FROM ssh_keys');
+    } else {
+      await _db.customStatement(
+        'DELETE FROM ssh_keys WHERE id NOT IN '
+        '(${List.filled(hardwareKeyIds.length, '?').join(', ')})',
+        hardwareKeyIds,
+      );
+    }
     await _db.customStatement('DELETE FROM groups');
     await _db.customStatement('DELETE FROM known_hosts');
   }

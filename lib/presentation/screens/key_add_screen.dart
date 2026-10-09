@@ -8,10 +8,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
+import '../../data/database/database.dart';
 import '../../domain/models/monetization.dart';
+import '../../domain/services/hardware_key_service.dart';
 import '../../domain/services/key_service.dart';
 import '../../domain/services/secure_transfer_service.dart';
 import '../../domain/services/telemetry_service.dart';
+import '../widgets/hardware_key_widgets.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/unsaved_changes_guard.dart';
@@ -23,7 +26,10 @@ typedef _GenerateKeyDraft = ({
   String passphrase,
   String keyType,
   int rsaBits,
+  bool requireUserPresence,
 });
+
+const _hardwareKeyType = 'hardware';
 
 typedef _ImportKeyDraft = ({String name, String privateKey, String passphrase});
 
@@ -151,6 +157,7 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
 
   String _keyType = 'ed25519';
   int _rsaBits = 4096;
+  bool _requireUserPresence = false;
   bool _isGenerating = false;
   bool _showPassphrase = false;
   late final _GenerateKeyDraft _initialDraft;
@@ -168,132 +175,159 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
     super.dispose();
   }
 
+  bool get _isHardware => _keyType == _hardwareKeyType;
+
   @override
-  Widget build(BuildContext context) => Form(
-    key: _formKey,
-    onChanged: _notifyUnsavedChangesChanged,
-    child: ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        // Name
-        TextFormField(
-          controller: _nameController,
-          decoration: const InputDecoration(
-            labelText: 'Key Name',
-            hintText: 'My SSH Key',
-            prefixIcon: Icon(Icons.label),
+  Widget build(BuildContext context) {
+    final hardwareAvailable =
+        _isHardware &&
+        (ref.watch(hardwareKeyCapabilitiesProvider).asData?.value.isAvailable ??
+            false);
+    return Form(
+      key: _formKey,
+      onChanged: _notifyUnsavedChangesChanged,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // Name
+          TextFormField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Key Name',
+              hintText: 'My SSH Key',
+              prefixIcon: Icon(Icons.label),
+            ),
+            textInputAction: TextInputAction.next,
+            validator: validateSshKeyName,
           ),
-          textInputAction: TextInputAction.next,
-          validator: validateSshKeyName,
-        ),
-        const SizedBox(height: 24),
+          const SizedBox(height: 24),
 
-        // Key type
-        Text('Key Type', style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        SegmentedButton<String>(
-          segments: [
-            ButtonSegment(
-              value: 'ed25519',
-              label: Text('Ed25519', style: FluttyTheme.monoStyle),
-              icon: const Icon(Icons.enhanced_encryption),
-            ),
-            ButtonSegment(
-              value: 'rsa',
-              label: Text('RSA', style: FluttyTheme.monoStyle),
-              icon: const Icon(Icons.key),
-            ),
-          ],
-          selected: {_keyType},
-          onSelectionChanged: (value) {
-            setState(() => _keyType = value.first);
-            _notifyUnsavedChangesChanged();
-          },
-        ),
-        const SizedBox(height: 16),
-
-        // RSA bits (only shown for RSA)
-        if (_keyType == 'rsa') ...[
-          Text('RSA Key Size', style: Theme.of(context).textTheme.titleSmall),
+          // Key type
+          Text('Key Type', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 2048, label: Text('2048')),
-              ButtonSegment(value: 4096, label: Text('4096')),
+          SegmentedButton<String>(
+            segments: [
+              ButtonSegment(
+                value: 'ed25519',
+                label: Text('Ed25519', style: FluttyTheme.monoStyle),
+                icon: const Icon(Icons.enhanced_encryption),
+              ),
+              ButtonSegment(
+                value: 'rsa',
+                label: Text('RSA', style: FluttyTheme.monoStyle),
+                icon: const Icon(Icons.key),
+              ),
+              ButtonSegment(
+                value: _hardwareKeyType,
+                label: Text('Hardware', style: FluttyTheme.monoStyle),
+                icon: const Icon(Icons.memory),
+                tooltip: 'Non-exportable key in secure hardware',
+              ),
             ],
-            selected: {_rsaBits},
+            selected: {_keyType},
             onSelectionChanged: (value) {
-              setState(() => _rsaBits = value.first);
+              setState(() => _keyType = value.first);
               _notifyUnsavedChangesChanged();
             },
           ),
           const SizedBox(height: 16),
-        ],
 
-        // Passphrase (optional)
-        TextFormField(
-          controller: _passphraseController,
-          decoration: InputDecoration(
-            labelText: 'Passphrase (optional)',
-            hintText: 'Leave empty for no passphrase',
-            prefixIcon: const Icon(Icons.lock),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _showPassphrase ? Icons.visibility_off : Icons.visibility,
-              ),
-              onPressed: () =>
-                  setState(() => _showPassphrase = !_showPassphrase),
+          // RSA bits (only shown for RSA)
+          if (_keyType == 'rsa') ...[
+            Text('RSA Key Size', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 2048, label: Text('2048')),
+                ButtonSegment(value: 4096, label: Text('4096')),
+              ],
+              selected: {_rsaBits},
+              onSelectionChanged: (value) {
+                setState(() => _rsaBits = value.first);
+                _notifyUnsavedChangesChanged();
+              },
             ),
-          ),
-          obscureText: !_showPassphrase,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'A passphrase adds extra security. You will need to enter it each time you use this key.',
-          style: Theme.of(context).textTheme.bodySmall
-              ?.copyWith(color: Theme.of(context).colorScheme.outline),
-        ),
-        const SizedBox(height: 32),
+            const SizedBox(height: 16),
+          ],
 
-        // Generate button
-        FilledButton.icon(
-          onPressed: _isGenerating ? null : _generateKey,
-          icon: _isGenerating
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.add),
-          label: Text(_isGenerating ? 'Generating...' : 'Generate Key'),
-        ),
-
-        if (_keyType == 'ed25519') ...[
-          const SizedBox(height: 16),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.info_outline,
-                    color: Theme.of(context).colorScheme.primary,
+          if (_isHardware) ...[
+            HardwareKeyGeneratePanel(
+              requireUserPresence: _requireUserPresence,
+              onRequireUserPresenceChanged: (value) {
+                setState(() => _requireUserPresence = value);
+                _notifyUnsavedChangesChanged();
+              },
+            ),
+            const SizedBox(height: 32),
+          ] else ...[
+            // Passphrase (optional)
+            TextFormField(
+              controller: _passphraseController,
+              decoration: InputDecoration(
+                labelText: 'Passphrase (optional)',
+                hintText: 'Leave empty for no passphrase',
+                prefixIcon: const Icon(Icons.lock),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _showPassphrase ? Icons.visibility_off : Icons.visibility,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Ed25519 is recommended for its security and performance.',
-                      style: Theme.of(context).textTheme.bodySmall,
+                  onPressed: () =>
+                      setState(() => _showPassphrase = !_showPassphrase),
+                ),
+              ),
+              obscureText: !_showPassphrase,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'A passphrase adds extra security. You will need to enter it each time you use this key.',
+              style: Theme.of(context).textTheme.bodySmall
+                  ?.copyWith(color: Theme.of(context).colorScheme.outline),
+            ),
+            const SizedBox(height: 32),
+          ],
+
+          // Generate button
+          FilledButton.icon(
+            onPressed: _isGenerating || (_isHardware && !hardwareAvailable)
+                ? null
+                : _generateKey,
+            icon: _isGenerating
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.add),
+            label: Text(_isGenerating ? 'Generating...' : 'Generate Key'),
+          ),
+
+          if (_keyType == 'ed25519') ...[
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      color: Theme.of(context).colorScheme.primary,
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Ed25519 is recommended for its security and performance.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
+          ],
         ],
-      ],
-    ),
-  );
+      ),
+    );
+  }
 
   Future<void> _generateKey() async {
     if (!_formKey.currentState!.validate()) return;
@@ -302,6 +336,10 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
 
     try {
       final keyService = ref.read(keyServiceProvider);
+      if (_isHardware) {
+        await _generateHardwareKey(keyService);
+        return;
+      }
       final passphrase = _passphraseController.text.isEmpty
           ? null
           : _passphraseController.text;
@@ -355,6 +393,45 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
     }
   }
 
+  Future<void> _generateHardwareKey(KeyService keyService) async {
+    final SshKey? result;
+    try {
+      // The switch shows off when confirmation became unavailable; match it.
+      final capabilities = ref.read(hardwareKeyCapabilitiesProvider).asData;
+      result = await keyService.generateHardwareKey(
+        name: _nameController.text.trim(),
+        requireUserPresence:
+            _requireUserPresence &&
+            (capabilities?.value.userPresenceAvailable ?? false),
+      );
+    } on HardwareKeyException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    if (result == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to generate key')));
+      return;
+    }
+    unawaited(
+      ref.read(telemetryServiceProvider).logKeyAdded(method: 'generated'),
+    );
+    widget.onSaved(
+      SnackBar(
+        content: Text(
+          'Key generated in the ${hardwareKeyBackingLabel(result)}',
+        ),
+      ),
+    );
+  }
+
   bool get _hasUnsavedChanges => _currentDraft() != _initialDraft;
 
   _GenerateKeyDraft _currentDraft() => (
@@ -362,6 +439,7 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
     passphrase: _passphraseController.text,
     keyType: _keyType,
     rsaBits: _rsaBits,
+    requireUserPresence: _requireUserPresence,
   );
 
   void _notifyUnsavedChangesChanged() =>

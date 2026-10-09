@@ -20,6 +20,7 @@ import '../../data/repositories/known_hosts_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../models/acp_native_preview.dart';
 import '../models/acp_session_keys.dart';
+import '../models/hardware_key.dart';
 import '../models/port_proxy_name.dart';
 import '../models/remote_multiplexer.dart';
 import '../models/terminal_preview.dart';
@@ -31,6 +32,7 @@ import 'app_review_prompt_service.dart';
 import 'background_ssh_service.dart';
 import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
+import 'hardware_key_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'interactive_auth_prompt.dart';
@@ -1291,7 +1293,7 @@ typedef SshClientFactory = SSHClient Function(
   SSHHostkeyVerifyHandler? onVerifyHostKey,
   SSHPasswordRequestHandler? onPasswordRequest,
   SSHUserInfoRequestHandler? onUserInfoRequest,
-  List<SSHKeyPair>? identities,
+  List<SSHIdentity>? identities,
   Duration? keepAliveInterval,
 });
 
@@ -1398,9 +1400,11 @@ class SshService {
     this.hostKeyPromptHandler,
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
+    HardwareKeyService? hardwareKeyService,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
   }) : wifiNetworkService = wifiNetworkService ?? WifiNetworkService(),
+       _hardwareKeyService = hardwareKeyService ?? HardwareKeyService(),
        _socketConnector = socketConnector ?? _connectWithKeepAlive,
        _clientFactory = clientFactory ?? _defaultClientFactory;
 
@@ -1430,6 +1434,7 @@ class SshService {
   /// Service used to read the current Wi-Fi SSID for jump host bypass.
   final WifiNetworkService wifiNetworkService;
 
+  final HardwareKeyService _hardwareKeyService;
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
 
@@ -1818,13 +1823,24 @@ class SshService {
     ConnectionProgressCallback? onProgress,
     bool isJumpHost = false,
     SshConnectionCancellationToken? cancellationToken,
-    List<SSHKeyPair>? parsedIdentities,
+    List<SSHIdentity>? parsedIdentities,
   }) async {
     SSHClient? client;
     SSHSocket? unownedSocket;
     var connected = false;
     final dependentClients = <SSHClient>[];
     SSHClient? jumpClient;
+    var hardwareIdentities = const <HardwareKeyIdentity>[];
+    final hardwareKeyFailures = <HardwareKeyException>[];
+    var onlyHardwareKeysOffered = false;
+    var abandoningHardwareSigns = false;
+    void abandonHardwareSigns(List<HardwareKeyIdentity> identities) {
+      abandoningHardwareSigns = true;
+      for (final identity in identities) {
+        identity.cancelPendingSigns();
+      }
+    }
+
     void report(SshConnectionState state, String message) {
       DiagnosticsLogService.instance.info(
         'ssh.connect',
@@ -1868,6 +1884,21 @@ class SshService {
       final identities =
           parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
+      hardwareIdentities = [...?identities?.whereType<HardwareKeyIdentity>()];
+      onlyHardwareKeysOffered =
+          hardwareIdentities.isNotEmpty &&
+          hardwareIdentities.length == identities!.length &&
+          config.password == null &&
+          interactiveAuthPromptHandler == null;
+      if (hardwareIdentities.isNotEmpty && cancellationToken != null) {
+        // Dismiss a biometric prompt the user can no longer act on.
+        final pendingIdentities = hardwareIdentities;
+        unawaited(
+          cancellationToken.cancelled.then(
+            (_) => abandonHardwareSigns(pendingIdentities),
+          ),
+        );
+      }
 
       Future<void> authenticate(
         SSHSocket socket,
@@ -1884,7 +1915,12 @@ class SshService {
           onVerifyHostKey: verify,
           onPasswordRequest: authHandlers.onPasswordRequest,
           onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: identities,
+          identities: _prepareHardwareIdentities(
+            identities,
+            authGate,
+            hardwareKeyFailures,
+            isAbandoned: () => abandoningHardwareSigns,
+          ),
           keepAliveInterval: config.keepAliveInterval,
         );
         client = createdClient;
@@ -2087,7 +2123,20 @@ class SshService {
         FormatException(:final message) => message,
         SSHHostkeyError(:final message) =>
           'Host key verification failed: $message',
+        // Name the hardware key failure rather than "no method worked", but
+        // keep the real cause when a password or another key also failed.
+        SSHAuthFailError(:final message) when hardwareKeyFailures.isNotEmpty =>
+          onlyHardwareKeysOffered
+              ? hardwareKeyFailures.last.message
+              : 'Authentication failed: $message. '
+                    '${hardwareKeyFailures.last.message}',
         SSHAuthFailError(:final message) => 'Authentication failed: $message',
+        SSHAuthAbortError(
+          reason: SSHInternalError(
+            error: final HardwareKeyException hardwareKeyError,
+          ),
+        ) =>
+          hardwareKeyError.message,
         SSHChannelOpenError() => 'The SSH server refused the tunnel to the destination. Check forwarding permissions and the destination address.',
         SSHError() => 'The SSH connection failed. Reconnect to try again.',
         SocketException(:final message) => 'Connection failed: $message',
@@ -2105,6 +2154,7 @@ class SshService {
       return SshConnectionResult(success: false, error: error);
     } finally {
       if (!connected) {
+        abandonHardwareSigns(hardwareIdentities);
         try {
           unownedSocket?.destroy();
         } finally {
@@ -2112,6 +2162,49 @@ class SshService {
         }
       }
     }
+  }
+
+  /// Adapts hardware key identities to dartssh2's authentication loop.
+  ///
+  /// Signatures that raise a biometric prompt run inside [gate], so the
+  /// authentication timeout waits for the user like it does for a password.
+  ///
+  /// dartssh2 closes the connection when a signer throws, which would skip
+  /// every remaining key, the saved password and keyboard-interactive. A key
+  /// that cannot sign (prompt dismissed, app in the background, key removed)
+  /// therefore records the failure in [failures] and answers with a
+  /// signature that cannot verify: the server reports an ordinary failure
+  /// and authentication moves on, as OpenSSH's client does. Once the attempt
+  /// is being torn down ([isAbandoned]), nothing more is sent.
+  List<SSHIdentity>? _prepareHardwareIdentities(
+    List<SSHIdentity>? identities,
+    _InteractiveAuthGate gate,
+    List<HardwareKeyException> failures, {
+    required bool Function() isAbandoned,
+  }) {
+    if (identities == null ||
+        !identities.any((i) => i is HardwareKeyIdentity)) {
+      return identities;
+    }
+    return [
+      for (final identity in identities)
+        if (identity is HardwareKeyIdentity)
+          identity.guardedBy((sign) async {
+            try {
+              return await (identity.requiresUserPresence
+                  ? gate.guard(sign)
+                  : sign());
+            } on HardwareKeyException catch (error) {
+              if (isAbandoned()) {
+                rethrow;
+              }
+              failures.add(error);
+              return HardwareKeyIdentity.unverifiableSignature;
+            }
+          })
+        else
+          identity,
+    ];
   }
 
   /// Builds the password / keyboard-interactive handlers for a connection.
@@ -2533,19 +2626,42 @@ class SshService {
       .where((session) => session.hostId == hostId)
       .toList(growable: false);
 
-  Future<List<SSHKeyPair>?> _parseIdentities(SshConnectionConfig config) async {
-    final identities = [
-      for (final parsed in await parseOpenSshPrivateKeys([
-        for (final key in config.identityKeys ?? const <SshKey>[])
-          (key.privateKey, key.passphrase),
-      ]))
-        ...parsed,
-    ];
+  Future<List<SSHIdentity>?> _parseIdentities(
+    SshConnectionConfig config,
+  ) async {
+    final identityKeys = config.identityKeys ?? const <SshKey>[];
+    final parsedSoftwareKeys = await parseOpenSshPrivateKeys([
+      for (final key in identityKeys)
+        if (!key.isHardwareBacked) (key.privateKey, key.passphrase),
+    ]);
+    final identities = <SSHIdentity>[];
+    var softwareIndex = 0;
+    for (final key in identityKeys) {
+      if (!key.isHardwareBacked) {
+        identities.addAll(parsedSoftwareKeys[softwareIndex++]);
+        continue;
+      }
+      // Like an unusable PEM key, a damaged reference is skipped in auto mode.
+      final reference = key.hardwareKeyReference;
+      if (reference != null) {
+        identities.add(_hardwareKeyService.identityFor(reference));
+      }
+    }
     if (identities.isNotEmpty) return identities;
-    if (config.privateKey == null) return null;
+    final privateKey = config.privateKey;
+    if (privateKey == null) return null;
+    if (HardwareKeyReference.looksLikeReference(privateKey)) {
+      final reference = parseHardwareKeyReference(privateKey);
+      if (reference == null) {
+        throw const FormatException(
+          'The selected hardware key is damaged. Generate a new key.',
+        );
+      }
+      return [_hardwareKeyService.identityFor(reference)];
+    }
     try {
       final parsed = await parseOpenSshPrivateKey(
-        config.privateKey!,
+        privateKey,
         config.passphrase,
       );
       if (parsed.isNotEmpty) return parsed;
@@ -2565,7 +2681,7 @@ class SshService {
     SSHHostkeyVerifyHandler? onVerifyHostKey,
     SSHPasswordRequestHandler? onPasswordRequest,
     SSHUserInfoRequestHandler? onUserInfoRequest,
-    List<SSHKeyPair>? identities,
+    List<SSHIdentity>? identities,
     Duration? keepAliveInterval,
   }) => SSHClient(
     socket,
@@ -7607,6 +7723,7 @@ final sshServiceProvider = Provider<SshService>(
       interactiveAuthPromptHandlerProvider,
     ),
     wifiNetworkService: ref.watch(wifiNetworkServiceProvider),
+    hardwareKeyService: ref.watch(hardwareKeyServiceProvider),
   ),
 );
 

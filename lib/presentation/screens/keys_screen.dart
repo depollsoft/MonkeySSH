@@ -5,12 +5,14 @@ import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
-import '../../data/repositories/key_repository.dart';
+import '../../domain/services/hardware_key_service.dart';
+import '../../domain/services/key_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/delete_confirmation_dialog.dart';
+import '../widgets/hardware_key_widgets.dart';
 
 /// Screen displaying list of SSH keys.
 class KeysScreen extends ConsumerWidget {
@@ -104,15 +106,25 @@ class KeysScreen extends ConsumerWidget {
     final confirmed = await showDeleteConfirmationDialog(
       context,
       title: 'Delete Key',
-      message: 'Are you sure you want to delete "${key.name}"?',
+      message: sshKeyDeleteConfirmationMessage(
+        key,
+        softwareKeyMessage: 'Are you sure you want to delete "${key.name}"?',
+      ),
     );
 
     if (confirmed) {
-      await ref.read(keyRepositoryProvider).delete(key.id);
+      final deleted = await ref.read(keyServiceProvider).deleteKey(key);
       ref.invalidate(allKeysProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Deleted "${key.name}"')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              deleted
+                  ? 'Deleted "${key.name}"'
+                  : hardwareKeyDeleteFailedMessage,
+            ),
+          ),
+        );
       }
     }
   }
@@ -144,8 +156,9 @@ class _KeyListTile extends StatelessWidget {
         child: Icon(_getKeyIcon(), size: 20, color: theme.colorScheme.primary),
       ),
       title: Text(sshKey.name),
-      subtitle: Text(
-        _getKeyTypeLabel(),
+      subtitle: SshKeyTypeLine(
+        sshKey: sshKey,
+        typeLabel: _getKeyTypeLabel(),
         style: FluttyTheme.monoStyle.copyWith(
           fontSize: 11,
           color: theme.colorScheme.onSurface.withAlpha(160),
@@ -235,8 +248,9 @@ class _KeyDetailsSheet extends StatelessWidget {
           // Key name and type
           Text(sshKey.name, style: theme.textTheme.headlineSmall),
           const SizedBox(height: 4),
-          Text(
-            _getKeyTypeLabel(),
+          SshKeyTypeLine(
+            sshKey: sshKey,
+            typeLabel: _getKeyTypeLabel(),
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.primary,
             ),
@@ -263,7 +277,12 @@ class _KeyDetailsSheet extends StatelessWidget {
             icon: const Icon(Icons.copy),
             label: const Text('Copy Public Key'),
           ),
-          if (sshKey.privateKey.isNotEmpty) ...[
+          if (sshKey.isHardwareBacked) ...[
+            const SizedBox(height: 24),
+            Text('Private Key', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            HardwareKeyPrivateKeyNotice(sshKey: sshKey),
+          ] else if (sshKey.privateKey.isNotEmpty) ...[
             const SizedBox(height: 24),
             Text('Private Key', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),

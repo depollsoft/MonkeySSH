@@ -10,6 +10,7 @@ import 'package:local_auth/local_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../data/security/hardened_keychain_store.dart';
+import 'biometric_prompt_coordinator.dart';
 import 'serial_task_queue.dart';
 
 const _defaultAuthAppName = 'MonkeySSH';
@@ -264,10 +265,13 @@ class AuthService {
 
     try {
       final localizedReason = reason ?? await _defaultLocalizedReason();
-      return await _localAuth.authenticate(
-        localizedReason: localizedReason,
-        biometricOnly: true,
-        persistAcrossBackgrounding: true,
+      // One biometric prompt at a time; see BiometricPromptCoordinator.
+      return await BiometricPromptCoordinator.instance.run(
+        () => _localAuth.authenticate(
+          localizedReason: localizedReason,
+          biometricOnly: true,
+          persistAcrossBackgrounding: true,
+        ),
       );
     } on PlatformException {
       return false;
@@ -398,7 +402,16 @@ class AuthStateNotifier extends Notifier<AuthState> {
   @override
   AuthState build() {
     _authService = ref.watch(authServiceProvider);
-    ref.onDispose(() => _disposed = true);
+    // Hardware key prompts wait while the lock screen is up.
+    listenSelf(
+      (_, next) => BiometricPromptCoordinator.instance.setAppLocked(
+        locked: next == AuthState.locked,
+      ),
+    );
+    ref.onDispose(() {
+      _disposed = true;
+      BiometricPromptCoordinator.instance.setAppLocked(locked: false);
+    });
     Future.microtask(_init);
     return AuthState.unknown;
   }

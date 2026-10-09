@@ -3,10 +3,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/hardware_key.dart';
+import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/keys_screen.dart';
+import 'package:monkeyssh/presentation/widgets/hardware_key_widgets.dart';
+
+import '../helpers/fake_hardware_key_platform.dart';
+
+class _MockKeyService extends Mock implements KeyService {}
 
 final _testKey = SshKey(
   id: 1,
@@ -165,5 +173,165 @@ void main() {
         expect(find.text('Copied to clipboard'), findsOneWidget);
       },
     );
+  });
+
+  group('hardware-backed keys', () {
+    testWidgets('list names the real backing and marks it non-exportable', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith(
+              (ref) => Stream.value([
+                hardwareSshKeyFixture(),
+                hardwareSshKeyFixture(
+                  id: 2,
+                  name: 'Pixel key',
+                  backing: HardwareKeyBacking.tee,
+                ),
+              ]),
+            ),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('non-exportable · Secure Enclave'), findsOneWidget);
+      expect(find.text('non-exportable · TEE'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Non-exportable key in Secure Enclave')),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('an emulator key does not claim hardware protection', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(
+        backing: HardwareKeyBacking.tee,
+        isEmulated: true,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('non-exportable · TEE (emulator)'), findsOneWidget);
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('simulated in software'), findsOneWidget);
+      expect(find.textContaining('inside this device’s secure'), findsNothing);
+    });
+
+    testWidgets('a biometric-only key does not promise the passcode', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(
+        backing: HardwareKeyBacking.tee,
+        requireUserPresence: true,
+        allowsPasscode: false,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('usually a fingerprint'), findsOneWidget);
+      expect(find.textContaining('passcode'), findsNothing);
+    });
+
+    testWidgets('a refused hardware delete says the key was kept', (
+      tester,
+    ) async {
+      final key = hardwareSshKeyFixture();
+      final service = _MockKeyService();
+      when(() => service.deleteKey(key)).thenAnswer((_) async => false);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+            keyServiceProvider.overrideWithValue(service),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      verify(() => service.deleteKey(key)).called(1);
+      expect(find.text(hardwareKeyDeleteFailedMessage), findsOneWidget);
+      expect(find.textContaining('Deleted'), findsNothing);
+    });
+
+    testWidgets('details never reveal or copy the hardware reference', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(requireUserPresence: true);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('held in Secure Enclave'), findsOneWidget);
+      expect(find.textContaining('at every sign-in'), findsOneWidget);
+      expect(find.text('Reveal Private Key'), findsNothing);
+      expect(find.text('Copy Private Key'), findsNothing);
+      expect(find.text('Copy Public Key'), findsOneWidget);
+      expect(find.textContaining(HardwareKeyReference.prefix), findsNothing);
+    });
   });
 }

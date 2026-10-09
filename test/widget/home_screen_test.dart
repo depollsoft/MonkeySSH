@@ -13,6 +13,7 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/hardware_key.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -41,6 +42,7 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
+import '../helpers/fake_hardware_key_platform.dart';
 import '../support/fake_acp_session_manager.dart';
 
 import '../support/settings_import_test_helpers.dart'
@@ -618,6 +620,47 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
   }
+
+  testWidgets('keys tab badges hardware keys and offers no export', (
+    tester,
+  ) async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final hardwareKey = hardwareSshKeyFixture(
+      backing: HardwareKeyBacking.strongBox,
+    );
+
+    await tester.pumpWidget(
+      buildMobileHomeScreen(
+        db: db,
+        initialTab: HomeScreenTab.keys,
+        overrides: [
+          activeSessionsProvider.overrideWith(_TestActiveSessionsNotifier.new),
+          allKeysProvider.overrideWith((ref) => Stream.value([hardwareKey])),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('non-exportable · StrongBox'), findsOneWidget);
+    expect(find.byTooltip('Export encrypted'), findsNothing);
+    expect(find.byTooltip('Share encrypted'), findsNothing);
+    expect(find.byTooltip('Copy public key'), findsOneWidget);
+
+    await tester.tap(find.text('Phone key'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('held in StrongBox'),
+      120,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('held in StrongBox'), findsOneWidget);
+    expect(find.textContaining(HardwareKeyReference.prefix), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
 
   group('HomeScreen mobile insets', () {
     const systemNavigationBarHeight = 24.0;
