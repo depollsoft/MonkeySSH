@@ -302,7 +302,13 @@ class AcpCustomProviderHostService {
         List<AcpSessionInfo>.unmodifiable(ordered.take(max)),
       );
     } finally {
-      await client.close();
+      try {
+        await client.close();
+      } finally {
+        // Closing the client only sends EOF; an agent that ignores it would
+        // keep the channel and its process. Destroy it after a short grace.
+        await closeAbandonedSshExec(exec);
+      }
     }
   }
 }
