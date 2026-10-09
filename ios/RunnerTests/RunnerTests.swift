@@ -242,6 +242,23 @@ final class LocationPromptQueueTests: XCTestCase {
     XCTAssertTrue(queue.isWaiting)
   }
 
+  func testLosingFocusDuringGraceWaitsForTheDecision() {
+    // A second alert (Local Network, or the location alert shown again) takes
+    // focus before the grace ends; the check must not answer while it is up.
+    enqueue()
+    queue.appWillResignActive()
+    queue.appDidBecomeActive()
+    queue.appWillResignActive()
+    runScheduled()
+
+    XCTAssertEqual(replies, [])
+    XCTAssertTrue(queue.isWaiting)
+
+    decided = "granted"
+    queue.authorizationDidChange()
+    XCTAssertEqual(replies, ["granted"])
+  }
+
   func testCallerArrivingDuringGraceKeepsWaitingForTheNewPrompt() {
     enqueue()
     queue.appWillResignActive()

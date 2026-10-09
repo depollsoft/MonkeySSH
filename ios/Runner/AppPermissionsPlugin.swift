@@ -207,9 +207,10 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
 /// A decided status settles every waiting caller. The alert can also close
 /// without a decision (home swipe, incoming call), and then the status stays
 /// `.notDetermined` and no delegate callback arrives. The alert takes focus
-/// from the app, so when the app becomes active again with the status still
-/// undecided, the waiting callers read as denied and the next request prompts
-/// again.
+/// from the app, so once the app has been active for a full second with the
+/// status still undecided, the waiting callers read as denied and the next
+/// request prompts again. Losing focus within that second (another system
+/// alert, or iOS showing the location alert again) cancels the check.
 final class LocationPromptQueue {
   typealias Reply = (String) -> Void
 
@@ -221,7 +222,8 @@ final class LocationPromptQueue {
   private let schedule: (TimeInterval, @escaping () -> Void) -> Void
 
   private var waiting: [Reply] = []
-  /// Bumped on every prompt, so a check scheduled for an earlier one stands down.
+  /// Bumped on every prompt and every loss of focus, so a scheduled check
+  /// stands down unless the app stayed active throughout.
   private var promptGeneration = 0
   /// Whether the app resigned active while callers were waiting, which the
   /// alert causes.
@@ -259,6 +261,7 @@ final class LocationPromptQueue {
   func appWillResignActive() {
     if !waiting.isEmpty {
       promptTookFocus = true
+      promptGeneration += 1
     }
   }
 
